@@ -124,8 +124,20 @@ chart_package() {
 # (a main publication: a re-run re-pushes its own version and is compared
 # again) or `immutable` (a release: a version already published must already be
 # these bytes, and is otherwise REFUSED rather than replaced).
+#
+# "NOT PUBLISHED" IS ONLY WHAT THE REGISTRY SAYS (PROD-14.0 review M-1). An
+# immutable push goes ahead only when the anonymous existence read ends in the
+# answer Helm prints for a version the registry does not have -- measured on
+# 2026-10-05 with Helm v4.0.1, the version release.yml installs, against
+# Docker Hub:
+#   Error: failed to perform "FetchReference" on source: registry-1.docker.io/<ns>/logweir-chart:<version>: not found
+# Any other failure -- a rate limit, a timeout, a refused connection, a
+# private repository -- leaves the question open, and an open question is
+# refused before any credential is used: pushing then could replace a
+# published release version with other bytes.
 chart_publish() {
   local package="$1" version="$2" mode="$3" dir anonymous_docker product pushed served existing pulled_log
+  local push=true
   # The images this chart names must already be PUBLIC under TAG: the chart
   # is published AFTER the promote step, never before, so no published
   # chart can point at a tag that does not exist. Asked ANONYMOUSLY -- an
@@ -138,17 +150,28 @@ chart_publish() {
   dir=$(mktemp -d)
   mkdir -p "$dir/login" "$dir/pulled" "$dir/anonymous" "$dir/existing"
   pushed=$(sha256sum "$package" | awk '{print $1}')
-  if [[ "$mode" == immutable ]] \
-    && DOCKER_CONFIG="$anonymous_docker" HELM_REGISTRY_CONFIG="$dir/anonymous/config.json" \
-      helm pull "$CHART_REPOSITORY/$CHART_NAME" --version "$version" -d "$dir/existing" >/dev/null 2>&1; then
-    existing=$(sha256sum "$dir/existing/$CHART_NAME-$version.tgz" | awk '{print $1}')
-    if [[ "$existing" != "$pushed" ]]; then
-      echo "$CHART_NAME $version is already published as other bytes ($existing, not $pushed);" \
-        "a release version is never replaced" >&2
+  if [[ "$mode" == immutable ]]; then
+    if DOCKER_CONFIG="$anonymous_docker" HELM_REGISTRY_CONFIG="$dir/anonymous/config.json" \
+      helm pull "$CHART_REPOSITORY/$CHART_NAME" --version "$version" -d "$dir/existing" > "$dir/existing.log" 2>&1; then
+      existing=$(sha256sum "$dir/existing/$CHART_NAME-$version.tgz" | awk '{print $1}')
+      if [[ "$existing" != "$pushed" ]]; then
+        echo "$CHART_NAME $version is already published as other bytes ($existing, not $pushed);" \
+          "a release version is never replaced" >&2
+        return 1
+      fi
+      echo "$CHART_NAME $version is already published as exactly these bytes; not pushed again" >&2
+      push=false
+    elif grep -qxF "Error: failed to perform \"FetchReference\" on source: ${CHART_REPOSITORY#oci://}/$CHART_NAME:$version: not found" \
+      "$dir/existing.log"; then
+      echo "$CHART_NAME $version is not published yet (the registry says not found); pushing it" >&2
+    else
+      cat "$dir/existing.log" >&2
+      echo "could not tell whether $CHART_NAME $version exists; nothing pushed" >&2
+      rm -rf "$anonymous_docker"
       return 1
     fi
-    echo "$CHART_NAME $version is already published as exactly these bytes; not pushed again" >&2
-  else
+  fi
+  if [[ "$push" == true ]]; then
     # The SAME credentials the image steps use, handed to Helm's own registry
     # client on stdin; nothing is written to the job log. The login is scoped
     # to its OWN registry configuration file, used for the push alone.

@@ -61,7 +61,10 @@ class Release(unittest.TestCase):
         self.docker_log = self.base / "docker.jsonl"
         self.summary = self.base / "summary"
         self.env = {
-            **{k: v for k, v in os.environ.items() if k not in ("DOCKER_CONFIG", "HELM_REGISTRY_CONFIG")},
+            # Hermetic: a caller's registry configuration, or a CI runner's own
+            # GITHUB_SHA, must not reach the script.
+            **{k: v for k, v in os.environ.items()
+               if k not in ("DOCKER_CONFIG", "HELM_REGISTRY_CONFIG", "GITHUB_SHA", "DELETED")},
             **GIT_ENV,
             "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "NS": NS,
@@ -137,16 +140,71 @@ class Release(unittest.TestCase):
 
 
 class Validate(Release):
+    def setUp(self):
+        super().setUp()
+        # origin, as the validate job's checkout has it: a remote holding the
+        # tags, one annotated (as the procedure cuts a release) and one
+        # lightweight, both on the run's commit.
+        self.origin = self.base / "origin.git"
+        made = subprocess.run(["git", "init", "-q", "--bare", str(self.origin)], capture_output=True, text=True,
+                              timeout=60)
+        self.assertEqual(made.returncode, 0, made.stderr)
+        self.git("remote", "add", "origin", str(self.origin))
+        self.git("tag", "-a", "v0.2.0-rc.1", "-m", "Logweir v0.2.0-rc.1")
+        self.git("tag", "v1.2.3")
+        self.git("push", "-q", "origin", "--tags")
+
     def outputs(self, **env):
         result = self.release("validate", env=env)
         return dict(line.split("=", 1) for line in result.stdout.splitlines())
 
+    def tag_push(self, tag="v0.2.0-rc.1", **env):
+        return {"EVENT": "push", "REF": f"refs/tags/{tag}", "REF_NAME": tag, "DELETED": "false",
+                "GITHUB_SHA": self.head, **env}
+
     def test_a_version_tag_push_publishes(self):
-        out = self.outputs(EVENT="push", REF="refs/tags/v0.2.0-rc.1", REF_NAME="v0.2.0-rc.1")
+        out = self.outputs(**self.tag_push())
         self.assertEqual(out, {"tag": "v0.2.0-rc.1", "version": "0.2.0-rc.1",
                                "prerelease": "true", "publish": "true"})
-        out = self.outputs(EVENT="push", REF="refs/tags/v1.2.3", REF_NAME="v1.2.3")
+        out = self.outputs(**self.tag_push("v1.2.3"))
         self.assertEqual((out["prerelease"], out["publish"]), ("false", "true"))
+
+    def test_a_tag_deletion_publishes_nothing(self):
+        """Review L-5: deleting a tag is a push too, run on the default branch's
+        commit. Only `github.event.deleted == false` may publish."""
+        for deleted in ("true", "", "1", None):
+            with self.subTest(deleted=deleted):
+                env = self.tag_push(DELETED=deleted)
+                if deleted is None:
+                    del env["DELETED"]
+                result = self.release("validate", env=env, success=False)
+                self.assertIn("a deleted tag publishes nothing", result.stderr)
+        # A run that starts after its tag is gone from origin publishes nothing
+        # either, whatever its event says.
+        self.git("push", "-q", "origin", ":refs/tags/v0.2.0-rc.1")
+        result = self.release("validate", env=self.tag_push(), success=False)
+        self.assertIn("origin has no tag v0.2.0-rc.1", result.stderr)
+
+    def test_the_tag_must_still_name_this_run_s_commit(self):
+        """A re-run of an older run after the tag was re-cut onto another commit
+        would publish the old commit's assets under the tag."""
+        newer = self.commit("scripts/fix.sh")
+        self.git("tag", "-f", "-a", "v0.2.0-rc.1", "-m", "re-cut", newer)
+        self.git("push", "-q", "-f", "origin", "refs/tags/v0.2.0-rc.1")
+        result = self.release("validate", env=self.tag_push(), success=False)
+        self.assertIn(f"names {newer}, not this run's commit {self.head}", result.stderr)
+        # The re-cut tag's own run publishes (the peeled commit of the new tag).
+        self.assertEqual(self.outputs(**self.tag_push(GITHUB_SHA=newer))["publish"], "true")
+        # A lightweight tag moved the same way is refused the same way.
+        self.git("tag", "-f", "v1.2.3", newer)
+        self.git("push", "-q", "-f", "origin", "refs/tags/v1.2.3")
+        result = self.release("validate", env=self.tag_push("v1.2.3"), success=False)
+        self.assertIn(f"names {newer}, not this run's commit", result.stderr)
+
+    def test_an_origin_that_cannot_be_read_publishes_nothing(self):
+        self.git("remote", "set-url", "origin", str(self.base / "gone.git"))
+        result = self.release("validate", env=self.tag_push(), success=False)
+        self.assertIn("could not read refs/tags/v0.2.0-rc.1 from origin; nothing is published", result.stderr)
 
     def test_a_dispatch_is_a_dry_run(self):
         out = self.outputs(EVENT="workflow_dispatch", REF="refs/heads/claude/x", REF_NAME="claude/x",
@@ -159,18 +217,24 @@ class Validate(Release):
         self.assertEqual(out["publish"], "false")
 
     def test_anything_else_is_refused(self):
-        for env in (
-            {"EVENT": "push", "REF": "refs/heads/main", "REF_NAME": "main"},
-            {"EVENT": "push", "REF": "refs/tags/v1.2", "REF_NAME": "v1.2"},
-            {"EVENT": "push", "REF": "refs/tags/1.2.3", "REF_NAME": "1.2.3"},
-            {"EVENT": "push", "REF": "refs/tags/v1.2.3+build", "REF_NAME": "v1.2.3+build"},
-            {"EVENT": "push", "REF": "refs/tags/v01.2.3", "REF_NAME": "v01.2.3"},
-            {"EVENT": "push", "REF": "refs/heads/v1.2.3", "REF_NAME": "v1.2.3"},
-            {"EVENT": "workflow_dispatch", "REF": "refs/heads/x", "REF_NAME": "x", "REHEARSAL_TAG": "latest"},
-            {"EVENT": "pull_request", "REF": "refs/pull/1/merge", "REF_NAME": "1/merge"},
+        # Each refusal for its own reason: the push rows carry DELETED=false and
+        # the run's commit, so a bad tag name is refused as a bad name.
+        not_semver = "is not v<semver>"
+        for env, reason in (
+            ({"EVENT": "push", "REF": "refs/heads/main", "REF_NAME": "main"}, "is not refs/tags/main"),
+            ({"EVENT": "push", "REF": "refs/tags/v1.2", "REF_NAME": "v1.2"}, not_semver),
+            ({"EVENT": "push", "REF": "refs/tags/1.2.3", "REF_NAME": "1.2.3"}, not_semver),
+            ({"EVENT": "push", "REF": "refs/tags/v1.2.3+build", "REF_NAME": "v1.2.3+build"}, not_semver),
+            ({"EVENT": "push", "REF": "refs/tags/v01.2.3", "REF_NAME": "v01.2.3"}, not_semver),
+            ({"EVENT": "push", "REF": "refs/heads/v1.2.3", "REF_NAME": "v1.2.3"}, "is not refs/tags/v1.2.3"),
+            ({"EVENT": "workflow_dispatch", "REF": "refs/heads/x", "REF_NAME": "x", "REHEARSAL_TAG": "latest"},
+             not_semver),
+            ({"EVENT": "pull_request", "REF": "refs/pull/1/merge", "REF_NAME": "1/merge"}, "not on 'pull_request'"),
         ):
             with self.subTest(env=env):
-                self.release("validate", env=env, success=False)
+                result = self.release("validate", env={"DELETED": "false", "GITHUB_SHA": self.head, **env},
+                                      success=False)
+                self.assertIn(reason, result.stderr)
 
 
 class Resolve(Release):
@@ -225,6 +289,38 @@ class Resolve(Release):
         self.registry.write_text("{}")
         self.publish(self.head, platforms={"logweir": ("amd64", "arm64")})
         self.resolve(self.head, success=False)
+
+    def test_a_read_that_cannot_tell_is_not_an_unpublished_commit(self):
+        """Review M-1, swept: a failed read is never taken for "not published".
+        The docs-only tip HAS its own publication; when one of its reads fails
+        the walk must stop, not ship the parent's older publication."""
+        self.publish(self.head)
+        tip = self.commit("docs/release-notes.md")
+        self.publish(tip)
+        ref = f"docker.io/{NS}/logweir-ui:sha-{tip}"
+        self.env["MOCK_UNREACHABLE_REF"] = ref
+        _, result = self.resolve(tip, success=False)
+        self.assertIn(f"could not tell whether {ref} exists", result.stderr)
+        # Control: the same read ANSWERED "not found" walks on to the parent.
+        del self.env["MOCK_UNREACHABLE_REF"]
+        self.env["MOCK_FAIL_INSPECT_REF"] = ref
+        images, _ = self.resolve(tip)
+        self.assertEqual(images["publication"], self.head)
+
+    def test_the_registry_s_not_found_must_be_readable_before_the_walk(self):
+        """resolve first reads a sha- tag no build ever had; anything but the
+        registry's "not found" stops it before it relies on that answer."""
+        self.publish(self.head)
+        never = f"docker.io/{NS}/weirkeeper:sha-{'0' * 40}"
+        self.env["MOCK_UNREACHABLE_REF"] = never
+        _, result = self.resolve(self.head, success=False)
+        self.assertIn(f"could not tell whether {never} exists", result.stderr)
+        del self.env["MOCK_UNREACHABLE_REF"]
+        state = self.state()
+        state[never] = state[f"docker.io/{NS}/weirkeeper:sha-{self.head}"]
+        self.registry.write_text(json.dumps(state))
+        _, result = self.resolve(self.head, success=False)
+        self.assertIn("answers cannot be trusted", result.stderr)
 
     def test_a_dry_run_may_name_the_publication_and_a_tag_may_not(self):
         self.publish(self.head)
@@ -283,8 +379,18 @@ class Promote(Release):
     def test_a_failed_read_is_not_an_absent_tag(self):
         self.env["MOCK_UNREACHABLE_REF"] = f"docker.io/{NS}/logweir-ui:{self.TAG}"
         result = self.promote(success=False)
-        self.assertIn("could not tell", result.stderr)
+        self.assertIn(f"could not tell whether docker.io/{NS}/logweir-ui:{self.TAG} exists", result.stderr)
         self.assertEqual(self.creates(), [])
+        # Words that merely CONTAIN "not found" are no answer about this tag:
+        # only the registry's own line for this exact reference is.
+        for error in (f"ERROR: unexpected status from HEAD request to https://registry-1.docker.io/v2/{NS}/"
+                      f"logweir-ui/manifests/{self.TAG}: 404 page not found",
+                      f"ERROR: docker.io/{NS}/logweir-ui:v0.2.0-rc.2: not found"):
+            with self.subTest(error=error):
+                self.env["MOCK_UNREACHABLE_ERROR"] = error
+                result = self.promote(success=False)
+                self.assertIn("could not tell whether", result.stderr)
+                self.assertEqual(self.creates(), [])
 
     def test_only_a_version_tag(self):
         for tag in ("sha-" + self.head, "latest", "main"):

@@ -32,6 +32,9 @@ TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-
 # Ancestors examined for a publication. Each docs-only commit after the newest
 # published one costs one; fifty is far more than a release ever has.
 MAX_ANCESTORS=50
+# A commit no build ever had: `resolve` reads its sha- tag to see the registry
+# answer "not found" before relying on that answer.
+NEVER_BUILT=0000000000000000000000000000000000000000
 
 die() { echo "release.sh: $*" >&2; exit 1; }
 
@@ -51,7 +54,8 @@ expected_platforms() { # product -> os/arch,... as main CI publishes it (docs/ga
 # Anonymous registry reads: an EMPTY Docker configuration, so "exists for the
 # publisher" can never pass for "pullable by anyone".
 ANONYMOUS_DOCKER=$(mktemp -d "${TMPDIR:-/tmp}/logweir-release-anonymous.XXXXXX")
-trap 'rm -rf "$ANONYMOUS_DOCKER"' EXIT
+READS=$(mktemp -d "${TMPDIR:-/tmp}/logweir-release-reads.XXXXXX")
+trap 'rm -rf "$ANONYMOUS_DOCKER" "$READS"' EXIT
 # Plugins, never credentials: Docker Desktop installs `buildx` as a plugin
 # under the user's configuration directory, which an empty DOCKER_CONFIG would
 # hide ("unknown command: docker buildx", measured). The link carries plugin
@@ -63,26 +67,67 @@ anonymous() {
   DOCKER_CONFIG="$ANONYMOUS_DOCKER" "$@"
 }
 
-complete_publication() { # commit -> 0 when all four sha-<commit> images resolve anonymously
+# EVERY "DOES IT ALREADY EXIST?" READ BEFORE A PUBLICATION (PROD-14.0 review
+# M-1, swept): 0 when the reference resolves, 1 when the registry SAYS it does
+# not, and the run stops when it cannot tell. Absent is only the answer buildx
+# prints for a reference the registry does not have -- containerd's resolver,
+# measured anonymously against Docker Hub on 2026-10-05:
+#   ERROR: docker.io/vladyslavhaina/logweir:v0.2.0-rc.1: not found
+# A rate limit, a timeout or a refused connection is not an answer, and is
+# never taken for an absent image: that would tag a version beside one already
+# published, or ship an older publication than the commit's own.
+# Never call it inside $(...): its refusal must end the script, not a subshell.
+published() { # ref [file for the manifest JSON]
+  local ref="$1" out="${2:-/dev/null}"
+  if anonymous docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > "$out" 2> "$READS/err"; then
+    return 0
+  fi
+  if grep -qxF "ERROR: $ref: not found" "$READS/err"; then
+    return 1
+  fi
+  cat "$READS/err" >&2
+  die "could not tell whether $ref exists (the registry did not answer 'not found'); nothing was tagged"
+}
+
+complete_publication() { # commit -> 0 when all four sha-<commit> images exist, 1 when the registry says one does not
   local product
   for product in "${PRODUCTS[@]}"; do
-    anonymous docker buildx imagetools inspect "docker.io/$NS/$product:sha-$1" \
-      --format '{{json .Manifest}}' > /dev/null 2>&1 || return 1
+    published "docker.io/$NS/$product:sha-$1" || return 1
   done
 }
 
 validate() {
-  local tag publish version prerelease=false
+  local tag publish version prerelease=false tagged
   case "${EVENT:?}" in
     push)
       [[ "${REF:?}" == "refs/tags/${REF_NAME:?}" ]] \
         || die "a publishing run is a tag push; '$REF' is not refs/tags/$REF_NAME"
+      # A TAG DELETION IS A PUSH TOO (PROD-14.0 review L-5), and GitHub runs it
+      # on the default branch's commit. Every push payload says whether it
+      # deleted the ref, so anything but an explicit `false` is refused.
+      [[ "${DELETED:-}" == false ]] \
+        || die "this push deleted $REF (github.event.deleted is '${DELETED:-}'); a deleted tag publishes nothing"
       tag="$REF_NAME" publish=true ;;
     workflow_dispatch)
       tag="${REHEARSAL_TAG:-}" publish=false ;;
     *) die "release.yml runs on a v<semver> tag push or as a dispatched dry run, not on '$EVENT'" ;;
   esac
   [[ "$tag" =~ $TAG_RE ]] || die "'$tag' is not v<semver> (vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE)"
+  if [[ "$publish" == true ]]; then
+    # AND THE TAG MUST STILL NAME THIS RUN'S COMMIT, read from origin: the
+    # checkout's own tag ref is written from GITHUB_SHA and always agrees. A
+    # re-run of an older run after the tag was deleted or re-cut would
+    # otherwise publish another commit's assets under the tag's name. An
+    # annotated tag is listed with its peeled commit (`^{}`), which is the one
+    # GITHUB_SHA names; a lightweight tag with its commit alone.
+    git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}" > "$READS/tag" 2> "$READS/err" \
+      || { cat "$READS/err" >&2; die "could not read refs/tags/$tag from origin; nothing is published"; }
+    tagged=$(awk -v ref="refs/tags/$tag" '$2 == ref "^{}" { peeled = $1 } $2 == ref { plain = $1 }
+      END { print (peeled != "" ? peeled : plain) }' "$READS/tag")
+    [[ -n "$tagged" ]] || die "origin has no tag $tag (deleted since this run started); nothing is published"
+    [[ "$tagged" == "${GITHUB_SHA:?}" ]] \
+      || die "origin's $tag names $tagged, not this run's commit $GITHUB_SHA; a re-cut tag publishes from its own run"
+  fi
   version="${tag#v}"
   if [[ "$version" == *-* ]]; then prerelease=true; fi
   printf 'tag=%s\nversion=%s\nprerelease=%s\npublish=%s\n' "$tag" "$version" "$prerelease" "$publish"
@@ -94,6 +139,12 @@ resolve() {
   : "${NS:?}" "${COMMIT:?}"
   [[ "$NS" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "NS '$NS' is not a Docker Hub namespace"
   [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "COMMIT '$COMMIT' is not a 40-hex commit"
+  # THE REGISTRY'S "NOT FOUND" MUST BE READABLE HERE before the walk relies on
+  # it: a commit that was never built has no sha- tag, so this read must end in
+  # that answer -- and every dry run proves it on the runner's own buildx.
+  if published "docker.io/$NS/weirkeeper:sha-$NEVER_BUILT"; then
+    die "docker.io/$NS/weirkeeper:sha-$NEVER_BUILT exists; this registry's answers cannot be trusted"
+  fi
   if [[ -n "${PUBLICATION:-}" ]]; then
     # A DRY RUN on a branch has no publication of its own: it may name the main
     # commit whose publication it rehearses against. A tag never may.
@@ -361,7 +412,8 @@ promote() {
   # 1. DECIDE FOR THE WHOLE SET BEFORE MOVING ANY TAG. A release tag is never
   #    moved: already there with these bytes is a re-run (nothing to do); there
   #    with other bytes is refused; absent is created — and "absent" only when
-  #    the registry SAYS not found, never on a read that merely failed.
+  #    the registry SAYS not found, never on a read that merely failed
+  #    (`published`, which stops the run when it cannot tell).
   : > "$work/create"
   for product in "${PRODUCTS[@]}"; do
     digest=$(jq -er --arg product "$product" '.images[$product].digest | select(test("^sha256:[0-9a-f]{64}$"))' "$images") \
@@ -369,15 +421,12 @@ promote() {
     anonymous docker buildx imagetools inspect "docker.io/$NS/$product@$digest" > /dev/null \
       || die "docker.io/$NS/$product@$digest is not publicly readable; nothing was tagged"
     dst="docker.io/$NS/$product:$TAG"
-    if anonymous docker buildx imagetools inspect "$dst" --format '{{json .Manifest}}' > "$work/found.json" 2> "$work/found.err"; then
+    if published "$dst" "$work/found.json"; then
       found=$(jq -r .digest "$work/found.json")
       [[ "$found" == "$digest" ]] || die "$dst already names $found; a release tag is never moved to $digest. Nothing was tagged."
       echo "release.sh: $dst already names $digest"
-    elif grep -q 'not found' "$work/found.err"; then
-      printf '%s %s\n' "$product" "$digest" >> "$work/create"
     else
-      cat "$work/found.err" >&2
-      die "could not tell whether $dst exists; nothing was tagged"
+      printf '%s %s\n' "$product" "$digest" >> "$work/create"
     fi
   done
   # 2. The tags, each a carbon copy of the commit tag's digest.

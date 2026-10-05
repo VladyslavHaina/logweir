@@ -38,7 +38,11 @@ if args[:3] == ["buildx", "imagetools", "inspect"]:
         with open(os.environ["MOCK_DOCKER_ENV_LOG"], "a") as out:
             out.write(json.dumps({"ref": ref, "docker_config": os.environ.get("DOCKER_CONFIG")}) + "\n")
     if ref == os.environ.get("MOCK_UNREACHABLE_REF"):
-        print(f"ERROR: failed to do request: Head \"https://registry-1.docker.io/v2/{ref}\": dial tcp: connection refused", file=sys.stderr)
+        # No answer about the reference: a refused connection (as measured), or
+        # the text MOCK_UNREACHABLE_ERROR names.
+        print(os.environ.get("MOCK_UNREACHABLE_ERROR")
+              or f"ERROR: failed to do request: Head \"https://registry-1.docker.io/v2/{ref}\": dial tcp: connection refused",
+              file=sys.stderr)
         sys.exit(1)
     if ref == os.environ.get("MOCK_FAIL_INSPECT_REF") or ref not in state:
         print(f"ERROR: {ref}: not found", file=sys.stderr)
@@ -128,8 +132,9 @@ class PromotionTests(unittest.TestCase):
             "MOCK_GIT_LOG": str(self.git_log),
             "MOCK_MAIN_SHA": SHA,
         }
-        self.env.pop("MOCK_FAIL_INSPECT_REF", None)
-        self.env.pop("MOCK_WRONG_ROLLING", None)
+        for knob in ("MOCK_FAIL_INSPECT_REF", "MOCK_WRONG_ROLLING", "MOCK_UNREACHABLE_REF", "MOCK_UNREACHABLE_ERROR",
+                     "MOCK_HELM_UNREACHABLE", "MOCK_CORRUPT_PULL"):
+            self.env.pop(knob, None)
         # Hermetic: a caller's registry configuration (a local gate run with
         # DOCKER_CONFIG set) must not reach the script, or the recorded
         # per-call configurations stop meaning what the assertions read.
@@ -343,9 +348,21 @@ if args[:1] == ["pull"]:
         "docker_config": docker_config,
         "docker_config_entries": sorted(os.listdir(docker_config))
             if docker_config and os.path.isdir(docker_config) else None}))
+    reference = ref[len("oci://"):] if ref.startswith("oci://") else ref
+    unreachable = os.environ.get("MOCK_HELM_UNREACHABLE")
+    if unreachable:
+        # The registry gave no answer: "1" is the refusal measured for an
+        # unresolvable host; any other value is printed as Helm's error.
+        host, path = reference.split("/", 1)
+        print(f'Error: failed to perform "FetchReference" on source: Get "https://{host}/v2/{path}/manifests/{version}": '
+              f'dial tcp: lookup {host}: no such host' if unreachable == "1" else unreachable, file=sys.stderr)
+        sys.exit(1)
     name = ref.rsplit("/", 1)[1]
     key = ref.rsplit("/", 1)[0] + "/" + f"{name}-{version}"
     if key not in state:
+        # Helm v4.0.1's answer for a version the registry does not have,
+        # measured anonymously against Docker Hub on 2026-10-05.
+        print(f'Error: failed to perform "FetchReference" on source: {reference}:{version}: not found', file=sys.stderr)
         sys.exit(1)
     data = bytes.fromhex(state[key])
     if os.environ.get("MOCK_CORRUPT_PULL"):
@@ -520,7 +537,9 @@ class ChartPublicationTests(unittest.TestCase):
 
     def test_chart_push_publishes_exactly_the_package_it_is_given(self):
         package = self.release_package()
-        self.push(package)
+        result = self.push(package)
+        # Pushed because the registry SAID the version is absent (review M-1).
+        self.assertIn("logweir-chart 1.2.3 is not published yet (the registry says not found)", result.stderr)
         key = f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3"
         self.assertEqual(bytes.fromhex(self.pushed()[key]), package.read_bytes(),
                          "the release's chart asset and the pushed chart are the same bytes")
@@ -539,6 +558,47 @@ class ChartPublicationTests(unittest.TestCase):
         self.assertEqual(self.pushed()[key], b"other bytes".hex())
         self.assertFalse(any(c[:1] == ["push"] for c in self.helm_calls()))
         self.assertFalse(self.login.exists(), "no credential is used for a refused publication")
+
+    # Existence reads that end in no answer about THIS version. The first is
+    # the knob's default, the refusal measured for an unresolvable host; the
+    # connection refusal was measured too (2026-10-05, Helm v4.0.1); the 429
+    # and 401 lines are Helm's form for those statuses. The last two are a
+    # registry's "not found" for ANOTHER version and ANOTHER chart.
+    COULD_NOT_TELL = (
+        "1",
+        'Error: failed to perform "FetchReference" on source: Get "https://registry-1.docker.io/v2/{ns}/logweir-chart/'
+        'manifests/1.2.3": dial tcp 127.0.0.1:443: connect: connection refused',
+        'Error: failed to perform "FetchReference" on source: GET "https://registry-1.docker.io/v2/{ns}/logweir-chart/'
+        'manifests/1.2.3": response status code 429: toomanyrequests: You have reached your unauthenticated pull rate limit',
+        'Error: failed to perform "FetchReference" on source: GET "https://registry-1.docker.io/v2/{ns}/logweir-chart/'
+        'manifests/1.2.3": response status code 401: unauthorized: authentication required',
+        "Error: context deadline exceeded",
+        'Error: failed to perform "FetchReference" on source: registry-1.docker.io/{ns}/logweir-chart:1.2.4: not found',
+        'Error: failed to perform "FetchReference" on source: registry-1.docker.io/{ns}/logweir-chart-old:1.2.3: not found',
+    )
+
+    def test_chart_push_that_cannot_tell_whether_the_version_exists_pushes_nothing(self):
+        """Review M-1: a FAILED existence read is not "unpublished". With other
+        bytes already published under the version (the reviewer's probe) a push
+        would replace a release; with none it would still be a guess. Either
+        way: refused before any login, nothing pushed, the registry as it was."""
+        package = self.release_package()
+        key = f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3"
+        for published in (b"other bytes", None):
+            for error in self.COULD_NOT_TELL:
+                with self.subTest(published=published, error=error):
+                    state = {key: published.hex()} if published else {}
+                    self.charts.write_text(json.dumps(state))
+                    for record in (self.login, self.helm_log):
+                        record.unlink(missing_ok=True)
+                    self.env["MOCK_HELM_UNREACHABLE"] = error.format(ns=NS)
+                    result = self.push(package, success=False)
+                    self.assertIn("could not tell whether logweir-chart 1.2.3 exists; nothing pushed", result.stderr)
+                    self.assertEqual([c[0] for c in self.helm_calls()], ["pull"],
+                                     "one existence read, then nothing: no login, no push, no pull-back")
+                    self.assertFalse(self.login.exists(), "no credential is used when the read cannot tell")
+                    self.assertEqual(self.pushed(), state, "the registry is left as it was")
+        self.env.pop("MOCK_HELM_UNREACHABLE")
 
     def test_chart_push_of_the_same_bytes_again_is_a_verified_no_op(self):
         package = self.release_package()

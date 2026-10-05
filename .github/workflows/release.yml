@@ -54,6 +54,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
+          DELETED: ${{ github.event.deleted }}
           REHEARSAL_TAG: ${{ inputs.rehearsal_tag }}
         run: |
           bash scripts/release.sh validate > release.env
@@ -221,19 +222,23 @@ jobs:
       VERSION: ${{ needs.validate.outputs.version }}
     outputs:
       chart_digest: ${{ steps.chart.outputs.chart_digest }}
+    # EVERY ACTION IN THIS JOB IS PINNED BY COMMIT (review L-7): the job holds
+    # the Docker Hub token — login-action receives it, setup-buildx-action's
+    # post step runs while it is on disk, and the Helm setup-helm installs is
+    # handed it. Each comment names the release tag that commit carried when
+    # pinned (resolved 2026-10-05); move a pin by resolving the new tag's
+    # commit and changing both.
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with: { name: release-assets, path: release-assets }
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Give the publication's own digests the version tag
         run: bash scripts/release.sh promote release-assets/release-in/images.json
-      # PINNED BY COMMIT, like images.yml's: this job holds the Docker Hub token
-      # and the Helm it installs receives it (v4.3.1 = 1a275c3b…).
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with: { version: v4.0.1 }
       - name: Publish the chart package the release lists, as those bytes
@@ -255,9 +260,10 @@ jobs:
       TAG: ${{ needs.validate.outputs.tag }}
       PRERELEASE: ${{ needs.validate.outputs.prerelease }}
       CHART_DIGEST: ${{ needs.publish-images.outputs.chart_digest }}
+    # Pinned by commit like publish-images': this job holds `contents: write`.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with: { name: release-assets, path: release-assets }
       - name: Create the GitHub Release from the verified assets (a re-run verifies the one it finds)
         run: |
@@ -268,12 +274,19 @@ jobs:
           if [ -n "$CHART_DIGEST" ]; then
             printf '\nThe chart, as an anonymous helm pull reports it: OCI manifest %s.\n' "$CHART_DIGEST" >> "$notes"
           fi
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+          # "No release yet" only when GitHub SAYS so: `release not found` is
+          # gh's answer for a tag without a release (measured 2026-10-05). Any
+          # other failure is refused, never taken for an absent release.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2> "$RUNNER_TEMP/view.err"; then
             echo "$TAG already has a GitHub Release; it is verified below, not recreated"
-          else
+          elif grep -qxF 'release not found' "$RUNNER_TEMP/view.err"; then
             flags=(--verify-tag --title "Logweir $TAG" --notes-file "$notes")
             if [ "$PRERELEASE" = true ]; then flags+=(--prerelease --latest=false); fi
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}" "$assets"/*
+          else
+            cat "$RUNNER_TEMP/view.err" >&2
+            echo "could not tell whether $TAG has a GitHub Release; nothing created" >&2
+            exit 1
           fi
       - name: Download the published release and verify every asset
         run: |

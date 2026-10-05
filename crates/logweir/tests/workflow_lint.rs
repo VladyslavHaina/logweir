@@ -229,7 +229,14 @@ fn the_chart_is_published_beside_the_images_it_names() {
             .position(pred)
             .unwrap_or_else(|| panic!("release.yml publish-images has no {what}"))
     };
-    let login = position(&|s| s["uses"] == "docker/login-action@v3", "docker login");
+    let login = position(
+        &|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("docker/login-action@"))
+        },
+        "docker login",
+    );
     let promote = position(
         &|s| s["run"] == "bash scripts/release.sh promote release-assets/release-in/images.json",
         "promotion of the resolved publication",
@@ -292,6 +299,11 @@ fn the_chart_is_published_beside_the_images_it_names() {
         "chart_publish \"$package\" \"$version\" replace",
         "chart_publish \"$package\" \"$version\" immutable",
         "a release version is never replaced",
+        // An immutable push only on the registry's own "not found" for THIS
+        // version; any other failed read refuses before the login (review M-1).
+        "elif grep -qxF \"Error: failed to perform \\\"FetchReference\\\" on source: \
+         ${CHART_REPOSITORY#oci://}/$CHART_NAME:$version: not found\"",
+        "could not tell whether $CHART_NAME $version exists; nothing pushed",
     ] {
         assert!(
             script.contains(needle),
@@ -408,6 +420,131 @@ fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
     let script = std::fs::read_to_string(root().join("scripts/release.sh")).unwrap();
     assert!(script.contains("tag=\"$REF_NAME\" publish=true ;;"));
     assert!(script.contains("tag=\"${REHEARSAL_TAG:-}\" publish=false ;;"));
+}
+
+/// PROD-14.0 (review L-5): A TAG DELETION IS A PUSH TOO, and so is a re-run
+/// after a tag was re-cut. `validate` is handed `github.event.deleted` and
+/// refuses unless it is `false`, then refuses a tag that origin no longer
+/// points at this run's commit (scripts/test-release.py, Validate, runs both
+/// against a real origin).
+#[test]
+fn a_deleted_or_re_cut_tag_publishes_nothing() {
+    let release = workflow("release.yml");
+    let step = release["jobs"]["validate"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "release")
+        .expect("validate has its `release` step");
+    assert_eq!(
+        step["env"]["DELETED"].as_str(),
+        Some("${{ github.event.deleted }}")
+    );
+    assert!(step["run"]
+        .as_str()
+        .is_some_and(|r| r.starts_with("bash scripts/release.sh validate")));
+    let script = std::fs::read_to_string(root().join("scripts/release.sh")).unwrap();
+    for needle in [
+        "[[ \"${DELETED:-}\" == false ]]",
+        "git ls-remote --tags origin \"refs/tags/$tag\" \"refs/tags/$tag^{}\"",
+        "[[ -n \"$tagged\" ]] || die",
+        "[[ \"$tagged\" == \"${GITHUB_SHA:?}\" ]]",
+    ] {
+        assert!(
+            script.contains(needle),
+            "scripts/release.sh validate must keep `{needle}`"
+        );
+    }
+}
+
+/// PROD-14.0 (review M-1, swept): a GitHub Release is created only when
+/// GitHub SAYS the tag has none (`release not found`); any other failed read
+/// refuses rather than being taken for an absent release.
+#[test]
+fn a_release_is_created_only_when_github_says_there_is_none() {
+    let release = workflow("release.yml");
+    let create = release["jobs"]["github-release"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["run"].as_str())
+        .find(|r| r.contains("gh release create"))
+        .expect("github-release creates the release");
+    let read = create
+        .find("gh release view \"$TAG\" --repo \"$GITHUB_REPOSITORY\" > /dev/null 2> \"$RUNNER_TEMP/view.err\"")
+        .expect("the release is looked up first, its error kept");
+    let absent = create
+        .find("elif grep -qxF 'release not found' \"$RUNNER_TEMP/view.err\"; then")
+        .expect("absent only on gh's own answer");
+    let created = create.find("gh release create").unwrap();
+    let refused = create
+        .find("could not tell whether $TAG has a GitHub Release; nothing created")
+        .expect("any other failure is refused");
+    assert!(read < absent && absent < created && created < refused);
+}
+
+/// PROD-14.0 (review L-7): EVERY ACTION IN A JOB THAT HOLDS A PUBLISHING
+/// CREDENTIAL IS PINNED BY COMMIT — publish-images (the Docker Hub token) and
+/// github-release (`contents: write`) — with the release tag that commit
+/// carried named beside it, the convention `azure/setup-helm` set.
+#[test]
+fn credentialed_release_jobs_pin_every_action_by_commit() {
+    let release = workflow("release.yml");
+    let text = std::fs::read_to_string(root().join(".github/workflows/release.yml")).unwrap();
+    for job in ["publish-images", "github-release"] {
+        let mut actions = Vec::new();
+        for step in release["jobs"][job]["steps"].as_sequence().unwrap() {
+            let Some(uses) = step["uses"].as_str() else {
+                continue;
+            };
+            let (action, sha) = uses
+                .split_once('@')
+                .unwrap_or_else(|| panic!("{job}: `{uses}` names no version"));
+            assert!(
+                sha.len() == 40 && sha.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+                "{job}: `{uses}` is not pinned by a 40-hex commit (review L-7)"
+            );
+            let line = text
+                .lines()
+                .find(|l| {
+                    l.trim_start()
+                        .trim_start_matches("- ")
+                        .starts_with(&format!("uses: {uses}"))
+                })
+                .unwrap();
+            let tag = line
+                .split_once(" # ")
+                .map(|(_, c)| c.trim())
+                .unwrap_or_else(|| {
+                    panic!("{job}: `{uses}` must name its release tag in a comment")
+                });
+            let numbers: Vec<&str> = tag.strip_prefix('v').unwrap_or("").split('.').collect();
+            assert!(
+                numbers.len() == 3
+                    && numbers
+                        .iter()
+                        .all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())),
+                "{job}: `{uses}` names `{tag}`, not a vX.Y.Z release tag"
+            );
+            actions.push(action.to_string());
+        }
+        assert!(
+            actions.iter().any(|a| a == "actions/download-artifact"),
+            "{job} pins its actions: {actions:?}"
+        );
+        if job == "publish-images" {
+            for action in [
+                "docker/login-action",
+                "docker/setup-buildx-action",
+                "azure/setup-helm",
+            ] {
+                assert!(
+                    actions.iter().any(|a| a == action),
+                    "publish-images uses {action}"
+                );
+            }
+        }
+    }
 }
 
 /// PROD-14.0: the CLI is the only release archive. Every v0.1.x plan
