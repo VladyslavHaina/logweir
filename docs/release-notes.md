@@ -20,8 +20,8 @@ mark without one). The supported path these notes assume is
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
-published image. Item 21 (FX-2, from the product-expansion tracker's fix-now
-rows) lands after `fdb48cd8`. No tag is cut at `fdb48cd8`, so the candidate
+published image. Items 21 and 22 (FX-2 and FX-3, from the product-expansion
+tracker's fix-now rows) land after `fdb48cd8`. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
@@ -162,7 +162,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-one operator-facing changes
+### The twenty-two operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -171,7 +171,8 @@ Items 17–20 were found by the PoC rounds and landed after its first
 publication (`86a554e6`); each was proven on the running install by the
 in-place upgrade that carried it. Item 21 is the product-expansion tracker's
 fix-now row FX-2 and is not proven live yet: the PoC upgrade that carries it
-runs its rows.
+runs its rows. Item 22 is fix-now row FX-3, proven on a compose stack (it
+changes the runner's signed scorecard, not the controller).
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -755,6 +756,40 @@ product API serves that refusal `failed` again. A
 `RehearsalSchedule` this build skipped for its block fires again under the
 older controller, uncapped: suspend it (`spec.suspend: true`, the one mutable
 field) before rolling back if it must not run. Nothing has to be deleted.
+
+#### 22. A `newTopic` restore's scorecard names the source settings it did not reconstruct (FX-3)
+
+**Changed.** A restore creates its target topics at the plan's replication
+factor, with `retention.ms=-1` and the target broker's `cleanup.policy`. The
+signed scorecard labelled those deviations from the source
+`intentionally_deviated` in every mode — right for a scratch drill, wrong for a
+`newTopic` restore, whose scorecard therefore signed lost compaction and
+replication factor 1 as intended. Scorecard format `1.2.0` names them in the new
+`topic_parity.not_reconstructed` and also in `unexpected_divergence`, never as
+intended, and `logweir drill verify`, `docs/verify_scorecard.py` 1.16.0 and
+`logweir drill show` say so in words; for a `newTopic` scorecard signed before
+1.2.0 they say its intended entries were not reconstructed. A scratch drill's
+scorecard is unchanged apart from `format_version` and `not_reconstructed: []`.
+No exit code or `outcome` changes: `topic_parity` decides neither.
+**Do:** nothing on the upgrade. After a `newTopic` restore, read
+`not_reconstructed` and apply the source's settings once the restore is
+verified ([stability.md](stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings));
+Logweir does not apply them yet (PROD-05). Re-read any `newTopic` scorecard
+signed by an earlier build with the current verifier. Automation that parses
+`intentionally_deviated` or `unexpected_divergence` should expect these entries
+in the second list for `newTopic` runs; how the format change is classified is
+in [stability.md](stability.md#format-120-fx-3-what-a-newtopic-restore-did-not-reconstruct).
+**Scope:** unit rows for each of the four settings in both modes and through
+the whole phase sequence (`crates/logweir/tests/verify_phase.rs`,
+`orchestrator.rs`), the three arms in both readers with the invariant corpus
+and the verifier-parity gate, and a live row on compose
+(`e2e/tests/new_topic_parity.rs`: a compacted, replication-factor-3 source on
+the `cluster3` profile restored as `newTopic` and as a drill, the broker's own
+configuration as the oracle, and a pre-FX-3 binary's restore of the same point
+for contrast). Readers built at the previous `main` and at `v0.1.5` accept the
+1.2.0 scorecards (measured).
+**Rollback:** an older runner writes 1.1.0 scorecards with the old labels again.
+The 1.2.0 scorecards already written stay valid under older and newer readers.
 
 ### Verification scope: what "verified" means in this release
 

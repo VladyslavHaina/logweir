@@ -369,7 +369,7 @@ would break every existing invocation, every document and
 > together in FX-4, so the two readers never disagreed in between.
 > `logweir drill verify` prints `checked:   the signature AND all eleven
 > backup-receipt invariants …`; `docs/verify_scorecard.py` prints `verifier:
-> verify_scorecard.py 1.15.0 (backup-receipt invariant set: …)`. Both also print
+> verify_scorecard.py <SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both also print
 > the configuration capture coverage in the same words, one
 > `config_coverage["<topic>"]: <coverage>[ (<reason>)], message.timestamp.type
 > <value> from <source>` line per topic — or `config_coverage: not recorded, so

@@ -1605,6 +1605,12 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// pre-upgrade inventory itself, so an item 21 that loses the command an
 /// operator runs before the upgrade fails here. The notes at FX-2's `3147f498`,
 /// with twenty items, fail the twenty-one pin (FX-2 fix round, 2026-10-05).
+///
+/// Then to twenty-two: item 22 is FX-3's scorecard change, a `newTopic`
+/// restore's not-reconstructed source settings. Its token is the new field's
+/// name, so an item 22 that stops naming what an operator reads after a
+/// restore fails here, and the notes at main `b8b9263f`, with twenty-one
+/// items, fail the twenty-two pin (FX-3, 2026-10-05).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1630,9 +1636,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=21).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-one operator-facing changes, `#### 1.` \
-         to `#### 21.` in order; found {numbers:?}"
+        (1..=22).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-two operator-facing changes, `#### 1.` \
+         to `#### 22.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1671,6 +1677,12 @@ fn the_release_notes_carry_every_owed_operator_action() {
         (
             "runnerResources applied or refused",
             "select(.spec.runnerResources // .spec.bounds.runnerResources)",
+        ),
+        // FX-3 (2026-10-05): a newTopic restore's scorecard names the source
+        // settings it did not reconstruct, never "intended".
+        (
+            "not-reconstructed source settings",
+            "topic_parity.not_reconstructed",
         ),
     ]) {
         assert!(

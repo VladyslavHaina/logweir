@@ -3,10 +3,11 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-drill-scorecard-1.1.0.json`](../../schemas/logweir-drill-scorecard-1.1.0.json)
+[`schemas/logweir-drill-scorecard-1.2.0.json`](../../schemas/logweir-drill-scorecard-1.2.0.json)
 and CI diffs it against the code on every build, so this document and the
-schema cannot drift apart silently. [`schemas/logweir-drill-scorecard-1.0.0.json`](../../schemas/logweir-drill-scorecard-1.0.0.json)
-is frozen beside it: format **1.1.0** (FX-4) added the nested optional
+schema cannot drift apart silently. [`schemas/logweir-drill-scorecard-1.1.0.json`](../../schemas/logweir-drill-scorecard-1.1.0.json)
+and [`schemas/logweir-drill-scorecard-1.0.0.json`](../../schemas/logweir-drill-scorecard-1.0.0.json)
+are frozen beside it. Format **1.1.0** (FX-4) added the nested optional
 [`topic_parity.not_assessed` and `target_diff.not_assessed`](#topic_parity-and-what-its-silence-means),
 the first fields added after the v0.1 tags and therefore a MINOR bump with a new
 schema file
@@ -17,6 +18,13 @@ the owner ruled them MINOR on 2026-10-05
 ([OD-7](../to-do/product-expansion.md#owner-decisions)'s follow-up ruling),
 because they can only weaken an older reader's verdict. Each
 `target_diff.collisions` string is written exactly as before.
+Format **1.2.0** (FX-3) adds the nested optional
+[`topic_parity.not_reconstructed`](#topic_parity-in-a-newtopic-restore-not-reconstructed-120):
+the source settings a `newTopic` restore did not reconstruct, which every
+earlier writer signed as `intentionally_deviated` in both modes. Those
+deviations are also written into the existing `unexpected_divergence`, and
+[`docs/stability.md`](../stability.md#format-120-fx-3-what-a-newtopic-restore-did-not-reconstruct)
+says how that is classified.
 The payload type keeps `version=1.0.0`, the major-1 envelope. A worked example is
 [`e2e/fixtures/scorecard-pass.json`](../../e2e/fixtures/scorecard-pass.json) —
 read [`e2e/fixtures/README.md`](../../e2e/fixtures/README.md) first, which lists
@@ -47,7 +55,7 @@ that reader and this one is a reference.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of this format. `1.0.0` in v0.1; `1.1.0` since FX-4. |
+| `format_version` | string | Semver of this format. `1.0.0` in v0.1; `1.1.0` since FX-4; `1.2.0` since FX-3. |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
 | `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../architecture.md#adr-0007-source-capture-scope) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
@@ -377,9 +385,10 @@ fields.
 | `integrity.mismatches` | integer | How many did not. A **compacted** target topic is reported through this path as a mismatch, not as `partial` — see [stability.md](../stability.md). |
 | `integrity.pass_rate_measured` | float \| null | `matching / sampled`. **Null in three cases**, and a `byte-fingerprint` document with a null rate is well-formed: the level is not `byte-fingerprint`; not every selection reached a conclusion; or `records_sampled` is 0 (a zero denominator is withheld, never published as NaN). |
 | `integrity.restoredPrincipalCouldConsume` | bool \| null | **SP3.** Null, never `false`, until then. The wire name is camelCase deliberately and permanently: renaming it later would be a major bump. |
-| `topic_parity.intentionally_deviated` | string[] | Config keys the drill deliberately set differently on the target. |
-| `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have, as `"<target topic>: <key>"`. Since 1.1.0 also one fail-safe entry `"<target topic>: configuration not assessed (<why>)"` per topic `not_assessed` names ([below](#topic_parity-and-what-its-silence-means)). |
+| `topic_parity.intentionally_deviated` | string[] | A SCRATCH drill's deviations on the four settings the restore's own topic creation decides (`cleanup.policy`, `retention.ms`, `partition_count`, `replication_factor`), as `"<target topic>: <key>"`. Since 1.2.0 always `[]` in a `newTopic` restore; in a `newTopic` document before 1.2.0 its entries were NOT reconstructed, whatever the label ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
+| `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have, as `"<target topic>: <key>"`. Since 1.1.0 also one fail-safe entry `"<target topic>: configuration not assessed (<why>)"` per topic `not_assessed` names ([below](#topic_parity-and-what-its-silence-means)). Since 1.2.0, in a `newTopic` restore, also every entry of `not_reconstructed` ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
 | `topic_parity.not_assessed` | string[], **optional** (1.1.0) | The mapped target topics whose CONFIGURATION parity was not assessed, as `"<target topic>: configuration (<why>)"`. See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
+| `topic_parity.not_reconstructed` | string[], **optional** (1.2.0) | The source settings a `newTopic` restore did NOT reconstruct, as `"<target topic>: <key>"`; each is also in `unexpected_divergence` and never in `intentionally_deviated`. `[]` in a scratch drill. See [below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120). ABSENT means not recorded. |
 
 ### `topic_parity`, and what its silence means
 
@@ -450,7 +459,81 @@ appears between phase 0 and phase 3.
 Neither reader adds an invariant for either field — they are informational —
 but both refuse a value serde cannot read as an array of strings
 (`drill verify` exit 1, the script exit 1; `shape-index.json` records both
-fields).
+fields). FX-3's `not_reconstructed`, below, has three arms.
+
+### `topic_parity` in a `newTopic` restore: not reconstructed (1.2.0)
+
+Four of the differences phase 7 can find are made by the restore's own topic
+creation, in both modes: `cleanup.policy` is left to the target broker's
+default (normally `delete`), `retention.ms` is `-1` (so a restored record
+older than the broker's retention is not deleted before it is verified), and
+the partition count and replication factor are the manifest's and the plan's
+`default_replication_factor`. A **scratch** drill restores into a throwaway
+cluster that runs `cleanup.policy=delete`, infinite retention and one broker on
+purpose, so there they are `intentionally_deviated`, exactly as before. A
+**`newTopic`** restore is the recovery itself, and every writer before format
+1.2.0 applied the same scratch rationale to it: a compacted source restored as
+a delete-policy topic, or a replication-factor-3 source restored at 1, was
+signed as "intended".
+
+Since 1.2.0 a `newTopic` restore writes each of the four that differs, as
+`"<target topic>: <key>"` (`<key>` is `cleanup.policy`, `retention.ms`,
+`partition_count` or `replication_factor`):
+
+- into `not_reconstructed`, the authoritative list: a source setting the
+  restore did NOT reconstruct on the target. Applying it is the operator's
+  until PROD-05 does it ([stability.md](../stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings));
+- into `unexpected_divergence`, the list every reader has always shown, so a
+  reader older than 1.2.0 sees a divergence: a weaker conclusion than the
+  label it replaces, never a stronger one, and never the silence that reads
+  as parity;
+
+and never into `intentionally_deviated`, which a 1.2.0 `newTopic` document
+leaves `[]`. Every other key that differs is `unexpected` in both modes, as
+before, and a scratch drill writes `not_reconstructed: []`.
+
+| Document | `intentionally_deviated` | `unexpected_divergence` | `not_reconstructed` |
+|---|---|---|---|
+| scratch drill, any version | the four that differ | every other differing key | `[]` from 1.2.0; absent before |
+| `newTopic` restore, 1.2.0 | `[]` | every other differing key **and** the four that differ | the four that differ |
+| `newTopic` restore, before 1.2.0 | the four that differ, **NOT reconstructed whatever the label** | every other differing key | absent |
+
+**Absent means not recorded:** every document before 1.2.0, and one whose
+phase 7 never ran. It is never read as "everything was reconstructed"; `[]` is
+that claim, and only phase 7 writes it. A `newTopic` document without the
+field predates the distinction, and both readers say what its `intended`
+entries are (below).
+
+**Three arms**, in both readers and in this order, fire only on a document
+that carries the field, so every document without it is decided exactly as
+before:
+
+| Arm | Refuses |
+|---|---|
+| NR-1 | the field under a `format_version` before 1.2.0: `topic_parity.not_reconstructed is present but format_version "<v>" predates it: the field is defined from 1.2.0` |
+| NR-2 | an entry missing from `unexpected_divergence` — the "dropped instead of moved" document an older reader would read as silence |
+| NR-3 | an entry also in `intentionally_deviated` |
+
+Phase 8 runs them before it signs, so no writer of this build can sign a
+document that breaks them. Both readers also refuse a `not_reconstructed`, an
+`intentionally_deviated` or an `unexpected_divergence` that is not an array of
+strings (`shape-index.json`).
+
+**What both readers print.** `logweir drill verify` and
+`docs/verify_scorecard.py` print the same `reconstruction:` sentence, and
+neither changes an exit code:
+
+```
+reconstruction: source settings NOT RECONSTRUCTED for restore-20260907T140500Z-orders: cleanup.policy; restore-20260907T140500Z-orders: replication_factor
+reconstruction: not recorded, so the settings this newTopic document labels intentionally_deviated were NOT reconstructed: restore-20260907T140500Z-orders: cleanup.policy
+```
+
+The first is a 1.2.0 document with a non-empty `not_reconstructed`; the second
+a `newTopic` document from before 1.2.0 whose `intentionally_deviated` names
+anything. Nothing is printed for `[]`, for a scratch drill, or for a `newTopic`
+document with nothing to say. `logweir drill show` adds
+`not reconstructed [...]`, or `intended = NOT reconstructed (a newTopic document
+before format 1.2.0)`, to its `topic parity` row.
 
 ### `partial_reason` must SAY something
 

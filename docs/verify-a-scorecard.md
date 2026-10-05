@@ -132,8 +132,8 @@ PAE of the type and raw payload bytes, then the applicable document rules.
 Scorecards use `application/vnd.logweir.drill-scorecard+json;version=1.0.0`.
 A signature for another document type cannot serve as a scorecard signature.
 The media type's `version=1.0.0` names the envelope and stays the same for a
-document whose `format_version` is `1.1.0`; the document's own version is the
-field inside it.
+document whose `format_version` is `1.1.0` or `1.2.0`; the document's own
+version is the field inside it.
 
 The current scorecard checks include:
 
@@ -157,6 +157,10 @@ The current scorecard checks include:
   `byte-fingerprint` level.
 - An auth block names a nonblank supported mode (`plaintext` or `scramSha512`);
   a username without a mode is refused. `redactions` is empty.
+- `topic_parity`'s lists are arrays of strings. A `topic_parity.not_reconstructed`
+  (format 1.2.0) appears only under a `format_version` of at least `1.2.0`, and
+  each of its entries is also in `unexpected_divergence` and never in
+  `intentionally_deviated`; see [the format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120).
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
 
@@ -173,6 +177,20 @@ parity was not assessed; the second is every 1.0.0 document, and a 1.1.0 one
 whose drill stopped before phase 7. Neither is a refusal and neither changes the
 exit code. No line is printed when every topic was assessed (`not_assessed: []`).
 See [what an empty divergence list does not prove](#an-empty-unexpected_divergence-is-not-configuration-parity).
+
+Both also print one line about the source settings a `newTopic` restore did
+not reconstruct, whenever the document has something to say:
+
+```
+reconstruction: source settings NOT RECONSTRUCTED for restore-20260907T140500Z-orders: cleanup.policy; restore-20260907T140500Z-orders: replication_factor
+reconstruction: not recorded, so the settings this newTopic document labels intentionally_deviated were NOT reconstructed: restore-20260907T140500Z-orders: cleanup.policy
+```
+
+The first is a format 1.2.0 document naming them in `not_reconstructed`; the
+second is a `newTopic` document signed before 1.2.0, whose writer labelled the
+same settings `intentionally_deviated`. Neither changes the exit code, and
+nothing is printed for a scratch drill, whose deviations are intended. See
+[a new-topic restore's settings](#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings).
 
 Backup receipts have their own shape and invariants — eleven arms since format
 1.1.0 ([the list](formats/backup-receipt.md#the-eleven-arms)). For an accepted
@@ -468,6 +486,20 @@ when every topic was assessed (measured live by FX-4). The backup receipt's
 `config_coverage` records that effective value and its source; comparing it is
 FX-8's, and the other effective values are PROD-05.1's.
 
+### A `newTopic` restore does not reconstruct the source's topic settings
+
+A restore creates its target topics itself, at the plan's replication factor,
+with `retention.ms=-1` and the target broker's `cleanup.policy`. In a scratch
+drill those deviations are intended and `intentionally_deviated` lists them. In
+a `newTopic` restore they are the source's compaction, retention and
+replication factor NOT reconstructed: a format 1.2.0 scorecard lists them in
+`topic_parity.not_reconstructed` and also in `unexpected_divergence`, and both
+readers print the `reconstruction:` line above. **A `newTopic` scorecard signed
+before 1.2.0 lists the same settings as `intentionally_deviated`; that label is
+the defect FX-3 fixed, not a finding that they were intended.** What to do about
+them, and what the comparison does not cover, is in
+[stability.md](stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings).
+
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 
 The current engine wrapper inherits the refusing default for `validation_run`,
@@ -544,9 +576,10 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.15.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.16.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
-`format_version` (`1.0.0`, or `1.1.0` for a scorecard signed since FX-4). It
+`format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, or `1.2.0`
+since FX-3). It
 changes when the reader's accepted-document set changes. The compatibility
 history is:
 
@@ -567,6 +600,7 @@ history is:
 | `1.13.0` | Rejects present target modes other than `scratch` or `newTopic`, including null; retains acceptance of failed integrity results with or without a partial reason. |
 | `1.14.0` | Adds `--payload-type catalog-point`, a signature-only check of a recovery catalog point record. |
 | `1.15.0` | Knows scorecard and backup-receipt format `1.1.0`. Adds the backup receipt's six `config_coverage` arms (6–11) and prints its per-topic coverage; checks that a scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed` are arrays of strings, and prints the configuration-parity line. Every document without the new fields is decided exactly as before. |
+| `1.16.0` | Knows scorecard format `1.2.0`. Adds the three `topic_parity.not_reconstructed` arms (NR-1 to NR-3) and prints the reconstruction line. Refuses `topic_parity.intentionally_deviated` and `unexpected_divergence` that are not arrays of strings, and a `format_version` whose major Rust's integer parse refuses (`" 1.0.0"`, `"0_1.0.0"`): `drill verify` refused all of these while earlier versions printed `VALID`. Every other document without the new field is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
@@ -579,6 +613,13 @@ print neither line. A topic whose configuration parity was not assessed still
 reaches them, as its `configuration not assessed (<why>)` entry in
 `unexpected_divergence`, which `logweir drill show` prints in its `topic parity`
 row.
+
+A verifier older than `1.16.0`, and a `logweir` built before FX-3, accept a
+1.2.0 scorecard the same way (measured with the readers at main `b8b9263f` and
+at `v0.1.5`): they check none of NR-1 to NR-3 and print no reconstruction line.
+A setting a `newTopic` restore did not reconstruct still reaches them, as its
+entry in `unexpected_divergence`, which `logweir drill show` prints under
+`unexpected [...]`; none of them shows it as intended.
 
 **Rerun the current verifier over retained documents and sidecars checked with
 older versions.** Earlier `VALID` results may reflect weaker consistency or

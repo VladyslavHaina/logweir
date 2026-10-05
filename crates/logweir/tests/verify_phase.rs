@@ -3761,3 +3761,67 @@ fn a_new_topic_restore_whose_target_read_was_refused_still_names_its_replication
     );
     assert!(out.topic_parity.intentionally_deviated.is_empty());
 }
+
+/// **FX-3's classification, stated in ONE place and not claimed MINOR.** The
+/// new field and arms NR-1..NR-3 fall under OD-7 (a); moving a `newTopic`
+/// restore's deviations out of `intentionally_deviated` and into the existing
+/// `unexpected_divergence` changes two existing fields' content, which OD-7's
+/// follow-up ruling (FX-4's entry only) does not cover. `docs/stability.md`'s
+/// FX-3 section says it is pending the owner's ruling, implemented as if
+/// MINOR, and no other document restates or resolves it.
+///
+/// When the owner rules, this test changes with the section, as FX-4's OD-7
+/// test did. Negative controls: the section without the pending bullet, a
+/// second copy of it in another document, or a sentence calling the change
+/// MINOR, fails here.
+#[test]
+fn fx3s_change_to_the_two_existing_lists_is_pending_the_owners_ruling_in_one_place() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let flat = |rel: &str| -> String {
+        std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("{rel}: {e}"))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let stability = flat("docs/stability.md");
+    let section = stability
+        .split("### Format 1.2.0 (FX-3)")
+        .nth(1)
+        .expect("docs/stability.md has FX-3's format section")
+        .split(" ### ")
+        .next()
+        .expect("the section");
+    for said in [
+        "**PENDING THE OWNER'S RULING: the content of the two existing lists.**",
+        "It is implemented as if MINOR and is not MINOR until the owner rules.",
+        "**The field and its three arms are MINOR** under the owner's OD-7 (a)",
+    ] {
+        assert!(
+            section.contains(said),
+            "docs/stability.md's FX-3 section no longer says: {said}"
+        );
+    }
+    let mut places = 0;
+    for doc in [
+        "docs/stability.md",
+        "docs/formats/drill-scorecard.md",
+        "docs/verify-a-scorecard.md",
+        "docs/release-notes.md",
+        "e2e/fixtures/invariants/README.md",
+        "MAINTAINERS.md",
+    ] {
+        let text = flat(doc);
+        places += text.matches("PENDING THE OWNER'S RULING").count();
+        for claim in [
+            "the change to the two existing lists is MINOR",
+            "FX-3's entries in `unexpected_divergence` are MINOR",
+        ] {
+            assert!(!text.contains(claim), "{doc} claims {claim:?}");
+        }
+    }
+    assert_eq!(
+        places, 1,
+        "FX-3's pending ruling is stated in exactly one place"
+    );
+}
