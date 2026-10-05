@@ -229,16 +229,38 @@ fn the_schema_bounds_are_the_parsers_own_rules() {
          controller then refuses — and a refused policy fails CLOSED and silently.",
         logweir_core::check_contract::MAX_TOPICS_CEILING
     );
-    let preflight = &schema["properties"]["checks"]["properties"]["preflight"]["properties"];
-    assert_eq!(
-        preflight["defaultTimeoutSeconds"]["minimum"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        preflight["defaultTimeoutSeconds"]["maximum"].as_u64(),
-        Some(600),
-        "`Policy::validate` enforces the contract's 1..=600"
-    );
+    // FX-10: the two withdrawn keys are ALLOWED (so an older values file still
+    // installs), OPTIONAL, UNBOUNDED (a value nothing reads must not be able to
+    // fail an install) and say so.
+    let checks_schema = &schema["properties"]["checks"]["properties"];
+    for (block, key) in [
+        ("discovery", "defaultMaxTopics"),
+        ("preflight", "defaultTimeoutSeconds"),
+    ] {
+        let node = &checks_schema[block]["properties"][key];
+        assert_eq!(
+            node["type"], "integer",
+            "`checks.{block}.{key}` is still typed"
+        );
+        assert!(
+            node.get("minimum").is_none() && node.get("maximum").is_none(),
+            "`checks.{block}.{key}` is withdrawn and bounds nothing: {node}"
+        );
+        assert!(
+            node["description"]
+                .as_str()
+                .is_some_and(|d| d.starts_with("WITHDRAWN (FX-10")),
+            "`checks.{block}.{key}` says it is withdrawn: {node}"
+        );
+        assert!(
+            !checks_schema[block]["required"]
+                .as_array()
+                .expect("a required list")
+                .iter()
+                .any(|r| r == key),
+            "`checks.{block}.{key}` must not be required"
+        );
+    }
     // Every field `validate()` bounds at >= 1 is bounded at >= 1 here too.
     let checks = &schema["properties"]["checks"]["properties"];
     for field in [
@@ -253,7 +275,7 @@ fn the_schema_bounds_are_the_parsers_own_rules() {
             "`checks.{field}` must be bounded at >= 1, as `Policy::validate` bounds it"
         );
     }
-    for field in ["keepPerConnection", "defaultMaxTopics", "hardMaxTopics"] {
+    for field in ["keepPerConnection", "hardMaxTopics"] {
         assert_eq!(
             discovery[field]["minimum"].as_u64(),
             Some(1),
@@ -321,12 +343,13 @@ fn the_extremes_the_schema_admits_are_documents_the_parser_accepts() {
                 "freshSeconds": n(1, 1_000_000),
                 "retentionSeconds": n(1, 1_000_000),
                 "keepPerConnection": n(1, 1_000_000),
-                "defaultMaxTopics": n(1, ceiling),
+                // FX-10: withdrawn; the chart renders min(20 000, hardMaxTopics).
+                "defaultMaxTopics": n(1, u64::from(policy::WITHDRAWN_DEFAULT_MAX_TOPICS)),
                 "hardMaxTopics": n(1, ceiling),
                 "visibilityAttestations": []
             },
             "preflight": {
-                "defaultTimeoutSeconds": n(1, 600),
+                "defaultTimeoutSeconds": policy::WITHDRAWN_DEFAULT_TIMEOUT_SECONDS,
                 "retentionSeconds": n(1, 1_000_000)
             },
             "engine": {"allowUnverifiedCustomCa": false},
@@ -354,15 +377,17 @@ fn the_extremes_the_schema_admits_are_documents_the_parser_accepts() {
     }
 }
 
-/// **The two cross-field rules `Policy::validate` enforces are real**, so the
-/// `fail`s `charts/logweir/templates/policy.yaml` carries for them are not
-/// belt-and-braces over a rule that does not exist.
+/// **The cross-field rule `Policy::validate` enforces is real**, so the `fail`
+/// `charts/logweir/templates/policy.yaml` carries for it is not
+/// belt-and-braces over a rule that does not exist — and the rule FX-10
+/// withdrew with `defaultMaxTopics` is really gone, so a document an older
+/// chart rendered is never refused for it.
 ///
-/// JSON Schema draft-07 cannot compare two sibling values, which is why they
-/// are refused at render time instead. This is the half that proves the rules
-/// they mirror.
+/// JSON Schema draft-07 cannot compare two sibling values, which is why the
+/// rule is refused at render time instead. This is the half that proves the
+/// rule it mirrors.
 #[test]
-fn the_two_rules_the_schema_cannot_express_are_rules_the_parser_enforces() {
+fn the_rule_the_schema_cannot_express_is_a_rule_the_parser_enforces() {
     let base: serde_json::Value = serde_json::from_str(
         &rendered_policies("default")
             .remove("weirkeeper-policy")
@@ -379,21 +404,22 @@ fn the_two_rules_the_schema_cannot_express_are_rules_the_parser_enforces() {
          templates/policy.yaml fails the render for it"
     );
 
+    // FX-10: the withdrawn pair's rule is gone. An older chart's document with
+    // `defaultMaxTopics` above `hardMaxTopics` (a value nothing reads) is
+    // accepted, where it used to fail closed.
     let mut inverted_topics = base;
     inverted_topics["discovery"]["defaultMaxTopics"] = serde_json::json!(50_000);
     inverted_topics["discovery"]["hardMaxTopics"] = serde_json::json!(100);
-    assert!(
-        policy::parse(inverted_topics.to_string().as_bytes()).is_err(),
-        "`defaultMaxTopics` above `hardMaxTopics` must be refused; \
-         templates/policy.yaml fails the render for it"
-    );
+    let parsed = policy::parse(inverted_topics.to_string().as_bytes())
+        .expect("a withdrawn value out of its old range is ignored, not refused");
+    assert_eq!(parsed.discovery.hard_max_topics, 100);
 }
 
-/// **The chart's own template refuses both cross-field pairs**, named, at
+/// **The chart's own template refuses the cross-field pair**, named, at
 /// render time — asserted over the template text because `chart_lint` is the
 /// crate that runs `helm` and this one does not.
 #[test]
-fn the_policy_template_names_both_cross_field_rules_in_its_refusals() {
+fn the_policy_template_names_its_cross_field_rule_in_its_refusal() {
     let template = std::fs::read_to_string(repo().join("charts/logweir/templates/policy.yaml"))
         .expect("the policy template is readable");
     let code: String = template
@@ -403,13 +429,10 @@ fn the_policy_template_names_both_cross_field_rules_in_its_refusals() {
         .join("\n");
     assert_eq!(
         code.matches("{{- fail (printf").count(),
-        2,
-        "two cross-field rules, two named refusals"
+        1,
+        "one cross-field rule, one named refusal (FX-10 withdrew the other with its value)"
     );
-    for needle in [
-        "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace",
-        "checks.discovery.defaultMaxTopics (%d) must be at most checks.discovery.hardMaxTopics",
-    ] {
+    for needle in ["checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace"] {
         assert!(
             code.contains(needle),
             "templates/policy.yaml must refuse the render naming the rule and both values; \
@@ -429,10 +452,7 @@ fn the_policy_template_names_both_cross_field_rules_in_its_refusals() {
     // nothing. `scripts/check-chart.sh` renders the two inverted pairs and is
     // the live proof; this is the cheap half that says which comparison each
     // `fail` hangs off.
-    for condition in [
-        "{{- if lt $maxTotal $maxNs -}}",
-        "{{- if gt $defaultMax $hardMax -}}",
-    ] {
+    for condition in ["{{- if lt $maxTotal $maxNs -}}"] {
         assert!(
             code.contains(condition),
             "templates/policy.yaml must guard its refusal with `{condition}`; a `fail` behind a \

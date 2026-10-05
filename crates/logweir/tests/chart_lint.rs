@@ -4336,15 +4336,7 @@ fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points
             "discovery.keepPerConnection",
             "checks.discovery.keepPerConnection",
         ),
-        (
-            "discovery.defaultMaxTopics",
-            "checks.discovery.defaultMaxTopics",
-        ),
         ("discovery.hardMaxTopics", "checks.discovery.hardMaxTopics"),
-        (
-            "preflight.defaultTimeoutSeconds",
-            "checks.preflight.defaultTimeoutSeconds",
-        ),
         (
             "preflight.retentionSeconds",
             "checks.preflight.retentionSeconds",
@@ -4367,6 +4359,40 @@ fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points
             j.is_u64(),
             "policy.json's `{json_path}` must be a JSON INTEGER; a float or a string is a \
              `deny_unknown_fields` parse failure that fails closed"
+        );
+    }
+    // FX-10: THE TWO WITHDRAWN FIELDS ARE NOT THE VALUES FILE'S. values.yaml no
+    // longer carries them; the document still does, at the fixed values a
+    // controller older than FX-10 requires (it refuses a document without
+    // them), and `weirkeeper/tests/chart_policy.rs` pins both to the parser.
+    for (json_path, yaml_path, compat) in [
+        (
+            "discovery.defaultMaxTopics",
+            "checks.discovery.defaultMaxTopics",
+            20_000u64,
+        ),
+        (
+            "preflight.defaultTimeoutSeconds",
+            "checks.preflight.defaultTimeoutSeconds",
+            120,
+        ),
+    ] {
+        let mut j = &policy;
+        for seg in json_path.split('.') {
+            j = &j[seg];
+        }
+        let mut y = &values;
+        for seg in yaml_path.split('.') {
+            y = &y[seg];
+        }
+        assert!(
+            y.is_null(),
+            "values.yaml carries the withdrawn `{yaml_path}`"
+        );
+        assert_eq!(
+            j.as_u64(),
+            Some(compat),
+            "policy.json's `{json_path}` is the fixed compatibility value"
         );
     }
     // THE TWO COLLECTIONS ARE EMPTY BY DEFAULT — with no attestation nothing
@@ -4835,7 +4861,13 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         // `--set-string` for the empty string.
         "'checks.discovery.hardMaxTopics=100000'",
         "'checks.maxActiveTotal=2'",
+        // FX-10: the withdrawn values are accepted, ignored and named in the
+        // notes.
         "'checks.discovery.defaultMaxTopics=60000'",
+        "'checks.preflight.defaultTimeoutSeconds=900'",
+        "cmp -s \"$tmp/withdrawn-base.yaml\" \"$tmp/withdrawn-set.yaml\"",
+        "KUBECONFIG=/dev/null helm install \"$RELEASE\" \"$CHART\" -n \"$NAMESPACE\" --dry-run=client",
+        "WITHDRAWN VALUES ARE SET AND IGNORED",
         "--set 'admissionPolicy.consoleServiceAccountName=null'",
         "--set-string 'admissionPolicy.consoleServiceAccountName='",
     ] {
@@ -5232,10 +5264,8 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "checks.discovery.freshSeconds",
         "checks.discovery.retentionSeconds",
         "checks.discovery.keepPerConnection",
-        "checks.discovery.defaultMaxTopics",
         "checks.discovery.hardMaxTopics",
         "checks.discovery.visibilityAttestations",
-        "checks.preflight.defaultTimeoutSeconds",
         "checks.preflight.retentionSeconds",
         // P10 — the manual-run pool, in the same ConfigMap.
         "runs.maxManualBackupsActivePerNamespace",
@@ -5330,9 +5360,7 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         ("checks.discovery.freshSeconds", 900),
         ("checks.discovery.retentionSeconds", 86_400),
         ("checks.discovery.keepPerConnection", 5),
-        ("checks.discovery.defaultMaxTopics", 20_000),
         ("checks.discovery.hardMaxTopics", 50_000),
-        ("checks.preflight.defaultTimeoutSeconds", 120),
         ("checks.preflight.retentionSeconds", 3_600),
         // P10: `RunsPolicy::default()`'s and `RunRateLimits::default()`'s
         // numbers — the ones the templates render NOTHING for.
@@ -5359,6 +5387,36 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "EMPTY, and that is the safe direction: with no attestation nothing can ever be \
          `attestedComplete`"
     );
+    // FX-10: TWO VALUES ARE WITHDRAWN. They changed nothing (the CRDs default
+    // the request fields at admission), so values.yaml does not show them —
+    // and the schema still ACCEPTS them, optional, so a values file or a
+    // `--reuse-values` upgrade that carries one does not fail on the closed
+    // schema. scripts/check-chart.sh proves the render ignores them and the
+    // install notes name them.
+    let schema_checks: serde_json::Value =
+        serde_json::from_str(&read("charts/logweir/values.schema.json")).expect("the schema");
+    for (block, key) in [
+        ("discovery", "defaultMaxTopics"),
+        ("preflight", "defaultTimeoutSeconds"),
+    ] {
+        assert!(
+            values["checks"][block][key].is_null(),
+            "values.yaml shows the withdrawn `checks.{block}.{key}`"
+        );
+        let node = &schema_checks["properties"]["checks"]["properties"][block];
+        assert!(
+            node["properties"][key].is_object(),
+            "values.schema.json must still accept `checks.{block}.{key}`: its block is \
+             additionalProperties:false, so dropping it fails every upgrade that carries it"
+        );
+        assert!(
+            !node["required"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|f| f == key)),
+            "`checks.{block}.{key}` must not be required"
+        );
+    }
+
     assert_eq!(
         Some(0),
         values["evidence"]["controllerIdentityLocations"]

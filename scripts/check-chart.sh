@@ -489,24 +489,24 @@ else
   echo "   rc=$rc  (a non-default api.console.rateLimits.* renders the rateLimits block)"
 fi
 
-# D2 W11 fix round 1 (review F1) — THE THREE BOUNDS `Policy::validate` ENFORCES
+# D2 W11 fix round 1 (review F1) — THE BOUNDS `Policy::validate` ENFORCES
 # THAT AN INSTALL USED TO WALK STRAIGHT PAST.
 #
 #   hardMaxTopics > MAX_TOPICS_CEILING   the schema said 200 000, the parser
 #                                        says 50 000
 #   maxActiveTotal < maxActivePerNamespace       cross-field
-#   defaultMaxTopics > hardMaxTopics             cross-field
 #
-# The two cross-field rules cannot be written in JSON Schema draft-07 at all
-# (it cannot compare two siblings), so `templates/policy.yaml` refuses them
-# with a named `fail`. All three are here because the failure they prevent is
-# the silent one: `helm install` succeeds, `weirkeeper-policy` renders, the
-# parser refuses it, and `Policy::fail_closed()` discards every attestation and
-# every evidence location while the install looks healthy.
+# The cross-field rule cannot be written in JSON Schema draft-07 at all (it
+# cannot compare two siblings), so `templates/policy.yaml` refuses it with a
+# named `fail`. Both are here because the failure they prevent is the silent
+# one: `helm install` succeeds, `weirkeeper-policy` renders, the parser refuses
+# it, and `Policy::fail_closed()` discards every attestation and every evidence
+# location while the install looks healthy. (The third row,
+# `defaultMaxTopics > hardMaxTopics`, went with the value: FX-10 withdrew it,
+# and the arm below proves the opposite of a refusal for it.)
 for bad in \
   'checks.discovery.hardMaxTopics=100000' \
-  'checks.maxActiveTotal=2' \
-  'checks.discovery.defaultMaxTopics=60000'; do
+  'checks.maxActiveTotal=2'; do
   helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
     --set "$bad" > /dev/null 2> "$tmp/schema-policy-bound.err"
   rc=$?
@@ -517,6 +517,67 @@ for bad in \
     echo "   rc=$rc  (--set $bad refused, as it must be)"
   fi
 done
+
+# FX-10 — THE TWO WITHDRAWN VALUES ARE ACCEPTED, IGNORED, AND SAID TO BE.
+#
+# `checks.discovery.defaultMaxTopics` and `checks.preflight.defaultTimeoutSeconds`
+# never changed anything (the CRDs default the request fields at admission), so
+# they left `values.yaml`. Three properties, each a way the withdrawal could go
+# wrong:
+#   1. a values file or a `--reuse-values` upgrade that still carries them must
+#      not fail on the closed schema — the render succeeds;
+#   2. they are IGNORED — the render is byte-identical to one without them, so
+#      the document carries the fixed compatibility values, not the configured
+#      ones (a pre-FX-10 controller requires both keys);
+#   3. the operator is TOLD — the install notes name each one, and say nothing
+#      when neither is set. `--dry-run=client` with `KUBECONFIG=/dev/null`
+#      renders NOTES.txt and cannot reach any cluster.
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  > "$tmp/withdrawn-base.yaml" 2> "$tmp/withdrawn-base.err"
+rc_base=$?
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set 'checks.discovery.defaultMaxTopics=60000' --set 'checks.preflight.defaultTimeoutSeconds=900' \
+  > "$tmp/withdrawn-set.yaml" 2> "$tmp/withdrawn-set.err"
+rc=$?
+if [ "$rc_base" -ne 0 ] || [ "$rc" -ne 0 ]; then
+  cat "$tmp/withdrawn-set.err" >&2
+  echo "FAIL: a render carrying the two withdrawn values was refused (rc=$rc, base rc=$rc_base); an upgrade from an older values file would fail" >&2
+  fail=1
+elif ! cmp -s "$tmp/withdrawn-base.yaml" "$tmp/withdrawn-set.yaml"; then
+  diff -u "$tmp/withdrawn-base.yaml" "$tmp/withdrawn-set.yaml" >&2
+  echo "FAIL: setting a withdrawn value changed the render; it must reach nothing" >&2
+  fail=1
+elif ! grep -q '"defaultMaxTopics": 20000' "$tmp/withdrawn-set.yaml" \
+  || ! grep -q '"defaultTimeoutSeconds": 120' "$tmp/withdrawn-set.yaml"; then
+  echo "FAIL: the policy document lost the fixed compatibility values a pre-FX-10 controller requires" >&2
+  fail=1
+else
+  echo "   rc=$rc  (the two withdrawn values render, change nothing, and the document keeps 20000/120)"
+fi
+KUBECONFIG=/dev/null helm install "$RELEASE" "$CHART" -n "$NAMESPACE" --dry-run=client \
+  ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set 'checks.discovery.defaultMaxTopics=60000' --set 'checks.preflight.defaultTimeoutSeconds=900' \
+  > "$tmp/withdrawn-notes.txt" 2> "$tmp/withdrawn-notes.err"
+rc=$?
+KUBECONFIG=/dev/null helm install "$RELEASE" "$CHART" -n "$NAMESPACE" --dry-run=client \
+  ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  > "$tmp/withdrawn-notes-none.txt" 2> "$tmp/withdrawn-notes-none.err"
+rc_none=$?
+if [ "$rc" -ne 0 ] || [ "$rc_none" -ne 0 ]; then
+  cat "$tmp/withdrawn-notes.err" "$tmp/withdrawn-notes-none.err" >&2
+  echo "FAIL: the client-side dry run that renders NOTES.txt failed (rc=$rc, without the values rc=$rc_none)" >&2
+  fail=1
+elif ! grep -q 'WITHDRAWN VALUES ARE SET AND IGNORED' "$tmp/withdrawn-notes.txt" \
+  || ! grep -q 'checks.discovery.defaultMaxTopics=60000' "$tmp/withdrawn-notes.txt" \
+  || ! grep -q 'checks.preflight.defaultTimeoutSeconds=900' "$tmp/withdrawn-notes.txt"; then
+  echo "FAIL: the install notes do not name both withdrawn values as ignored" >&2
+  fail=1
+elif grep -q 'WITHDRAWN VALUES' "$tmp/withdrawn-notes-none.txt"; then
+  echo "FAIL: the install notes warn about withdrawn values that nobody set" >&2
+  fail=1
+else
+  echo "   rc=$rc  (the install notes name both withdrawn values as ignored, and are silent without them)"
+fi
 
 # AND THE ADMISSION POLICY'S SUBJECT, WHICH IS ITS WHOLE EFFECT (review F4). A
 # null name used to render `%!s(<nil>)`: the fence installed, read as enabled,

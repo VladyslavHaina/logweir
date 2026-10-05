@@ -155,14 +155,15 @@ A key that must not be compromised everywhere cannot be un-revoked (G3, and G9
 in this build). Either delete that policy before the upgrade, or re-issue the key.
 Do not deploy until every listed record is one you mean installation-wide.
 
-### The twenty operator-facing changes
+### The twenty-one operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
-verification scope), and how to roll it back. Every one of them was collected
-for PLAT-20.2 from a merged change; the defect names are the platform
-tracker's. Items 17–20 were found by the PoC rounds and landed after its first
+verification scope), and how to roll it back. Items 1–20 were collected for
+PLAT-20.2 from merged changes; the defect names are the platform tracker's.
+Items 17–20 were found by the PoC rounds and landed after its first
 publication (`86a554e6`); each was proven on the running install by the
-in-place upgrade that carried it.
+in-place upgrade that carried it. Item 21 is the product-expansion tracker's
+fix-now row FX-10.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -683,6 +684,59 @@ Check made a new check. *Discover topics* after its inventory went stale could
 not be staged inside the PoC's 15-minute session. **Rollback:** `helm rollback`
 moves the API and the console together, and the older pair replays a spent
 check again; nothing stored changes.
+
+#### 21. Two policy values that changed nothing are withdrawn (FX-10)
+
+**Changed.** `checks.discovery.defaultMaxTopics` and
+`checks.preflight.defaultTimeoutSeconds` were documented as the default a
+request that names none gets. They never reached anything. Both CRDs default
+the request field at admission (`maxTopics` 20 000, `timeoutSeconds` 120) and
+the console writes both, so an operator who set either changed nothing.
+
+- They are gone from `values.yaml` and the chart README.
+- The controller's policy parser accepts both keys, reads neither, and applies
+  no rule to them.
+- The chart renders both at fixed values: 20 000 (or `hardMaxTopics`, if that
+  is lower) and 120. A controller older than this one requires both keys, and
+  this keeps the document readable to it.
+- Nothing that runs changes: every install has always used the request's own
+  values.
+
+**Also changed: the retention worker refuses a cap it cannot read.**
+`logweir-retention` now refuses a run whose `LOGWEIR_RETENTION_MAX_DELETIONS`
+or `LOGWEIR_RETENTION_MAX_OBJECTS` is absent, or is not a whole number of at
+least 1. It exits 3 and deletes nothing. Before, it silently used 50 and
+20 000. Every controller that creates an enforcement Job sets both from
+`spec.enforcement`, so a supported controller and runner never hit the
+refusal.
+
+**Do:**
+
+- Remove either key from your values file.
+- A `helm upgrade` that still carries one succeeds, because the schema still
+  accepts both. It renders exactly what it would render without them, and its
+  notes print `WITHDRAWN VALUES ARE SET AND IGNORED`.
+- An upgrade with `--reuse-values` carries an older chart's defaults forward
+  and prints the same warning. Upgrade once with `--reset-then-reuse-values`.
+- To bound a discovery, name `maxTopics` on it; `checks.discovery.hardMaxTopics`
+  still caps it. To give a slow cluster longer, name `timeoutSeconds` (30–600)
+  on the `Preflight`.
+
+**Scope:**
+
+- `crates/weirkeeper/tests/chart_policy.rs`;
+- `crates/logweir/tests/chart_lint.rs`;
+- `scripts/check-chart.sh`, its withdrawn-values arm;
+- `crates/logweir-retention/tests/worker.rs`, the caps at 7 and 1234 and the
+  refusals;
+- the mutants in the FX-10 report.
+
+The policy digest is unchanged for an unchanged document, so no retained
+`Preflight` reads `policyChanged` because of the upgrade.
+
+**Rollback:** `helm rollback` restores the previous chart's values and
+document. Rolling back only the controller image is also safe, because the
+document still carries both keys at values an older controller accepts.
 
 ### Verification scope: what "verified" means in this release
 

@@ -1095,13 +1095,15 @@ configured and the discovery still says `unknown`".
 
 **A Helm install cannot produce a document the controller then refuses.**
 `values.schema.json` carries every per-field bound, pinned to the same
-constants the parser uses; `templates/policy.yaml` refuses the two cross-field
-rules JSON Schema cannot express (`maxActiveTotal >= maxActivePerNamespace`,
-`defaultMaxTopics <= hardMaxTopics`) with a named `fail` at render time. If you
-**hand-write** the file, validate it against
-`charts/logweir/values.schema.json`'s `checks`/`engine`/`evidence` blocks *and*
-check those two pairs yourself — or render one with `helm template` and copy
-the result, which is the shortest safe path.
+constants the parser uses; `templates/policy.yaml` refuses the one cross-field
+rule JSON Schema cannot express (`maxActiveTotal >= maxActivePerNamespace`)
+with a named `fail` at render time. If you **hand-write** the file, validate it
+against `charts/logweir/values.schema.json`'s `checks`/`engine`/`evidence`
+blocks *and* check that pair yourself — or render one with `helm template` and
+copy the result, which is the shortest safe path. A hand-written file should
+keep `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` (see
+[kubernetes.md](kubernetes.md) §22.2): this controller ignores both, and a
+controller older than FX-10 refuses a document without them.
 
 ### 5b. Fencing the console's `create secrets` (Kubernetes 1.30+)
 

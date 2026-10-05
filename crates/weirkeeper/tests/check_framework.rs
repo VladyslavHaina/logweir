@@ -1182,10 +1182,18 @@ async fn an_absent_policy_is_the_documented_defaults_and_is_ready() {
     let p = load.policy();
     assert_eq!(p.checks.max_active_per_namespace, 4);
     assert_eq!(p.checks.max_active_total, 20);
-    assert_eq!(p.discovery.default_max_topics, 20_000);
     assert_eq!(p.discovery.hard_max_topics, 50_000);
     assert_eq!(p.discovery.keep_per_connection, 5);
-    assert_eq!(p.preflight.default_timeout_seconds, 120);
+    // FX-10: the two withdrawn fields keep their wire values so the digest of
+    // an unchanged document does not move; nothing reads them.
+    assert_eq!(
+        p.discovery.withdrawn_default_max_topics,
+        policy::WITHDRAWN_DEFAULT_MAX_TOPICS
+    );
+    assert_eq!(
+        p.preflight.withdrawn_default_timeout_seconds,
+        policy::WITHDRAWN_DEFAULT_TIMEOUT_SECONDS
+    );
     assert!(
         p.discovery.visibility_attestations.is_empty(),
         "with no policy nothing is ever attestedComplete"
@@ -1260,11 +1268,6 @@ fn a_malformed_policy_is_refused_by_name_and_fails_closed() {
         ),
         (
             r#"{"version":1,"discovery":{"freshSeconds":900,"retentionSeconds":1,
-                "keepPerConnection":5,"defaultMaxTopics":60000,"hardMaxTopics":50000}}"#,
-            "defaultMaxTopics above hardMaxTopics",
-        ),
-        (
-            r#"{"version":1,"discovery":{"freshSeconds":900,"retentionSeconds":1,
                 "keepPerConnection":5,"defaultMaxTopics":10,"hardMaxTopics":999999}}"#,
             "hardMaxTopics above the contract ceiling",
         ),
@@ -1308,6 +1311,120 @@ fn a_malformed_policy_is_refused_by_name_and_fails_closed() {
     assert_eq!(
         policy::from_data(Some(&data)).code(),
         CheckCode::PolicyLoaded
+    );
+}
+
+/// **FX-10: the two withdrawn fields are accepted, read by nothing, and can
+/// never fail a document closed.**
+///
+/// `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` never
+/// reached a request (the CRDs default the request fields at admission), so the
+/// knobs were withdrawn. Three documents must keep parsing, each a real one:
+///
+/// * a document an OLDER chart rendered, carrying both keys at any value its
+///   schema admitted — including one the old rules would now be pointless
+///   about (`defaultMaxTopics` above `hardMaxTopics`, a 900-second budget);
+/// * a hand-written document that omits both;
+/// * the chart's own document, with the compatibility values.
+///
+/// And the digest of an unchanged document must not move, or every retained
+/// `Preflight` would read `policyChanged` after an upgrade that changed no
+/// behaviour.
+///
+/// MUTANTS: restoring either range rule refuses the first document (it fails
+/// CLOSED: attestations and the allowlist gone); dropping
+/// `#[serde(default = …)]` from either field refuses the second; dropping a
+/// field altogether refuses the first and third (`deny_unknown_fields`).
+#[test]
+fn the_withdrawn_fields_are_accepted_with_any_value_or_none_and_read_by_nothing() {
+    let parse = |doc: serde_json::Value| -> policy::Policy {
+        let mut data = BTreeMap::new();
+        data.insert(policy::POLICY_KEY.to_string(), doc.to_string());
+        match policy::from_data(Some(&data)) {
+            policy::PolicyLoad::Loaded(p) => p,
+            other => panic!("refused, so it would fail closed: {other:?}\n{doc}"),
+        }
+    };
+    let base: serde_json::Value = serde_json::from_str(GOOD_POLICY).expect("GOOD_POLICY is JSON");
+
+    // An older chart's document, out of the old rules' range on both fields.
+    let mut old = base.clone();
+    old["discovery"]["defaultMaxTopics"] = json!(60_000);
+    old["discovery"]["hardMaxTopics"] = json!(100);
+    old["preflight"]["defaultTimeoutSeconds"] = json!(900);
+    let p = parse(old);
+    assert_eq!(p.discovery.hard_max_topics, 100, "the live ceiling is read");
+    assert_eq!(
+        p.discovery.visibility_attestations.len(),
+        1,
+        "and the attestation survives: the document was NOT refused"
+    );
+
+    // A document that omits both: the wire defaults fill them.
+    let mut none = base.clone();
+    none["discovery"]
+        .as_object_mut()
+        .expect("a discovery block")
+        .remove("defaultMaxTopics");
+    none["preflight"]
+        .as_object_mut()
+        .expect("a preflight block")
+        .remove("defaultTimeoutSeconds");
+    let omitted = parse(none);
+    assert_eq!(
+        omitted.discovery.withdrawn_default_max_topics,
+        policy::WITHDRAWN_DEFAULT_MAX_TOPICS
+    );
+    assert_eq!(
+        omitted.preflight.withdrawn_default_timeout_seconds,
+        policy::WITHDRAWN_DEFAULT_TIMEOUT_SECONDS
+    );
+
+    // The chart's own values: the same parsed object, so the same digest, as a
+    // document that omits them.
+    let carried = parse(base);
+    assert_eq!(carried, omitted);
+    assert_eq!(carried.digest(), omitted.digest());
+
+    // AND THE WIRE NAMES ARE THE OLD ONES, so the digest of a document an older
+    // controller digested is the digest this one computes.
+    let wire = serde_json::to_value(policy::Policy::defaults()).expect("serialises");
+    assert_eq!(wire["discovery"]["defaultMaxTopics"], json!(20_000));
+    assert_eq!(wire["preflight"]["defaultTimeoutSeconds"], json!(120));
+    assert!(wire["discovery"].get("withdrawnDefaultMaxTopics").is_none());
+}
+
+/// **FX-10: the digest of the default policy is the one every controller
+/// before FX-10 computed.**
+///
+/// `Policy::digest` is SHA-256 over the parsed object's JSON, and a retained
+/// `Preflight` whose recorded `policyDigest` differs from the current one is
+/// downgraded to `unknown` with `policyChanged` (`controllers/preflight.rs`).
+/// Renaming the two withdrawn fields in Rust must therefore leave the JSON —
+/// names AND order — exactly as it was. The literal below is the pre-FX-10
+/// serialisation of `Policy::defaults()`, field by field in declaration order.
+///
+/// MUTANT: move `withdrawn_default_max_topics` after `hard_max_topics`, or
+/// drop its `rename`, and the bytes (and the digest) change.
+#[test]
+fn the_default_policy_serialises_exactly_as_before_the_withdrawal() {
+    let expected = concat!(
+        r#"{"version":1,"#,
+        r#""checks":{"maxActivePerNamespace":4,"maxActiveTotal":20,"#,
+        r#""maxActiveDiscoveriesPerConnection":1,"maxEvidenceFetchActivePerNamespace":4},"#,
+        r#""discovery":{"freshSeconds":900,"retentionSeconds":86400,"keepPerConnection":5,"#,
+        r#""defaultMaxTopics":20000,"hardMaxTopics":50000,"visibilityAttestations":[]},"#,
+        r#""preflight":{"defaultTimeoutSeconds":120,"retentionSeconds":3600},"#,
+        r#""engine":{"allowUnverifiedCustomCa":false},"#,
+        r#""evidence":{"controllerIdentityLocations":[]},"#,
+        r#""legacyArchiveAddressing":{"endpoint":"","region":"","allowHttp":false,"virtualHostedStyle":false},"#,
+        r#""runs":{"maxManualBackupsActivePerNamespace":4,"maxManualRestoresActivePerNamespace":2}}"#,
+    );
+    let actual = serde_json::to_string(&policy::Policy::defaults()).expect("serialises");
+    assert_eq!(actual, expected);
+    assert_eq!(
+        policy::Policy::defaults().digest(),
+        logweir_core::ids::sha256_prefixed(expected.as_bytes())
     );
 }
 
