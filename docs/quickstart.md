@@ -161,7 +161,12 @@ always a destination with no `evidenceRead` grant.
    ([ui/README.md](../ui/README.md), *Restore, from here*).
 2. In the wizard, choose the target connection (a `target` role), the topics and
    the new-topic mapping, and the point in time inside the covered window.
-   Restores only ever write **new** topics.
+   Restores only ever write **new** topics. Check the **replication factor** in
+   step 4: it defaults to the target's broker count, at most 3, when a fresh
+   *Discover topics* of the target connection has read it, and otherwise to 1,
+   which the step says; run the discovery first, or set the factor yourself
+   ([ui/README.md](../ui/README.md), *The replication factor: a default with its
+   basis, an input, and a refusal before Create*).
 3. The readiness check must pass before *Create the Restore* is enabled: every
    blocking row `ready`, except the approval row, which is `skipped` until the
    Restore exists ([kubernetes.md](kubernetes.md) §21.7; [ui/README.md](../ui/README.md),
