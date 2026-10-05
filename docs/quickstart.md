@@ -383,7 +383,11 @@ which shares no code with Logweir.
 - An **existing** `kafka-backup` archive in an S3-compatible bucket, created
   by `logweir backup run` or another compatible producer. This drill path reads
   that archive; integrated `--from-cluster` capture remains deferred
-  ([architecture](architecture.md#adr-0007-source-capture-scope)).
+  ([architecture](architecture.md#adr-0007-source-capture-scope)). An archive
+  written by a `kafka-backup` engine before 0.21, which includes anything
+  `kafka-backup-operator` 1.3.0 writes, carries no segment digests. Such an
+  archive drills as `outcome: fail-integrity` with `integrity.result: partial`
+  and exits 2 ([support-matrix.md](support-matrix.md)).
 - A **scratch** Kafka cluster you are willing to have topics created in. Not
   your production cluster, and not a cluster anything else depends on.
 - A **marker topic** on that scratch cluster. This is v0.1's segregation proof:
