@@ -559,10 +559,16 @@ struct Observation {
     superseded: bool,
     /// **FX-7 fix round (review H-1).** The receipt pins a manifest version
     /// this bucket does not hold — a copy of the archive, a bucket without
-    /// versioning, a version lifecycle expired — so the pin could not be
-    /// checked here and the digest decided. Never a verdict of its own: it
-    /// appends [`pin::UNCHECKED_NOTE`] to the entry's remedy.
+    /// versioning, a version that was expired or deleted — so the pin could
+    /// not be checked here and the digest decided. Never a verdict of its own:
+    /// it appends [`pin::UNCHECKED_NOTE`] to the entry's remedy.
     pin_unchecked: bool,
+    /// **FX-7 re-check, nit 1.** The pinned version's read BY ID failed for a
+    /// reason other than "not this bucket's history" (a 403 without
+    /// `s3:GetObjectVersion`, an outage). Always `Unreadable`; carried
+    /// separately so the entry's remedy is [`pin::UNREADABLE_REMEDY`], which
+    /// names that grant, rather than the generic one.
+    pin_unreadable: bool,
 }
 
 impl Observation {
@@ -575,6 +581,7 @@ impl Observation {
             format_version: None,
             superseded: false,
             pin_unchecked: false,
+            pin_unreadable: false,
         }
     }
 }
@@ -1240,6 +1247,7 @@ fn examine(
         point: Some(point),
         superseded: false,
         pin_unchecked: false,
+        pin_unreadable: false,
     };
     let point = observation
         .point
@@ -1332,6 +1340,7 @@ fn examine(
                         // "Could not tell" — never "not here" and never a pass
                         // over a rewrite nobody could rule out.
                         observation.availability = Availability::Unreadable;
+                        observation.pin_unreadable = true;
                     }
                     PinVerdict::Unpinned | PinVerdict::Current | PinVerdict::Unchecked { .. } => {
                         observation.pin_unchecked = matches!(verdict, PinVerdict::Unchecked { .. });
@@ -1517,6 +1526,9 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
 fn entry_remedy(observation: &Observation) -> Option<String> {
     if observation.superseded {
         return Some(pin::SUPERSEDED_REMEDY.to_string());
+    }
+    if observation.pin_unreadable {
+        return Some(pin::UNREADABLE_REMEDY.to_string());
     }
     let remedy = remedy_for(observation.availability, observation.signature);
     if !observation.pin_unchecked {

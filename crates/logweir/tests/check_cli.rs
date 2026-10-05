@@ -6850,6 +6850,13 @@ fn a_pinned_version_that_cannot_be_read_is_unreadable() {
             .contains(logweir::catalog::pin::UNCHECKED_NOTE),
         "{entry}"
     );
+    // FX-7 re-check, nit 1: the remedy names the grant a by-id read needs,
+    // which the generic `Unreadable` remedy does not.
+    assert_eq!(
+        entry["remedy"],
+        logweir::catalog::pin::UNREADABLE_REMEDY,
+        "{entry}"
+    );
 }
 
 /// The live `Store` behind the trait, the original and both copy shapes: an

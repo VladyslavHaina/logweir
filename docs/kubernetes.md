@@ -1204,13 +1204,26 @@ list` still reads the durable catalog.
 
 | `availability` | meaning |
 |---|---|
-| `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's, and — for a point whose receipt pins a manifest version (FX-7, versioned buckets) — the manifest's current version is the pinned one, or this bucket does not hold the pinned version at all (a copy of the archive, an unversioned bucket, a version a lifecycle rule expired): then the digest decided, and the entry's `remedy` says the pin could not be checked in this bucket |
+| `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's, and — for a point whose receipt pins a manifest version (FX-7, versioned buckets) — the manifest's current version is the pinned one, or this bucket does not hold the pinned version at all (a copy of the archive, an unversioned bucket, a version that was expired or deleted): then the digest decided — which an identical manifest over rewritten segments passes — and the entry's `remedy` says the pin could not be checked in this bucket |
 | `Missing` | a definite `NotFound` |
-| `Unreadable` | any other storage error — 403, timeout, truncated, or a failed read of a pinned manifest version (FX-7; a 403 there is a principal without `s3:GetObjectVersion`). **"Could not tell", never "is not there".** |
+| `Unreadable` | any other storage error — 403, timeout, truncated, or a failed read of a pinned manifest version (FX-7; a 403 there is a principal without `s3:GetObjectVersion`, and the entry's remedy names it). **"Could not tell", never "is not there".** |
 | `Deleted` | a completed retention tombstone exists |
 | `Conflict` | two records disagree for one identity, a record's facts contradict the receipt, or this bucket holds the manifest version the receipt pins and it is no longer the current one — the set was written again in this bucket after the point was signed (FX-7; the entry's remedy says so) |
 | `UnsupportedFormat` | the record's major version is above this build's |
 | `Partial` | a sampled segment the manifest lists is missing |
+
+**What the pin cannot see (FX-7).** The pin is checked only where the bucket
+still holds the pinned version and serves it by id. A version that was expired
+or DELETED, a copy synced after the set was written again, or a store that
+cannot read by version leaves the digest alone, which an identical manifest
+over rewritten segments passes
+([the three routes](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+Object Lock retention covering a point's lifetime keeps its pinned version, and
+when the signing bucket's catalog says `Conflict` while a copy's says
+`Available`, believe the `Conflict`: it is evidence about the set, not about
+the place. Where ONE catalog lists a point at two locations, the locations merge
+best-of, so there the copy's `Available` is the entry's and the signing
+bucket's verdict survives only as "<location> is Conflict" in its `remedy`.
 
 | `verification` | meaning |
 |---|---|
@@ -1574,8 +1587,9 @@ no configuration is reconstructed by hand.**
    engine restores only the current one. When they differ it reads the pinned
    version by id: a version this bucket still holds is a rewrite here; one it
    does not hold — every copy of the archive, an unversioned bucket, a version
-   a lifecycle rule expired — leaves the decision to the digest, and the runner
-   logs `PointPinUnchecked` and goes on. A digest mismatch, or a pinned version
+   that was expired or deleted — leaves the decision to the digest (which an
+   identical manifest over rewritten segments passes), and the runner logs
+   `PointPinUnchecked` and goes on. A digest mismatch, or a pinned version
    the bucket holds that is no longer current, is exit 3 `PointBindingMismatch`;
    a pinned version that cannot be read at all (a 403 without
    `s3:GetObjectVersion`, an outage) is exit 1;

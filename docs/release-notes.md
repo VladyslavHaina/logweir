@@ -375,8 +375,14 @@ stays selectable. A version id belongs to one bucket, so a byte-for-byte COPY
 of the archive (`aws s3 sync`, `mc mirror`, an unversioned destination) is the
 same point, checked by its manifest digest: the restore runs and logs
 `PointPinUnchecked`, and the catalog entry's remedy says the pin could not be
-checked in that bucket. A rewrite whose pinned version a lifecycle rule has
-since expired reads the same way. The pin's read by id needs
+checked in that bucket. **The pin is checked only where the bucket still holds
+the pinned version and serves it by id:** a rewrite whose pinned version was
+since expired or DELETED, a copy synced after the set was written again, or a
+store that cannot read by version reads the same way, and there the digest
+cannot see segments rewritten under an identical manifest. Object Lock
+retention covering a point's lifetime keeps its pinned version; when the
+signing bucket's catalog says `Conflict` and a copy's says `Available`, believe
+the `Conflict`. The pin's read by id needs
 `s3:GetObjectVersion` on the archive prefix
 ([backup-receipt.md](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
 **Scope:** in-process rows, a private MinIO `RELEASE.2025-09-07T16-13-09Z`

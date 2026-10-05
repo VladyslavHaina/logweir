@@ -54,9 +54,11 @@ pub const REHEARSAL_SCOPE_VIOLATION: &str = "RehearsalScopeViolation";
 pub const POINT_UNTRUSTED: &str = "PointUntrusted";
 /// **FX-7.** The token the runner's NOTE opens with when a bound point's
 /// receipt pins a manifest version this bucket does not hold — a copy of the
-/// archive, a bucket without versioning, or a version a lifecycle rule
-/// expired. Never a refusal: the point is then proven by its digest, as a
-/// point without a pin always was ([`crate::catalog::pin`]).
+/// archive, a bucket without versioning, or a version that was expired or
+/// deleted. Never a refusal: the point is then proven by its digest, as a
+/// point without a pin always was, and that digest cannot see segments
+/// rewritten under an identical manifest ([`crate::catalog::pin`], "The cost,
+/// stated").
 pub const POINT_PIN_UNCHECKED: &str = "PointPinUnchecked";
 
 fn refuse(message: String) -> DrillError {
@@ -264,19 +266,12 @@ pub fn verify_point_binding(
             current,
             retained_matches,
         } => {
-            let retained = if retained_matches {
-                "is still retained at that version, but a restore reads only the current one"
-            } else {
-                "is at that version but no longer hashes to the attested digest"
-            };
-            return Err(refuse(format!(
-                "{POINT_BINDING_MISMATCH}. Recovery point {}'s manifest {manifest_key} {} (the \
-                 point pins version {pinned}, the current version is {}). The backup set may \
-                 have been rewritten under it (its segments are rewritten in place), and the \
-                 manifest the point attests {retained}; no data operation was started.",
-                point.point_id,
-                pin::SUPERSEDED_CAUSE,
-                current.as_deref().unwrap_or("unversioned")
+            return Err(refuse(superseded_refusal(
+                &point.point_id,
+                &manifest_key,
+                &pinned,
+                current.as_deref(),
+                retained_matches,
             )));
         }
         PinVerdict::Unchecked { pinned } => {
@@ -343,6 +338,38 @@ fn verified_coverage(
             logweir_core::backup_receipt::SourceConfigCoverage::unknown()
         }
     }
+}
+
+/// **FX-7.** The binding's refusal for a pinned version this bucket HOLDS and
+/// no longer serves ([`PinVerdict::Superseded`]): the one cause
+/// ([`pin::SUPERSEDED_CAUSE`]), and what the current read answered, AS
+/// OBSERVED. A current read answered with no version id is not "an
+/// unversioned current version" — it may be suspended versioning's `null`, or
+/// a proxy that strips the header (FX-7 re-check, nit 3) — so it is said as
+/// seen. Fail-closed either way.
+fn superseded_refusal(
+    point_id: &str,
+    manifest_key: &str,
+    pinned: &str,
+    current: Option<&str>,
+    retained_matches: bool,
+) -> String {
+    let retained = if retained_matches {
+        "is still retained at that version, but a restore reads only the current one"
+    } else {
+        "is at that version but no longer hashes to the attested digest"
+    };
+    let current = match current {
+        Some(version) => format!("the current version is {version}"),
+        None => "the current read answered no version id".to_string(),
+    };
+    format!(
+        "{POINT_BINDING_MISMATCH}. Recovery point {point_id}'s manifest {manifest_key} {} (the \
+         point pins version {pinned}; {current}). The backup set may have been rewritten under \
+         it (its segments are rewritten in place), and the manifest the point attests \
+         {retained}; no data operation was started.",
+        pin::SUPERSEDED_CAUSE,
+    )
 }
 
 /// The mounted evidence keyring, parsed -- or the refusal that there is none.
@@ -1569,6 +1596,34 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         let rendered = error.to_string();
         assert!(rendered.contains("s3:GetObjectVersion"), "{rendered}");
         assert!(!rendered.contains(POINT_PIN_UNCHECKED), "{rendered}");
+    }
+
+    /// FX-7 re-check, nit 3: the superseded refusal says what the current read
+    /// ANSWERED. With a version id it names it; with none (suspended
+    /// versioning's `null`, or a proxy that strips the header) it says so,
+    /// rather than calling the current version "unversioned", which the reader
+    /// could not observe. The cause is the same one sentence either way.
+    #[test]
+    fn the_superseded_refusal_says_what_the_current_read_answered() {
+        let named = superseded_refusal("lwp1-x", MANIFEST_KEY, "v1", Some("v2"), true);
+        assert!(named.starts_with(POINT_BINDING_MISMATCH), "{named}");
+        assert!(named.contains(pin::SUPERSEDED_CAUSE), "{named}");
+        assert!(
+            named.contains("the point pins version v1; the current version is v2"),
+            "{named}"
+        );
+        assert!(named.contains("still retained at that version"), "{named}");
+        let none = superseded_refusal("lwp1-x", MANIFEST_KEY, "v1", None, false);
+        assert!(none.contains(pin::SUPERSEDED_CAUSE), "{none}");
+        assert!(
+            none.contains("the point pins version v1; the current read answered no version id"),
+            "{none}"
+        );
+        assert!(!none.contains("unversioned"), "{none}");
+        assert!(
+            none.contains("no longer hashes to the attested digest"),
+            "{none}"
+        );
     }
 
     /// A missing point is exit 1, NOT exit 3: the archive did not answer, and

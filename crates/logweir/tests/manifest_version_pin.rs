@@ -300,7 +300,10 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
         logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION
     );
     assert_eq!(record["archive"]["manifest_version_id"], last.as_str());
-    for topic in record["topics"].as_array().expect("the record lists its topics") {
+    for topic in record["topics"]
+        .as_array()
+        .expect("the record lists its topics")
+    {
         let name = topic["name"].as_str().expect("a topic name");
         assert_eq!(
             topic["config_coverage"],

@@ -2483,8 +2483,8 @@ fn check_v2_bindings(
         )? {
             tracing::info!(point_id = %verified.point_id, "recovery point binding verified");
             // FX-7: the receipt's pin could not be checked in this bucket (a
-            // copy, an unversioned bucket, an expired version), so the digest
-            // decided. Said, never refused.
+            // copy, an unversioned bucket, an expired or deleted version), so
+            // the digest decided. Said, never refused.
             if let Some(note) = verified.pin_note.as_deref() {
                 tracing::warn!(point_id = %verified.point_id, "{note}");
             }

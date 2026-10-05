@@ -596,8 +596,8 @@ its answer decide (FX-7 fix round; one rule for both, `catalog::pin`):
 | The read of the pinned version | Point-bound restore | `catalogSync` deep check |
 |---|---|---|
 | **the bucket holds it** and it is not current: the set was written again in this bucket after the point was signed | exit 3 `PointBindingMismatch`, saying whether the attested manifest is still retained at that version | `Conflict`, not selectable; the remedy says the set was written again in this bucket |
-| **the bucket does not hold it**: `404 NoSuchVersion`; `400 InvalidArgument` for an id the store could never have issued (MinIO answers that for any id that is not a UUID, measured); or a store that does not read by version at all — a copy, an unversioned bucket, a version a lifecycle rule expired | the manifest digest decides, as for a point without a pin; the run goes on and the runner logs `PointPinUnchecked`, "the pin could not be checked in this bucket" | the digest decides; the entry's `remedy` carries the same note after the state's own remedy |
-| **any other failure** — a 403 (the principal lacks `s3:GetObjectVersion`), an outage | exit 1: could not tell, nothing restored | `Unreadable`: could not tell |
+| **the bucket does not hold it**: `404 NoSuchVersion`; `400 InvalidArgument` for an id the store could never have issued (MinIO answers that for any id that is not a UUID, measured); or a store that does not read by version at all — a copy, an unversioned bucket, a version that was expired or deleted | the manifest digest decides, as for a point without a pin; the run goes on and the runner logs `PointPinUnchecked`, "the pin could not be checked in this bucket" | the digest decides; the entry's `remedy` carries the same note after the state's own remedy |
+| **any other failure** — a 403 (the principal lacks `s3:GetObjectVersion`), an outage | exit 1: could not tell, nothing restored | `Unreadable`: could not tell; the remedy names `s3:GetObjectVersion` |
 
 The deep check takes the pin from the verified RECEIPT, never from the record
 (an older writer's record may lack it), and reserves the extra read in its
@@ -606,14 +606,30 @@ exactly as before, and costs no extra read. The read by id needs
 `s3:GetObjectVersion` on the archive prefix, beside the `s3:GetObject` the
 manifest read already needs.
 
-**The cost of reading a copy as a copy.** "Not this bucket's history" and
-"this bucket's history, expired" are one answer to a reader. When a lifecycle
-rule has expired the noncurrent versions of a manifest that was written again
-in its ORIGINAL bucket, the pinned version is gone, and that point degrades to
-the unversioned case: the digest alone, which an identical manifest over
-rewritten segments passes — with the note, never a refusal. A copy cannot see
-either whether the original was written again before it was copied. Keep
-noncurrent manifest versions at least as long as the points that pin them.
+**The cost of reading a copy as a copy.** The pin is checked only where the
+bucket being read still HOLDS the pinned version and serves it by id: "not this
+bucket's history" and "this bucket's history, gone" are one answer to a reader.
+So a set that really WAS written again reads like a copy — the digest alone,
+which an identical manifest over rewritten segments passes, with the note and
+never a refusal — by three routes:
+
+- the pinned version is gone from the bucket that signed the point: a
+  lifecycle rule expired it, or a principal holding `s3:DeleteObjectVersion`
+  deleted it (measured, FX-7 re-check: deleting the pinned version turned that
+  bucket's `Conflict` into `Available` with the note);
+- the copy never held it: a copy synced AFTER the set was written again, or a
+  copy rewritten after it was made (measured: both copies read `Available` with
+  the note while the signing bucket read `Conflict`);
+- the store cannot serve a version it holds (a misbehaving S3-compatible store,
+  or a proxy that drops `?versionId=`; seen on neither MinIO nor SeaweedFS).
+
+Keep noncurrent manifest versions at least as long as the points that pin them;
+Object Lock retention covering a point's lifetime keeps its pinned version
+against both deletion and expiry [UNVERIFIED — needs a delete of a retained version on a bucket with default retention]. When the
+signing bucket's catalog says `Conflict` and a copy's says `Available`, believe
+the `Conflict`: it is evidence about the set, not about the place. Only a check
+of the segment digests the manifest records closes all three routes, and this
+build runs none.
 
 The digest alone cannot give that answer: an identical manifest over rewritten
 segments hashes the same. **An auditor** reads the attested bytes by version and

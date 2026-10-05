@@ -28,18 +28,34 @@
 //!
 //! # The cost, stated
 //!
-//! "Not this bucket's history" and "this bucket's history, expired" are ONE
-//! answer to a reader. When a lifecycle rule has expired the noncurrent
-//! versions of a manifest that was written again in its ORIGINAL bucket, the
-//! pinned version is gone, its read answers `NotFound`, and the point degrades
-//! to the unversioned case: the digest alone, which an identical manifest over
-//! rewritten segments passes. A copy cannot see either whether the original
-//! was written again before it was copied. Both are reported with
-//! [`UNCHECKED_NOTE`], never as a rewrite; a bucket whose noncurrent versions
-//! must outlive its points is the operator's lifecycle rule to keep. The
-//! alternative the review named — recording the SIGNING bucket in the receipt
-//! and enforcing the pin only there — is a format change, and it would not
-//! help the expired case either.
+//! The pin is checked only where the bucket being read still HOLDS the pinned
+//! version and SERVES it by id. "Not this bucket's history" and "this bucket's
+//! history, gone" are ONE answer to a reader, so a REAL rewrite reaches
+//! [`PinVerdict::Unchecked`] by three routes (FX-7 re-check, R-L1):
+//!
+//! 1. the pinned version is gone from the bucket that signed the point — a
+//!    lifecycle rule expired it, or a principal holding `s3:DeleteObjectVersion`
+//!    deleted it (measured: a delete of the pin turned the signing bucket's
+//!    `Conflict` into `Available` + the note);
+//! 2. the rewrite sits in a bucket that never held the pinned version — a copy
+//!    synced AFTER the set was written again, or a copy rewritten after it was
+//!    made (measured);
+//! 3. a store that cannot serve a version it holds (a 404, a `400
+//!    InvalidArgument`, another version or none for a retained id) — a
+//!    misbehaving S3-compatible store or a proxy that drops `?versionId=`; seen
+//!    on neither MinIO nor SeaweedFS.
+//!
+//! On all three the point degrades to the unversioned case: the digest alone,
+//! which an identical manifest over rewritten segments passes by construction.
+//! Only a rewrite that CHANGES the manifest bytes is still caught there. Each
+//! is reported with [`UNCHECKED_NOTE`], never as a rewrite and never as a pass
+//! of the pin. Object Lock retention covering a point's lifetime keeps its
+//! pinned version against routes 1's deletion and expiry; a bucket whose
+//! noncurrent versions must outlive its points is the operator's rule to keep.
+//! The alternative the review named — recording the SIGNING bucket in the
+//! receipt and enforcing the pin only there — is a format change, and it would
+//! not help route 1 either. Only a segment-digest reader closes all three
+//! (`SegmentSample`, declared and not implemented by this build).
 //!
 //! # The texts live here, once
 //!
@@ -82,9 +98,18 @@ pub const SUPERSEDED_REMEDY: &str = concat!(
 /// binding logs it beside the point it proved.
 pub const UNCHECKED_NOTE: &str = "The pin could not be checked in this bucket: the signed \
      receipt pins a manifest version this bucket does not hold (a copy of the archive, a \
-     bucket without versioning, or a version a lifecycle rule expired), so the manifest was \
+     bucket without versioning, or a version that was expired or deleted), so the manifest was \
      checked by its digest alone, which cannot see segments rewritten under an identical \
      manifest.";
+
+/// **The deep check's remedy when the pinned version could not be READ** (FX-7
+/// re-check, nit 1): "could not tell", and the one grant the generic
+/// `Unreadable` remedy does not name. A fixed sentence, like every remedy.
+pub const UNREADABLE_REMEDY: &str = "The manifest's pinned version could not be read — this \
+     is \"could not tell\", not \"is not there\", and never a pass over a rewrite nobody \
+     could rule out. Reading a version by id needs s3:GetObjectVersion on the archive prefix, \
+     beside s3:GetObject (a 403 here is that grant missing); check it, the endpoint and the \
+     network path, then sync again.";
 
 /// What the receipt's pin proves in the bucket being read.
 #[derive(Debug)]
@@ -92,9 +117,9 @@ pub enum PinVerdict {
     /// The receipt pins nothing [`pinnable_version_id`] accepts: a receipt
     /// without the field (every `1.0.0` and `1.1.0` one — an unversioned
     /// bucket's, or one written before FX-7), or a blank or `"null"` pin no
-    /// writer produces (a pin is what
-    /// that function says it is, on the writing side and on the reading side).
-    /// The digest is the whole check, as it always was.
+    /// writer produces (a pin is what that function says it is, on the writing
+    /// side and on the reading side). The digest is the whole check, as it
+    /// always was.
     Unpinned,
     /// The key's current version IS the pinned one. No extra read was made.
     Current,
@@ -268,5 +293,34 @@ mod tests {
         assert!(SUPERSEDED_REMEDY.contains(SUPERSEDED_CAUSE));
         assert!(!UNCHECKED_NOTE.contains(SUPERSEDED_CAUSE));
         assert!(UNCHECKED_NOTE.contains("could not be checked in this bucket"));
+    }
+
+    /// FX-7 re-check R-L1: the note names every way a bucket can stop holding
+    /// the pinned version — DELETED included, which an operator may well have
+    /// done on purpose — and says what the digest then cannot see.
+    #[test]
+    fn the_note_names_a_deleted_version_and_what_the_digest_misses() {
+        assert!(
+            UNCHECKED_NOTE.contains("expired or deleted"),
+            "{UNCHECKED_NOTE}"
+        );
+        assert!(
+            UNCHECKED_NOTE.contains("a copy of the archive"),
+            "{UNCHECKED_NOTE}"
+        );
+        assert!(
+            UNCHECKED_NOTE.contains("cannot see segments rewritten under an identical manifest"),
+            "{UNCHECKED_NOTE}"
+        );
+    }
+
+    /// FX-7 re-check, nit 1: the deep check's remedy for an unreadable pinned
+    /// version names the one grant the generic `Unreadable` remedy does not,
+    /// and is neither the superseded cause nor the "could not be checked" note.
+    #[test]
+    fn the_unreadable_remedy_names_get_object_version() {
+        assert!(UNREADABLE_REMEDY.contains("s3:GetObjectVersion"));
+        assert!(!UNREADABLE_REMEDY.contains(SUPERSEDED_CAUSE));
+        assert!(!UNREADABLE_REMEDY.contains("could not be checked in this bucket"));
     }
 }

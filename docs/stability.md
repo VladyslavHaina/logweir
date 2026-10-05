@@ -1036,13 +1036,19 @@ What changes for an operator:
   a runner from before these checks, after a rollback, or by anything else), which the digest alone
   cannot see when the manifest bytes came out identical: exit 3 `PointBindingMismatch`, and
   `Conflict` in the catalog. If the bucket does not hold it — a version id belongs to one bucket, so
-  every byte-for-byte copy of the archive, an unversioned bucket, and a version a lifecycle rule
-  expired are this case — the digest decides, as for a point without a pin, and the runner's log and
+  every byte-for-byte copy of the archive, an unversioned bucket, and a version that was expired or
+  deleted are this case — the digest decides, as for a point without a pin, and the runner's log and
   the entry's remedy say the pin could not be checked in this bucket. A read of the pinned version
   that fails otherwise (a 403 without `s3:GetObjectVersion`) is exit 1 / `Unreadable`. Only the
   manifest is pinned — a rewrite is detected, not undone — and the detection covers the points THIS
   build signed: an older runner's own receipt over a set it rewrote pins nothing and stays
   selectable.
+- **The pin is checked only where the bucket still holds the pinned version and serves it by id.**
+  A version that was expired or DELETED, a copy synced after the set was written again, or a store
+  that cannot read by version leaves the digest alone, which an identical manifest over rewritten
+  segments passes ([the three routes](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+  Object Lock retention covering a point's lifetime keeps its pinned version, and a `Conflict` in
+  the signing bucket outranks a copy's `Available`.
 - **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key).
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
