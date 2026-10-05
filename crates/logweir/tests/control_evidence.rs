@@ -27,9 +27,10 @@
 //!    an organisation compliant, certified or audit-ready, and never says a field
 //!    satisfies, meets or fulfils a requirement — in any inflection: claim
 //!    stems, claim phrases and claim verbs next to a regulatory object are all
-//!    refused, after removing the few official quotations and the page's own
-//!    "no compliance claim" sentence. The scan is wrap-insensitive, because a
-//!    phrase broken across two source lines renders as one.
+//!    refused, after removing the page's own "no compliance claim" sentence and
+//!    the one DORA quotation that says "meet the obligations". The scan is
+//!    wrap-insensitive, because a phrase broken across two source lines renders
+//!    as one.
 //! 4. **NO SUPPORTED ROW SAYS MORE THAN ITS CONDITION.** A row claiming a
 //!    byte-level comparison names `byte-fingerprint` and cites
 //!    `integrity.level`; a row saying every test leaves a signed record says

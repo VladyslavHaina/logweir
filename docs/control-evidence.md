@@ -77,7 +77,8 @@ Four reading notes:
 
 - **Only a run that reaches a result is signed.** A restore test signs a
   scorecard when it passes and when it fails a check; a refused or interrupted
-  run signs nothing, and its record is unsigned Kubernetes status
+  run signs nothing, and is recorded only on unsigned Kubernetes status or in
+  the operator's own logs
   ([runs that end before a result sign nothing](#runs-that-end-before-a-result-sign-nothing)).
 - **A rehearsal writes an ordinary scorecard.** In it, `approval.approver`
   reads `standing-authorization/<schedule>` rather than a person's name,
@@ -645,11 +646,11 @@ where `outcome` reads `pass`, and at exit 2, where it reads `fail-objective`,
 A run that ends earlier signs nothing and uploads nothing: a plan refused before
 anything ran (exit 3, which includes every refusal of a standing authorization
 at the runner), an operational failure such as a broker outage during the
-restore (exit 1), a failed signature or lock proof (exit 4), and a Job that
-ended without an exit code. A backup run is the same: a backup whose engine
-fails signs no receipt and indexes no recovery point.
+restore (exit 1), a failed signature or lock proof (exit 4), and a run killed
+before it signed, whose Job ends with no exit code. A backup run is the same: a
+backup whose engine fails signs no receipt and indexes no recovery point.
 
-Such a run is recorded only where Logweir keeps no evidence:
+Such a run is recorded only outside the signed evidence:
 
 - Under Kubernetes, on its `Restore`: `status.exitCode`, `status.exitReason`,
   `status.reason` and `status.conditions`, unsigned and kept as long as the
