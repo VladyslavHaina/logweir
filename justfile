@@ -67,11 +67,27 @@ golden:
 # interfere. Neither target is a SIGNED artefact — unlike `fixtures-sign`'s,
 # these files carry no signature and a truncated redirect target costs a
 # `just schema`, not a re-mint (Task 5).
+#
+# A MINOR bump is "a new schema file beside the old one" (docs/stability.md).
+# FX-7 adds the receipt's and the catalog record's optional
+# `archive.manifest_version_id` at 1.1.0, so their CURRENT files are named by
+# the two variables below, each equal to its writer's constant
+# (`backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION`,
+# `catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION`, which also build the
+# schemas' `$id`). `schemas/logweir-backup-receipt-1.0.0.json` and
+# `schemas/logweir-catalog-point-1.0.0.json` are FROZEN beside them and are NOT
+# regenerated: they describe every document written before the bump
+# (`the_frozen_1_0_0_*_schema_is_still_the_1_0_0_schema`). A renumber (FX-4
+# merging first makes FX-7 1.2.0) moves the constant and the variable, and
+# freezes the old file beside the new.
+receipt_schema_version := "1.1.0"
+catalog_schema_version := "1.1.0"
+
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-1.0.0.json
-    cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-1.0.0.json
+    cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-{{receipt_schema_version}}.json
     cargo run -p logweir-api --example emit_openapi > schemas/logweir-api-v1.openapi.json
-    cargo run -p logweir --example emit_catalog_point_schema > schemas/logweir-catalog-point-1.0.0.json
+    cargo run -p logweir --example emit_catalog_point_schema > schemas/logweir-catalog-point-{{catalog_schema_version}}.json
 
 # Compare regenerated schemas without changing the working tree.
 schema-check:
@@ -85,9 +101,9 @@ schema-check:
     cargo run --locked -p logweir-api --example emit_openapi > "$tmp/api.json"
     cargo run --locked -p logweir --example emit_catalog_point_schema > "$tmp/catalog-point.json"
     diff -u schemas/logweir-drill-scorecard-1.0.0.json "$tmp/scorecard.json"
-    diff -u schemas/logweir-backup-receipt-1.0.0.json "$tmp/receipt.json"
+    diff -u schemas/logweir-backup-receipt-{{receipt_schema_version}}.json "$tmp/receipt.json"
     diff -u schemas/logweir-api-v1.openapi.json "$tmp/api.json"
-    diff -u schemas/logweir-catalog-point-1.0.0.json "$tmp/catalog-point.json"
+    diff -u schemas/logweir-catalog-point-{{catalog_schema_version}}.json "$tmp/catalog-point.json"
 
 # Compatibility alias; the main check runs schema-check only once.
 receipt-schema-check: schema-check

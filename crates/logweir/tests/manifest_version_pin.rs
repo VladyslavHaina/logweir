@@ -258,7 +258,11 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
         "the pin is the version of the bytes the run READ BACK — the last write — not an \
          earlier one and not none"
     );
-    assert_eq!(receipt.format_version, "1.1.0", "a pinned receipt is 1.1.0");
+    assert_eq!(
+        receipt.format_version,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        "a pinned receipt carries the pin's MINOR"
+    );
     let (pinned, _) = store
         .get_version(&receipt.archive.manifest_key, &last)
         .unwrap();
@@ -276,7 +280,10 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
         .expect("the run wrote its catalog point");
     let (record, _) = store.get(&record_key).unwrap();
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
-    assert_eq!(record["format_version"], "1.1.0");
+    assert_eq!(
+        record["format_version"],
+        logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION
+    );
     assert_eq!(record["archive"]["manifest_version_id"], last.as_str());
 }
 
@@ -306,6 +313,38 @@ fn an_unversioned_run_writes_the_1_0_0_receipt_with_no_pin_field() {
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
     assert_eq!(record["format_version"], "1.0.0");
     assert!(record["archive"].get("manifest_version_id").is_none());
+}
+
+/// **The pin's format is a MINOR bump, the same for both documents** (FX-7
+/// fix round, review M-2). Its number lives in ONE constant per format, so a
+/// renumber (FX-4 merging first makes FX-7 1.2.0) is that constant and a schema
+/// file name, and the tests read the constants. This row keeps whatever the
+/// number becomes honest: inside major 1, a MINOR above the unpinned format,
+/// and the receipt's equal to the catalog record's.
+#[test]
+fn the_pinned_format_is_a_minor_bump_of_both_documents() {
+    use logweir_core::backup_receipt::{FORMAT_VERSION, FORMAT_VERSION_WITH_MANIFEST_VERSION};
+    let parse = |v: &str| -> Vec<u64> {
+        v.split('.')
+            .map(|n| n.parse().expect("a semver component"))
+            .collect()
+    };
+    let (unpinned, pinned) = (
+        parse(FORMAT_VERSION),
+        parse(FORMAT_VERSION_WITH_MANIFEST_VERSION),
+    );
+    assert_eq!(pinned.len(), 3, "{FORMAT_VERSION_WITH_MANIFEST_VERSION}");
+    assert_eq!(pinned[0], 1, "inside major 1");
+    assert_eq!(pinned[0], unpinned[0], "a MINOR bump, never a MAJOR one");
+    assert!(
+        pinned[1] > unpinned[1],
+        "{FORMAT_VERSION_WITH_MANIFEST_VERSION} must be a MINOR above {FORMAT_VERSION}"
+    );
+    assert_eq!(
+        logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        "the catalog record copies the receipt's pin at the same minor"
+    );
 }
 
 /// S3's literal `null` is the version id of an object written while

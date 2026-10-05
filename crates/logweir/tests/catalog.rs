@@ -1522,20 +1522,60 @@ fn the_catalog_commands_exit_with_the_existing_contract_and_no_new_variant() {
 // The published schema
 // ---------------------------------------------------------------------------
 
+/// **FX-7 fix round (review M-2): the 1.0.0 catalog-point schema is FROZEN**
+/// beside the current one and still describes every record written before the
+/// pin: it names itself 1.0.0, and its `RecordArchive` has no
+/// `manifest_version_id`.
+#[test]
+fn the_frozen_1_0_0_catalog_point_schema_is_still_the_1_0_0_schema() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../schemas/logweir-catalog-point-1.0.0.json");
+    let frozen: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display())),
+    )
+    .expect("the frozen schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-catalog-point-1.0.0.json"
+    );
+    let archive = &frozen["definitions"]["RecordArchive"]["properties"];
+    assert!(archive["manifest_sha256"].is_object());
+    assert!(
+        archive.get("manifest_version_id").is_none(),
+        "the frozen 1.0.0 schema must not describe the newer MINOR's field"
+    );
+}
+
 #[test]
 fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // The drift arm, IN PROCESS, so the gate holds with no subprocess — the
     // shape `crates/logweir-api/tests/contract.rs` uses for the OpenAPI
     // document. `just schema` is the only sanctioned way to change the file.
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../schemas/logweir-catalog-point-1.0.0.json");
+    // The CURRENT file is the newest MINOR's, named by the writer's constant
+    // (FX-7 fix round, review M-2), so a renumber moves the constant and the
+    // justfile, not this test; the 1.0.0 file is frozen beside it.
+    let version = logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../schemas/logweir-catalog-point-{version}.json"
+    ));
     let checked_in = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
     assert_eq!(
         checked_in,
         logweir::catalog::schema::catalog_point_schema(),
-        "schemas/logweir-catalog-point-1.0.0.json no longer describes CatalogPoint. Run \
+        "schemas/logweir-catalog-point-{version}.json no longer describes CatalogPoint. Run \
          `just schema` and commit the diff."
+    );
+    let justfile =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../justfile"))
+            .expect("read the justfile");
+    assert!(
+        justfile
+            .lines()
+            .any(|l| l == format!("catalog_schema_version := \"{version}\"")),
+        "the justfile's catalog_schema_version must be the writer's constant ({version}): \
+         `just schema` writes the file that variable names"
     );
     // The major is pinned by a PATTERN as well as by the reader, so a
     // schema-only validator — the one route that does not go through

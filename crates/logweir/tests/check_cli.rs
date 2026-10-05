@@ -6489,10 +6489,11 @@ fn drive_sync(
 // FX-7: points pinned to a manifest VERSION
 // ---------------------------------------------------------------------------
 
-/// A receipt taken on a VERSIONED bucket: format `1.1.0`, pinning `version`.
+/// A receipt taken on a VERSIONED bucket: the pin's format, pinning `version`.
 fn pinned_catalog_receipt(version: &str) -> BackupReceipt {
     let mut r = catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z");
-    r.format_version = "1.1.0".to_string();
+    r.format_version =
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION.to_string();
     r.archive.manifest_version_id = Some(version.to_string());
     r
 }
@@ -6523,14 +6524,18 @@ fn only_entry(objects: FakeObjects) -> serde_json::Value {
 }
 
 /// A pinned point whose pinned version IS the current one is `Available`,
-/// with the record's own 1.1.0 format reported.
+/// with the record's own (pinned) format reported.
 #[test]
 fn a_pinned_point_whose_version_is_current_is_available() {
     let (objects, _) =
         versioned_objects(&pinned_catalog_receipt("v1"), &[("v1", CATALOG_MANIFEST)]);
     let entry = only_entry(objects);
     assert_eq!(entry["availability"], "Available", "{entry}");
-    assert_eq!(entry["formatVersion"], "1.1.0", "{entry}");
+    assert_eq!(
+        entry["formatVersion"],
+        logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        "{entry}"
+    );
 }
 
 /// **The pin's whole point, in the catalog.** Engine 0.21.0 re-running over a

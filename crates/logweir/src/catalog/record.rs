@@ -113,7 +113,7 @@ pub fn log_key(recovery_point_at: DateTime<Utc>, point_id: &str) -> String {
 /// Field order IS byte order: `serde_json` is built with `preserve_order` and
 /// `logweir_core::det_json::to_deterministic_json` walks the value, so
 /// declaration order here is the order in the bytes that get signed. Do not
-/// reorder without regenerating `schemas/logweir-catalog-point-1.0.0.json`
+/// reorder without regenerating the current catalog point schema
 /// (`just schema`).
 ///
 /// **Nothing here may hold a credential.** `source.bootstrap_servers` is

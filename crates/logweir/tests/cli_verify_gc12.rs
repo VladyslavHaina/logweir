@@ -90,8 +90,14 @@ fn schema_backup_receipt_is_byte_identical_to_the_checked_in_file() {
         "`logweir schema backup-receipt` must exit 0 (GC13 as revised), stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let checked_in =
-        std::fs::read("../../schemas/logweir-backup-receipt-1.0.0.json").expect("read the schema");
+    // The CURRENT file, named by the writer's constant (FX-7 fix round, review
+    // M-2); the 1.0.0 file is frozen beside it
+    // (`crates/logweir-core/tests/schema_drift.rs::the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`).
+    let checked_in = std::fs::read(format!(
+        "../../schemas/logweir-backup-receipt-{}.json",
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
+    ))
+    .expect("read the schema");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&checked_in),

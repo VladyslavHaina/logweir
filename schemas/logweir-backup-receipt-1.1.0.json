@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://logweir.dev/schemas/logweir-backup-receipt-1.0.0.json",
+  "$id": "https://logweir.dev/schemas/logweir-backup-receipt-1.1.0.json",
   "title": "BackupReceipt",
-  "description": "The signed record of one `logweir backup run`.\n\nField order is the document's own serialisation order (`serde_json` is built with `preserve_order`, so declaration order IS byte order through `crate::det_json::to_deterministic_json`). Do not reorder without regenerating `schemas/logweir-backup-receipt-1.0.0.json` and re-minting `e2e/fixtures/signed/backup-receipt.json`.",
+  "description": "The signed record of one `logweir backup run`.\n\nField order is the document's own serialisation order (`serde_json` is built with `preserve_order`, so declaration order IS byte order through `crate::det_json::to_deterministic_json`). Do not reorder without regenerating the current receipt schema (`just schema`) and re-minting `e2e/fixtures/signed/backup-receipt.json`.",
   "type": "object",
   "required": [
     "archive",
@@ -44,7 +44,7 @@
       "format": "date-time"
     },
     "format_version": {
-      "description": "Semver of THIS format — `1.0.0`, and independent of the scorecard's.\n\nThe schema PINS the major with a pattern rather than leaving the field an unconstrained string, for the reason `crate::scorecard::Scorecard::format_version` records: without it a document reading `\"9.9.9\"` validated cleanly against the file named `logweir-backup-receipt-1.0.0.json`, so a schema-only validator — the one route that does not go through `validate_invariants` — accepted exactly the document GC12 exists to refuse. Any `1.x.y` is allowed, because a MINOR bump adds optional fields only and a 1.0.0 reader must still read it.",
+      "description": "Semver of THIS format — `1.0.0`, or `1.1.0` for a receipt that pins `archive.manifest_version_id` (FX-7) — and independent of the scorecard's.\n\nThe schema PINS the major with a pattern rather than leaving the field an unconstrained string, for the reason `crate::scorecard::Scorecard::format_version` records: without it a document reading `\"9.9.9\"` validated cleanly against the file named `logweir-backup-receipt-1.0.0.json`, so a schema-only validator — the one route that does not go through `validate_invariants` — accepted exactly the document GC12 exists to refuse. Any `1.x.y` is allowed, because a MINOR bump adds optional fields only and a 1.0.0 reader must still read it.",
       "type": "string",
       "pattern": "^1\\.[0-9]+\\.[0-9]+$"
     },
@@ -81,7 +81,7 @@
   },
   "definitions": {
     "ReceiptArchive": {
-      "description": "What was written, and where. The two fields an auditor needs in order to go and look: the manifest's key, and a digest over the exact manifest bytes THIS RUN READ BACK (not over bytes Logweir remembers writing).",
+      "description": "What was written, and where. The two fields an auditor needs in order to go and look: the manifest's key, and a digest over the exact manifest bytes THIS RUN READ BACK (not over bytes Logweir remembers writing) — and, on a versioned bucket, WHICH VERSION of that key those bytes were.",
       "type": "object",
       "required": [
         "manifest_key",
@@ -96,6 +96,11 @@
         "manifest_sha256": {
           "description": "`\"sha256:<hex>\"` over the manifest bytes read back after the run.",
           "type": "string"
+        },
+        "manifest_version_id": {
+          "description": "**FX-7, format `1.1.0`.** The object store's VERSION id for the manifest bytes this run read back — present only when the store answered that read with one, i.e. on a bucket with versioning enabled.\n\n**ABSENT means \"no version was pinned\"**: an unversioned bucket (whose objects carry no version id, or S3's literal `null`, which names an object an overwrite replaces in place), or a receipt written before this field existed. Never read as \"version zero\" and never inferred.\n\nA reader that finds it compares the key's CURRENT version with it: a different current version means the backup set was written again after this receipt was signed, which the manifest digest alone cannot see — engine 0.21.0 rewrites a set's segments in place and can leave the manifest bytes identical. And it can read THIS version by id, which a versioned bucket retains whatever the current one is.\n\nAbsent when `None`, and that is the compatibility argument: declaration order is byte order, and an absent field writes nothing, so a receipt without a pin is byte-for-byte the `1.0.0` document it always was.",
+          "type": "string",
+          "nullable": true
         },
         "prefix": {
           "description": "The object-store prefix everything this run wrote lives under. GC6: Logweir writes only under its own `logweir/` prefix.",

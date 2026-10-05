@@ -33,9 +33,11 @@ pub fn run(which: &str) -> ExitCode {
         }
         // Task 5. The SECOND schema tag 1 ships, and the reason GC13 was
         // revised: the backup's evidence is a new document, not new scorecard
-        // fields (spec §7, GC12 as amended). Byte-identical to
-        // `schemas/logweir-backup-receipt-1.0.0.json` — the CI drift arm
-        // regenerates that file and `diff -u`s it, and
+        // fields (spec §7, GC12 as amended). Byte-identical to the CURRENT
+        // receipt schema file, `schemas/logweir-backup-receipt-<v>.json` with
+        // `v` = `FORMAT_VERSION_WITH_MANIFEST_VERSION` (the 1.0.0 file is
+        // frozen beside it) — the CI drift arm regenerates that file and
+        // `diff -u`s it, and
         // `crates/logweir/tests/cli_verify_gc12.rs::
         // schema_backup_receipt_is_byte_identical_to_the_checked_in_file`
         // compares THIS stdout against it, so the printed schema and the

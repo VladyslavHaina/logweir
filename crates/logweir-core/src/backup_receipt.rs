@@ -18,8 +18,8 @@
 //!
 //! So this is its own media type
 //! (`logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT`), its own schema
-//! (`schemas/logweir-backup-receipt-1.0.0.json`), its own
-//! `format_version: "1.0.0"` and its own five arms — four
+//! (`schemas/logweir-backup-receipt-<format_version>.json`, one file per MINOR,
+//! the older ones frozen), its own `format_version` and its own five arms — four
 //! self-contradiction invariants and one closed value set. Spec §7: "new
 //! payload types, not new scorecard fields."
 //!
@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 /// Field order is the document's own serialisation order (`serde_json` is
 /// built with `preserve_order`, so declaration order IS byte order through
 /// `crate::det_json::to_deterministic_json`). Do not reorder without
-/// regenerating `schemas/logweir-backup-receipt-1.0.0.json` and re-minting
+/// regenerating the current receipt schema (`just schema`) and re-minting
 /// `e2e/fixtures/signed/backup-receipt.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BackupReceipt {
