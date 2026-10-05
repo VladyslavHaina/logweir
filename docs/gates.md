@@ -48,6 +48,14 @@ checks that prove different behavior. It does not repeat the entire suite in
 release mode or enforce a workstation timing threshold. `just time-unit-suite`
 and `just deps-count` remain optional diagnostics.
 
+`just test-shifted-clock` is a third: it runs the workspace suite with every
+test binary's wall clock a year and a day ahead (`+<days>d` sets another
+offset). A test that compares the wall clock with a fixed instant then fails
+before that instant passes, instead of on the day it does. On macOS it builds
+a small clock shim with `cc`; on Linux it preloads libfaketime, a path run on
+macOS only so far. It refuses, rather than running at the real clock, when no
+shim is available or the shift does not reach a test binary.
+
 ## Image publication
 
 The shared [image workflow](../.github/workflows/images.yml) builds the
