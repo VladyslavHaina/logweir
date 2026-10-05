@@ -1029,7 +1029,7 @@ What changes for an operator:
   exit 4 `ExecutionClaimUnproven`. **No permission is added**: the run's read-back
   already lists and reads the archive prefix.
 - **On a versioned bucket a receipt pins its manifest's version** —
-  `archive.manifest_version_id`, receipt and catalog record format `1.1.0`
+  `archive.manifest_version_id`, receipt and catalog record format `1.2.0`, the MINOR after FX-4's `1.1.0`
   ([why](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)). When the
   current version is not the pin, a point-bound restore and the catalog read the pinned version BY
   ID. If the bucket still holds it, the set was written again there after the point was signed (by
@@ -1043,7 +1043,7 @@ What changes for an operator:
   manifest is pinned — a rewrite is detected, not undone — and the detection covers the points THIS
   build signed: an older runner's own receipt over a set it rewrote pins nothing and stays
   selectable.
-- **Unversioned buckets pin nothing**, and their receipts are the byte-identical `1.0.0` document.
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key).
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and

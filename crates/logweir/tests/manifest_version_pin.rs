@@ -2,7 +2,8 @@
 //!
 //! A backup taken on a VERSIONED bucket records, in its signed receipt and in
 //! its catalog point record, the object version id of the manifest bytes it
-//! attests (`archive.manifest_version_id`, receipt and record format `1.1.0`).
+//! attests (`archive.manifest_version_id`, receipt and record format `1.2.0`,
+//! the MINOR after FX-4's `1.1.0`).
 //! A reader then compares the key's CURRENT version with that pin, so a set
 //! written again after the point was signed is seen even when the manifest
 //! bytes came out identical — which engine 0.21.0 does: it rewrites a set's
@@ -231,8 +232,9 @@ impl ClusterReader for StubReader {
 
 /// **The pin.** On a versioned bucket the receipt names the version of the
 /// manifest bytes it attests — the LAST one the engine wrote, which is the one
-/// the run read back — at format `1.1.0`, and the catalog record carries the
-/// same pin at its own `1.1.0`.
+/// the run read back — at format `1.2.0`, and the catalog record carries the
+/// same pin at its own `1.2.0`. FX-4's `config_coverage` travels beside it: a
+/// pinned receipt is FX-4's document plus the pin, never instead of it.
 #[test]
 fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
     let f = Fixture::new();
@@ -271,9 +273,22 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
         receipt.archive.manifest_sha256,
         "the digest is over exactly the pinned version's bytes"
     );
+    // FX-4 and FX-7 merged: the pin is ADDED to FX-4's document, which keeps
+    // its coverage block, and the pair is a receipt both verifiers accept
+    // (arm 6 reads the 1.2.0 minor as at least 1).
+    let coverage = receipt
+        .config_coverage
+        .as_ref()
+        .expect("FX-4 writes config_coverage on every receipt, a pinned one too");
+    assert_eq!(
+        coverage.keys().cloned().collect::<Vec<_>>(),
+        receipt.source.topics,
+        "one coverage entry per named topic"
+    );
+    assert_eq!(receipt.validate_invariants(), Ok(()));
 
     // The catalog record carries the receipt's pin, and says so in its own
-    // minor version.
+    // minor version — beside FX-4's per-topic coverage copy.
     let record_key = outcome
         .catalog_key
         .clone()
@@ -285,6 +300,14 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
         logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION
     );
     assert_eq!(record["archive"]["manifest_version_id"], last.as_str());
+    for topic in record["topics"].as_array().expect("the record lists its topics") {
+        let name = topic["name"].as_str().expect("a topic name");
+        assert_eq!(
+            topic["config_coverage"],
+            serde_json::to_value(&coverage[name]).unwrap(),
+            "the pinned record copies the receipt's coverage for {name}"
+        );
+    }
 }
 
 /// **Unpinned evidence keeps its shape.** On an unversioned bucket there is

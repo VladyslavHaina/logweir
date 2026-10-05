@@ -3,7 +3,7 @@
 `application/vnd.logweir.backup-receipt+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-backup-receipt-1.1.0.json`](../../schemas/logweir-backup-receipt-1.1.0.json)
+[`schemas/logweir-backup-receipt-1.2.0.json`](../../schemas/logweir-backup-receipt-1.2.0.json)
 and CI regenerates it from the Rust type and `diff -u`s it against the checked-in
 file on every build, so this document and the schema cannot drift apart
 silently. A MINOR bump is a new schema file beside the old one: the
@@ -119,7 +119,7 @@ claiming that version.
 |---|---|---|
 | `archive.manifest_key` | string | The manifest's object key. Empty **if and only if** the backup did not exit 0 — invariant 2. |
 | `archive.manifest_sha256` | string | `sha256:<hex>` over the manifest bytes **this run read back** — not over bytes Logweir remembers writing. |
-| `archive.manifest_version_id` | string, **optional** (format `1.1.0`) | The object store's version id for those exact bytes — present only on a bucket with versioning enabled, where the read-back was answered with one. **Absent** means no version was pinned: an unversioned bucket, S3's `null` version, or a receipt from before the field. See [the pinned manifest version](#the-pinned-manifest-version-versioned-buckets). |
+| `archive.manifest_version_id` | string, **optional** (format `1.2.0`) | The object store's version id for those exact bytes — present only on a bucket with versioning enabled, where the read-back was answered with one. **Absent** means no version was pinned: an unversioned bucket, S3's `null` version, or a receipt from before the field. See [the pinned manifest version](#the-pinned-manifest-version-versioned-buckets). |
 | `archive.prefix` | string | The object-store prefix everything this run wrote lives under. Logweir writes only under its own `logweir/` prefix. |
 
 ## `records` — per-topic counts
@@ -562,19 +562,20 @@ receipts, and the catalog keeps both as two points (see
 
 ### The pinned manifest version (versioned buckets)
 
-**FX-7, receipt format `1.1.0`.** On a bucket with versioning enabled the store
+**FX-7, receipt format `1.2.0`** (the MINOR after FX-4's `1.1.0`). On a bucket with versioning enabled the store
 answers every read with the object's version id. `logweir backup run` keeps the
 one its read-back of the manifest was answered with — the version of exactly the
 bytes `archive.manifest_sha256` is over, i.e. the LAST manifest the engine wrote
 (it re-puts the manifest several times in one run: five versions per run were
 measured on SeaweedFS) — and signs it as `archive.manifest_version_id`, at
-`format_version` `1.1.0`. The catalog point record copies it, at its own
-`1.1.0` ([catalog-point.md](catalog-point.md)).
+`format_version` `1.2.0`, beside the `config_coverage` block every receipt
+carries. The catalog point record copies it, at its own `1.2.0`
+([catalog-point.md](catalog-point.md)).
 
 | The store answered the read-back with | The receipt |
 |---|---|
-| a version id | `format_version: 1.1.0`, `archive.manifest_version_id: <id>` |
-| no version id (MinIO and SeaweedFS unversioned buckets; any filesystem store) | `format_version: 1.0.0`, no `manifest_version_id` key — byte-for-byte the document every earlier build wrote |
+| a version id | `format_version: 1.2.0`, `archive.manifest_version_id: <id>` |
+| no version id (MinIO and SeaweedFS unversioned buckets; any filesystem store) | `format_version: 1.1.0`, no `manifest_version_id` key — byte-for-byte the document FX-4's build writes |
 | S3's literal `null` (versioning never enabled, or suspended) | as above: a `null` version is replaced in place by the next write, so it pins nothing |
 
 Measured on SeaweedFS 4.48 (versioned, Object Lock) and on MinIO and SeaweedFS
@@ -668,9 +669,11 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema` and
 
 ## Upgrade, rollback and old receipts (format 1.1.0)
 
-- **Every receipt this build signs is 1.1.0** and carries `config_coverage`.
-  The payload type is unchanged, so every reader that verifies a receipt today
-  still verifies a new one.
+- **Every receipt this build signs carries `config_coverage`**, at 1.1.0 — or
+  at 1.2.0 when it also pins its manifest's version (FX-7,
+  [below](#upgrade-rollback-and-old-receipts-format-120)). The payload type is
+  unchanged, so every reader that verifies a receipt today still verifies a new
+  one.
 - **Readers built before FX-4 accept 1.1.0 receipts**: they compare majors only
   and ignore the unknown field. Measured for FX-4 with both readers at
   `ac76cd0d` (`git show ac76cd0d:docs/verify_scorecard.py`, script 1.14.0, and
@@ -697,6 +700,25 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema` and
   `notCaptured` (`manifestDiffers`), because the engine's capture is
   all-or-nothing and its record for them is empty. Measured on the compose
   stack in `e2e/tests/config_coverage.rs`.
+
+## Upgrade, rollback and old receipts (format 1.2.0)
+
+- **A pinned receipt is 1.2.0; every other receipt is FX-4's 1.1.0.** The pin
+  is the only difference: `schemas/logweir-backup-receipt-1.2.0.json` is the
+  frozen 1.1.0 schema plus the optional `archive.manifest_version_id`, with no
+  other property, type or required field moved. The payload type keeps
+  `version=1.0.0`, and no arm reads the pin.
+- **Readers built before FX-7 accept 1.2.0 receipts and ignore the pin** —
+  FX-4's (script 1.15.0, a `logweir` built after FX-4 and before FX-7) and the ones before
+  them: they compare majors only, arm 6 reads the 1.2 minor as "at least 1",
+  and none of the receipt's types refuses an unknown field. They print no
+  manifest version, so an auditor who needs the pin verifies with script 1.16.0
+  or a `logweir` built from FX-7 on.
+- **Rollback.** A build from before FX-7 writes unpinned receipts again (1.1.0
+  from FX-4's build, 1.0.0 before it), and its readers neither print nor check
+  a pin. The 1.2.0 receipts already written stay valid and verifiable under
+  every major-1 reader. Before rolling the runner back past the execution
+  claim, read [what it still does not cover](#the-execution-claim-one-engine-run-per-backup_id).
 
 ---
 

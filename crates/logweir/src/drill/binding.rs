@@ -1375,6 +1375,77 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
+    /// **FX-4 and FX-7 together.** What this build signs on a versioned
+    /// bucket is FX-4's receipt PLUS the pin (format 1.2.0). A point-bound run
+    /// over it hands the receipt's configuration coverage to phases 3 and 7
+    /// whether the pin was checked (the bucket that signed it) or could not be
+    /// (a byte-identical copy in an unversioned bucket): the note is added
+    /// beside the coverage, never instead of it. Mutant: build the
+    /// `VerifiedPoint` with UNKNOWN coverage when a note is set, and the copy
+    /// half fails.
+    #[test]
+    fn a_pinned_point_hands_over_its_coverage_with_or_without_the_note() {
+        use logweir_core::backup_receipt::{ConfigCoverage, TopicConfigCoverage};
+        let (store, _bucket) = Store::in_memory_versioned("");
+        let manifest = br#"{"topics":[]}"#.to_vec();
+        let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
+        let version = store
+            .put_create_only(MANIFEST_KEY, &manifest)
+            .expect("the manifest is written")
+            .version_id
+            .expect("a versioned bucket names the version");
+        let mut r = receipt(MANIFEST_KEY, &manifest_sha256);
+        r.format_version =
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION.into();
+        r.archive.manifest_version_id = Some(version);
+        r.config_coverage = Some(BTreeMap::from([(
+            "orders".to_string(),
+            TopicConfigCoverage {
+                coverage: "captureDenied".into(),
+                reason: None,
+                timestamp_type: None,
+            },
+        )]));
+        assert_eq!(r.validate_invariants(), Ok(()), "a 1.2.0 receipt with both");
+        let receipt_bytes = serde_json::to_vec(&r).expect("serialises");
+        let signer = SigningKey::generate_ed25519();
+        put_signed_receipt(&store, &receipt_bytes, &signer);
+        let binding = PointBinding {
+            point_id: crate::catalog::record::point_id(&receipt_bytes),
+            receipt_key: RECEIPT_KEY.into(),
+            receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
+            manifest_sha256,
+        };
+        let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
+
+        let original = check(&plan_with(Some(binding.clone())), &store, &keys)
+            .expect("the signing bucket proves the point")
+            .expect("the plan is bound");
+        assert_eq!(original.pin_note, None, "the pin was checked here");
+        assert_eq!(
+            original.config_coverage.of("orders"),
+            ConfigCoverage::CaptureDenied
+        );
+
+        let copy = Store::in_memory("");
+        copy_every_object(&store, &copy);
+        let copied = check(&plan_with(Some(binding)), &copy, &keys)
+            .expect("a copy of a signed point is that point")
+            .expect("the plan is bound");
+        assert!(
+            copied
+                .pin_note
+                .as_deref()
+                .is_some_and(|note| note.starts_with(POINT_PIN_UNCHECKED)),
+            "{copied:?}"
+        );
+        assert_eq!(
+            copied.config_coverage.of("orders"),
+            ConfigCoverage::CaptureDenied,
+            "the note never costs the run its verified coverage"
+        );
+    }
+
     /// **H-1, the versioned copy.** The same copy into a VERSIONED bucket,
     /// which issued its OWN ids: the pinned id is not in its history
     /// (`NotFound`), so the pin cannot be checked here.

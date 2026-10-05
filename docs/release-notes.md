@@ -350,7 +350,7 @@ execution id only when it has `spec.retry`. An evidence store that does not
 enforce `If-None-Match: *` makes every backup exit 4 `ExecutionClaimUnproven`
 before any data is written, and a destination with `writeProbe` on reports it
 `notReady / ConditionalCreateUnsupported` first. The claim adds no permission and
-changes no signed format; FX-7 below adds receipt and catalog format `1.1.0`.
+changes no signed format; FX-7 below adds receipt and catalog format `1.2.0`, the MINOR after FX-4's `1.1.0` ([stability.md](stability.md#the-first-post-tag-addition-format-110-fx-4)).
 **Do:** confirm the evidence store honours conditional create — turn on `writeProbe: CreateOnlyMarker` for one run of the destination
 check, and never set `AWS_CONDITIONAL_PUT=disabled` — see the store table in
 [support-matrix.md](support-matrix.md). A standalone `logweir backup run` that
@@ -365,7 +365,7 @@ finish before upgrading. A read of the archive that fails while proving the set
 new is exit 1 when it is transient (a transport error, a timeout, a 5xx), so a
 schedule with `spec.retry` retries it under a new execution id, and exit 4
 `ExecutionClaimUnproven` otherwise (a 403, a wrong bucket). On a versioned bucket a receipt also pins its
-manifest's version (`archive.manifest_version_id`, receipt format `1.1.0`), so a
+manifest's version (`archive.manifest_version_id`, receipt format `1.2.0`), so a
 set written again in that bucket after the point was signed — by an older
 runner after a rollback, say — is refused by a point-bound restore
 (`PointBindingMismatch`) and reported `Conflict` by the catalog even when the

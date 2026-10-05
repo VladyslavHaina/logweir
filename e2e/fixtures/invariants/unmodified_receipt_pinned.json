@@ -1,5 +1,5 @@
 {
-  "format_version": "1.1.0",
+  "format_version": "1.2.0",
   "run_id": "01J8Z9QK7V6M3F2R5T8W1XB0CD",
   "backup_id": "logweir-backup-01J8Z9QK7V",
   "requested_at": "2026-09-09T11:02:14Z",
@@ -39,5 +39,17 @@
   "covered": {
     "from_ms": 1757415734000,
     "to_ms": 1757419486000
+  },
+  "config_coverage": {
+    "orders": {
+      "coverage": "captured",
+      "timestamp_type": {
+        "value": "LogAppendTime",
+        "source": "dynamicDefaultBrokerConfig"
+      }
+    },
+    "payments": {
+      "coverage": "captureDenied"
+    }
   }
 }

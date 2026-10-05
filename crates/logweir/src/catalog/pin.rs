@@ -89,8 +89,10 @@ pub const UNCHECKED_NOTE: &str = "The pin could not be checked in this bucket: t
 /// What the receipt's pin proves in the bucket being read.
 #[derive(Debug)]
 pub enum PinVerdict {
-    /// The receipt pins nothing [`pinnable_version_id`] accepts: a `1.0.0`
-    /// receipt, or a blank or `"null"` pin no writer produces (a pin is what
+    /// The receipt pins nothing [`pinnable_version_id`] accepts: a receipt
+    /// without the field (every `1.0.0` and `1.1.0` one — an unversioned
+    /// bucket's, or one written before FX-7), or a blank or `"null"` pin no
+    /// writer produces (a pin is what
     /// that function says it is, on the writing side and on the reading side).
     /// The digest is the whole check, as it always was.
     Unpinned,
