@@ -1023,6 +1023,23 @@ fn attestation(principal: &str, cluster_id: &str, expires: &str) -> Value {
     })
 }
 
+/// An `expiresAt` the reconciler's clock is always inside: a year after the
+/// REAL clock, for every row that goes through `reconcile_discovery`.
+///
+/// `reconcile_discovery` judges an attestation at `Utc::now()` (the one clock
+/// read `the_reconciler_reads_one_clock_in_one_place` pins), so these rows
+/// follow the rule `listed` states for the collector: date the fixture
+/// relative to the real clock. They used the literal `2026-12-15`, and FX-9's
+/// shifted-clock sweep showed what that date does. The `attestedComplete` row
+/// goes red. The truncated-listing and blank-principal rows go VACUOUS: they
+/// keep passing because the EXPIRY refuses the attestation, not the rule each
+/// row exists to prove, and their own mutants survive 366 days ahead. The pure
+/// `attestation_candidate` and `attestation_for` rows read no clock and keep
+/// their literals.
+fn unexpired() -> String {
+    (Utc::now() + chrono::Duration::days(365)).to_rfc3339()
+}
+
 async fn attested_status(attestations: Value) -> Value {
     let entries = vec![TopicEntry::new("orders", 6)];
     let inventory = inventory_of(&entries, counts_for(&entries, 0));
@@ -1064,12 +1081,7 @@ async fn attested_status(attestations: Value) -> Value {
 /// verification.
 #[tokio::test]
 async fn an_administrator_attestation_is_the_only_route_to_attested_complete() {
-    let status = attested_status(json!([attestation(
-        PRINCIPAL,
-        CLUSTER_ID,
-        "2026-12-15T00:00:00Z"
-    )]))
-    .await;
+    let status = attested_status(json!([attestation(PRINCIPAL, CLUSTER_ID, &unexpired())])).await;
     assert_eq!(
         status["result"]["visibility"]["state"],
         json!("attestedComplete")
@@ -1093,7 +1105,7 @@ async fn an_attestation_for_another_principal_or_cluster_does_not_apply() {
     let wrong_principal = attested_status(json!([attestation(
         "User:someone-else",
         CLUSTER_ID,
-        "2026-12-15T00:00:00Z"
+        &unexpired()
     )]))
     .await;
     assert_eq!(
@@ -1111,7 +1123,7 @@ async fn an_attestation_for_another_principal_or_cluster_does_not_apply() {
     let wrong_cluster = attested_status(json!([attestation(
         PRINCIPAL,
         "some-other-cluster",
-        "2026-12-15T00:00:00Z"
+        &unexpired()
     )]))
     .await;
     assert_eq!(
@@ -2197,11 +2209,7 @@ async fn a_truncated_inventory_records_its_reason_and_cannot_be_attested() {
                 method: "GET",
                 path_suffix: "/configmaps/weirkeeper-policy",
                 status: 200,
-                body: policy_body(json!([attestation(
-                    PRINCIPAL,
-                    CLUSTER_ID,
-                    "2026-12-15T00:00:00Z"
-                )])),
+                body: policy_body(json!([attestation(PRINCIPAL, CLUSTER_ID, &unexpired())])),
             },
         ],
     ));
@@ -2863,7 +2871,7 @@ async fn an_attestation_with_an_empty_principal_never_matches_an_unknown_one() {
         "id": "att-blank", "namespace": NS, "kafkaCluster": "source",
         "clusterId": CLUSTER_ID, "principal": "",
         "attestedBy": "platform-admin@example.invalid",
-        "attestedAt": "2026-09-15T00:00:00Z", "expiresAt": "2026-12-15T00:00:00Z",
+        "attestedAt": "2026-09-15T00:00:00Z", "expiresAt": unexpired(),
         "statement": "an attestation an administrator left half-written"
     });
     let (client, _r, bodies) = mock_client_recording_bodies(finished_routes(
