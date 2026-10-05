@@ -8,7 +8,8 @@
 //!
 //! 1. **FIELD EXISTENCE.** Every field the page cites must exist in the document
 //!    the citation names. The field sets are DERIVED, never typed here: the
-//!    three JSON schemas under `schemas/`, the generated `RehearsalSchedule` CRD
+//!    newest version of each of the three JSON schemas under `schemas/`
+//!    (chosen by numeric semver), the generated `RehearsalSchedule` CRD
 //!    schema, and — for the two documents with no checked-in schema — the Rust
 //!    type that reads them, by round-tripping their documented example through
 //!    it (the put receipt's example in `docs/verify-a-scorecard.md`, and the
@@ -290,15 +291,15 @@ impl Fields {
         let mut sets = BTreeMap::new();
         sets.insert(
             Doc::Scorecard,
-            json_schema_paths(&read_json("schemas/logweir-drill-scorecard-1.0.0.json")),
+            json_schema_paths(&read_json(&newest_schema("drill-scorecard"))),
         );
         sets.insert(
             Doc::BackupReceipt,
-            json_schema_paths(&read_json("schemas/logweir-backup-receipt-1.0.0.json")),
+            json_schema_paths(&read_json(&newest_schema("backup-receipt"))),
         );
         sets.insert(
             Doc::CatalogPoint,
-            json_schema_paths(&read_json("schemas/logweir-catalog-point-1.0.0.json")),
+            json_schema_paths(&read_json(&newest_schema("catalog-point"))),
         );
         sets.insert(
             Doc::RehearsalSchedule,
@@ -348,6 +349,52 @@ impl Fields {
 fn top_segment(path: &str) -> &str {
     let first = path.split('.').next().unwrap_or(path);
     first.strip_suffix("[]").unwrap_or(first)
+}
+
+/// `MAJOR.MINOR.PATCH`, numerically, or nothing.
+fn parse_semver(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.').map(|p| p.parse::<u64>().ok());
+    let triple = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(triple)
+}
+
+/// The highest semver among `logweir-<stem>-<semver>.json` file names.
+fn newest_version_file<'a>(
+    stem: &str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let prefix = format!("logweir-{stem}-");
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let version = name.strip_prefix(&prefix)?.strip_suffix(".json")?;
+            Some((parse_semver(version)?, name))
+        })
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, name)| name)
+}
+
+/// The newest checked-in schema of a document, as a path from the repository
+/// root. A MINOR bump only adds optional fields, so every field an older 1.x
+/// schema declares is in the newest one; a MAJOR bump that drops a field the
+/// page cites fails the field check, which is the point. Reading the newest,
+/// not a pinned version, is what lets the page cite a field the day its
+/// version lands.
+fn newest_schema(stem: &str) -> String {
+    let dir = repo_root().join("schemas");
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{} is readable: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .expect("a directory entry is readable")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let newest = newest_version_file(stem, names.iter().map(String::as_str))
+        .unwrap_or_else(|| panic!("schemas/ holds no logweir-{stem}-<semver>.json"));
+    format!("schemas/{newest}")
 }
 
 /// The field paths a JSON schema (draft-07, `definitions` + `$ref`) declares.
@@ -980,6 +1027,34 @@ fn a_made_up_or_misattributed_field_is_refused() {
             .any(|p| p.contains("`measured.rto_guaranteed_seconds`")),
         "the prose check must refuse a made-up field outside the tables; it reported {problems:?}"
     );
+}
+
+/// **The newest schema is chosen by numeric semver**: `1.10.0` beats `1.2.0`
+/// (a lexicographic pick would not), and another document's file or a malformed
+/// version is never chosen. This selection feeds the field check, so it gets
+/// its own negative control.
+#[test]
+fn the_newest_schema_is_chosen_by_numeric_semver() {
+    let names = [
+        "logweir-drill-scorecard-1.0.0.json",
+        "logweir-drill-scorecard-1.2.0.json",
+        "logweir-drill-scorecard-1.10.0.json",
+        "logweir-drill-scorecard-2.0.json",
+        "logweir-backup-receipt-9.9.9.json",
+        "logweir-api-v1.openapi.json",
+    ];
+    assert_eq!(
+        newest_version_file("drill-scorecard", names),
+        Some("logweir-drill-scorecard-1.10.0.json")
+    );
+    assert_eq!(newest_version_file("catalog-point", names), None);
+    for stem in ["drill-scorecard", "backup-receipt", "catalog-point"] {
+        let path = newest_schema(stem);
+        assert!(
+            repo_root().join(&path).is_file(),
+            "the newest {stem} schema `{path}` is a file"
+        );
+    }
 }
 
 /// **Every anchor the page links resolves**, in the page and in the docs it

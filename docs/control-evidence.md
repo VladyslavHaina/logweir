@@ -56,10 +56,10 @@ is the companion to this page.
 
 | Document | Signed by | What it records | Fields are defined in |
 |---|---|---|---|
-| Scorecard | The runner's evidence-signing key (under Kubernetes, the installation identity), in a DSSE sidecar | One restore drill or scheduled rehearsal: the archive, the target, the approval, the measured RTO and RPO, and a sampled integrity check | [Scorecard format](formats/drill-scorecard.md); [schema](../schemas/logweir-drill-scorecard-1.0.0.json) |
+| Scorecard | The runner's evidence-signing key (under Kubernetes, the installation identity), in a DSSE sidecar | One restore drill or scheduled rehearsal: the archive, the target, the approval, the measured RTO and RPO, and a sampled integrity check | [Scorecard format](formats/drill-scorecard.md) |
 | Put receipt | The same key | What the store reported when the scorecard was uploaded | [The storage receipt](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document) |
-| Backup receipt | The same key | One backup run: the source cluster, the topics, per-topic record counts, the covered window and the manifest digest | [Backup receipt format](formats/backup-receipt.md); [schema](../schemas/logweir-backup-receipt-1.0.0.json) |
-| Catalog point | The key named in its `signing.key_id`; the backup receipt it points at is the verification root | One recovery point: when its capture started, its window and where its archive is | [Catalog point format](formats/catalog-point.md); [schema](../schemas/logweir-catalog-point-1.0.0.json) |
+| Backup receipt | The same key | One backup run: the source cluster, the topics, per-topic record counts, the covered window and the manifest digest | [Backup receipt format](formats/backup-receipt.md) |
+| Catalog point | The key named in its `signing.key_id`; the backup receipt it points at is the verification root | One recovery point: when its capture started, its window and where its archive is | [Catalog point format](formats/catalog-point.md) |
 | Standing authorization | A human approver's key with usage `GovernedApproval` | The scope inside which one rehearsal schedule may run, for at most 90 days | [The standing rehearsal authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature); [Kubernetes §7g](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization) |
 | RehearsalSchedule | Nothing: Kubernetes status written by the controller | The cadence and objectives of scheduled rehearsals, and the last pass, failure and skipped slot | [Kubernetes §7g](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization); [CRD schema](../config/crd/rehearsalschedules.yaml) |
 
@@ -217,8 +217,9 @@ results of tests".
   [archive-relative, not source-relative](#archive-relative-not-source-relative).
 - Transaction boundaries, the source's timestamps and repeated headers:
   [transaction and timestamp semantics](#transaction-and-timestamp-semantics).
-- That an empty `topic_parity.unexpected_divergence` means configuration was
-  compared at all: [configuration coverage](#configuration-coverage).
+- In a scorecard of format 1.0.0, that an empty
+  `topic_parity.unexpected_divergence` means configuration was compared at all:
+  [configuration coverage](#configuration-coverage).
 
 ## The DORA RTS: Commission Delegated Regulation (EU) 2024/1774
 
@@ -511,13 +512,17 @@ the source topic's other configuration, such as `cleanup.policy` or
 `min.insync.replicas`, is not applied.
 
 `topic_parity.unexpected_divergence` compares the target with the topic
-configuration the archive recorded, and that recording carries no coverage
-flag: when the source refused DescribeConfigs, the capture reads as "no
-overrides", and the parity check then reports no divergence without having
-compared anything. Tracker row FX-4, in progress, adds per-topic capture
-coverage to receipts and catalog points and reports parity as not assessed
-without it; until it merges, an empty list does not show that configuration was
-compared. `topic_parity.intentionally_deviated` labels differences in
+configuration the archive recorded. A backup receipt and a scorecard of format
+1.0.0 carry no coverage for that recording: when the source refused
+DescribeConfigs, the capture reads as "no overrides", and the parity check
+reports no divergence without having compared anything, so an empty list in a
+1.0.0 scorecard does not show that configuration was compared. Tracker row FX-4
+narrows this in format 1.1.0: the backup receipt carries a per-topic
+`config_coverage` (`captured`, `notCaptured` or `captureDenied`), the catalog
+point copies it, and the scorecard's `topic_parity` and `target_diff` gain a
+`not_assessed` list that names each topic whose configuration was not compared,
+and why. Absent coverage, as in every 1.0.0 document, means unknown and never
+`captured`. `topic_parity.intentionally_deviated` labels differences in
 `cleanup.policy`, `retention.ms`, partition count and replication factor as
 intended in every target mode, including `newTopic`, where they are not (FX-3,
 proposed). Both rows are in the tracker's
