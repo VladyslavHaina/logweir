@@ -56,7 +56,7 @@ is the companion to this page.
 
 | Document | Signed by | What it records | Fields are defined in |
 |---|---|---|---|
-| Scorecard | The installation's evidence-signing key, in a DSSE sidecar | One restore drill or scheduled rehearsal: the archive, the target, the approval, the measured RTO and RPO, and a sampled integrity check | [Scorecard format](formats/drill-scorecard.md); [schema](../schemas/logweir-drill-scorecard-1.0.0.json) |
+| Scorecard | The runner's evidence-signing key (under Kubernetes, the installation identity), in a DSSE sidecar | One restore drill or scheduled rehearsal: the archive, the target, the approval, the measured RTO and RPO, and a sampled integrity check | [Scorecard format](formats/drill-scorecard.md); [schema](../schemas/logweir-drill-scorecard-1.0.0.json) |
 | Put receipt | The same key | What the store reported when the scorecard was uploaded | [The storage receipt](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document) |
 | Backup receipt | The same key | One backup run: the source cluster, the topics, per-topic record counts, the covered window and the manifest digest | [Backup receipt format](formats/backup-receipt.md); [schema](../schemas/logweir-backup-receipt-1.0.0.json) |
 | Catalog point | The key named in its `signing.key_id`; the backup receipt it points at is the verification root | One recovery point: when its capture started, its window and where its archive is | [Catalog point format](formats/catalog-point.md); [schema](../schemas/logweir-catalog-point-1.0.0.json) |
@@ -100,8 +100,8 @@ results of tests".
 | What the evidence supports | Fields |
 |---|---|
 | A restore from a named archive was tested at a recorded time, and the test recorded its own outcome. | Scorecard: `run_id`, `requested_at`, `outcome`, `source.backup_id`, `source.manifest_sha256` |
-| The test ran a plan that was approved before it ran, and the approval binds the exact plan bytes. | Scorecard: `approval.approver`, `approval.ticket`, `approval.approved_at`, `approval.plan_hash` |
-| Scheduled rehearsals recur on a configured cadence, and the last pass, the last failure and the last refused slot are recorded with their reasons. | RehearsalSchedule: `spec.schedule`, `status.lastSucceeded.at`, `status.lastFailed.reason`, `status.lastSkipped.slot`, `status.lastSkipped.reason` |
+| The test ran a plan approved before it ran: a per-run approval signs the exact plan bytes, and a rehearsal's plan was proven to fall inside a scope a human signed for that one schedule. | Scorecard: `approval.approver`, `approval.ticket`, `approval.approved_at`, `approval.plan_hash`, `approval.key_id`; Standing authorization: `subjectRef.uid`, `scope.templateDigest`, `issuedAt`, `expiresAt` |
+| Scheduled rehearsals recur on a configured cadence; the last pass is recorded, and so are the last failure and the last refused slot, with their reasons. | RehearsalSchedule: `spec.schedule`, `status.lastSucceeded.at`, `status.lastFailed.reason`, `status.lastSkipped.slot`, `status.lastSkipped.reason` |
 | The restore software is identified by version and image digest, so tests before and after a change to it can be told apart. | Scorecard: `engine.version`, `engine.digest` |
 
 **What it does not show**
@@ -250,7 +250,7 @@ Article 25(5):
 |---|---|
 | The result of each restore test is documented in a signed record, which also says why a test did not pass. | Scorecard: `outcome`, `integrity.result`, `integrity.partial_reason`, `phases[].notes` |
 | A failed rehearsal is recorded with its reason, and the schedule reports itself unhealthy until a rehearsal passes. | RehearsalSchedule: `status.lastFailed.at`, `status.lastFailed.reason`, `status.conditions` |
-| Whether the restored data reads back as archived, on the sample checked. | Scorecard: `integrity.level`, `integrity.records_sampled_matching`, `sample.records_expected` |
+| The restored sample was compared with the archive, and the test records how much of it read back exactly as archived. | Scorecard: `integrity.level`, `integrity.records_sampled_matching`, `sample.records_expected` |
 | The stored record of a test is bound to its exact signed bytes, and the store's answer to its create-only upload is recorded. | Put receipt: `scorecard_sha256`, `scorecard_key`, `create_only_enforced`, `version_id` |
 
 **What it does not show**
@@ -478,7 +478,7 @@ the sample is.
 target, not every record the restore wrote: the scorecard records no total of
 restored records. The record count check is a bound computed from the archive
 manifest, not an exact count per partition. Duplicates and record order are not
-checked, and only the sampled partitions' segments are hashed.
+checked, and only the in-window segments of the sampled partitions are hashed.
 [PROD-08.1](to-do/product-expansion.md#prod-081--complete-archive-integrity-and-exact-counts)
 lists these limits and plans complete per-partition counts, duplicate and order
 checks, and a signed field that says whether a check was sampled or complete.
@@ -580,8 +580,8 @@ put of the scorecard (`create_only_enforced`) and the version id it returned
 [PROD-09.1](to-do/product-expansion.md#prod-091--make-archive-protection-observable)
 plans observed lock mode, retention and grants.
 
-The archive is written by the engine's own store client. Logweir lets one
-engine run per `backup_id` reach the store
+The archive is written by the engine's own store client. Logweir starts at most
+one engine run per `backup_id`
 ([the execution claim](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)),
 and records the manifest's version id when the store returns one
 (`source.manifest_version_id`), but sets written by older builds can carry two
@@ -601,7 +601,7 @@ Logweir never deletes evidence under `logweir/`.
 ### Transaction and timestamp semantics
 
 With the pinned engine, a restore can differ from the source in ways the test
-does not detect, and the test is still signed `pass`
+does not detect. In each measured case below, the test was signed `pass`
 ([the measured cases](verify-a-scorecard.md#a-pass-compares-the-restored-topic-with-the-archive-not-with-the-source)):
 
 - Aborted records, records of open transactions, and commit and abort markers
@@ -612,13 +612,16 @@ does not detect, and the test is still signed `pass`
   ([`LogAppendTime` sources](stability.md#logappendtime-sources-are-restored-with-the-producers-timestamps)).
   Tracker row FX-8 (proposed) refuses that selection unless the approved plan
   asks for it, and labels the result.
-- Out-of-order timestamps within a segment can drop a record from every
-  restore of an archive, or omit one at or before the requested point
+- Out-of-order timestamps within a segment can make a point-in-time restore
+  omit a record at or before the requested point
   ([recovery-point selection](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
 - A repeated header key keeps one copy
-  ([repeated header keys](stability.md#a-repeated-header-key-keeps-one-copy)),
-  and a broker outage during a restore can leave duplicates
-  ([broker outages](stability.md#a-broker-outage-during-a-restore-can-leave-a-partial-target-with-duplicates)).
+  ([repeated header keys](stability.md#a-repeated-header-key-keeps-one-copy)).
+
+A broker outage or a lost acknowledgement during a restore can leave duplicates
+and a partial target. In every measured case Logweir exited 1 and signed
+nothing, so what a completed test makes of duplicates was not measured
+([broker outages](stability.md#a-broker-outage-during-a-restore-can-leave-a-partial-target-with-duplicates)).
 
 So a `pass` shows that the restored sample matches the archive; it does not
 show transactional, exactly-once or source-faithful recovery.
@@ -672,9 +675,9 @@ the scorecard records the marker in `target.marker_topic`
 runner also refuses a scratch target whose id equals the archive's source
 cluster id when the allowlist file names that id; the scorecard does not record
 whether it did. These are checks of a cluster's identity, not of the
-infrastructure under it: the evidence
-does not show that the target shares no hosts, network or account with the
-source, or that it is protected from unauthorised access. In `newTopic` mode the
+infrastructure under it: the evidence does not show that the target shares no
+hosts, network or account with the source, or that it is protected from
+unauthorised access. In `newTopic` mode the
 allowlist and marker checks are skipped, `target.marker_topic` is absent, and
 only the new topic names separate restored data from the cluster's existing
 topics; that cluster may be the source cluster itself. Restoring into a live
@@ -685,13 +688,13 @@ Scheduled rehearsals run in scratch mode only (Standing authorization
 ### Test scope, cadence and follow-up
 
 A test's scope is its plan: which archive, which topics, which window and which
-target. `approval.plan_hash` binds the exact plan bytes; the scorecard itself
-carries counts (`sample.topics`, `sample.partitions`) and the created target
-names (`target_diff.would_create`), so naming the source topics a test covered
-takes the plan document, checked against that digest. Whether a test's scope
-covers what a clause names, such as all functions, the critical or important
-ones, or the systems holding protected health information, is the control
-owner's mapping.
+target. `approval.plan_hash` is the digest of the exact plan bytes that ran; the
+scorecard itself carries counts (`sample.topics`, `sample.partitions`) and the
+target names it set out to create (`target_diff.would_create`), so naming the
+source topics a test covered takes the plan document, checked against that
+digest. Whether a test's scope covers what a clause names, such as all
+functions, the critical or important ones, or the systems holding protected
+health information, is the control owner's mapping.
 
 Cadence is configuration: `spec.schedule` says when rehearsals should fire. The
 record of tests that happened is the set of signed scorecards under
