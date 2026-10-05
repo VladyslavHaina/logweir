@@ -33,8 +33,9 @@
 //! 4. **NO SUPPORTED ROW SAYS MORE THAN ITS CONDITION.** A row claiming a
 //!    byte-level comparison names `byte-fingerprint` and cites
 //!    `integrity.level`; a row saying every test leaves a signed record says
-//!    "that reaches a result"; and no row calls a restore an exact or complete
-//!    copy, or the approver a human.
+//!    "that reaches a result"; a row saying configuration was compared cites
+//!    the `not_assessed` list that bounds it; and no row calls a restore an
+//!    exact or complete copy, or the approver a human.
 //!
 //! Around them, the structure the row's acceptance names: every supported
 //! statement cites a field, and links the page that defines that document's
@@ -1187,6 +1188,15 @@ fn overreach_problems(page: &str) -> Vec<String> {
                  and 4 sign nothing): {statement}"
             ));
         }
+        if w.contains(&"configuration")
+            && w.iter().any(|x| x.starts_with("compar"))
+            && !fields.contains("not_assessed`")
+        {
+            problems.push(format!(
+                "a row says configuration was compared without citing the `not_assessed` list \
+                 that says for which topics it was not (FX-4): {statement}"
+            ));
+        }
         for phrase in OVERREACH {
             if text.contains(phrase) {
                 problems.push(format!("a row says `{phrase}`: {statement}"));
@@ -1789,8 +1799,8 @@ fn the_permitted_phrasings_pass_the_claim_scan() {
     );
 }
 
-/// **No supported row says more than its condition** — the review's M1, M2
-/// and overreach findings, as a guard over every row.
+/// **No supported row says more than its condition** — the review's M1, M2,
+/// M3 and overreach findings, as a guard over every row.
 #[test]
 fn no_supported_statement_says_more_than_its_condition() {
     let page = read(PAGE);
@@ -1835,6 +1845,10 @@ fn no_supported_statement_says_more_than_its_condition() {
         (
             "| A rehearsal's plan was proven to fall inside a scope a human signed for that one schedule. | [Scorecard](formats/drill-scorecard.md): `approval.key_id` |",
             "`a human`",
+        ),
+        (
+            "| The target's topic configuration was compared with the configuration the archive recorded. | [Scorecard](formats/drill-scorecard.md): `topic_parity.unexpected_divergence`, `topic_parity.intentionally_deviated` |",
+            "configuration was compared without citing the `not_assessed` list",
         ),
     ] {
         let problems = overreach_problems(&with_extra_row(&page, row));
