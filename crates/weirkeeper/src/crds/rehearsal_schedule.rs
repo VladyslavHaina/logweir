@@ -88,8 +88,11 @@ pub const TOPIC_NAME_PATTERN: &str = super::topic_discovery::TOPIC_NAME_PATTERN;
 /// comparing quantities in CEL needs the `quantity` library, whose presence
 /// cannot be proved on the 1.29 floor Global Constraint 25 fixes — the same
 /// reason D2 R5 uses a regex instead of the CEL URL library. **Both are the
-/// rehearsal controller's**, which must refuse an oversized or wrong-unit
-/// request with `AuthorizationInvalid` rather than creating the Job.
+/// controller's** — [`crate::runner_resources::validate`], since FX-2, which
+/// the rehearsal controller runs every slot (an oversized or wrong-unit
+/// request is skipped `AuthorizationInvalid` rather than creating a child
+/// `Restore`) and the `Restore` controller runs before anything else (such a
+/// `Restore` is refused `ExecutionSpecInvalid` before its Job exists).
 pub const QUANTITY_PATTERN: &str =
     r"^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$";
 
@@ -232,26 +235,31 @@ pub struct RehearsalTarget {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceQuantities {
-    /// CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. The **ceiling**
-    /// (4) is the rehearsal controller's, not this pattern's.
+    /// CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. A whole number of
+    /// millicores, at most 4: the **ceiling** is the controller's, not this
+    /// pattern's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(regex(path = "QUANTITY_PATTERN"), length(max = 20))]
     pub cpu: Option<String>,
-    /// Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. The **ceiling**
-    /// (8Gi) is the rehearsal controller's, not this pattern's.
+    /// Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. A whole number of
+    /// bytes (`100m` is a tenth of a byte), at most 8Gi, and as a limit at
+    /// least 32Mi: the **bounds** are the controller's, not this pattern's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(regex(path = "QUANTITY_PATTERN"), length(max = 20))]
     pub memory: Option<String>,
 }
 
-/// What the runner pod asks for and is capped at.
+/// What the runner pod asks for and is capped at — FX-2 applies it to the
+/// runner container's `resources`, exactly as written, after
+/// [`crate::runner_resources::validate`] accepted every quantity.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerResources {
-    /// Requests.
+    /// The runner container's `resources.requests`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests: Option<ResourceQuantities>,
-    /// Limits.
+    /// The runner container's `resources.limits`. A limit is never zero, and
+    /// no request is above its limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<ResourceQuantities>,
 }
@@ -283,7 +291,15 @@ pub struct RehearsalBounds {
     #[serde(default = "default_max_partitions")]
     #[schemars(range(min = 1, max = 2000))]
     pub max_partitions: i32,
-    /// The runner pod's resources, projected onto the `Restore` it creates.
+    /// The runner pod's resources, projected verbatim onto the `Restore` each
+    /// slot creates and from there onto its runner container. Checked every
+    /// slot before anything is created: a value outside the bounds (whole
+    /// millicores and bytes, at most 4 CPUs and 8Gi, a memory limit of at
+    /// least 32Mi, no zero limit, no request above its limit) skips the slot
+    /// as `AuthorizationInvalid` and creates no `Restore`. Refused, never
+    /// clamped; the spec is sealed, so the remedy is a new schedule. Absent,
+    /// the runner states no resources and the namespace's `LimitRange`
+    /// defaults apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_resources: Option<RunnerResources>,
 }

@@ -123,11 +123,13 @@ use k8s_openapi::api::batch::v1::{
 };
 use k8s_openapi::api::core::v1::{
     Capabilities, ConfigMapVolumeSource, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource,
-    KeyToPath, PodSecurityContext, PodSpec, PodTemplateSpec, SeccompProfile, SecretKeySelector,
-    SecretVolumeSource, SecurityContext, Volume, VolumeMount,
+    KeyToPath, PodSecurityContext, PodSpec, PodTemplateSpec, ResourceRequirements, SeccompProfile,
+    SecretKeySelector, SecretVolumeSource, SecurityContext, Volume, VolumeMount,
 };
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::ObjectMeta;
+use std::collections::BTreeMap;
 
 /// The one container in every runner Job, **always named this**.
 ///
@@ -445,6 +447,45 @@ pub struct EnvFromSecret {
     pub key: String,
 }
 
+/// The runner container's requests and limits — FX-2.
+///
+/// ALREADY VALIDATED WHEN IT GETS HERE, by
+/// [`crate::runner_resources::validate`]: every quantity parses, fits its
+/// resource's unit, is inside its ceiling, and no request is above its limit.
+/// This type only carries the result to [`build`], resource name to quantity,
+/// in the spelling the object carried.
+///
+/// A TYPE OF THIS CRATE'S AND NOT `ResourceRequirements` ITSELF, because
+/// [`RunnerJobSpec`] is `Eq` and the generated Kubernetes type is only
+/// `PartialEq`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContainerResources {
+    /// `resources.requests`, resource name → quantity.
+    pub requests: BTreeMap<String, String>,
+    /// `resources.limits`, resource name → quantity.
+    pub limits: BTreeMap<String, String>,
+}
+
+impl ContainerResources {
+    /// The container's `resources` block. An empty map renders as an ABSENT
+    /// key, never as `{}`.
+    #[must_use]
+    pub fn requirements(&self) -> ResourceRequirements {
+        let render = |map: &BTreeMap<String, String>| {
+            (!map.is_empty()).then(|| {
+                map.iter()
+                    .map(|(name, value)| (name.clone(), Quantity(value.clone())))
+                    .collect::<BTreeMap<_, _>>()
+            })
+        };
+        ResourceRequirements {
+            claims: None,
+            limits: render(&self.limits),
+            requests: render(&self.requests),
+        }
+    }
+}
+
 /// The owning custom resource, as the four fields an `ownerReference` needs.
 ///
 /// A DEDICATED TYPE RATHER THAN `OwnerReference` ITSELF, so `controller: true`
@@ -559,6 +600,16 @@ pub struct RunnerJobSpec {
     /// [`RUNNER_IMAGE_ENV`] and [`RUNNER_PULL_POLICY_ENV`], rendered from the
     /// chart's `runnerImage` and `runnerImagePullPolicy`.
     pub image_pull_policy: Option<String>,
+    /// The runner container's requests and limits, or **`None` for no
+    /// `resources` key at all** — FX-2.
+    ///
+    /// `None` IS EVERY JOB'S SHAPE BEFORE FX-2, and it is still the answer
+    /// for every Job no custom resource states resources for: the namespace's
+    /// `LimitRange` defaults apply to it exactly as they did. Only a `Restore`
+    /// sets it, from `spec.runnerResources` — which a `RehearsalSchedule`
+    /// fills from its sealed `spec.bounds.runnerResources` — and only after
+    /// [`crate::runner_resources::validate`] accepted every quantity.
+    pub resources: Option<ContainerResources>,
 }
 
 /// The `podFailurePolicy` every runner Job carries, **in this exact order**.
@@ -646,6 +697,10 @@ pub fn failure_policy() -> PodFailurePolicy {
 /// [`IMAGE_PULL_POLICY`] otherwise**. The two are independent — an image
 /// override leaves the policy alone and a policy override leaves the image
 /// alone — and nothing else in the Job moved.
+///
+/// FX-2 added the SEVENTH: **the container's `resources` is
+/// [`RunnerJobSpec::resources`] when that is `Some`, and absent otherwise.**
+/// Before FX-2 no Job carried any, whatever its object asked for.
 #[must_use]
 pub fn build(spec: &RunnerJobSpec) -> Job {
     let mut env: Vec<EnvVar> = Vec::new();
@@ -800,6 +855,13 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
         ),
         args: Some(spec.args.clone()),
         env: Some(env),
+        // WHAT THE OBJECT ASKED FOR, OR NOTHING — FX-2. A `Restore`'s
+        // validated `spec.runnerResources`; `None` renders no key, which is
+        // the pre-FX-2 shape every other Job keeps.
+        resources: spec
+            .resources
+            .as_ref()
+            .map(ContainerResources::requirements),
         volume_mounts: Some(mounts),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),

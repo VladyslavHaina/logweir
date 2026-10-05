@@ -3011,6 +3011,8 @@ pub fn build_sync_job(spec: &SyncJobSpec) -> Job {
         plan_config_map: None,
         image: spec.image.clone(),
         image_pull_policy: spec.image_pull_policy.clone(),
+        // No `RecoveryCatalog` field states resources for its sync Job (FX-2).
+        resources: None,
     });
 
     let labels = BTreeMap::from([

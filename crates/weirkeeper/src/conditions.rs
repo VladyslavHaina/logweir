@@ -326,6 +326,11 @@ pub const TERMINAL_STATE_POD_CREATION_FORBIDDEN: &str = "PodCreationForbidden";
 /// TERMINAL, because `spec` is CEL-immutable and the run identity is derived
 /// from it and from server-generated metadata, never from an annotation. The
 /// condition message names the field.
+///
+/// FX-2 gave it a `Restore` meaning, the same one: `spec.runnerResources`
+/// asks for requests or limits the controller will not apply
+/// ([`crate::runner_resources::validate`]), so the spec cannot produce a
+/// runnable Job. Refused before any read or `POST`, naming every field.
 pub const TERMINAL_STATE_EXECUTION_SPEC_INVALID: &str = "ExecutionSpecInvalid";
 
 /// A `KafkaCluster`'s settings contradict each other or name an unusable
