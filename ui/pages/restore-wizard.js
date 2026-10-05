@@ -4075,7 +4075,10 @@ export function wizardDraftValues(state) {
     allowHttp: source.allowHttp === true,
     evidenceBucket: (f.evidence || {}).bucket,
     archiveSecret: s.archiveSecretName,
-    topics: selectedTopics(s),
+    // A LIST, KEPT AS TEXT (FX-5's class sweep): `keepDraft` keeps strings and
+    // booleans only, and an array here was dropped without a word -- the
+    // subset came back as every frozen topic under "your edits are back".
+    topics: draftList(selectedTopics(s)),
     evidenceDestination: evidenceDestinationName(s),
     evidenceDestinationUid: ((s.evidenceDestination || {}).uid) || "",
     evidenceSameAsArchive: s.evidenceSameAsArchive !== false,
@@ -4084,7 +4087,7 @@ export function wizardDraftValues(state) {
     evidencePathStyle: (f.evidence || {}).pathStyle === true,
     evidenceAllowHttp: (f.evidence || {}).allowHttp === true,
     catalogPointId: isCatalogPoint(s.point) ? catalogPointUid(s.point) : "",
-    catalogTopics: isCatalogPoint(s.point) ? frozenTopicsOf(s) : [],
+    catalogTopics: draftList(isCatalogPoint(s.point) ? frozenTopicsOf(s) : []),
     // FX-5: A FACTOR THE OPERATOR SET, AS TEXT -- `keepDraft` keeps strings and
     // booleans only, so a number here would be dropped without a word -- and
     // the empty string while the default stands, so the next mount works the
@@ -4093,6 +4096,25 @@ export function wizardDraftValues(state) {
       ? String(replicationFactorOf(s))
       : "",
   };
+}
+
+/** A topic list as a draft keeps it: one name per line. A Kafka topic name
+ *  cannot hold a newline (`isKafkaTopicName`), so the text is the list. */
+function draftList(list) {
+  return (Array.isArray(list) ? list : []).map(String).join("\n");
+}
+
+/** The list a draft kept -- as [`draftList`] wrote it, or as an array from a
+ *  caller that built the draft by hand -- or `null` when it kept none. The
+ *  empty text is the EMPTY list, which is a real edit. */
+function listFromDraft(value) {
+  if (Array.isArray(value)) {
+    return value.map(String);
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  return value.length === 0 ? [] : value.split("\n");
 }
 
 /** Puts a kept draft back into a freshly built state -- only when the draft
@@ -4120,8 +4142,9 @@ export function applyWizardDraft(state, draft) {
   if ((typeof d.catalogPointId === "string" ? d.catalogPointId : "") !== pointKey) {
     return false;
   }
-  if (pointKey.length > 0 && Array.isArray(d.catalogTopics)) {
-    setCatalogTopics(state, d.catalogTopics.map(String));
+  const typedTopics = listFromDraft(d.catalogTopics);
+  if (pointKey.length > 0 && typedTopics !== null) {
+    setCatalogTopics(state, typedTopics);
   }
   if (typeof d.pointInTime === "string") {
     state.fields.pointInTime = d.pointInTime;
@@ -4215,8 +4238,9 @@ export function applyWizardDraft(state, draft) {
   // AN EMPTY KEPT SUBSET IS A REAL EDIT and is applied as one: it is the state
   // `mappingProblems` refuses by name, and dropping it here would silently put
   // every frozen topic back.
-  if (Array.isArray(d.topics)) {
-    state.fields.topics = d.topics.slice();
+  const keptTopics = listFromDraft(d.topics);
+  if (keptTopics !== null) {
+    state.fields.topics = keptTopics;
     state.fields.topics = selectedTopics(state);
   }
   return true;

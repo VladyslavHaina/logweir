@@ -569,3 +569,84 @@ test("fx5_legacy_mode_has_no_discovery_and_says_so_with_the_grammar_default", as
   assert.ok(!html.includes("run Discover topics;"),
     "no discovery to run where there is no route for one");
 });
+
+// ------------------------------------- the class: a draft value the store drops
+
+import { catalogRecoveryPoint, selectedTopics, setCatalogTopics } from "../pages/restore-wizard.js";
+
+/** A catalog point the wizard restores from, with no Backup behind it. */
+function catalogPointState(ns) {
+  const destination = fixture("console/destination.json").item;
+  const pointId = "lwp1-0123456789abcdef0123456789abcdef";
+  const point = catalogRecoveryPoint(
+    { apiVersion: "logweir.dev/v1alpha1", kind: "RecoveryCatalog",
+      metadata: { name: "archive", namespace: ns, uid: "cat-uid" },
+      spec: { destinationRef: { name: destination.name } }, status: {} },
+    { pointId: pointId, backupId: "set-fx5", runId: "01JB7Z00000000000000000000",
+      recoveryPointAt: "2026-09-22T14:00:00Z", coveredFrom: "2026-09-22T13:00:00Z",
+      coveredTo: "2026-09-22T14:00:00Z", availability: "Available", verification: "Verified",
+      selectable: true, signerKeyId: "c".repeat(64),
+      receiptKey: "logweir/backups/set-fx5/01JB7Z00000000000000000000.receipt.json",
+      receiptSha256: "sha256:" + "a1".repeat(32), manifestKey: "set-fx5/manifest.json",
+      manifestSha256: "sha256:" + "b2".repeat(32),
+      locations: [{ locationId: "s3://kafka-backups/team-a/prod", availability: "Available" }] },
+    destination, null);
+  return initialState(ns, clusters(), { items: [] }, { catalog: "archive", point: pointId },
+    destination, undefined, { point: point });
+}
+
+test("fx5_class_every_wizard_draft_value_is_one_the_draft_store_keeps", () => {
+  // THE CLASS (FX-5's sweep). `keepDraft` keeps strings and booleans and DROPS
+  // anything else without a word. The replication factor met it as a number;
+  // the topic subset and a catalog point's typed topic list had met it as
+  // arrays since they were added, so a re-mount put every frozen topic back
+  // under "your unsubmitted edits ... are back". Every value the wizard hands
+  // the store is held to the store's two types, over both kinds of point.
+  const backupPoint = withBrokers(wizardState("team-fx5-class"), BROKERS);
+  const catalogPoint = catalogPointState("team-fx5-class-cat");
+  setCatalogTopics(catalogPoint, ["orders", "payments"]);
+  for (const state of [backupPoint, catalogPoint]) {
+    setReplicationFactor(state, "2");
+    const values = wizardDraftValues(state);
+    for (const field of WIZARD_DRAFT_FIELDS) {
+      const kind = typeof values[field];
+      assert.ok(kind === "string" || kind === "boolean",
+        "NEGATIVE CONTROL: `" + field + "` is a " + (Array.isArray(values[field]) ? "array" : kind) +
+          ", which keepDraft drops without a word");
+    }
+  }
+});
+
+test("fx5_class_the_subset_and_a_catalog_points_topics_survive_the_draft", () => {
+  // THE BACKUP POINT'S SUBSET: one topic of two, through the real store.
+  const state = wizardState("team-fx5-subset");
+  state.fields.topics = ["orders"];
+  keepDraft("fx5-subset-probe", wizardDraftValues(state), WIZARD_DRAFT_FIELDS);
+  const again = wizardState("team-fx5-subset");
+  assert.equal(applyWizardDraft(again, readDraft("fx5-subset-probe")), true);
+  assert.deepEqual(selectedTopics(again), ["orders"],
+    "NEGATIVE CONTROL: [\"orders\", \"payments\"] -- every frozen topic back -- fails this");
+  // AN EMPTY KEPT SUBSET IS A REAL EDIT, and comes back as one.
+  const none = wizardState("team-fx5-subset");
+  none.fields.topics = [];
+  keepDraft("fx5-subset-none", wizardDraftValues(none), WIZARD_DRAFT_FIELDS);
+  const emptied = wizardState("team-fx5-subset");
+  applyWizardDraft(emptied, readDraft("fx5-subset-none"));
+  assert.deepEqual(selectedTopics(emptied), [], "the refused empty subset, not all of them");
+
+  // A CATALOG POINT'S TYPED LIST, and the subset over it.
+  const typed = catalogPointState("team-fx5-cat");
+  setCatalogTopics(typed, ["orders", "payments"]);
+  typed.fields.topics = ["payments"];
+  keepDraft("fx5-catalog-probe", wizardDraftValues(typed), WIZARD_DRAFT_FIELDS);
+  const back = catalogPointState("team-fx5-cat");
+  assert.equal(applyWizardDraft(back, readDraft("fx5-catalog-probe")), true);
+  assert.deepEqual(back.point.spec.topics, ["orders", "payments"],
+    "NEGATIVE CONTROL: [] -- the typed list lost -- fails this");
+  assert.deepEqual(selectedTopics(back), ["payments"]);
+  // A draft built by hand with arrays (the suites' older rows) still applies.
+  const byHand = catalogPointState("team-fx5-cat");
+  applyWizardDraft(byHand, Object.assign({}, readDraft("fx5-catalog-probe"),
+    { catalogTopics: ["orders"], topics: ["orders"] }));
+  assert.deepEqual(selectedTopics(byHand), ["orders"]);
+});
