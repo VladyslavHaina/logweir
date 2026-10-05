@@ -52,9 +52,15 @@ and `just deps-count` remain optional diagnostics.
 test binary's wall clock a year and a day ahead (`+<days>d` sets another
 offset). A test that compares the wall clock with a fixed instant then fails
 before that instant passes, instead of on the day it does. On macOS it builds
-a small clock shim with `cc`; on Linux it preloads libfaketime, a path run on
-macOS only so far. It refuses, rather than running at the real clock, when no
-shim is available or the shift does not reach a test binary.
+a small clock shim with `cc`. On Linux it preloads libfaketime; with Debian's
+libfaketime 0.9.10 it refuses at its self-check (C11 timed waits hang and
+`rustc` deadlocks under it), so the suite has not run on Linux yet. The Rust
+toolchain keeps the real clock, because cargo judges its shared cache in
+`~/.cargo` by it: the shim stands down in cargo and rustc, and the run refuses
+unless a cargo started under the shim sees the real clock. It also refuses,
+rather than running at the real clock or hanging, when no shim is available,
+the shift does not reach a test binary, a timed wait does not return under the
+shift, or `--target` is passed.
 
 ## Image publication
 
