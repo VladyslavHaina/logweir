@@ -1,0 +1,81 @@
+{
+  "lastSuccessful": {
+    "brokerCount": 2,
+    "chunkCount": 1,
+    "clusterId": "Tk9UQV9TT1VSQ0VfQ0xVU1Q",
+    "conditions": [],
+    "connection": {
+      "authMode": "plaintext",
+      "generation": 1,
+      "name": "orders-scratch",
+      "principal": "User:ANONYMOUS",
+      "uid": "2b2c3d4e-5f60-4718-8293-a4b5c6d7e8fa"
+    },
+    "counts": {
+      "errored": 0,
+      "internalExcluded": 1,
+      "listed": 4,
+      "returned": 3
+    },
+    "createdAt": "2026-09-17T04:56:54Z",
+    "freshUntil": "2026-09-17T05:12:20Z",
+    "id": "td-target-counted",
+    "namespace": "team-a",
+    "observedAt": "2026-09-17T04:57:20Z",
+    "reason": "Succeeded",
+    "resourceVersion": "2429150",
+    "stale": false,
+    "staleReasons": [],
+    "state": "succeeded",
+    "terminal": true,
+    "topicsSha256": "sha256:bb",
+    "truncated": false,
+    "uid": "6b1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "visibility": {
+      "basis": [
+        "listingOnly"
+      ],
+      "state": "unknown"
+    }
+  },
+  "latestAttempt": {
+    "brokerCount": 2,
+    "chunkCount": 1,
+    "clusterId": "Tk9UQV9TT1VSQ0VfQ0xVU1Q",
+    "conditions": [],
+    "connection": {
+      "authMode": "plaintext",
+      "generation": 1,
+      "name": "orders-scratch",
+      "principal": "User:ANONYMOUS",
+      "uid": "2b2c3d4e-5f60-4718-8293-a4b5c6d7e8fa"
+    },
+    "counts": {
+      "errored": 0,
+      "internalExcluded": 1,
+      "listed": 4,
+      "returned": 3
+    },
+    "createdAt": "2026-09-17T04:56:54Z",
+    "freshUntil": "2026-09-17T05:12:20Z",
+    "id": "td-target-counted",
+    "namespace": "team-a",
+    "observedAt": "2026-09-17T04:57:20Z",
+    "reason": "Succeeded",
+    "resourceVersion": "2429150",
+    "stale": false,
+    "staleReasons": [],
+    "state": "succeeded",
+    "terminal": true,
+    "topicsSha256": "sha256:bb",
+    "truncated": false,
+    "uid": "6b1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "visibility": {
+      "basis": [
+        "listingOnly"
+      ],
+      "state": "unknown"
+    }
+  },
+  "requestId": "r-fx5-target"
+}

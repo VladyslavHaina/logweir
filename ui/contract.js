@@ -1263,6 +1263,10 @@ const TOPIC_DISCOVERY = shapeOf(
   },
   {
     createdAt: str, reason: str, observedAt: str, freshUntil: str, clusterId: str,
+    // FX-5: how many brokers answered the inventory's metadata read. Absent is
+    // unknown and never zero; the restore wizard caps its replication factor
+    // at it for a fresh discovery of the target.
+    brokerCount: int,
     counts: objectOf(DISCOVERY_COUNTS), truncationReason: str,
     visibility: objectOf(VISIBILITY), expected: objectOf(EXPECTED_TOPICS),
     topicsSha256: str, error: objectOf(CHECK_ERROR),
