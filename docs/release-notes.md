@@ -21,7 +21,9 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2) and 22 (FX-5), from the product-expansion
-tracker's fix-now rows, land after `fdb48cd8`. No tag is cut at `fdb48cd8`, so the candidate
+tracker's fix-now rows, land after `fdb48cd8`, and so do FX-7's additions to
+item 11 (the execution-claim set check, receipt and catalog format 1.2.0, the
+pin's read by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
@@ -967,7 +969,10 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21 and 22.
+from `fdb48cd8` crosses items 21 and 22 and item 11's FX-7 additions: grant
+`s3:GetObjectVersion` before the upgrade, or a pinned point whose current version
+differs fails closed at the binding, and let in-flight Backups finish before
+rolling the runner back.
 
 **The chart and the images move together.** This chart's controller probes run
 `weirkeeper --probe`, and its console configuration can carry
