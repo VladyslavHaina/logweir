@@ -1070,18 +1070,30 @@ fn s3_storage(prefix: &str) -> StorageUrl {
 
 const SET_SEGMENT: &str = "topics/orders/partition=0/segment-00000000000000000000.bin";
 
-/// MinIO's answer to a request that exhausted the client's retries, verbatim
-/// in shape (`RetryError` then `RequestError::Status`).
+/// The shapes `object_store` 0.14.1 prints (`RetryError`'s Display, then
+/// `RequestError`'s). **A failure it RETRIED prints `retry_timeout: …`**, which
+/// the classifier's `timeout` token reads as `Timeout`: every retried failure
+/// (a 5xx, a 429, a transport error) is transient, correctly. The SINGLE-
+/// ATTEMPT shapes — a 5xx or a 429 whose first answer already exhausted the
+/// retry budget, an unreachable endpoint on its only try — carry no such
+/// clause, and are what the status arm and the `EndpointUnreachable` arm of
+/// `a_retry_can_change` exist for (review L-3's mutants L3c and L3d).
 const A_503: &str =
     "Generic S3 error: Error performing GET http://minio:9000/lw-archive?list-type=2 \
      in 180.2s, after 10 retries, max_retries: 10, retry_timeout: 180s  - Server returned \
      non-2xx status code: 503 Service Unavailable: <Error><Code>SlowDown</Code></Error>";
+const A_503_ON_ITS_ONLY_TRY: &str = "Generic S3 error: Error performing GET \
+     http://minio:9000/lw-archive?list-type=2 in 181.3s - Server returned non-2xx status code: \
+     503 Service Unavailable: <Error><Code>SlowDown</Code></Error>";
+const A_429_ON_ITS_ONLY_TRY: &str = "Generic S3 error: Error performing GET \
+     http://minio:9000/lw-archive?list-type=2 in 181.3s - Server returned non-2xx status code: \
+     429 Too Many Requests: <Error><Code>SlowDown</Code></Error>";
 const A_403: &str =
     "Generic S3 error: Error performing GET http://minio:9000/lw-archive?list-type=2 \
      in 3ms - Server returned non-2xx status code: 403 Forbidden: <Error><Code>AccessDenied</Code>\
      <Message>Access Denied.</Message></Error>";
 const UNREACHABLE: &str = "Generic S3 error: Error performing GET http://minio:9000/lw-archive in \
-     180.1s, after 10 retries - HTTP error: error sending request";
+     2.0ms - HTTP error: error sending request";
 const A_400: &str = "Generic S3 error: Error performing GET http://minio:9000/lw-archive in 2ms - \
      Server returned non-2xx status code: 400 Bad Request: <Error><Code>InvalidRequest</Code></Error>";
 
@@ -1186,6 +1198,22 @@ fn a_transient_archive_failure_is_retryable_and_a_configuration_one_is_not() {
             "a LIST that could not reach the endpoint",
             SetReads {
                 list_error: Some(UNREACHABLE),
+                ..SetReads::default()
+            },
+            true,
+        ),
+        (
+            "a LIST answered 503 on its only try",
+            SetReads {
+                list_error: Some(A_503_ON_ITS_ONLY_TRY),
+                ..SetReads::default()
+            },
+            true,
+        ),
+        (
+            "a manifest GET answered 429 on its only try",
+            SetReads {
+                get_error: Some(A_429_ON_ITS_ONLY_TRY),
                 ..SetReads::default()
             },
             true,
