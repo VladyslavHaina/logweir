@@ -99,7 +99,12 @@ fn mint(common_name: &str) -> Minted {
         tlv(0x02, &[0x01]),             // serialNumber
         algorithm.clone(),
         name(common_name),
-        seq(&[tlv(0x17, b"200101000000Z"), tlv(0x17, b"491231235959Z")]),
+        // notAfter is RFC 5280's "no well-defined expiration" GeneralizedTime
+        // (§4.1.2.5), not a UTCTime. rustls judges the window at the WALL
+        // clock, and UTCTime cannot say anything after 2049: the old
+        // `491231235959Z` made every row here fail from 2050-01-01. FX-9
+        // found it by running the suite 26,752 days ahead.
+        seq(&[tlv(0x17, b"200101000000Z"), tlv(0x18, b"99991231235959Z")]),
         name(common_name),
         spki,
         extensions,
