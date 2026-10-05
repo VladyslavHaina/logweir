@@ -404,7 +404,13 @@ impl ObjectAccess for FakeObjects {
     /// version at all, which is an error and never the current bytes.
     fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
         let mut s = self.state.lock().unwrap();
-        s.calls.push(format!("get {key}?versionId={version}"));
+        let at = format!("{key}?versionId={version}");
+        s.calls.push(format!("get {at}"));
+        // A fault scoped to ONE version read (FX-7 fix round): `failing_key`
+        // with the `<key>?versionId=<id>` spelling.
+        if let Some(f) = s.key_faults.get(&at) {
+            return Err(f.to_error(&at));
+        }
         match s.versions.get(key) {
             None => Err(StoreError::Backend(format!(
                 "{key} is not versioned; it cannot be read by version"
@@ -6541,7 +6547,7 @@ fn a_pinned_point_whose_manifest_was_written_again_is_a_conflict_that_says_so() 
     assert_eq!(entry["availability"], "Conflict", "{entry}");
     assert_eq!(
         entry["remedy"],
-        logweir::check::kinds::catalog_sync::SUPERSEDED_REMEDY,
+        logweir::catalog::pin::SUPERSEDED_REMEDY,
         "{entry}"
     );
 
@@ -6630,6 +6636,259 @@ fn catalog_sync_reads_the_version_the_live_store_reports() {
             if rewritten { "Conflict" } else { "Available" },
             "rewritten={rewritten}: {}",
             entries[0]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FX-7 fix round (review H-1): a byte-identical COPY of a pinned point is the
+// same point in another place — never "written again"
+// ---------------------------------------------------------------------------
+
+/// The remedy of an `Available` point whose pin could not be checked here:
+/// the table's own remedy (these fixtures trust no key, so `notAttempted`'s)
+/// with the note after it, and never the superseded remedy.
+fn assert_noted(entry: &serde_json::Value) {
+    let remedy = entry["remedy"].as_str().expect("a remedy");
+    assert!(
+        remedy.contains(logweir::catalog::pin::UNCHECKED_NOTE),
+        "the pin could not be checked in this bucket, and the entry says so: {entry}"
+    );
+    assert!(
+        !remedy.contains(logweir::catalog::pin::SUPERSEDED_CAUSE),
+        "never the superseded remedy: {entry}"
+    );
+}
+
+/// **H-1, the unversioned copy.** A pinned point copied byte for byte into an
+/// UNVERSIONED bucket: the copy answers no version id and cannot be read by
+/// one. It is the same signed point (one point in two places), `Available` by
+/// its digest, with the note. Before the fix it was `Conflict`.
+#[test]
+fn a_byte_identical_copy_of_a_pinned_point_in_an_unversioned_bucket_is_available() {
+    let f = catalog_fixture(
+        &pinned_catalog_receipt("v1"),
+        "s3://lw-copy/kafka-backups",
+        &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let objects = place(FakeObjects::new(), &f);
+    let entry = only_entry(objects.clone());
+    assert_eq!(entry["availability"], "Available", "{entry}");
+    assert_noted(&entry);
+    assert!(
+        objects
+            .calls()
+            .contains(&format!("get {}?versionId=v1", f.manifest_key)),
+        "the pinned version was asked for BY ID before the point was judged: {:?}",
+        objects.calls()
+    );
+}
+
+/// **H-1, the versioned copy.** The same copy into a VERSIONED bucket that
+/// issued its OWN ids: the pinned id is not in its history (`NotFound`).
+#[test]
+fn a_byte_identical_copy_in_a_versioned_bucket_with_its_own_ids_is_available() {
+    let (objects, _) = versioned_objects(
+        &pinned_catalog_receipt("v1"),
+        &[("copy-7f3a", CATALOG_MANIFEST)],
+    );
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Available", "{entry}");
+    assert_noted(&entry);
+}
+
+/// **The control.** The same copy of a point that pins NOTHING: `Available`
+/// with exactly the table's remedy — the note is about a pin, not about copies
+/// — and no read by version at all.
+#[test]
+fn a_copy_of_an_unpinned_point_carries_no_note() {
+    use logweir::check::kinds::catalog_sync::{Availability, SignatureVerdict};
+    let f = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-copy/kafka-backups",
+        &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let objects = place(FakeObjects::new(), &f);
+    let entry = only_entry(objects.clone());
+    assert_eq!(entry["availability"], "Available", "{entry}");
+    assert_eq!(
+        entry["remedy"],
+        logweir::check::kinds::catalog_sync::remedy_for(
+            Availability::Available,
+            SignatureVerdict::NotAttempted
+        )
+        .expect("notAttempted has a remedy"),
+        "{entry}"
+    );
+    assert!(
+        !objects.calls().iter().any(|c| c.contains("?versionId=")),
+        "{:?}",
+        objects.calls()
+    );
+}
+
+/// The fallback IS the digest check: a copy whose manifest bytes differ is
+/// `Conflict` by the digest, with the generic remedy and the note — the pin
+/// was not what judged it.
+#[test]
+fn a_copy_whose_manifest_differs_is_a_conflict_by_the_digest() {
+    use logweir::check::kinds::catalog_sync::{Availability, SignatureVerdict};
+    let (objects, _) = versioned_objects(
+        &pinned_catalog_receipt("v1"),
+        &[("copy-7f3a", br#"{"topics":["swapped"]}"#)],
+    );
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Conflict", "{entry}");
+    let remedy = entry["remedy"].as_str().expect("a remedy");
+    assert!(
+        remedy.starts_with(
+            logweir::check::kinds::catalog_sync::remedy_for(
+                Availability::Conflict,
+                SignatureVerdict::NotAttempted
+            )
+            .expect("Conflict has a remedy")
+        ),
+        "{entry}"
+    );
+    assert_noted(&entry);
+}
+
+/// A read of the pinned version that fails for any OTHER reason (a principal
+/// without `s3:GetObjectVersion`, an outage) is `Unreadable` — "could not
+/// tell" — and never the note, which would pass a rewrite nobody ruled out.
+#[test]
+fn a_pinned_version_that_cannot_be_read_is_unreadable() {
+    let (objects, f) = versioned_objects(
+        &pinned_catalog_receipt("v1"),
+        &[("v1", CATALOG_MANIFEST), ("v2", CATALOG_MANIFEST)],
+    );
+    let objects = objects.failing_key(
+        &format!("{}?versionId=v1", f.manifest_key),
+        Fault::Io(
+            "Generic S3 error: Error performing GET http://s3/k?versionId=v1 in 2ms - Server \
+             returned non-2xx status code: 403 Forbidden: <Error><Code>AccessDenied</Code>"
+                .into(),
+        ),
+    );
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Unreadable", "{entry}");
+    assert!(
+        !entry["remedy"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(logweir::catalog::pin::UNCHECKED_NOTE),
+        "{entry}"
+    );
+}
+
+/// The live `Store` behind the trait, the original and both copy shapes: an
+/// unversioned in-memory store (it does not read by version: `Backend`) and a
+/// versioned double with its own ids (`NotFound`). The original is read as
+/// current through `Store`'s own `get_with_version`; the copies' answers come
+/// from `Store::get_version` itself, not from a fake's model of it. (That a
+/// RETAINED pinned version still reaches `Conflict` through the live store —
+/// which needs `Store`'s `get_version` override — is
+/// `catalog_sync_reads_the_version_the_live_store_reports`.)
+#[test]
+fn catalog_sync_over_a_live_store_copy_notes_the_pin() {
+    let (original, _bucket) = logweir_engine_oso::storage::Store::in_memory_versioned("");
+    let manifest_key = "logweir/archive/set-a/manifest.json";
+    let version = original
+        .put_create_only(manifest_key, CATALOG_MANIFEST)
+        .unwrap()
+        .version_id
+        .unwrap();
+    let mut receipt = pinned_catalog_receipt(&version);
+    receipt.archive.manifest_key = manifest_key.to_string();
+    let f = catalog_fixture(
+        &receipt,
+        "s3://lw-archive/kafka-backups",
+        &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let objects: [(&str, &[u8]); 5] = [
+        (&f.log_key, &f.log_bytes),
+        (&f.record_key, &f.record_bytes),
+        (&f.receipt_key, &f.receipt_bytes),
+        (&f.sidecar_key, &f.sidecar_bytes),
+        (manifest_key, CATALOG_MANIFEST),
+    ];
+    for (key, bytes) in &objects[..4] {
+        original.put_create_only(key, bytes).unwrap();
+    }
+    let unversioned = logweir_engine_oso::storage::Store::in_memory("");
+    let (versioned, _copy_bucket) = logweir_engine_oso::storage::Store::in_memory_versioned("");
+    for (key, bytes) in objects {
+        unversioned.put_create_only(key, bytes).unwrap();
+        versioned.put_create_only(key, bytes).unwrap();
+    }
+    for (what, store, noted) in [
+        ("the original", original, false),
+        ("an unversioned copy", unversioned, true),
+        ("a versioned copy with its own ids", versioned, true),
+    ] {
+        let wiring = FakeWiring {
+            shared_store: Some(Arc::new(store)),
+            ..FakeWiring::default()
+        };
+        let run = drive_sync(sync_request(), &wiring);
+        let entries = entries_of(&body_of(&run));
+        assert_eq!(entries.len(), 1, "{what}: {entries:?}");
+        assert_eq!(
+            entries[0]["availability"], "Available",
+            "{what}: {}",
+            entries[0]
+        );
+        assert_eq!(
+            entries[0]["remedy"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(logweir::catalog::pin::UNCHECKED_NOTE),
+            noted,
+            "{what}: {}",
+            entries[0]
+        );
+    }
+}
+
+/// **The fifth object is paid for before the point is begun.** A pinned copy
+/// costs five objects (record, receipt, sidecar, manifest, the pinned version
+/// by id), and [`OBJECTS_PER_POINT`] reserves five: with seven objects (the
+/// floor listing, one shard listing, one point) it is examined whole; with six
+/// it is not begun. A reservation of four would begin it at six and spend
+/// seven — the overspend `a_budget_stop_is_the_walks_outcome_and_never_a_points`
+/// forbids for unpinned points.
+#[test]
+fn a_pinned_copy_is_reserved_its_fifth_object() {
+    let f = catalog_fixture(
+        &pinned_catalog_receipt("v1"),
+        "s3://lw-copy/kafka-backups",
+        &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let objects = place(FakeObjects::new(), &f);
+    for (budget, examined) in [(7_i64, 1_i64), (6, 0)] {
+        let run = drive_sync(
+            logweir_core::check_contract::CatalogSyncRequest {
+                max_objects_per_run: budget,
+                ..sync_request()
+            },
+            &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+        );
+        let body = body_of(&run);
+        let spent: i64 = run.row(CheckId::DestinationArchiveListable).facts["catalogObjectsRead"]
+            .parse()
+            .expect("an object count");
+        assert!(
+            spent <= budget,
+            "A WALK NEVER SPENDS MORE OBJECTS THAN ITS BUDGET: {spent} of {budget}. {body}"
+        );
+        assert_eq!(
+            summary_of(&body, "catalog-counts=")["total"],
+            examined,
+            "budget {budget}: {body}"
         );
     }
 }

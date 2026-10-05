@@ -111,6 +111,7 @@ use logweir_evidence::{Sidecar, PAYLOAD_TYPE_BACKUP_RECEIPT};
 use serde::{Serialize, Serializer};
 
 use super::Wiring;
+use crate::catalog::pin::{self, PinVerdict};
 use crate::catalog::reader::{self, CrossCheck, RecordVerdict};
 use crate::catalog::record::{self, CatalogPoint};
 use crate::check::store::{self as check_store, ObjectAccess};
@@ -187,15 +188,19 @@ pub const PAGE_ENTRY_TARGET: usize = 1_000;
 pub const MAX_SHARDS_PER_SYNC: i64 = 3_660;
 
 /// How many objects one point's examination may spend: the record, the
-/// receipt, its sidecar and the manifest.
+/// receipt, its sidecar, the manifest and — only for a point whose receipt
+/// pins a manifest version that is not the key's current one — that pinned
+/// version, read by id (FX-7, [`crate::catalog::pin`]).
 ///
-/// The walk checks it can afford ALL FOUR before it starts a point, so a point
-/// is either examined whole or not begun. That is review finding **F5**: a
-/// point abandoned half way used to be reported `Unreadable`, whose remedy
+/// The walk checks it can afford the WORST CASE before it starts a point, so a
+/// point is either examined whole or not begun. That is review finding **F5**:
+/// a point abandoned half way used to be reported `Unreadable`, whose remedy
 /// names the grant and the network, and whose bucket the controller reads as
 /// `PartialScan` — "a permission or transport failure" — for what is the
-/// designed, normal state of a budget-bounded walk.
-pub const OBJECTS_PER_POINT: i64 = 4;
+/// designed, normal state of a budget-bounded walk. Almost every point spends
+/// four; reserving five costs at most the last point of a budget-bounded walk,
+/// which the next walk takes from the cursor.
+pub const OBJECTS_PER_POINT: i64 = 5;
 
 /// How many keys the floor listing asks for.
 ///
@@ -546,11 +551,18 @@ struct Observation {
     signer_key_id: Option<String>,
     point: Option<Box<CatalogPoint>>,
     format_version: Option<String>,
-    /// **FX-7.** The receipt pins a manifest VERSION and the key's current
-    /// version is another one: the backup set was written again after the
-    /// point was signed. Always `Conflict`; carried separately so the entry's
-    /// remedy says so rather than the generic one.
+    /// **FX-7.** The receipt pins a manifest VERSION that this bucket HOLDS
+    /// and that is not the key's current one: the backup set was written again
+    /// here after the point was signed. Always `Conflict`; carried separately
+    /// so the entry's remedy is [`pin::SUPERSEDED_REMEDY`] rather than the
+    /// generic one.
     superseded: bool,
+    /// **FX-7 fix round (review H-1).** The receipt pins a manifest version
+    /// this bucket does not hold — a copy of the archive, a bucket without
+    /// versioning, a version lifecycle expired — so the pin could not be
+    /// checked here and the digest decided. Never a verdict of its own: it
+    /// appends [`pin::UNCHECKED_NOTE`] to the entry's remedy.
+    pin_unchecked: bool,
 }
 
 impl Observation {
@@ -562,17 +574,10 @@ impl Observation {
             point: None,
             format_version: None,
             superseded: false,
+            pin_unchecked: false,
         }
     }
 }
-
-/// **FX-7.** The remedy of a point whose pinned manifest version is no longer
-/// the current one. A fixed sentence, like every remedy in [`remedy_for`].
-pub const SUPERSEDED_REMEDY: &str =
-    "This point's manifest was written again after the point was signed: its current \
-     version is not the one the signed receipt pins, so a restore would read a manifest \
-     this point does not describe, and the set's segments may have been rewritten. \
-     Restore from another point; the attested version may remain in the bucket's history.";
 
 /// Why a walk ended.
 ///
@@ -1234,6 +1239,7 @@ fn examine(
         format_version: Some(point.format_version.clone()),
         point: Some(point),
         superseded: false,
+        pin_unchecked: false,
     };
     let point = observation
         .point
@@ -1288,35 +1294,55 @@ fn examine(
         && req.deep_check != CatalogDeepCheck::None
     {
         walk.objects = walk.objects.saturating_add(1);
-        // **FX-7 — the pinned version.** Taken from the RECEIPT, the
-        // verification root, and never from the record, whose copy an older
-        // writer may have left out (`reader::cross_check` has already refused a
-        // record whose copy differs).
-        let pinned = receipt.archive.manifest_version_id.as_deref();
         match access.get_with_version(&point.archive.manifest_key) {
             Ok((bytes, answered)) => {
-                let current =
-                    logweir_core::backup_receipt::pinnable_version_id(answered.as_deref());
-                if pinned.is_some() && current.as_deref() != pinned {
-                    // The key's current version is not the one the receipt
-                    // attests: the set was written again after the point was
-                    // signed. The digest cannot always see it — engine 0.21.0
-                    // rewrites a set's segments in place and can leave the
-                    // manifest bytes IDENTICAL under a new version — and a
-                    // restore reads only the current version, so the point is
-                    // not selectable whatever the bytes hash to. No second read
-                    // here: the walk affords [`OBJECTS_PER_POINT`] objects a
-                    // point, and the version comparison needs none.
-                    observation.availability = Availability::Conflict;
-                    observation.superseded = true;
-                } else {
-                    let got = logweir_core::ids::sha256_prefixed(&bytes);
-                    if got != point.archive.manifest_sha256 {
-                        // The bytes in the bucket are not the bytes the signed
-                        // receipt describes. The receipt is the authority, so
-                        // this is a contradiction about the point and not a
-                        // fact about the record.
+                // **FX-7 — the pin, judged in THIS bucket** ([`pin::judge`],
+                // shared with the drill's point binding). The pin is taken from
+                // the RECEIPT, the verification root, and never from the
+                // record, whose copy an older writer may have left out
+                // (`reader::cross_check` has already refused a record whose
+                // copy differs). When the key's current version is not the
+                // pin, the pinned version is read BY ID — the fifth object
+                // [`OBJECTS_PER_POINT`] reserves — because a version id
+                // belongs to one bucket and a COPY of the archive carries the
+                // pin without the version (review H-1).
+                let verdict = pin::judge(
+                    receipt.archive.manifest_version_id.as_deref(),
+                    answered.as_deref(),
+                    &point.archive.manifest_sha256,
+                    |version| {
+                        walk.objects = walk.objects.saturating_add(1);
+                        access.get_version(&point.archive.manifest_key, version)
+                    },
+                );
+                match verdict {
+                    PinVerdict::Superseded { .. } => {
+                        // The bucket HOLDS the pinned version and it is not the
+                        // current one: the set was written again here after the
+                        // point was signed. The digest cannot always see it —
+                        // engine 0.21.0 rewrites a set's segments in place and
+                        // can leave the manifest bytes IDENTICAL under a new
+                        // version — and a restore reads only the current
+                        // version, so the point is not selectable whatever the
+                        // bytes hash to.
                         observation.availability = Availability::Conflict;
+                        observation.superseded = true;
+                    }
+                    PinVerdict::Unreadable { .. } => {
+                        // "Could not tell" — never "not here" and never a pass
+                        // over a rewrite nobody could rule out.
+                        observation.availability = Availability::Unreadable;
+                    }
+                    PinVerdict::Unpinned | PinVerdict::Current | PinVerdict::Unchecked { .. } => {
+                        observation.pin_unchecked = matches!(verdict, PinVerdict::Unchecked { .. });
+                        let got = logweir_core::ids::sha256_prefixed(&bytes);
+                        if got != point.archive.manifest_sha256 {
+                            // The bytes in the bucket are not the bytes the
+                            // signed receipt describes. The receipt is the
+                            // authority, so this is a contradiction about the
+                            // point and not a fact about the record.
+                            observation.availability = Availability::Conflict;
+                        }
                     }
                 }
             }
@@ -1471,19 +1497,35 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
         availability,
         signature: observation.signature,
         signer_key_id: observation.signer_key_id.as_deref().map(redact_digest),
-        remedy: (if observation.superseded {
-            Some(SUPERSEDED_REMEDY)
-        } else {
-            remedy_for(availability, observation.signature)
-        })
-        .map(redact)
-        .filter(|r| !r.is_empty()),
+        remedy: entry_remedy(observation)
+            .map(|r| redact(&r))
+            .filter(|r| !r.is_empty()),
     };
     // One sync contributes one location, so this can only ever be a no-op —
     // and it is written down so the cap is enforced on the side that renders
     // the line rather than assumed on the side that parses it.
     entry.locations.truncate(MAX_ENTRY_LOCATIONS);
     Some(entry)
+}
+
+/// An entry's remedy: [`pin::SUPERSEDED_REMEDY`] for a pin this bucket holds
+/// and no longer serves, otherwise [`remedy_for`]'s — with
+/// [`pin::UNCHECKED_NOTE`] after it when the receipt's pin could not be checked
+/// in this bucket (FX-7 fix round, review H-1). Fixed sentences only, so no
+/// adopter bytes reach an entry; the note never REPLACES a remedy, because the
+/// state the table names is still the state the point is in.
+fn entry_remedy(observation: &Observation) -> Option<String> {
+    if observation.superseded {
+        return Some(pin::SUPERSEDED_REMEDY.to_string());
+    }
+    let remedy = remedy_for(observation.availability, observation.signature);
+    if !observation.pin_unchecked {
+        return remedy.map(str::to_string);
+    }
+    Some(match remedy {
+        Some(remedy) => format!("{remedy} {}", pin::UNCHECKED_NOTE),
+        None => pin::UNCHECKED_NOTE.to_string(),
+    })
 }
 
 // ===========================================================================

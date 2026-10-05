@@ -2435,13 +2435,19 @@ fn check_v2_bindings(
             .map_err(|error| DrillError::Operational(error.to_string()))?;
         // THE SIGNATURE HALF NEEDS THE CLOCK, read here (Global Constraint 1)
         // and passed down, like the standing authorization's.
-        if let Some(point_id) = binding::verify_point_binding(
+        if let Some(proven) = binding::verify_point_binding(
             plan,
             &archive,
             startup.evidence_keys.as_deref(),
             chrono::Utc::now(),
         )? {
-            tracing::info!(point_id = %point_id, "recovery point binding verified");
+            tracing::info!(point_id = %proven.point_id, "recovery point binding verified");
+            // FX-7: the receipt's pin could not be checked in this bucket (a
+            // copy, an unversioned bucket, an expired version), so the digest
+            // decided. Said, never refused.
+            if let Some(note) = proven.pin_note.as_deref() {
+                tracing::warn!(point_id = %proven.point_id, "{note}");
+            }
         }
     }
     Ok(standing_approved)
