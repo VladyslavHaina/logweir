@@ -52,6 +52,13 @@ expected_platforms() { # product -> os/arch,... as main CI publishes it (docs/ga
 # publisher" can never pass for "pullable by anyone".
 ANONYMOUS_DOCKER=$(mktemp -d "${TMPDIR:-/tmp}/logweir-release-anonymous.XXXXXX")
 trap 'rm -rf "$ANONYMOUS_DOCKER"' EXIT
+# Plugins, never credentials: Docker Desktop installs `buildx` as a plugin
+# under the user's configuration directory, which an empty DOCKER_CONFIG would
+# hide ("unknown command: docker buildx", measured). The link carries plugin
+# binaries only; credentials live in config.json, which is not there.
+if [[ -d "${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins" ]]; then
+  ln -s "${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins" "$ANONYMOUS_DOCKER/cli-plugins"
+fi
 anonymous() {
   DOCKER_CONFIG="$ANONYMOUS_DOCKER" "$@"
 }

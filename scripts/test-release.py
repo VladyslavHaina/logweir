@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -304,7 +305,7 @@ class Assemble(Release):
         for target in TARGETS:
             self.archive(target)
 
-    def archive(self, target, binary=b"\x7fELF a logweir binary\n", leave_out=(), sidecar=None):
+    def archive(self, target, binary=b"\x7fELF a logweir binary\n", leave_out=(), sidecar=None, notice=None):
         name = f"logweir-{target}"
         data = io.BytesIO()
         with tarfile.open(fileobj=data, mode="w:xz") as tar:
@@ -315,6 +316,8 @@ class Assemble(Release):
             files = {"logweir": binary}
             for doc in ("LICENSE", "NOTICE", "README.md", "THIRD_PARTY_NOTICES.md"):
                 files[doc] = (self.repo / doc).read_bytes()
+            if notice is not None:
+                files["NOTICE"] = notice
             for member, content in files.items():
                 if member in leave_out:
                     continue
@@ -390,6 +393,7 @@ class Assemble(Release):
             "no NOTICE": dict(leave_out=("NOTICE",)),
             "an engine inside": dict(binary=b"logweir \x00/src/kafka-backup-core/src/lib.rs\x00"),
             "a wrong sidecar": dict(sidecar="0" * 64),
+            "another commit's NOTICE": dict(notice=b"an older NOTICE\n"),
         }
         for label, change in cases.items():
             with self.subTest(case=label):
@@ -406,6 +410,68 @@ class Assemble(Release):
         out = self.base / "existing"
         out.mkdir()
         self.assemble(success=False, out=out)
+
+
+# A stand-in for the packaged binary's `drill countersign`, for the check's own
+# rows: MODE `honest` countersigns and refuses as the real binary does (the
+# positive control), `copy` adds no signature, `wrongkey` adds one by a key it
+# was not given, `lenient` countersigns everything it is handed.
+STUB = r'''#!PYTHON
+import base64, hashlib, json, os, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+args = sys.argv[1:]
+if args[:2] != ["drill", "countersign"]:
+    sys.exit(2)
+opt = {args[i]: args[i + 1] for i in range(2, len(args), 2)}
+mode = os.environ["STUB_MODE"]
+doc = open(opt["--document"], "rb").read()
+sidecar = json.load(open(opt["--confirmation"]))
+key = serialization.load_pem_private_key(open(opt["--key"], "rb").read(), None)
+def keyid(k):
+    return hashlib.sha256(k.public_key().public_bytes(serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+document = json.loads(doc)
+if mode != "lenient":
+    if document["authorizationMode"] != "Governed":
+        print("an Ordinary authorization: nothing to countersign", file=sys.stderr); sys.exit(1)
+    if any(s["keyid"] == keyid(key) for s in sidecar["signatures"]):
+        print("key has already signed this document", file=sys.stderr); sys.exit(1)
+pt = sidecar["payloadType"].encode()
+pae = b"DSSEv1 " + str(len(pt)).encode() + b" " + pt + b" " + str(len(doc)).encode() + b" " + doc
+signer = ec.generate_private_key(ec.SECP256R1()) if mode == "wrongkey" else key
+if mode != "copy":
+    sidecar["signatures"].append({"keyid": keyid(key), "sig": base64.b64encode(
+        signer.sign(pae, ec.ECDSA(hashes.SHA256()))).decode()})
+open(opt["--out"], "w").write(json.dumps(sidecar))
+r = document["requester"]
+print("countersigned\n  requester  " + r["issuer"] + "#" + r["subject"])
+'''
+
+
+class CountersignCheck(unittest.TestCase):
+    """scripts/release-countersign-check.py must be able to fail."""
+
+    def run_check(self, mode):
+        with tempfile.TemporaryDirectory(prefix="logweir-countersign-stub-") as tmp:
+            stub = Path(tmp) / "logweir"
+            stub.write_text(STUB.replace("#!PYTHON", "#!" + sys.executable))
+            stub.chmod(0o755)
+            return subprocess.run([sys.executable, str(ROOT / "scripts/release-countersign-check.py"), str(stub)],
+                                  env={**os.environ, "STUB_MODE": mode}, capture_output=True, text=True, timeout=120)
+
+    def test_an_honest_countersignature_passes(self):
+        result = self.run_check("honest")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("both signatures verify independently", result.stdout)
+
+    def test_a_binary_that_does_not_countersign_fails(self):
+        for mode, reason in (("copy", "exactly one more"), ("wrongkey", "does not verify"),
+                             ("lenient", "was not refused")):
+            with self.subTest(mode=mode):
+                result = self.run_check(mode)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(reason, result.stderr)
 
 
 if __name__ == "__main__":
