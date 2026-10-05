@@ -136,7 +136,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | FX-1 | Parse the engine's consumer-group snapshot | P1 | M1 | fix | — | — | compose | A | Done |
 | 0 | FX-2 | Apply or refuse `runnerResources` | P1 | M1 | fix | — | — | k8s | A | In progress |
-| 0 | FX-3 | Stop labelling new-topic deviations "intended" | P1 | M1 | fix | — | — | compose | A | Proposed |
+| 0 | FX-3 | Stop labelling new-topic deviations "intended" | P1 | M1 | fix | — | — | compose | A | In progress |
 | 0 | FX-4 | Record topic-configuration capture coverage | P1 | M1 | fix | — | — | compose | A | In progress |
 | 0 | FX-5 | Console replication factor from the source | P1 | M1 | fix | — | — | k8s | B | In progress |
 | 0 | FX-6 | Disclose transaction and timestamp semantics | P1 | M1 | docs | — | — | none | B | In progress |
