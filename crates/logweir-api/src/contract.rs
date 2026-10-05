@@ -2109,6 +2109,18 @@ pub struct TopicDiscovery {
     /// The cluster id the check read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cluster_id: Option<String>,
+    /// How many brokers answered the metadata request this inventory came
+    /// from (`status.result.brokerCount`, from the same read as `clusterId`).
+    ///
+    /// ADDITIVE (FX-5). The restore wizard caps its default replication factor
+    /// at it, and refuses a factor above it, when the discovery of the TARGET
+    /// connection is fresh; nothing else in this product published the
+    /// target's broker count to the console. Absent means the result recorded
+    /// none -- a failed or unfinished attempt, or a controller older than the
+    /// field -- and is never read as zero brokers. It counts the brokers that
+    /// answered at `observedAt`, not the brokers the cluster is meant to have.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broker_count: Option<i64>,
     /// The counts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counts: Option<DiscoveryCountsView>,

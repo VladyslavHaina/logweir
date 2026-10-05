@@ -1050,6 +1050,17 @@ different inventory. **A successful list is never called complete**:
 connection, a changed principal — and a failed attempt never hides the last
 successful inventory: `?latest=true` returns both slots separately.
 
+A discovery also carries **`brokerCount`**: how many brokers answered the
+metadata read the inventory came from (`status.result.brokerCount`, beside
+`clusterId`). It is **additive**: absent means the result recorded none — a
+failed or unfinished attempt — and is never sent as `0`, and a client written
+before it reads the discovery exactly as before. The console's restore wizard
+reads it from the target connection's newest successful discovery, when that
+discovery is not `stale`, to cap its default replication factor and to refuse
+a factor above it (FX-5); it is a count of the brokers that answered at
+`observedAt`, and the readiness check's `target.topicCreate` row stays the
+check of the factor against the target as it is when the check runs.
+
 A claim of completeness is checked before it is published: a controller that
 writes `visibility.state: attestedComplete` **without** an `attestation` is
 answered `unknown`, with `attestationMissing` recorded in `basis`. `limited` is
