@@ -432,13 +432,12 @@ fn the_policy_template_names_its_cross_field_rule_in_its_refusal() {
         1,
         "one cross-field rule, one named refusal (FX-10 withdrew the other with its value)"
     );
-    for needle in ["checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace"] {
-        assert!(
-            code.contains(needle),
-            "templates/policy.yaml must refuse the render naming the rule and both values; \
-             `{needle}` is missing"
-        );
-    }
+    let needle = "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace";
+    assert!(
+        code.contains(needle),
+        "templates/policy.yaml must refuse the render naming the rule and both values; \
+         `{needle}` is missing"
+    );
     assert!(
         code.contains("fails CLOSED"),
         "the refusal says WHY it is a render-time error and not a runtime one: a policy the \
@@ -452,13 +451,12 @@ fn the_policy_template_names_its_cross_field_rule_in_its_refusal() {
     // nothing. `scripts/check-chart.sh` renders the two inverted pairs and is
     // the live proof; this is the cheap half that says which comparison each
     // `fail` hangs off.
-    for condition in ["{{- if lt $maxTotal $maxNs -}}"] {
-        assert!(
-            code.contains(condition),
-            "templates/policy.yaml must guard its refusal with `{condition}`; a `fail` behind a \
-             condition that cannot fire is a message nobody ever reads"
-        );
-    }
+    let condition = "{{- if lt $maxTotal $maxNs -}}";
+    assert!(
+        code.contains(condition),
+        "templates/policy.yaml must guard its refusal with `{condition}`; a `fail` behind a \
+         condition that cannot fire is a message nobody ever reads"
+    );
     assert!(
         !code.contains("{{- if false -}}"),
         "a disabled guard in the policy template"
