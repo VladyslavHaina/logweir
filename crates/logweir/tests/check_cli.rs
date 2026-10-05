@@ -6890,6 +6890,13 @@ fn a_pinned_copy_is_reserved_its_fifth_object() {
             examined,
             "budget {budget}: {body}"
         );
+        // And the read by id is COUNTED: two listings and five objects, not
+        // two listings and four plus an uncounted fifth.
+        assert_eq!(
+            spent,
+            2 + examined * 5,
+            "budget {budget}: catalogObjectsRead counts every read. {body}"
+        );
     }
 }
 
