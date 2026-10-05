@@ -36,6 +36,10 @@ pub const KAFKA_PORT: &str = "LOGWEIR_E2E_KAFKA_PORT";
 pub const K8S_PORT: &str = "LOGWEIR_E2E_K8S_PORT";
 pub const SASL_PORT: &str = "LOGWEIR_E2E_SASL_PORT";
 pub const S3_PORT: &str = "LOGWEIR_E2E_S3_PORT";
+/// Profile `acl` (FX-4): kafka-acl's PLAINTEXT (super user) and SCRAM
+/// (restricted) host ports.
+pub const ACL_PORT: &str = "LOGWEIR_E2E_ACL_PORT";
+pub const ACL_SASL_PORT: &str = "LOGWEIR_E2E_ACL_SASL_PORT";
 
 /// One row of the list: a published host port's variable, its default, and
 /// the optional profile that publishes it (`None` for the always-on services).
@@ -278,6 +282,18 @@ pub fn bootstrap_k8s() -> String {
 /// MinIO's S3 endpoint as a host-side client reaches it.
 pub fn s3_endpoint() -> String {
     format!("http://localhost:{}", port(S3_PORT))
+}
+
+/// Profile `acl`: kafka-acl's host-side PLAINTEXT bootstrap, where every
+/// client is User:ANONYMOUS, a SUPER USER (FX-4).
+pub fn bootstrap_acl() -> String {
+    format!("localhost:{}", port(ACL_PORT))
+}
+
+/// Profile `acl`: kafka-acl's host-side SASL_PLAINTEXT/SCRAM-SHA-512
+/// bootstrap, where `logweir` is the RESTRICTED principal a row's ACLs name.
+pub fn bootstrap_acl_sasl() -> String {
+    format!("localhost:{}", port(ACL_SASL_PORT))
 }
 
 /// A per-stack scratch directory under `base` (relative to the workspace

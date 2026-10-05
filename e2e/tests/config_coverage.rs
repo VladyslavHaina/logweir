@@ -2,41 +2,40 @@
 //! **FX-4 — topic-configuration capture coverage, and the denied-read class,
 //! observed live.**
 //!
-//! Three rows, each `#[ignore]`d because each needs the default stack WITH the
-//! StandardAuthorizer overlay (`e2e/fixtures/config-coverage/authorizer-overlay.yml`):
-//! User:ANONYMOUS (every PLAINTEXT client) is a super user, and the SCRAM user
-//! `logweir` is the restricted principal whose DescribeConfigs the rows deny.
+//! Three rows, each `#[ignore]`d because each needs the stack's `acl` profile
+//! (`e2e/README.md`): `kafka-acl` runs KRaft's StandardAuthorizer, every
+//! PLAINTEXT client on it is User:ANONYMOUS and a super user, and the SCRAM
+//! user `logweir` is the restricted principal whose DescribeConfigs the rows
+//! deny with ACLs.
 //!
 //! | row | proves |
 //! |---|---|
 //! | `a_denied_describe_configs_is_a_refusal_at_every_reader` | T13 at the reader: rdkafka 0.36.2 answers a refused topic or broker with ZERO entries and no error; `RdKafkaReader` and `KafkaInventory` now return the refusal; the restore readiness row `target.timestampBound` goes from READY (the pre-fix flattening of that live answer) to UNKNOWN |
 //! | `phase_0_never_assumes_create_time_for_a_refused_broker_read` | T13 at phase 0, by PROCESS: on a `LogAppendTime` broker, a restore identity without cluster DescribeConfigs is admitted as `CreateTime` by the pre-FX-4 binary (`FX4_BEFORE_BIN`) and stopped at phase 0 by this build |
-//! | `capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity` | FX-4 itself: a DENIED DescribeConfigs is `captureDenied` (and empties its neighbour's manifest record: `notCaptured`); overrides and a broker-default and a topic-override `LogAppendTime` are `captured` with their timestamp type and source; the catalog point copies them; a point-bound restore's parity is `notAssessed` exactly where the capture was not |
+//! | `capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity` | FX-4 itself: a DENIED DescribeConfigs is `captureDenied` (and empties its neighbour's manifest record: `notCaptured`); overrides and a broker-default and a topic-override `LogAppendTime` are `captured` with their timestamp type and source; the catalog point copies them; a point-bound restore's parity is `notAssessed` exactly where the capture was not, and a restore identity that may not DescribeConfigs its TARGET topics gets `targetReadDenied`; every not-assessed topic also leaves its fail-safe entry in `unexpected_divergence` (review M5), and the signed scorecards are kept for the old-reader check |
 //!
 //! # Running them
 //!
 //! ```text
-//! C="-f e2e/compose/docker-compose.yml -f e2e/fixtures/config-coverage/authorizer-overlay.yml"
-//! docker compose $C up -d --wait
-//! docker compose $C --profile setup run --rm minio-setup
-//! docker compose $C --profile setup run --rm topic-setup
-//! docker compose $C --profile setup run --rm scram-setup
+//! eval "$(e2e/compose/stack-env.sh --slot N --profiles acl)"
+//! just e2e-up
 //! cargo build -p logweir
 //! FX4_BEFORE_BIN=<a logweir binary built before FX-4> AWS_EC2_METADATA_DISABLED=true \
 //!   cargo test -p e2e --features e2e --test config_coverage -- --ignored --test-threads=1 --nocapture
-//! docker compose $C --profile setup --profile tools down -v --remove-orphans
+//! just e2e-down
 //! ```
 //!
-//! Each row writes what it observed to `.e2e/config-coverage/<row>.json`.
+//! Each row writes what it observed to `config-coverage/<row>.json` under the
+//! stack's scratch directory (`harness::demo_dir()`: `.e2e/` on the default
+//! stack, `.e2e/<project>/` on a slot).
 //!
 //! # Every stack address is `stack()`'s
 //!
-//! PROD-01.5 parameterises the stack's ports and project name. Every broker
-//! address, S3 endpoint, credential and the compose project this file uses
-//! comes from [`stack`] and nowhere else, so its sweep changes one function.
-//! This file never calls a harness helper that runs `docker compose run` or
-//! `up` with the default file alone: that would recreate the broker WITHOUT the
-//! overlay (the service definition differs), mid-row.
+//! Every broker address, S3 endpoint, credential and the compose project this
+//! file uses comes from [`stack`], which reads the per-stack harness
+//! (`harness::bootstrap_acl()`, `bootstrap_acl_sasl()`, `s3_endpoint()`,
+//! `stack::project()`) after `stack::ensure_coherent()`, and nothing else
+//! names one.
 mod harness;
 
 use harness::{bin, demo_dir, engine_bin, engine_digest, engine_mount, engine_version, root};
@@ -55,13 +54,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 struct Stack {
     /// The compose project the running stack belongs to.
     compose_project: String,
-    /// The default compose file, relative to the repository root.
+    /// The compose file, relative to the repository root.
     compose_file: String,
-    /// The overlay this file's rows need, relative to the repository root.
-    overlay_file: String,
-    /// The broker's service name inside the project.
+    /// The profile the broker below belongs to (`acl`).
+    profile: String,
+    /// The ACL-enforcing broker's service name inside the project.
     broker_service: String,
-    /// PLAINTEXT on the host: User:ANONYMOUS, a super user under the overlay.
+    /// Its KRaft node id: the broker resource DescribeConfigs names.
+    broker_node_id: i32,
+    /// PLAINTEXT on the host: User:ANONYMOUS, a super user.
     plaintext: String,
     /// SASL/SCRAM-SHA-512 on the host: User:`scram_user`, NOT a super user.
     sasl: String,
@@ -79,18 +80,20 @@ struct Stack {
 
 /// THE ONE PLACE this file reads the stack's addresses (see the module doc).
 fn stack() -> Stack {
+    harness::stack::ensure_coherent();
     let minio = ["minio", "admin"].concat();
     Stack {
-        compose_project: "logweir-e2e".into(),
+        compose_project: harness::stack::project(),
         compose_file: "e2e/compose/docker-compose.yml".into(),
-        overlay_file: "e2e/fixtures/config-coverage/authorizer-overlay.yml".into(),
-        broker_service: "kafka-broker-1".into(),
-        plaintext: harness::BOOTSTRAP.into(),
-        sasl: harness::BOOTSTRAP_SASL.into(),
-        in_network: "kafka-broker-1:9094".into(),
+        profile: "acl".into(),
+        broker_service: "kafka-acl".into(),
+        broker_node_id: 4001,
+        plaintext: harness::bootstrap_acl(),
+        sasl: harness::bootstrap_acl_sasl(),
+        in_network: "kafka-acl:9094".into(),
         scram_user: harness::SCRAM_USER.into(),
         scram_password: harness::SCRAM_PASSWORD.into(),
-        s3_endpoint: "http://localhost:9000".into(),
+        s3_endpoint: harness::s3_endpoint(),
         s3_user: minio.clone(),
         s3_secret: minio,
         archive_bucket: harness::ARCHIVE_BUCKET.into(),
@@ -153,8 +156,8 @@ fn text(o: &Output) -> String {
     )
 }
 
-/// One of the broker's own CLIs, inside the RUNNING broker container, as
-/// User:ANONYMOUS (a super user under the overlay). `exec`, never `run`.
+/// One of the broker's own CLIs, inside the RUNNING `kafka-acl` container, as
+/// User:ANONYMOUS (a super user). `exec`, never `run`.
 fn broker_cli(args: &[&str]) -> Output {
     let s = stack();
     let mut c = Command::new("docker");
@@ -164,8 +167,8 @@ fn broker_cli(args: &[&str]) -> Output {
         &s.compose_project,
         "-f",
         &s.compose_file,
-        "-f",
-        &s.overlay_file,
+        "--profile",
+        &s.profile,
         "exec",
         "-T",
         &s.broker_service,
@@ -202,8 +205,8 @@ fn assert_the_authorizer_is_on() {
         props.contains(
             "authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer"
         ),
-        "the broker is not running the StandardAuthorizer: start the stack with \
-         e2e/fixtures/config-coverage/authorizer-overlay.yml (this file's module doc)"
+        "kafka-acl is not running the StandardAuthorizer: start the stack with the \
+         `acl` profile (this file's module doc)"
     );
 }
 
@@ -351,6 +354,8 @@ struct ClusterGuard {
     cluster_acl: bool,
     broker_default: bool,
     topic_acls: Vec<String>,
+    /// Prefixes [`allow_restore_without_describe_configs`] granted.
+    prefixed_acls: Vec<String>,
     topics: Vec<String>,
 }
 
@@ -360,6 +365,7 @@ impl ClusterGuard {
             cluster_acl: false,
             broker_default: false,
             topic_acls: Vec::new(),
+            prefixed_acls: Vec::new(),
             topics: Vec::new(),
         }
     }
@@ -413,10 +419,57 @@ impl Drop for ClusterGuard {
                 topic,
             ]);
         }
+        for prefix in &self.prefixed_acls {
+            let args = restore_acl_args("--remove", prefix);
+            let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+            let _ = broker_cli(&borrowed);
+        }
         for topic in &self.topics {
             delete_topic(topic);
         }
     }
+}
+
+/// What a `newTopic` restore does on its target topics — Create, Write, Read,
+/// Describe (and Delete, which a scratch teardown needs) — and deliberately
+/// NOT DescribeConfigs (FX-4 review M5).
+const RESTORE_OPERATIONS: [&str; 5] = ["Create", "Write", "Read", "Describe", "Delete"];
+
+/// `kafka-acls.sh` argv adding or removing [`RESTORE_OPERATIONS`] for the
+/// restricted principal on every topic under `prefix`.
+fn restore_acl_args(op: &str, prefix: &str) -> Vec<String> {
+    let s = stack();
+    let mut args: Vec<String> = [
+        "/opt/kafka/bin/kafka-acls.sh",
+        "--bootstrap-server",
+        &s.in_network,
+        op,
+    ]
+    .iter()
+    .map(|x| x.to_string())
+    .collect();
+    if op == "--remove" {
+        args.push("--force".into());
+    }
+    args.extend(["--allow-principal".into(), format!("User:{}", s.scram_user)]);
+    for operation in RESTORE_OPERATIONS {
+        args.extend(["--operation".into(), operation.into()]);
+    }
+    args.extend([
+        "--topic".into(),
+        prefix.into(),
+        "--resource-pattern-type".into(),
+        "prefixed".into(),
+    ]);
+    args
+}
+
+/// The restricted principal may restore into `prefix…` but may not
+/// DescribeConfigs what it created: phase 7 then reads `targetReadDenied`.
+fn allow_restore_without_describe_configs(prefix: &str) -> String {
+    let args = restore_acl_args("--add", prefix);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    broker_cli_ok(&borrowed, &format!("kafka-acls --add prefixed {prefix}"))
 }
 
 fn produce(topic: &str, count: usize) {
@@ -534,7 +587,7 @@ fn pre_fx4_broker_configs(scram: bool) -> BTreeMap<String, String> {
     }
     let admin: AdminClient<DefaultClientContext> = cfg.create().expect("an admin client");
     let res = block_on(admin.describe_configs(
-        &[ResourceSpecifier::Broker(1001)],
+        &[ResourceSpecifier::Broker(s.broker_node_id)],
         &AdminOptions::new().request_timeout(Some(Duration::from_secs(20))),
     ))
     .expect("the DescribeConfigs call itself answers");
@@ -591,8 +644,13 @@ fn kafka_error_kind(e: &KafkaError) -> &'static str {
 
 // ============================================================ the pipeline
 
+/// This stack's evidence directory for these rows.
+fn evidence_dir() -> PathBuf {
+    demo_dir().join("config-coverage")
+}
+
 fn write_evidence(row: &str, v: &Value) {
-    let dir = root().join(".e2e/config-coverage");
+    let dir = evidence_dir();
     std::fs::create_dir_all(&dir).expect("the evidence directory");
     let p = dir.join(format!("{row}.json"));
     std::fs::write(&p, serde_json::to_vec_pretty(v).expect("serialises")).expect("written");
@@ -956,6 +1014,8 @@ fn restore_spec(
 struct Restore {
     out: Output,
     scorecard: Value,
+    /// The signed scorecard `--out` wrote; its sidecar is beside it (`.sig`).
+    scorecard_path: PathBuf,
 }
 
 fn restore(binary: &Path, spec_text: &str, label: &str, bound: bool, scram: bool) -> Restore {
@@ -1006,7 +1066,11 @@ fn restore(binary: &Path, spec_text: &str, label: &str, bound: bool, scram: bool
         out.status.code(),
         scorecard["outcome"]
     );
-    Restore { out, scorecard }
+    Restore {
+        out,
+        scorecard,
+        scorecard_path: out_json,
+    }
 }
 
 fn tail(o: &Output, n: usize) -> Vec<String> {
@@ -1039,7 +1103,7 @@ fn topic_exists(topic: &str) -> bool {
 /// flattening of that live answer (READY) and over the live `KafkaInventory`
 /// (UNKNOWN). The ANONYMOUS super user's answers are the controls.
 #[test]
-#[ignore = "needs the StandardAuthorizer overlay; see the module doc"]
+#[ignore = "needs the stack's `acl` profile; see the module doc"]
 fn a_denied_describe_configs_is_a_refusal_at_every_reader() {
     assert_the_authorizer_is_on();
     let n = nonce();
@@ -1048,7 +1112,10 @@ fn a_denied_describe_configs_is_a_refusal_at_every_reader() {
     let mut guard = ClusterGuard::new();
     guard.topics.extend([rd.clone(), open.clone()]);
     create_topic(&rd, &[("retention.ms", "3600000")]);
-    create_topic(&open, &[("retention.ms", "7200000")]);
+    // The control carries NO override (review M4): an authorised describe of
+    // the common topic answers only broker and default entries, and must read
+    // as a successful, non-empty answer — the no-misfire direction.
+    create_topic(&open, &[]);
     guard.topic_acls.push(rd.clone());
     let acl_out = deny_describe_configs_on(&rd);
 
@@ -1065,7 +1132,16 @@ fn a_denied_describe_configs_is_a_refusal_at_every_reader() {
         .expect("the call answers")
         .into_iter()
         .map(|(t, r)| match r {
-            Ok(entries) => json!({"topic": t, "entries": entries.len()}),
+            Ok(entries) => json!({
+                "topic": t,
+                "entries": entries.len(),
+                "topic_overrides": entries
+                    .iter()
+                    .filter(|e| {
+                        e.source == logweir_kafka::reader::ConfigSourceKind::DynamicTopicConfig
+                    })
+                    .count(),
+            }),
             Err(e) => json!({"topic": t, "err": kafka_error_kind(&e)}),
         })
         .collect();
@@ -1086,8 +1162,9 @@ fn a_denied_describe_configs_is_a_refusal_at_every_reader() {
     // The broker resource.
     guard.cluster_acl = true;
     let cluster_acl_out = deny_cluster_describe_configs();
-    let raw_broker_denied = raw_describe(true, Some(1001), None);
-    let raw_broker_control = raw_describe(false, Some(1001), None);
+    let node = stack().broker_node_id;
+    let raw_broker_denied = raw_describe(true, Some(node), None);
+    let raw_broker_control = raw_describe(false, Some(node), None);
     let broker_configs = match reader.broker_configs() {
         Ok(m) => json!({"ok": m.len()}),
         Err(e) => json!({"err": kafka_error_kind(&e), "message": e.to_string()}),
@@ -1100,7 +1177,7 @@ fn a_denied_describe_configs_is_a_refusal_at_every_reader() {
     let after_row = readiness_row(None);
     undo_deny_cluster_describe_configs();
     guard.cluster_acl = false;
-    let raw_broker_after_undo = raw_describe(true, Some(1001), None);
+    let raw_broker_after_undo = raw_describe(true, Some(node), None);
 
     let evidence = json!({
         "topic": rd,
@@ -1147,6 +1224,10 @@ fn a_denied_describe_configs_is_a_refusal_at_every_reader() {
     assert_eq!(topic_configs["err"], "NotAuthorized", "{topic_configs}");
     assert_eq!(batch[0]["err"], "NotAuthorized", "{batch:?}");
     assert!(batch[1]["entries"].as_u64().unwrap() > 0, "{batch:?}");
+    assert_eq!(
+        batch[1]["topic_overrides"], 0,
+        "the control is the NO-override case, and it reads Ok: {batch:?}"
+    );
     assert_eq!(
         inventory_topic["err"], "TopicAuthorizationFailed",
         "{inventory_topic}"
@@ -1362,7 +1443,7 @@ fn readiness_row(before: Option<BTreeMap<String, String>>) -> Value {
 /// the override probe; this build stops at phase 0 naming the refusal, before
 /// creating anything on the target.
 #[test]
-#[ignore = "needs the StandardAuthorizer overlay and FX4_BEFORE_BIN; see the module doc"]
+#[ignore = "needs the stack's `acl` profile and FX4_BEFORE_BIN; see the module doc"]
 fn phase_0_never_assumes_create_time_for_a_refused_broker_read() {
     assert_the_authorizer_is_on();
     let before_bin = PathBuf::from(std::env::var("FX4_BEFORE_BIN").expect(
@@ -1380,7 +1461,7 @@ fn phase_0_never_assumes_create_time_for_a_refused_broker_read() {
     let broker_default = set_broker_default_timestamp_type(Some("LogAppendTime"));
     guard.cluster_acl = true;
     deny_cluster_describe_configs();
-    let raw = raw_describe(true, Some(1001), None);
+    let raw = raw_describe(true, Some(stack().broker_node_id), None);
 
     let before_prefix = format!("fx4-{n}-before-");
     let after_prefix = format!("fx4-{n}-after-");
@@ -1437,7 +1518,10 @@ fn phase_0_never_assumes_create_time_for_a_refused_broker_read() {
     // AFTER: stopped at phase 0, exit 1, naming the refusal; nothing created.
     assert_eq!(after.out.status.code(), Some(1), "{}", text(&after.out));
     assert!(
-        text(&after.out).contains("not authorized: broker 1001 configuration"),
+        text(&after.out).contains(&format!(
+            "not authorized: broker {} configuration",
+            stack().broker_node_id
+        )),
         "{}",
         text(&after.out)
     );
@@ -1458,9 +1542,15 @@ fn phase_0_never_assumes_create_time_for_a_refused_broker_read() {
 ///   its source;
 /// - point-bound restores of A and B: `not_assessed` names exactly A's two
 ///   topics and none of B's; an unbound restore of B names its topic
-///   `unknown`.
+///   `unknown`;
+/// - a point-bound restore of B by the RESTRICTED principal, which may do what
+///   a restore does on its target prefix but not DescribeConfigs: every topic
+///   is `targetReadDenied` (review M5);
+/// - every topic a restore did not assess also has its fail-safe entry in
+///   `unexpected_divergence`, and the signed scorecards are kept under
+///   `config-coverage/old-reader/` for a reader built before FX-4.
 #[test]
-#[ignore = "needs the StandardAuthorizer overlay; see the module doc"]
+#[ignore = "needs the stack's `acl` profile; see the module doc"]
 fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
     assert_the_authorizer_is_on();
     use_stack_s3_env();
@@ -1551,6 +1641,37 @@ fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
         false,
         false,
     );
+    // Restore T (review M5, live): the restricted principal restores B and may
+    // not DescribeConfigs its own target topics.
+    let pt = format!("fx4-{n}-rt-");
+    for t in [&ovr, &lat_default, &lat_override] {
+        guard.topics.push(format!("{pt}{t}"));
+    }
+    guard.prefixed_acls.push(pt.clone());
+    let restore_acl = allow_restore_without_describe_configs(&pt);
+    let rt = restore(
+        &bin(),
+        &restore_spec(&bb, &[&ovr, &lat_default, &lat_override], &pt, true, true),
+        &format!("{n}-rt"),
+        true,
+        true,
+    );
+    // The signed documents, kept for the old-reader check (review M5).
+    let keep = evidence_dir().join("old-reader");
+    std::fs::create_dir_all(&keep).expect("the old-reader directory");
+    for (name, r) in [
+        ("restore-a", &ra),
+        ("restore-b", &rb),
+        ("restore-unbound", &ru),
+        ("restore-target-read-denied", &rt),
+    ] {
+        for ext in ["json", "sig"] {
+            let from = r.scorecard_path.with_extension(ext);
+            if from.exists() {
+                std::fs::copy(&from, keep.join(format!("{name}.{ext}"))).expect("copied");
+            }
+        }
+    }
 
     let parity = |r: &Restore| {
         json!({
@@ -1583,6 +1704,11 @@ fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
         "restore_a_point_bound": parity(&ra),
         "restore_b_point_bound": parity(&rb),
         "restore_b_unbound": parity(&ru),
+        "restore_b_point_bound_target_read_denied": {
+            "acl": restore_acl,
+            "parity": parity(&rt),
+        },
+        "old_reader_documents": keep.display().to_string(),
     });
     write_evidence(
         "capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity",
@@ -1665,4 +1791,38 @@ fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
         "{}",
         parity(&ru)
     );
+    assert_eq!(rt.out.status.code(), Some(0), "{}", parity(&rt));
+    assert_eq!(
+        na(&rt),
+        json!([
+            format!("{pt}{lat_default}: configuration (targetReadDenied)"),
+            format!("{pt}{lat_override}: configuration (targetReadDenied)"),
+            format!("{pt}{ovr}: configuration (targetReadDenied)"),
+        ]),
+        "{}",
+        parity(&rt)
+    );
+    // Review M5: a topic nobody assessed is never silent to a reader that
+    // predates `not_assessed` — its fail-safe entry is in the array such a
+    // reader shows.
+    for r in [&ra, &rb, &ru, &rt] {
+        let unexpected = &r.scorecard["topic_parity"]["unexpected_divergence"];
+        for entry in na(r).as_array().expect("not_assessed").iter() {
+            let entry = entry.as_str().expect("a string");
+            let (topic, why) = entry
+                .split_once(": configuration (")
+                .and_then(|(t, w)| Some((t, w.strip_suffix(')')?)))
+                .expect("the not_assessed shape");
+            let marker = format!("{topic}: configuration not assessed ({why})");
+            assert!(
+                unexpected
+                    .as_array()
+                    .expect("unexpected_divergence")
+                    .iter()
+                    .any(|u| u == &json!(marker)),
+                "{marker} is missing from unexpected_divergence: {}",
+                parity(r)
+            );
+        }
+    }
 }

@@ -550,6 +550,81 @@ services:
       timeout: 5s
       retries: 90
 
+  # --- profile `acl`: a broker that enforces ACLs (FX-4) ----------------------
+  # A single-node cluster running KRaft's StandardAuthorizer, for rows about
+  # what a principal may NOT do: a refused DescribeConfigs (FX-4's capture
+  # coverage and PROD-04.0's T13), and the ACL rows of PROD-04.x and PROD-05.3.
+  # Every PLAINTEXT client — in-network on 9094, host-side on the published
+  # EXTERNAL port — is User:ANONYMOUS and a SUPER USER, so setup and the
+  # assertions' own reads are unrestricted. The SCRAM-SHA-512 user `logweir`
+  # (the stack's fixture credential) on the published SASLEXT port is the
+  # RESTRICTED principal a row denies with ACLs; `allow.everyone.if.no.acl.found`
+  # keeps every resource without an ACL open to it, so a row restricts exactly
+  # the resources it names. SCRAM-SHA-512 because it is the one SASL mechanism
+  # Logweir speaks, so a `logweir backup run` or `restore run` can be the
+  # restricted client itself.
+  kafka-acl:
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    hostname: kafka-acl
+    profiles: [acl]
+    networks: [kafka-net]
+    ports:
+      - "${LOGWEIR_E2E_ACL_PORT:-9150}:9092"
+      - "${LOGWEIR_E2E_ACL_SASL_PORT:-9151}:9097"
+    env_file:
+      - path: ./slots/${COMPOSE_PROJECT_NAME:-logweir-e2e}/kafka-acl.env
+        required: true
+    environment:
+      KAFKA_NODE_ID: 4001
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 4001@kafka-acl:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://kafka-acl:9094,CONTROLLER://kafka-acl:9093,EXTERNAL://kafka-acl:9092,SASLEXT://kafka-acl:9097
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-acl:9094,EXTERNAL://localhost:${LOGWEIR_E2E_ACL_PORT:-9150},SASLEXT://localhost:${LOGWEIR_E2E_ACL_SASL_PORT:-9151}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,SASLEXT:SASL_PLAINTEXT
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_LISTENER_NAME_SASLEXT_SCRAM___SHA___512_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_SUPER_USERS: 'User:ANONYMOUS'
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: 'true'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_DIRS: /tmp/kafka-logs
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "kafka-acl:9094", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # The restricted principal's SCRAM-SHA-512 credential and the marker topic,
+  # written once the quorum serves; long-running with a readiness marker, like
+  # kafka-auth-setup, so `up --wait` waits for both and fails if either fails.
+  kafka-acl-setup:
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    profiles: [acl]
+    networks: [kafka-net]
+    depends_on:
+      kafka-acl: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-acl:9094 --alter
+        --add-config 'SCRAM-SHA-512=[password=logweir-e2e-not-a-secret]'
+        --entity-type users --entity-name logweir
+        && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-acl:9094 --create
+        --if-not-exists --topic logweir.scratch --partitions 1 --replication-factor 1
+        && touch /tmp/ready && exec sleep 2147483647
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
   # --- profile `streams`: a pinned minimal Kafka Streams application ----------
   # Apache Kafka's own WordCountDemo, from the SAME apache/kafka image as the
   # broker (kafka-streams-examples-<KAFKA_VERSION>.jar), so the application's
