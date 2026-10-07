@@ -59,10 +59,11 @@
 //!
 //! # The texts live here, once
 //!
-//! Whether "the pinned version is superseded" may widen `availability:
-//! Conflict` and exit 3 inside major 1 is an owner question (FX-7 review, V3).
-//! [`judge`]'s `Superseded` arm and [`SUPERSEDED_CAUSE`] are the whole of that
-//! cause in both readers, so a ruling either way is a change here.
+//! "The pinned version is superseded" widens `availability: Conflict` and
+//! exit 3 inside major 1. The owner ruled that MINOR on 2026-10-07 (FX-7
+//! review, V3): it can only move a point toward not restorable
+//! (`docs/stability.md`). [`judge`]'s `Superseded` arm and
+//! [`SUPERSEDED_CAUSE`] are the whole of that cause in both readers.
 
 use logweir_core::backup_receipt::pinnable_version_id;
 use logweir_engine_oso::storage::StoreError;

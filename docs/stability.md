@@ -17,8 +17,10 @@ adopter's evidence bucket is a document some reader may already parse, so:
 - **Adding an optional field is a MINOR bump** — `1.1.0` — with a new schema
   file beside the old one. It is not a free edit and it is not "still 1.0.0".
 - **Changing a field's type, its meaning, or an identity rule
-  (`validate_invariants`) is a MAJOR bump** — `2.0.0` — and needs two maintainer
-  approvals ([MAINTAINERS.md](../MAINTAINERS.md)). The owner's decision
+  (`validate_invariants`) is a MAJOR bump** — `2.0.0` — and needs the owner's
+  recorded decision, a row in the tracker's
+  [Owner decisions](to-do/product-expansion.md#owner-decisions) table, while the
+  project has one maintainer ([MAINTAINERS.md](../MAINTAINERS.md)). The owner's decision
   [OD-7](to-do/product-expansion.md#owner-decisions), taken on 2026-10-05,
   rules two cases MINOR:
   - **A `validate_invariants` arm that reads ONLY a new optional block is
@@ -27,6 +29,17 @@ adopter's evidence bucket is a document some reader may already parse, so:
     the existing `topic_parity.unexpected_divergence` is MINOR** (OD-7's
     follow-up ruling, the same day), because it can only weaken an older
     reader's verdict.
+
+  On 2026-10-07 the owner added a third, general case (FX-7's review V3 and
+  FX-3):
+  - **A new cause for an existing value, or new content in an existing field,
+    is MINOR when it can only move a reader's verdict to the safer side**: not
+    restorable, not trusted, not intended. It is never MINOR when it can make
+    any verdict stronger. FX-7's superseded pin is this case: `availability:
+    Conflict`, exit 3, and exit 1 / `Unreadable` for a failed read of the
+    pinned version, reached only through the new optional
+    `archive.manifest_version_id`. So is FX-3's move of the new-topic
+    deviations from `intentionally_deviated` to `unexpected_divergence`.
 
   Nothing else is ruled: any other change to an existing field's content is
   still a MAJOR bump.
@@ -1047,19 +1060,20 @@ What changes for an operator:
   A version that was expired or DELETED, a copy synced after the set was written again, or a store
   that cannot read by version leaves the digest alone, which an identical manifest over rewritten
   segments passes ([the three routes](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
-  Object Lock retention covering a point's lifetime keeps its pinned version, and a `Conflict` in
-  the signing bucket outranks a copy's `Available`.
+  Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
+  bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
+  merges the two views for you yet (PROD-09.2 owns that merge).
 - **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key).
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and
   `logweir catalog sync` never infers a pin for one.
-- **One change awaits the owner's ruling (FX-7 review, V3).** `availability: Conflict` gains a cause:
-  a pinned manifest version this bucket still holds that is no longer the current one. Only a point
-  whose receipt carries the new optional `archive.manifest_version_id` can reach it, but it widens
-  what an existing value means, and OD-7 does not cover it. Whether it is MINOR or MAJOR under the
-  rule above is **pending the owner's ruling**; the cause is `crates/logweir/src/catalog/pin.rs`
-  (`judge`'s `Superseded` arm and `SUPERSEDED_CAUSE`), so either ruling is a change there.
+- **The owner ruled this cause MINOR on 2026-10-07 (FX-7 review, V3).** `availability: Conflict`
+  gains a cause: a pinned manifest version this bucket still holds that is no longer the current
+  one. Only a point whose receipt carries the new optional `archive.manifest_version_id` can reach
+  it, and it can only move a point toward not restorable, so it is the general MINOR case in the
+  rule above. The cause lives once in `crates/logweir/src/catalog/pin.rs` (`judge`'s `Superseded`
+  arm and `SUPERSEDED_CAUSE`).
 
 **Upgrade.** Nothing to migrate; readers of either major-1 format ignore the new field. An older
 runner that is still RUNNING when its Job is re-created, and has written nothing yet, is seen by

@@ -33,7 +33,8 @@ relicense the whole.
 
 Changes to `schemas/logweir-drill-scorecard-1.0.0.json` follow the policy in
 [docs/stability.md](docs/stability.md): a minor adds optional fields only, a
-major changes an identity rule. A major bump needs two maintainer approvals.
+major changes an identity rule. A major bump needs the owner's recorded
+decision while the project has one maintainer (docs/stability.md).
 
 Documentation is licensed [CC-BY-4.0](docs/LICENSE-docs).
 
