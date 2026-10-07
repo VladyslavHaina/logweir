@@ -141,10 +141,10 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | FX-5 | Console replication factor from the source | P1 | M1 | fix | — | — | k8s | B | In progress |
 | 0 | FX-6 | Disclose transaction and timestamp semantics | P1 | M1 | docs | — | — | none | B | In progress |
 | 0 | FX-7 | Keep earlier points valid after a manifest rewrite | P1 | M1 | fix | — | — | compose | A | In progress |
-| 0 | FX-8 | Refuse or label point-in-time selection over `LogAppendTime` sources | P1 | M1 | fix | 01.1; FX-4 for the broker-default arm | — | compose | A | Proposed |
+| 0 | FX-8 | Refuse or label point-in-time selection over `LogAppendTime` sources | P1 | M1 | fix | 01.1; FX-4 for the broker-default arm | — | compose | A | In progress |
 | 0 | FX-9 | Pass `now` into the standing-authorization mint and countersign checks (time-bombed fixture) | P1 | M1 | fix | — | — | none | A | In progress |
 | 0 | FX-10 | Apply or withdraw configured values that reach nothing (two inert chart defaults; the retention caps' parse) | P2 | M1 | fix | — | — | none | A | Proposed |
-| 0 | FX-11 | Report a rejected Job pod promptly, with its reason, in every Job-owning controller | P2 | M1 | fix | — | — | none | A | Proposed |
+| 0 | FX-11 | Report a rejected Job pod promptly, with its reason, in every Job-owning controller | P2 | M1 | fix | — | — | none | A | In progress |
 | 0 | FX-12 | Pass `now` into weirkeeper's evidence verification (trust-window clock reads) | P2 | M1 | fix | FX-9 | — | none | A | Proposed |
 | 0 | PROD-00.1 | Evaluate the engine; decide a route per capability | P1 | M1 | research | — | — | compose | B | In progress |
 | 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | Done |
