@@ -1083,7 +1083,14 @@ fn each_phases_result_reaches_the_signed_document() {
         sc.topic_parity.not_assessed,
         Some(vec!["drill-orders: configuration (unknown)".to_string()])
     );
-    assert_eq!(sc.format_version, "1.1.0");
+    assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
+    // FX-8: the fixture's plan states no point in time and its sample window
+    // ends on the archive's newest timestamp, so nothing was selected by time:
+    // the block is WRITTEN (1.3.0's claim) and both lists are empty.
+    assert_eq!(
+        sc.source.time_basis,
+        Some(logweir_core::scorecard::TimeBasisLabel::default())
+    );
     // 8 — the objectives, as REQUESTED plus the verdict
     assert_eq!(sc.objectives.rto_seconds, Some(900));
     assert_eq!(sc.objectives.met, Some(true));

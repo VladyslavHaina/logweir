@@ -101,7 +101,91 @@ pub struct SourceInfo {
     /// execution path lands in a follow-up task, so nothing in the main task
     /// line yet sets this true. The invariant below is live regardless.
     pub captured_by_logweir: bool,
+    /// **Format 1.3.0 (FX-8).** Which clock this restore's TIME SELECTION
+    /// read, for each source topic where that is not the topic's own: see
+    /// [`TimeBasisLabel`].
+    ///
+    /// ABSENT means NOT RECORDED — every document before 1.3.0 — and is never
+    /// read as "every selection used the topic's own clock": before FX-8 a
+    /// point-in-time restore over a `LogAppendTime` source was signed `pass`
+    /// with no label at all (PROD-01.1, `lat`). Every run that reaches the
+    /// time-basis decision writes `Some`, so a 1.3.0 document whose two lists
+    /// are empty is the CLAIM that no selected topic was selected by producer
+    /// time or with an unrecorded timestamp type.
+    ///
+    /// Global Constraint 12 as amended permits this as a NESTED optional
+    /// field: `SourceInfo`'s properties are not the scorecard's 21.
+    /// `skip_serializing_if`, so the signed 1.0.0 fixtures under
+    /// `e2e/fixtures/signed/` round-trip byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_basis: Option<TimeBasisLabel>,
 }
+
+/// **FX-8, scorecard format 1.3.0.** What the restore's time selection read,
+/// per selected source topic.
+///
+/// # Why a restore needs this label at all
+///
+/// The pinned engine archives each record's PRODUCER timestamp (PROD-01.1
+/// S3), so every selection by time — a stated `restore.point_in_time`, or a
+/// `sample.window_end` earlier than what the archive holds — reads producer
+/// time. For a `CreateTime` topic that is the topic's own clock. For a
+/// `LogAppendTime` topic it is not, and phase 7 cannot notice: it compares the
+/// target with the archive, and both carry producer time. So the runner
+/// REFUSES such a selection (`PointInTimeByProducerTime`) unless the approved
+/// plan states `restore.time_basis: producerTime`, and this block is what the
+/// signed document says about the selections it did make.
+///
+/// # The three fields
+///
+/// | field | meaning |
+/// |---|---|
+/// | `plan` | the approved plan's `restore.time_basis`, copied: `producerTime`, or ABSENT when the plan stated none |
+/// | `producer_time` | source topics whose recorded timestamp type is `LogAppendTime` and which this restore selected by time — by producer time, accepted by `plan` (arm TB-3) |
+/// | `not_recorded` | source topics this restore selected by time while their timestamp type was NOT RECORDED: no `message.timestamp.type` override in the archive manifest, and no effective value in a verified backup receipt (FX-4) — so the selection may have read producer time |
+///
+/// A topic whose recorded type is `CreateTime`, and a topic the restore did
+/// not select by time (no `restore.point_in_time`, and a `sample.window_end`
+/// at or after every timestamp the manifest records for it), is in neither
+/// list. Both lists are sorted topic names.
+///
+/// # Why the unknown case runs and is labelled rather than refused
+///
+/// Rule 3 of the expansion tracker: never read old evidence as a stronger
+/// guarantee. A receipt from before FX-4, or a plan bound to no receipt,
+/// carries no effective timestamp type, and most topics carry no manifest
+/// override; reading that silence as `CreateTime` would be the stronger
+/// reading, so it is never taken. Refusing would be the other mistake: it
+/// would stop every point-in-time restore of every archive written before
+/// FX-4, where a `CreateTime` topic's selection is right. So the restore runs
+/// and this list says, in the signed document, that the clock it selected by
+/// is unknown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TimeBasisLabel {
+    /// `producerTime` ([`TIME_BASIS_PRODUCER_TIME`], arm TB-2) when the
+    /// approved plan stated `restore.time_basis: producerTime`; absent when it
+    /// stated none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Source topics selected by PRODUCER time: recorded `LogAppendTime`,
+    /// selected by time, accepted by `plan` (arm TB-3).
+    pub producer_time: Vec<String>,
+    /// Source topics selected by time whose timestamp type was not recorded.
+    pub not_recorded: Vec<String>,
+}
+
+/// The first minor of scorecard format 1 that defines `source.time_basis`
+/// (FX-8), which arm TB-1 enforces. **A renumber changes this and
+/// [`crate::FORMAT_VERSION`] together**; TB-1's message is built from it,
+/// `docs/verify_scorecard.py`'s `SCORECARD_TIME_BASIS_SINCE_MINOR` must equal
+/// it (`docs/test_verify_scorecard.py::
+/// test_the_time_basis_minor_is_the_rust_readers`), and
+/// `the_written_version_defines_time_basis` keeps the pair coherent.
+pub const TIME_BASIS_SINCE_MINOR: u64 = 3;
+
+/// `source.time_basis.plan`'s one value (arm TB-2):
+/// `crate::spec::TimeBasis::ProducerTime`'s wire spelling.
+pub const TIME_BASIS_PRODUCER_TIME: &str = "producerTime";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TargetInfo {
@@ -611,6 +695,14 @@ fn major_version(v: &str) -> Option<u64> {
     v.split('.').next()?.parse().ok()
 }
 
+/// The second dot-separated component of a semver string, parsed as an
+/// integer; `None` when there is none or it does not parse. Read by the arms
+/// that ask whether a document's version defines a field added in a minor
+/// (FX-8's TB-1).
+fn minor_version(v: &str) -> Option<u64> {
+    v.split('.').nth(1)?.parse().ok()
+}
+
 impl Scorecard {
     /// GLOBAL CONSTRAINT 12, IN ONE PLACE: a reader must refuse a
     /// `format_version` whose major is newer than the one this binary
@@ -1077,6 +1169,70 @@ impl Scorecard {
                 ));
             }
         }
+        // `source.time_basis` (format 1.3.0, FX-8): arms TB-1 to TB-4. They
+        // fire ONLY on a document that CARRIES the block and judge the block
+        // alone (TB-1 against `format_version`, as the receipt's FX-4 arm 6
+        // judges `config_coverage`), so every document without it — every
+        // scorecard before 1.3.0 — is decided exactly as before: MINOR under
+        // the owner's OD-7 (a) (`docs/stability.md`, "The v0.1.0 tag is the
+        // compatibility boundary").
+        //
+        // NOT INTERPOLATED, except TB-1's version: the lists name topics, an
+        // adopter-influenced string, and the messages are joined to
+        // `index.json`'s `arm` fields by literal substring.
+        //
+        // Mirrored arm for arm, in this order and this position (after
+        // `target.auth`, before `redactions`, which stays last), in
+        // `docs/verify_scorecard.py::check_invariants`.
+        if let Some(time_basis) = &self.source.time_basis {
+            // TB-1. A document declaring a version before 1.3.0 cannot carry
+            // a 1.3.0 field.
+            let defined = major_version(&self.format_version) == Some(1)
+                && minor_version(&self.format_version)
+                    .is_some_and(|minor| minor >= TIME_BASIS_SINCE_MINOR);
+            if !defined {
+                return Err(InvariantError(format!(
+                    "source.time_basis is present but format_version {:?} predates it: the \
+                     field is defined from 1.{TIME_BASIS_SINCE_MINOR}.0",
+                    self.format_version
+                )));
+            }
+            // TB-2. The plan's time basis has one value; any other spelling is
+            // not one `restore.time_basis` can parse to.
+            if time_basis
+                .plan
+                .as_deref()
+                .is_some_and(|plan| plan != TIME_BASIS_PRODUCER_TIME)
+            {
+                return Err(InvariantError(
+                    "source.time_basis.plan is not \"producerTime\", the one value restore.time_basis has"
+                        .into(),
+                ));
+            }
+            // TB-3. THE RULE ITSELF, in the signed document: a selection by
+            // producer time over a `LogAppendTime` topic is one the approved
+            // plan accepted, never a default.
+            if !time_basis.producer_time.is_empty()
+                && time_basis.plan.as_deref() != Some(TIME_BASIS_PRODUCER_TIME)
+            {
+                return Err(InvariantError(
+                    "source.time_basis.producer_time names a topic but source.time_basis.plan is not \"producerTime\"; a selection by producer time is one the approved plan accepted, never a default"
+                        .into(),
+                ));
+            }
+            // TB-4. A topic's timestamp type was either recorded as
+            // `LogAppendTime` or not recorded at all.
+            if time_basis
+                .producer_time
+                .iter()
+                .any(|t| time_basis.not_recorded.contains(t))
+            {
+                return Err(InvariantError(
+                    "source.time_basis names a topic in both producer_time and not_recorded; a topic's timestamp type was either recorded as LogAppendTime or not recorded"
+                        .into(),
+                ));
+            }
+        }
         // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
         // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
         // now nothing enforced it and no surface displayed it — a third party
@@ -1154,6 +1310,10 @@ mod tests {
                 manifest_sha256: "sha256:0".into(),
                 manifest_version_id: None,
                 captured_by_logweir: false,
+                // Absent, the shape of every document before 1.3.0. The four
+                // `source.time_basis` arms have their own unit tests below,
+                // over this same base document.
+                time_basis: None,
             },
             target: TargetInfo {
                 cluster_id: "cluster-1".into(),
@@ -1825,8 +1985,11 @@ mod tests {
             .expect_err("a format_version from a future major must be refused");
         assert_eq!(
             err.0,
-            "format_version 9.9.9 has a major version newer than this reader understands \
-             (this build knows 1.1.0)"
+            format!(
+                "format_version 9.9.9 has a major version newer than this reader understands \
+                 (this build knows {})",
+                crate::FORMAT_VERSION
+            )
         );
     }
 
@@ -1869,8 +2032,11 @@ mod tests {
             .expect_err("v0.1 has no writer that can produce a redaction");
         assert_eq!(
             err.0,
-            "redactions is non-empty but format_version 1.1.0 has no way to produce one; \
-             --redact is a v0.1.1 feature"
+            format!(
+                "redactions is non-empty but format_version {} has no way to produce one; \
+                 --redact is a v0.1.1 feature",
+                crate::FORMAT_VERSION
+            )
         );
     }
 
@@ -2245,5 +2411,129 @@ mod tests {
         let sc = valid_scorecard();
         assert_eq!(sc.outcome, Outcome::Pass, "the control really is a `pass`");
         assert!(sc.validate_invariants().is_ok());
+    }
+
+    // --- FX-8: `source.time_basis`, arms TB-1 to TB-4 ----------------------
+
+    fn time_basis(plan: Option<&str>, producer: &[&str], unknown: &[&str]) -> TimeBasisLabel {
+        TimeBasisLabel {
+            plan: plan.map(str::to_string),
+            producer_time: producer.iter().map(|t| t.to_string()).collect(),
+            not_recorded: unknown.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    /// The writer's block at the writer's version is coherent in each of its
+    /// shapes: the control for TB-1..TB-4, so an arm written backwards cannot
+    /// pass the refusing tests below for the wrong reason.
+    #[test]
+    fn the_time_basis_block_is_accepted_in_every_shape_the_writer_produces() {
+        for label in [
+            time_basis(None, &[], &[]),
+            time_basis(None, &[], &["old"]),
+            time_basis(Some("producerTime"), &["lat"], &[]),
+            time_basis(Some("producerTime"), &["bd", "lat"], &["old"]),
+            time_basis(Some("producerTime"), &[], &[]),
+        ] {
+            let mut sc = valid_scorecard();
+            sc.source.time_basis = Some(label.clone());
+            assert!(sc.validate_invariants().is_ok(), "{label:?}");
+        }
+    }
+
+    /// TB-1. KILLS: deleting the arm (a 1.1.0 document carrying the block is
+    /// accepted); comparing against the wrong minor (1.2.0 accepted).
+    #[test]
+    fn tb1_refuses_the_block_under_a_version_that_predates_it() {
+        for version in ["1.0.0", "1.1.0", "1.2.0", "1.x.0"] {
+            let mut sc = valid_scorecard();
+            sc.format_version = version.into();
+            sc.source.time_basis = Some(time_basis(None, &[], &[]));
+            let err = sc.validate_invariants().expect_err("the block predates its version");
+            assert_eq!(
+                err.0,
+                format!(
+                    "source.time_basis is present but format_version {version:?} predates it: \
+                     the field is defined from 1.{TIME_BASIS_SINCE_MINOR}.0"
+                )
+            );
+        }
+        // Absent, every earlier version is decided exactly as before.
+        let mut sc = valid_scorecard();
+        sc.format_version = "1.1.0".into();
+        assert!(sc.validate_invariants().is_ok());
+    }
+
+    /// TB-2. KILLS: deleting the arm; accepting a second spelling.
+    #[test]
+    fn tb2_refuses_a_plan_value_restore_time_basis_cannot_have() {
+        for plan in ["appendTime", "ProducerTime", ""] {
+            let mut sc = valid_scorecard();
+            sc.source.time_basis = Some(time_basis(Some(plan), &[], &[]));
+            let err = sc.validate_invariants().expect_err("one value only");
+            assert_eq!(
+                err.0,
+                "source.time_basis.plan is not \"producerTime\", the one value restore.time_basis has"
+            );
+        }
+    }
+
+    /// TB-3, the rule in the signed document. KILLS: deleting the arm (a
+    /// producer-time selection with no opt-in is accepted).
+    #[test]
+    fn tb3_refuses_a_producer_time_selection_the_plan_did_not_accept() {
+        let mut sc = valid_scorecard();
+        sc.source.time_basis = Some(time_basis(None, &["lat"], &[]));
+        let err = sc
+            .validate_invariants()
+            .expect_err("producer time without the plan's opt-in");
+        assert_eq!(
+            err.0,
+            "source.time_basis.producer_time names a topic but source.time_basis.plan is not \"producerTime\"; a selection by producer time is one the approved plan accepted, never a default"
+        );
+    }
+
+    /// TB-4. KILLS: deleting the arm.
+    #[test]
+    fn tb4_refuses_a_topic_in_both_lists() {
+        let mut sc = valid_scorecard();
+        sc.source.time_basis = Some(time_basis(Some("producerTime"), &["lat"], &["lat"]));
+        let err = sc.validate_invariants().expect_err("both lists");
+        assert_eq!(
+            err.0,
+            "source.time_basis names a topic in both producer_time and not_recorded; a topic's timestamp type was either recorded as LogAppendTime or not recorded"
+        );
+    }
+
+    /// The TB arms sit before `redactions`, which stays LAST: a document
+    /// violating both reports the TB arm, from both readers.
+    #[test]
+    fn the_time_basis_arms_report_before_the_redactions_arm() {
+        let mut sc = valid_scorecard();
+        sc.source.time_basis = Some(time_basis(None, &["lat"], &[]));
+        sc.redactions = vec![Redaction {
+            path: "/target/cluster_id".into(),
+            reason: "ordering".into(),
+            present: false,
+        }];
+        let err = sc.validate_invariants().expect_err("two arms");
+        assert!(err.0.starts_with("source.time_basis.producer_time"), "{}", err.0);
+    }
+
+    /// The writer's version defines the field it writes: a renumber that moved
+    /// [`crate::FORMAT_VERSION`] without [`TIME_BASIS_SINCE_MINOR`] (or back)
+    /// would sign documents its own TB-1 refuses.
+    #[test]
+    fn the_written_version_defines_time_basis() {
+        assert_eq!(major_version(crate::FORMAT_VERSION), Some(1));
+        assert_eq!(
+            minor_version(crate::FORMAT_VERSION),
+            Some(TIME_BASIS_SINCE_MINOR),
+            "the writer's minor is the one that introduced source.time_basis"
+        );
+        assert_eq!(
+            crate::spec::TimeBasis::ProducerTime.as_str(),
+            TIME_BASIS_PRODUCER_TIME
+        );
     }
 }

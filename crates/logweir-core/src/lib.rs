@@ -14,7 +14,17 @@
 /// (`Scorecard::refuse_unreadable_major`), so a 1.0.0 reader reads a 1.1.0
 /// document and ignores the field; the signed 1.0.0 fixtures under
 /// `e2e/fixtures/signed/` stay 1.0.0 and keep verifying.
-pub const FORMAT_VERSION: &str = "1.1.0";
+///
+/// `1.3.0` since FX-8, which added `source.time_basis`: which source topics a
+/// restore selected by producer time, and which it selected by time with no
+/// recorded timestamp type. **1.3.0 and not 1.2.0** because FX-3 holds 1.2.0
+/// for `topic_parity.not_reconstructed` on its own branch; the orchestrator
+/// assigns the final number at integration. Its first minor is
+/// [`scorecard::TIME_BASIS_SINCE_MINOR`]; a renumber moves both, the justfile's
+/// `scorecard_schema_version`, `docs/verify_scorecard.py`'s `FORMAT_VERSION`
+/// and `SCORECARD_TIME_BASIS_SINCE_MINOR`, and the parity script's
+/// `SCORECARD_TIME_BASIS_VERSION`.
+pub const FORMAT_VERSION: &str = "1.3.0";
 
 /// PLAT-19.2 / decision D0: ordinary confirmation and governed approval —
 /// the installation policy set, the policy snapshot and authorization
@@ -37,14 +47,20 @@ pub mod rehearsal_scope;
 pub mod schema;
 pub mod scorecard;
 pub mod spec;
+/// FX-8: which clock a restore's time selection reads per source topic, and
+/// the `PointInTimeByProducerTime` refusal.
+pub mod time_basis;
 /// PLAT-19.1 / decision D3 §7.4: the trust lifecycle — `decide`,
 /// `may_sign_new` and `claimed_signing_time`, with `now` always an argument.
 pub mod trust;
 
 #[cfg(test)]
 mod tests {
+    /// The one literal pin of the writer's version (FX-8: 1.3.0). Every
+    /// other test derives the number from the constant, so a renumber is this
+    /// line and the constant.
     #[test]
-    fn format_version_is_one_one_zero() {
-        assert_eq!(crate::FORMAT_VERSION, "1.1.0");
+    fn format_version_is_one_three_zero() {
+        assert_eq!(crate::FORMAT_VERSION, "1.3.0");
     }
 }

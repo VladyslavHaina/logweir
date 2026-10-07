@@ -161,7 +161,12 @@ PAYLOAD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 # docs/stability.md). Only the MAJOR
 # is ever compared, so a 1.0.0 document still verifies and a reader built
 # before the bump still reads a 1.1.0 one.
-FORMAT_VERSION = "1.1.0"
+#
+# `1.3.0` since FX-8 (`source.time_basis`: which source topics a restore
+# selected by producer time, and which it selected by time with no recorded
+# timestamp type). 1.3.0 and not 1.2.0 because FX-3 holds 1.2.0 on its branch;
+# the orchestrator assigns the final number at integration.
+FORMAT_VERSION = "1.3.0"
 
 # This SCRIPT's own version — NOT the format version (GC12: FORMAT_VERSION stays
 # "1.0.0"). Bumped whenever this script's VERDICT RULE changes: when there is a
@@ -364,7 +369,32 @@ FORMAT_VERSION = "1.1.0"
 # document does not claim. `target_diff.not_assessed` (phase 3's collisions
 # whose configuration was not assessed) is shape-checked like it and not
 # printed: the collisions themselves are not printed either.
-SCRIPT_VERSION = "1.15.0"
+#
+# 1.18.0 (FX-8) knows scorecard format 1.3.0 and its `source.time_basis`: the
+# approved plan's `restore.time_basis`, the source topics a restore selected by
+# producer time (recorded `LogAppendTime`, accepted by the plan) and the ones it
+# selected by time with no recorded timestamp type. Four arms, TB-1 to TB-4,
+# mirrored byte for byte and in position from `Scorecard::validate_invariants`:
+# the block only under a version of at least 1.3.0, `plan` only
+# `producerTime`, a producer-time topic only under it, and no topic in both
+# lists. They fire only on a document carrying the block, so every document
+# without it is decided exactly as before. The shape layer refuses a block that
+# is not an object of an optional string `plan` and two arrays of strings. The
+# `time basis:` lines say which topics were selected by producer time or with
+# an unrecorded type, and that a document before 1.3.0 does not say; a backup
+# receipt's `time basis:` lines name its LogAppendTime topics, whose covered
+# window is their producers' time. 1.16.0 and 1.17.0 are held by FX-7 and FX-3
+# on their branches; the orchestrator assigns the final number at integration
+# (this line, the literal pins in docs/test_verify_scorecard.py and the guide's
+# table move together).
+SCRIPT_VERSION = "1.18.0"
+
+# The first minor of SCORECARD format 1 that defines `source.time_basis` (arm
+# TB-1) -- `TIME_BASIS_SINCE_MINOR` in `crates/logweir-core/src/scorecard.rs`,
+# which it must equal (`docs/test_verify_scorecard.py::
+# test_the_time_basis_minor_is_the_rust_readers`). A renumber moves both, and
+# FORMAT_VERSION.
+SCORECARD_TIME_BASIS_SINCE_MINOR = 3
 
 # The first minor of the BACKUP RECEIPT's format 1 that defines
 # `config_coverage` (arm 6) — `CONFIG_COVERAGE_SINCE_MINOR` in
@@ -521,6 +551,40 @@ def _major(version: str):
         return int(head)
     except ValueError:
         return None
+
+
+def _minor(version: str):
+    """Second integer of a dotted version string, or None if there is none.
+
+    Mirrors `logweir_core::scorecard::minor_version`: split on ".", take the
+    second field, parse it as Rust's `str::parse::<u64>` does -- an optional
+    leading `+` and ASCII digits, below 2**64, and nothing else. Python's
+    `int()` is wider (whitespace, `_`, unicode digits), and a wider parse here
+    would let `"1. 3.0"` define a field the Rust reader says it predates. Read
+    by arm TB-1.
+    """
+    parts = version.split(".") if isinstance(version, str) else []
+    if len(parts) < 2 or not re.fullmatch(r"\+?[0-9]+", parts[1]):
+        return None
+    n = int(parts[1])
+    return n if n < 2 ** 64 else None
+
+
+def _time_basis_shape_ok(block) -> bool:
+    """`source.time_basis` has the shape `TimeBasisLabel` deserialises: an
+    object whose `plan` is absent, null or a string and whose `producer_time`
+    and `not_recorded` are both PRESENT arrays of strings. Unknown keys are
+    ignored, as serde ignores them."""
+    if not isinstance(block, dict):
+        return False
+    plan = block.get("plan")
+    if plan is not None and not isinstance(plan, str):
+        return False
+    for name in ("producer_time", "not_recorded"):
+        listed = block.get(name)
+        if not isinstance(listed, list) or not all(isinstance(t, str) for t in listed):
+            return False
+    return True
 
 
 def _finite(x) -> bool:
@@ -878,6 +942,19 @@ def check_invariants(doc) -> str:
     sample = doc["sample"]
     integrity = doc["integrity"]
     evidence = doc["evidence"]
+
+    # Also shape (FX-8, scorecard 1.3.0): `source.time_basis` is an
+    # `Option<TimeBasisLabel>` over there, so `null` is ABSENT and anything
+    # that is not an object of an optional string `plan` and two REQUIRED
+    # arrays of strings is refused at DESERIALISATION. First of the nested
+    # shape checks, because serde meets `source` before `sample` and
+    # `target_diff`. Every bad shape is a case in `shape-index.json`.
+    time_basis = source.get("time_basis")
+    if time_basis is not None and not _time_basis_shape_ok(time_basis):
+        return (
+            "source.time_basis is not an object of an optional string plan and two arrays "
+            "of strings, producer_time and not_recorded"
+        )
 
     # Also shape, and also the Rust reader's type doing the work over there:
     # `sample.records_expected` is a `u64`, so `null`, a string or an absent
@@ -1251,6 +1328,45 @@ def check_invariants(doc) -> str:
                 "is \"plaintext\" or \"scramSha512\" and nothing else"
             )
 
+    # `source.time_basis` (format 1.3.0, FX-8): arms TB-1 to TB-4, mirrored ARM
+    # FOR ARM, IN THIS POSITION (after `target.auth`, before `redactions`) and
+    # with the same words from `Scorecard::validate_invariants`. They fire ONLY
+    # on a document carrying the block, so every document before 1.3.0 is
+    # decided exactly as before. Not interpolated except TB-1's version: the
+    # lists name topics. The shape layer above has proved the block's shape.
+    if time_basis is not None:
+        # TB-1. A version before 1.3.0 cannot carry the 1.3.0 field.
+        minor = _minor(version)
+        if not (
+            doc_major == 1
+            and minor is not None
+            and minor >= SCORECARD_TIME_BASIS_SINCE_MINOR
+        ):
+            return (
+                f"source.time_basis is present but format_version "
+                f"{_rust_debug_str(version)} predates it: the field is defined from "
+                f"1.{SCORECARD_TIME_BASIS_SINCE_MINOR}.0"
+            )
+        # TB-2. One value.
+        if time_basis.get("plan") is not None and time_basis["plan"] != "producerTime":
+            return (
+                "source.time_basis.plan is not \"producerTime\", the one value "
+                "restore.time_basis has"
+            )
+        # TB-3. A selection by producer time is one the approved plan accepted.
+        if time_basis["producer_time"] and time_basis.get("plan") != "producerTime":
+            return (
+                "source.time_basis.producer_time names a topic but source.time_basis.plan is "
+                "not \"producerTime\"; a selection by producer time is one the approved plan "
+                "accepted, never a default"
+            )
+        # TB-4. Recorded as LogAppendTime, or not recorded: never both.
+        if any(t in time_basis["not_recorded"] for t in time_basis["producer_time"]):
+            return (
+                "source.time_basis names a topic in both producer_time and not_recorded; a "
+                "topic's timestamp type was either recorded as LogAppendTime or not recorded"
+            )
+
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
     # for the full argument. `docs/formats/drill-scorecard.md` states "Always
@@ -1592,6 +1708,51 @@ def _coverage_lines(block):
     return lines
 
 
+def _time_basis_lines(block):
+    """`source.time_basis` as lines -- the twin of `crates/logweir/src/
+    verify.rs::time_basis_lines` (FX-8), in the same words from the same cases.
+    ABSENT is NOT RECORDED (every scorecard before 1.3.0), never "every
+    selection used the topic's own clock"; an empty block prints nothing."""
+    if block is None:
+        return [
+            "time basis: not recorded, so whether a time selection read a LogAppendTime "
+            "topic's producer timestamps is unknown"
+        ]
+    lines = []
+    if block["producer_time"]:
+        lines.append(
+            "time basis: SELECTED BY PRODUCER TIME for "
+            + ", ".join(block["producer_time"])
+            + " (recorded as LogAppendTime; the approved plan states restore.time_basis: "
+            "producerTime)"
+        )
+    if block["not_recorded"]:
+        lines.append(
+            "time basis: timestamp type NOT RECORDED for "
+            + ", ".join(block["not_recorded"])
+            + ", so its time selection may have read producer timestamps"
+        )
+    return lines
+
+
+def _receipt_time_basis_lines(block):
+    """The backup receipt's LogAppendTime topics, one line each in NAME order --
+    the twin of `crates/logweir/src/verify.rs::receipt_time_basis_lines` (FX-8).
+    The receipt's format is unchanged: its covered window reads those topics'
+    producer timestamps, and this says so."""
+    lines = []
+    for topic in sorted(block or {}):
+        observed = block[topic].get("timestamp_type")
+        if observed is not None and observed.get("value") == "LogAppendTime":
+            lines.append(
+                f"time basis: {_rust_debug_str(topic)} is LogAppendTime, so the archive holds "
+                "its producers' timestamps and the covered window reads them; a restore that "
+                "selects it by time is refused unless its plan states restore.time_basis: "
+                "producerTime"
+            )
+    return lines
+
+
 def _parity_line(not_assessed):
     """`topic_parity.not_assessed` as one sentence, or "" when every topic was
     assessed — the twin of `crates/logweir/src/verify.rs::parity_line` (FX-4).
@@ -1822,6 +1983,11 @@ def main(
         parity = _parity_line(doc["topic_parity"].get("not_assessed"))
         if parity:
             print(f"       parity:   {parity}")
+        # FX-8: nor a selection by the source topics' own clocks it does not
+        # claim. The same lines `logweir drill verify` prints
+        # (`crates/logweir/src/verify.rs::time_basis_lines`).
+        for line in _time_basis_lines(doc["source"].get("time_basis")):
+            print(f"       time:     {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -1854,6 +2020,8 @@ def main(
             "evidence.offset_report_key and its sha256 present or absent together; "
             "target.marker_topic present unless target.mode is newTopic; "
             "target.mode absent or one of the two values the format defines; "
+            "source.time_basis only from 1.3.0, its plan only producerTime, producer time "
+            "only under it, and no topic in both of its lists; "
             "approval.self_attested derived, not echoed)"
         )
         return 0
@@ -1907,6 +2075,9 @@ def main(
         # verify.rs::coverage_lines`); `scripts/check-verifier-parity.sh`
         # compares every line starting `config_coverage` between the two.
         for line in _coverage_lines(doc.get("config_coverage")):
+            print(f"       {line}")
+        # FX-8: a LogAppendTime topic's covered window is its producers' time.
+        for line in _receipt_time_basis_lines(doc.get("config_coverage")):
             print(f"       {line}")
         print(
             "       This signature covers the receipt only. It says what THIS run "

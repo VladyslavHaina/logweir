@@ -88,6 +88,7 @@ fn spec_in(mode: TargetMode, topic_naming: Option<TopicNaming>) -> DrillSpec {
         },
         restore: RestoreSpecBlock {
             point_in_time: Some(ts(POINT_IN_TIME)),
+            time_basis: None,
         },
         objectives: ObjectivesSpec {
             rto_seconds: None,

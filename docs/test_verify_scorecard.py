@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.15.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.18.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -917,6 +917,11 @@ def test_the_version_line_names_the_current_invariant_set():
         assert (
             "target.mode absent or one of the two values the format defines"
         ) in r.stdout, r.stdout
+        # 1.18.0's addition (FX-8): `source.time_basis`'s four arms.
+        assert (
+            "source.time_basis only from 1.3.0, its plan only producerTime, producer time "
+            "only under it, and no topic in both of its lists"
+        ) in r.stdout, r.stdout
 
 
 def test_the_script_version_is_not_the_format_version():
@@ -925,8 +930,9 @@ def test_the_script_version_is_not_the_format_version():
     # a format bump.
     mod = _verifier_module()
     assert mod.SCRIPT_VERSION != mod.FORMAT_VERSION
-    # 1.1.0 since FX-4 (`topic_parity.not_assessed`, a MINOR bump).
-    assert mod.FORMAT_VERSION == "1.1.0"
+    # 1.1.0 since FX-4 (`topic_parity.not_assessed`, a MINOR bump); 1.3.0
+    # since FX-8 (`source.time_basis`; FX-3 holds 1.2.0 on its branch).
+    assert mod.FORMAT_VERSION == "1.3.0"
 
 
 def test_a_negative_rpo_is_refused():
@@ -1107,8 +1113,8 @@ def test_the_format_version_matches_the_rust_constant():
     # The refusal above is only meaningful if this script and the signer agree
     # on what "this major" is.
     rust = (ROOT / "crates" / "logweir-core" / "src" / "lib.rs").read_text()
-    assert 'pub const FORMAT_VERSION: &str = "1.1.0"' in rust
-    assert _verifier_module().FORMAT_VERSION == "1.1.0"
+    assert 'pub const FORMAT_VERSION: &str = "1.3.0"' in rust
+    assert _verifier_module().FORMAT_VERSION == "1.3.0"
 
 
 # ------------------------------------------ no raw tracebacks, ever (the header
@@ -2182,9 +2188,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.15.0 (FX-4) adds the backup receipt's six `config_coverage` arms and the
     # scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed`
     # shape checks. Map still five.
+    #
+    # 1.18.0 (FX-8) adds the scorecard's four `source.time_basis` arms and its
+    # shape check (1.16.0 and 1.17.0 are held by FX-7 and FX-3 on their
+    # branches). Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.15.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.18.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -2472,3 +2482,137 @@ def test_a_target_diff_not_assessed_value_serde_would_refuse_is_refused_here_too
         doc["format_version"] = "1.1.0"
         doc["target_diff"]["not_assessed"] = good
         assert mod.check_invariants(doc) == "", good
+
+
+# ---------------------------------------------------------------------------
+# FX-8: the scorecard's format 1.3.0 `source.time_basis`, and the backup
+# receipt's time-basis lines.
+# ---------------------------------------------------------------------------
+
+def _scorecard_1_3(block):
+    doc = json.loads((ROOT / "e2e/fixtures/scorecard-pass.json").read_text())
+    doc["format_version"] = "1.3.0"
+    if block is not None:
+        doc["source"]["time_basis"] = block
+    return doc
+
+
+def test_the_time_basis_minor_is_the_rust_readers():
+    # TB-1's minor is ONE number in each reader; a renumber must move both, and
+    # the arm's message is built from it on both sides.
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const TIME_BASIS_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares TIME_BASIS_SINCE_MINOR"
+    assert mod.SCORECARD_TIME_BASIS_SINCE_MINOR == int(m.group(1))
+    assert mod._minor(mod.FORMAT_VERSION) == mod.SCORECARD_TIME_BASIS_SINCE_MINOR
+
+
+def test_a_time_basis_block_is_accepted_in_every_shape_the_writer_produces():
+    mod = _verifier_module()
+    for block in [
+        None,
+        {"producer_time": [], "not_recorded": []},
+        {"producer_time": [], "not_recorded": ["old"]},
+        {"plan": "producerTime", "producer_time": ["lat"], "not_recorded": []},
+        {"plan": "producerTime", "producer_time": ["bd", "lat"], "not_recorded": ["old"]},
+        {"plan": None, "producer_time": [], "not_recorded": []},
+    ]:
+        assert mod.check_invariants(_scorecard_1_3(block)) == "", block
+    # `null` is absent, as `Option` reads it.
+    doc = _scorecard_1_3(None)
+    doc["source"]["time_basis"] = None
+    assert mod.check_invariants(doc) == ""
+
+
+def test_the_time_basis_arms_refuse_with_the_rust_readers_exact_messages():
+    # One refusal per arm, TB-1 to TB-4: the SAME strings
+    # `Scorecard::validate_invariants` returns (its unit tests pin them there).
+    mod = _verifier_module()
+    for version in ["1.0.0", "1.1.0", "1.2.0"]:
+        doc = _scorecard_1_3({"producer_time": [], "not_recorded": []})
+        doc["format_version"] = version
+        assert mod.check_invariants(doc) == (
+            f'source.time_basis is present but format_version "{version}" predates it: '
+            "the field is defined from 1.3.0"
+        ), version
+    for plan in ["appendTime", "ProducerTime", ""]:
+        assert mod.check_invariants(
+            _scorecard_1_3({"plan": plan, "producer_time": [], "not_recorded": []})
+        ) == (
+            'source.time_basis.plan is not "producerTime", the one value restore.time_basis has'
+        ), plan
+    assert mod.check_invariants(
+        _scorecard_1_3({"producer_time": ["lat"], "not_recorded": []})
+    ) == (
+        'source.time_basis.producer_time names a topic but source.time_basis.plan is not '
+        '"producerTime"; a selection by producer time is one the approved plan accepted, '
+        "never a default"
+    )
+    assert mod.check_invariants(
+        _scorecard_1_3({"plan": "producerTime", "producer_time": ["lat"], "not_recorded": ["lat"]})
+    ) == (
+        "source.time_basis names a topic in both producer_time and not_recorded; a topic's "
+        "timestamp type was either recorded as LogAppendTime or not recorded"
+    )
+
+
+def test_a_time_basis_block_serde_would_refuse_is_refused_at_the_shape_layer():
+    mod = _verifier_module()
+    want = (
+        "source.time_basis is not an object of an optional string plan and two arrays of "
+        "strings, producer_time and not_recorded"
+    )
+    for bad in [
+        "x",
+        [],
+        {"not_recorded": []},
+        {"producer_time": []},
+        {"producer_time": "lat", "not_recorded": []},
+        {"producer_time": [], "not_recorded": [1]},
+        {"plan": 1, "producer_time": [], "not_recorded": []},
+    ]:
+        assert mod.check_invariants(_scorecard_1_3(bad)) == want, bad
+
+
+def test_the_time_basis_lines_never_read_absent_as_the_topics_own_clock():
+    mod = _verifier_module()
+    assert mod._time_basis_lines(None) == [
+        "time basis: not recorded, so whether a time selection read a LogAppendTime "
+        "topic's producer timestamps is unknown"
+    ]
+    assert mod._time_basis_lines({"producer_time": [], "not_recorded": []}) == []
+    assert mod._time_basis_lines(
+        {"plan": "producerTime", "producer_time": ["bd", "lat"], "not_recorded": ["old"]}
+    ) == [
+        "time basis: SELECTED BY PRODUCER TIME for bd, lat (recorded as LogAppendTime; the "
+        "approved plan states restore.time_basis: producerTime)",
+        "time basis: timestamp type NOT RECORDED for old, so its time selection may have "
+        "read producer timestamps",
+    ]
+
+
+def test_the_receipt_time_basis_lines_name_its_log_append_time_topics_only():
+    mod = _verifier_module()
+    assert mod._receipt_time_basis_lines(None) == []
+    assert mod._receipt_time_basis_lines(_GOOD_COVERAGE) == [
+        'time basis: "orders" is LogAppendTime, so the archive holds its producers\' '
+        "timestamps and the covered window reads them; a restore that selects it by time "
+        "is refused unless its plan states restore.time_basis: producerTime"
+    ]
+    assert mod._receipt_time_basis_lines(
+        {"orders": {"coverage": "captured",
+                    "timestamp_type": {"value": "CreateTime", "source": "defaultConfig"}}}
+    ) == []
+
+
+def test_a_scorecard_with_a_time_basis_block_verifies_and_prints_its_lines():
+    with tempfile.TemporaryDirectory() as d:
+        doc = _scorecard_1_3(
+            {"plan": "producerTime", "producer_time": ["lat"], "not_recorded": ["old"]}
+        )
+        sc, sig = _write_signed(d, "case", SCORECARD_TYPE, doc)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "time basis: SELECTED BY PRODUCER TIME for lat" in r.stdout, r.stdout
+        assert "time basis: timestamp type NOT RECORDED for old" in r.stdout, r.stdout

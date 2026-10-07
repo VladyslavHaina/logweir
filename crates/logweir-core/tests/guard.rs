@@ -276,7 +276,17 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
         TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
         "TargetTopicConfigRefused"
     );
-    assert_eq!(TERMINAL_STATES.len(), 3);
+    // FX-8's state, the fourth: a time selection over a `LogAppendTime`
+    // source the plan did not accept by producer time.
+    assert_eq!(
+        logweir_core::guard::TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME,
+        "PointInTimeByProducerTime"
+    );
+    assert_eq!(
+        refusal_reason_line("PointInTimeByProducerTime: topic `lat` is LogAppendTime"),
+        "refusal-reason=PointInTimeByProducerTime"
+    );
+    assert_eq!(TERMINAL_STATES.len(), 4);
     // The line carries no whitespace and no quoting: a controller reads it as
     // the final stdout line and splits on `=`.
     let line = refusal_reason_line("CredentialNotRenderable: x");

@@ -55,6 +55,9 @@ fn main() {
             manifest_sha256: sha256_prefixed(b"manifest"),
             manifest_version_id: None,
             captured_by_logweir: false,
+            // Absent, which `skip_serializing_if` keeps OUT of the bytes: the
+            // signed 1.0.0 fixtures this example reproduces predate FX-8.
+            time_basis: None,
         },
         target: TargetInfo {
             cluster_id: "MkU3OEVBNTcwNTJENDM2Qk".into(),

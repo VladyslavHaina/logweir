@@ -171,6 +171,34 @@ fn parity_assessment(not_assessed: Option<&[String]>) -> String {
     }
 }
 
+/// The `source.time_basis` footer value (FX-8). ABSENT — a document before
+/// 1.3.0 — is NOT RECORDED, never "every selection used the topic's own
+/// clock"; an empty block is an em dash; otherwise each non-empty list.
+fn time_basis_qualifier(label: Option<&logweir_core::scorecard::TimeBasisLabel>) -> String {
+    let Some(label) = label else {
+        return "not recorded: whether a time selection read producer timestamps is unknown"
+            .into();
+    };
+    let mut parts = Vec::new();
+    if !label.producer_time.is_empty() {
+        parts.push(format!(
+            "SELECTED BY PRODUCER TIME [{}] (restore.time_basis: producerTime)",
+            label.producer_time.join(", ")
+        ));
+    }
+    if !label.not_recorded.is_empty() {
+        parts.push(format!(
+            "timestamp type NOT RECORDED [{}]",
+            label.not_recorded.join(", ")
+        ));
+    }
+    if parts.is_empty() {
+        "—".into()
+    } else {
+        parts.join("  ")
+    }
+}
+
 /// The `redactions` footer value: an em dash for the whole document every v0.1
 /// run writes, and otherwise the count followed by every removed path.
 ///
@@ -265,6 +293,14 @@ fn qualifiers(sc: &Scorecard) -> String {
     // redaction is not a "this reader cannot honestly render this document"
     // condition — it is a qualifier — so this RENDERS it and the exit code
     // stays 0. The two verifiers are the ones that refuse.
+    // FX-8: which clock the restore's time selection read, where it was not
+    // the topic's own. A qualifier in this footer's sense — the rows above
+    // say `pass` for a point-in-time restore of a `LogAppendTime` topic
+    // either way — so it is rendered here and the frozen rows are untouched.
+    o.push_str(&format!(
+        "    source.time_basis         {}\n",
+        time_basis_qualifier(sc.source.time_basis.as_ref())
+    ));
     o.push_str(&format!(
         "    redactions                {}\n",
         redactions_line(&sc.redactions)

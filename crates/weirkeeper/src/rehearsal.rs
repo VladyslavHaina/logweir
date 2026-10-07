@@ -839,6 +839,12 @@ pub fn render_plan(inputs: &PlanInputs<'_>) -> DrillSpec {
         },
         restore: RestoreSpecBlock {
             point_in_time: Some(point_in_time),
+            // FX-8: a schedule has no field that states a time basis, so a
+            // slot's plan never accepts a selection by producer time, and the
+            // runner refuses a slot whose topics are recorded as
+            // `LogAppendTime` (`PointInTimeByProducerTime`). Absent, the bytes
+            // are what they were before FX-8.
+            time_basis: None,
         },
         objectives: ObjectivesSpec {
             rto_seconds: spec
