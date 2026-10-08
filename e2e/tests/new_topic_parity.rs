@@ -213,6 +213,9 @@ fn create_source_topic(topic: &str, configs: &[(&str, &str)]) {
         &borrowed,
         &format!("create topic {topic}"),
     );
+    // FX-18: three brokers, so "served" is three leaders answering, not one
+    // broker's metadata listing the topic.
+    harness::await_created_on(&s.source_bootstrap, topic, 3);
 }
 
 /// `topic`'s replication factor and dynamic topic configuration as the broker

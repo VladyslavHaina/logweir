@@ -415,3 +415,81 @@ def test_the_stop_guards_catch_their_planted_twins():
     assert not short_settle_waits('const v1 = await settle(pageF, "#schedule-readiness", 240);\n'
                                   'export async function settledRows(page, selector, seconds, interval) {\n'
                                   '  while (Date.now() < end) {\n    read = await checkRowsIn(page, selector);\n  }\n}\n')
+
+
+# ---------------------------------------------------------------- FX-18: the browser
+LAUNCHER = re.compile(r"export async function launchBrowser\b.*?\n}\n", re.S)
+
+
+def bare_launches(name: str, text: str) -> list[str]:
+    """FX-18: every journey launches its browser through console.mjs's `launchBrowser`, which
+    honours LOGWEIR_POC_CHROMIUM. A bare `chromium.launch(` runs only the headless shell the
+    installed Playwright pins, and fails on a host whose browser cache lacks it."""
+    if name == "console.mjs":
+        text = LAUNCHER.sub("", text)
+    code = (line.split("//")[0] for line in text.splitlines())
+    return [line.strip() for line in code if "chromium.launch(" in line]
+
+
+def test_every_journey_launches_through_the_override():
+    for p in FILES:
+        if p.suffix == ".mjs":
+            assert not bare_launches(p.name, p.read_text()), (p.name, bare_launches(p.name, p.read_text()))
+    console = (HERE / "console.mjs").read_text()
+    assert LAUNCHER.search(console), "console.mjs defines launchBrowser"
+    assert "executablePath: CHROMIUM" in LAUNCHER.search(console).group(0)
+
+
+def test_the_launch_guard_catches_its_planted_twin():
+    assert bare_launches("journey.mjs", "const browser = await chromium.launch();\n")
+    assert not bare_launches("journey.mjs", "const browser = await launchBrowser();\n")
+    own = "export async function launchBrowser(options = {}) {\n  return chromium.launch(options);\n}\n"
+    assert not bare_launches("console.mjs", own), "the launcher itself may call it"
+    assert bare_launches("console.mjs", own + "const b = await chromium.launch();\n")
+    assert not bare_launches("x.mjs", "// a bare `chromium.launch()` fails here\n"), "a comment is no launch"
+
+
+def _launch_options(env: dict) -> dict:
+    """What `launchBrowser()` hands Playwright, read through a stand-in `playwright` module whose
+    `chromium.launch` returns its options: no browser, no network."""
+    import json
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("node is not installed")
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = pathlib.Path(tmp) / "playwright"
+        fake.mkdir()
+        (fake / "index.js").write_text("exports.chromium = { launch: async (o) => o };\n")
+        probe = (
+            f"const m = await import({json.dumps((HERE / 'console.mjs').as_uri())});"
+            "console.log(JSON.stringify(await m.launchBrowser({ headless: true })));"
+        )
+        run_env = {k: v for k, v in os.environ.items() if k not in ("LOGWEIR_POC_CHROMIUM", "UI_E2E_CHROMIUM")}
+        run_env.update(env, NODE_PATH=tmp)
+        out = subprocess.run(
+            [node, "--input-type=module", "-e", probe],
+            capture_output=True, text=True, env=run_env, timeout=60, check=False,
+        )
+        return {"rc": out.returncode, "stdout": out.stdout.strip(), "stderr": out.stderr}
+
+
+def test_launch_browser_uses_the_named_executable_and_refuses_a_missing_one():
+    import sys
+
+    plain = _launch_options({})
+    assert plain["rc"] == 0, plain
+    assert plain["stdout"] == '{"headless":true}', plain
+    named = _launch_options({"LOGWEIR_POC_CHROMIUM": sys.executable})
+    assert named["rc"] == 0, named
+    assert '"executablePath":' in named["stdout"] and '"headless":true' in named["stdout"], named
+    fallback = _launch_options({"UI_E2E_CHROMIUM": sys.executable})
+    assert '"executablePath":' in fallback["stdout"], fallback
+    missing = _launch_options({"LOGWEIR_POC_CHROMIUM": "/nonexistent/chrome"})
+    assert missing["rc"] != 0 and "/nonexistent/chrome" in missing["stderr"], missing

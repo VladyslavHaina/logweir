@@ -55,7 +55,7 @@
 //! rather than from the port
 //! ([`a_non_loopback_listener_is_refused_before_anything_is_bound`]).
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
@@ -978,6 +978,40 @@ fn an_oversized_request_head_is_refused() {
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
 }
 
+/// How many of [`the_connection_ceiling_holds_and_then_releases`]'s connections
+/// may be waiting in the kernel's listen queue, not yet accepted, at any one
+/// time.
+///
+/// THE LISTEN QUEUE IS SMALLER THAN THE CEILING. `kern.ipc.somaxconn` is 128
+/// on macOS, and the kernel caps the listener's backlog to it whatever the
+/// server asks for; when the queue overflows, XNU resets a queued connection.
+/// Opening all 256 connections back to back therefore assumed the server's
+/// accept loop would keep pace with the client, which is a statement about the
+/// scheduler, not about the server. On a host at load average 20-40 the loop
+/// fell behind by more than 128 and the test failed with `connection N:
+/// Connection reset by peer`, N between 129 and 213 (FX-3, FX-8, FX-13 and
+/// FX-16's workspace runs, 2026-10-07/08; FX-18). A quarter of the queue
+/// leaves room for whatever else this host is connecting to the same port.
+const UNACCEPTED_AT_ONCE: usize = 32;
+
+/// GET `/healthz` on a fresh connection, retried until [`SERVE_LIMIT`], and
+/// how long it took to be answered.
+///
+/// Used as a FIFO PROBE: the kernel hands connections to `accept` in the order
+/// their handshakes completed, so an answer on a connection opened after
+/// `ahead` others proves the server has accepted every one of them. That is
+/// the condition [`the_connection_ceiling_holds_and_then_releases`] waits on,
+/// instead of sleeping and hoping.
+fn answered_after(port: u16, ahead: usize) -> Duration {
+    let started = Instant::now();
+    let answer = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(
+        answer.starts_with("HTTP/1.1 200"),
+        "the probe behind {ahead} held connections was answered with: {answer}"
+    );
+    started.elapsed()
+}
+
 /// **At the connection ceiling the server stops accepting, and recovers the
 /// moment a connection closes.**
 ///
@@ -986,32 +1020,60 @@ fn an_oversized_request_head_is_refused() {
 /// becoming a task — which is the difference between a bounded server and one
 /// that runs out of memory politely.
 ///
-/// The test is deterministic rather than timing-based in the part that matters:
-/// the pending request is unanswered while every permit is held, and answered
-/// after exactly one connection is dropped.
+/// NOTHING HERE WAITS ON THE SCHEDULER (FX-18). The connections that hold the
+/// permits are opened [`UNACCEPTED_AT_ONCE`] at a time, and after each batch a
+/// probe request ([`answered_after`]) must be answered before another batch is
+/// opened, so the listen queue never holds more than one batch however slowly
+/// the server runs. The fixed 500 ms sleep that used to stand in for "the
+/// accept loop has taken them all" is gone; the probe IS that condition.
 ///
 /// The held connections send nothing, and since FX-24 the server closes such
 /// a connection at the header deadline ([`HEADER_DEADLINE`], counted from its
-/// accept), which frees its permit by itself. So the release must be seen
-/// before the FIRST held connection's deadline: until then every permit is
-/// held by a connection this test opened, and only this test can free one.
+/// accept), which frees its permit by itself. So both assertions finish before
+/// the FIRST held connection's deadline: until then every permit is held by a
+/// connection this test opened, and only this test can free one.
+///
+/// The two assertions:
+///
+/// - **Held.** The pending request is not answered while every permit is
+///   held. Absence of an answer can only be shown over a window, so the window
+///   is MEASURED: four times the slowest probe answer, and never less than the
+///   two seconds it used to be. A server without a ceiling answers within
+///   about one probe's time, so on a slow host a fixed two seconds could have
+///   expired before a broken server answered, and passed it. The window must
+///   end [`RELEASE_MARGIN`] before the first held connection's deadline; a host
+///   too slow for that fails as inconclusive, by name, rather than passing.
+/// - **Released.** After one accepted connection is dropped, the pending
+///   request is answered before that deadline, so the permit came back from
+///   the drop and not from the deadline; one that never came back fails
+///   there.
 #[test]
 fn the_connection_ceiling_holds_and_then_releases() {
     const CEILING: usize = 256;
     let fixture = Fixture::new("ceiling");
     let (_server, port) = start_server(&fixture);
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let connect = |i: usize| {
+        TcpStream::connect_timeout(&address, Duration::from_secs(5))
+            .unwrap_or_else(|e| panic!("connection {i}: {e}"))
+    };
 
-    // Fill every permit with connections that are accepted and then idle.
+    // Every permit but one, a batch at a time, each batch proven accepted by a
+    // probe. A probe needs a free permit to be answered, which is why the last
+    // permit is taken separately below.
     let mut held = Vec::with_capacity(CEILING);
+    let mut slowest_answer = Duration::ZERO;
     let first = Instant::now();
-    for i in 0..CEILING {
-        let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
-            .unwrap_or_else(|e| panic!("connection {i}: {e}"));
-        held.push(stream);
+    while held.len() < CEILING - 1 {
+        let batch = (CEILING - 1 - held.len()).min(UNACCEPTED_AT_ONCE);
+        for _ in 0..batch {
+            held.push(connect(held.len()));
+        }
+        slowest_answer = slowest_answer.max(answered_after(port, held.len()));
     }
-    // Give the accept loop time to take all of them.
-    std::thread::sleep(Duration::from_millis(500));
+    // The last permit. Nothing proves this one accepted, and nothing needs to:
+    // the pending request below is queued behind it either way.
+    held.push(connect(held.len()));
 
     // A further request connects (the backlog accepts the TCP handshake) but is
     // not served, because no permit is free.
@@ -1024,21 +1086,37 @@ fn the_connection_ceiling_holds_and_then_releases() {
         "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
     )
     .unwrap();
-    pending
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    let mut buffer = [0u8; 64];
+    let window = (slowest_answer * 4).max(Duration::from_secs(2));
+    let budget = HEADER_DEADLINE
+        .saturating_sub(first.elapsed())
+        .saturating_sub(RELEASE_MARGIN);
     assert!(
-        pending.read(&mut buffer).is_err(),
-        "the server answered past its connection ceiling"
+        window <= budget,
+        "inconclusive, not a product failure: filling the ceiling took {:?} and the slowest \
+         probe {slowest_answer:?}, which leaves {budget:?} before the first held connection's \
+         header deadline for a {window:?} window",
+        first.elapsed()
     );
+    pending.set_read_timeout(Some(window)).unwrap();
+    let mut buffer = [0u8; 64];
+    // Only an expired read timeout is "unanswered". A reset or an EOF is the
+    // server (or the kernel) doing something with the connection, which is not
+    // what a held ceiling does.
+    match pending.read(&mut buffer) {
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+        other => panic!(
+            "the server answered past its connection ceiling within {window:?} (slowest probe \
+             {slowest_answer:?}): {other:?} {:?}",
+            String::from_utf8_lossy(&buffer)
+        ),
+    }
 
-    // Free exactly one permit.
-    drop(held.pop().expect("one to drop"));
+    // Free exactly one permit: the FIRST connection, which the first probe
+    // proved accepted.
+    drop(held.swap_remove(0));
 
     // Now it is served, before any held connection's own deadline could have
-    // freed a permit. The read timeout is the assertion: a permit that never
-    // came back would fail here.
+    // freed a permit. A permit that never came back fails here.
     let before_deadline = HEADER_DEADLINE.saturating_sub(first.elapsed());
     pending
         .set_read_timeout(Some(before_deadline.max(Duration::from_millis(1))))
@@ -1053,6 +1131,7 @@ fn the_connection_ceiling_holds_and_then_releases() {
     let text = String::from_utf8_lossy(&response);
     assert!(text.starts_with("HTTP/1.1 200"), "{text}");
     assert!(text.contains("\"status\":\"ok\""), "{text}");
+    drop(held);
 }
 
 /// **A client holding a connection open cannot hold the shutdown open.**
@@ -1203,53 +1282,43 @@ fn answered_keep_alive(address: &SocketAddr, port: u16) -> Result<TcpStream, Str
 /// server no longer has.
 const HEADER_DEADLINE: Duration = Duration::from_secs(10);
 
+/// How much of [`HEADER_DEADLINE`] [`the_connection_ceiling_holds_and_then_releases`]
+/// keeps for its release after its held window: the dropped connection's
+/// permit must reach the pending request before any held connection's own
+/// deadline could. An answer takes milliseconds; two seconds is for a loaded
+/// host.
+const RELEASE_MARGIN: Duration = Duration::from_secs(2);
+
 /// How long past [`HEADER_DEADLINE`] the FX-24 rows wait for the server to act
 /// before calling it a hang: the same 15 s of slack the R4 row
 /// ([`a_connection_that_never_sends_its_headers_is_closed`]) gives its
 /// 25-second read.
 const DEADLINE_SLACK: Duration = Duration::from_secs(15);
 
-/// How many connections [`hold_silent_connections`] lets wait in the kernel's
-/// listen queue, unaccepted, at any one time. `kern.ipc.somaxconn` is 128 on
-/// macOS and the kernel resets a queued connection when the queue overflows,
-/// so 256 connections opened back to back only work while the accept loop
-/// keeps pace with the client (FX-18 measured it not keeping pace at load
-/// 20-40). A quarter of the queue leaves room for anything else on the host.
-const SILENT_BATCH: usize = 32;
-
 /// `count` connections to `port` that send nothing, every one proven ACCEPTED
 /// but the last, plus how long the slowest FIFO probe took and when the first
 /// of them connected.
 ///
-/// They are opened [`SILENT_BATCH`] at a time, and after each batch a
-/// `GET /healthz` on a fresh connection must be answered before the next batch
-/// is opened. The kernel hands connections to `accept` in the order their
-/// handshakes completed, so that answer proves every connection opened before
-/// it was accepted, which is when the server's deadline for it starts. The
-/// probe needs a free permit to be answered, which is why the last connection
-/// is opened after the loop, unproven: whatever is queued behind it is queued
-/// behind it either way.
+/// The ceiling row's fill: [`UNACCEPTED_AT_ONCE`] at a time, each batch proven
+/// accepted by an [`answered_after`] FIFO probe before the next is opened —
+/// and being accepted is when the server's deadline for a connection starts.
+/// The probe needs a free permit to be answered, which is why the last
+/// connection is opened after the loop, unproven: whatever is queued behind it
+/// is queued behind it either way.
 fn hold_silent_connections(port: u16, count: usize) -> (Vec<TcpStream>, Duration, Instant) {
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let mut held = Vec::with_capacity(count);
     let mut slowest = Duration::ZERO;
     let first = Instant::now();
     while held.len() < count - 1 {
-        for _ in 0..(count - 1 - held.len()).min(SILENT_BATCH) {
+        for _ in 0..(count - 1 - held.len()).min(UNACCEPTED_AT_ONCE) {
             let i = held.len();
             held.push(
                 TcpStream::connect_timeout(&address, Duration::from_secs(5))
                     .unwrap_or_else(|e| panic!("silent connection {i}: {e}")),
             );
         }
-        let asked = Instant::now();
-        let answer = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
-        assert!(
-            answer.starts_with("HTTP/1.1 200"),
-            "the probe behind {} silent connections was answered with: {answer}",
-            held.len()
-        );
-        slowest = slowest.max(asked.elapsed());
+        slowest = slowest.max(answered_after(port, held.len()));
     }
     held.push(
         TcpStream::connect_timeout(&address, Duration::from_secs(5))

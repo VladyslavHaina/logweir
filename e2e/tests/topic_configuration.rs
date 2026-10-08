@@ -233,6 +233,12 @@ fn try_create_topic(topic: &str, partitions: u32, configs: &[(&str, &str)]) -> R
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     let o = broker_cli(&borrowed);
     if o.status.success() {
+        // FX-18: rows describe the new topic at once; wait until it is served.
+        harness::await_created_on(
+            &s.plaintext,
+            topic,
+            partitions.parse().expect("a partition count"),
+        );
         Ok(())
     } else {
         Err(text(&o)
