@@ -4838,6 +4838,17 @@ spec:
                     enum:
                     - NewestAvailable
                     type: string
+                  timeBasis:
+                    description: |-
+                      **FX-8.** Which clock this rehearsal's point in time may be read on, rendered into every slot's plan as `restore.time_basis` exactly as the chosen point becomes `restore.point_in_time`.
+
+                      The archive holds each record's PRODUCER timestamp, so a point in time over a source topic recorded as `LogAppendTime` (the archive manifest's topic override, or the bound receipt's effective value) selects by the producers' clocks, and the runner refuses it with `PointInTimeByProducerTime` unless the plan accepts that. ABSENT — every schedule written before FX-8 — accepts nothing: such a slot is refused, and the schedule's `lastFailed.reason` names the refusal. `producerTime` accepts it: the slot runs, and its signed scorecard lists the topic under `source.time_basis.producer_time`.
+
+                      INSIDE THE STANDING AUTHORIZATION. `templateDigest` is the digest of this spec minus `suspend`, so a schedule that states the field has a different digest from one that does not, and needs its own signed authorization; the spec is sealed, so the field cannot be added later. Absent, it is not serialised, so every existing schedule's digest is what it was.
+                    enum:
+                    - producerTime
+                    nullable: true
+                    type: string
                   topics:
                     description: The topics to restore. Must be a subset of the chosen
                       point's.
@@ -6111,6 +6122,43 @@ spec:
                       type: object
                     maxItems: 256
                     nullable: true
+                    type: array
+                type: object
+              timeBasis:
+                description: '**FX-8 (review M-2).** The signed scorecard''s `source.time_basis`,
+                  copied when the controller read the document, like `outcome` and
+                  `integrity`: a CLAIM until `evidence.verification` says `Valid`.
+                  ABSENT means not recorded — a scorecard before format 1.3.0, a run
+                  that signed none (a refusal), or one not read yet — and is never
+                  read as "every selection used the topics'' own clocks". Absent too
+                  when the document''s block is malformed or a list holds more than
+                  256 topics: a partial list would be a claim the signed document
+                  does not make.'
+                nullable: true
+                properties:
+                  notRecorded:
+                    default: []
+                    description: 'Source topics selected by time whose timestamp type
+                      was not recorded: the clock their point in time was read on
+                      is unknown.'
+                    items:
+                      maxLength: 249
+                      type: string
+                    maxItems: 256
+                    type: array
+                  plan:
+                    description: 'The approved plan''s `restore.time_basis`: `producerTime`,
+                      or absent.'
+                    maxLength: 32
+                    nullable: true
+                    type: string
+                  producerTime:
+                    default: []
+                    description: Source topics selected by producer time.
+                    items:
+                      maxLength: 249
+                      type: string
+                    maxItems: 256
                     type: array
                 type: object
               topicPreflight:

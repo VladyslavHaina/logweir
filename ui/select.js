@@ -534,10 +534,12 @@ export function probeLine(state) {
 export const VERDICT_OWN_REASONS = Object.freeze(["Reachable", "ProbeReportedUnreachable"]);
 
 /** What a LATER probe's reason means when it stands beside an EARLIER
- *  reading. A probe Job that crashed writes `observedAt` and its reason and
- *  leaves `reachable` alone (`crashed_status_patch`), so "reachable" beside
- *  `NoExitCode` read as a contradiction (MCP-9); it is two facts about two
- *  probes. */
+ *  reading. A probe Job that crashed under a controller older than FX-11's
+ *  O-1 fix wrote `observedAt` and its reason and left `reachable` alone
+ *  (`crashed_status_patch`), so "reachable" beside `NoExitCode` read as a
+ *  contradiction (MCP-9); it is two facts about two probes. The controller
+ *  now clears `reachable` on every `Unknown` verdict, so this pairing is only
+ *  ever an older controller's object until its next probe. */
 export const LATER_PROBE_GLOSS = Object.freeze({
   NoExitCode: "the latest probe Job ended without an exit code, so it recorded no reading",
   ProbeOutputUnreadable: "the latest probe's output could not be read",

@@ -2169,38 +2169,111 @@ export function bucketOf(url) {
  *  class sweep). Used only to render a copyable command; nothing here
  *  addresses a store.
  *
- *  A line reader, not a YAML parser: the block is the one the console renders
- *  (`plan.js`, two-space indentation, JSON-quoted values), and a hand-written
- *  plan in another shape reads as `""`, which renders the placeholder. */
+ *  Read by [`planBlockValue`], a tolerant line reader and not a YAML parser:
+ *  any indentation, a flow mapping, quoted or bare values, comments dropped. A
+ *  plan in a shape it cannot read gives `""`, which renders the placeholder. */
 export function planEvidenceBucket(planBytes) {
+  // THE SAME TOLERANT BLOCK READER AS `planTimeBasis` (FX-8 review L-3's
+  // class sweep): any indentation, a flow mapping, quotes and comments. A
+  // bucket it cannot find still renders the placeholder.
+  const bucket = planBlockValue(planBytes, "evidence", "bucket");
+  // A BUCKET NAME OR NOTHING (review L5). This value is plan text an
+  // approver signed, not an API-validated URL, and it is pasted into a
+  // shell: anything outside the S3 bucket grammar renders the placeholder.
+  return bucket !== null && isBucketName(bucket) ? bucket : "";
+}
+
+/** The plan's `restore.time_basis` (FX-8): `"producerTime"` when the approved
+ *  plan bytes state it, `""` when this reader finds no such value.
+ *
+ *  A TOLERANT LINE READER, NOT A YAML PARSER (review L-3). It reads a
+ *  `restore:` block at any indentation, a flow mapping (`restore: {...}`, on
+ *  one line or several) and values with or without quotes, and drops
+ *  comments; a plan written by hand or by the CLI and approved with the opt-in
+ *  is read as the runner reads it. `""` is still only "not found HERE": the
+ *  page that prints it says so and points at the signed scorecard, which is
+ *  authoritative, and never asserts that the plan states none. */
+export function planTimeBasis(planBytes) {
+  return planBlockValue(planBytes, "restore", "time_basis") === "producerTime"
+    ? "producerTime"
+    : "";
+}
+
+/** The scalar value of `key` directly inside the top-level block `block` of
+ *  the plan bytes, unquoted, or `null` when this reader finds none.
+ *
+ *  A TOLERANT LINE READER, NOT A YAML PARSER: the block may be indented by
+ *  any amount or written as a flow mapping (`block: {...}`, on one line or
+ *  several); values may be quoted or bare; comments are dropped. A key nested
+ *  one level deeper, or commented out, is not the block's own. */
+export function planBlockValue(planBytes, block, key) {
   if (typeof planBytes !== "string" || planBytes.length === 0) {
-    return "";
+    return null;
   }
-  let inEvidence = false;
-  for (const raw of planBytes.split("\n")) {
-    const line = raw.replace(/\r$/, "");
-    if (/^\S/.test(line)) {
-      if (inEvidence) {
-        return "";
+  const lines = planBytes.split("\n").map((raw) => withoutComment(raw.replace(/\r$/, "")));
+  const valueIn = (text) => {
+    const quoted = /^"([^"]*)"/.exec(text) || /^'([^']*)'/.exec(text);
+    return quoted !== null ? quoted[1] : (/^[^,}\s]*/.exec(text) || [""])[0];
+  };
+  const keyAt = new RegExp("^\\s*" + key + "\\s*:\\s*(.*)$");
+  const head = new RegExp("^" + block + "\\s*:\\s*(.*)$");
+  for (let i = 0; i < lines.length; i += 1) {
+    const top = head.exec(lines[i]);
+    if (top === null) {
+      continue;
+    }
+    const rest = top[1].trim();
+    if (rest.startsWith("{")) {
+      let flow = rest;
+      for (let j = i + 1; !flow.includes("}") && j < lines.length; j += 1) {
+        flow += " " + lines[j].trim();
       }
-      inEvidence = /^evidence:\s*$/.test(line);
-      continue;
+      const m = new RegExp("(?:^|[{,\\s])" + key + "\\s*:\\s*(.*)$").exec(flow);
+      return m === null ? null : valueIn(m[1].trim());
     }
-    if (!inEvidence) {
-      continue;
+    let indent = null;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = lines[j];
+      if (line.trim().length === 0) {
+        continue;
+      }
+      const lead = /^\s*/.exec(line)[0].length;
+      if (lead === 0) {
+        break;
+      }
+      if (indent === null) {
+        indent = lead;
+      }
+      if (lead !== indent) {
+        continue;
+      }
+      const m = keyAt.exec(line);
+      if (m !== null) {
+        return valueIn(m[1].trim());
+      }
     }
-    const match = /^ {2}bucket:\s*(.*?)\s*$/.exec(line);
-    if (match !== null) {
-      const value = match[1];
-      const quoted = /^"(.*)"$/.exec(value) || /^'(.*)'$/.exec(value);
-      const bucket = quoted !== null ? quoted[1] : value;
-      // A BUCKET NAME OR NOTHING (review L5). This value is plan text an
-      // approver signed, not an API-validated URL, and it is pasted into a
-      // shell: anything outside the S3 bucket grammar renders the placeholder.
-      return isBucketName(bucket) ? bucket : "";
+    return null;
+  }
+  return null;
+}
+
+/** One plan line with its comment removed: a `#` at the start or after
+ *  whitespace, outside quotes, opens a YAML comment. */
+function withoutComment(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null;
+      }
+    } else if (ch === "\"" || ch === "'") {
+      quote = ch;
+    } else if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) {
+      return line.slice(0, i).replace(/\s+$/, "");
     }
   }
-  return "";
+  return line;
 }
 
 /** The S3 bucket-name grammar the destination form and the API enforce:

@@ -9753,3 +9753,139 @@ fn a_workload_identity_archive_grant_is_the_runner_pods_service_account() {
         "the object store authenticates the POD's identity, and a pod has exactly one"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FX-8 review M-2: the signed time basis reaches the Restore's status
+// ---------------------------------------------------------------------------
+
+/// The fixture scorecard at format 1.3.0 with `source.time_basis` set to `block`.
+fn scorecard_with_time_basis(block: &str) -> String {
+    scorecard_json("pass", "pass", "")
+        .replacen(
+            "\"format_version\": \"1.0.0\"",
+            "\"format_version\": \"1.3.0\"",
+            1,
+        )
+        .replacen(
+            "\"run_id\"",
+            &format!("\"source\": {{ \"time_basis\": {block} }},\n  \"run_id\""),
+            1,
+        )
+}
+
+/// **The signed lists reach `status.timeBasis`.** A scorecard that carries
+/// `source.time_basis` puts `{plan, producerTime, notRecorded}` on the
+/// terminal patch — beside `outcome`, from the same read — so the console can
+/// show what the run selected by the producers' clocks and what it selected
+/// with an unrecorded timestamp type. Empty lists are written as such (a
+/// claim); a document without the block writes no key (not recorded).
+///
+/// KILLS: `scorecard_facts` not writing `timeBasis`; the observation not
+/// reading `source.time_basis`; writing an empty block for a document that
+/// carries none.
+#[tokio::test]
+async fn the_signed_time_basis_reaches_the_restore_status() {
+    let doc = scorecard_with_time_basis(
+        r#"{"plan": "producerTime", "producer_time": ["lat"], "not_recorded": ["old"]}"#,
+    );
+    let observation = scorecard_observation(doc.as_bytes()).expect("the fixture is a scorecard");
+    assert_eq!(
+        observation.time_basis,
+        Some(weirkeeper::crds::restore::RestoreTimeBasis {
+            plan: Some("producerTime".into()),
+            producer_time: vec!["lat".into()],
+            not_recorded: vec!["old".into()],
+        })
+    );
+    let oracle = move |_key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
+        let o = observation.clone();
+        Box::pin(async move { Some(o) })
+    };
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+        "Complete",
+    ));
+    reconcile_restore(&restore(), &client, &oracle, &unverified_evidence, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    let status = patched_statuses(&seen).remove(0);
+    assert_eq!(
+        status["timeBasis"],
+        serde_json::json!({"plan": "producerTime", "producerTime": ["lat"], "notRecorded": ["old"]}),
+        "{status}"
+    );
+
+    // The claim of nothing: written, with empty lists.
+    let empty = scorecard_observation(
+        scorecard_with_time_basis(r#"{"producer_time": [], "not_recorded": []}"#).as_bytes(),
+    )
+    .expect("a scorecard");
+    assert_eq!(
+        empty.time_basis,
+        Some(weirkeeper::crds::restore::RestoreTimeBasis::default())
+    );
+    // Not recorded: no block, no key.
+    let absent =
+        scorecard_observation(scorecard_json("pass", "pass", "").as_bytes()).expect("a scorecard");
+    assert_eq!(absent.time_basis, None);
+}
+
+/// **All of it or nothing.** A block whose shape is not the format's — a list
+/// that is not an array of strings, a non-string `plan`, a missing list — or a
+/// list longer than `status.timeBasis` holds is NOT copied: a partial or
+/// reshaped list would be a claim the signed document does not make.
+#[test]
+fn a_malformed_or_oversized_time_basis_is_not_copied() {
+    for bad in [
+        r#""x""#,
+        r#"{"producer_time": "lat", "not_recorded": []}"#,
+        r#"{"producer_time": [1], "not_recorded": []}"#,
+        r#"{"plan": 1, "producer_time": [], "not_recorded": []}"#,
+        r#"{"producer_time": []}"#,
+    ] {
+        let o = scorecard_observation(scorecard_with_time_basis(bad).as_bytes())
+            .expect("still a JSON object");
+        assert_eq!(o.time_basis, None, "{bad}");
+    }
+    let many: Vec<String> = (0..=weirkeeper::controllers::restore::TIME_BASIS_TOPICS_MAX)
+        .map(|i| format!("\"t{i}\""))
+        .collect();
+    let block = format!(
+        r#"{{"producer_time": [], "not_recorded": [{}]}}"#,
+        many.join(",")
+    );
+    let o = scorecard_observation(scorecard_with_time_basis(&block).as_bytes()).expect("JSON");
+    assert_eq!(o.time_basis, None, "one past maxItems is not copied");
+}
+
+/// **The relay path's facts carry it too.** `scorecard_facts` — what the
+/// evidence-fetch relay and the controller read write beside their verdict —
+/// puts `timeBasis` on the facts whenever the read document carried the block,
+/// and nothing when it did not, exactly as the terminal patch does.
+///
+/// KILLS: dropping `timeBasis` from `scorecard_facts` alone.
+#[test]
+fn the_relay_facts_carry_the_signed_time_basis() {
+    let with = scorecard_observation(
+        scorecard_with_time_basis(r#"{"producer_time": [], "not_recorded": ["old"]}"#).as_bytes(),
+    )
+    .expect("a scorecard");
+    let result = weirkeeper::verification::VerificationResult::not_attempted(
+        "application/vnd.logweir.drill-scorecard+json;version=1.0.0",
+        "fixture",
+    );
+    let (_, facts) = weirkeeper::controllers::restore::scorecard_facts(&with, &result, None);
+    assert_eq!(
+        facts.get("timeBasis"),
+        Some(&serde_json::json!({"producerTime": [], "notRecorded": ["old"]}))
+    );
+    let without =
+        scorecard_observation(scorecard_json("pass", "pass", "").as_bytes()).expect("a scorecard");
+    let (_, facts) = weirkeeper::controllers::restore::scorecard_facts(&without, &result, None);
+    assert!(facts.get("timeBasis").is_none(), "{facts:?}");
+}

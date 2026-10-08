@@ -2209,8 +2209,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        43,
-        "the forty-three terminal states that are NOT an exit code — the original ten, plus \
+        44,
+        "the forty-four terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2243,7 +2243,10 @@ fn every_exit_code_maps_to_its_wire_reason() {
          an operator told the latter goes looking at a subject binding that is correct, plus \
          PLAT-19.2's `ApprovalPolicyMismatch` / `AuthorizationExpired` — the Approval was \
          issued under another approval policy than the namespace is bound to now, or its \
-         authorization document v2 expired before admission; both immutable, both terminal; \
+         authorization document v2 expired before admission; both immutable, both terminal, \
+         plus FX-8's `PointInTimeByProducerTime` — the runner's refusal of a point-in-time \
+         selection over a `LogAppendTime` source the plan did not accept by producer time, read \
+         off `refusal-reason=` like `TargetTopicConfigRefused`; \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not

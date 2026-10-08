@@ -1367,8 +1367,9 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         // — spec §9's shape, carried verbatim by Task 21 — had no caller.
         (v(&[""]), v(&["pods"]), v(&["list"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         (v(&[""]), v(&["pods/log"]), v(&["get"])),
-        // D2 §7.1 / W9: `FailedCreate` and `FailedMount` for the check Jobs
-        // and pods the preflight controller owns. `list` and nothing else.
+        // D2 §7.1 / W9, and every Job-owning reconciler since FX-11:
+        // `FailedCreate` and `FailedMount` for the Jobs and pods the
+        // controller owns. `list` and nothing else.
         (v(&[""]), v(&["events"]), v(&["list"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         (v(&[""]), v(&["configmaps"]), v(&["create", "get"])),
         // PLAT-19.1 — the `TrustPolicy` reconciler's own two rows, added by the

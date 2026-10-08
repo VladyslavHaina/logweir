@@ -44,6 +44,21 @@
 //! `reachable: false` from it would report a control-plane mistake as a fact
 //! about somebody's cluster.
 //!
+//! # A probe whose pod is refused at creation says so (FX-11)
+//!
+//! A `ResourceQuota`, a `LimitRange` or an admission webhook can refuse the
+//! probe Job's pod outright, and the Job controller's only trace is a
+//! `FailedCreate` Event on the Job. Once the Job has had no pod for
+//! [`check::waiting::POD_CREATE_GRACE`] (30 s, the `Preflight` grace) and that
+//! Event says why, the Job is cancelled and the status reads
+//! `Reachable=Unknown` / `PodCreationForbidden` with the admission's own
+//! words — never `ProbeRunning` for two minutes and then `NoExitCode`.
+//! `reachable` is cleared (the verdict is `Unknown`, so it vouches for no
+//! earlier reading); `clusterId` and `observedAt` keep their last values: a
+//! probe that never ran observed nothing, so the last look's record ages and
+//! goes stale exactly as it would with no probe at all. The Job then gets the usual TTL, so the next probe runs on
+//! the ordinary cadence and clears the reason once the namespace admits it.
+//!
 //! # It creates, it patches, and it deletes nothing
 //!
 //! The re-probe cadence is the Job's own [`PROBE_TTL_SECONDS`]: the API server
@@ -163,6 +178,9 @@ pub const PROBE_CONDITION_REASONS: &[&str] = &[
     crate::conditions::TERMINAL_STATE_CONNECTION_REFERENCE_INVALID,
     crate::conditions::TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED,
     crate::conditions::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+    // FX-11: the probe Job's pod was refused at creation. The shared terminal
+    // state a `Backup`'s or a `Restore`'s runner reaches for the same refusal.
+    crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN,
 ];
 
 /// `spec.activeDeadlineSeconds` on a probe Job.
@@ -290,9 +308,10 @@ pub struct Verdict {
     pub status: &'static str,
     /// The condition's `reason`, and verbatim the scalar `status.reason`.
     pub reason: String,
-    /// The value for `status.reachable`. `None` leaves the field alone: a merge
-    /// patch that omits a key does not clear it, so an unreadable probe does
-    /// not erase the last thing that WAS known.
+    /// The value for `status.reachable`. `None` CLEARS the field
+    /// ([`observed_status_patch`] writes `null`): an unreadable probe vouches
+    /// for no earlier reading, and admission reads `reachable == true` alone
+    /// (PoC batch 1, O-1).
     pub reachable: Option<bool>,
     /// The value for `status.clusterId`, written only alongside
     /// `reachable: Some(true)`.
@@ -356,7 +375,7 @@ pub fn verdict_message(v: &Verdict, exit_code: i32) -> String {
         ),
         None => format!(
             "the pod log carried no parseable `{CLUSTER_ID_PREFIX}` / `{REACHABLE_PREFIX}` line \
-             in its last {} non-empty lines (pod exit {exit_code}); `reachable` is left unset \
+             in its last {} non-empty lines (pod exit {exit_code}); `reachable` is cleared \
              rather than guessed from the exit code, which Global Constraint 11 uses for every \
              operational failure alike",
             backup::KEY_SCAN_TAIL_LINES
@@ -628,8 +647,15 @@ pub fn probe_started_patch(cluster: &KafkaCluster, job_name: &str, now: DateTime
 
 /// The `/status` merge patch for a probe whose log has been read.
 ///
-/// `reachable` and `clusterId` appear only when the verdict HAS them, so an
-/// unreadable probe leaves both alone rather than clearing them — and
+/// `reachable` is written on EVERY verdict: `true` or `false` from the log's
+/// own line, and `null` — which removes it under a merge patch — when the log
+/// carried neither line (`ProbeOutputUnreadable`). A verdict that moves the
+/// condition to `Unknown` no longer vouches for an earlier `reachable`, and a
+/// `Restore` and a rehearsal admit a target on `reachable == true` alone
+/// (PoC batch 1, O-1). `clusterId` is written only alongside `reachable: true`
+/// and otherwise kept: it is the cluster's identity as last observed, paired
+/// with `observedAt` as the record of that look, never a verdict about now —
+/// every consumer that acts on it reads `reachable == true` first. And
 /// `observedAt` is written on every verdict, because "we looked and could not
 /// tell" is itself an observation with a time.
 #[must_use]
@@ -640,9 +666,8 @@ pub fn observed_status_patch(
     observed_at: DateTime<Utc>,
 ) -> Value {
     let mut status = serde_json::Map::new();
-    if let Some(r) = v.reachable {
-        status.insert("reachable".to_string(), json!(r));
-    }
+    // `null` FOR AN UNREADABLE PROBE: clear what this verdict cannot vouch for.
+    status.insert("reachable".to_string(), json!(v.reachable));
     if let Some(id) = v.cluster_id.as_ref() {
         status.insert("clusterId".to_string(), json!(id));
     }
@@ -671,8 +696,14 @@ pub fn observed_status_patch(
 ///
 /// The sub-case is [`backup::crash_terminal_state`]'s, shared rather than
 /// re-derived, and the condition is `Unknown`: a pod that never ran wrote no
-/// log, so nothing about the cluster is known either way. `reachable` and
-/// `clusterId` are left alone.
+/// log, so nothing about the cluster is known either way.
+///
+/// **`reachable` IS CLEARED** (PoC batch 1, O-1). This patch used to leave it
+/// alone, and a merge patch that omits a key keeps it: a connection whose
+/// probe Job lost its pod went on reading `reachable: true` beside
+/// `Reachable=Unknown/NoExitCode` — and a `Restore` admitted a target on that
+/// stale `true`. `clusterId` stays, as the identity last observed (see
+/// [`observed_status_patch`]); `observedAt` is the crashed attempt's instant.
 #[must_use]
 pub fn crashed_status_patch(
     cluster: &KafkaCluster,
@@ -682,6 +713,7 @@ pub fn crashed_status_patch(
 ) -> Value {
     json!({
         "status": {
+            "reachable": null,
             "observedAt": observed_at,
             "reason": terminal_state,
             "conditions": [condition(
@@ -690,8 +722,9 @@ pub fn crashed_status_patch(
                 terminal_state,
                 &format!(
                     "probe Job {job_name} finished with no terminated state for the `{}` \
-                     container, so no exit code and no log could be read; `reachable` is left \
-                     unset rather than invented",
+                     container, so no exit code and no log could be read; `reachable` is \
+                     cleared rather than invented, and the next probe runs on the ordinary \
+                     cadence",
                     crate::job::CONTAINER_NAME
                 ),
                 observed_at,
@@ -700,8 +733,58 @@ pub fn crashed_status_patch(
     })
 }
 
+/// The `/status` merge patch for a probe Job whose pod the namespace REFUSED
+/// at creation — FX-11.
+///
+/// `PodCreationForbidden` and the admission's own words (`refusal` is
+/// [`check::waiting::pod_create_refusal`]'s, already redacted), with the
+/// condition `Unknown`: the probe never ran, so nothing about the cluster is
+/// known either way. `reachable` is cleared and `clusterId` kept, exactly as
+/// [`crashed_status_patch`] does (PoC batch 1, O-1). The difference from that
+/// patch is the whole point: the operator reads the quota, not "no exit code".
+///
+/// **NO `observedAt`, AND THAT IS THE CONTRACT** (FX-11 review M1). The field
+/// is "when the probe above was performed", and a refused probe was never
+/// performed. The refusal loop re-probes every [`RE_PROBE_SECS`]; writing the
+/// refusal's instant there would make the last real observation look fresh in
+/// the console's freshness budget for as long as the quota stands. A merge
+/// patch that omits the key leaves that observation's instant in place, so it
+/// ages and goes stale on its own. `seen_at` is the condition's
+/// `lastTransitionTime` and nothing else.
+#[must_use]
+pub fn pod_refused_status_patch(
+    cluster: &KafkaCluster,
+    job_name: &str,
+    refusal: &check::Waiting,
+    seen_at: DateTime<Utc>,
+) -> Value {
+    let reason = crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN;
+    json!({
+        "status": {
+            "reachable": null,
+            "reason": reason,
+            "conditions": [condition(
+                cluster,
+                "Unknown",
+                reason,
+                &format!(
+                    "probe Job {job_name} never ran, so `reachable` is cleared rather than \
+                     invented: {} ({})",
+                    refusal.message,
+                    refusal.code.as_str()
+                ),
+                seen_at,
+            )],
+        }
+    })
+}
+
 /// The `/status` merge patch for a refusal this controller made ITSELF, before
 /// any `POST`.
+///
+/// `reachable` is cleared, as [`connection_refused_status_patch`] clears it: a
+/// cluster this controller refuses to probe is one no run may use on the
+/// strength of an earlier reading (PoC batch 1, O-1's class).
 #[must_use]
 pub fn refused_status_patch(
     cluster: &KafkaCluster,
@@ -711,6 +794,7 @@ pub fn refused_status_patch(
 ) -> Value {
     json!({
         "status": {
+            "reachable": null,
             "reason": reason,
             "conditions": [condition(cluster, "Unknown", reason, message, now)],
         }
@@ -850,6 +934,25 @@ impl From<kube::Error> for KafkaClusterError {
 // The reconcile
 // ---------------------------------------------------------------------------
 
+/// Patch a FINISHED probe Job's `ttlSecondsAfterFinished` — which is also the
+/// re-probe timer ([`PROBE_TTL_SECONDS`]).
+///
+/// EVERY CALLER SENDS THIS ONLY AFTER ITS STATUS PATCH RETURNED: a status that
+/// did not land leaves the reconcile through `?` before any TTL exists, so pod
+/// garbage collection never races the read the status records.
+async fn set_probe_ttl(jobs: &Api<Job>, job_name: &str) -> Result<(), KafkaClusterError> {
+    jobs.patch(
+        job_name,
+        &PatchParams::default(),
+        &Patch::Merge(json!({
+            "spec": { "ttlSecondsAfterFinished": PROBE_TTL_SECONDS }
+        })),
+    )
+    .await
+    .map_err(KafkaClusterError::Api)?;
+    Ok(())
+}
+
 /// The probe pod for a Job — D-SEAMS **S6**, `SEC-PODLOG`.
 ///
 /// Found by the two labels in [`backup::pod_selectors`]'s order, and then by
@@ -867,9 +970,9 @@ impl From<kube::Error> for KafkaClusterError {
 /// (`TERMINAL_STATE_CLUSTER_NOT_REACHABLE` on the other side), so a pod
 /// planted with `batch.kubernetes.io/job-name=<probe job>` could assert that
 /// an unreachable cluster is reachable, or hold a reachable one shut. Zero
-/// owned pods is now "no pod yet" and leaves `reachable` untouched — which is
-/// exactly what the crashed-probe branch below already does, and what "nothing
-/// about this cluster is known either way" means.
+/// owned pods is now "no pod yet": the crashed-probe branch below, which
+/// clears `reachable` — "nothing about this cluster is known either way" —
+/// and replaces the Job on the re-probe cadence (PoC batch 1, O-1).
 async fn find_pod(
     client: &kube::Client,
     namespace: &str,
@@ -908,7 +1011,14 @@ async fn find_pod(
 ///    re-probe timer.
 /// 4. **Job finished, no terminated state for `runner`** → the crashed-Job
 ///    case, classified by [`backup::crash_terminal_state`], with `reachable`
-///    left alone.
+///    cleared and the usual TTL, so the Job is replaced on the re-probe cadence
+///    (PoC batch 1, O-1) — or, when the Job never had a pod and its
+///    `FailedCreate` Event says why, `PodCreationForbidden` with the
+///    admission's words, `reachable` cleared and the same TTL (FX-11).
+///
+/// Step 2 also fails fast: a Job with no pod after 30 seconds and a
+/// `FailedCreate` Event naming it is cancelled, and the same
+/// `PodCreationForbidden` status is written then.
 ///
 /// # No clock read in this function
 ///
@@ -1160,6 +1270,47 @@ async fn reconcile_cluster_inner(
 
     // STEP 2. Running.
     if !backup::job_finished(&job) {
+        // FX-11: A POD THE NAMESPACE REFUSED IS FAILED FAST. No request at all
+        // while the Job's own status counts a pod or the Job is younger than
+        // the 30-second grace; otherwise one pod list and, when it finds none,
+        // one events list by the Job's UID.
+        if let Some(refusal) = check::refused_pod_creation(client, &namespace, &job, now)
+            .await
+            .map_err(KafkaClusterError::Api)?
+        {
+            let cancelled =
+                check::cancel(client, &namespace, &job, &cluster.uid().unwrap_or_default())
+                    .await
+                    .map_err(KafkaClusterError::Api)?;
+            warn!(
+                cluster = %name,
+                namespace = %namespace,
+                job = %job_name,
+                code = refusal.code.as_str(),
+                cancelled,
+                reason = %refusal.message,
+                "the probe Job's pod was refused at creation; the Job is cancelled and the \
+                 status names the refusal and `reachable` is cleared"
+            );
+            patch_status_if_changed(
+                &clusters,
+                cluster,
+                &name,
+                pod_refused_status_patch(cluster, &job_name, &refusal, now),
+            )
+            .await?;
+            return Ok(ProbeOutcome {
+                job_name,
+                created: false,
+                reachable: None,
+                cluster_id: None,
+                reason: Some(crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN.to_string()),
+                ttl_patched: false,
+                // The cancelled Job finishes within a second; the pass that
+                // sees it finished gives it the TTL (step 4).
+                requeue: Requeue::After(REQUEUE_SECS),
+            });
+        }
         patch_status_if_changed(
             &clusters,
             cluster,
@@ -1191,6 +1342,51 @@ async fn reconcile_cluster_inner(
     // path needs a pod whose container terminated and this branch is "there is
     // none".
     let Some((pod, exit_code)) = terminated else {
+        // FX-11: A JOB THAT NEVER HAD A POD, AND WAS TOLD WHY. Read before the
+        // crash classification, which can only say `NoExitCode` for "no pod".
+        let refusal = if found.pod.is_none() && found.contested.is_empty() {
+            check::finished_without_pod(client, &namespace, &job, now).await
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            // THE REFUSAL'S INSTANT, for the condition only: it is not an
+            // observation of the cluster, so it never reaches `observedAt`.
+            let seen = observed_at(&job, None, now);
+            warn!(
+                cluster = %name,
+                namespace = %namespace,
+                job = %job_name,
+                code = refusal.code.as_str(),
+                reason = %refusal.message,
+                "the probe Job finished without ever having a pod, because its pod was refused \
+                 at creation; `reachable` is cleared and the Job gets the usual TTL, so the \
+                 next probe runs on the ordinary cadence"
+            );
+            patch_status_if_changed(
+                &clusters,
+                cluster,
+                &name,
+                pod_refused_status_patch(cluster, &job_name, &refusal, seen),
+            )
+            .await?;
+            // ONLY NOW, as on the happy path: the status that names the
+            // refusal is on the server before the Job (and the Event's
+            // subject) can be collected. The TTL is also the re-probe timer,
+            // so a quota that is lifted is noticed within one cadence, and a
+            // quota that is not costs one refused Job per cadence — never a
+            // retry storm.
+            set_probe_ttl(&jobs, &job_name).await?;
+            return Ok(ProbeOutcome {
+                job_name,
+                created: false,
+                reachable: None,
+                cluster_id: None,
+                reason: Some(crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN.to_string()),
+                ttl_patched: true,
+                requeue: Requeue::After(RE_PROBE_SECS),
+            });
+        }
         let terminal_state = if found.contested.is_empty() {
             backup::crash_terminal_state(found.pod.as_ref())
         } else {
@@ -1205,7 +1401,8 @@ async fn reconcile_cluster_inner(
             contested = %found.contested.join(","),
             "no probe output could be read: either the Job finished with no terminated state for \
              the runner container, or more than one pod claimed the Job and none was read. \
-             Nothing about this cluster is known either way, and `reachable` is left unset"
+             Nothing about this cluster is known either way: `reachable` is cleared, and the Job \
+             gets the usual TTL so the next probe runs on the ordinary cadence"
         );
         patch_status_if_changed(
             &clusters,
@@ -1214,13 +1411,21 @@ async fn reconcile_cluster_inner(
             crashed_status_patch(cluster, terminal_state, &job_name, observed),
         )
         .await?;
+        // THE JOB IS REPLACED ON THE RE-PROBE CADENCE (PoC batch 1, O-1). This
+        // branch used to stop here: the terminal, pod-less Job was never given a
+        // TTL, every requeue re-read it, and the connection was never probed
+        // again — all twelve PoC connections sat at `NoExitCode` for a week.
+        // The TTL is the re-probe timer, exactly as on the happy path, and it is
+        // patched only after the status above landed. Bounded: one probe Job per
+        // `PROBE_TTL_SECONDS` + requeue, however long the crash cause lasts.
+        set_probe_ttl(&jobs, &job_name).await?;
         return Ok(ProbeOutcome {
             job_name,
             created: false,
             reachable: None,
             cluster_id: None,
             reason: Some(terminal_state.to_string()),
-            ttl_patched: false,
+            ttl_patched: true,
             requeue: Requeue::After(RE_PROBE_SECS),
         });
     };
@@ -1245,7 +1450,7 @@ async fn reconcile_cluster_inner(
             pod = %pod_name,
             exit_code,
             tail_lines = backup::KEY_SCAN_TAIL_LINES,
-            "the probe pod log carried no parseable contract line; `reachable` is left unset and \
+            "the probe pod log carried no parseable contract line; `reachable` is cleared and \
              nothing is guessed from the exit code"
         );
     }
@@ -1263,15 +1468,7 @@ async fn reconcile_cluster_inner(
     // function before any TTL exists, so pod garbage collection cannot start on
     // a probe whose log was never read. The TTL is also the re-probe timer —
     // see `PROBE_TTL_SECONDS`.
-    jobs.patch(
-        &job_name,
-        &PatchParams::default(),
-        &Patch::Merge(json!({
-            "spec": { "ttlSecondsAfterFinished": PROBE_TTL_SECONDS }
-        })),
-    )
-    .await
-    .map_err(KafkaClusterError::Api)?;
+    set_probe_ttl(&jobs, &job_name).await?;
 
     info!(
         cluster = %name,

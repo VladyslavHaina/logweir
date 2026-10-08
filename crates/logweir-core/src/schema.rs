@@ -10,8 +10,9 @@ use crate::scorecard::Scorecard;
 /// regenerated (`docs/stability.md`: a new optional field is a MINOR bump
 /// "with a new schema file beside the old one").
 ///
-/// **1.2.0 since FX-3** (`topic_parity.not_reconstructed`), and the 1.1.0 file
-/// is frozen beside it the same way. The `$id` is built from
+/// **1.2.0 since FX-3** (`topic_parity.not_reconstructed`), and **1.3.0 since
+/// FX-8** (`source.time_basis`); the 1.1.0 and 1.2.0 files are frozen beside
+/// the current one the same way. The `$id` is built from
 /// [`crate::FORMAT_VERSION`], so the file this writes is always the one the
 /// writer's documents name.
 pub fn scorecard_schema() -> String {
