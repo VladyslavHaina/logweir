@@ -445,6 +445,26 @@ impl ClusterReader for RdKafkaReader {
             .collect())
     }
 
+    fn replication_factors(&self, topics: &[String]) -> Result<BTreeMap<String, u32>, KafkaError> {
+        if topics.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let md = self
+            .consumer
+            .fetch_metadata(None, T)
+            .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        Ok(md
+            .topics()
+            .iter()
+            .filter(|t| t.error().is_none() && topics.iter().any(|n| n == t.name()))
+            .filter_map(|t| {
+                let smallest = t.partitions().iter().map(|p| p.replicas().len()).min()?;
+                let factor = u32::try_from(smallest).ok().filter(|n| *n >= 1)?;
+                Some((t.name().to_string(), factor))
+            })
+            .collect())
+    }
+
     fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
         let md = self
             .consumer

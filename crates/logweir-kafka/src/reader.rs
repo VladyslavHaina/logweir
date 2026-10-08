@@ -449,6 +449,19 @@ pub trait ClusterReader: Send + Sync {
             "this ClusterReader does not report per-entry configuration sources".to_string(),
         ))
     }
+    /// **PROD-05.1.** Per named topic, its replication factor as the
+    /// cluster's metadata states it: the SMALLEST replica count of its
+    /// partitions (a partition mid-reassignment lists the adding replicas too,
+    /// so the smallest never overstates), from one metadata request. A topic
+    /// the answer does not name, or names with an error or no partition, is
+    /// ABSENT — not recorded, never `0`.
+    ///
+    /// The DEFAULT knows none, so a reader that does not implement it — every
+    /// test double — can only leave the factor unrecorded.
+    fn replication_factors(&self, topics: &[String]) -> Result<BTreeMap<String, u32>, KafkaError> {
+        let _ = topics;
+        Ok(BTreeMap::new())
+    }
     fn consume_range(
         &self,
         topic: &str,

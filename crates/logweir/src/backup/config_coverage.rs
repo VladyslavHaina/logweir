@@ -232,24 +232,38 @@ pub type Layout = (Option<i32>, Option<i16>);
 ///   was denied or failed — exactly arm 15's rule, because [`classify`] calls
 ///   a successful read `captured` or `notCaptured`/`manifestDiffers` and
 ///   nothing else.
-/// - `partitions` / `replication_factor`: the manifest's (`layouts`, the
-///   topics the manifest mentions). A count the manifest does not hold, or
-///   holds as `0` or less, is NOT RECORDED rather than written as a value arm
-///   19 refuses — a run must not refuse its own receipt after the archive
-///   exists.
+/// - `partitions`: the manifest's `original_partition_count` (`layouts`, the
+///   topics the manifest mentions) — the count the restore creates the topic
+///   with (`drill::phase3_diff::restore_partition_count`).
+/// - `replication_factor`: Logweir's OWN metadata read before the engine
+///   (`factors`, `ClusterReader::replication_factors`), and the manifest's
+///   `source_replication_factor` only where that read named none. Not the
+///   manifest first, because the pinned engine records the factor reliably
+///   only for the FIRST topic it saves: its `merge_manifests` carries
+///   `original_partition_count` from each later save and drops
+///   `source_replication_factor` (engine 0.23.3 `backup/engine.rs:1683-1705`;
+///   measured on compose, PROD-05.1 report).
+/// - A count that is absent, or `0` or less, is NOT RECORDED rather than
+///   written as a value arm 19 refuses — a run must not refuse its own receipt
+///   after the archive exists.
 /// - `owner`: from `owners`, whatever the read said: who manages a topic does
 ///   not depend on whether its configuration could be read.
 #[must_use]
 pub fn model(
     observations: &BTreeMap<String, Observation>,
     layouts: &BTreeMap<String, Layout>,
+    factors: &BTreeMap<String, u32>,
     owners: &BTreeMap<String, TopicOwner>,
 ) -> BTreeMap<String, TopicConfiguration> {
     let count = |n: Option<i64>| n.filter(|n| *n >= 1).and_then(|n| u32::try_from(n).ok());
     observations
         .iter()
         .map(|(topic, observed)| {
-            let (partitions, factor) = layouts.get(topic).copied().unwrap_or((None, None));
+            let (partitions, manifest_factor) = layouts.get(topic).copied().unwrap_or((None, None));
+            let factor = factors
+                .get(topic)
+                .map(|n| i64::from(*n))
+                .or(manifest_factor.map(i64::from));
             let entries = match observed {
                 Observation::Read { model, .. } => Some(model.clone()),
                 Observation::Denied(_) | Observation::Failed(_) => None,
@@ -258,7 +272,7 @@ pub fn model(
                 topic.clone(),
                 TopicConfiguration {
                     partitions: count(partitions.map(i64::from)),
-                    replication_factor: count(factor.map(i64::from)),
+                    replication_factor: count(factor),
                     entries,
                     owner: owners.get(topic).cloned(),
                 },
@@ -748,7 +762,7 @@ mod tests {
                 reference: "kafka/orders".into(),
             },
         );
-        let m = model(&observed, &layouts, &owners);
+        let m = model(&observed, &layouts, &BTreeMap::new(), &owners);
         let orders = &m["orders"];
         assert_eq!(
             (orders.partitions, orders.replication_factor),
@@ -832,7 +846,7 @@ mod tests {
                 reference: "gitops: topics/b.yaml".into(),
             },
         );
-        let m = model(&observed, &layouts, &owners);
+        let m = model(&observed, &layouts, &BTreeMap::new(), &owners);
         let topics = names(&["a", "b", "c", "d"]);
         let receipt = logweir_core::backup_receipt::BackupReceipt {
             format_version: logweir_core::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
@@ -873,5 +887,40 @@ mod tests {
             topic_configuration: Some(m),
         };
         assert_eq!(receipt.validate_invariants(), Ok(()));
+    }
+
+    /// **The factor's source** (PROD-05.1, measured): Logweir's own metadata
+    /// read wins over the manifest, which the pinned engine fills for the
+    /// first topic it saves only; the manifest's stands where the read named
+    /// none; a zero from either is NOT RECORDED.
+    #[test]
+    fn the_factor_is_logweirs_own_read_and_the_manifests_only_where_that_named_none() {
+        let observed = observe(
+            &Scripted(Ok(vec![
+                ("a".into(), Err(KafkaError::Client("x".into()))),
+                ("b".into(), Err(KafkaError::Client("x".into()))),
+                ("c".into(), Err(KafkaError::Client("x".into()))),
+                ("d".into(), Err(KafkaError::Client("x".into()))),
+            ])),
+            &names(&["a", "b", "c", "d"]),
+        );
+        let mut layouts = BTreeMap::new();
+        layouts.insert("a".to_string(), (Some(6), Some(2)));
+        layouts.insert("b".to_string(), (Some(6), Some(1)));
+        layouts.insert("c".to_string(), (Some(1), None));
+        layouts.insert("d".to_string(), (Some(1), Some(0)));
+        let mut factors = BTreeMap::new();
+        factors.insert("a".to_string(), 3);
+        factors.insert("c".to_string(), 0);
+        let m = model(&observed, &layouts, &factors, &BTreeMap::new());
+        assert_eq!(m["a"].replication_factor, Some(3), "the read wins");
+        assert_eq!(
+            m["b"].replication_factor,
+            Some(1),
+            "the manifest where the read named none"
+        );
+        assert_eq!(m["c"].replication_factor, None, "a zero is not recorded");
+        assert_eq!(m["d"].replication_factor, None, "a zero is not recorded");
+        assert_eq!(m["a"].partitions, Some(6), "partitions are the manifest's");
     }
 }

@@ -649,12 +649,26 @@ fn execute_with_signer(
     // capture cannot answer this.
     let observed = config_coverage::observe(reader, &plan.topics);
     config_coverage::log(&observed);
+    // PROD-05.1: each named topic's replication factor, from the same reader's
+    // metadata, before the engine — the pinned engine's manifest keeps it for
+    // the first topic it saves only (`config_coverage::model`). Never fatal: a
+    // failed read leaves the factor NOT RECORDED.
+    let factors = reader
+        .replication_factors(&plan.topics)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                "the topics' replication factors could not be read before the engine; the \
+                 receipt records them only where the archive manifest does"
+            );
+            BTreeMap::new()
+        });
 
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
     let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
     let topic_configuration =
-        config_coverage::model(&observed, &ran.manifest_layouts, &inputs.owners);
+        config_coverage::model(&observed, &ran.manifest_layouts, &factors, &inputs.owners);
 
     let mut outcome = BackupOutcome {
         backup_id,
