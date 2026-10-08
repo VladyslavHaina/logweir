@@ -283,7 +283,7 @@ docker run --rm --platform linux/amd64 docker.io/<namespace>/logweir@sha256:<rev
   identity bootstrap --help
 ```
 
-Save that output, with a `# image: <the pinned reference>` line, as
+Save that output, with a `# digest: sha256:<the pinned digest>` line, as
 `crates/logweir/tests/fixtures/bootstrap-image-help.txt`: `chart_lint` holds
 every render to the flags it lists and to that digest, so a re-pin without the
 refreshed help, or hook flags without a re-pin, is a red gate rather than a

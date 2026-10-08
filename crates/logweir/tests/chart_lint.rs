@@ -6534,13 +6534,14 @@ fn bootstrap_args(docs: &[Doc]) -> Vec<String> {
 
 /// The flags `identity bootstrap --help` of the PINNED bootstrap image lists
 /// (`crates/logweir/tests/fixtures/bootstrap-image-help.txt`, refreshed at
-/// every re-pin), and the image that help came from.
+/// every re-pin), and the digest of the image that help came from (the digest
+/// only: the runner repository is named once under `crates/`).
 fn pinned_bootstrap_flags() -> (String, BTreeSet<String>) {
     let help = read("crates/logweir/tests/fixtures/bootstrap-image-help.txt");
     let image = help
         .lines()
-        .find_map(|l| l.strip_prefix("# image: "))
-        .expect("the fixture names the image its help came from")
+        .find_map(|l| l.strip_prefix("# digest: "))
+        .expect("the fixture names the digest its help came from")
         .trim()
         .to_string();
     let flags = help
@@ -6579,9 +6580,10 @@ fn chart_lint_the_hook_passes_only_flags_its_pinned_image_runs() {
     let feature = values["identity"]["bootstrapFeatures"]["consoleKey"]
         .as_bool()
         .expect("identity.bootstrapFeatures.consoleKey");
-    let (image, flags) = pinned_bootstrap_flags();
+    let (digest, flags) = pinned_bootstrap_flags();
     assert_eq!(
-        image, pinned,
+        Some(digest.as_str()),
+        pinned.split_once('@').map(|(_, d)| d),
         "crates/logweir/tests/fixtures/bootstrap-image-help.txt is the help of another image: \
          refresh it from `docker run --rm --platform linux/amd64 {pinned} identity bootstrap \
          --help` when you re-pin"

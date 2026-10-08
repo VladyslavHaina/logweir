@@ -180,7 +180,7 @@ approvalPolicy:
   allowOrdinaryConfirmation: false  # D0's floor: confirm (Ordinary) policies and default: confirm need it
   policies: []                      # [{name, mode: confirm|strict (Ordinary|Governed), maxAgeSeconds, requireDistinctPrincipal}]
   namespaces: {}                    # {<namespace>: <policy name>}; an explicit binding always wins
-  confirmationKeySecret: ""         # "" = the key the identity hook generates (logweir-console-confirmation)
+  confirmationKeySecret: ""         # "" = the hook's key with identity.bootstrapFeatures.consoleKey, else none
 
 # ------------------------- api.enabled — the console/API principal's RBAC (D3)
 # ServiceAccount + roles only. api.console.enabled additionally runs the pod.
