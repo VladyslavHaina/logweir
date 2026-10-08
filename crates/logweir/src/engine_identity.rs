@@ -383,7 +383,7 @@ mod tests {
     /// REVIEW L3/L4: the version signed must be one the engine prints.
     #[test]
     fn the_signed_version_must_be_the_one_the_engine_prints() {
-        let bin = std::path::Path::new("/usr/local/bin/kafka-backup");
+        let bin = std::path::Path::new("/opt/engine/kafka-backup");
         check_reported(
             bin,
             true,
