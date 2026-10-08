@@ -6240,6 +6240,13 @@ kubectl --context "$LOGWEIR_CONTEXT" -n <namespace> get job <restore-name> \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="runner")].resources}'
 ```
 
+A Job whose `Restore` states no `runnerResources` prints `{}`, not an empty
+line: the API server stores the container's `resources` as an empty object, so
+`{}` means no requests and no limits (measured on the PoC on 2026-10-08, for a
+Job from this build and from the controller before FX-2 alike). A Job whose
+`Restore` states the block prints it, for example
+`{"limits":{"memory":"512Mi"},"requests":{"cpu":"250m"}}`.
+
 ### The credential is validated by the RUNNER, and the controller checks nothing
 
 `weirkeeper` holds **no `get` on Secrets anywhere** (§9), so it never sees the
