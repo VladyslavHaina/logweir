@@ -4171,6 +4171,8 @@ pub fn legacy_source_destination(
             secret_access_key_key: super::backup::ARCHIVE_SECRET_KEY.to_string(),
             session_token_key: None,
         },
+        // FX-20: an inline archive — its Secret is bound to the location.
+        inline_archive: true,
     })
 }
 

@@ -388,6 +388,14 @@ pub struct ResolvedDestination {
     pub ca_pem: Option<Vec<u8>>,
     /// The grant for [`ResolvedDestination::role`], after defaulting.
     pub grant: ResolvedGrant,
+    /// FX-20: this resolution stands for an INLINE archive — a legacy
+    /// `secretRef` read where an approved plan or an inline `archive.url`
+    /// says — and not for a `BackupDestination` object. Its Secret is bound to
+    /// the LOCATION ([`logweir_core::credential_binding::archive_location_binding`]),
+    /// because there is no object UID to bind it to. Omitted when `false`, so
+    /// every resolution serialised before it existed reads the same.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inline_archive: bool,
 }
 
 /// Where a CA bundle is, as a reference.
@@ -647,6 +655,7 @@ pub fn resolve(
         ca_sha256: None,
         ca_pem: None,
         grant,
+        inline_archive: false,
     })
 }
 
@@ -1200,6 +1209,9 @@ impl ResolvedDestination {
     /// expects.
     #[must_use]
     pub fn credential_binding(&self) -> String {
+        if self.inline_archive {
+            return credential_binding::archive_location_binding(&self.plan_storage());
+        }
         binding_for(&self.uid, &self.plan_storage())
     }
 
@@ -1707,6 +1719,69 @@ fn push_binding_pair(
         optional: true,
         key: credential_binding::CREDENTIAL_BINDING_KEY.to_string(),
     });
+}
+
+/// FX-20: what an INLINE archive's `secretRef` contributes to a runner Job —
+/// the binding pair for the `AWS_*` credential it projects, over the LOCATION
+/// the runner dials (`archive`: scheme, bucket and endpoint), and, when the
+/// run also writes evidence with that credential somewhere ELSE (an inline
+/// `Restore` whose approved plan names another bucket or endpoint for its
+/// `evidence:`), a second pair from the same Secret expecting the evidence
+/// location's binding — which one Secret cannot carry beside the first, so
+/// such a run is refused rather than presenting the credential at a location
+/// it was never bound to.
+///
+/// Literals and `secretKeyRef`s, appended by the caller beside the
+/// `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` pair it already projects.
+#[must_use]
+pub fn inline_archive_binding_env(
+    secret: &str,
+    archive: &StorageUrl,
+    evidence: Option<&StorageUrl>,
+) -> DestinationEnv {
+    let mut env = DestinationEnv::default();
+    let archive_binding = credential_binding::archive_location_binding(archive);
+    push_binding_pair(
+        &mut env,
+        secret,
+        credential_binding::ARCHIVE_CREDENTIAL_BINDING_ENV,
+        credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV,
+        &archive_binding,
+    );
+    if let Some(evidence) = evidence {
+        let evidence_binding = credential_binding::archive_location_binding(evidence);
+        if evidence_binding != archive_binding {
+            push_binding_pair(
+                &mut env,
+                secret,
+                credential_binding::EVIDENCE_CREDENTIAL_BINDING_ENV,
+                credential_binding::EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV,
+                &evidence_binding,
+            );
+        }
+    }
+    env
+}
+
+/// The location an inline-archive runner actually dials: the plan's (or the
+/// frozen) storage block, with an S3 endpoint the block leaves out filled from
+/// the `AWS_ENDPOINT_URL` the Job is handed — `object_store`'s own fall-back,
+/// so the binding covers the host the request really goes to.
+#[must_use]
+pub fn effective_inline_storage(
+    storage: &StorageUrl,
+    addressing: &[(String, String)],
+) -> StorageUrl {
+    let mut effective = storage.clone();
+    if let StorageUrl::S3 { endpoint, .. } = &mut effective {
+        if endpoint.as_deref().is_none_or(|e| e.trim().is_empty()) {
+            *endpoint = addressing
+                .iter()
+                .find(|(name, value)| name == AWS_ENDPOINT_URL_ENV && !value.trim().is_empty())
+                .map(|(_, value)| value.clone());
+        }
+    }
+    effective
 }
 
 /// FX-20: a destination's binding, or the fail-closed expectation for an

@@ -399,6 +399,17 @@ impl std::error::Error for CredentialBindingRefusal {}
 /// `expected` of `None` means no controller asked for a binding — a hand-run
 /// `logweir` whose operator supplies their own environment — and is accepted.
 ///
+/// **FX-20: a Secret may carry SEVERAL bindings**, separated by whitespace or
+/// commas, and is accepted when ONE of them equals `expected` exactly. Each is
+/// an explicit authorization by whoever wrote the Secret — the same act as
+/// copying the credential into a second Secret bound to the second object, and
+/// no wider: a principal who may write a Secret's data could already put any
+/// binding there (Secret `patch` is equivalent to `get` for a credential,
+/// `docs/kubernetes.md` §20.9). It lets one S3 key serve, say, the archive and
+/// the evidence location of an inline restore, or two destinations, without a
+/// copy. A single binding — everything the console writes — reads exactly as
+/// before.
+///
 /// # Errors
 ///
 /// [`CredentialBindingRefusal`].
@@ -424,7 +435,12 @@ pub fn check_credential_binding(
             binding_env,
             absent: true,
         }),
-        Some(p) if p == expected => Ok(()),
+        Some(p)
+            if p.split(|c: char| c.is_ascii_whitespace() || c == ',')
+                .any(|token| token == expected) =>
+        {
+            Ok(())
+        }
         Some(_) => Err(CredentialBindingRefusal {
             binding_env,
             absent: false,
@@ -521,6 +537,18 @@ mod tests {
         assert!(!foreign.absent);
         // The message names neither binding.
         assert!(!foreign.to_string().contains("v1:a") && !foreign.to_string().contains("v1:b"));
+        // FX-20: several bindings, one of them this one — accepted; none of
+        // them this one, or a mere prefix of it — refused.
+        assert_eq!(
+            check_credential_binding(env, Some("v1:a"), Some("v1:x\nv1:a")),
+            Ok(())
+        );
+        assert_eq!(
+            check_credential_binding(env, Some("v1:a"), Some("v1:x, v1:a")),
+            Ok(())
+        );
+        assert!(check_credential_binding(env, Some("v1:a"), Some("v1:x v1:ab")).is_err());
+        assert!(check_credential_binding(env, Some("v1:a"), Some("v1:x\nv1:b")).is_err());
         // FX-20: the fail-closed expectation is refused even when a Secret
         // carries the very same string.
         assert!(

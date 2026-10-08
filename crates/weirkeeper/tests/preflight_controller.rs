@@ -8346,3 +8346,50 @@ fn fx20_every_credential_in_a_check_pod_carries_its_binding_pair() {
         "one destination, one binding for both of its Secrets"
     );
 }
+
+/// **FX-20: a legacy source's check pod expects the LOCATION binding — the
+/// one the restore Job expects — not the fail-closed no-UID value** an object
+/// without a UID would get. The pseudo-destination stands for an inline
+/// archive, and its Secret is bound where it is read.
+///
+/// KILLS: `inline_archive` not set on the legacy resolution (every legacy
+/// readiness check would refuse a correctly bound Secret); the location binding
+/// over another storage block than the restore Job's.
+#[test]
+fn fx20_a_legacy_source_check_expects_the_restore_jobs_location_binding() {
+    use logweir_core::credential_binding as cb;
+    let plan = legacy_plan_yaml("kafka-backups");
+    let source = legacy_plan_source(&plan);
+    let resolved = pf::legacy_source_destination(
+        NS,
+        &legacy(),
+        Some(&source),
+        &weirkeeper::check::policy::LegacyArchiveAddressing::default(),
+    )
+    .expect("resolves");
+    assert!(resolved.inline_archive);
+    assert_eq!(
+        resolved.credential_binding(),
+        cb::archive_location_binding(&source)
+    );
+    let env = resolved.job_env();
+    assert_eq!(
+        env.literal(cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        Some(cb::archive_location_binding(&source).as_str())
+    );
+    assert_ne!(
+        env.literal(cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        Some(cb::UNBOUND_NO_UID)
+    );
+    // And it is the value the restore Job projects for the same plan.
+    let restore_env =
+        weirkeeper::controllers::restore::inline_restore_binding_env(LEGACY_SECRET, &plan, &[]);
+    assert_eq!(
+        restore_env
+            .literals
+            .iter()
+            .find(|(n, _)| n == cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV)
+            .map(|(_, v)| v.as_str()),
+        env.literal(cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV)
+    );
+}

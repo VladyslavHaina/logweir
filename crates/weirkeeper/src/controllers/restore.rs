@@ -2981,6 +2981,39 @@ pub fn runner_argv(restore: &Restore, approver_key_ids: &[String]) -> Vec<String
     argv
 }
 
+/// FX-20: the binding pairs an inline `sourceArchive.secretRef` contributes
+/// to a `Restore` Job — over the approved plan's `source.storage` and
+/// `evidence:` locations as the runner will dial them
+/// ([`crate::destination::inline_archive_binding_env`],
+/// [`crate::destination::effective_inline_storage`]). Plan bytes that do not
+/// parse project the fail-closed expectation.
+#[must_use]
+pub fn inline_restore_binding_env(
+    secret: &str,
+    plan_bytes: &str,
+    addressing: &[(String, String)],
+) -> crate::destination::DestinationEnv {
+    match serde_yaml::from_str::<logweir_core::spec::RestoreSpec>(plan_bytes) {
+        Ok(plan) => crate::destination::inline_archive_binding_env(
+            secret,
+            &crate::destination::effective_inline_storage(&plan.source.storage, addressing),
+            Some(&crate::destination::effective_inline_storage(
+                &plan.evidence,
+                addressing,
+            )),
+        ),
+        Err(_) => crate::destination::DestinationEnv {
+            literals: vec![(
+                logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV
+                    .to_string(),
+                logweir_core::credential_binding::UNBOUND_NO_UID.to_string(),
+            )],
+            from_secret: Vec::new(),
+            service_account_name: None,
+        },
+    }
+}
+
 /// The [`RunnerJobSpec`] one `Restore` produces.
 ///
 /// PURE, so the Job a test builds is byte-identical to the one the reconciler
@@ -3156,6 +3189,24 @@ pub fn runner_job_spec_with_policy(
     secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
 
     let mut env_from_secret = Vec::new();
+    // FX-20: AN INLINE ARCHIVE'S SECRET IS BOUND TO THE LOCATIONS THE RUNNER
+    // DIALS WITH IT. On this path the approved plan names them: the source
+    // archive (`source.storage`) and the evidence store (`evidence:`), both
+    // reached with this one credential (D2 grounding G6), with an endpoint the
+    // block leaves out filled from the forwarded `AWS_ENDPOINT_URL`. A plan
+    // whose bytes do not parse projects the fail-closed expectation — the
+    // runner refuses it anyway, and never with an unbound credential.
+    let inline_binding = match (
+        restore.spec.source_archive.secret_ref.as_ref(),
+        destinations,
+    ) {
+        (Some(secret), None) => Some(inline_restore_binding_env(
+            &secret.name,
+            &restore.spec.plan_bytes,
+            &backup::archive_addressing_env(),
+        )),
+        _ => None,
+    };
     if let Some(secret) = restore.spec.source_archive.secret_ref.as_ref() {
         env_from_secret.push(EnvFromSecret {
             name: ARCHIVE_ACCESS_KEY_ENV.to_string(),
@@ -3169,6 +3220,9 @@ pub fn runner_job_spec_with_policy(
             optional: false,
             key: ARCHIVE_SECRET_KEY.to_string(),
         });
+    }
+    if let Some(binding) = inline_binding.as_ref() {
+        env_from_secret.extend(binding.from_secret.iter().cloned());
     }
     // THE TARGET'S SASL PASSWORD, PROJECTED AND NEVER READ. `secretKeyRef`
     // only: the controller holds no `get` on Secrets, so this is a reference
@@ -3351,6 +3405,10 @@ pub fn runner_job_spec_with_policy(
                 // was: the four forwarded variables, or none of them on a
                 // default install that sets none.
                 _ => env.extend(backup::archive_addressing_env()),
+            }
+            // FX-20: the inline archive Secret's expected location bindings.
+            if let Some(binding) = inline_binding.as_ref() {
+                env.extend(binding.literals.iter().cloned());
             }
             env.extend(execution_contract_env_with_policy(
                 restore, approval, trust, policy, now,

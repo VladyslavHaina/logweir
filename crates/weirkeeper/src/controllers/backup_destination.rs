@@ -172,6 +172,7 @@ pub async fn reconcile_destination(
                 ca_sha256: None,
                 ca_pem: None,
                 grant: crate::destination::ResolvedGrant::NotConfigured,
+                inline_archive: false,
             };
             read_ca_bundle(client, &resolved)
                 .await
