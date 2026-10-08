@@ -104,7 +104,35 @@ So the facts a reader of the older format can see are the selection's; nothing i
 
 ### 5.3 Arms
 
-<!-- filled from the implementation -->
+Both readers, identical words, in this position (after `sample.unsampled_topics`, before `redactions`); each fires only on a document carrying the block.
+
+| Arm | Refuses | Reads | OD-7 |
+|---|---|---|---|
+| SEL-1 | the block under a version before 1.7.0 | the block, `format_version` | (a) |
+| SEL-2 | a block with neither a start nor a subset | the block | (a) |
+| SEL-3 | `window_start_ms >= window_end_ms` | the block | (a) |
+| SEL-4 | subsets that are not each topic once in order, each with a non-empty, ascending list of distinct, non-negative partitions | the block | (a) |
+| SEL-5 | `engine_runs: 0` | the block | (a) |
+| SEL-6 | a complete block whose `window` is not the selection's start and end | the block and `complete.window` (1.4.0) | (a): judges an existing field against the block and can only refuse, as IV-6 |
+| SEL-7 | a complete block expecting records (`replay.expected > 0`) from a partition the selection does not select | the block and `complete.partitions[]` | (a), as SEL-6 |
+
+`scripts/check-verifier-parity.sh` runs four accepted documents (whose `replay selection:` lines both readers print identically) and the seven refusals through both readers; `e2e/fixtures/invariants/` carries 16 cases (one or more per arm, four accepts) and one shape case; `every_invariant_arm_has_a_corpus_case` closes the arithmetic over the seven new `return Err` statements.
+
+### 5.4 Each signed field a selection changes, and what an older verifier concludes
+
+| Field | Without a selection | With one | An older reader (verify_scorecard.py 1.21.0/1.22.0, `logweir` before this build) |
+|---|---|---|---|
+| `format_version` | 1.6.0 sampled / 1.4.0–1.5.0 complete, as before | 1.7.0 | accepts (same major) |
+| `source.selection` | absent | the block (§5.1) | ignores it |
+| `sample.window_start` | the spec's sample start | never earlier than `restore.window_start` | reads the narrowed start (the field it always read as "the window drilled") |
+| `sample.coverage_note` | phase 4's notes | `replay selection: …; ` + phase 4's notes | `drill show` prints it: the selection in words |
+| `sample.topics`, `sample.partitions`, `records_expected` | sampled counts | sampled counts of selected partitions only | the selection's counts |
+| `integrity.*` verdict | over every partition from the floor | over the selection only (§4) | the same verdict, now about the selection |
+| `integrity.verification.complete.window.start_ms` | absent (the floor) | the stated start | the narrowed start (a 1.4.0 field defined for exactly this) |
+| `integrity.verification.complete.partitions[]` | every listed partition | the selected partitions, plus an unselected one only when it holds a record (then failing) | the selection's partitions |
+| `evidence.offset_report_*` | the engine's report | one run: the engine's report; several: a JSON array of the runs' reports | the digest it always checked |
+
+**The row that proves it** (live, slot 3): the narrowed scorecard of `the_start_is_inclusive_…`'s `after` restore (start `S+1`, complete coverage, 1.7.0) was checked by three readers: `verify_scorecard.py` from main `93fe3f4a` (1.21.0), from `claude/fx-23` (1.22.0) and from this branch (1.23.0). All three: `VALID`, exit 0, `integrity coverage: every selected record compared: 6 expected, 6 restored, 6 matching …`; only 1.23.0 prints `replay selection: every partition of every restored topic, from epoch-ms 1760000010001 (the plan's restore.window_start, inclusive) …`. None prints a claim of a full restore; the document's `sample.window_start` is `2025-10-09T08:53:30.001Z` (= the start) and its `sample.coverage_note` opens with the selection (artifacts `claude/artifacts/prod-11-1/old-reader/`). So no older reader reads it as a full restore, and OD-7 MAJOR does not apply.
 
 ## 6. Compatibility, upgrade and rollback
 
@@ -116,7 +144,34 @@ So the facts a reader of the older format can see are the selection's; nothing i
 
 ## 7. Tests and evidence
 
-<!-- filled from the runs -->
+Unit and seam rows (all passing at the tip):
+
+| File | Rows |
+|---|---|
+| `crates/logweir-core/src/replay_selection.rs` | 8: both ends inclusive and an absent start bounds nothing; partition selection; a start before coverage refused, at the floor the plan's own; the engine's segment rule over selected partitions with the record bound; different subsets are different runs; an empty selection and an unlisted partition refused; the shape refusals (incl. a start after `sample.window_end`); an absent selection keeps its bytes |
+| `crates/logweir/tests/replay_selection.rs` | 9: binding into the plan; no selection is the floor as before; a start before coverage refused at resolution, construction and phase 5; the enum check's new arm; phase 5 refuses a start moved to the floor and the reverse; phase 5 refuses a dropped, merged or swapped subset; unlisted partition and empty selection; a start at a segment's last record still selects it; phase 4 samples only selected partitions from the start |
+| `crates/logweir-engine-oso/tests/render_selection.rs` | 4: one unfiltered run (the golden document); one shared subset; three runs with their own files and `render` refusing; an unmapped subset adds no run |
+| `crates/logweir-engine-oso/tests/engine_runs.rs` | 6: three runs validated and restored in order with the composed report; one run as before; divergence refused; a failing run named and the rest not started; merged preflight reports only worse; engine reports merged only when all read |
+| `crates/logweir/tests/complete_verify.rs` | 3: a subset passes complete with the block naming the selection (controls: a stray record fails; without the subset the empty partition is missing); a sub-window passes and signs its start (controls: start ignored → missing; a record below the start → unexpected); the sampled lane judges over the selection (controls: no subset → fails by name; a stray record → fails naming the selection) |
+| `crates/logweir/tests/orchestrator.rs` | 1: a stated selection is restored and signed 1.7.0 with its block and coverage note; control without a selection keeps its version |
+| `crates/logweir/tests/check_cli.rs` | 4: the preview refuses a start before coverage; names an unlisted partition, an empty selection and a malformed subset; checks only the selection's segments (control: full plan reports the missing segment); preview and execution resolve the same selection |
+| `crates/logweir-core/src/scorecard.rs` | 6: version rule and accepted shapes; SEL-1; SEL-2 to SEL-5; SEL-6 and SEL-7; arm position; the coverage note |
+| `docs/test_verify_scorecard.py` | 6 (+2 updated): the minor, accepts, SEL-1 to SEL-5, SEL-6/7, the shape, the line |
+
+**Mutants (17, all killed by a failing assertion, none by a compile error;** `claude/artifacts/prod-11-1/mutants.json`): the record predicate's inclusive start; the partition predicate; the coverage refusal in `resolve`; the plan's InheritedFromSpec arm; phase 5's start comparison; phase 5's subset comparison; phase 4's partition filter; phase 4's start clamp; phase 7's bound over the whole archive; phase 7's unselected-partition finding; the complete lane's unselected expectation; the engine adapter comparing one digest; the renderer dropping `source_partitions`; SEL-7; the 1.7.0 version step; the block not signed; the preview's segments row reading the floor.
+
+**Live rows (compose slot 3, Kafka 3.7.1, engine `0.23.3+logweir.1` native arm64, `e2e/tests/replay_selection.rs`, 6 passed in 349 s; outcomes in `claude/artifacts/prod-11-1/e2e-run1/`):**
+
+| Row | Observed |
+|---|---|
+| inclusive / exclusive at the start, equal and non-monotonic timestamps | start `S`: 9 records restored, both records at `S` included, `S-1` and `S-50` not, oracle diff empty, `pass`, `window_start_ms = S`, `complete.window.start_ms = S`, `sample.window_start = S`; start `S+1`: 6 restored, the two at `S` excluded, `pass` |
+| a segment whose last record is before the start | the engine skipped p0's first segment and lost `S+50` (oracle: exactly that record missing); complete coverage: `fail-integrity`, exit 2, `missing: 1` — never `pass` |
+| subsets `A: [0, 2]`, `B: [1]`, topic C not selected | `engine_runs: 2`; every selected partition exact, every unselected one empty, C not restored; `pass` under complete and sampled coverage |
+| refusals | start 1 ms before coverage, an empty selection, an existing target name: exit 3, no scorecard, no target created; control at the floor: `pass` |
+| compaction hole in a sub-window | target = the compacted log's records from the start (offsets 2–5 on p0); `pass`; `offset_holes: 3` (one per partition) |
+| a newer backup set after approval | B2 written under the same archive prefix; the run restored B1's selection exactly and signed `backup_id = B1` |
+
+Before the selection was executable, the same refusal row ran live against the fail-closed build: the three refusals as above and the control refused `SelectionNotYetExecutable` (`claude/artifacts/prod-11-1/failclosed/`).
 
 ## 8. Limits
 
@@ -131,7 +186,15 @@ So the facts a reader of the older format can see are the selection's; nothing i
 
 ## 10. Rows for the orchestrator's PoC upgrade
 
-<!-- filled -->
+No CRD changes. The runner image changes (selection, engine runs, phase 7, the block); the controller changes only in that rehearsal slots render the two new fields absent (byte-identical plans). Rows, each with its predicate and control:
+
+| # | Row | Predicate | Control |
+|---|---|---|---|
+| K1 | A `Restore` (`newTopic`) whose `planBytes` state `restore.window_start` and `restore.partitions` with two different subsets, over a PoC topic with three partitions | Job `Succeeded`; signed scorecard 1.7.0 with `source.selection` (`engine_runs: 2`), `integrity.result: pass`; each target topic's unselected partitions empty and selected ones holding exactly the archive's records from the start | the same plan without the selection: scorecard 1.6.0, no block, every partition restored |
+| K2 | A `Preflight` (restore) over a plan whose `window_start` is 1 ms before the recovery point's earliest covered timestamp | `archive.coverage` `notReady`, `WindowStartBeforeCoverage` | start at the floor: `ready`, `PointInTimeCovered`, message names the selection and its runs |
+| K3 | A `Restore` whose plan's `restore.partitions` names a partition the archive does not list | the Job exits 3 before any target topic exists; `status.exitReason` `GuardRefused`; no scorecard | — |
+| K4 | An existing `RehearsalSchedule`'s next slot after the upgrade | its plan bytes and `templateDigest` are byte-identical to the pre-upgrade slot's (no `window_start`/`partitions` keys) | — |
+| K5 | The K1 scorecard downloaded through the product API, checked by `logweir drill verify` and `verify_scorecard.py` 1.23.0, and by the 1.22.0 script | 1.23.0 readers: `VALID` and the `replay selection:` line; 1.22.0: `VALID`, no line, `every selected record compared` | the K1 control's scorecard: no selection line from any reader |
 
 ---
 
