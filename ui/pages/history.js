@@ -327,6 +327,47 @@ export function renderRestoreOperation(object, operation) {
   );
 }
 
+/** The signed time basis (FX-8 review M-2), in words: `status.timeBasis` --
+ *  the scorecard's `source.time_basis` as the controller copied it. ABSENT is
+ *  not recorded and is never read as "every selection used the topics' own
+ *  clocks"; two empty lists are the run's claim, as far as the archive
+ *  manifest's segment bounds show. */
+export function signedTimeBasisText(timeBasis) {
+  if (timeBasis === null || timeBasis === undefined || typeof timeBasis !== "object") {
+    return "not recorded: this run carries no signed time basis (a scorecard before format " +
+      "1.3.0, a refused run, or one whose scorecard has not been read)";
+  }
+  const producer = Array.isArray(timeBasis.producerTime) ? timeBasis.producerTime : [];
+  const unknown = Array.isArray(timeBasis.notRecorded) ? timeBasis.notRecorded : [];
+  const parts = [];
+  if (producer.length > 0) {
+    parts.push("selected by producer time (the plan accepted it): " + producer.join(", "));
+  }
+  if (unknown.length > 0) {
+    parts.push("selected by time with the timestamp type NOT RECORDED: " + unknown.join(", "));
+  }
+  return parts.length > 0
+    ? parts.join("; ")
+    : "no topic selected by producer time or with an unrecorded timestamp type, as far as " +
+      "the archive manifest's segment bounds show";
+}
+
+/** The warning a Restore detail carries when its signed time basis names a
+ *  topic whose timestamp type was not recorded (FX-8 review M-2): the clock
+ *  that topic's point in time was read on is unknown. Empty otherwise. */
+export function unrecordedTimeBasisWarning(timeBasis) {
+  const unknown = timeBasis && Array.isArray(timeBasis.notRecorded) ? timeBasis.notRecorded : [];
+  if (unknown.length === 0) {
+    return "";
+  }
+  return "<p class=\"caveat\" id=\"restore-time-basis-unrecorded\">" +
+    esc("The timestamp type of " + unknown.join(", ") + " was not recorded when the archive " +
+      "was written, so the clock this restore's point in time was read on is unknown: if a " +
+      "topic is LogAppendTime, its records were selected by the producers' clocks, not by when " +
+      "the broker appended them. A backup taken since FX-4, with the restore bound to its " +
+      "point, records it.") + "</p>";
+}
+
 /** One Restore, in full. With `operation`, the view opens with where the
  *  operation stands (see [`renderRestoreOperation`]). */
 export function renderRestoreDetail(object, operation) {
@@ -370,12 +411,18 @@ export function renderRestoreDetail(object, operation) {
             "LogAppendTime topic at a point is refused, and the signed result below is " +
             "authoritative") +
         "</span>"],
+      // FX-8 (review M-2): WHAT THE RUN SIGNED, from `status.timeBasis` -- the
+      // scorecard's `source.time_basis` as the controller read it. A claim
+      // until the evidence verifies, like every scorecard fact on this page.
+      ["time basis (signed)", "<span id=\"restore-time-basis-signed\">" +
+        claim(signedTimeBasisText(status.timeBasis)) + "</span>"],
       ["backup set", cell(spec.backupSetRef)],
     ]) +
     (verified
       ? ""
       : "<p class=\"caveat\" data-scorecard-claim=\"note\">" + esc(SCORECARD_CLAIM_SENTENCE) +
         "</p>") +
+    unrecordedTimeBasisWarning(status.timeBasis) +
     "<h3>Integrity</h3>" +
     facts([
       ["level", claim(integrity.level)],

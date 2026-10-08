@@ -919,6 +919,30 @@ could produce, and would send the operator to the wrong field.
 an absent declaration is left out of the idempotency request hash, so a client
 that predates it replays onto the same object it always did.
 
+### The restore's signed time basis (FX-8)
+
+Both restore reads carry an optional **`timeBasis`**: the signed scorecard's
+`source.time_basis` (format 1.3.0) as the controller copied it onto
+`Restore.status.timeBasis` when it read the document.
+
+```json
+{"timeBasis": {"plan": "producerTime", "producerTime": ["lat"], "notRecorded": ["old"]}}
+```
+
+`producerTime` names the source topics the restore selected by the PRODUCERS'
+clocks — recorded as `LogAppendTime`, accepted by the plan's
+`restore.time_basis: producerTime`; `notRecorded` names the topics it selected
+by time while nothing recorded their timestamp type, so the clock their point in
+time was read on is unknown; `plan` is the approved plan's value, absent when it
+stated none. It is a **claim until the evidence verifies**, like
+`operation.result.outcome`. **Absent means not recorded** — a scorecard before
+format 1.3.0, a refused run (`PointInTimeByProducerTime` signs nothing), or one
+whose scorecard was not read yet — and never "every selection used the topics'
+own clocks". A list longer than this view's bound of 100 omits the whole field
+rather than truncating it, because a partial list would be a claim the signed
+document does not make. The field is additive: a client that predates it
+ignores it.
+
 ### Saved destinations
 
 `spec.storage` and `spec.transport.security` are immutable — a different

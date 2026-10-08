@@ -273,3 +273,98 @@ test("fx8_review_l3_the_evidence_bucket_reader_is_as_tolerant_as_the_time_basis_
   assert.equal(planBlockValue("restore:\n  point_in_time: x\n", "restore", "time_basis"), null);
   assert.equal(planBlockValue(undefined, "restore", "time_basis"), null);
 });
+
+// ------------------------------------------- review M-2: the signed result
+
+test("fx8_review_m2_the_detail_shows_the_signed_lists_and_warns_on_an_unrecorded_type", async () => {
+  const { renderRestoreDetail, signedTimeBasisText } = await import("../pages/history.js");
+  const restore = (timeBasis, verification) => ({
+    metadata: { name: "r", namespace: "team-fx8" },
+    spec: { planBytes: text("plan-time-basis.golden.yaml"), pointInTime: "2026-09-07T14:05:00Z",
+      backupSetRef: "b" },
+    status: Object.assign({ phase: "Succeeded", exitCode: 0, outcome: "pass" },
+      timeBasis === undefined ? {} : { timeBasis },
+      verification === undefined ? {} : { evidence: { verification } }),
+  });
+  const signed = (html) => visible(/<span id="restore-time-basis-signed">([\s\S]*?)<\/span><\/dd>|<span id="restore-time-basis-signed">([\s\S]*?)<\/span>/
+    .exec(html)[0]);
+  // The signed lists, by name.
+  const html = renderRestoreDetail(restore({ plan: "producerTime", producerTime: ["lat"],
+    notRecorded: ["old"] }));
+  assert.ok(signed(html).includes(
+    "selected by producer time (the plan accepted it): lat; selected by time with the " +
+      "timestamp type NOT RECORDED: old"),
+    "NEGATIVE CONTROL: a detail page that never shows the signed lists fails this:\n" +
+      signed(html));
+  // ...as a CLAIM until the evidence verifies, like every scorecard fact here.
+  assert.match(html, /data-scorecard-claim/);
+  // The unrecorded type is WARNED about, naming the topic.
+  const warning = /<p class="caveat" id="restore-time-basis-unrecorded">([^<]*)<\/p>/.exec(html);
+  assert.ok(warning !== null, "NEGATIVE CONTROL: no warning for an unrecorded type fails this");
+  assert.ok(visible(warning[1]).includes("The timestamp type of old was not recorded"));
+  // No unrecorded topic, no warning; the empty claim reads as such.
+  const quiet = renderRestoreDetail(restore({ producerTime: [], notRecorded: [] }));
+  assert.ok(!quiet.includes("restore-time-basis-unrecorded"));
+  assert.ok(signed(quiet).includes("no topic selected by producer time or with an unrecorded " +
+    "timestamp type, as far as the archive manifest's segment bounds show"));
+  // ABSENT is not recorded, never "none".
+  assert.ok(signed(renderRestoreDetail(restore(undefined))).includes("not recorded"),
+    "NEGATIVE CONTROL: an absent block read as the empty claim fails this");
+  assert.equal(signedTimeBasisText(undefined).startsWith("not recorded"), true);
+});
+
+test("fx8_review_m2_the_console_projection_carries_the_apis_time_basis", async () => {
+  // BOTH SIDES READ ONE FIXTURE: `console/restore-time-basis.json` is the
+  // product API's projection of a Restore whose status carries `timeBasis`
+  // (`crates/logweir-api/tests/list_projection_additions.rs`). Read here
+  // through the real console client, decoder and projection.
+  const { apiClient, resetMode, selectMode } = await import("../client.js");
+  resetMode();
+  await selectMode({
+    probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }),
+  });
+  const answer = fixture("console/restore-time-basis.json");
+  const original = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = (url) => {
+    asked.push(String(url));
+    // The detail also reads the run's operation, on its own route.
+    const body = String(url).includes("/operations")
+      ? fixture("console/operation-restore-completed.json")
+      : answer;
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: () => Promise.resolve(JSON.stringify(body)),
+    });
+  };
+  try {
+    const object = await apiClient().get("team-a", "restores", answer.item.name);
+    assert.deepEqual(object.status.timeBasis,
+      { plan: "producerTime", producerTime: ["lat"], notRecorded: ["old"] },
+      "NEGATIVE CONTROL: a decoder that refuses, or a projection that drops, the field fails " +
+        "this: " + asked.join(", "));
+    const { signedTimeBasisText } = await import("../pages/history.js");
+    assert.ok(signedTimeBasisText(object.status.timeBasis).includes("lat"));
+  } finally {
+    globalThis.fetch = original;
+    resetMode();
+  }
+});
+
+test("fx8_review_m2_the_review_step_warns_when_the_plan_opts_in", async () => {
+  const { TIME_BASIS_OPTED_WARNING } = await import("../pages/restore-wizard.js");
+  const state = wizardState();
+  let html = renderPlanStep(await preparePlan(state), state);
+  assert.ok(!html.includes("review-time-basis-warning"), "no opt-in, no warning");
+  state.fields.timeBasis = TIME_BASIS_PRODUCER_TIME;
+  html = renderPlanStep(await preparePlan(state), state);
+  const warning = /<p class="caveat" id="review-time-basis-warning">([\s\S]*?)<\/p>/.exec(html);
+  assert.ok(warning !== null,
+    "NEGATIVE CONTROL: a review step that does not warn about the opt-in fails this");
+  const said = visible(warning[1]);
+  assert.ok(said.includes("This page cannot see which topics are LogAppendTime"), said);
+  assert.ok(said.includes("not the ones the broker had appended by then"), said);
+  assert.equal(TIME_BASIS_OPTED_WARNING.split("`LogAppendTime`").length, 3);
+});

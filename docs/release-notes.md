@@ -1007,8 +1007,12 @@ scorecard — format **1.3.0** — lists the topic under
 recorded runs and is listed under `source.time_basis.not_recorded`. Full
 restores still run. `logweir drill verify`, `verify_scorecard.py` 1.18.0 and
 `logweir drill show` print the label; both verifiers also say, for a backup
-receipt, which topics it records as `LogAppendTime`. The console's restore
-wizard offers the opt-in and shows it on the review step
+receipt, which topics it records as `LogAppendTime`. The controller copies the
+signed label onto `Restore.status.timeBasis` (a new optional status field) and
+the product API serves it as `timeBasis`; the console's Restore detail shows the
+signed lists and warns about a topic whose type was not recorded. The console's
+restore wizard offers the opt-in, shows it on the review step and warns when a
+plan takes it
 ([stability.md](stability.md#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time),
 [drill-spec.md](formats/drill-spec.md#restoretime_basis-fx-8),
 [the scorecard format](formats/drill-scorecard.md#sourcetime_basis-format-130)).
@@ -1282,7 +1286,8 @@ policy or roster ([keys.md](keys.md)).
   submission, read-only protection, rehearsal, retention and trust policies,
   the namespace's approval policy, cadence previews, and the shared console's
   sign-in routes (`/auth/login`, `/auth/callback`, session logout). Its
-  component schemas grew from 66 to 257; none was removed.
+  component schemas grew from 66 to 258 (FX-8 added `RestoreTimeBasisView`,
+  served as a restore's optional `timeBasis`); none was removed.
 - **No in-place runner signing-key cutover** ([keys.md](keys.md), step 2 of
   *The supported procedure*).
 - **Restore admission does not hold on a retention lease** (above).

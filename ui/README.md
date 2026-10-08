@@ -1285,12 +1285,27 @@ which way the plan reads, and a Restore's detail page reads the same from its
 approved plan bytes, beside the runner's own reason (`PointInTimeByProducerTime`
 on a refused one).
 
-**Limits.** The console does not yet know which topics are `LogAppendTime`, so
-it cannot warn about a particular topic or about one whose type nothing
-recorded (the scorecard's `source.time_basis.not_recorded`); projecting the
-receipt's per-topic `config_coverage` into the catalog view is a follow-up. The
-FX-6 sentence above stays true and unchanged: restored timestamps of a
-`LogAppendTime` topic are still the producers' `CreateTime`.
+**When the plan opts in, the review step warns** (`TIME_BASIS_OPTED_WARNING`,
+`#review-time-basis-warning`): the restore takes the records whose producer
+timestamps are at or before the point, not the ones the broker had appended by
+then, and the page cannot see which topics are `LogAppendTime`.
+
+**After the run, the Restore detail shows what was SIGNED** (FX-8 review M-2).
+The *time basis (signed)* row reads `status.timeBasis` — the scorecard's
+`source.time_basis`, copied by the controller and served by the product API as
+`timeBasis` — and names the topics selected by producer time and the ones
+selected with the timestamp type NOT RECORDED. Like every scorecard fact on the
+page it is labelled a claim until the evidence verifies. A topic whose type was
+not recorded also gets a warning paragraph (`#restore-time-basis-unrecorded`):
+the clock its point in time was read on is unknown. An absent block reads "not
+recorded", never "none".
+
+**Limits.** Before the run the console cannot know which topics are
+`LogAppendTime`: the catalog view does not carry the receipt's per-topic
+`config_coverage`, so the box, its note and the review warning name no topic;
+projecting it is a follow-up. The FX-6 sentence above stays true and
+unchanged: restored timestamps of a `LogAppendTime` topic are still the
+producers' `CreateTime`.
 
 **Upgrade and rollback.** A Restore created before this keeps its plan bytes,
 which state no time basis; if its topic is `LogAppendTime` and its runner is

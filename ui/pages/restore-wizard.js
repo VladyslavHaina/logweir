@@ -2172,6 +2172,17 @@ export const TIME_BASIS_NOTE =
   "clocks and the signed scorecard says so. This page cannot see each topic's timestamp " +
   "type: the run reads it from the archive and its backup receipt.";
 
+/** The warning the review step carries when the plan opts in (FX-8 review
+ *  M-2). The page cannot know which topics are `LogAppendTime` before the
+ *  run, so it says what the opt-in does and that it cannot see that, rather
+ *  than naming topics. */
+export const TIME_BASIS_OPTED_WARNING =
+  "This plan accepts a point in time read on the producers' clocks: for a topic that is " +
+  "`LogAppendTime`, the restore takes the records whose producer timestamps are at or before " +
+  "the point, not the ones the broker had appended by then, and the signed scorecard lists " +
+  "that topic. This page cannot see which topics are `LogAppendTime`; the run reads that " +
+  "from the archive and its backup receipt.";
+
 /** The review step's time-basis line (FX-8), from the plan's own value. */
 export function timeBasisText(state) {
   const s = state || {};
@@ -3556,6 +3567,11 @@ export function renderPlanStep(prepared, state) {
       // FX-8: THE CLOCK THE POINT IS READ ON, beside the plan that states it.
       ["time basis", "<span id=\"review-time-basis\">" + esc(timeBasisText(s)) + "</span>"],
     ]) +
+    // FX-8 review M-2: A PLAN THAT OPTS IN IS WARNED, where it is reviewed.
+    (((s.fields || {}).timeBasis) === TIME_BASIS_PRODUCER_TIME
+      ? "<p class=\"caveat\" id=\"review-time-basis-warning\">" +
+        messageText(TIME_BASIS_OPTED_WARNING) + "</p>"
+      : "") +
     (replicationMayDiffer(replicationChoice(s))
       ? "<p class=\"note\" id=\"review-replication-differs\">" + esc(REPLICATION_DIFFERS_NOTE) +
         "</p>"

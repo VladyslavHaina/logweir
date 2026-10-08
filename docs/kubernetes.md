@@ -2583,6 +2583,15 @@ message names the field — and no child is created; the spec is sealed, so the
 remedy is a new schedule under a new authorization. Before FX-2 the block was
 copied onto the child and then dropped at the Job.
 
+**A `Restore` carries its signed time basis (FX-8).** When the controller reads
+a run's scorecard it copies `source.time_basis` (format 1.3.0) onto
+`status.timeBasis` — `{plan, producerTime, notRecorded}`, beside `outcome` and
+`integrity` and, like them, a claim until `status.evidence.verification` is
+`Valid` — so the console and the product API can show which topics were
+selected by the producers' clocks and which with an unrecorded timestamp type.
+Absent means not recorded. A refused run (`exitReason:
+PointInTimeByProducerTime`) signs nothing and carries none.
+
 **`spec.point.timeBasis` lets a rehearsal of a `LogAppendTime` topic run
 (FX-8).** Every slot's plan states `restore.point_in_time`, and the archive
 holds each record's PRODUCER timestamp, so over a source topic recorded as
