@@ -833,40 +833,52 @@ against a sentinel) is the next PoC upgrade's.
 the new status fields; bound Secrets keep working with them. An older console
 offers `existing` again, which this API refuses — roll the console with the
 controller.
-#### 39. A restore can select a window start and per-topic partitions, and the scorecard signs what it selected (PROD-11.1)
+#### 39. A restore can select a window start, and the scorecard signs it (PROD-11.1)
 
-**Added.** A drill or restore plan may state an inclusive
-`restore.window_start` and per-topic `restore.partitions`
-([drill-spec.md](formats/drill-spec.md#restorewindow_start-and-restorepartitions-prod-111)).
-Absent, a restore is what it was. A start before the archive's coverage, a
-partition the archive does not list, a malformed subset and a selection no
-archived segment overlaps are refused (exit 3) before any target topic is
-created — never widened. Topics with different subsets are restored by one
-engine run each (the engine's partition filter applies to every topic of a
-run); phase 5 checks every run's document against the approved plan; phases 4
-and 7 judge only the selection, and a record in an unselected partition fails
-the run. The restore preflight previews the selection through the same
-function execution uses (`WindowStartBeforeCoverage`,
-`PartitionNotInBackupSet`, `SelectionEmpty`, `SelectionInvalid`). A narrowed
-restore's scorecard is format **1.7.0** and carries `source.selection`; its
-existing fields (`sample.window_start`, `sample.coverage_note`, a complete
-block's window and partitions) name the selection too
-([stability.md](stability.md#scorecard-format-170-sourceselection-a-narrowed-restores-replay-selection-prod-111)).
-`verify_scorecard.py` 1.23.0 checks it (arms SEL-1 to SEL-7).
-**Do:** nothing for a plan without a selection. Run plans with a selection on
-this release's runner: an older one ignores both keys and restores everything.
-The `Restore` CRD and the console are unchanged (the console's advanced
-selection is PROD-11.1a); a `Restore` carries the plan bytes as they are.
-**Scope:** six compose rows (slot 3, Kafka 3.7.1, engine `0.23.3+logweir.1`)
-with an oracle of their own: inclusive vs exclusive at the start with equal
-and non-monotonic timestamps; a segment whose last record is before the start
-hides an in-window record, which complete coverage fails (the engine's limit,
-PROD-01.1b); different subsets on two topics (two engine runs) with a topic
-subset, under both coverages; the refusals with a control; a compaction hole
-inside a sub-window; a newer backup set arriving after approval.
-**Rollback:** an older runner ignores the selection (above); 1.7.0 scorecards
-already written stay valid under both readers, and an older reader ignores the
-block.
+**Added.** A drill or restore plan may state an inclusive window START, as the
+interval form of its point in time:
+`restore.point_in_time: "<start>/<end>"`
+([drill-spec.md](formats/drill-spec.md#a-window-start-restorepoint_in_time-startend-prod-111)).
+A single instant is what it was. Every partition of every topic the plan names
+is restored from the start; a start before the archive's coverage (never moved
+to it), a start at or after the end and a window no archived segment overlaps
+are refused (exit 3) before any target topic is created. Phases 4 and 7 judge
+the window only. The restore preflight previews it through the same function
+execution uses (`WindowStartBeforeCoverage`, `SelectionEmpty`,
+`SelectionInvalid`). The scorecard is format **1.7.0** and carries
+`source.selection {window_start_ms, window_end_ms}`; its existing fields
+(`sample.window_start`, `sample.coverage_note`, a complete block's window) name
+the start too
+([stability.md](stability.md#scorecard-format-170-sourceselection-a-restore-from-a-stated-window-start-prod-111)).
+`verify_scorecard.py` 1.23.0 and `logweir drill verify` check it (arms SEL-1
+to SEL-3), print a `replay selection:` line, and qualify a sampled `pass` by
+its window.
+**Refused:** `restore.partitions` (a partition subset), by name,
+`PartitionSubsetsAwaitOwnerDecision`, until the owner decides how a
+subset-narrowed scorecard is versioned (OD-9); and a plan stating a start
+under a standing rehearsal authorization, which restores every partition from
+the floor.
+**Do:** nothing for a plan without a start. A runner older than this release
+refuses a plan with a start (`drill spec does not parse`, exit 1) before it
+touches anything, so roll the runner forward before submitting one. The
+`Restore` CRD and the console are unchanged (the console's selection is
+PROD-11.1a); a `Restore` carries the plan bytes as they are.
+**Scope:** compose rows (slot 2 with `COMPOSE_PROFILES=auth`, Kafka 3.7.1,
+engine `0.23.3+logweir.1`) with an oracle of their own: inclusive vs exclusive
+at the start with equal and non-monotonic timestamps; a segment whose last
+record is before the start hides an in-window record, which complete coverage
+fails (the engine's limit, PROD-01.1b); a topic subset from a start under both
+coverages, read by both verifiers; the refusals (a partition subset among
+them) with a control; a compaction hole inside a sub-window; a newer backup
+set arriving after approval; a partition whose records all precede the start,
+signed `preflight-failed` naming it (phase 5's existing rule for a partition
+with nothing in the window), never `pass`; and main's runner from before this release
+refusing a plan with a start, with the same plan without it restoring.
+**Rollback:** an older runner refuses plans with a start (above) and ignores a
+`restore.partitions` key (which no Logweir writer emits). 1.7.0 scorecards
+already written stay valid under the older readers, which ignore the block;
+the document's `sample.window_start` and `sample.coverage_note` still name the
+start.
 
 ### Required operator actions after `v0.2.0-rc.1`
 

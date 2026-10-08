@@ -181,7 +181,7 @@ their refusal text, so the agreement is checked rather than asserted.
 | `source.manifest_version_id` | string \| null | The store's version id for the manifest object, when the backend returned one. |
 | `source.captured_by_logweir` | bool | `true` **exactly when** phase −1 ran. `validate_invariants` enforces the pairing in **both** directions with `last_phase_completed` and the two `rpo_source_relative_*` fields, so it cannot be forged into a signed document. **Always `false` in v0.1.0.** |
 | `source.time_basis` | object, **optional** (1.3.0) | Which source topics the restore's time selection read by **producer time**, and which it selected by time with no recorded timestamp type. See [below](#sourcetime_basis-format-130). ABSENT means not recorded. |
-| `source.selection` | object, **optional** (1.7.0) | The plan's **replay selection** — its stated inclusive window start and per-topic partition subsets — for a narrowed restore. See [below](#sourceselection-format-170). ABSENT means the restore selected every partition of every restored topic from the archive's floor. |
+| `source.selection` | object, **optional** (1.7.0) | The plan's **replay selection**: its stated inclusive window start and the window's end, for a restore narrowed by a start. See [below](#sourceselection-format-170). ABSENT means the restore selected every partition of every restored topic from the archive's floor. |
 | `target.cluster_id` | string | The target cluster's own id, read from it. |
 | `target.mode` | string, optional | Which of the two target modes the run was in: `scratch` or `newTopic`. **Absent means `scratch`**, which is what every document written before this field existed carries, so the three checked-in signed fixtures keep their bytes. |
 | `target.marker_topic` | string, optional | The **scratch** segregation proof: the cluster is in `allowedClusterIds` **and** this topic exists, both verified at phase 0, whose failure refuses the drill with exit 3 before anything runs. **Absent in `newTopic` mode**, because that mode skips both checks — a reader that saw the field there would be reading a verification that never ran. Both readers REFUSE a document that is `scratch` and omits it. |
@@ -257,57 +257,69 @@ corpus cases `time_basis_*.json` (their `format_version` and TB-1's reason).
 ```json
 "selection": {
   "window_start_ms": 1788000000000,
-  "window_end_ms": 1788055200000,
-  "partitions": [{"topic": "orders", "partitions": [0, 2]}],
-  "engine_runs": 2
+  "window_end_ms": 1788055200000
 }
 ```
 
-A plan may narrow a restore with an inclusive `restore.window_start` and
-per-topic `restore.partitions` ([the plan fields](drill-spec.md#restorewindow_start-and-restorepartitions-prod-111)).
-A narrowed restore's document is format 1.7.0 and carries this block; the
+A plan may state an inclusive window START, written
+`restore.point_in_time: "<start>/<end>"`
+([the plan field](drill-spec.md#a-window-start-restorepoint_in_time-startend-prod-111)).
+A restore from a stated start is format 1.7.0 and carries this block; the
 contract is [`PROD-11.1-replay-selection.md`](../to-do/decisions/PROD-11.1-replay-selection.md).
+A partition subset (`restore.partitions`) is refused before anything runs
+until the owner decides OD-9, so no document narrowed by a subset exists.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `window_start_ms` | integer, optional | The plan's stated inclusive start, epoch milliseconds. ABSENT means the window started at the archive set's floor (guard G-WIN). |
-| `window_end_ms` | integer | The inclusive end: `restore.point_in_time`, or `sample.window_end` when the plan states none. |
-| `partitions` | `{topic, partitions}[]` | The per-topic subsets, one entry per topic in ascending order, each list ascending and distinct. A restored topic not listed was restored on every partition the archive lists for it. |
-| `engine_runs` | integer | How many engine runs restored it: the engine's partition filter applies to every topic of one run, so topics with different subsets are different runs. |
+| `window_start_ms` | integer | The plan's stated inclusive start, epoch milliseconds, never earlier than the archive set's floor (guard G-WIN; a start before it is refused, never moved). |
+| `window_end_ms` | integer | The inclusive end: the end of `restore.point_in_time`. |
 
-**Every verdict of such a document is judged over the selection only:**
-samples come only from selected partitions and from the stated start; the
-count bound and the per-partition presence check are the selected partitions'
-over `[window_start_ms, window_end_ms]`; a record found in a partition the plan
-did not select fails the run; a complete verification expects records only
-from selected partitions, by each record's own timestamp.
+Every partition of every restored topic was restored from the start, so the
+block names no partition.
 
-**The existing fields name the selection too**, so a reader that predates the
-block never reads a narrowed restore as a full one: `sample.window_start` is
-never earlier than the stated start; `sample.coverage_note` opens with
-`replay selection: …`, naming every subset and the window; and a complete
-block's `window.start_ms` is the stated start and its `partitions[]` are the
-selected partitions (plus any unselected partition holding a record, which
-fails it).
+**Every verdict of such a document is judged over the window only:** samples
+are drawn from the stated start; the count bound and the per-partition
+presence check are over `[window_start_ms, window_end_ms]`; a complete
+verification expects every archived record whose own timestamp is in that
+window.
 
-Seven arms, enforced by both readers in the same position (after
+**The existing fields name the window too**, so a reader that predates the
+block never reads the restore as one from the archive's floor:
+`sample.window_start` is never earlier than the stated start;
+`sample.coverage_note` opens with `replay selection: every partition of every
+restored topic, from epoch-ms S (the plan's stated window start, inclusive) to
+epoch-ms E (inclusive); no record before the start was restored or expected`
+and, under the sampled lane, names the one limit a start adds (an in-window
+record held in a segment whose last record is before the start is not found
+by a sampled check; `sample.coverage: complete` finds it); and a complete
+block's `window.start_ms` is the stated start.
+
+Three arms, enforced by both readers in the same position (after
 `sample.unsampled_topics`, before `redactions`) and words, fire only on a
 document carrying the block:
 
 | Arm | Refuses |
 |---|---|
 | SEL-1 | the block under a `format_version` before 1.7.0 |
-| SEL-2 | a block with neither a start nor a subset: a restore that selects everything carries no block |
-| SEL-3 | a start at or after the end |
-| SEL-4 | subsets that are not each topic once, in order, with a non-empty, ascending list of distinct partitions that are not negative |
-| SEL-5 | `engine_runs: 0` |
-| SEL-6 | a complete block whose `window` is not the selection's start and end |
-| SEL-7 | a complete block expecting records from a partition the selection does not select |
+| SEL-2 | a start at or after the end |
+| SEL-3 | a complete block whose `window` is not the block's start and end |
 
-Each reads only the new block, or judges an existing field against it and can
-only refuse: MINOR under OD-7 (a). Both readers print one `replay selection:`
-coverage line for a document carrying the block; `logweir drill show` shows
+A block that is not an object with both fields as integers is refused when
+the document is read; an unknown key in it is ignored, as everywhere in the
+document (which is why a partition subset cannot be added to this block as a
+MINOR: a 1.23.0 reader would ignore it and read the restore as every
+partition — OD-9). Each arm reads only the new block, or
+judges an existing field against it, and can only refuse: MINOR under OD-7
+(a). Both readers print one `replay selection:` coverage line for a document
+carrying the block, and for a sampled `pass` the `sample coverage:` line is
+QUALIFIED by the window (`a sampled pass over a replay selection from
+epoch-ms S to epoch-ms E: …`); `logweir drill show` shows
 `sample.coverage_note`, which opens with the same sentence.
+
+**The version only rises.** A restore that states a start AND is sampled
+(FX-23's 1.6.0) is 1.7.0; each step that raises the version keeps the newer
+of the two minors (`scorecard::newer_format_version`), so no step can lower a
+version an earlier step chose.
 
 **The number.** 1.7.0; 1.6.0 is FX-23's. A renumber moves
 `scorecard::FORMAT_VERSION_WITH_SELECTION` and `scorecard::SELECTION_SINCE_MINOR`
@@ -819,7 +831,7 @@ transformations do to it — is
 | `complete.replay.duplicates` | integer | Restored records that repeat an `x-original-offset` already read. |
 | `complete.replay.out_of_order` | integer | Restored records whose `x-original-offset` is below one read before them. |
 | `complete.replay.mismatched` | integer | Expected records whose first restored copy differs from the archive. |
-| `complete.partitions[]` | object[] | One entry per partition of every restored topic, sorted: `topic` (archive side), `partition`, `target_topic`, `compared` (false when this partition was not compared), `segments`, `segments_verified`, `records_decoded`, `offset_holes`, `replay` (the eight counts above, for this partition), and `findings`: the first 20 findings in words (which offsets are missing, duplicated, out of order or different, and why a partition was not compared), and one more saying how many were left out. The counts are complete; the words illustrate. |
+| `complete.partitions[]` | object[] | One entry per partition of every restored topic, sorted (unchanged in 1.7.0: a restore from a stated start restores every partition, so its `replay` counts are each partition's over `[window.start_ms, window.end_ms]`): `topic` (archive side), `partition`, `target_topic`, `compared` (false when this partition was not compared), `segments`, `segments_verified`, `records_decoded`, `offset_holes`, `replay` (the eight counts above, for this partition), and `findings`: the first 20 findings in words (which offsets are missing, duplicated, out of order or different, and why a partition was not compared), and one more saying how many were left out. The counts are complete; the words illustrate. |
 
 **Absent means not recorded.** Every document before 1.4.0 — and one whose
 phase 7 never ran — is read as a SAMPLED verdict, never a complete one. Every

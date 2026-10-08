@@ -2,8 +2,8 @@
 
 **This is not yet a complete drill-spec reference.** It documents exactly six
 things — the top-level `name` key, `source.point`, `restore.time_basis`,
-`sample.coverage` with its bound, the replay selection
-(`restore.window_start`, `restore.partitions`) and the `notifications` block —
+`sample.coverage` with its bound, the replay selection (a window start,
+`restore.point_in_time: "<start>/<end>"`) and the `notifications` block —
 because those are what Task 14, decision D3, FX-8, PROD-08.1 and PROD-11.1
 created and changed. Every other key of a drill spec is
 described today only by the commented example at
@@ -275,8 +275,8 @@ Optional. **How much of the restore phase 7 verifies.**
   topic is read, its sha256 checked against the manifest and its records
   decoded; the expected output is every archived record whose OWN timestamp
   is at or before the restore window's end (no lower bound: the window starts
-  at the archive, unless the plan states `restore.window_start`, which is then
-  the lower bound); every restored record is read back and compared with it by
+  at the archive, unless the plan states a window start,
+  `restore.point_in_time: "<start>/<end>"`, which is then the lower bound); every restored record is read back and compared with it by
   its `x-original-offset` — content with headers in order, exact counts,
   duplicates and order. The manifest's first/last-timestamp count bound is not
   consulted. The contract is
@@ -323,79 +323,85 @@ recorded" — never as complete.
 
 ---
 
-## `restore.window_start` and `restore.partitions` (PROD-11.1)
+## A window start: `restore.point_in_time: "<start>/<end>"` (PROD-11.1)
 
 ```yaml
 source:
-  topics: [orders, payments, audit]
+  topics: [orders, payments]          # a topic subset is just the topics named
 restore:
-  point_in_time: "2026-09-07T14:05:00Z"
-  window_start: "2026-09-07T13:00:00Z"   # optional: the window's INCLUSIVE start
-  partitions:                            # optional: per-topic partition subsets
-    orders: [0, 2]
-    payments: [1]
+  point_in_time: "2026-09-07T13:00:00Z/2026-09-07T14:05:00Z"   # <start>/<end>
 ```
 
-Optional, both. Absent, a restore is what it always was: every partition of
-every topic in `source.topics`, from the archive set's floor (its earliest
-covered timestamp; guard G-WIN) to the window's end. The contract is
+Optional. A `point_in_time` holding ONE instant is what it always was: every
+partition of every topic in `source.topics`, from the archive set's floor (its
+earliest covered timestamp; guard G-WIN) to that instant. The INTERVAL form,
+two RFC 3339 instants joined by `/`, also states the window's START. It is the
+only way to state one: a `restore.window_start` key is refused when the plan
+is parsed, naming the interval form. The contract is
 [`PROD-11.1-replay-selection.md`](../to-do/decisions/PROD-11.1-replay-selection.md).
 
-- **`window_start`** is INCLUSIVE, like the window's end: a record whose
-  timestamp equals it is restored. It is a time selection, so FX-8's
-  `restore.time_basis` rule applies to it as to `point_in_time`.
-- **`partitions`** names, per topic, the partitions to restore. A topic of
-  `source.topics` not named here restores every partition. The selected
-  partitions keep their numbers on the target; every partition not selected
-  stays empty, and phase 7 checks that it is.
+- **The start is INCLUSIVE**, like the end: a record whose timestamp equals it
+  is restored. It is a time selection, so FX-8's `restore.time_basis` rule
+  applies to it as to the end.
+- **Every partition** of every topic in `source.topics` is restored from the
+  start. A topic subset is the topics `source.topics` names.
+
+**`restore.partitions` (a partition subset) is REFUSED BY NAME**, exit 3 at
+phase 0 and `SelectionInvalid` in the restore preview, with the reason
+`PartitionSubsetsAwaitOwnerDecision`. It stays refused until the owner decides
+OD-9: how a subset-narrowed scorecard is versioned so that a verifier which
+predates it refuses it instead of reading it as a full restore. The engine
+support for subsets is in the tree and unreachable from a plan.
 
 **Refused, exit 3, before anything runs** — each names the value to fix, and
 none is ever answered by restoring something wider than the plan states:
 
 | what | when |
 |---|---|
-| a subset for a topic `source.topics` does not select; an empty subset; a repeated or negative partition | phase 0, before any broker or bucket is touched |
-| `window_start` at or after the window's end, or after `sample.window_end` | phase 0 |
-| `window_start` earlier than the archive set's floor — refused, **never moved to the floor** | as soon as the manifest is read, before any target topic is created |
-| a subset partition the archive does not list for its topic | the same |
-| a selection no archived segment of a selected partition overlaps (an empty restore is never a pass) | the same |
+| any `restore.partitions` | phase 0, before any broker or bucket is touched |
+| a start at or after the window's end, or after `sample.window_end` | phase 0 |
+| a start earlier than the archive set's floor — refused, **never moved to the floor** | as soon as the manifest is read, before any target topic is created |
+| a window no archived segment overlaps (an empty restore is never a pass) | the same |
+| a start under a standing rehearsal authorization (`plan_within_scope`): a standing scope restores every partition from the floor and admits no narrowing nobody approved | before the run, with the scope's other checks |
 
-**How it runs.** The pinned engine's `restore.source_partitions` filter applies
-to every topic of one engine run, so a plan whose topics carry different
-subsets is restored by one engine run per distinct subset (plus one for the
-topics without a subset). Each run has its own rendered document
-(`restore.run-<n>.yaml`), checkpoint and offset report; phase 5 checks every
-run's document against what the approved plan states.
+**A partition with no record in the window** — every record of it before the
+start — is signed `preflight-failed` (exit 2) at phase 5, naming it
+(`<topic>/<partition> empty: no records in the selected window for this
+partition`), before any target topic is created. That is phase 5's existing
+rule (the engine's header preflight reports the partition `empty`, which is
+never a positive pass), as for a partition with nothing before the window's
+end; a start makes it likelier. Choose a start every restored partition has a
+record after, or restore fewer topics.
 
-**What phase 7 judges.** Only the selection: samples come only from selected
-partitions, from the stated start; the count bound is the selected partitions'
-over `[window_start, end]`; and a complete verification computes its expected
-output only for the selected partitions, by each record's own timestamp. A
-record found in a partition the plan did not select fails the run.
+**What phase 7 judges.** Only the window: samples are drawn from the stated
+start, the count bound is every partition's over `[start, end]`, and a complete
+verification computes its expected output by each record's own timestamp in
+`[start, end]`.
 
-**What the scorecard says.** A restore with a selection signs it in
-`source.selection` (format 1.7.0, [the scorecard format](drill-scorecard.md)),
-and the existing fields name it too: `sample.window_start` is never earlier
-than the stated start, `sample.coverage_note` opens with the selection, and a
-complete verification's `window.start_ms` and `partitions[]` are the
-selection's.
+**What the scorecard says.** A restore with a stated start signs it in
+`source.selection` (`window_start_ms`, `window_end_ms`; format 1.7.0,
+[the scorecard format](drill-scorecard.md)), and the existing fields name it
+too: `sample.window_start` is never earlier than the start,
+`sample.coverage_note` opens with the selection, and a complete verification's
+`window.start_ms` is the start.
 
 **The restore preflight previews it** through the same selection function: its
-`archive.coverage` row reports `WindowStartBeforeCoverage`,
-`PartitionNotInBackupSet` or `SelectionEmpty`, its `archive.segments` row checks
-exactly the segments the selection reads, and `plan.parse` reports
-`SelectionInvalid` for a malformed one.
+`archive.coverage` row reports `WindowStartBeforeCoverage` or `SelectionEmpty`,
+its `archive.segments` row checks exactly the segments the window reads, and
+`plan.parse` reports `SelectionInvalid` for a start at or after the end or any
+partition subset.
 
-**It is inside `plan_hash`.** Both fields are omitted from the serialised plan
-when absent, so every plan without them — a `RehearsalSchedule` slot's
-included — is byte-identical to one written before they existed.
+**It is inside `plan_hash`.** A plan without a start serialises exactly as one
+written before PROD-11.1 — a `RehearsalSchedule` slot's included.
 
-**Absent field, old plans, old runners.** A plan without them restores the
-full selection, exactly as before. A runner built before PROD-11.1 IGNORES
-both keys (the grammar ignores unknown keys) and restores the full selection:
-wider than the plan states, into new topics only, and its scorecard carries no
-`source.selection` block, so it truthfully describes the full restore it did.
-Run such plans only on a runner that reports PROD-11.1 support (the decision
+**Old plans, old runners.** A plan without a start restores the full window,
+exactly as before. A runner built BEFORE PROD-11.1 reads `point_in_time` as a
+single instant, so it cannot parse the interval form: it refuses the plan
+(`drill spec does not parse`, exit 1) before it reaches a broker or bucket,
+creates nothing and signs nothing. It never restores from the floor what the
+plan said to restore from a start. That older runner IGNORES a
+`restore.partitions` key it does not know and restores every partition; no
+Logweir writer emits that key, and this release refuses it (the decision
 record's §6).
 
 ---

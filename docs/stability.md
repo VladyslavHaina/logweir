@@ -453,45 +453,49 @@ side:
   the 1.6.0 documents already written stay valid under both readers. Its
   `pass` over an early-stopped restore is the defect this section closes.
 
-### Scorecard format 1.7.0: `source.selection`, a narrowed restore's replay selection (PROD-11.1)
+### Scorecard format 1.7.0: `source.selection`, a restore from a stated window start (PROD-11.1)
 
-A plan may narrow a restore with an inclusive `restore.window_start` and
-per-topic `restore.partitions`
-([the plan fields](formats/drill-spec.md#restorewindow_start-and-restorepartitions-prod-111)).
+A plan may state an inclusive window START, written as the interval form of
+`restore.point_in_time`, `"<start>/<end>"`
+([the plan field](formats/drill-spec.md#a-window-start-restorepoint_in_time-startend-prod-111)).
 Guard G-WIN is amended, not removed: a start STATED in the approved plan is the
 plan's own (`InheritedFromSpec`), is never earlier than the archive set's floor
 (refused, never moved to it), is re-derived by phase 5 from the spec and the
 manifest, and is signed
 ([the decision record](to-do/decisions/PROD-11.1-replay-selection.md) §2).
 
-- **The signed block.** A narrowed restore's scorecard carries
-  `source.selection {window_start_ms?, window_end_ms, partitions[], engine_runs}`
-  and is format **1.7.0** (MINOR): arms SEL-1 to SEL-7 read only the block or
-  judge an existing field against it and can only refuse (OD-7 (a)). Every
-  other document is the one it was.
-- **Every verdict is the selection's.** Samples come only from selected
-  partitions and from the stated start; the count bound and the per-partition
-  presence check are the selected partitions' over the selection's window; a
-  record in a partition the plan did not select fails the run (a new cause for
-  the existing `fail-integrity`, only on a narrowed restore); a complete
-  verification expects records only from selected partitions.
-- **An older reader never reads a narrowed restore as a full one**, because the
-  existing fields name the selection: `sample.window_start` is never earlier
-  than the stated start, `sample.coverage_note` opens with `replay selection:`,
-  and a complete block's `window.start_ms` and `partitions[]` are the
-  selection's. A 1.21.0 or 1.22.0 `verify_scorecard.py` accepts a narrowed
-  1.7.0 document and prints `every selected record compared`; it prints no
-  selection line, and claims no full one.
-- **One engine run per distinct subset.** The engine's `source_partitions`
-  applies to every topic of a run, so topics with different subsets are
-  separate runs, each with its own document, checkpoint and offset report;
-  the uploaded offset report of such a restore is a JSON array of the runs'
-  reports in run order (`null` for a run that wrote none). A restore with one
-  run keeps the engine's own report object.
-- **A runner built before PROD-11.1 ignores both plan keys** and restores the
-  full selection — wider than the plan states, into new topics only — and its
-  scorecard, without the block, truthfully describes the full restore it did.
-  Plans with a selection need this release's runner.
+- **The signed block.** A restore from a stated start carries
+  `source.selection {window_start_ms, window_end_ms}` and is format **1.7.0**
+  (MINOR): arms SEL-1 to SEL-3 read only the block or judge an existing field
+  against it and can only refuse (OD-7 (a)). Every other document is the one
+  it was. Each version step keeps the newer minor, so a sampled restore from a
+  start is 1.7.0, never 1.6.0.
+- **Every verdict is the window's.** Samples are drawn from the stated start,
+  the count bound and the per-partition presence check are over
+  `[start, end]`, and a complete verification expects every archived record
+  whose own timestamp is in that window. Every partition of every restored
+  topic is restored: the block narrows the window, never the partitions.
+- **An older reader never reads it as a restore from the floor**, because the
+  existing fields name the start: `sample.window_start` is never earlier than
+  it, `sample.coverage_note` opens with `replay selection: … from epoch-ms S
+  (the plan's stated window start, inclusive) …`, and a complete block's
+  `window.start_ms` is it. What 1.21.0, 1.22.0 and main's `logweir drill
+  verify` print for a sampled and a complete document is quoted in
+  [`verify-a-scorecard.md`](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves);
+  this release's readers also print a `replay selection:` line and qualify a
+  sampled pass by the window.
+- **Partition subsets are refused** (`restore.partitions`,
+  `PartitionSubsetsAwaitOwnerDecision`, exit 3 before anything runs) until the
+  owner decides OD-9. A subset-narrowed document would be misread by every
+  reader before it (its unselected partitions read as restored), so it is a
+  MAJOR change under OD-7; the proposal is a 2.0.0 document written only when a
+  subset is stated.
+- **A runner built before PROD-11.1 refuses a plan stating a start**: it reads
+  `point_in_time` as one instant, so the interval form does not parse
+  (`drill spec does not parse`, exit 1), and it creates and signs nothing. It
+  never restores from the floor what the plan said to restore from a start.
+  That older runner ignores a `restore.partitions` key and restores every
+  partition; no Logweir writer emits that key, and this release refuses it.
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -1283,9 +1287,9 @@ offers `[from_ms + 1 ms, to_ms - 1 ms]` and defaults to its end (WIZARD-DEFAULT-
 while treating `point_in_time` as exclusive would silently drop the boundary record. Both
 documents' floors are the minimum segment start over the topics that document names, so a
 receipt's `covered.from_ms` and a restore's `time_window_start` agree for the same archive and the
-same topics — unless the plan states its own inclusive start, `restore.window_start` (PROD-11.1),
-which must be at or after that floor (a start before it is refused, never moved to it) and is
-signed in `source.selection`. Both rules apply to the records the engine reads: it selects segments by their first
+same topics — unless the plan states its own inclusive start, `restore.point_in_time:
+"<start>/<end>"` (PROD-11.1), which must be at or after that floor (a start before it is refused,
+never moved to it) and is signed in `source.selection`. Both rules apply to the records the engine reads: it selects segments by their first
 and last record timestamps, and a segment's start is its first record's timestamp, not its
 minimum, so with out-of-order timestamps a record at or before the point can sit in a segment that
 is never read, and a record older than every segment's first record is below every floor — see

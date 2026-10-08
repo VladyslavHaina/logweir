@@ -185,12 +185,9 @@ The current scorecard checks include:
   that defines it; it is never empty, names no blank topic, is sorted with no
   repeat, and never sits beside a complete verification
   ([the arms](formats/drill-scorecard.md#sampleunsampled_topics-format-160)).
-- A `source.selection` block (format 1.7.0) appears only under a version that
-  defines it; it narrows something (a start or a subset); its start is before
-  its end; its subsets name each topic once, in order, each with a non-empty,
-  ascending list of distinct partitions that are not negative; it records at
-  least one engine run; and a complete block beside it uses its window and
-  expects nothing from a partition it does not select
+- A `source.selection` block (format 1.7.0, a restore from a stated window
+  start) appears only under a version that defines it; its start is before its
+  end; and a complete block beside it uses its window
   ([the arms](formats/drill-scorecard.md#sourceselection-format-170)).
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
@@ -802,8 +799,7 @@ history is:
 | `1.20.0` | Knows backup-receipt and catalog-point format `1.3.0` (PROD-05.1). Adds the backup receipt's eight `topic_configuration` arms (12–19) and two `owner_detection` arms (20–21), their shape checks (the counts are `u32`, an entry's value a string or absent, `owner_detection` a list of strings) and the `topic_configuration` lines: per topic the recorded partition count, replication factor, entry counts by portability class and the apply route — never a configuration value. The route is the admin API only where `owner_detection` says the run looked for an owner; otherwise the line says the owner was not checked. Every document without the block is decided exactly as before. |
 | `1.21.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.4.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.4.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
 | `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line naming them; for every sampled `pass` it also prints a `sample coverage:` line saying whether the document's version proves FX-23's checks ran (only 1.6.0 or later does). Every document without the field is decided exactly as before. |
-
-| `1.23.0` | Knows scorecard format `1.7.0` (PROD-11.1). Adds `source.selection`'s seven arms (SEL-1 to SEL-7: only from 1.7.0; narrowing something; a start before the end; the subsets' one spelling; at least one engine run; a complete block over its window that expects nothing from an unselected partition), its shape check, and prints the `replay selection:` coverage line. Every document without the block is decided exactly as before. |
+| `1.23.0` | Knows scorecard format `1.7.0` (PROD-11.1). Adds `source.selection`'s three arms (SEL-1 to SEL-3: only from 1.7.0; a start before the end; a complete block over the block's window) and its shape check (an object with two integers), prints the `replay selection:` coverage line, and for a sampled `pass` over a selection prints the `sample coverage:` line QUALIFIED by the window (`a sampled pass over a replay selection from epoch-ms S to epoch-ms E: …`) instead of the unqualified 1.6.0 line. Every document without the block is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
@@ -811,13 +807,22 @@ reports `run_id`. Both refuse; this is not an acceptance disagreement.
 
 A verifier older than `1.23.0`, and a `logweir` built before PROD-11.1, accept a
 1.7.0 scorecard — the major is unchanged — ignore `source.selection` and print
-no `replay selection:` line. They never read the narrowed restore as a full
-one: its existing fields say what was restored (`sample.window_start` is never
-earlier than the stated start, `sample.coverage_note` opens with the selection,
-and a complete block's window and partitions are the selection's), and
-`logweir drill show` of any version prints the coverage note. Measured on a
-live narrowed scorecard with the 1.21.0 and 1.22.0 scripts: `VALID`, exit 0,
-`integrity coverage: every selected record compared: 6 expected …`.
+no `replay selection:` line. A 1.7.0 document is a restore from a stated
+window START over every partition (a partition subset is refused until the
+owner decides OD-9), and what they print about it is true: measured on the
+two live scorecards of a restore from epoch-ms 1760000000030 to
+1760000010000, `1.22.0` and main's `logweir drill verify` print, for the
+sampled one, `sample coverage: a sampled pass at format 1.6.0 or later: every
+mapped partition was held to its own count bound, …` (every partition was,
+over the restore window), and `1.21.0`, `1.22.0` and main's reader print, for
+the complete one, `integrity coverage: every selected record compared: 18
+expected, 18 restored, 18 matching, …`. None claims a restore from the
+archive's floor; the document's `sample.window_start` is the start,
+`sample.coverage_note` opens with it, and a complete block's
+`window.start_ms` is it. `1.23.0` adds the `replay selection:` line and says
+`a sampled pass over a replay selection from epoch-ms 1760000000030 to
+epoch-ms 1760000010000: …` instead of the unqualified line
+([the record](to-do/decisions/PROD-11.1-replay-selection.md) §5.4).
 
 A verifier older than `1.22.0`, and a `logweir` built before FX-23, accept a
 1.6.0 scorecard — the major is unchanged — ignore `sample.unsampled_topics`
