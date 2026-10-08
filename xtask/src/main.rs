@@ -121,6 +121,18 @@ const CHECKS: &[Check] = &[
             ("ConsumerGroupEntry", "AutoConsumerGroupSnapshotGroup"),
         ],
     },
+    // FX-23: the restore's offset-mapping report, two fields of each struct
+    // and no catch-all on purpose (`offset_report.rs`'s header): the fields
+    // upstream adds or keeps beyond them are notes, a field we read that
+    // upstream drops or retypes is DRIFT.
+    Check {
+        vendored: "offset_report.rs",
+        upstream: "crates/kafka-backup-core/src/manifest.rs",
+        items: &[
+            ("OffsetMappingReport", "OffsetMapping"),
+            ("OffsetMappingEntry", "OffsetMappingEntry"),
+        ],
+    },
 ];
 
 /// A vendored LIST, not a serde shape (FX-4): a `&str` array constant in a
