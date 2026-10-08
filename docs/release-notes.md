@@ -856,7 +856,9 @@ which had no header deadline either. Browsers, an ingress controller dialling
 an HTTP backend and kubelet probes all speak HTTP/1.1 to the console, and
 nothing Logweir ships spoke HTTP/2 to it. The deadline covers the request head
 only: a body a handler is reading and an answer a client has stopped reading
-have none ([api.md](api.md#conventions)).
+have none, and **that case is still open (FX-24b)**: until it lands, clients
+that send requests and stop reading the answers can hold all 256 connections
+and the console answers nobody ([api.md](api.md#conventions)).
 **Do:** nothing, unless an ingress controller was configured to dial the
 console's Service with HTTP/2 (an `h2c` or gRPC backend, never the chart's
 setting): return it to HTTP/1.1, or the console is unreachable through it

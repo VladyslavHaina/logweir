@@ -1406,7 +1406,10 @@ head larger than 32 KiB is refused. At most 256 connections are served at
 once, and further ones wait in the kernel's listen queue until one closes, so
 idle sockets cannot hold that ceiling for longer than the ten-second deadline.
 The clock covers the head only: a request body a handler is still reading, and
-an answer the client has stopped reading, have no deadline of their own.
+an answer the client has stopped reading, have no deadline of their own. **That
+case is open (FX-24b):** until it lands, clients that send requests and stop
+reading the answers can hold all 256 connections, and the console then answers
+nobody, exactly as silent sockets could before FX-24.
 HTTP/2 is not served: a client that opens with the HTTP/2 preface (prior
 knowledge, `h2c`) is closed at its first line. A shutdown signal gives open
 connections ten seconds to finish, then drops them and exits 0.
