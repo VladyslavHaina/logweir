@@ -1,0 +1,15 @@
+# The console beside an operator-pinned bootstrap image OLDER than PROD-16.1
+# (for example a mirror that has not caught up). With
+# identity.bootstrapFeatures.consoleKey off the chart passes the hook none of
+# the PROD-16.1 flags and renders no managed console key, no trust grant and no
+# fresh-install marker: approval stays what it was before PROD-16.1. chart_lint
+# holds this render as the feature-off negative control.
+identity:
+  bootstrapFeatures:
+    consoleKey: false
+api:
+  enabled: true
+  console:
+    enabled: true
+    mode: localAdmin
+    keySecret: logweir-console-keys

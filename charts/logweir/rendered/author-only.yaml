@@ -7559,6 +7559,8 @@ spec:
             - logweir-system
             - --public-configmap-name
             - logweir-signing-trust
+            - --revoke-trust-binding
+            - logweir-identity-trust
           resources:
             limits:
               memory: 128Mi
