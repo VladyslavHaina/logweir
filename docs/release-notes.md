@@ -265,30 +265,49 @@ retry, anything after the slot) is still withheld. The same set id now also
 survives in check details and remedies, where a scheduled set's segment key
 used to read `[redacted]`. When a set id or receipt key does come back
 redacted, the console says so in ONE reason naming the field and its cause
-(an older runner, or a set id chosen for `logweir backup run` that is not a UUID
-or a lower-case name under 40 characters), instead of the old "keeps a ULID
-run id" advice or "no usable backup set id".
+(an older runner, or a set id chosen for `logweir backup run` that is not a
+public form), instead of the old "keeps a ULID run id" advice or "no usable
+backup set id".
 
 What changes on the upgrade:
 
 - **A catalog's published view does not change until its next sync** with the
   new runner image. Until then its scheduled points stay "not offered", now
   with the reason above.
+- **The schedule page shows the catalog's verdict for scheduled runs.** It
+  joins a run to its catalog row on the set id, so every scheduled run there
+  read `not in the catalog` in both verdict columns while the catalog held it,
+  and a scheduled set the catalog marks not selectable kept its restore link.
+  After the re-sync the columns carry the catalog's own words, and such a set
+  reads "not restorable: the catalog marks this set not selectable" instead of
+  a link. A `ProtectionPolicy` that judges a scheduled run with no receipt
+  digest joins its catalog row the same way, on the set id.
 - **A set id chosen for `logweir backup run`** (`--backup-id-override`, or a
-  plan's `backup_id`) that is neither a UUID nor lower-case letters, digits,
-  `.`, `-`, `_` and `=` under 40 characters still has its receipt key withheld:
-  the run id already spends the key's one free component. Its points are listed
-  and not offered, and the row says why.
+  plan's `backup_id`) still has its receipt key withheld unless it is a public
+  form — for example a UUID, or lower-case letters, digits, `.`, `-`, `_` and
+  `=` under 40 characters: the run id already spends the key's one free
+  component. Its points are listed and not offered, and the row says why; a
+  retention pass keeps such a point as `protected: Unknown`, and a rehearsal
+  never selects one.
 - **A `RetentionPolicy` starts weighing scheduled sets one by one.** Every
   scheduled point used to share the set id `[redacted]` and the manifest key
-  `[redacted].json`, so retention treated them as ONE set: it kept them all
-  (`protected: SharedSegment`) while any one was retained, and refused its plan
-  as out of scope when all were due. No scheduled set was ever expired. After
-  the re-sync each scheduled set is its own set, so those outside `keepLast` /
-  `keepDays` become candidates, and an `Enforce` policy with
-  `requireApprovedPlan: false` deletes them at its next run. A catalog-point
-  readiness check (`Preflight`) compared a plan's set id and receipt key against
-  the redacted row and refused it; it now compares against the whole values.
+  `[redacted].json`, so retention treated them as ONE set and no scheduled set
+  was ever expired: while any one was retained, every scheduled candidate was
+  `protected: SharedSegment`; when all were due, the group was held back over
+  `maxDeletionsPerRun` (`truncatedByCap`) or, when it fit, its manifest key
+  under no set bound refused the WHOLE plan, UUID sets included. An active
+  `Restore` of a scheduled set did not protect its point either, because the
+  join never matched; the shared group hid that. After the re-sync each
+  scheduled set is its own set: those outside `keepLast` / `keepDays` become
+  candidates, an active `Restore` protects its own, and an `Enforce` policy
+  with `requireApprovedPlan: false` deletes the due ones at its next run. A
+  scheduled set and its retry (`…-r1`) are separate sets, and deleting one
+  never touches the other.
+- **A catalog-point readiness check (`Preflight`)** compared a plan's set id
+  and receipt key against the redacted row and refused it; it now compares
+  against the whole values. A rehearsal that drew a scheduled point bound
+  nothing redacted: a candidate whose only receipt key is the redactor's output
+  is not selected.
 
 **Do:** before the runner image rolls, read the plan preview of every
 `Enforce` `RetentionPolicy` with `requireApprovedPlan: false`, or set it to
@@ -298,24 +317,42 @@ value — rather than wait for its interval.
 **Scope:** `crates/logweir-core/tests/check_contract.rs` (the PoC's set ids
 kept bare and in receipt, manifest and segment keys; thirteen near misses
 withheld; F1's credential probes with the scheduled id as the anchor; the
-fixture `ui/tests/fixtures/set-ids.json` the console's rows read too),
-`crates/logweir/tests/check_cli.rs` (a real catalog sync publishes a scheduled
-point whole, and withholds a forged one), `crates/weirkeeper/tests/cadence.rs`
-(every set id the schedule controller mints survives), the console rows in
-`ui/tests/restore-catalog.spec.js` and `ui/tests/d3.spec.js`, and planted
+fixture `ui/tests/fixtures/set-ids.json`, edges included, that the console's
+rows read too), `crates/logweir/tests/check_cli.rs` (a real catalog sync
+publishes a scheduled point whole and withholds a forged one; the resume
+cursor survives), `crates/weirkeeper/tests/cadence.rs` (every set id the
+schedule controller mints survives), `retention_policy_controller.rs` (a
+redacted set is `Unknown` and refuses no plan; a scheduled set and its retry
+are weighed one by one), `rehearsal_controller.rs` (a redacted binding never
+qualifies), `crates/logweir-reaper/tests/reaper.rs` (deleting a scheduled set
+leaves its retry), the console rows in `ui/tests/restore-catalog.spec.js`,
+`ui/tests/schedules-detail.spec.js` and `ui/tests/d3.spec.js`, and planted
 mutants, each killed but one equivalent (FX-17). Live, on compose slot 3 with
 the console on the host: seven real backups (four scheduled set ids, one a
 retry) synced by this build's runner were all offered and each opened the
 restore wizard on its point; the same archive synced by the `v0.2.0-rc.1`
-runner image reproduced the PoC's "not offered" rows. Not yet proven on the
-PoC: the upgrade that carries FX-17 re-syncs its catalog.
+runner image reproduced the PoC's "not offered" rows. And a second archive of
+five real backups (scheduled `X`, `Y`, `X-r1`, `Z` and a manual run): the
+controller's retention evaluation over this build's view planned `X` and `Y`
+as two separate lines, over the rc.1 view kept every scheduled point
+`Unknown`, and the `logweir-retention` worker deleted `X` and `Y` and left every
+key of `X-r1`. Not yet proven on the PoC: the upgrade that carries FX-17
+re-syncs its catalog and checks the Catalog view and the nightly schedule's
+page.
 **Rollback:** an older runner withholds the scheduled set ids again at the
-catalog's next sync, and the view returns to "not offered" for those points.
-Nothing in the archive changes in either direction.
+catalog's next sync, the views return to "not offered" and `not in the catalog`
+for those points, and retention treats every scheduled set as one shared set
+again. Nothing in the archive changes on the rollback itself; sets an
+`Enforce` policy deleted in between stay deleted.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
+
+- **Before the runner image rolls, read the plan preview of every `Enforce`
+  `RetentionPolicy` with `requireApprovedPlan: false`**, or set it to `true`
+  until you have read its first plan after the re-sync below: scheduled sets
+  it never expired become candidates (item 31).
 
 - **Back up the console key too, once it exists** (item 29):
   `logweir-console-confirmation` and `logweir-console-trust`, beside the
@@ -326,6 +363,9 @@ In addition to the next entry's six, in its order:
   replaces its engine binary and its `LOGWEIR_ENGINE_VERSION` /
   `LOGWEIR_ENGINE_DIGEST`, and every spec that names an `http://` archive
   endpoint says `allow_http: true` (item 28).
+- **After the runner image rolls, set each `RecoveryCatalog`'s
+  `spec.syncRequest` to a new value** so its view is published again by the
+  new runner (item 31).
 
 ### Verification scope after `v0.2.0-rc.1`
 

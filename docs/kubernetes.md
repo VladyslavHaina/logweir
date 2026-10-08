@@ -2295,6 +2295,16 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
   worded covers it, so the value stays `NotEnforced` and the `Evaluated`
   message says which half is in force. It becomes `LogweirEnforced` on its
   own, with no code change, the day a view entry carries its keys.
+  A point whose set id names no single directory is never a candidate: an
+  empty id, one carrying `/`, and — since FX-17 — one the catalog published
+  as the redactor's output (`backupId` or `manifestKey` carrying
+  `[redacted]`; a long set id someone chose for `logweir backup run`) is
+  protected `Unknown`, so it neither shares a group with every other such
+  point nor makes the plan writer refuse the whole plan. A scheduled run's
+  set id (`<schedule uid>-<slot>[-r<k>]`) is published whole by a runner after
+  v0.2.0-rc.1, and a set and its retry are two directories: the bound
+  `<scope>/<backupId>/` ends in `/`, so removing one never enumerates the
+  other.
 * `legalHold` is `ProviderEnforcedUnverified` even in `Enforce`, because
   `object_store` 0.14 exposes no WORM readback. "Legal hold respected" means
   exactly *a provider refusal is authoritative, recorded, not retried, and
