@@ -581,6 +581,11 @@ services:
   # the resources it names. SCRAM-SHA-512 because it is the one SASL mechanism
   # Logweir speaks, so a `logweir backup run` or `restore run` can be the
   # restricted client itself.
+  # PROD-04.0d: PROD-04.0 §3.9's visibility state — groups the restricted
+  # principal cannot see, and a cluster ACL for another principal — is NOT
+  # part of this profile's setup, because that cluster ACL takes every
+  # cluster operation from `logweir`; `e2e/compose/groups.sh visibility
+  # apply` adds it and `remove` takes it away again (e2e/README.md).
   kafka-acl:
     image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     hostname: kafka-acl

@@ -6,7 +6,9 @@
 #   just e2e-up && e2e/compose/profile-smoke.sh && just e2e-down
 #
 # With no argument it smokes every profile in COMPOSE_PROFILES; name profiles
-# to smoke fewer. Every check prints PASS or FAIL with the evidence, and every
+# to smoke fewer. `groups` is not a profile: name it to smoke the groups
+# fixture (`e2e/compose/groups.sh`, PROD-04.0d), which it brings up itself and
+# leaves up. Every check prints PASS or FAIL with the evidence, and every
 # positive check has a NEGATIVE CONTROL beside it (a wrong password, a missing
 # client certificate, a wrong CA…) that must be refused — a listener that let
 # everything in would pass the positive half alone. Exit 1 if anything failed.
