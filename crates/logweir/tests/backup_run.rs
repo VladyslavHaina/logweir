@@ -589,18 +589,16 @@ fn backup_run_refuses_an_http_endpoint_without_allow_http() {
         "a refused plan must never reach the engine"
     );
 
-    // The control: plaintext stated explicitly is not this rule's business.
+    // The control: the same spec with plaintext stated explicitly passes
+    // every local guard and reaches the (unreachable) source cluster, which is
+    // exit 1, never a refusal.
     let f = fixture(
         &spec_yaml("mvp-demo", "[orders]", ""),
         &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
     );
-    match exec(&f.args, "run-1", &reader, &engine, &store, &store) {
-        Err(BackupError::Guard(refusal)) => assert!(
-            !refusal.0.contains("allow_http"),
-            "allow_http: true must not trip C15: {}",
-            refusal.0
-        ),
-        _ => {}
+    match exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err() {
+        BackupError::Kafka(_) => {}
+        other => panic!("allow_http: true must pass the C15 rule, got {other:?}"),
     }
 }
 
