@@ -191,7 +191,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-01.1a | Detect transactional archives; refuse by default, label an approved override | P1 | M2 | impl | 01.1, FX-6 | — | compose | A | Proposed |
 | 1 | PROD-01.1b | Make recovery-point selection safe for out-of-order timestamps | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
 | 1 | PROD-01.4a | Topic IDs through DescribeTopics (the first wrapper under OD-6's policy) | P1 | M2 | impl | 01.4 | OD-6 | compose | A | Proposed |
-| 1 | PROD-04.0a | Committed positions through the safe consumer API | P1 | M2 | impl | 04.0 | — | compose | A | Proposed |
+| 1 | PROD-04.0a | Committed positions through the safe consumer API | P1 | M2 | impl | 04.0 | — | compose | A | Done |
 | 1 | PROD-01.5a | Move the default broker line off 3.7.1 | P1 | M1 | infra | 01.5, 00.1 | — | compose | B | Proposed |
 | 1 | PROD-01.5c | Run PROD-01.1's and 01.4's suites on the 3.9, 4.1 and 4.3 lines | P1 | M2 | infra | 01.5 | — | compose | C | Proposed |
 | 3 | PROD-01.5b | Put the `crates/` e2e rows on the per-stack variables | P2 | M3 | infra | 01.5 | — | compose | B | Proposed |
@@ -644,6 +644,13 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Upstream reports proposed (not filed):** librdkafka T9 and T3; rust-rdkafka PR #785's missing wrappers and T13. Filing them publicly needs the owner's OK.
 - **Left for PROD-04.1's brief** (the reviewer's non-blocking LOWs): "no new third-party crate" wording at :135; §0's summary aligned with §5's missing-group rule; ten `examples/` targets that also lack `forbid(unsafe_code)`.
 - **Artifacts:** `claude/artifacts/prod-04-0/`.
+
+**Completion record — Done (2026-10-08), PROD-04.0a.**
+- **Ownership:** worker `prod-04-0a` (a run and a fix round), independent Tier-A review `claude/prod-04-0a.review.md`: ACCEPT-WITH-FIXES (MEDIUM: no test bounded a fetch's time; LOWs), fixed and read by the orchestrator. Merged as `901dcde1` (branch tip `a02b4184`). Gate: `scripts/ci-check.sh` rc 0 at `a02b4184`.
+- **Delivered:** `committed_positions(group, partitions, listing)` and `commit_positions(group, positions)` on `RdKafkaReader` (`crates/logweir-kafka`), through a private per-call handle that can never subscribe or join; RequireStable fetches; a commit from a non-member that the broker refuses while the group has members (`GroupActive`); every rdkafka code mapped as `decisions/PROD-04.0-admin-path.md` §4.3 says (`PositionsUnstable` per group, `NotVisibleOrUnreachable`, absence never offset 0, commits at leader epoch −1); bounded timeouts. No `unsafe`, no new crate; `forbid(unsafe_code)` intact. The third argument says whether the caller's listing shows the group; the review found a wrong value only swaps failure labels, never yields `Ok`.
+- **Finding recorded in the decision record (§13):** the safe route CAN name a group hidden from the principal (`NotVisibleToPrincipal` / `NotAuthorized`); AP-04.1-6 now uses the reviewer's wording.
+- **Evidence:** six e2e rows on compose (classic Empty, classic with a live member, consumer protocol, absent, unstable, invisible) pass at Kafka 4.3.1, 3.9.2 and 3.7.1 (the KIP-848 row only from 4.0); unit rows bound an unanswered fetch and commit in time. Mutants: 29 (first round) and 8 of 9 in the fix round; the survivor is a drain hardening that cannot be provoked. Not run live: a share-group refusal (it needs PROD-04.0d's fixture).
+- **Artifacts:** `claude/artifacts/prod-04-0a/`.
 - **Rows added:** PROD-04.0a–d. PROD-04.1 now also depends on 04.0a and 04.0d, and PROD-05.3 on 04.0b and 04.0d.
 
 ### PROD-04.1 — Archive consumer position evidence
