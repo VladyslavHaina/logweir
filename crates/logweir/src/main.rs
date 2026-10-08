@@ -32,12 +32,32 @@ fn main() -> std::process::ExitCode {
             public_configmap_name,
             external_secret_name,
             external_secret_key,
+            mark_fresh_install_confirm,
+            console_secret_name,
+            console_secret_key,
+            console_public_configmap_name,
+            installation_trust_policy,
+            allowed_target_cluster_ids,
         }) => logweir::identity::run(&logweir::identity::BootstrapArgs {
             namespace,
             secret_name,
             secret_key,
             public_configmap_name,
             external_secret: external_secret_name.zip(external_secret_key),
+            mark_fresh_install_confirm,
+            console: console_secret_name.zip(console_public_configmap_name).map(
+                |(secret_name, public_configmap_name)| logweir::identity::ConsoleKeyArgs {
+                    secret_name,
+                    secret_key: console_secret_key,
+                    public_configmap_name,
+                },
+            ),
+            installation_trust: installation_trust_policy.map(|policy_name| {
+                logweir::identity::InstallationTrustArgs {
+                    policy_name,
+                    allowed_target_cluster_ids,
+                }
+            }),
         }),
         cli::Command::Identity(cli::IdentityCmd::Distribute {
             source_namespace,

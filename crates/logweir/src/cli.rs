@@ -338,6 +338,38 @@ pub enum IdentityCmd {
         /// Key within --external-secret-name.
         #[arg(long, requires = "external_secret_name")]
         external_secret_key: Option<String>,
+        /// PROD-16.1: when this run GENERATES the installation identity (a
+        /// fresh install), record on it that unbound namespaces start in
+        /// one-person console confirmation (`confirm`). Never written on an
+        /// identity that already existed or was adopted.
+        #[arg(long)]
+        mark_fresh_install_confirm: bool,
+        /// PROD-16.1: retained Secret holding the console's
+        /// ConsoleConfirmation key, generated exactly once (Ed25519) or
+        /// adopted when it already holds a key. Absent: no console key is
+        /// managed.
+        #[arg(long, requires = "console_public_configmap_name")]
+        console_secret_name: Option<String>,
+        /// Key in --console-secret-name.
+        #[arg(long, default_value = "confirmation.key")]
+        console_secret_key: String,
+        /// Retained ConfigMap carrying the console key's public half.
+        #[arg(long, requires = "console_secret_name")]
+        console_public_configmap_name: Option<String>,
+        /// PROD-16.1: on a fresh install, create this cluster-scoped
+        /// `TrustPolicy` (`default: true`) trusting the installation signer
+        /// (EvidenceSigning) and the console key (ConsoleConfirmation) — once,
+        /// and never when another default policy or `TrustRoster/default`
+        /// already exists.
+        #[arg(long)]
+        installation_trust_policy: Option<String>,
+        /// A cluster id restores under the installation's TrustPolicy may
+        /// target (`allowedTargetClusterIds`). Repeatable.
+        #[arg(
+            long = "allowed-target-cluster-id",
+            requires = "installation_trust_policy"
+        )]
+        allowed_target_cluster_ids: Vec<String>,
     },
     /// Copy the already established installation signer into one explicitly
     /// authorized runner namespace. Refuses missing, incomplete, or different
