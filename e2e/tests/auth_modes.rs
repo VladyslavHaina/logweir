@@ -593,9 +593,13 @@ fn assert_refused(row: Row, m: &Material, needles: &[&str], why: &str) {
     assert!(!receipt.exists(), "{}: {why} wrote a receipt", row.label);
     assert_no_secret(row.label, "a refused run's output", &printed, m);
     eprintln!(
-        "[prod-01-3] {}: {why} refused with exit {:?}",
+        "[prod-01-3] {}: {why} refused with exit {:?}, naming {:?}",
         row.label,
-        out.status.code()
+        out.status.code(),
+        needles
+            .iter()
+            .filter(|n| printed.contains(*n))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -664,11 +668,18 @@ fn an_untrusted_client_certificate_is_refused() {
         client(MTLS, &m).cluster_id().is_err(),
         "a self-signed client certificate was accepted by a listener that requires the CA's"
     );
+    // THE BROKER'S REFUSAL OF THIS CERTIFICATE, and nothing a stopped broker
+    // or another TLS fault would also print (review F7): the TLS alert the
+    // broker sends when it rejects the client's certificate — `bad
+    // certificate` (alert 42) or, under TLS 1.3, `certificate required`
+    // (alert 116) / `unknown ca` (alert 48).
     let needles = [
-        "SSL handshake failed",
-        "certificate",
-        "Disconnected",
-        "Broker transport failure",
+        "alert bad certificate",
+        "SSL alert number 42",
+        "alert certificate required",
+        "SSL alert number 116",
+        "alert unknown ca",
+        "SSL alert number 48",
     ];
     assert_refused(MTLS, &m, &needles, "an untrusted client certificate");
     assert!(
