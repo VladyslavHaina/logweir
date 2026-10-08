@@ -27,24 +27,24 @@ fn decoded(secret: &Value, key: &str) -> String {
     .expect("utf-8")
 }
 
-/// FX-20: the binding a stored destination's Secrets must carry, computed the
-/// way the controller publishes it.
+/// FX-20: the binding a stored destination's Secrets must carry, computed by
+/// the CONTROLLER's own code — `status_for`, which publishes
+/// `status.credentialBinding` — so the value the API writes and the value the
+/// controller expects are compared across the two crates, not each against a
+/// copy of the formula.
 fn destination_binding(destination: &Value) -> String {
-    let spec: weirkeeper::crds::backup_destination::BackupDestinationSpec =
-        serde_json::from_value(destination["spec"].clone()).expect("a destination spec");
-    let location = logweir_core::destination::DestinationLocation {
-        provider: spec.storage.provider,
-        bucket: spec.storage.bucket.clone(),
-        prefix: spec.storage.prefix.clone(),
-        region: spec.storage.region.clone(),
-        endpoint: spec.storage.endpoint.clone(),
-        addressing: spec.storage.addressing,
-        transport: spec.transport.security,
-    };
-    logweir_core::credential_binding::destination_binding(
-        destination["metadata"]["uid"].as_str().expect("a UID"),
-        &location.archive_storage_url(),
-    )
+    let mut object = destination.clone();
+    object["apiVersion"] = json!("logweir.dev/v1alpha1");
+    object["kind"] = json!("BackupDestination");
+    let dest: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(object).expect("a BackupDestination");
+    let verdict = weirkeeper::destination::evaluate(
+        &dest,
+        &weirkeeper::destination::CaObservation::NotDeclared,
+    );
+    weirkeeper::controllers::backup_destination::status_for(&dest, &verdict, chrono::Utc::now())
+        .credential_binding
+        .expect("the controller publishes a binding for an object with a UID")
 }
 
 #[tokio::test]

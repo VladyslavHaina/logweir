@@ -133,6 +133,61 @@ pub const STORE_BINDING_PAIRS: [(&str, &str); 3] = [
     ),
 ];
 
+/// The value a Job builder backstop projects as the expectation of a
+/// credential it found projected WITHOUT one — never satisfied, so the runner
+/// refuses that credential rather than using it unchecked.
+pub const UNBOUND_MISSING_EXPECTATION: &str = "unbound:missing-expectation";
+
+/// Every credential variable a controller-built Job may project from a
+/// Secret, with its binding pair: `(credential, projected binding, expected
+/// binding)`. The Job builder's backstop reads this table: a credential
+/// projected with no expectation beside it gets
+/// [`UNBOUND_MISSING_EXPECTATION`], so a builder that forgets the pair fails
+/// CLOSED instead of reaching a runner as a "hand-run" credential nobody
+/// checks.
+pub const GUARDED_CREDENTIALS: [(&str, &str, &str); 8] = [
+    (
+        "LOGWEIR_SOURCE_PASSWORD",
+        crate::connection::SOURCE_CREDENTIAL_BINDING_ENV,
+        crate::connection::SOURCE_CREDENTIAL_BINDING_EXPECTED_ENV,
+    ),
+    (
+        "LOGWEIR_TARGET_PASSWORD",
+        crate::connection::TARGET_CREDENTIAL_BINDING_ENV,
+        crate::connection::TARGET_CREDENTIAL_BINDING_EXPECTED_ENV,
+    ),
+    (
+        "AWS_ACCESS_KEY_ID",
+        ARCHIVE_CREDENTIAL_BINDING_ENV,
+        ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV,
+    ),
+    (
+        "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID",
+        EVIDENCE_CREDENTIAL_BINDING_ENV,
+        EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV,
+    ),
+    (
+        "LOGWEIR_EVIDENCE_READ_AWS_ACCESS_KEY_ID",
+        EVIDENCE_READ_CREDENTIAL_BINDING_ENV,
+        EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV,
+    ),
+    (
+        "PAGERDUTY_ROUTING_KEY",
+        NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV,
+        NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV,
+    ),
+    (
+        "NOTIFY_WEBHOOK_URL",
+        NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV,
+        NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV,
+    ),
+    (
+        "NOTIFY_SLACK_WEBHOOK_URL",
+        NOTIFY_SLACK_CREDENTIAL_BINDING_ENV,
+        NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV,
+    ),
+];
+
 /// One binding: `v1:<subject>:sha256:<hex>` over a domain-separated canonical
 /// form. `subject` is the object UID, or `location` for an inline archive.
 fn binding(subject: &str, kind: &str, lines: &[(&str, &str)]) -> String {
