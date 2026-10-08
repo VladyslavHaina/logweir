@@ -24,7 +24,7 @@ under `docs/` and always run everything, since images copy them.
 |---|---|
 | `changes` | Classifies the diff as docs-only or not; `e2e` (and so `publish`) runs only when something outside `docs/` changed |
 | `check` | Runs [scripts/ci-check.sh](../scripts/ci-check.sh): formatting, Clippy, workspace tests, UI behavior, independent Python verification, dependency boundaries, licenses/advisories, generated schemas/CRDs/chart/install drift, documentation links and notices |
-| `e2e` | Runs the feature-gated integration suite against Docker Compose Kafka and MinIO, with the pinned engine and both evidence readers; retains Compose logs and tears down the stack |
+| `e2e` | Runs the feature-gated integration suite against Docker Compose Kafka and MinIO, with Logweir's build of the engine compiled from the vendored source (`scripts/engine-source.sh build`; OSO's pinned image seeds the archive) and both evidence readers; retains Compose logs and tears down the stack |
 | `publish` | On a successful push to `main` only, calls [images.yml](../.github/workflows/images.yml) to publish the tested image set |
 
 The Compose suite excludes the test that requires a local `docker-desktop`
@@ -39,7 +39,7 @@ just gate
 
 This invokes the same script as the CI `check` job. It requires Rust, just,
 Node 20+, Helm 4+, kubectl, cargo-deny, and Python with cryptography and pytest.
-It needs Docker to extract and verify the pinned engine, but no running broker or Kubernetes cluster. Dependency downloads
+It needs Docker to extract and verify the pinned engine, but no running broker or Kubernetes cluster. It also runs `cargo deny` over the engine's own lockfile, prepared with the patch folder (`third_party/kafka-backup-deny.toml`), and `scripts/check-cosign-verify.py`. Dependency downloads
 and advisory updates may use the network.
 
 For a shorter iteration use `just lint` or the relevant test target. The gate
@@ -64,10 +64,16 @@ shift, or `--target` is passed.
 
 ## Image publication
 
-The shared [image workflow](../.github/workflows/images.yml) builds the
-controller and UI on native amd64 and arm64 runners. The bundled Kafka engine
-supports amd64, so the runner image is amd64 only. The image checks exercise
-the binaries, required attribution and UI asset bytes before publication.
+The shared [image workflow](../.github/workflows/images.yml) builds all four
+images — runner, controller, console and UI — on native amd64 and arm64
+runners. The runner's engine is Logweir's build of the vendored source
+(PROD-00.2), so it exists for both. The image checks exercise the binaries,
+the engine's declared identity (`scripts/check-image.sh` check 8), required
+attribution and UI asset bytes before publication. After promotion the `sign`
+job signs every published index keylessly, attests the runner's SBOM and
+records SLSA provenance, then verifies them with the pins `docs/install.md`
+documents (`scripts/check-cosign-verify.py` holds every verification command
+to them).
 
 [scripts/ci-images.sh](../scripts/ci-images.sh) pushes candidate images, checks
 the registry digests, and promotes the complete successful set. Main builds

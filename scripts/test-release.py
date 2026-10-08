@@ -104,7 +104,7 @@ class Release(unittest.TestCase):
         for product in PRODUCTS:
             if product in skip:
                 continue
-            arches = (platforms or {}).get(product) or (("amd64",) if product == "logweir" else ("amd64", "arm64"))
+            arches = (platforms or {}).get(product) or ("amd64", "arm64")
             labels = {"org.opencontainers.image.revision": revision or commit}
             configs = {f"linux/{a}": {"os": "linux", "architecture": a, "config": {"Labels": labels}} for a in arches}
             # One platform: its configuration. Several: a manifest list's map.
@@ -248,7 +248,7 @@ class Resolve(Release):
             ref = f"docker.io/{NS}/{product}:sha-{self.head}"
             self.assertEqual(images["images"][product]["digest"], state[ref]["digest"])
             self.assertEqual(images["images"][product]["published_as"], ref)
-        self.assertEqual(images["images"]["logweir"]["platforms"], ["linux/amd64"])
+        self.assertEqual(images["images"]["logweir"]["platforms"], ["linux/amd64", "linux/arm64"])
         self.assertEqual(images["images"]["weirkeeper"]["platforms"], ["linux/amd64", "linux/arm64"])
 
     def test_a_docs_only_commit_ships_its_newest_published_ancestor(self):
@@ -286,9 +286,12 @@ class Resolve(Release):
         self.publish(self.head, platforms={"weirkeeper": ("amd64",)})
         _, result = self.resolve(self.head, success=False)
         self.assertIn("not linux/amd64,linux/arm64", result.stderr)
+        # PROD-00.2: a runner published for amd64 alone is no longer what main
+        # CI publishes either.
         self.registry.write_text("{}")
-        self.publish(self.head, platforms={"logweir": ("amd64", "arm64")})
-        self.resolve(self.head, success=False)
+        self.publish(self.head, platforms={"logweir": ("amd64",)})
+        _, result = self.resolve(self.head, success=False)
+        self.assertIn("not linux/amd64,linux/arm64", result.stderr)
 
     def test_a_read_that_cannot_tell_is_not_an_unpublished_commit(self):
         """Review M-1, swept: a failed read is never taken for "not published".

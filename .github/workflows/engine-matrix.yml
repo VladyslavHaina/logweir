@@ -43,6 +43,10 @@ jobs:
     env:
       AWS_EC2_METADATA_DISABLED: "true"
       KAFKA_VERSION: ${{ matrix.kafka }}
+      # The full drill runs the e2e suite exactly as ci.yml's e2e job does,
+      # PROD-01.3's `auth_modes` rows included, which need the `auth`
+      # profile's `kafka-auth` listeners.
+      COMPOSE_PROFILES: auth
     strategy:
       fail-fast: false
       matrix:
