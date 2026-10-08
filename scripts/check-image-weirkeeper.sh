@@ -350,8 +350,7 @@ fi
 # THE EXECUTION MODE — Task 23's four checks, plus Task 29's inventory file.
 # =========================================================================
 # NO `--platform` FLAG IN THIS MODE, and that is deliberate. `check-image.sh`
-# pins `linux/amd64` because the runner image is amd64-only (the engine binary
-# is). This image is built for whatever `LOGWEIR_IMAGE_PLATFORM` said —
+# reads the runner image's own platform back and names it. This image is built for whatever `LOGWEIR_IMAGE_PLATFORM` said —
 # `linux/arm64` by default on this host — so naming a platform here would either
 # be wrong on the developer machine or wrong on a CI runner. `docker run` with
 # no `--platform` runs the image's own. (`--no-exec` above does name one,

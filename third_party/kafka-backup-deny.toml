@@ -1,0 +1,53 @@
+# cargo-deny for the ENGINE's dependency graph (PROD-00.2, OD-3): Logweir
+# builds kafka-backup from the vendored source, so the engine's lockfile is
+# Logweir's to check, and engine CVEs are in SECURITY.md's scope.
+#
+# `scripts/ci-check.sh` prepares the source exactly as the image build does
+# (`scripts/engine-source.sh prepare`: the tarball, then the patch folder),
+# copies this file in as the prepared tree's `deny.toml`, and runs
+# `cargo deny --locked check licenses advisories sources bans` over it. Logweir's own graph
+# keeps the repository's `deny.toml`; the two are separate on purpose: the
+# engine is its own workspace, built from its own Cargo.lock, and the
+# workspace ban on `kafka-backup-core` (Global Constraint 2) would refuse the
+# engine's own crate.
+#
+# A finding here is fixed the OD-3 way, by a patch in
+# third_party/kafka-backup-patches/ (a lockfile bump is a patch like any
+# other), not by an ignore. An ignore needs a reason a reviewer can check and
+# the row that removes it.
+
+[graph]
+# The binary the images ship: the two Linux targets, default features
+# (`--bin kafka-backup`, no `gssapi`), and no dev-dependencies — the engine's
+# test-only crates (testcontainers, bollard) never reach the image.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+exclude-dev = true
+
+[licenses]
+# The same allow list as Logweir's own graph (deny.toml); the engine's graph
+# needs nothing beyond it.
+allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "CDLA-Permissive-2.0"]
+confidence-threshold = 0.9
+
+[sources]
+# Review M2: every crate comes from crates.io. A lockfile patch that moved one to
+# a git fork or another registry (the natural way to carry a kafka-protocol-rs
+# fix, C13) would be fetched outside crates.io's checksum chain, and RustSec
+# advisories, which key on the crates.io source, would stop matching it. Such a
+# source is refused unless it is recorded here as an exception, with its reason.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+ignore = [
+  # rustls-pemfile 2.2.0 is a direct dependency of kafka-backup-core and its
+  # repository is archived. It carries no vulnerability, and the fix is a
+  # source change (rustls-pki-types' PemObject), not a version: an upstream
+  # PR candidate (OD-3 rule 3), or a source patch if one is needed first.
+  # Proposed child row PROD-00.3p, decision record section 13.
+  { id = "RUSTSEC-2025-0134", reason = "unmaintained, not vulnerable; source change owed, PROD-00.3p" },
+]

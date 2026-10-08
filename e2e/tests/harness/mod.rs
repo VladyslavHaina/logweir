@@ -236,16 +236,36 @@ fn probe_engine_bin() -> PathBuf {
         let shim = root().join("e2e/fixtures/engine-docker.sh");
         assert!(shim.exists(), "{} is missing", shim.display());
         eprintln!(
-            "[e2e] engine route: DOCKER via {} — {} cannot exec on this host \
-             (upstream publishes linux/amd64 only)",
+            "[e2e] engine route: DOCKER via {} — {} cannot exec on this host; image {} \
+             under {}",
             shim.display(),
-            native.display()
+            native.display(),
+            std::env::var("LOGWEIR_E2E_ENGINE_IMAGE")
+                .unwrap_or_else(|_| "osodevops/kafka-backup@<pinned digest>".into()),
+            std::env::var("LOGWEIR_E2E_ENGINE_PLATFORM").unwrap_or_else(|_| "linux/amd64".into()),
         );
         shim
     }
 }
 
+/// The digest that names the engine that runs, recorded into every signed
+/// document a suite writes. Logweir's build (PROD-00.2) is named by its
+/// build-input digest, `ENGINE_DIGEST` in `third_party/kafka-backup-build.env`;
+/// OSO's released binary — the default shim, and every engine-matrix row that
+/// extracts one — by the image digest it came from. Which one is decided by
+/// what the engine PRINTS (`engine_version`), never assumed, so a row cannot
+/// record one engine's digest beside another's version.
 pub fn engine_digest() -> String {
+    if engine_version().contains("+logweir.") {
+        let build = std::fs::read_to_string(root().join("third_party/kafka-backup-build.env"))
+            .expect("third_party/kafka-backup-build.env");
+        return build
+            .lines()
+            .find_map(|l| l.strip_prefix("ENGINE_DIGEST="))
+            .expect("third_party/kafka-backup-build.env sets ENGINE_DIGEST")
+            .trim()
+            .to_string();
+    }
     std::fs::read_to_string(root().join("third_party/kafka-backup-binary.digest"))
         .expect("third_party/kafka-backup-binary.digest")
         .trim()

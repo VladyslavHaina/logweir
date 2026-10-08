@@ -9,6 +9,11 @@ Decision record for **PROD-01.1** ("Prove record and transaction behaviour") in 
 - **Addendum, 2026-10-07 (PROD-00.3f):** the pin moved to `kafka-backup` **0.23.3** and every live
   row here was re-run on it with the contract asserted (`CONTRACT_ENGINE`). **No contract change:**
   §11 records the runs. The rest of this record is as measured on 0.21.0.
+- **Addendum, 2026-10-08 (PROD-00.2):** the engine the images ship is Logweir's build of the same
+  0.23.3 source, `0.23.3+logweir.1`, and `CONTRACT_ENGINE` moved to it. Every live row here passed with
+  the contract asserted on that build, on linux/arm64 and linux/amd64. All nine outcome files compared
+  the same, in semantics, as OSO's 0.23.3 binary's in the same session. **No contract change**
+  (`PROD-00-engine-route.md` §13.5). OSO's 0.23.3 now records outcomes without asserting them.
 - Engine: `kafka-backup` v0.21.0, the pinned source `third_party/kafka-backup-v0.21.0.tar.gz`
   (sha256 `0252a83735148331c16d7c4e737a41f099c0f52eda5d7a66db75b8848ddc405b`) and the pinned image
   `osodevops/kafka-backup@sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`.

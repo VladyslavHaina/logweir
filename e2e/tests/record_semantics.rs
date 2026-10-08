@@ -24,7 +24,8 @@
 //!
 //! The expected divergence sets below are PROD-01.1's capability contract for
 //! the pinned engine, `CONTRACT_ENGINE` (`docs/to-do/decisions/PROD-01.1-record-semantics.md`;
-//! stated on 0.21.0, re-measured unchanged on 0.23.3 by PROD-00.3f): the
+//! stated on 0.21.0, re-measured unchanged on 0.23.3 by PROD-00.3f and on
+//! Logweir's build of it, `0.23.3+logweir.1`, by PROD-00.2): the
 //! known counterexamples, stated exactly. They are not desired behaviour.
 //! When the engine changes — READ_COMMITTED capture through PROD-00.3, say —
 //! the row goes red and the contract and this file change together.
@@ -448,13 +449,16 @@ fn kill_own_restores() {
 ///
 /// It is a LITERAL on purpose, and it moves with the pin only after the rows
 /// have been re-run on the new engine (A-3f-1): PROD-00.3f moved it from
-/// `0.21.0` to `0.23.3` with that run. `crates/logweir/tests/engine_pin.rs`
+/// `0.21.0` to `0.23.3` with that run, and PROD-00.2 to Logweir's build of the
+/// same source, `0.23.3+logweir.1`, which is the engine the images ship and
+/// CI's e2e job runs (OSO's 0.23.3 release now records outcomes like any other
+/// engine-matrix row). `crates/logweir/tests/engine_pin.rs`
 /// fails when it differs from the pin `doctor` accepts, so a bump cannot leave
 /// every contract row recording outcomes on the new engine while asserting
 /// nothing. That guard runs in CI's workspace job and never in this package:
 /// `engine-matrix` runs this package with each row's own engine, so nothing
 /// here may compare the engine with the pin.
-const CONTRACT_ENGINE: &str = "0.23.3";
+const CONTRACT_ENGINE: &str = "0.23.3+logweir.1";
 
 fn contract_applies(row: &str) -> bool {
     let v = engine_version();

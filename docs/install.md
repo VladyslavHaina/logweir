@@ -13,10 +13,15 @@ are GA at 1.29. The `ValidatingAdmissionPolicy` example is 1.30+ and ships
 commented out.
 
 **Minimum `kafka-backup` engine: 0.21.0.** That is the floor for the drill as
-shipped. The engine the images carry, and the one the pinned digest in
-[../third_party/kafka-backup-binary.digest](../third_party/kafka-backup-binary.digest)
-names, is **0.23.3** (since PROD-00.3f); a standalone CLI install needs that
-binary, because `logweir doctor` accepts exactly the pinned version. Engines
+shipped. The engine the images carry is **Logweir's build of OSO 0.23.3**,
+`kafka-backup 0.23.3+logweir.1` (PROD-00.2): the vendored OSO source plus
+Logweir's patch folder, built for linux/amd64 and linux/arm64
+([../third_party/kafka-backup-build.env](../third_party/kafka-backup-build.env)).
+A standalone CLI install needs that binary, because `logweir doctor` accepts
+exactly that version; copy it out of the runner image or build it with
+`scripts/engine-source.sh build`. OSO's own 0.23.3 binary, pinned by the digest
+in [../third_party/kafka-backup-binary.digest](../third_party/kafka-backup-binary.digest),
+is the one-release rollback ([Rolling the engine back](#rolling-the-engine-back)). Engines
 below the floor, such as `v0.19.1` (the default of `strimzi-backup-operator`
 v0.2.22–v0.2.25; its v0.3.x and v0.4.0 default to v0.22.0), are reported
 `unsupported (lever-absent)`, never as a fault.
@@ -50,15 +55,108 @@ Local BuildKit provenance can change the digest even on a cached rebuild.
 `kubectl apply` can succeed while a pod remains in `ImagePullBackOff`; verify
 Deployment readiness separately.
 
+All four images are published for **linux/amd64 and linux/arm64**: the
+runner joined the controller, console and UI on arm64 with PROD-00.2, when its
+engine became Logweir's build of the vendored source rather than OSO's
+amd64-only binary. An arm64 node pulls its own variant; nothing is emulated.
+
+#### Verify the images
+
+Publications from PROD-00.2 on are signed keylessly by CI: `images.yml`, run by
+`ci.yml`'s `publish` job on a push to `main`, signs each image index and every
+platform manifest in it with cosign, attests the runner's SBOM (SPDX, one per
+platform) to each platform's digest, and records SLSA build provenance with
+GitHub's attestation action. No private key exists. Verify a digest before you
+deploy it, with **every** pin below:
+
+```bash
+DIGEST=sha256:...           # the published index digest, e.g. the run's runner_digest
+PLATFORM_DIGEST=sha256:...  # one platform's manifest in it (docker buildx imagetools inspect)
+cosign verify \
+  --certificate-identity "https://github.com/VladyslavHaina/logweir/.github/workflows/images.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  --certificate-github-workflow-repository "VladyslavHaina/logweir" \
+  --certificate-github-workflow-ref "refs/heads/main" \
+  --certificate-github-workflow-trigger "push" \
+  "docker.io/vladyslavhaina/logweir@$DIGEST"
+
+# The runner's SBOM, for one platform's manifest digest:
+cosign verify-attestation --type spdxjson \
+  --certificate-identity "https://github.com/VladyslavHaina/logweir/.github/workflows/images.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  --certificate-github-workflow-repository "VladyslavHaina/logweir" \
+  --certificate-github-workflow-ref "refs/heads/main" \
+  --certificate-github-workflow-trigger "push" \
+  "docker.io/vladyslavhaina/logweir@$PLATFORM_DIGEST"
+
+# SLSA provenance:
+gh attestation verify "oci://docker.io/vladyslavhaina/logweir@$DIGEST" \
+  --cert-identity "https://github.com/VladyslavHaina/logweir/.github/workflows/images.yml@refs/heads/main" \
+  --repo VladyslavHaina/logweir \
+  --source-ref refs/heads/main \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  --deny-self-hosted-runners
+```
+
+Why every pin, and never `--certificate-identity-regexp`: `images.yml` is a
+reusable workflow, and the certificate's identity is the called file's ref
+whoever called it. The repository, ref and trigger pins name the run that
+called it — this repository's `main`, on a push — so a signature another
+repository's workflow made by calling `images.yml` does not verify. The flags
+are cosign's own (`cosign verify --help`; documented for `verify` and
+`verify-attestation` from cosign v2.0.0, and in v2.5.2, which CI uses).
+`gh attestation verify` takes the same exact identity (`--cert-identity`, not
+`--signer-workflow`, whose matching of a ref differs between gh releases) and
+refuses an attestation made on a self-hosted runner. Never give a flag twice:
+both tools keep the last value. `scripts/check-cosign-verify.py` refuses a
+verification command in this repository that drops a pin, repeats a flag or
+adds a switch that weakens the check (`--insecure-ignore-tlog`, `--key`, …). A version release (`release.yml`) gives main's
+publication its version tag without rebuilding, so a release's images carry
+these same main signatures. Publications before PROD-00.2 are unsigned.
+
+#### Rolling the engine back
+
+For one release, OSO's own released binary stays available as a rollback in
+case Logweir's build misbehaves. Build the runner with the build argument, for
+linux/amd64 only (OSO publishes nothing else), push it, and point the chart's
+`runnerImage` at it:
+
+```bash
+docker build --platform linux/amd64 --build-arg ENGINE_SOURCE=oso \
+  -t <registry>/logweir:<version>-oso .
+bash scripts/check-image.sh <registry>/logweir:<version>-oso   # check 8 names OSO's release
+docker push <registry>/logweir:<version>-oso
+helm upgrade logweir <chart> --reuse-values \
+  --set runnerImage=<registry>/logweir:<version>-oso@sha256:<pushed digest>
+```
+
+The rollback image declares OSO's identity in `/etc/logweir/engine-identity`
+(`version=0.23.3`, the digest of OSO's image), and that declaration is what
+every scorecard and receipt signs. The controller states no engine identity in
+a Job, and the runner asks the engine for its `--version` before it signs
+anything, refusing a version the binary does not print. `logweir doctor` in
+that image names OSO's release as the declared rollback. Its runner Jobs need
+amd64 nodes. To return, set `runnerImage` back to the published runner. The
+next release may drop the `ENGINE_SOURCE=oso` stage.
+
+**The rollback is this image, or the older controller and runner together —
+nothing else.** A runner image published before PROD-00.2 declares no engine,
+and this controller gives it none, so under this controller its runs are
+refused (exit 1, before the engine spawns, nothing signed) rather than
+mislabelled. Do not pair images across that line: roll the controller and the
+runner image together.
+
 ### (b) Local build — **author-only**
 
 ```bash
 just image && just image-weirkeeper
 ```
 
-The runner is `linux/amd64`. The controller recipe defaults to `linux/arm64`;
-on a native amd64 builder use `LOGWEIR_IMAGE_PLATFORM=linux/amd64 just image-weirkeeper`.
-The controller cannot be cross-compiled by the shipped Dockerfile. Images are
+Both recipes default to `linux/arm64`, this host's architecture; on a native
+amd64 builder set `LOGWEIR_IMAGE_PLATFORM=linux/amd64`. The runner's Dockerfile
+cross-compiles to either platform (`docker build --platform linux/amd64` on an
+arm64 host compiles natively and runs nothing heavier than `apt-get` under
+emulation); the controller cannot be cross-compiled by the shipped Dockerfile. Images are
 loaded into the local Docker store; the cluster must be able to use that store.
 
 The runner image carries **two** binaries. `logweir` is its entrypoint and is
@@ -82,7 +180,7 @@ kubectl --context docker-desktop -n logweir-system set env deployment/weirkeeper
 ```
 
 The overlay sets `imagePullPolicy: Never`. On kind, load both local tags into
-the nodes before using them. The amd64 runner requires compatible nodes.
+the nodes before using them. Build the runner for the nodes' architecture.
 
 Older controllers without the environment override need the exact compiled
 runner digest present under its shipped repository name. The historical step
@@ -153,10 +251,11 @@ helm upgrade --install logweir charts/logweir -n logweir-system \
 From a checkout the four image defaults are `:latest`; the published chart
 above is the way to install one commit's images by construction.
 
-That pinned runner, like every runner image, is amd64-only. On an arm64 node
+That pinned runner predates PROD-00.2 and is amd64-only: on an arm64 node
 without amd64 emulation the bootstrap hook fails with `exec format error` and
-writes no identity; schedule the hooks on amd64-capable nodes with
-`kubernetes.nodeSelector` (runner Jobs need such nodes anyway).
+writes no identity, so schedule the hooks on amd64-capable nodes with
+`kubernetes.nodeSelector` until the pin moves to a runner published since
+PROD-00.2, which carries linux/arm64 too.
 
 Development on Docker Desktop with locally built images uses the explicit
 local-image exception; it is not a user installation or publication claim:
@@ -216,9 +315,10 @@ does not run Helm hooks; when using it, provision an existing
 
 Build the controller and runner images, plus `logweir-ui` when enabling the
 UI, and publish them to a registry your nodes can pull from.
-Set `ACCOUNT` and `REGION` for this ECR example. The runner remains amd64;
-choose compatible runner nodes and build the controller natively for its nodes.
-For an amd64 controller, set `LOGWEIR_IMAGE_PLATFORM=linux/amd64` before its build.
+Set `ACCOUNT` and `REGION` for this ECR example. Build the runner for your
+nodes' architecture (`LOGWEIR_IMAGE_PLATFORM=linux/amd64` or `linux/arm64`) and
+the controller natively for its nodes; for an amd64 controller, set
+`LOGWEIR_IMAGE_PLATFORM=linux/amd64` before its build.
 
 ```bash
 aws ecr create-repository --repository-name logweir/weirkeeper   # once, per image

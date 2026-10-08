@@ -350,10 +350,11 @@ printf '{"allowed_cluster_ids":["SCRATCH-CLUSTER-NOT-THE-SOURCE"],"source_cluste
 
 # The engine ROUTE is probed, never assumed, and it is PRINTED — a demo that
 # quietly swapped its engine would be showing you a result about something
-# other than what it claims to run. Upstream publishes the image for
-# linux/amd64 only (permitted by global ruling GR6), so on the darwin/arm64
-# laptop this repository is developed on the extracted ELF cannot exec at all
-# and the same digest-pinned image is used under --platform linux/amd64.
+# other than what it claims to run. `.engine/kafka-backup` is a Linux ELF, so
+# on the darwin/arm64 laptop this repository is developed on it cannot exec at
+# all and the container shim runs the engine instead (OSO's digest-pinned image
+# under --platform linux/amd64 by default; the runner image's Logweir build
+# when LOGWEIR_E2E_ENGINE_IMAGE/LOGWEIR_E2E_ENGINE_PLATFORM name it).
 export LOGWEIR_E2E_ENGINE_MOUNT="$PWD/$OUT/tmp"
 mkdir -p "$LOGWEIR_E2E_ENGINE_MOUNT"
 if .engine/kafka-backup --version >/dev/null 2>&1; then
@@ -365,7 +366,12 @@ else
 fi
 LOGWEIR_ENGINE_VERSION=$("$LOGWEIR_ENGINE_BIN" --version)
 LOGWEIR_ENGINE_VERSION=${LOGWEIR_ENGINE_VERSION##* }
-LOGWEIR_ENGINE_DIGEST=$(tr -d '[:space:]' < third_party/kafka-backup-binary.digest)
+# Logweir's build is named by its build-input digest (PROD-00.2), OSO's
+# release by its image digest.
+case "$LOGWEIR_ENGINE_VERSION" in
+  *+logweir.*) LOGWEIR_ENGINE_DIGEST=$(sed -n 's/^ENGINE_DIGEST=//p' third_party/kafka-backup-build.env) ;;
+  *) LOGWEIR_ENGINE_DIGEST=$(tr -d '[:space:]' < third_party/kafka-backup-binary.digest) ;;
+esac
 export LOGWEIR_ENGINE_VERSION LOGWEIR_ENGINE_DIGEST
 export AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin AWS_REGION=us-east-1
 export TMPDIR="$LOGWEIR_E2E_ENGINE_MOUNT"
