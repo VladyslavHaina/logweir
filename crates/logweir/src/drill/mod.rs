@@ -3063,6 +3063,7 @@ fn execute_with_validated_approval(
     // creates them, with `TARGET_TOPIC_CONFIGS` on every one.
     phase0_admit::create_target_topics(
         creator,
+        reader,
         &admitted.topic_mapping,
         &facts,
         c.spec.target.default_replication_factor,

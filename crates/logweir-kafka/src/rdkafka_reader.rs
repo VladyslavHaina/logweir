@@ -4,8 +4,8 @@ use crate::positions::{
 };
 use crate::rdkafka_positions::GroupHandle;
 use crate::reader::{
-    empty_broker_config_answer, empty_topic_config_answer, AuthConfig, ClusterReader,
-    ConfigEntryObservation, ConfigSourceKind, ConsumedRecord, KafkaError, NewTopicSpec,
+    empty_broker_config_answer, empty_topic_config_answer, settle, AuthConfig, ClusterReader,
+    ConfigEntryObservation, ConfigSourceKind, ConsumedRecord, KafkaError, NewTopicSpec, Settling,
     TopicConfigRead, TopicCreator, TopicDeleter, TopicMeta, TopicVisibility,
 };
 use rdkafka::admin::AdminClient;
@@ -465,6 +465,35 @@ impl RdKafkaReader {
     }
 }
 
+/// **FX-18.** The broker and client codes a topic answers with while its
+/// creation is still propagating, and nothing else: `UnknownTopicOrPartition`
+/// (the answering broker's metadata does not hold it yet) and its two
+/// client-side spellings, `LeaderNotAvailable` (no leader elected yet) and
+/// `NotLeaderForPartition` (the listed leader has not yet become one —
+/// main CI run 37753000930's failure). An authorization failure, a timeout or a
+/// transport error is not on the list: waiting cannot change it.
+fn creation_in_progress(code: rdkafka::error::RDKafkaErrorCode) -> bool {
+    use rdkafka::error::RDKafkaErrorCode as Code;
+    matches!(
+        code,
+        Code::UnknownTopicOrPartition
+            | Code::UnknownTopic
+            | Code::UnknownPartition
+            | Code::LeaderNotAvailable
+            | Code::NotLeaderForPartition
+    )
+}
+
+/// [`Settling::NotYet`] for a code [`creation_in_progress`] names,
+/// [`Settling::Failed`] for any other, with the same error either way.
+fn settling_on<T>(code: rdkafka::error::RDKafkaErrorCode, error: KafkaError) -> Settling<T> {
+    if creation_in_progress(code) {
+        Settling::NotYet(error)
+    } else {
+        Settling::Failed(error)
+    }
+}
+
 impl ClusterReader for RdKafkaReader {
     fn cluster_id(&self) -> Result<String, KafkaError> {
         self.consumer.client().fetch_cluster_id(T).ok_or_else(|| {
@@ -560,6 +589,102 @@ impl ClusterReader for RdKafkaReader {
         }
         out.sort();
         Ok(out)
+    }
+
+    /// FX-18: metadata first (the topic, every partition, every leader), then
+    /// one ListOffsets per partition through the leader, which is the read
+    /// that failed in CI run 37753000930. One attempt is two kinds of request;
+    /// [`settle`] repeats it while the answers are those of a creation in
+    /// progress.
+    fn await_served(
+        &self,
+        topic: &str,
+        partitions: i32,
+        within: Duration,
+    ) -> Result<(), KafkaError> {
+        use rdkafka::error::{KafkaError as RdKafkaError, RDKafkaErrorCode as Code};
+        settle(within, || {
+            let md = match self.consumer.fetch_metadata(Some(topic), T) {
+                Ok(md) => md,
+                Err(e) => return Settling::Failed(KafkaError::Unreachable(e.to_string())),
+            };
+            let Some(t) = md.topics().first() else {
+                return Settling::NotYet(KafkaError::TopicNotFound(topic.to_string()));
+            };
+            if let Some(err) = t.error() {
+                let code = Code::from(err);
+                return settling_on(code, Self::classify_topic_error(topic, code));
+            }
+            let listed = t.partitions().len();
+            if i32::try_from(listed).ok() != Some(partitions) {
+                return Settling::NotYet(KafkaError::Client(format!(
+                    "{topic}: metadata lists {listed} partition(s); it was created with \
+                     {partitions}"
+                )));
+            }
+            for p in t.partitions() {
+                if let Some(err) = p.error() {
+                    let code = Code::from(err);
+                    return settling_on(
+                        code,
+                        KafkaError::Client(format!("{topic}/{}: metadata: {code}", p.id())),
+                    );
+                }
+                if p.leader() < 0 {
+                    return Settling::NotYet(KafkaError::Client(format!(
+                        "{topic}/{}: no leader yet",
+                        p.id()
+                    )));
+                }
+            }
+            for p in t.partitions() {
+                match self.consumer.fetch_watermarks(topic, p.id(), T) {
+                    Ok(_) => {}
+                    Err(RdKafkaError::MetadataFetch(code)) => {
+                        return settling_on(
+                            code,
+                            KafkaError::Client(format!("{topic}/{}: ListOffsets: {code}", p.id())),
+                        )
+                    }
+                    Err(e) => {
+                        return Settling::Failed(KafkaError::Client(format!(
+                            "{topic}/{}: ListOffsets: {e}",
+                            p.id()
+                        )))
+                    }
+                }
+            }
+            Settling::Done(())
+        })
+    }
+
+    /// FX-18: as the default, and ALSO waits out [`KafkaError::NotAuthorized`],
+    /// because here that error is T13's inference from an EMPTY DescribeConfigs
+    /// answer ([`empty_topic_config_answer`]), never a code the broker sent
+    /// (rdkafka 0.36.2 does not read the per-resource error). Kafka answers a
+    /// topic its metadata does not hold yet with exactly that empty list, and
+    /// the metadata read that names it a moment later finds the topic
+    /// "visible": PROD-00.3f's matrix row failed so
+    /// ("DescribeConfigs answered this visible topic with no configuration").
+    /// A principal that really lacks DescribeConfigs therefore costs `within`
+    /// before the same refusal is returned.
+    fn created_topic_configs(
+        &self,
+        topic: &str,
+        partitions: i32,
+        within: Duration,
+    ) -> Result<BTreeMap<String, String>, KafkaError> {
+        let started = std::time::Instant::now();
+        self.await_served(topic, partitions, within)?;
+        settle(within.saturating_sub(started.elapsed()), || {
+            match self.topic_configs(topic) {
+                Ok(configs) => Settling::Done(configs),
+                Err(e @ (KafkaError::TopicNotFound(_) | KafkaError::NotAuthorized(_))) => {
+                    Settling::NotYet(e)
+                }
+                Err(e) => Settling::Failed(e),
+            }
+        })
     }
 
     fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
@@ -1320,6 +1445,35 @@ mod tests {
         // variant alone.
         let reset = RdErr::MessageConsumption(Code::AutoOffsetReset);
         assert!(matches!(reset, RdErr::MessageConsumption(c) if c == Code::AutoOffsetReset));
+    }
+
+    /// **FX-18.** Exactly the answers of a creation in progress are waited
+    /// out by `await_served`; an authorization failure, a timeout and a
+    /// transport failure are not, because waiting cannot change them and a
+    /// wait on them would only delay the refusal by `CREATED_TOPIC_SETTLE`.
+    #[test]
+    fn only_the_answers_of_a_creation_in_progress_are_waited_out() {
+        use rdkafka::error::RDKafkaErrorCode as Code;
+        for code in [
+            Code::UnknownTopicOrPartition,
+            Code::UnknownTopic,
+            Code::UnknownPartition,
+            Code::LeaderNotAvailable,
+            Code::NotLeaderForPartition,
+        ] {
+            assert!(super::creation_in_progress(code), "{code:?} is propagation");
+        }
+        for code in [
+            Code::TopicAuthorizationFailed,
+            Code::ClusterAuthorizationFailed,
+            Code::OperationTimedOut,
+            Code::RequestTimedOut,
+            Code::BrokerTransportFailure,
+            Code::AllBrokersDown,
+            Code::InvalidTopic,
+        ] {
+            assert!(!super::creation_in_progress(code), "{code:?} is final");
+        }
     }
 
     #[test]
