@@ -4618,9 +4618,11 @@ the deadline as the cause. A named allowlist has no such floor.
 1. Resolves `spec.sourceRef` once with the saved-connection resolver and
    records the digest of that resolution. The digest covers the cluster's UID
    and its connection settings, and deliberately **not**
-   `KafkaCluster.status.clusterId` — that field is written by the probe and
-   cleared on any unreachable or unreadable pass, so pinning it would turn
-   ordinary probe churn during the discovery window into a refused run.
+   `KafkaCluster.status.clusterId` — that field is the probe's record of its
+   last successful look, rewritten by every reachable pass (the companion
+   `reachable` is cleared by every pass that cannot vouch for it), so pinning
+   it would turn ordinary probe churn during the discovery window into a
+   refused run.
 2. Creates `lwd-<backup uid>` — a `topicInventory` check Job, running
    `logweir check run --plan /check/check-plan.json --check-contract-version 1`
    as the runner ServiceAccount with **no** Kubernetes token, **no** signing key
@@ -5334,8 +5336,8 @@ in. See [install.md](install.md) for the runner namespace layout.
 Job. If two pods nevertheless claim it, at least one was minted by somebody who
 read the Job's UID, and the controller cannot tell which — so it reads **none**
 of them and writes the terminal state `PodOwnershipContested` (`exitCode`
-absent, phase `Failed`; for a `KafkaCluster` probe, `Reachable=Unknown` and
-`reachable` left unset). Picking the newest would be worse than picking at
+absent, phase `Failed`; for a `KafkaCluster` probe, `Reachable=Unknown`,
+`reachable` cleared and the Job replaced on the re-probe cadence). Picking the newest would be worse than picking at
 random: a planted pod is created after the genuine one by construction, so a
 newest-wins rule decides every contest in the planter's favour.
 `PodOwnershipContested` is deliberately **not** retryable — re-running the Job
@@ -5353,8 +5355,9 @@ finishes.
 
 **There is no fallback.** Zero claiming pods is "no pod yet" and takes the
 crashed-Job branch below — `exitCode` absent, phase `Failed`, reason
-`NoExitCode`, and for a probe `reachable` left untouched — which is also what
-happens when the pod was genuinely garbage-collected. A Job with no
+`NoExitCode`, and for a probe `reachable` cleared and the Job replaced on the
+re-probe cadence — which is also what happens when the pod was genuinely
+garbage-collected. A Job with no
 `metadata.uid` is not even listed for. Every candidate that was not read is
 logged once, with code `ForeignPodIgnored` and the namespace, the Job and the
 pod name; in the contested case **all** claimants are named, including the one
@@ -5381,6 +5384,17 @@ turns a lost run into a green badge.
 
 `status.exitCode` is **absent** in all four rows.
 
+**A probe whose Job crashed vouches for nothing, and is probed again**
+(PoC batch 1, O-1). For a `KafkaCluster` every row above writes
+`Reachable=Unknown`, **clears `status.reachable`** and keeps `clusterId` (the
+identity last observed) — so no earlier `reachable: true` survives beside
+`NoExitCode` to admit a `Restore` or a rehearsal — and then gives the finished
+Job the usual five-minute TTL, which is the re-probe timer: the pass after the
+TTL controller collects it creates a fresh probe Job. A `ProbeOutputUnreadable`
+verdict and a `NameTooLong` refusal clear `reachable` the same way. Before this
+build a crashed probe left `reachable` and the terminal Job in place, and the
+connection was never probed again.
+
 **A pod that was never created is not a crash** (FX-11). When the Job has no
 pod at all and the Job controller's `FailedCreate` event on it says why — a
 `ResourceQuota`, a `LimitRange`, an admission webhook or a missing
@@ -5388,7 +5402,8 @@ ServiceAccount — the reason is `PodCreationForbidden`, quoting that event,
 rather than `NoExitCode`: on a `Backup` and a `Restore` through the
 diagnostics' fail-fast (*The runner's requests and limits*, §12), and on a
 `KafkaCluster` probe as `Reachable=Unknown` / `PodCreationForbidden` with
-`reachable` and `observedAt` left alone and the usual TTL, so the next probe runs. With no such
+`reachable` cleared, `observedAt` left alone and the usual TTL, so the next
+probe runs. With no such
 event the rows above stand. An absent `EXIT` column with
 `PHASE=Failed` is therefore a real, distinct state and not a rendering gap.
 
@@ -5935,7 +5950,7 @@ The same holds for a pod refused because its ServiceAccount does not exist
 | A `TopicDiscovery` | `Failed` / `PodCreateRejected` once the Job has had no pod for 30 seconds, quoting the admission, and the Job is cancelled |
 | A `RecoveryCatalog` sync | `Synced` names `PodCreateRejected` once the Job has had no pod for 30 seconds and the Job is cancelled; the harvest that follows is `Synced=False` / `PodCreateRejected` with `lastSyncJob.refusalReason: PodCreateRejected`, and the published view is kept |
 | A dynamic `Backup`'s topic discovery | Once the discovery Job has had no pod for 30 seconds the Job is cancelled and the `Backup` ends `Failed` / `PodCreationForbidden` (also on `TopicsResolved`), quoting the admission; no runner Job is created |
-| A `KafkaCluster` probe | `Reachable=Unknown` / `PodCreationForbidden` (also in `status.reason`) once the Job has had no pod for 30 seconds, quoting the admission; the Job is cancelled, `reachable`, `clusterId` and `observedAt` keep their last values (a refused probe observed nothing, so an earlier reading ages and goes stale as usual), and the finished Job gets the usual five-minute TTL, so the next probe runs on the ordinary cadence and clears the reason once the namespace admits the pod |
+| A `KafkaCluster` probe | `Reachable=Unknown` / `PodCreationForbidden` (also in `status.reason`) once the Job has had no pod for 30 seconds, quoting the admission; the Job is cancelled, `reachable` is cleared, `clusterId` and `observedAt` keep their last values (a refused probe observed nothing, so the last look's record ages and goes stale as usual), and the finished Job gets the usual five-minute TTL, so the next probe runs on the ordinary cadence and clears the reason once the namespace admits the pod |
 | A `ProtectionPolicy` delivery | Once the delivery Job has had no pod for 30 seconds the Job is cancelled and the attempt is recorded `Failed`, `lastError` naming `PodCreationForbidden` and the admission, with `NotificationsDelivered=False` / `DeliveryFailed`; the ordinary backoff retries it, three attempts in all |
 | A `RetentionPolicy` enforcement run | Once the Job has had no pod for 30 seconds the Job is cancelled and `Enforced=False` / `PodCreationForbidden` quotes the admission, "nothing was deleted". The run is recorded when the cancelled Job has finished, about a second later, and its lease is held until then. It counts as a failed run, so three in a row turn `EnforcementDegraded=True` |
 

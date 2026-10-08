@@ -542,9 +542,11 @@ async fn a_probe_log_with_no_contract_lines_is_not_a_guess() {
          later compares that value against a target's: {}",
         statuses[0]
     );
-    assert!(
-        statuses[0].get("reachable").is_none(),
-        "`reachable` is ABSENT, not `false`: {}",
+    assert_eq!(
+        statuses[0].get("reachable"),
+        Some(&Value::Null),
+        "`reachable` is CLEARED (`null`), never `false`, and never left at an earlier value \
+         this probe cannot vouch for (PoC batch 1, O-1): {}",
         statuses[0]
     );
     assert_eq!(
@@ -724,9 +726,11 @@ async fn a_kafka_cluster_whose_name_is_too_long_is_refused_before_any_post() {
         statuses[0]["reason"].as_str(),
         Some(TERMINAL_STATE_NAME_TOO_LONG)
     );
-    assert!(
-        statuses[0].get("reachable").is_none(),
-        "and `reachable` is left alone: {}",
+    assert_eq!(
+        statuses[0].get("reachable"),
+        Some(&Value::Null),
+        "and `reachable` is CLEARED: a cluster this controller refuses to probe vouches for no \
+         earlier reading (PoC batch 1, O-1's class): {}",
         statuses[0]
     );
     let message = statuses[0]["conditions"][0]["message"]
@@ -1040,6 +1044,13 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
                 status: 200,
                 body: cluster_json(NAME, PLAINTEXT_AUTH, "{}"),
             },
+            // The TTL that replaces the Job on the re-probe cadence (O-1).
+            Route {
+                method: "PATCH",
+                path_suffix: "/jobs/logweir-probe-orders-prod",
+                status: 200,
+                body: job_body("Complete"),
+            },
         ];
         let (client, _rec, bodies) = mock_client_recording_bodies(routes);
         let outcome = reconcile_cluster(&cluster(), &client, now())
@@ -1062,8 +1073,10 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
         let statuses = patched_statuses(&seen);
         assert_eq!(statuses.len(), 1, "{label}: exactly one status patch");
         assert!(
-            statuses[0].get("reachable").is_none() && statuses[0].get("clusterId").is_none(),
-            "{label}: and neither field is written: {}",
+            statuses[0].get("reachable") == Some(&Value::Null)
+                && statuses[0].get("clusterId").is_none(),
+            "{label}: `reachable` is cleared — never set from an unowned pod — and no \
+             cluster id is written: {}",
             statuses[0]
         );
         assert_eq!(
@@ -1154,6 +1167,13 @@ async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
                 status: 200,
                 body: cluster_json(NAME, PLAINTEXT_AUTH, "{}"),
             },
+            // The TTL that replaces the Job on the re-probe cadence (O-1).
+            Route {
+                method: "PATCH",
+                path_suffix: "/jobs/logweir-probe-orders-prod",
+                status: 200,
+                body: job_body("Complete"),
+            },
         ];
         let (client, _rec, bodies) = mock_client_recording_bodies(routes);
         let outcome = reconcile_cluster(&cluster(), &client, now())
@@ -1176,8 +1196,10 @@ async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
         let statuses = patched_statuses(&seen);
         assert_eq!(statuses.len(), 1, "{label}: exactly one status patch");
         assert!(
-            statuses[0].get("reachable").is_none() && statuses[0].get("clusterId").is_none(),
-            "{label}: neither field is written: {}",
+            statuses[0].get("reachable") == Some(&Value::Null)
+                && statuses[0].get("clusterId").is_none(),
+            "{label}: `reachable` is cleared — never set from either claimant — and no cluster \
+             id is written: {}",
             statuses[0]
         );
         let condition = conditions_of(&statuses[0]).remove(0);
@@ -1193,10 +1215,37 @@ async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
     }
 }
 
-/// A probe Job that finished with no terminated `runner` container leaves
-/// `reachable` alone and names the sub-case.
+/// **PoC batch 1, O-1: a crashed probe CLEARS `reachable` and is REPLACED on the
+/// re-probe cadence.** A cluster that read `reachable: true`, whose probe Job
+/// then finished with no terminated `runner` container, used to keep that
+/// `true` beside `Reachable=Unknown/NoExitCode` — a merge patch that omits a key
+/// keeps it, and a `Restore` admits a target on it — and the terminal Job was
+/// re-read on every requeue and never replaced, so the connection was never
+/// probed again (all twelve PoC connections, for a week).
+///
+/// Now: the status writes `reachable: null` (cleared), keeps `clusterId` (the
+/// identity last observed) and names the sub-case; THEN the Job gets the usual
+/// TTL, which is the re-probe timer; and the pass after the TTL controller has
+/// collected it creates a fresh probe Job.
+///
+/// NEGATIVE CONTROLS: a probe that read `reachable=true` writes `true`
+/// (`kafka_cluster_reconcile_creates_a_probe_job_and_writes_status`), and a
+/// probe still running gets no TTL and keeps the last verdict
+/// (`a_running_probe_job_writes_only_that_a_probe_is_running`).
+///
+/// KILLS: `crashed_status_patch` without `"reachable": null`; the STEP 4 TTL
+/// dropped (the Job never replaced).
 #[tokio::test]
-async fn a_crashed_probe_job_leaves_reachable_alone() {
+async fn a_crashed_probe_job_clears_reachable_and_is_replaced() {
+    let was_reachable: KafkaCluster = serde_json::from_str(&cluster_json(
+        NAME,
+        PLAINTEXT_AUTH,
+        &format!(
+            r#"{{"reachable": true, "clusterId": "{CLUSTER_ID}",
+                "observedAt": "2026-09-03T12:00:00Z", "reason": "Reachable"}}"#
+        ),
+    ))
+    .expect("a reachable KafkaCluster");
     let routes = vec![
         Route {
             method: "GET",
@@ -1216,6 +1265,12 @@ async fn a_crashed_probe_job_leaves_reachable_alone() {
             status: 200,
             body: cluster_json(NAME, PLAINTEXT_AUTH, "{}"),
         },
+        Route {
+            method: "PATCH",
+            path_suffix: "/jobs/logweir-probe-orders-prod",
+            status: 200,
+            body: job_body("Failed"),
+        },
         // Present and unused: the log must NOT be read when there is no code.
         Route {
             method: "GET",
@@ -1225,7 +1280,7 @@ async fn a_crashed_probe_job_leaves_reachable_alone() {
         },
     ];
     let (client, _rec, bodies) = mock_client_recording_bodies(routes);
-    let outcome = reconcile_cluster(&cluster(), &client, now())
+    let outcome = reconcile_cluster(&was_reachable, &client, now())
         .await
         .expect("the reconcile completes");
     let seen = bodies.lock().expect("the recorder is readable").clone();
@@ -1245,15 +1300,59 @@ async fn a_crashed_probe_job_leaves_reachable_alone() {
         "the reason is one of the crate's own crash states: {:?}",
         conditions[0]
     );
-    assert!(
-        statuses[0].get("reachable").is_none() && statuses[0].get("clusterId").is_none(),
-        "and nothing about the cluster is written: {}",
+    assert_eq!(
+        statuses[0].get("reachable"),
+        Some(&Value::Null),
+        "`reachable` is CLEARED, not left at last week's `true`: {}",
         statuses[0]
     );
     assert!(
-        !outcome.ttl_patched,
-        "no TTL is patched on a path that wrote no verdict off a log"
+        statuses[0].get("clusterId").is_none(),
+        "`clusterId` is not written, so the identity last observed stays: {}",
+        statuses[0]
     );
+    let mut after = serde_json::to_value(was_reachable.status.as_ref().expect("a status"))
+        .expect("a status value");
+    apply_merge_patch(&mut after, &statuses[0]);
+    assert!(
+        after.get("reachable").is_none(),
+        "merged: no `reachable` at all"
+    );
+    assert_eq!(
+        after["clusterId"], CLUSTER_ID,
+        "merged: the id last observed"
+    );
+
+    assert!(outcome.ttl_patched, "the Job gets the re-probe TTL");
+    assert_eq!(outcome.requeue, Requeue::After(RE_PROBE_SECS));
+    let status_at = seen
+        .iter()
+        .position(|b| path(&b.uri).ends_with("/status"))
+        .expect("a status write");
+    let ttl = seen
+        .iter()
+        .position(|b| {
+            b.method == "PATCH" && path(&b.uri).ends_with("/jobs/logweir-probe-orders-prod")
+        })
+        .expect("a TTL patch");
+    assert!(status_at < ttl, "the status lands before the TTL");
+    assert!(seen[ttl].body.contains("ttlSecondsAfterFinished"));
+
+    // ---- once the TTL controller has collected the Job: a fresh probe ----
+    let (client, _rec, bodies) = mock_client_recording_bodies(creating_routes());
+    let outcome = reconcile_cluster(&after_status(&was_reachable, &statuses[0]), &client, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    assert!(outcome.created, "the connection is probed again");
+    assert_eq!(count(&seen, "POST", "/jobs"), 1);
+}
+
+/// The cluster as the API server holds it after `patch` merged onto it.
+fn after_status(cluster: &KafkaCluster, patch: &Value) -> KafkaCluster {
+    let mut value = serde_json::to_value(cluster).expect("a KafkaCluster value");
+    apply_merge_patch(&mut value["status"], patch);
+    serde_json::from_value(value).expect("a KafkaCluster")
 }
 
 /// A probe Job that exists and has not finished is a running status and nothing
@@ -2169,8 +2268,10 @@ async fn fx11_a_probe_pod_the_quota_refuses_names_the_quota_and_leaves_reachable
         "the admission's own words: {said}"
     );
     assert!(
-        status.get("reachable").is_none() && status.get("clusterId").is_none(),
-        "a probe that never ran observed nothing: {status}"
+        status.get("reachable") == Some(&serde_json::Value::Null)
+            && status.get("clusterId").is_none(),
+        "a probe that never ran observed nothing: `reachable` is cleared (O-1), `clusterId` \
+         not written: {status}"
     );
     let lists: Vec<String> = seen
         .iter()
@@ -2204,7 +2305,11 @@ async fn fx11_a_probe_pod_the_quota_refuses_names_the_quota_and_leaves_reachable
         status["reason"], "PodCreationForbidden",
         "not NoExitCode: {status}"
     );
-    assert!(status.get("reachable").is_none());
+    assert_eq!(
+        status.get("reachable"),
+        Some(&serde_json::Value::Null),
+        "cleared (O-1)"
+    );
     let patches = job_patches(&seen);
     assert_eq!(patches.len(), 1, "{seen:?}");
     assert_eq!(
@@ -2225,8 +2330,12 @@ async fn fx11_a_probe_pod_the_quota_refuses_names_the_quota_and_leaves_reachable
 }
 
 /// **FX-11 NEGATIVE CONTROL.** The same podless probe with no `FailedCreate`
-/// Event keeps the pre-FX-11 path: `ProbeRunning` and no cancel while it runs,
-/// `NoExitCode` and no TTL once it has failed.
+/// Event is not a refusal: `ProbeRunning` and no cancel while it runs,
+/// `NoExitCode` once it has failed.
+///
+/// THE SECOND HALF IS EXACTLY THE POC'S SHAPE (PoC batch 1, O-1): a finished
+/// probe Job with no pod and no Event, which the twelve PoC connections sat
+/// behind for a week. It now clears `reachable` and gets the re-probe TTL.
 #[tokio::test]
 async fn fx11_control_a_podless_probe_with_no_event_keeps_no_exit_code() {
     let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
@@ -2257,8 +2366,21 @@ async fn fx11_control_a_podless_probe_with_no_event_keeps_no_exit_code() {
         .expect("the reconcile completes");
     let seen = bodies.lock().expect("readable").clone();
     assert_eq!(outcome.reason.as_deref(), Some("NoExitCode"), "{seen:?}");
-    assert!(!outcome.ttl_patched);
-    assert!(job_patches(&seen).is_empty());
+    assert_eq!(
+        patched_statuses(&seen)[0].get("reachable"),
+        Some(&serde_json::Value::Null),
+        "O-1: cleared"
+    );
+    assert!(
+        outcome.ttl_patched,
+        "O-1: the Job is replaced on the re-probe cadence"
+    );
+    let patches = job_patches(&seen);
+    assert_eq!(patches.len(), 1, "the TTL and nothing else: {seen:?}");
+    assert_eq!(
+        patches[0]["spec"]["ttlSecondsAfterFinished"],
+        serde_json::json!(PROBE_TTL_SECONDS)
+    );
 }
 
 /// **FX-11, THE GRACE AND THE COST BOUND.** A podless probe Job 15 s old is
@@ -2300,7 +2422,8 @@ async fn fx11_a_young_or_counted_probe_job_costs_no_read() {
 
 /// **FX-11 review M1: A REFUSED PROBE NEVER REFRESHES `observedAt`.** The field
 /// is "when the probe above was performed", and the console's freshness budget
-/// (630 s) reads it. A cluster probed `reachable: true` last week, whose
+/// (630 s) reads it. (Since O-1 the refusal also clears `reachable`, so no
+/// stale `true` survives either way; `observedAt` stays the last real look.) A cluster probed `reachable: true` last week, whose
 /// namespace now refuses every probe pod, is re-probed every cadence; had each
 /// refusal written its instant there, last week's reading would show as fresh
 /// for as long as the quota stood. Both refused passes — the fail-fast one and
@@ -2352,7 +2475,15 @@ async fn fx11_a_refused_probe_never_refreshes_observed_at() {
             after["observedAt"], LAST_WEEK,
             "the last real observation's instant stays"
         );
-        assert_eq!(after["reachable"], true, "and so does its reading");
+        assert!(
+            after.get("reachable").is_none(),
+            "but `reachable` is CLEARED: the newest verdict is `Unknown` and vouches for no \
+             earlier reading (PoC batch 1, O-1)"
+        );
+        assert_eq!(
+            after["clusterId"], CLUSTER_ID,
+            "the identity last observed stays"
+        );
         assert_eq!(
             after["reason"], "PodCreationForbidden",
             "beside the newest reason"

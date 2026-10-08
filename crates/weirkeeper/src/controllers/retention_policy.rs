@@ -918,6 +918,15 @@ impl Pass<'_> {
             "enforcement": ENFORCEMENT_EXTERNAL,
             "guarantees": guarantees,
             "conditions": conditions,
+            // CLEARED, BESIDE `Evaluated=Unknown/NeverEvaluated` (O-1's class,
+            // swept by FX-11). A policy that was `Report` or `Enforce` before
+            // it declared a provider rule kept its last evaluation under a
+            // merge patch that omits the key: the console showed a plan
+            // preview this mode says it never makes, the API derived an
+            // approved-plan state from it, and a later switch back to
+            // `Enforce` re-used its `planExpiresAt` anchor. The next
+            // evaluation writes a fresh one.
+            "lastEvaluation": Value::Null,
         });
         self.adopt_generation(&mut status);
         self.patch_status(status).await?;

@@ -1021,12 +1021,25 @@ What changes on the upgrade:
   retried by a `BackupSchedule`'s `spec.retry`; `PodCreationForbidden` is
   not, exactly as for a `Backup` whose runner pod is refused. The next slot
   runs normally.
-- **A refused probe is re-probed.** Its finished Job now gets the usual
-  five-minute TTL, so the next probe runs on the ordinary cadence and the
-  reason clears once the namespace admits the pod. A refusal never writes
-  `observedAt`, so an earlier `reachable` reading still ages and shows as
-  stale in the console. Before, a podless probe Job
-  kept `NoExitCode` until someone deleted the Job.
+- **A probe that produced no verdict clears `reachable` and is probed again**
+  (PoC batch 1, O-1). A probe Job that crashed, lost its pod, was refused, or
+  printed no contract line used to leave an earlier `reachable: true` beside
+  `Reachable=Unknown`, and a crashed or refused one was never replaced, so the
+  connection was never probed again (all twelve PoC connections, for a week).
+  Now `reachable` is cleared (`clusterId` is kept, as the identity last
+  observed), the finished Job gets the usual five-minute TTL, and the next
+  probe runs on the ordinary cadence. A refusal never writes `observedAt`.
+  **A `Restore` or a rehearsal against a cluster whose newest probe could not
+  vouch for it is now refused `ClusterNotReachable`** where a stale `true`
+  used to admit it; the next successful probe, within about five and a half
+  minutes, admits it again. On the upgrade, every connection stuck behind a
+  terminal probe Job reads `reachable` cleared on its first pass and is
+  re-probed within one cadence.
+- **A `RetentionPolicy` that declares a provider rule clears an earlier
+  evaluation.** `mode: ExternalLifecycle` writes `Evaluated=Unknown`; a policy
+  that was `Report` or `Enforce` before kept its `lastEvaluation` beside it,
+  so the console showed a plan preview this mode never makes. It is now
+  cleared, and the next evaluation (in `Report` or `Enforce`) writes a fresh one.
 - **Retries stay bounded.** A refused delivery is a failed attempt, so it is
   retried by the ordinary backoff, three attempts in all. A refused retention
   run counts toward `EnforcementDegraded`, so three in a row stop scheduling.
@@ -1044,7 +1057,12 @@ kubectl --context <ctx> get events -A --field-selector reason=FailedCreate \
   -o custom-columns=NS:.metadata.namespace,JOB:.involvedObject.name,WHY:.message
 ```
 
-Give each namespace a `LimitRange` default, or room in its `ResourceQuota`,
+Before the upgrade, list the connections whose `reachable` rests on an
+earlier probe than their newest verdict: `kubectl --context <ctx> get
+kafkaclusters -A` and look for a `REACHABLE` value beside a reason other than
+`Reachable` or `ProbeReportedUnreachable`. Each one is cleared on the
+upgrade and re-probed; a `Restore` waiting to be admitted against it waits
+for that probe. Give each namespace a `LimitRange` default, or room in its `ResourceQuota`,
 for Jobs that state no resources. Add `PodCreationForbidden` wherever an alert
 rule or dashboard matches `NoExitCode`, `DiscoveryFailed` or `RunFailed` on
 these kinds. A schedule that relied on `spec.retry` to ride out quota
@@ -1053,8 +1071,8 @@ contention needs the quota fixed instead. **Scope:**
 `LimitRange` refusal, the Job cancelled), `recovery_catalog_controller.rs` (the
 running pass and the harvest of the cancelled Job), `backup_selection.rs` (the
 `Backup` ends `PodCreationForbidden` and creates no runner Job),
-`kafka_cluster_controller.rs` (`reachable` and `observedAt` untouched, the
-status before the TTL), `protection_controller.rs` (cancel, status, TTL, and the third attempt is
+`kafka_cluster_controller.rs` (`reachable` cleared, `observedAt` untouched,
+the status before the TTL, a crashed Job replaced), `protection_controller.rs` (cancel, status, TTL, and the third attempt is
 the last) and `retention_policy_controller.rs` (named at once, harvested with its lease released only after the cancelled Job has finished, counted, and degraded
 on the third). Each row has a negative control with no event, or another Job's,
 which keeps the path from before, and `check_framework.rs` pins both grace
@@ -1064,7 +1082,9 @@ Not yet proven live: the PoC upgrade that carries FX-11 runs its rows.
 refused pods wait out their Job's deadline as before. An object this build
 ended (a `TopicDiscovery`, a `Backup`) keeps its `PodCreateRejected` or
 `PodCreationForbidden`. A `KafkaCluster`, a delivery and a retention policy
-are rewritten by the older controller's next verdict. Nothing has to be
+are rewritten by the older controller's next verdict; an older controller
+leaves a crashed probe's Job in place again, and an ExternalLifecycle policy's
+cleared `lastEvaluation` stays absent until its next evaluation. Nothing has to be
 deleted, and the role is unchanged.
 
 ### Verification scope: what "verified" means in this release

@@ -6886,3 +6886,47 @@ async fn fx11_control_a_podless_run_with_no_event_keeps_the_old_path() {
         .unwrap_or_default()
         .contains("produced no exit code"));
 }
+
+/// **PoC batch 1 O-1's class, swept (FX-11): a policy that DECLARES a provider
+/// rule clears the evaluation it no longer vouches for.** `ExternalLifecycle`
+/// writes `Evaluated=Unknown/NeverEvaluated`; a policy that was `Report`
+/// before kept its `lastEvaluation` beside that under a merge patch, so the
+/// console showed a plan preview this mode never makes and the approved-plan
+/// state was derived from it. The declaration now writes `lastEvaluation:
+/// null`.
+///
+/// NEGATIVE CONTROL: a `Report` evaluation writes `lastEvaluation`
+/// (`report_mode_*` rows); here the same key is present and null.
+///
+/// KILLS: `declare_external` without the `lastEvaluation` null.
+#[tokio::test]
+async fn external_lifecycle_clears_an_earlier_evaluation() {
+    let routes = vec![
+        route("GET", "/retentionpolicies", policy_list(vec![])),
+        route(
+            "PATCH",
+            "/retentionpolicies/primary/status",
+            policy_value(json!({}), json!({})).to_string(),
+        ),
+    ];
+    let f = fixture(routes);
+    let earlier = json!({
+        "observedGeneration": 3,
+        "lastEvaluation": {
+            "at": "2026-09-16T04:00:00Z",
+            "pointsEvaluated": 6,
+            "candidateCount": 4,
+            "planSha256": format!("sha256:{}", "a".repeat(64))
+        }
+    });
+    let outcome = run(&f, &policy(external(90), earlier)).await;
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Declared);
+    let patches = f.status_patches();
+    let last = patches.last().expect("a status write");
+    assert_eq!(
+        last["status"].get("lastEvaluation"),
+        Some(&Value::Null),
+        "the declaration clears the evaluation beside Evaluated=Unknown: {last}"
+    );
+    assert_eq!(f.condition(ctrl::CONDITION_EVALUATED)["status"], "Unknown");
+}
