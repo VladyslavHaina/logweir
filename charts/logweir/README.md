@@ -18,7 +18,13 @@ images (including the UI image when enabled). The only things you must supply ar
    the last one to a reviewed runner digest (see *Runtime tags and the
    privileged bootstrap digest*); override all three together only for your own
    registry (*Bring your own registry* in
-   [`docs/install.md`](../../docs/install.md));
+   [`docs/install.md`](../../docs/install.md)). `controllerImage` and
+   `runnerImage` come from ONE publication: since PROD-00.2 the runner image
+   states its own engine and the controller states none, so a runner published
+   before PROD-00.2 under a newer controller has its runs refused rather than
+   mislabelled. The only engine rollback is the `ENGINE_SOURCE=oso` runner
+   image or the older controller and runner together (*Rolling the engine
+   back* in `docs/install.md`);
 2. **an archive** — `archive.url` and, for anything S3-compatible,
    `archive.s3.endpoint` and `archive.s3.region`; or `minio.enabled: true` to
    get one in the cluster;

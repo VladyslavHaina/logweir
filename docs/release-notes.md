@@ -570,17 +570,25 @@ own `0.23.3` is named as OSO's release and passes only as the declared
 rollback. The first patch is a lockfile-only bump of three dependencies the
 engine's new `cargo deny` gate found in its shipped graph: rustls 0.23.45
 (RUSTSEC-2026-0285), h2 0.4.19 (RUSTSEC-2026-0258) and spin 0.9.9 (0.9.8 was
-yanked). Engine vulnerabilities are now in `SECURITY.md`'s scope. The image
-declares its engine in `/etc/logweir/engine-identity`, and every scorecard and
-receipt signs that declaration ahead of a Job's `LOGWEIR_ENGINE_VERSION`/
-`LOGWEIR_ENGINE_DIGEST`: new documents say `engine.version: 0.23.3+logweir.1`
-and an `engine.digest` that is Logweir's build-input digest
-(`third_party/kafka-backup-build.env`), not an image digest. From the first
+yanked). Engine vulnerabilities are now in `SECURITY.md`'s scope, and the
+engine's `cargo deny` also refuses any crate from outside crates.io. One
+version names one build: a change to a patch or the tarball bumps `<n>` and is
+appended to `third_party/kafka-backup-builds.txt`, and a reused version is
+refused. The image declares its engine in `/etc/logweir/engine-identity`, and
+every scorecard and receipt signs that declaration: new documents say
+`engine.version: 0.23.3+logweir.1` and an `engine.digest` that is Logweir's
+build-input digest (`third_party/kafka-backup-build.env`), not an image
+digest. **The controller no longer puts `LOGWEIR_ENGINE_VERSION`/
+`LOGWEIR_ENGINE_DIGEST` in any Job**, and a drill or backup asks its engine
+for `--version` before it signs anything and refuses a version the binary
+does not print. From the first
 `main` publication after the merge, CI signs all four images keylessly,
 attests the runner's SBOM and records SLSA provenance.
-**Do:** roll the controller and the runner image together, as before (the
-controller stamps the new identity into every Job; an image that declares its
-engine is signed under its own declaration either way). Verify a digest before
+**Do:** roll the controller and the runner image together, as before.
+**Never pair this controller with a runner image published before this
+change:** that image declares no engine, the controller now gives it none, and
+its runs are refused (exit 1, before the engine spawns, nothing signed)
+instead of signing an engine that did not run. Verify a digest before
 deploying it with the pinned commands in [install.md](install.md#verify-the-images),
 never with an identity regular expression. A standalone CLI install replaces
 its engine with Logweir's build (copy it out of the runner image, or

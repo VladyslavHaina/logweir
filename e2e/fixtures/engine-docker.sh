@@ -13,8 +13,10 @@
 # host) and linux/amd64 — which is how the from-source engine runs the same
 # suites as OSO's binary (docs/to-do/decisions/PROD-00-engine-route.md §13).
 # One of the two without the other is refused: an image run under a platform
-# it was not chosen for is a different engine from the one named. On darwin/arm64 — the machine this repo is developed on — exec'ing it
-# fails with ENOEXEC (`logweir doctor` reports exit 126). On a linux/amd64 CI
+# it was not chosen for is a different engine from the one named.
+#
+# On darwin/arm64 — the machine this repo is developed on — exec'ing the
+# extracted ELF fails with ENOEXEC (`logweir doctor` reports exit 126). On a linux/amd64 CI
 # runner the native binary runs directly and this script is never used;
 # `e2e/tests/harness/mod.rs::engine_bin` probes `--version` (permitted by
 # global ruling GR8: `--version` prints a string and acts on no cluster or
