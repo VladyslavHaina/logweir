@@ -1081,11 +1081,11 @@ a contract constant or a plan field and never from prose this page invented:
   (`Restore.status.completion.newTopics[].partitions`, from the target diff),
   and no field of a `Backup` or of its projection carries the archive
   manifest's. PLAT-15.1's catalog is where that would come from;
-* the **sampled verification scope**, from the plan's `sample` block, closing
-  with the clause D3 section 3.5 makes non-optional -- *a sampled check, not an
-  exhaustive comparison*. No restore the console starts compares every record
-  (complete coverage, PROD-08.1, is a plan field the wizard does not offer
-  yet);
+* the **verification scope**, from the plan's `sample` block: by default the
+  sampled check, closing with the clause D3 section 3.5 makes non-optional --
+  *a sampled check, not an exhaustive comparison*; when the operator ticks the
+  closed *Advanced: verify every record* choice beside it, complete coverage
+  with its cost stated (PROD-08.1a, *Complete coverage* below);
 * the **consumer cutover limitation**, byte for byte from `render.js`'s
   `COMPLETION_GUIDANCE` and `TARGET_MODE_MEANING` -- the same fixed sentences
   the completion panel shows afterwards;
@@ -2818,10 +2818,12 @@ compromise-revoked key whose evidence a controller had already observed. It is
 **never green**, and it is not silent either: the observation is real and it is
 not a substitute for a signature this installation still accepts.
 
-**Every restore result carries its scope sentence.** A record check is a
-SAMPLE: the counts are labelled exactly, the last clause says "this is a sampled
-check, not an exhaustive comparison", and the word `complete` is not a level
-this version has -- no function in `render.js` can spell it.
+**Every restore result carries its scope sentence.** A sampled record check's
+counts are labelled exactly, and the last clause says "this is a sampled check,
+not an exhaustive comparison". `complete` is still not a LEVEL (how records were
+compared); it is rendered only for a run whose SIGNED scorecard recorded
+`coverage: complete` (PROD-08.1a), and then always with whether it covered --
+`covered: false` is never a pass.
 
 ## What the four D3 surfaces refuse to say
 
