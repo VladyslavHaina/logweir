@@ -782,6 +782,8 @@ pub struct PlanInputs<'a> {
 ///   substitution.
 /// * `restore.point_in_time` = `to_ms - 1 ms`, because the restore window's end
 ///   is inclusive and the archive's `to_ms` is not.
+/// * `restore.time_basis` = `spec.point.timeBasis` (FX-8), absent when the
+///   schedule states none. Inside `templateDigest`, so a human signed it.
 /// * `sample.window_start` = `from_ms`, `sample.window_end` = `to_ms - 1 ms`,
 ///   `sample.anchor` = `head` — the only anchor phase 7 implements
 ///   (`spec::Anchor`'s own doc comment says why `tail` and `random` are refused).
@@ -839,12 +841,18 @@ pub fn render_plan(inputs: &PlanInputs<'_>) -> DrillSpec {
         },
         restore: RestoreSpecBlock {
             point_in_time: Some(point_in_time),
-            // FX-8: a schedule has no field that states a time basis, so a
-            // slot's plan never accepts a selection by producer time, and the
-            // runner refuses a slot whose topics are recorded as
-            // `LogAppendTime` (`PointInTimeByProducerTime`). Absent, the bytes
-            // are what they were before FX-8.
-            time_basis: None,
+            // FX-8 (review M-1): the schedule's `spec.point.timeBasis`, and
+            // nothing else. It is inside `templateDigest`, so the standing
+            // authorization signed it. Absent, the slot's plan accepts no
+            // selection by producer time — the runner refuses a slot whose
+            // topics are recorded as `LogAppendTime`
+            // (`PointInTimeByProducerTime`) — and the bytes are what they were
+            // before FX-8.
+            time_basis: spec.point.time_basis.map(|t| match t {
+                crate::crds::rehearsal_schedule::RehearsalTimeBasis::ProducerTime => {
+                    logweir_core::spec::TimeBasis::ProducerTime
+                }
+            }),
         },
         objectives: ObjectivesSpec {
             rto_seconds: spec
