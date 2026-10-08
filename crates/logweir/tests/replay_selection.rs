@@ -292,7 +292,7 @@ fn phase5_refuses_a_rendered_start_that_is_not_the_approved_one() {
     assert_eq!(
         guard_message(&r.unwrap_err()),
         format!(
-            "rendered time_window_start {FLOOR_MS} is not the approved restore.window_start \
+            "rendered time_window_start {FLOOR_MS} is not the approved window start \
              {START_MS} (the archive floor is {FLOOR_MS}); a Restore's window starts at the \
              archive's floor or at the start its approved plan states, and nowhere else"
         )

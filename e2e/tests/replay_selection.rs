@@ -829,7 +829,11 @@ fn a_topic_subset_from_a_start_is_restored_and_signed_under_both_coverages() {
         );
         assert_eq!((rust_rc, py_rc), (0, 0), "{label}: {rust_out}\n{py_out}");
         let lines = selection_lines(&rust_out);
-        assert_eq!(lines, selection_lines(&py_out), "{label}: the readers differ");
+        assert_eq!(
+            lines,
+            selection_lines(&py_out),
+            "{label}: the readers differ"
+        );
         let selection_line = format!(
             "replay selection: every partition of every restored topic, from epoch-ms {start} \
              (the plan's stated window start, inclusive) to epoch-ms {end} (inclusive); no record \
@@ -1182,7 +1186,11 @@ fn an_older_runner_refuses_a_plan_stating_a_start() {
     let (r, target, _) = run("start", &start);
     let both = format!("{}\n{}", r.stdout, r.stderr);
     assert_eq!(r.exit, Some(1), "{}", r.summary());
-    assert!(both.contains("drill spec does not parse"), "{}", r.summary());
+    assert!(
+        both.contains("drill spec does not parse"),
+        "{}",
+        r.summary()
+    );
     assert!(r.scorecard.is_null(), "the older runner signed a scorecard");
     assert!(
         !topic_exists(&target),

@@ -135,8 +135,8 @@ impl std::fmt::Display for SelectionRefusal {
                 end_field,
             } => write!(
                 f,
-                "this plan's restore.window_start is epoch-ms {start_ms}, at or after its \
-                 {end_field} of epoch-ms {end_ms}, so the restore window [{start_ms}, {end_ms}] \
+                "this plan's window start (restore.point_in_time's \"<start>\") is epoch-ms {start_ms}, at \
+                 or after its {end_field} of epoch-ms {end_ms}, so the restore window [{start_ms}, {end_ms}] \
                  holds no instant after its start and would restore at most one instant; a \
                  window start must be EARLIER than the window's end"
             ),
@@ -149,8 +149,8 @@ impl std::fmt::Display for SelectionRefusal {
             ),
             Self::StartBeforeCoverage { start_ms, floor_ms } => write!(
                 f,
-                "this plan's restore.window_start is epoch-ms {start_ms}, before the archive \
-                 set's earliest covered timestamp of epoch-ms {floor_ms}: the archive does not \
+                "this plan's window start (restore.point_in_time's \"<start>\") is epoch-ms {start_ms}, \
+                 before the archive set's earliest covered timestamp of epoch-ms {floor_ms}: the archive does not \
                  cover the start of the requested window. Refused rather than moved to the \
                  archive's floor, which would restore a window nobody approved; state a start \
                  at or after epoch-ms {floor_ms}, or pick a recovery point that covers it"
@@ -165,8 +165,8 @@ impl std::fmt::Display for SelectionRefusal {
                 sample_end_ms,
             } => write!(
                 f,
-                "this plan's restore.window_start is epoch-ms {start_ms}, after its \
-                 sample.window_end of epoch-ms {sample_end_ms}: the drill's sample window would \
+                "this plan's window start (restore.point_in_time's \"<start>\") is epoch-ms {start_ms}, \
+                 after its sample.window_end of epoch-ms {sample_end_ms}: the drill's sample window would \
                  hold no restored record. Move the sample window into the restore window"
             ),
             Self::EmptySelection { start_ms, end_ms } => write!(

@@ -896,8 +896,8 @@ fn print_report(r: &VerifyReport) {
         &r.format_version,
         r.selection.as_ref(),
     )
-        .into_iter()
-        .chain(unsampled_lines(r.unsampled_topics.as_deref()))
+    .into_iter()
+    .chain(unsampled_lines(r.unsampled_topics.as_deref()))
     {
         println!("coverage:  {line}");
     }

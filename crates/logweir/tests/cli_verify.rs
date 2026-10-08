@@ -989,3 +989,55 @@ fn a_sampled_pass_says_what_it_proves_at_its_version() {
     complete.coverage = COVERAGE_COMPLETE.into();
     assert!(sampled_pass_lines(Outcome::Pass, Some(&complete), "1.6.0").is_empty());
 }
+
+/// **PROD-11.1 review H1.** A sampled `pass` over a document carrying
+/// `source.selection` says what it proves over THAT window, never the
+/// unqualified 1.6.0 line; a complete pass or a non-pass over a selection
+/// prints nothing, and a document without the block keeps the 1.6.0 line.
+/// KILLS: printing the unqualified line for a narrowed document; dropping the
+/// window from the line; printing a line for a complete pass.
+#[test]
+fn a_sampled_pass_over_a_selection_says_so() {
+    use logweir::verify::sampled_pass_lines_over;
+    use logweir_core::outcome::Outcome;
+    use logweir_core::scorecard::*;
+    let sampled = Verification {
+        coverage: COVERAGE_SAMPLED.into(),
+        comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
+        header_order: HEADER_ORDER_NOT_VERIFIED.into(),
+        application: APPLICATION_NOT_ATTEMPTED.into(),
+        gaps: vec![],
+        pruned: vec![],
+        complete: None,
+    };
+    let window = SelectionLabel {
+        window_start_ms: 1_760_000_010_000,
+        window_end_ms: 1_760_000_015_000,
+    };
+    assert_eq!(
+        sampled_pass_lines_over(Outcome::Pass, Some(&sampled), "1.7.0", Some(&window)),
+        vec![
+            "sample coverage: a sampled pass over a replay selection from epoch-ms 1760000010000 \
+             to epoch-ms 1760000015000: every mapped partition was held to its own count bound \
+             over that window, max_partitions reached every topic before a second partition of \
+             any, and a readable engine report lacking a partition with records in that window \
+             was refused; no record before the start was restored or expected"
+                .to_string()
+        ]
+    );
+    let unqualified = sampled_pass_lines_over(Outcome::Pass, Some(&sampled), "1.7.0", None);
+    assert_eq!(unqualified.len(), 1);
+    assert!(
+        unqualified[0].starts_with("sample coverage: a sampled pass at format 1.6.0 or later"),
+        "{unqualified:?}"
+    );
+    assert!(
+        sampled_pass_lines_over(Outcome::FailIntegrity, Some(&sampled), "1.7.0", Some(&window))
+            .is_empty()
+    );
+    let mut complete = sampled.clone();
+    complete.coverage = COVERAGE_COMPLETE.into();
+    assert!(
+        sampled_pass_lines_over(Outcome::Pass, Some(&complete), "1.7.0", Some(&window)).is_empty()
+    );
+}

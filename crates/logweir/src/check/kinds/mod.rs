@@ -372,9 +372,10 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              earlier point, or take a newer backup."
         }
         CheckCode::SelectionInvalid => {
-            "The plan's restore.window_start or restore.partitions is malformed: a subset for a \
-             topic it does not select, an empty or repeated partition list, or a start at or \
-             after the window's end. Fix the selection in the draft."
+            "The plan's replay selection is refused: a partition subset (restore.partitions), which \
+             is not accepted until the owner decides how its scorecard is versioned, or a window \
+             start (restore.point_in_time \"<start>/<end>\") at or after the window's end. \
+             Fix the selection in the draft."
         }
         CheckCode::WindowStartBeforeCoverage => {
             "The requested window start is older than anything this backup set covers. It is \

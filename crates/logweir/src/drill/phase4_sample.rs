@@ -111,7 +111,7 @@ pub fn run_selected(
         Some(start_ms) if start_ms > spec.window_start.timestamp_millis() => {
             DateTime::<Utc>::from_timestamp_millis(start_ms).ok_or_else(|| {
                 DrillError::Operational(format!(
-                    "restore.window_start epoch-ms {start_ms} is outside the representable range"
+                    "the window start epoch-ms {start_ms} is outside the representable range"
                 ))
             })?
         }

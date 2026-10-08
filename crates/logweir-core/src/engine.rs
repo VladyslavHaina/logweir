@@ -391,7 +391,7 @@ pub enum EngineReport {
 /// **`InheritedFromSpec` is PROD-11.1's.** It was constructed nowhere in tag
 /// 1 (plan erratum E7). Since guard G-WIN's recorded amendment
 /// (`docs/to-do/decisions/PROD-11.1-replay-selection.md` §2) it is what a plan
-/// says when its spec states `restore.window_start`: plan construction binds
+/// says when its spec states window start (`restore.point_in_time: "<start>/<end>"`): plan construction binds
 /// that instant and refuses it before the archive's floor, phase 5 re-derives
 /// the same instant from the SPEC and the manifest (never from this claim) and
 /// checks the rendered integer against it, and the complete lane selects its

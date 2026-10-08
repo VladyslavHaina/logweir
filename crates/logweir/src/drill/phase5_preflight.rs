@@ -75,7 +75,7 @@ pub fn check_rendered_window_floor(
 /// phase 5 reads it: never from the plan, whose claim it checks.
 #[derive(Debug, Clone, Default)]
 pub struct StatedSelection {
-    /// `restore.window_start`, epoch milliseconds.
+    /// window start (`restore.point_in_time: "<start>/<end>"`), epoch milliseconds.
     pub window_start_ms: Option<i64>,
     /// `restore.partitions`, as stated.
     pub partitions: std::collections::BTreeMap<String, Vec<i32>>,
@@ -99,7 +99,7 @@ impl StatedSelection {
 /// refuses, exit 3, unless:
 ///
 /// 1. its `time_window_start` is the instant re-derived from the SPEC and the
-///    manifest: the stated `restore.window_start` when there is one — refused
+///    manifest: the stated window start (`restore.point_in_time: "<start>/<end>"`) when there is one — refused
 ///    outright when it is earlier than the archive's floor — else the floor;
 /// 2. its `source_partitions` is the spec's subset of every topic it names
 ///    (absent exactly when those topics have none), and its
@@ -207,7 +207,7 @@ pub fn check_rendered_selection(
             Some(start_ms) if rendered != start_ms => {
                 return Err(DrillError::Guard(GuardRefusal(format!(
                     "rendered time_window_start {rendered} is not the approved \
-                     restore.window_start {start_ms} (the archive floor is {floor}); a Restore's \
+                     window start {start_ms} (the archive floor is {floor}); a Restore's \
                      window starts at the archive's floor or at the start its approved plan \
                      states, and nowhere else"
                 ))));

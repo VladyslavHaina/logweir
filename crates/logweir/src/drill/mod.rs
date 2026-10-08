@@ -3067,7 +3067,7 @@ fn execute_with_validated_approval(
         // which is a different failure at a later point (see the function's
         // own doc comment).
         // PROD-11.1: and the rendered selection of EVERY engine run, against
-        // what the approved spec states (`restore.window_start`,
+        // what the approved spec states (window start (`restore.point_in_time: "<start>/<end>"`),
         // `restore.partitions`) — re-derived, never read off the plan.
         phase5_preflight::check_rendered_selection(
             &plan,
@@ -3643,7 +3643,7 @@ pub fn build_plan(
     // same topics (plan erratum E7(b)). Phase 5 re-derives it from the same
     // field of the plan built here.
     let named_topics: BTreeSet<&str> = mapping.keys().map(String::as_str).collect();
-    // PROD-11.1: a stated `restore.window_start` is resolved by the shared
+    // PROD-11.1: a stated window start (`restore.point_in_time: "<start>/<end>"`) is resolved by the shared
     // selection function, which refuses it before the floor (never moves it
     // there) and reports the claim the plan makes about it. A plan that states
     // none takes the archive's floor below, exactly as before.
@@ -3675,7 +3675,7 @@ pub fn build_plan(
         Some(r) if r.start_source == WindowFloorSource::InheritedFromSpec => (
             chrono::DateTime::from_timestamp_millis(r.start_ms).ok_or_else(|| {
                 DrillError::Guard(GuardRefusal(format!(
-                    "this plan's restore.window_start of epoch-ms {} is outside the \
+                    "this plan's window start of epoch-ms {} is outside the \
                      representable date range",
                     r.start_ms
                 )))
