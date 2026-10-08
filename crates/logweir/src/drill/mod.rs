@@ -1755,18 +1755,14 @@ fn context(
         (
             Store::from_url_with(&spec.evidence, &evidence_options)
                 .map_err(|e| DrillError::Operational(e.to_string()))?,
-            Store::read_only_with(&spec.source.storage, &archive_options)
-                .map_err(|e| DrillError::Operational(e.to_string()))?,
-            Store::read_only_with(&spec.source.storage, &archive_options)
-                .map_err(|e| DrillError::Operational(e.to_string()))?,
+            archive_read_handle(&spec.source.storage, Some(&archive_options))?,
+            archive_read_handle(&spec.source.storage, Some(&archive_options))?,
         )
     } else {
         (
             Store::from_url(&spec.evidence).map_err(|e| DrillError::Operational(e.to_string()))?,
-            Store::read_only_from_url(&spec.source.storage)
-                .map_err(|e| DrillError::Operational(e.to_string()))?,
-            Store::read_only_from_url(&spec.source.storage)
-                .map_err(|e| DrillError::Operational(e.to_string()))?,
+            archive_read_handle(&spec.source.storage, None)?,
+            archive_read_handle(&spec.source.storage, None)?,
         )
     };
 
@@ -1819,6 +1815,30 @@ fn context(
         // FX-16: the set that record describes; `None` when nothing is bound.
         bound_set,
     })
+}
+
+/// A READ-ONLY handle over the plan's archive, built the ONE way this run
+/// builds every archive handle: under the store contract with the options the
+/// controller named (`archive_options`: the named credential, the projected
+/// CA, no `AWS_*` relocation), otherwise with the legacy constructor.
+///
+/// **FX-16 class sweep.** The point binding used to build its own handle with
+/// `Store::read_only_from_url` whatever the contract said, so on a
+/// destination-backed run the receipt, its signature and the manifest the
+/// binding verified (and FX-7's pin, judged by version) were read through a
+/// client that ignored the archive's CA and could be relocated by a stray
+/// `AWS_ENDPOINT_URL`, while the engine and phase 7 read through this one. Two
+/// clients can answer for two archives; one constructor cannot.
+/// `tests::every_archive_handle_is_built_by_one_constructor` pins it.
+fn archive_read_handle(
+    storage: &logweir_core::engine::StorageUrl,
+    contract_options: Option<&logweir_engine_oso::storage::StoreOptions>,
+) -> Result<Store, DrillError> {
+    match contract_options {
+        Some(options) => Store::read_only_with(storage, options),
+        None => Store::read_only_from_url(storage),
+    }
+    .map_err(|e| DrillError::Operational(e.to_string()))
 }
 
 /// The phase sequence, over handles this function does not build. `pub`
@@ -2334,6 +2354,7 @@ fn execute_for_reporting(
         &startup,
         &authenticated_spec,
         contract.as_ref(),
+        store_contract,
         &signer.verifying_key(),
     ) {
         Ok(bindings) => bindings,
@@ -2417,6 +2438,7 @@ fn check_v2_bindings(
     startup: &StartupInputs,
     plan: &DrillSpec,
     contract: Option<&ExecutionContract>,
+    store_contract: bool,
     signing_key: &logweir_evidence::keys::VerifyingKey,
 ) -> Result<V2Bindings, DrillError> {
     use logweir_core::execution_contract::AuthorizationKind;
@@ -2487,8 +2509,17 @@ fn check_v2_bindings(
         // at all (`put_create_only` refuses every key through it), so this
         // read can never become the first write of a run that is about to be
         // refused.
-        let archive = Store::read_only_from_url(&plan.source.storage)
-            .map_err(|error| DrillError::Operational(error.to_string()))?;
+        //
+        // FX-16 class sweep: built by `archive_read_handle`, with the store
+        // contract's options when this run is under it, so the archive the
+        // binding verifies is read through the same client configuration as
+        // the archive the engine restores and phase 7 reads.
+        let contract_options = if store_contract {
+            Some(crate::backup::store_contract::archive_options()?)
+        } else {
+            None
+        };
+        let archive = archive_read_handle(&plan.source.storage, contract_options.as_ref())?;
         // THE SIGNATURE HALF NEEDS THE CLOCK, read here (Global Constraint 1)
         // and passed down, like the standing authorization's.
         if let Some(verified) = binding::verify_point_binding(
@@ -4029,6 +4060,55 @@ mod tests {
             ctx.contains("bound_set: Option<binding::BoundSet>,")
                 && ctx.contains("        bound_set,\n    })"),
             "context() must take the set and store exactly what it is given"
+        );
+    }
+
+    /// **FX-16 class sweep: the archive the binding verifies is read through
+    /// the same client configuration as the archive the run restores.** Every
+    /// read-only archive handle in this module comes from
+    /// `archive_read_handle`, and the binding passes it the store contract's
+    /// options when the run is under the contract — so a destination's CA and
+    /// named credential apply to the receipt, signature, manifest and pin
+    /// reads exactly as to the engine's and phase 7's.
+    ///
+    /// KILLS: the binding building its own `Store::read_only_from_url` again
+    /// (the pre-FX-16 shape: no archive CA, relocatable by `AWS_ENDPOINT_URL`);
+    /// the binding ignoring `store_contract`.
+    #[test]
+    fn every_archive_handle_is_built_by_one_constructor() {
+        let src = include_str!("mod.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("mod.rs production half");
+        assert_eq!(prod.matches("Store::read_only_from_url(").count(), 1);
+        assert_eq!(prod.matches("Store::read_only_with(").count(), 1);
+        let handle = fn_body(src, "archive_read_handle");
+        assert!(
+            handle.contains("Store::read_only_from_url(")
+                && handle.contains("Store::read_only_with("),
+            "both constructors live in archive_read_handle: {handle}"
+        );
+        let body = fn_body(src, "check_v2_bindings");
+        assert!(
+            body.contains("let contract_options = if store_contract {")
+                && body.contains(
+                    "archive_read_handle(&plan.source.storage, contract_options.as_ref())?"
+                ),
+            "the binding builds its handle under the run's store contract: {body}"
+        );
+        let ctx = fn_body(src, "context");
+        assert_eq!(
+            ctx.matches("archive_read_handle(&spec.source.storage, Some(&archive_options))?")
+                .count(),
+            2,
+            "context's two archive handles under the contract"
+        );
+        let binding = include_str!("binding.rs");
+        let binding = binding.split("#[cfg(test)]").next().unwrap_or(binding);
+        assert!(
+            !binding.contains("Store::read_only") && !binding.contains("Store::from_url"),
+            "the binding reads only through the handle it is given"
         );
     }
 
