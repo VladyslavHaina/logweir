@@ -1632,6 +1632,13 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// name, so an item 24 that stops naming what an operator reads after a
 /// restore fails here, and the notes at main `19b5ecd9`, with twenty-three
 /// items, fail the twenty-four pin (FX-3 fix round, 2026-10-07).
+///
+/// Then to twenty-five: item 25 is FX-13's sign-in limit, counted per client
+/// behind the trusted ingress instead of per socket peer. Its token is the
+/// audit note an operator reads to tell which counter a refused sign-in
+/// spent. The notes at main's `fcaae178`, with twenty-four items, fail the
+/// twenty-five pin, and so does an item 25 without its token (FX-13, after
+/// FX-3 took 24, 2026-10-07).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1657,9 +1664,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=24).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-four operator-facing changes, `#### 1.` \
-         to `#### 24.` in order; found {numbers:?}"
+        (1..=25).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-five operator-facing changes, `#### 1.` \
+         to `#### 25.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1716,6 +1723,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
             "not-reconstructed source settings",
             "topic_parity.not_reconstructed",
         ),
+        // FX-13 (2026-10-07): the sign-in limit per client behind the
+        // trusted ingress, and the audit note that says which counter.
+        ("the sign-in limit per client", "loginRateKey"),
     ]) {
         assert!(
             body.contains(token),
