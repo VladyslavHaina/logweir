@@ -1596,6 +1596,13 @@ env:     LOGWEIR_RETENTION_PLAN_SHA256=sha256:<64 lowercase hex>
          LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID / …_SECRET_ACCESS_KEY  ← the evidenceWrite grant
 ```
 
+**Every binding variable is required except `LOGWEIR_RETENTION_APPROVER`** (absent means
+`unattended`). An absent or blank one is refused by name, exit 3, nothing deleted. The two
+ceilings are whole numbers of at least 1. Since FX-10 (2026-10-05), a ceiling the worker cannot
+read is refused (`CapUnreadable`) rather than replaced by 50 or 20 000. The controller has
+projected both on every enforcement Job since the worker existed, so a supported pairing never
+meets that refusal.
+
 **The contract version is checked before the plan is read.** A newer controller handing this
 binary a plan shape it does not implement is refused by name rather than partially obeyed — the
 same handshake execution contract v2 uses, and for the same reason.

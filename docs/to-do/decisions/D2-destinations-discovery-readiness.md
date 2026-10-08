@@ -825,6 +825,15 @@ key is `policy.json`:
  "legacyArchiveAddressing": {"endpoint": "", "region": "", "allowHttp": false, "virtualHostedStyle": false}}
 ```
 
+*(Amended 2026-10-05, FX-10: `discovery.defaultMaxTopics` and
+`preflight.defaultTimeoutSeconds` are withdrawn. The CRDs default
+`spec.request.maxTopics` and `spec.request.timeoutSeconds` at admission and the
+console writes both, so "a request that names none" never reached the
+controller and neither value was ever read. The parser still accepts both keys
+and applies no rule to them; the chart renders them at fixed values so that a
+pre-FX-10 controller, which requires them, can still read the document.
+`charts/logweir/README.md`, *Withdrawn values*.)*
+
 - **Who can write it.** Only principals who can write that `ConfigMap` in the
   release namespace: chart and cluster administrators. Namespace operators cannot.
   This is the "explicit administrator-governed capability" the API decision
@@ -1161,7 +1170,7 @@ spec:
       destinationRef: {name: primary}
       roles: [ArchiveRead, EvidenceRead]     # 1..4
     skipChecks: [archive.segments]           # optional, maxItems 32; skipped blocking checks keep overall unknown
-    timeoutSeconds: 120                      # default policy.preflight.defaultTimeoutSeconds, 30..600
+    timeoutSeconds: 120                      # 30..600; the CRD's default (amended 2026-10-05, FX-10: no policy default)
   cancelRequested: false                     # false -> true only
 status:
   phase: Completed                           # Pending | Queued | Running | Completed | Failed | Cancelled

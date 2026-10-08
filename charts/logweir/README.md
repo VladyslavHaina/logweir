@@ -94,10 +94,8 @@ reference; this is what the values do.
 | `checks.discovery.freshSeconds` | `900` | after this an inventory reads *stale*, never *wrong* |
 | `checks.discovery.retentionSeconds` | `86400` | a terminal `TopicDiscovery` is collected after this |
 | `checks.discovery.keepPerConnection` | `5` | and never more than this many are kept per connection |
-| `checks.discovery.defaultMaxTopics` | `20000` | for a request that names none |
-| `checks.discovery.hardMaxTopics` | `50000` | the ceiling a request is clamped to. It only ever LOWERS a request |
+| `checks.discovery.hardMaxTopics` | `50000` | the ceiling a request's `maxTopics` is clamped to. It only ever LOWERS a request |
 | `checks.discovery.visibilityAttestations` | `[]` | the **only** route to `visibility.state: attestedComplete` |
-| `checks.preflight.defaultTimeoutSeconds` | `120` | the default check budget |
 | `checks.preflight.retentionSeconds` | `3600` | a terminal `Preflight` is collected after this |
 | `runs.maxManualBackupsActivePerNamespace` | `4` | P10: manual `Backup` runs ("Back up now") holding a runner slot at once in one namespace. Over it a run is `phase: Queued` with nothing created, and starts in creation order as slots free |
 | `runs.maxManualRestoresActivePerNamespace` | `2` | P10: admitted manual `Restore` runs at once in one namespace; the rest wait `Queued`, approval intact |
@@ -106,15 +104,80 @@ reference; this is what the values do.
 
 **`helm install` refuses what the controller would refuse.** Every per-field
 bound in `values.schema.json` is pinned to the constant the parser uses —
-`hardMaxTopics` to `check_contract::MAX_TOPICS_CEILING` (50 000), the preflight
-timeout to `1..=600` — and `templates/policy.yaml` fails the render, naming both
-values, for the two rules JSON Schema cannot express:
-`checks.maxActiveTotal >= checks.maxActivePerNamespace` and
-`checks.discovery.defaultMaxTopics <= checks.discovery.hardMaxTopics`. That
+`hardMaxTopics` to `check_contract::MAX_TOPICS_CEILING` (50 000) — and
+`templates/policy.yaml` fails the render, naming both values, for the one rule
+JSON Schema cannot express:
+`checks.maxActiveTotal >= checks.maxActivePerNamespace`. That
 matters because a document the controller refuses fails **closed and almost
 silently**: every attestation and every evidence location is discarded, the
 ceilings revert to the compiled-in defaults, and the only signals are one
 advisory row on a `Preflight` and one `WARN` line in the controller log.
+
+### Withdrawn values: `checks.discovery.defaultMaxTopics` and `checks.preflight.defaultTimeoutSeconds`
+
+**They never changed anything, and since FX-10 (2026-10-05) the chart does not
+read them.** Both were documented as the default a request that names none
+gets. No request ever names none: the `TopicDiscovery` and `Preflight` CRDs
+default `spec.request.maxTopics` (20 000) and `spec.request.timeoutSeconds`
+(120) when the object is created, and the console API writes both explicitly.
+An administrator who raised `defaultTimeoutSeconds` for a slow cluster still
+got 120-second preflights.
+
+The bounds that do work are unchanged: a discovery's own `maxTopics`
+(1–50 000), clamped by `checks.discovery.hardMaxTopics`, and a preflight's own
+`timeoutSeconds` (30–600).
+
+**Why withdrawn and not wired up.** Wiring them would mean dropping both CRD
+defaults, making the fields optional through the controller and the console
+API, and changing how the console recognises a repeated request (its
+idempotency and `reuseFresh` keys treat an omitted field as the default). It
+would also do nothing on most upgrades: Helm never upgrades this chart's
+`crds/`, so a CRD that still defaults the field leaves the knob as inert as
+before.
+
+**Upgrading with either key still set is safe.**
+
+- `values.schema.json` still **accepts** both keys. Without that, Helm would
+  refuse the upgrade, because the schema rejects an unknown key
+  (`additional properties '…' not allowed`).
+- The rendered objects are byte-identical to an install that does not set
+  them.
+- `NOTES.txt` prints `WITHDRAWN VALUES ARE SET AND IGNORED`, naming each one.
+- **The policy document changes once if you had set either key to another
+  value.** The chart now renders a fixed value in its place (below), so an
+  install that had set, say, `defaultTimeoutSeconds: 300` gets a different
+  document and a different policy digest. Every retained `Preflight` whose
+  `ready` verdict has not expired yet then reads `unknown`, its message naming
+  `policyChanged`: run the check again. An install that never set either key,
+  or set exactly the value now rendered, keeps a byte-identical document and
+  digest.
+
+**If you never set them**, an upgrade with `--reuse-values` may still carry
+them forward. That flag reuses the previous release's computed values, which
+include the older chart's defaults. Upgrade once with
+`--reset-then-reuse-values`, and remove the keys from your own values file.
+
+**The policy document still carries both keys,** at fixed values:
+`discovery.defaultMaxTopics` is 20 000, or `hardMaxTopics` if that is lower,
+and `preflight.defaultTimeoutSeconds` is 120.
+
+- A controller older than FX-10 requires both keys and refuses a document
+  without them. A refused document fails closed. Keeping the keys lets such a
+  controller read a default install's document, which covers an image-only
+  rollback and the old pod during a rolling upgrade.
+- The current controller accepts the keys, with or without them present, and
+  never reads them. It applies no range rule, only the type: any whole number
+  from 0 to 4 294 967 295. A hand-written document that puts `null`, a
+  negative, a fraction, a quoted number or a larger number there is refused
+  whole and fails closed, as it was before FX-10. The chart never renders a
+  configured value there, so a chart install cannot meet that refusal.
+
+**Rollback.** `helm rollback` to a chart from before FX-10 restores that
+revision's own values and document, so nothing changes. Rolling back only the
+controller image is also safe, for the reason above.
+
+Read [docs/kubernetes.md](../../docs/kubernetes.md) §22.2 for the document
+itself.
 
 **The two empty lists are the safe direction, not an oversight.** With no
 attestation nothing can ever be `attestedComplete`; with no allowlist an
