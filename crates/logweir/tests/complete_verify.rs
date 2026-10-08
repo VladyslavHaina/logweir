@@ -1348,3 +1348,84 @@ fn a_sub_window_passes_complete_and_signs_its_start() {
     assert_eq!(v.integrity.result, IntegrityResult::Fail);
     assert_eq!(block(&v).replay.unexpected, 1);
 }
+
+/// **The sampled lane judges the selection too** (PROD-11.1). A subset plan
+/// whose unselected partition is empty passes: the count bound and FX-23's
+/// per-partition presence check are the SELECTED partitions'. Controls: the
+/// same empty partition under a plan without the subset fails (the manifest
+/// proves it holds records); a record in the unselected partition fails,
+/// naming the selection. And a sub-window restore passes with its bound over
+/// `[start, end]`. KILLS: the bound or presence check read over the whole
+/// archive (a correct narrowed restore fails), the unselected-partition check
+/// deleted (a stray record passes).
+#[test]
+fn the_sampled_lane_judges_a_selection_over_the_selection_only() {
+    let mut case = healthy();
+    case.target.insert(1, Vec::new());
+    let floor = case.archive.floor();
+    let v = case.verify_plan(&subset_plan(floor, case.end, &[0]), Coverage::Sampled);
+    assert_eq!(
+        v.integrity.result,
+        IntegrityResult::Pass,
+        "{:?}",
+        v.integrity
+    );
+
+    let v = case.verify_plan(&plan(floor, case.end), Coverage::Sampled);
+    assert_eq!(
+        v.integrity.result,
+        IntegrityResult::Fail,
+        "{:?}",
+        v.integrity
+    );
+    assert!(
+        v.integrity
+            .partial_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("orders/1: drill-orders/1 holds no record"),
+        "{:?}",
+        v.integrity.partial_reason
+    );
+
+    let mut stray = healthy();
+    stray.target.insert(1, vec![archived(0, T + 1000)]);
+    let v = stray.verify_plan(&subset_plan(floor, stray.end, &[0]), Coverage::Sampled);
+    assert_eq!(v.integrity.result, IntegrityResult::Fail);
+    assert!(
+        v.integrity
+            .partial_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains(
+                "drill-orders/1 holds 1 records but the plan's restore.partitions does not select \
+                 partition 1 of orders"
+            ),
+        "{:?}",
+        v.integrity.partial_reason
+    );
+
+    let base = healthy();
+    let start = T + 1250;
+    let narrowed: BTreeMap<i32, Vec<Rec>> = base
+        .target
+        .iter()
+        .map(|(p, recs)| (*p, recs.iter().filter(|r| r.ts >= start).cloned().collect()))
+        .collect();
+    let sub_case = Case {
+        archive: base.archive,
+        end: base.end,
+        target: narrowed,
+    };
+    let sub = RestorePlan {
+        window_floor_source: WindowFloorSource::InheritedFromSpec,
+        ..plan(start, sub_case.end)
+    };
+    let v = sub_case.verify_plan(&sub, Coverage::Sampled);
+    assert_eq!(
+        v.integrity.result,
+        IntegrityResult::Pass,
+        "{:?}",
+        v.integrity
+    );
+}

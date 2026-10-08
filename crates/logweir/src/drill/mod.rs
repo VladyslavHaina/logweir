@@ -2894,29 +2894,13 @@ fn execute_with_validated_approval(
     // function `build_plan` binds the window with, and the restore preflight
     // previews it with (`logweir_core::replay_selection`).
     let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &facts)?;
-    // **FAIL CLOSED until the selection is executable end to end** (the
-    // orchestrator's binding note on PROD-11.1's WIP, 2026-10-08). The plan
-    // grammar, plan construction, phase 5's re-derivation and the restore
-    // preflight's preview are selection-aware; phases 4, 6 and 7 and the
-    // signed `source.selection` block are not yet. So a plan that states a
-    // selection is refused HERE — exit 3, before phase 2, no target topic
-    // created, no engine started, nothing signed — rather than restored and
-    // signed by phases that would judge it over the whole archive.
-    // `orchestrator.rs::a_stated_selection_is_refused_before_phase_2_until_it_is_executable`
-    // pins it; it is removed by the commit that makes the selection
-    // executable and signed.
-    if let Some(r) = &replay_selection {
-        return Err(DrillError::Guard(GuardRefusal(format!(
-            "{SELECTION_NOT_YET_EXECUTABLE}: this plan states a replay selection \
-             (restore.window_start and/or restore.partitions: {} partition(s) from epoch-ms {} \
-             to {}), which this build resolves and previews but does not yet execute and sign; \
-             refused before any target topic is created rather than restored and judged over \
-             the whole archive",
-            r.partitions.len(),
-            r.start_ms,
-            r.end_ms
-        ))));
-    }
+    // PROD-11.1: the selection is SIGNED (`source.selection`, format 1.7.0)
+    // in every document this run writes from here on, and every phase below
+    // judges it: phase 4 samples only selected partitions from the stated
+    // start, phase 5 checks every engine run's document against the spec,
+    // phase 6 runs the engine once per distinct subset, and phase 7 judges
+    // the count bound, presence and records over the selection only.
+    sc.source.selection = replay_selection.as_ref().map(selection_label);
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -2958,6 +2942,18 @@ fn execute_with_validated_approval(
         &sc.format_version,
         &sc.sample,
         c.spec.sample.coverage,
+    )
+    .to_string();
+    // PROD-11.1: a narrowed restore is a 1.7.0 document, AFTER the step above
+    // (which would otherwise write 1.6.0 over it), and its EXISTING
+    // `sample.coverage_note` opens with the selection, so a reader that
+    // predates `source.selection` reads what was restored.
+    if let Some(label) = &sc.source.selection {
+        sc.sample.coverage_note = format!("{}; {}", label.coverage_note(), sc.sample.coverage_note);
+    }
+    sc.format_version = logweir_core::scorecard::format_version_with_selection(
+        &sc.format_version,
+        sc.source.selection.as_ref(),
     )
     .to_string();
 
@@ -3667,11 +3663,6 @@ pub fn build_plan(
     )
 }
 
-/// **PROD-11.1, temporary.** The named refusal of a plan that states a replay
-/// selection while phases 4, 6 and 7 and the signed block cannot yet carry
-/// it (fail closed).
-pub const SELECTION_NOT_YET_EXECUTABLE: &str = "SelectionNotYetExecutable";
-
 /// **PROD-11.1.** The plan's replay selection resolved against the archive
 /// set it restores, through the ONE function the restore preflight previews
 /// it with (`logweir_core::replay_selection::ReplaySelection::resolve`).
@@ -3701,6 +3692,28 @@ pub fn resolve_selection(
         ..selection
     };
     selection.resolve(&facts.topics).map(Some).map_err(refused)
+}
+
+/// **PROD-11.1.** The signed `source.selection` block of a resolved
+/// selection: its stated start (absent for the archive's floor), its end,
+/// its subsets over the mapped topics and its engine runs.
+pub fn selection_label(
+    r: &logweir_core::replay_selection::ResolvedSelection,
+) -> logweir_core::scorecard::SelectionLabel {
+    logweir_core::scorecard::SelectionLabel {
+        window_start_ms: r.selection.window_start_ms,
+        window_end_ms: r.end_ms,
+        partitions: r
+            .selection
+            .partitions
+            .iter()
+            .map(|(topic, set)| logweir_core::scorecard::TopicPartitions {
+                topic: topic.clone(),
+                partitions: set.iter().copied().collect(),
+            })
+            .collect(),
+        engine_runs: u32::try_from(r.runs.len()).unwrap_or(u32::MAX),
+    }
 }
 
 /// The window's floor, and the CLAIM the plan is about to make about where it
@@ -3950,6 +3963,8 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             // `time_basis::decide`; a draft that never got that far has not
             // decided it.
             time_basis: None,
+            // PROD-11.1: written once the selection is resolved.
+            selection: None,
         },
         target: TargetInfo {
             cluster_id: String::new(),
@@ -4066,6 +4081,8 @@ fn source_info(
         // FX-8: ALWAYS written once decided, so a 1.3.0 document's empty lists
         // are a claim and an absent block means "not recorded" (pre-1.3.0).
         time_basis: Some(time_basis),
+        // PROD-11.1: set by the caller once the plan's selection is resolved.
+        selection: None,
     }
 }
 

@@ -124,6 +124,105 @@ pub struct SourceInfo {
     /// `e2e/fixtures/signed/` round-trip byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_basis: Option<TimeBasisLabel>,
+    /// **Format 1.7.0 (PROD-11.1).** The plan's REPLAY SELECTION — its stated
+    /// inclusive window start and per-topic partition subsets — when it states
+    /// one: see [`SelectionLabel`].
+    ///
+    /// ABSENT means the restore selected EVERY partition of every restored
+    /// topic from the archive's floor, which is what every restore before
+    /// 1.7.0 did. A runner built before PROD-11.1 ignores a plan's selection
+    /// and restores everything, and its document, without this block, says
+    /// exactly that. Nested optional (Global Constraint 12 as amended);
+    /// `skip_serializing_if`, so every document without a selection keeps its
+    /// bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionLabel>,
+}
+
+/// **PROD-11.1, scorecard format 1.7.0.** What a narrowed restore selected:
+/// the contract is `docs/to-do/decisions/PROD-11.1-replay-selection.md`.
+///
+/// Every verdict of such a document is judged over this selection only:
+/// samples come only from selected partitions and from the stated start, the
+/// count bound and the per-partition presence check are the selected
+/// partitions' over `[window_start_ms, window_end_ms]`, a record in a
+/// partition the plan did not select fails the run, and a complete
+/// verification expects records only from selected partitions. The EXISTING
+/// fields name the selection too, so a reader that predates this block never
+/// reads a narrowed restore as a full one: `sample.window_start` is never
+/// earlier than the stated start, `sample.coverage_note` opens with the
+/// selection, and a complete block's `window.start_ms` and `partitions[]` are
+/// the selection's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SelectionLabel {
+    /// The plan's stated INCLUSIVE window start, epoch milliseconds. ABSENT
+    /// means the window started at the archive set's floor (guard G-WIN).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_start_ms: Option<i64>,
+    /// The window's INCLUSIVE end, epoch milliseconds: `restore.point_in_time`,
+    /// or `sample.window_end` when the plan states none.
+    pub window_end_ms: i64,
+    /// The per-topic partition subsets, one entry per topic in ascending
+    /// order, each list ascending and distinct. A restored topic not listed
+    /// was restored on every partition the archive lists for it.
+    pub partitions: Vec<TopicPartitions>,
+    /// How many engine runs restored it: the engine's partition filter applies
+    /// to every topic of one run, so topics with different subsets are
+    /// different runs.
+    pub engine_runs: u32,
+}
+
+/// One topic's partition subset in a [`SelectionLabel`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TopicPartitions {
+    /// The SOURCE topic.
+    pub topic: String,
+    /// Its selected partitions, ascending and distinct.
+    pub partitions: Vec<i32>,
+}
+
+impl SelectionLabel {
+    /// Whether `topic`'s `partition` is in this selection: a topic not listed
+    /// restores every partition.
+    #[must_use]
+    pub fn selects_partition(&self, topic: &str, partition: i32) -> bool {
+        self.partitions
+            .iter()
+            .find(|tp| tp.topic == topic)
+            .is_none_or(|tp| tp.partitions.contains(&partition))
+    }
+
+    /// The `sample.coverage_note` sentence that names the selection in an
+    /// EXISTING field (PROD-11.1 §5.2), so a reader that predates this block
+    /// reads what was restored.
+    #[must_use]
+    pub fn coverage_note(&self) -> String {
+        let start = match self.window_start_ms {
+            Some(ms) => format!("from epoch-ms {ms} (the plan's restore.window_start, inclusive)"),
+            None => "from the archive's floor".to_string(),
+        };
+        let parts = if self.partitions.is_empty() {
+            "every partition of every restored topic".to_string()
+        } else {
+            let named: Vec<String> = self
+                .partitions
+                .iter()
+                .map(|tp| {
+                    let list: Vec<String> = tp.partitions.iter().map(i32::to_string).collect();
+                    format!("{} partitions [{}]", tp.topic, list.join(", "))
+                })
+                .collect();
+            format!(
+                "ONLY {} (every partition of any other restored topic); no other partition of \
+                 these topics was restored",
+                named.join("; ")
+            )
+        };
+        format!(
+            "replay selection: {parts}, {start} to epoch-ms {} (inclusive), in {} engine run(s)",
+            self.window_end_ms, self.engine_runs
+        )
+    }
 }
 
 /// **FX-8, scorecard format 1.3.0.** What the restore's time selection read,
@@ -221,6 +320,36 @@ pub const UNSAMPLED_TOPICS_SINCE_MINOR: u64 = 6;
 /// ([`format_version_with_sample`]). The newest minor: the current schema
 /// file is this version's.
 pub const FORMAT_VERSION_WITH_UNSAMPLED_TOPICS: &str = "1.6.0";
+
+/// **PROD-11.1.** The first minor of scorecard format 1 that defines
+/// `source.selection`, which arm SEL-1 enforces. **A renumber changes this and
+/// [`FORMAT_VERSION_WITH_SELECTION`] together**, and
+/// `docs/verify_scorecard.py`'s `SCORECARD_SELECTION_SINCE_MINOR` follows it.
+pub const SELECTION_SINCE_MINOR: u64 = 7;
+
+/// **PROD-11.1.** The `format_version` of a scorecard that carries
+/// `source.selection` — a MINOR bump for a new optional block, under OD-7:
+/// arms SEL-1 to SEL-7 read only that block, or judge an existing field
+/// against it and can only refuse. Written only for a narrowed restore
+/// ([`format_version_with_selection`]), so every other document is the one it
+/// was. The newest minor: the current schema file is this version's.
+pub const FORMAT_VERSION_WITH_SELECTION: &str = "1.7.0";
+
+/// The `format_version` a scorecard is written with once its plan's replay
+/// selection is known (PROD-11.1): [`FORMAT_VERSION_WITH_SELECTION`] when it
+/// carries `source.selection`, else `current` unchanged. 1.7.0 defines
+/// everything 1.6.0 does.
+#[must_use]
+pub fn format_version_with_selection<'a>(
+    current: &'a str,
+    selection: Option<&SelectionLabel>,
+) -> &'a str {
+    if selection.is_some() {
+        FORMAT_VERSION_WITH_SELECTION
+    } else {
+        current
+    }
+}
 
 /// **FX-23 review M2.** Whether a scorecard's `format_version` shows that a
 /// build with FX-23's sampled-lane checks signed it: major 1, minor 1.6 or
@@ -1939,6 +2068,110 @@ impl Scorecard {
                 ));
             }
         }
+        // `source.selection` (format 1.7.0, PROD-11.1): arms SEL-1 to SEL-7.
+        // They fire ONLY on a document that CARRIES the block, so every
+        // document without it is decided exactly as before: MINOR under the
+        // owner's OD-7 (a). SEL-6 and SEL-7 judge an existing field (the 1.4.0
+        // complete block) against it, as IV-6 does, and can only refuse.
+        //
+        // NOT INTERPOLATED, except SEL-1's version: the block names topics, an
+        // adopter-influenced string, and the messages are joined to
+        // `index.json`'s `arm` fields by literal substring.
+        //
+        // Mirrored arm for arm, in this order and this position (after
+        // `sample.unsampled_topics`, before `redactions`, which stays last), in
+        // `docs/verify_scorecard.py::check_invariants`.
+        if let Some(selection) = &self.source.selection {
+            // SEL-1. A document declaring a version before 1.7.0 cannot carry
+            // a 1.7.0 block.
+            let defined = major_version(&self.format_version) == Some(1)
+                && minor_version(&self.format_version)
+                    .is_some_and(|minor| minor >= SELECTION_SINCE_MINOR);
+            if !defined {
+                return Err(InvariantError(format!(
+                    "source.selection is present but format_version {:?} predates it: the \
+                     block is defined from 1.{SELECTION_SINCE_MINOR}.0",
+                    self.format_version
+                )));
+            }
+            // SEL-2. The block is the claim that the restore was narrowed; a
+            // block that narrows nothing is not one this format writes.
+            if selection.window_start_ms.is_none() && selection.partitions.is_empty() {
+                return Err(InvariantError(
+                    "source.selection states neither a window start nor a partition subset; a \
+                     restore that selects every partition from the archive's floor carries no \
+                     selection block"
+                        .into(),
+                ));
+            }
+            // SEL-3. A stated start is before the end (the plan refuses
+            // anything else before it runs).
+            if selection
+                .window_start_ms
+                .is_some_and(|start| start >= selection.window_end_ms)
+            {
+                return Err(InvariantError(
+                    "source.selection.window_start_ms is not before window_end_ms; a selection's \
+                     window holds at least one instant after its start"
+                        .into(),
+                ));
+            }
+            // SEL-4. One spelling per selection: each topic once, in order,
+            // each list non-empty, ascending, distinct and not negative.
+            let well_formed = selection
+                .partitions
+                .windows(2)
+                .all(|w| w[0].topic < w[1].topic)
+                && selection.partitions.iter().all(|tp| {
+                    !tp.topic.trim().is_empty()
+                        && !tp.partitions.is_empty()
+                        && tp.partitions.iter().all(|p| *p >= 0)
+                        && tp.partitions.windows(2).all(|w| w[0] < w[1])
+                });
+            if !well_formed {
+                return Err(InvariantError(
+                    "source.selection.partitions does not name each topic once, in order, with a \
+                     non-empty, sorted list of distinct partitions that are not negative"
+                        .into(),
+                ));
+            }
+            // SEL-5. A restore is at least one engine run.
+            if selection.engine_runs == 0 {
+                return Err(InvariantError(
+                    "source.selection.engine_runs is 0; a restore is at least one engine run"
+                        .into(),
+                ));
+            }
+            let complete = self
+                .integrity
+                .verification
+                .as_ref()
+                .and_then(|v| v.complete.as_ref());
+            if let Some(c) = complete {
+                // SEL-6. A complete verification's expected output is selected
+                // by the plan's own window.
+                if c.window.start_ms != selection.window_start_ms
+                    || c.window.end_ms != selection.window_end_ms
+                {
+                    return Err(InvariantError(
+                        "integrity.verification.complete.window is not source.selection's window; \
+                         the expected output is selected by the plan's own start and end"
+                            .into(),
+                    ));
+                }
+                // SEL-7. Nothing is expected from a partition the plan did not
+                // select.
+                if c.partitions.iter().any(|p| {
+                    p.replay.expected > 0 && !selection.selects_partition(&p.topic, p.partition)
+                }) {
+                    return Err(InvariantError(
+                        "integrity.verification.complete.partitions expects records from a \
+                         partition source.selection does not select"
+                            .into(),
+                    ));
+                }
+            }
+        }
         // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
         // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
         // now nothing enforced it and no surface displayed it — a third party
@@ -2020,6 +2253,7 @@ mod tests {
                 // `source.time_basis` arms have their own unit tests below,
                 // over this same base document.
                 time_basis: None,
+                selection: None,
             },
             target: TargetInfo {
                 cluster_id: "cluster-1".into(),
@@ -4102,5 +4336,193 @@ mod tests {
             .unwrap_err()
             .0
             .starts_with("sample.unsampled_topics is present"));
+    }
+
+    // ---- PROD-11.1: `source.selection`, arms SEL-1 to SEL-7 ----
+
+    /// A sampled 1.7.0 scorecard narrowed to `orders` [0, 2] from `start`.
+    fn with_selection(start: Option<i64>) -> Scorecard {
+        let mut sc = with_verification(sampled_verification());
+        sc.format_version = FORMAT_VERSION_WITH_SELECTION.into();
+        sc.source.selection = Some(SelectionLabel {
+            window_start_ms: start,
+            window_end_ms: 1_760_000_005_000,
+            partitions: vec![TopicPartitions {
+                topic: "orders".into(),
+                partitions: vec![0, 2],
+            }],
+            engine_runs: 1,
+        });
+        sc
+    }
+
+    fn sel_err(sc: &Scorecard) -> String {
+        sc.validate_invariants().unwrap_err().0
+    }
+
+    /// The writer's shapes are accepted, and the version rule: 1.7.0 exactly
+    /// when the block is present. KILLS: writing 1.7.0 for every document,
+    /// or the old version beside the block (SEL-1 would refuse it).
+    #[test]
+    fn a_selection_is_written_as_1_7_0_and_accepted() {
+        let sc = with_selection(Some(1_760_000_001_000));
+        assert!(sc.validate_invariants().is_ok());
+        assert_eq!(
+            format_version_with_selection("1.6.0", sc.source.selection.as_ref()),
+            "1.7.0"
+        );
+        assert_eq!(format_version_with_selection("1.6.0", None), "1.6.0");
+        assert_eq!(format_version_with_selection("1.4.0", None), "1.4.0");
+        assert!(with_selection(None).validate_invariants().is_ok());
+        let mut start_only = with_selection(Some(1_760_000_001_000));
+        start_only
+            .source
+            .selection
+            .as_mut()
+            .unwrap()
+            .partitions
+            .clear();
+        assert!(start_only.validate_invariants().is_ok());
+        assert!(proves_fx23_sampled_checks(FORMAT_VERSION_WITH_SELECTION));
+    }
+
+    /// SEL-1. KILLS: deleting the arm; comparing against the wrong minor.
+    #[test]
+    fn sel1_refuses_a_selection_under_a_version_that_predates_it() {
+        for version in ["1.4.0", "1.5.0", "1.6.0", "1.x.0"] {
+            let mut sc = with_selection(None);
+            // No 1.4.0 block, so IV-1 does not answer first.
+            sc.integrity.verification = None;
+            sc.format_version = version.into();
+            assert_eq!(
+                sel_err(&sc),
+                format!(
+                    "source.selection is present but format_version {version:?} predates it: \
+                     the block is defined from 1.{SELECTION_SINCE_MINOR}.0"
+                )
+            );
+        }
+    }
+
+    /// SEL-2 to SEL-5. KILLS: deleting any arm or any condition of SEL-4.
+    #[test]
+    fn sel2_to_sel5_refuse_a_block_that_is_not_a_selection() {
+        let mut sc = with_selection(None);
+        sc.source.selection.as_mut().unwrap().partitions.clear();
+        assert_eq!(
+            sel_err(&sc),
+            "source.selection states neither a window start nor a partition subset; a restore that selects every partition from the archive's floor carries no selection block"
+        );
+        for start in [1_760_000_005_000, 1_760_000_006_000] {
+            assert_eq!(
+                sel_err(&with_selection(Some(start))),
+                "source.selection.window_start_ms is not before window_end_ms; a selection's window holds at least one instant after its start"
+            );
+        }
+        let sel4 = "source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative";
+        let tp = |t: &str, ps: &[i32]| TopicPartitions {
+            topic: t.into(),
+            partitions: ps.to_vec(),
+        };
+        for bad in [
+            vec![tp("orders", &[])],
+            vec![tp("orders", &[2, 0])],
+            vec![tp("orders", &[1, 1])],
+            vec![tp("orders", &[-1])],
+            vec![tp("\u{2003}", &[0])],
+            vec![tp("payments", &[0]), tp("orders", &[0])],
+            vec![tp("orders", &[0]), tp("orders", &[1])],
+        ] {
+            let mut sc = with_selection(None);
+            sc.source.selection.as_mut().unwrap().partitions = bad.clone();
+            assert_eq!(sel_err(&sc), sel4, "{bad:?}");
+        }
+        let mut sc = with_selection(None);
+        sc.source.selection.as_mut().unwrap().engine_runs = 0;
+        assert_eq!(
+            sel_err(&sc),
+            "source.selection.engine_runs is 0; a restore is at least one engine run"
+        );
+    }
+
+    /// SEL-6 and SEL-7, over the 1.4.0 complete block. KILLS: deleting
+    /// either; comparing only the start, or only the end; judging a listed
+    /// unselected partition with nothing expected (a stray record's partition
+    /// is listed with `expected: 0`).
+    #[test]
+    fn sel6_and_sel7_hold_the_complete_block_to_the_selection() {
+        let complete = |start: Option<i64>, end: i64| {
+            let mut v = complete_verification();
+            let c = v.complete.as_mut().unwrap();
+            c.window = CompleteWindow {
+                start_ms: start,
+                end_ms: end,
+            };
+            v
+        };
+        // The fixture block lists partitions 0 and 1 with records expected;
+        // the selection is orders [0, 1] here so SEL-7 holds.
+        let mut ok = with_selection(Some(1_760_000_001_000));
+        ok.integrity.verification = Some(complete(Some(1_760_000_001_000), 1_760_000_005_000));
+        ok.source.selection.as_mut().unwrap().partitions[0].partitions = vec![0, 1];
+        assert!(
+            ok.validate_invariants().is_ok(),
+            "{:?}",
+            ok.validate_invariants()
+        );
+        let sel6 = "integrity.verification.complete.window is not source.selection's window; the expected output is selected by the plan's own start and end";
+        for (start, end) in [
+            (None, 1_760_000_005_000),
+            (Some(1_760_000_000_000), 1_760_000_005_000),
+            (Some(1_760_000_001_000), 1_760_000_004_000),
+        ] {
+            let mut sc = ok.clone();
+            sc.integrity.verification = Some(complete(start, end));
+            assert_eq!(sel_err(&sc), sel6, "{start:?} {end}");
+        }
+        let mut sc = ok.clone();
+        sc.source.selection.as_mut().unwrap().partitions[0].partitions = vec![0];
+        assert_eq!(
+            sel_err(&sc),
+            "integrity.verification.complete.partitions expects records from a partition source.selection does not select"
+        );
+        // A listed unselected partition expecting nothing (a stray record's)
+        // is the selection's, not SEL-7's.
+        let mut stray = sc.clone();
+        let v = stray.integrity.verification.as_mut().unwrap();
+        let c = v.complete.as_mut().unwrap();
+        c.partitions[1].replay.expected = 0;
+        let r = stray.validate_invariants();
+        assert!(
+            !matches!(&r, Err(e) if e.0.starts_with("integrity.verification.complete.partitions expects")),
+            "SEL-7 does not judge a partition that expects nothing: {r:?}"
+        );
+    }
+
+    /// SEL-1 to SEL-7 sit after US-1 to US-3 and before `redactions`. KILLS:
+    /// moving the block.
+    #[test]
+    fn the_selection_arms_sit_between_the_unsampled_arms_and_redactions() {
+        let mut sc = with_selection(None);
+        sc.sample.unsampled_topics = Some(vec![]);
+        assert!(sel_err(&sc).starts_with("sample.unsampled_topics is empty"));
+        let mut sc = with_selection(None);
+        sc.format_version = "1.6.0".into();
+        sc.redactions = vec![Redaction {
+            path: "/x".into(),
+            reason: "y".into(),
+            present: true,
+        }];
+        assert!(sel_err(&sc).starts_with("source.selection is present"));
+    }
+
+    /// The `sample.coverage_note` sentence names every subset and the start.
+    #[test]
+    fn the_coverage_note_names_the_selection() {
+        let sc = with_selection(Some(1_760_000_001_000));
+        assert_eq!(
+            sc.source.selection.as_ref().unwrap().coverage_note(),
+            "replay selection: ONLY orders partitions [0, 2] (every partition of any other restored topic); no other partition of these topics was restored, from epoch-ms 1760000001000 (the plan's restore.window_start, inclusive) to epoch-ms 1760000005000 (inclusive), in 1 engine run(s)"
+        );
     }
 }

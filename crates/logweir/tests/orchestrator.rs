@@ -2356,44 +2356,63 @@ fn a_complete_coverage_plan_finds_a_changed_record_past_the_canary() {
     assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
 }
 
-/// **PROD-11.1, fail closed while the selection is not executable end to
-/// end** (the orchestrator's binding note on the WIP, 2026-10-08). A plan that
-/// states `restore.partitions` — one the archive satisfies, so the refusal is
-/// not the archive's — is refused exit 3, naming `SelectionNotYetExecutable`,
-/// before phase 2: no target topic created, no engine started, no sample
-/// fingerprinted, nothing signed. The control is the same archive with no
-/// selection (`Drill::Passes`), which runs and signs.
+/// **PROD-11.1: a stated selection is restored, judged over the selection and
+/// SIGNED.** The approved plan states `restore.partitions: {orders: [0]}` (the
+/// fixture archive's one partition, so the restore is the archive's). The run
+/// passes and its scorecard is format 1.7.0 with `source.selection` naming the
+/// subset and one engine run, and the EXISTING `sample.coverage_note` opening
+/// with the selection — what a reader that predates the block reads. The
+/// control is the same archive with no selection: no block, its version as
+/// before. This row replaced the fail-closed refusal the orchestrator's note
+/// required while phases 4, 6 and 7 and the block were not yet
+/// selection-aware (2026-10-08).
 ///
-/// KILLS: deleting the refusal (the run would restore and sign a narrowed
-/// selection judged over the whole archive), moving it after the target-topic
-/// creation step or after phase 4.
+/// KILLS: dropping the block, writing it for a plan with no selection, the
+/// FX-23 version step writing 1.6.0 over 1.7.0, the coverage note not naming
+/// the selection.
 #[test]
-fn a_stated_selection_is_refused_before_phase_2_until_it_is_executable() {
+fn a_stated_selection_is_restored_and_signed_with_its_selection() {
     let f = fixtures::orchestrator_fixture(Drill::StatesAPartitionSelection);
-    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
-    let (message, code, line) = refusal(err);
-    assert_eq!(code, ExitCode::GuardRefused);
-    assert_eq!(line, "refusal-reason=GuardRefused");
-    assert!(
-        message.starts_with("SelectionNotYetExecutable: this plan states a replay selection"),
-        "{message}"
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the selection runs");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
+    assert_eq!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
     );
-    assert!(
-        fixtures::created_topics(&f).is_empty(),
-        "a refused selection created a target topic: {:?}",
-        fixtures::created_topics(&f)
+    let label = sc
+        .source
+        .selection
+        .as_ref()
+        .expect("the selection is signed");
+    assert_eq!(label.window_start_ms, None, "no stated start: the floor");
+    assert_eq!(
+        label.partitions,
+        vec![logweir_core::scorecard::TopicPartitions {
+            topic: "orders".into(),
+            partitions: vec![0],
+        }]
     );
-    assert!(fixtures::fingerprint_calls(&f).is_empty(), "before phase 4");
+    assert_eq!(label.engine_runs, 1);
     assert!(
-        f.ctx
-            .store
-            .get(&format!("logweir/drills/{}.json", f.run_id))
-            .is_err(),
-        "a refused run signs nothing"
+        sc.sample.coverage_note.starts_with(
+            "replay selection: ONLY orders partitions [0] (every partition of any other \
+             restored topic)"
+        ),
+        "{}",
+        sc.sample.coverage_note
     );
+    assert!(sc.validate_invariants().is_ok());
 
     let control = fixtures::orchestrator_fixture(Drill::Passes);
-    execute_with(&control.args, &control.run_id, &control.ctx)
-        .expect("the same archive without a selection runs");
-    assert_eq!(fixtures::created_topics(&control).len(), 1);
+    execute_with(&control.args, &control.run_id, &control.ctx).expect("the control runs");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&control)).unwrap();
+    assert!(sc.source.selection.is_none(), "no selection, no block");
+    assert_ne!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+    );
+    assert!(!sc.sample.coverage_note.contains("replay selection"));
 }

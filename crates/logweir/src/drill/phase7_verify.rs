@@ -223,6 +223,7 @@ use logweir_core::engine::{
     EngineReport, EngineRun, RecordFingerprint, RestorePlan, SampleSelection, SegmentFacts,
 };
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
+use logweir_core::replay_selection::ReplaySelection;
 use logweir_core::scorecard::{Integrity, TopicParity};
 use logweir_core::scorecard::{
     Verification, APPLICATION_NOT_ATTEMPTED, COMPARISON_BASIS_ARCHIVE, HEADER_ORDER_NOT_VERIFIED,
@@ -1614,7 +1615,12 @@ fn check_restored_count(
     mapping: &BTreeMap<String, String>,
     floor_ms: i64,
     pit_ms: i64,
+    selection: &ReplaySelection,
 ) -> Result<Option<String>, DrillError> {
+    // PROD-11.1: the bound is the SELECTION's. A partition the plan did not
+    // select is no partition of this restore: it proves nothing and must be
+    // empty on the target (below). A plan with no subset restricts nothing.
+    let facts = &selection.restrict(facts);
     // UNREACHABLE FROM `run` TODAY, and kept deliberately — the same cheap
     // belt-and-braces as `roll_up`'s redundant `!verdicts.is_empty()`
     // conjunct below, and stated here for the same reason: an unexplained
@@ -1698,7 +1704,12 @@ fn check_restored_count(
             }
         }
         for (id, hi) in &ends {
-            if *hi > 0 && !listed.contains(id) {
+            if *hi > 0 && !selection.selects_partition(src, *id) {
+                per_partition.push(format!(
+                    "{target}/{id} holds {hi} records but the plan's restore.partitions does not \
+                     select partition {id} of {src}"
+                ));
+            } else if *hi > 0 && !listed.contains(id) {
                 per_partition.push(format!(
                     "{target}/{id} holds {hi} records but the manifest lists no partition {id} \
                      of {src}"
@@ -1939,6 +1950,10 @@ pub fn run_after_restore(
     // guard: it is the chokepoint's own precondition — `roll_up` can only be
     // sound if the ledger it reads covers every selection.
     let selected: Vec<(String, i32)> = sel.iter().map(|s| (s.topic.clone(), s.partition)).collect();
+    // PROD-11.1: the plan's replay selection (its own start, its subsets),
+    // which every whole-drill check below is judged over. A plan that states
+    // none selects every partition from the archive's floor.
+    let selection = ReplaySelection::from_plan(plan);
     let (verdicts, count_bound, block) = match verify {
         Coverage::Sampled => {
             let archives = probe_archive_modes(engine, sel)?;
@@ -1973,6 +1988,7 @@ pub fn run_after_restore(
                 mapping,
                 plan.time_window.0.timestamp_millis(),
                 plan.time_window.1.timestamp_millis(),
+                &selection,
             )?;
             if let Some(why) = &count_bound {
                 tracing::error!(target: "logweir::verify", detail = %why,
@@ -2022,7 +2038,8 @@ pub fn run_after_restore(
     // in the joined text — both are whole-drill findings `roll_up` takes as
     // one argument and can only turn into a `Fail`.
     let report_finding = check_engine_report(
-        facts,
+        // PROD-11.1: only the selected partitions must be in the report.
+        &selection.restrict(facts),
         mapping,
         plan.time_window.0.timestamp_millis(),
         plan.time_window.1.timestamp_millis(),

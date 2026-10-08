@@ -357,6 +357,31 @@ impl ReplaySelection {
         ts <= end_ms && start_ms.is_none_or(|s| ts >= s)
     }
 
+    /// `facts` with every partition this selection does not select removed
+    /// (topics kept, so a selected topic the plan narrowed to nothing in the
+    /// archive still reads as listed). Phase 7's count bound, FX-23's
+    /// per-partition presence check and its engine-report check judge a
+    /// narrowed restore over THIS, never over the whole archive.
+    #[must_use]
+    pub fn restrict(&self, facts: &crate::engine::BackupSetFacts) -> crate::engine::BackupSetFacts {
+        crate::engine::BackupSetFacts {
+            topics: facts
+                .topics
+                .iter()
+                .map(|t| TopicFacts {
+                    partitions: t
+                        .partitions
+                        .iter()
+                        .filter(|p| self.selects_partition(&t.name, p.partition_id))
+                        .cloned()
+                        .collect(),
+                    ..t.clone()
+                })
+                .collect(),
+            ..facts.clone()
+        }
+    }
+
     /// The selection a built plan carries: its mapped topics, its start when
     /// it states one of its own (`InheritedFromSpec`; `None` for the archive's
     /// floor), its end and its per-topic subsets. Phase 7 judges a restore by
