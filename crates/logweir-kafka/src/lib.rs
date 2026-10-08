@@ -3,8 +3,11 @@
 #![forbid(unsafe_code)]
 pub mod fingerprint;
 pub mod inventory;
+pub mod positions;
 pub mod reader;
 pub mod token;
 
+#[cfg(feature = "client")]
+mod rdkafka_positions;
 #[cfg(feature = "client")]
 pub mod rdkafka_reader;

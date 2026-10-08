@@ -10,7 +10,10 @@
 #      (built here by `scripts/ci-images.sh chart-package` for versions.env's
 #      commit — byte-for-byte what `helm install oci://…` installs), and this
 #      checkout's chart with the four images `--set` from versions.env (the
-#      development path). Every image pinned; no `kubectl patch` in the profile;
+#      development path). A RELEASE pin (`LOGWEIR_TAG` v<semver>) names each
+#      image `:<tag>@sha256:…` from LOGWEIR_IMAGE_DIGESTS, both in the package
+#      (as IMAGE_DIGESTS, which `chart-package` requires for a release) and in
+#      the `--set` values, so the two paths still render the same objects. Every image pinned; no `kubectl patch` in the profile;
 #      the console's host alias, trusted proxy Service, egress peer and CA
 #      bundle agree with the Traefik render and with each other.
 #   2. The two upgrade-rehearsal baselines with THEIR OWN charts (git archive at
@@ -109,7 +112,36 @@ if grep -rn -E 'kubectl[^|]*[[:space:]]patch[[:space:]]' deploy/poc/README.md de
   grep -rn -E 'kubectl[^|]*[[:space:]]patch[[:space:]]' deploy/poc/README.md deploy/poc/*.sh deploy/poc/*.yaml >&2
   fail=1
 fi
-package="$(GITHUB_SHA="$LOGWEIR_COMMIT" NS=vladyslavhaina TAG="$LOGWEIR_TAG" \
+# A RELEASE PIN (PROD-14.0): a `v<semver>` LOGWEIR_TAG names its four images by
+# digest, from versions.env's LOGWEIR_IMAGE_DIGESTS (the release's release.json
+# `.images.refs[*].digest`); a `sha-` publication keeps its tags and sets none.
+# `image_ref <image>` is the reference the published chart carries for it.
+image_digests=""
+case "$LOGWEIR_TAG" in
+  v*)
+    if [ -z "${LOGWEIR_IMAGE_DIGESTS:-}" ]; then
+      echo "FAIL: LOGWEIR_TAG $LOGWEIR_TAG is a release; versions.env must name its four digests (LOGWEIR_IMAGE_DIGESTS)" >&2
+      fail=1
+    else
+      image_digests="$work/image-digests.json"
+      printf '%s\n' "$LOGWEIR_IMAGE_DIGESTS" > "$image_digests"
+      for image in weirkeeper logweir logweir-console logweir-ui; do
+        jq -er --arg i "$image" '.[$i] | select(test("^sha256:[0-9a-f]{64}$"))' "$image_digests" > /dev/null 2>&1 \
+          || { echo "FAIL: LOGWEIR_IMAGE_DIGESTS has no sha256 digest for $image" >&2; fail=1; }
+      done
+    fi ;;
+  *)
+    if [ -n "${LOGWEIR_IMAGE_DIGESTS:-}" ]; then
+      echo "FAIL: LOGWEIR_IMAGE_DIGESTS is set for the sha- publication $LOGWEIR_TAG; it is a release pin's" >&2
+      fail=1
+    fi ;;
+esac
+image_ref() { # image
+  local digest=""
+  [ -n "$image_digests" ] && digest="$(jq -r --arg i "$1" '.[$i] // empty' "$image_digests")"
+  echo "docker.io/vladyslavhaina/$1:$LOGWEIR_TAG${digest:+@$digest}"
+}
+package="$(GITHUB_SHA="$LOGWEIR_COMMIT" NS=vladyslavhaina TAG="$LOGWEIR_TAG" IMAGE_DIGESTS="$image_digests" \
   bash scripts/ci-images.sh chart-package "$work/package" 2> "$work/package.err")"
 if [ ! -f "$package" ]; then
   echo "FAIL: scripts/ci-images.sh chart-package produced no package:" >&2
@@ -124,10 +156,10 @@ else
     || { echo "FAIL: helm lint of the package" >&2; cat "$work/lint.log" >&2; fail=1; }
 fi
 RELEASE=logweir render logweir-checkout charts/logweir "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml \
-  --set "controllerImage=docker.io/vladyslavhaina/weirkeeper:$LOGWEIR_TAG" \
-  --set "runnerImage=docker.io/vladyslavhaina/logweir:$LOGWEIR_TAG" \
-  --set "api.console.image=docker.io/vladyslavhaina/logweir-console:$LOGWEIR_TAG" \
-  --set "ui.image=docker.io/vladyslavhaina/logweir-ui:$LOGWEIR_TAG"
+  --set "controllerImage=$(image_ref weirkeeper)" \
+  --set "runnerImage=$(image_ref logweir)" \
+  --set "api.console.image=$(image_ref logweir-console)" \
+  --set "ui.image=$(image_ref logweir-ui)"
 if [ -f "$work/logweir.yaml" ] && [ -f "$work/logweir-checkout.yaml" ]; then
   # The two paths must install the same objects; only the chart's own label
   # (`helm.sh/chart: logweir-chart-…` against `logweir-0.1.0`) may differ.
@@ -141,8 +173,9 @@ if [ -f "$work/logweir.yaml" ] && [ -f "$work/logweir-checkout.yaml" ]; then
     echo "   ok: the published package and the checkout (images from versions.env) render the same objects"
   fi
   need "the Logweir render" "$work/logweir.yaml" \
-    "docker.io/vladyslavhaina/weirkeeper:$LOGWEIR_TAG" \
-    "docker.io/vladyslavhaina/logweir-console:$LOGWEIR_TAG" \
+    "$(image_ref weirkeeper)" \
+    "$(image_ref logweir)" \
+    "$(image_ref logweir-console)" \
     "caBundleFile: /var/run/logweir/oidc-ca/ca.crt" \
     "name: logweir-dex-ca" \
     "systemRoots: false" \
@@ -159,6 +192,31 @@ if [ -f "$work/logweir.yaml" ] && [ -f "$work/logweir-checkout.yaml" ]; then
     echo "FAIL: an egress ipBlock names Dex's ClusterIP; an enforcing CNI matches after DNAT (use oidcPeers)" >&2
     fail=1
   fi
+fi
+
+# THE PUBLISHED CHART NAMES EXACTLY THESE FOUR IMAGES. The package above is
+# built here, so a wrong digest or tag in versions.env would render the same
+# wrong reference on both paths and agree with itself. The chart the profile
+# installs is the one in the registry: pull it (anonymously, as README.md does;
+# `charts-dir` may hold it) and require each of its four image defaults to be
+# versions.env's reference, digest included for a release.
+published="$charts/logweir-chart-$LOGWEIR_CHART_VERSION.tgz"
+if [ -f "$published" ] || bounded 120 helm pull "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" -d "$charts" > "$work/published-pull.log" 2>&1; then
+  helm show values "$published" 2> "$work/published-values.err" \
+    | grep -E '^[[:space:]]*(controllerImage|runnerImage|image):' \
+    | sed -E 's/^[^:]*:[[:space:]]*//; s/"//g; s/[[:space:]]+#.*$//; s/[[:space:]]*$//' > "$work/published-images.txt"
+  published_ok=1
+  for image in weirkeeper logweir logweir-console logweir-ui; do
+    want="$(image_ref "$image")"
+    if ! grep -F -x -q -- "$want" "$work/published-images.txt"; then
+      echo "FAIL: the published $LOGWEIR_CHART $LOGWEIR_CHART_VERSION does not name $want (versions.env); it names:" >&2
+      grep -F "/$image" "$work/published-images.txt" >&2
+      fail=1; published_ok=0
+    fi
+  done
+  [ "$published_ok" -eq 1 ] && echo "   ok: the published chart $LOGWEIR_CHART_VERSION names versions.env's four images"
+else
+  echo "FAIL: could not obtain $LOGWEIR_CHART $LOGWEIR_CHART_VERSION:" >&2; cat "$work/published-pull.log" >&2; fail=1
 fi
 
 echo "== 2. The upgrade-rehearsal baselines, each with its own chart =="

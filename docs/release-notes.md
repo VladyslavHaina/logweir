@@ -46,18 +46,18 @@ the GitHub Release asset, after the tag, together with the run rows
 
 | What | Value |
 |---|---|
-| Candidate commit (the tagged commit) | — |
-| Version tag | — |
-| Publication commit (`release.json` `.images.publication`: the `sha-<commit>` images and chart the tag promotes) | — |
-| CI run (`ci.yml`) for the publication commit, its `publish` job green | — |
-| Release dry run (`release.yml` dispatched on the candidate) | — |
-| Release run (`release.yml` on the tag) and release drill | — |
-| Runner image digest (`linux/amd64`) | — |
-| Controller image digest (manifest list; amd64 and arm64) | — |
-| Console image digest (`logweir-console`) | — |
-| UI image digest (`logweir-ui`) | — |
-| Chart (`logweir-chart` version and package sha256 from the tag run's `release.json` `.chart`; OCI digest from the release's notes, as an anonymous `helm pull` reports it) | — |
-| CLI archives (three; the tag run's `release.json` `.archives`, each with its sha256 and run-time needs) | — |
+| Candidate commit (the tagged commit) | `56a60ebe509f2449c649fc1899756100d961832f` (the pre-tag record; it differs from the publication commit only under `docs/`) |
+| Version tag | `v0.2.0-rc.1` (pushed 2026-10-08 with the owner's standing approval of 2026-10-07) |
+| Publication commit (`release.json` `.images.publication`: the `sha-<commit>` images and chart the tag promotes) | `2c277dc11521c337748fbf9059cbaff76c36e82c` |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | [37725467323](https://github.com/VladyslavHaina/logweir/actions/runs/37725467323): `check`, `e2e` and `publish` (build amd64, build arm64, promote) green |
+| Release dry run (`release.yml` dispatched on the candidate) | [37730468445](https://github.com/VladyslavHaina/logweir/actions/runs/37730468445) on `2c277dc1`, every job green; `release.sh verify` on its `release-assets`: 14 assets verified, `SHA256SUMS` 14/14 |
+| Release run (`release.yml` on the tag) and release drill | [37733173995](https://github.com/VladyslavHaina/logweir/actions/runs/37733173995): every job green, including `drill / drill-from-artifact` (job 113167927725), `publish-images` and `github-release`; the GitHub Release is a pre-release |
+| Runner image digest (`linux/amd64`) | `docker.io/vladyslavhaina/logweir@sha256:affa8075492614ff0964bf29ca79a0caa61aa2f8aa47d022460f855e92024054` |
+| Controller image digest (manifest list; amd64 and arm64) | `docker.io/vladyslavhaina/weirkeeper@sha256:fac312ba31df831e4cf96dd4546266ee47766528752f97a931eb125974dd56c6` |
+| Console image digest (`logweir-console`) | `docker.io/vladyslavhaina/logweir-console@sha256:b7402cb143aee14356707ee10fb644e5f5c25a4993ff285315adfccf5b13b0a7` |
+| UI image digest (`logweir-ui`) | `docker.io/vladyslavhaina/logweir-ui@sha256:2a43b5c0a7ec42688076986c96f63d34449060981fc746a9c8e4ac397e305daf` |
+| Chart (`logweir-chart` version and package sha256 from the tag run's `release.json` `.chart`; OCI digest from the release's notes, as an anonymous `helm pull` reports it) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart` `0.2.0-rc.1`, package sha256 `515be23262193931c1c4028654c24a2e2b72a96f9473232724e2cd12e5ce561b`, OCI digest `sha256:d10e9772159da2934fd27e86daa822623e82366021acbbaa09fc21871ca6b727`; an anonymous `helm pull` is byte-identical to the release asset |
+| CLI archives (three; the tag run's `release.json` `.archives`, each with its sha256 and run-time needs) | `logweir-x86_64-unknown-linux-gnu.tar.xz` `6b45d0787a0cae4edd952c50b2218eeb5730148a498a7323bd799ee18d3ce02d` (glibc 2.34+; libssl3, libsasl2-2, zlib1g); `logweir-aarch64-unknown-linux-gnu.tar.xz` `32e07061a67f1b29554d5a336118fcf3bfee97f0d635af9a0de8fbf273e70839` (the same); `logweir-aarch64-apple-darwin.tar.xz` `a2ddd05df432c0b7fcb09f749ee8f4b75297dcc802a6679fb0741c9990792a66` (macOS 11+, Homebrew `openssl@3`) |
 | `ui/` bundle, file by file | the output of the command below, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate (context, auth mode, storage, limits) | — |
 | Checks deliberately deferred, each with its reason | — |

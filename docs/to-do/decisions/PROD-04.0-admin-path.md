@@ -326,7 +326,7 @@ What the rows show:
 - **Filtered silently (T14).** A caller without Describe on the cluster is shown only the groups it may Describe, with no error (`KafkaApis.scala:1350-1374`). A group missing from both listings may therefore exist.
 - **Targeted calls tell the difference.**
   - FFI DescribeConsumerGroups and ListConsumerGroupOffsets answer an undescribable id with 30 (the source is `KafkaApis.scala:1302-1315` and `:1018-1030`).
-  - The safe `committed_offsets` gives only a timeout. FindCoordinator for that group is refused too (`KafkaApis.scala:1244-1247`), so the consumer never finds a coordinator.
+  - The safe `committed_offsets` gives only a timeout. FindCoordinator for that group is refused too (`KafkaApis.scala:1244-1247`), so the consumer never finds a coordinator. *PROD-04.0a's handle also reads the lookup's 30 off its queue after the bound (§13).*
 - **An absent, describable id answers at once with no error** (K7), which is what lets it be called absent.
 - **With Describe on the cluster, the listing is unfiltered.** The safe listing then shows the undescribable group with an empty state and no error: `GroupInfo` exposes no per-group error (C2).
 
@@ -341,8 +341,8 @@ The first run of this session (`A/live-4.3.1-visibility/`) measured the same tar
 
 | # | Operation | Recommended route | Why not the others | Cost | Under OD-6 (e): no `unsafe` |
 | --- | --- | --- | --- | --- | --- |
-| 1 | List groups with their type | **O2** `ListConsumerGroups` for the typed list of classic and consumer groups, joined by group id with a **name** listing (ListGroups). DescribeCluster says whether the listing is complete: it is unfiltered only with Describe on the cluster (T14). | O1's listing aborts on 0.36.2 and has no type. O2 alone drops share and streams groups silently (C7). O4 would give every type but brings a second client. O5 has no state or type. | ~45 lines inside OD-6's perimeter, plus the name listing: the safe `fetch_group_list` with `members()` never called (§4.1), or `rd_kafka_list_groups` inside the perimeter | Classic groups only, with a guard against `members()`. Consumer (KIP-848) groups cannot be told from streams groups, so they are not captured (§7.1). An undescribable id reads as a timeout (§5). |
-| 2 | Describe groups | **O2** `DescribeConsumerGroups`, only for ids the typed list classifies as classic or consumer, and only when its type agrees with the list | O1: unsound and wrong. O2 on any other id returns "simple Classic Dead" with no error (§3.1). O4 would add epochs and share and streams detail that no row needs. | ~42 lines | Membership of classic groups only; consumer groups undescribed; no explicit 30 for an undescribable id (§3.9) |
+| 1 | List groups with their type | **O2** `ListConsumerGroups` for the typed list of classic and consumer groups, joined by group id with a **name** listing (ListGroups). DescribeCluster says whether the listing is complete: it is unfiltered only with Describe on the cluster (T14). | O1's listing aborts on 0.36.2 and has no type. O2 alone drops share and streams groups silently (C7). O4 would give every type but brings a second client. O5 has no state or type. | ~45 lines inside OD-6's perimeter, plus the name listing: the safe `fetch_group_list` with `members()` never called (§4.1), or `rd_kafka_list_groups` inside the perimeter | Classic groups only, with a guard against `members()`. Consumer (KIP-848) groups cannot be told from streams groups, so they are not captured (§7.1). An undescribable id reads as a timeout (§5); PROD-04.0a's handle also reads the lookup's 30 off its queue (§13). |
+| 2 | Describe groups | **O2** `DescribeConsumerGroups`, only for ids the typed list classifies as classic or consumer, and only when its type agrees with the list | O1: unsound and wrong. O2 on any other id returns "simple Classic Dead" with no error (§3.1). O4 would add epochs and share and streams detail that no row needs. | ~42 lines | Membership of classic groups only; consumer groups undescribed; no explicit 30 for an undescribable id (§3.9), though PROD-04.0a's handle reads the lookup's 30 off its queue (§13) |
 | 3 | Fetch committed offsets | **O1** `committed_offsets` from a non-subscribing consumer, over the recovery point's partitions, `read_committed` (RequireStable) | O2 adds discovery of partitions outside the recovery point, leader epochs and an explicit code 88; useful, not required. O5 returns stale positions (§3.4). | ~30 lines, no `unsafe` | Unchanged; `PositionsUnstable` per group (§4.2) |
 | 4 | Commit (alter) offsets | **O1** `commit` from a non-subscribing consumer; the broker's refusal is the atomic liveness guard (§3.3) | O2 has the same broker semantics with per-partition codes. O5 is gated upstream and logs only (E2, E6). | ~30 lines, no `unsafe` | The commit is unchanged. The pre-apply type check has only the safe describe, which cannot tell an Empty consumer group from an Empty streams group (§3.1, §3.3), so 04.2 must refuse every existing target group the describe does not prove classic, and Empty consumer groups become unsupported targets. |
 | 5 | Describe ACLs | **O2** `DescribeAcls`, with guards against T9 and T10 (§6) | No safe, upstream or engine call exists. O4 is exact but brings a second client. | ~35 lines, plus T9's two probes: the broker's `authorizer.class.name` through the safe DescribeConfigs, and DescribeCluster's authorized operations (FFI, ~30 lines) | **No route**: PROD-05.3 stays Blocked, or funds O4 |
@@ -376,7 +376,7 @@ The bump is a dependency decision for the child row: notices, `cargo deny`, and 
   - UNKNOWN_MEMBER_ID (25) → `GroupActive`;
   - GROUP_ID_NOT_FOUND (69) → `NotAConsumerGroup`;
   - GROUP_AUTHORIZATION_FAILED (30) → `NotAuthorized`. OffsetCommit needs Read on the group (`KafkaApis.scala:273-282`).
-  - A principal without Describe on the group never finds its coordinator (`:1244-1247`). The safe commit then times out rather than answering 30. This is inferred from §3.9's fetch, which does exactly that; the commit case was not run.
+  - A principal without Describe on the group never finds its coordinator (`:1244-1247`). The safe commit then times out rather than answering 30. This is inferred from §3.9's fetch, which does exactly that; the commit case was not run. *PROD-04.0a measured it (§13): the commit fails `_WAIT_COORD` after the handle's bound, nothing changes, and the coordinator lookup's 30 on the handle's queue names it `NotAuthorized`.*
   - anything else → `failed` with its integer code.
 - **The target group is classified before any commit, by §5's rules.**
   - An id classified `GroupNotFound` is created as a simple classic group by the commit (§3.3), and the audit says `created`.
@@ -417,7 +417,8 @@ Every selected group gets exactly one of these outcomes in PROD-04.1's snapshot.
 | In neither listing; the listing is filtered (no Describe on the cluster), and a targeted FFI DescribeConsumerGroups returns 30 | `failed` | `NotVisibleToPrincipal` | the group may exist, and this principal may not see it (§3.9). Never `GroupNotFound`. |
 | In neither listing; the listing is filtered, and the targeted call answers without error ("simple, Classic, Dead") | `excluded` | `GroupNotFound` | the id is describable, so a filtered listing would have shown it |
 | Under OD-6 (e), no DescribeCluster and no FFI: the targeted safe fetch answers at once without error | `excluded` | `GroupNotFound` | §3.9: 86 ms, every partition Invalid |
-| Under OD-6 (e): the targeted safe fetch times out | `failed` | `NotVisibleOrUnreachable` | the safe route cannot separate the two (§3.9, §4.2) |
+| Under OD-6 (e): the targeted safe fetch times out, and the handle's queue holds the coordinator lookup's GROUP_AUTHORIZATION_FAILED | `failed` | `NotVisibleToPrincipal` | measured by PROD-04.0a (§13): librdkafka posts the refusal there while the fetch waits out its bound |
+| Under OD-6 (e): the targeted safe fetch times out with no such refusal | `failed` | `NotVisibleOrUnreachable` | the safe route cannot separate the rest (§3.9, §4.2) |
 | Imported from an engine snapshot (FX-1) | as found in the archive | `groupType: unknown` | the engine records no type (§3.7); 04.2 applies such positions only after its own target-side classification |
 | Listed, but its fetch refused, pending or failing | `failed` | `NotAuthorized` (30 on a listed id, e.g. one shown only through Describe on the cluster: §3.9), `PositionsUnstable` (per group under O1: §4.2), `Unreachable` | per group; other groups continue |
 
@@ -444,6 +445,9 @@ PROD-01.4 found one (its C4: librdkafka's topic-ID text uses the wrong base64 al
 | T13 | rust-rdkafka's `DescribeConfigsFuture` never reads `rd_kafka_ConfigResource_error`: a refused or unknown resource comes back as `Ok` with no entries. Unfixed through 0.39.0. | O1: `R/src/admin.rs:1121-1159` (no call in 0.37–0.39 either); measured for a denied broker resource (§3.8) | T9's first probe reads a **missing** `authorizer.class.name` as `unverified`, and only a present, empty value as disabled. The same defect reaches `logweir-kafka`'s existing `topic_configs` and `broker_configs`: see §11's class sweep, which is FX-4's. |
 | T14 | ListGroups filters silently. A caller without Describe on the cluster is shown only the groups it may Describe, with no error; the safe listing, the FFI listing and the engine's all inherit it. With Describe on the cluster the listing is complete, but the safe listing then shows an undescribable group with an empty state and no error (C2). | the broker: `kafka-src/4.3.1-KafkaApis.scala:1350-1374` (sha256 `f93449b5…`); measured, §3.9 | §5: an id missing from every listing is `GroupNotFound` only if the listing is complete (DescribeCluster shows Describe) or a targeted call answers without error. A targeted 30 means `NotVisibleToPrincipal`. D2 §5.4 records the topic analogue. |
 | T15 | OffsetFetch for all partitions (a null topic list) silently drops the topics the caller may not Describe; the explicit form answers them with TOPIC_AUTHORIZATION_FAILED | the broker: `KafkaApis.scala:1075-1085`, `:1148-1152` (source, not run) | O1's explicit fetch shows the refusal; O2's all-partitions discovery and the engine's snapshot do not (§4.2) |
+| T16 | A synchronous commit returns the LAST failing partition's code, even when other partitions of the request were applied | O1: `rd_kafka_commit` and `rdkafka_request.c:1733-1750` (source; found by PROD-04.0a) | a failed commit says `applied: Unknown` unless its code is one the broker returns for the whole request; read back before reporting it refused (§13) |
+| T17 | librdkafka silently leaves a partition with a negative offset out of an OffsetCommit, so it reads as committed when nothing was sent | O1: `rdkafka_request.c:1847-1863` (source; found by PROD-04.0a) | refuse a negative offset before sending (§13) |
+| T18 | rust-rdkafka's `TopicPartitionListElem::metadata()` panics on committed metadata that is not UTF-8 | O1: `rdkafka-0.36.2/src/topic_partition_list.rs:141-145` (source; found by PROD-04.0a) | withhold such metadata (`None`); an Apache Kafka broker always returns UTF-8 (§13) |
 
 ## 7. Input to OD-6: what PROD-04.0 needs from the `unsafe` policy
 
@@ -463,7 +467,7 @@ PROD-01.4 §6.4 proposed it and recommends (a2). This section adds this row's ne
 | Operation | librdkafka call outside the safe API | Needed by | Under (e), without it |
 | --- | --- | --- | --- |
 | List groups with their type | `rd_kafka_ListConsumerGroups` | 04.1, 04.2 | Classic groups only. KIP-848 groups read like share and streams groups (§3.1), so they are not captured. |
-| Describe groups; the targeted visibility probe | `rd_kafka_DescribeConsumerGroups` | 04.1 (state, members), 04.2 (inactivity, target type), T14's explicit 30 | Membership of classic groups only. An undescribable id reads as a timeout (`NotVisibleOrUnreachable`, §5). |
+| Describe groups; the targeted visibility probe | `rd_kafka_DescribeConsumerGroups` | 04.1 (state, members), 04.2 (inactivity, target type), T14's explicit 30 | Membership of classic groups only. An undescribable id reads as a timeout (`NotVisibleOrUnreachable`, §5); PROD-04.0a's handle also reads the coordinator lookup's 30 off its queue, so it is named `NotVisibleToPrincipal` (§13). |
 | Listing completeness; ACL guard | `rd_kafka_DescribeCluster` (authorized operations) | 04.1 (T14), 05.3 (T9) | completeness unknown |
 | Describe ACLs | `rd_kafka_DescribeAcls` | 05.3 | no route: 05.3 Blocked |
 | Fetch committed offsets | none: the safe consumer (O1) | 04.1 | unchanged |
@@ -599,6 +603,7 @@ Both texts are proposals. Neither lands in this row (rule 8).
   - It maps the codes of §4.3, and the timeouts of §4.2 and §5 (`PositionsUnstable` per group; `NotVisibleOrUnreachable`).
   - Mutants for the error mapping and for the leader epoch.
   - PROD-04.1 and 04.2 both consume it. It owes no FFI, so it proceeds under every OD-6 option.
+  - **Landed:** §13.
 - **PROD-04.0b — Group and ACL calls inside OD-6's perimeter** (impl, Tier A, gated on **OD-6 (a1) or (a2)**; lab: a slot).
   - ListConsumerGroups, DescribeConsumerGroups, DescribeCluster (authorized operations) and DescribeAcls.
   - They go in the FFI crate (a2) or module (a1) that the owner picks and PROD-01.4a creates. Whichever row lands first takes §7.4's steps: the five `forbid` roots, the perimeter and the gate. The other row extends the perimeter.
@@ -646,7 +651,7 @@ These rows sit beside PROD-01.4's TI-04.1-1…4 and TI-04.2-1…3, and PROD-01.1
 | AP-04.1-3 | While a transactional offset commit is pending for a selected group, the pre-transaction position is never recorded as captured. The unit is stated per route (§4.2). Under O1's single fetch, **every selected partition of the group** is `failed: PositionsUnstable`, because the bounded RequireStable call times out without naming a partition. With per-partition fetches, or O2's code 88, only the affected partitions are. | A fetch without RequireStable (the engine's OffsetFetch v5, or `isolation.level=read_uncommitted`) returns 3 while 7 is pending (§3.4) and records it; the row fails. | compose 4.3; §3.4's TxnOffsetCommit held open longer than the capture's bound |
 | AP-04.1-4 | The listing never calls `GroupInfo::members()` on rdkafka 0.36.2. A workspace `clippy.toml` (none exists yet; the child row adds it) lists it under `disallowed-methods`, or the lock carries rdkafka ≥ 0.37. A capture on a cluster with an Empty group completes. | Two controls:<br>(1) With the entry present, a mutant that calls `GroupInfo::members()` fails `cargo clippy -D warnings` (`clippy::disallowed_methods`).<br>(2) A gate test reads `Cargo.lock` and `clippy.toml`, and fails when the entry is missing while rdkafka < 0.37 is locked. A mutant deleting the entry makes it red.<br>At run time the call aborts the debug build on an Empty group (§3.1, §3.6: exit 134 on both lines). | lint and the gate test; compose 3.9 (an Empty classic group) |
 | AP-04.1-5 | A consumer group whose state librdkafka maps to Unknown is captured with `stateUnknownToClient` and marked active. | A classifier that reads Unknown as Empty marks it inactive; a unit test over the classifier with state code 0 catches it. | unit test over recorded listing rows |
-| AP-04.1-6 | A selected group that the capture principal may not Describe, and that its filtered listing therefore omits, is `failed: NotVisibleToPrincipal`: a targeted DescribeConsumerGroups returned 30 (§5). Under OD-6 (e) it is `NotVisibleOrUnreachable`, from the targeted fetch's timeout. The other groups are captured. | **Classifying from the listings alone reports it `GroupNotFound`**: measured, `pa-hidden` is missing from both the safe and the FFI listing for `User:logweir` (§3.9). The row fails. So does aborting the whole snapshot, or mapping the refusal to an empty result, which records it captured with no positions. | PROD-04.0d `acl`'s visibility setup (§3.9): a principal without Describe on the cluster or on one group |
+| AP-04.1-6 | A selected group that the capture principal may not Describe, and that its filtered listing therefore omits, is `failed: NotVisibleToPrincipal`, never `GroupNotFound`. This holds whichever targeted call classifies it: DescribeConsumerGroups returning 30 (PROD-04.0b, OD-6 (a2)), or PROD-04.0a's fetch called with `GroupListing::NotListed`, whose bounded timeout carries the coordinator lookup's GROUP_AUTHORIZATION_FAILED from the handle's queue (§13). `NotVisibleOrUnreachable` is accepted only for a timeout that carries no such refusal. The other groups are captured, and the hidden group costs at most one position bound. | **Classifying from the listings alone reports it `GroupNotFound`**: measured, `pa-hidden` is missing from both the safe and the FFI listing for `User:logweir` (§3.9). The row fails. So does aborting the whole snapshot, or mapping the refusal to an empty result, which records it captured with no positions. Three more controls: (a) a reader that ignores the handle's queue labels the hidden group `NotVisibleOrUnreachable`, and the row fails (PROD-04.0a's mutant M26e); (b) a capture that passes `GroupListing::Listed` for an id its listing omitted labels it `NotAuthorized`, and the row fails; (c) in the same run, a describable absent id is `excluded: GroupNotFound` well inside the bound, and a listed group with a pending TxnOffsetCommit is `PositionsUnstable`, never `NotVisibleToPrincipal`. | PROD-04.0d `acl`'s visibility setup (§3.9): a principal without Describe on the cluster or on one group. Until 04.0d lands, the in-test setup of `e2e/tests/consumer_positions.rs` (`a_group_hidden_from_the_principal_is_never_absent`) |
 | AP-04.1-7 | Positions imported from an engine consumer-group snapshot (FX-1) carry `groupType: unknown` and are never shown as a consumer group's. | The engine keeps a streams group's positions untyped (§3.7). Importing them as `groupType: consumer` fails the row. | an engine snapshot written by `snapshot-groups` against §3's fixture (FX-1's regression input) |
 
 ### PROD-04.2
@@ -659,7 +664,7 @@ These rows sit beside PROD-01.4's TI-04.1-1…4 and TI-04.2-1…3, and PROD-01.1
 | AP-04.2-4 | Every applied position carries leader epoch −1, never a captured source epoch. | A mutant of the commit builder that copies the captured epoch fails a unit test over it. The safe route has no setter today; the row guards a future switch to O2. | unit test |
 | AP-04.2-5 | A target consumer group in a state librdkafka maps to Unknown is refused `GroupActive` without a commit attempt. | Reading Unknown as inactive attempts the commit (visible in the audit); a unit test over the classifier catches it. | unit test |
 | AP-04.2-6 | A target id that §5's rules classify `GroupNotFound` is created by the apply as a simple classic group, and the audit says `created`. | Reporting "applied to an existing group" contradicts the pre-apply classification, and the audit comparison fails. After the apply the id lists as classic, protocol type empty, Empty (§3.3). | compose 4.3 or 3.9 |
-| AP-04.2-7 | A target id that the applying principal cannot see (a targeted call returns 30, §3.9) is refused `TargetNotVisible` before any commit, and the audit never says `created` for it. | Classifying the target from the listings alone takes the hidden group for absent, and records `created` for a group that exists. The row fails. | PROD-04.0d `acl`'s visibility setup, on the target |
+| AP-04.2-7 | A target id that the applying principal cannot see (a targeted call returns 30, §3.9, or PROD-04.0a's fetch carries the coordinator lookup's queued 30, §13) is refused `TargetNotVisible` before any commit, and the audit never says `created` for it. | Classifying the target from the listings alone takes the hidden group for absent, and records `created` for a group that exists. The row fails. | PROD-04.0d `acl`'s visibility setup, on the target |
 
 ### PROD-05.3
 
@@ -683,7 +688,7 @@ These rows answer D2 §5.4's objections (§4.4).
 - **Only local fixtures.** Managed providers (MSK, Confluent Cloud) were not tried; their group and ACL APIs follow OD-4.
 - **Nothing ships.** The prototypes are throwaway, under `A/`. The measured values this record relies on are in its tables.
 - **The engine's snapshot was not run.** §3.7 infers it from source and from the probe replaying its two requests. AP-04.1-7's fixture runs `snapshot-groups`.
-- **Commits by an undescribable principal were not run.** §4.3's timeout for a principal that cannot Describe the target group is inferred from §3.9's fetch.
+- **Commits by an undescribable principal were not run.** §4.3's timeout for a principal that cannot Describe the target group is inferred from §3.9's fetch. *Measured since by PROD-04.0a (§13).*
 - **A class sweep this row does not own (T13): FX-4's.**
   - `L/crates/logweir-kafka/src/rdkafka_reader.rs:293-325` (`topic_configs`) and `:343-386` (`broker_configs`) map a per-resource `Err` that rdkafka 0.36.2 never produces. A refused or unknown resource therefore reads as a configuration with no entries, rather than `NotAuthorized` or `TopicNotFound`.
   - The broker-resource case is measured (§3.8, §3.9); the topic case is read from source.
@@ -728,6 +733,53 @@ All paths are under `A/`, so `/tmp/logweir-roadmap-run/claude/artifacts/prod-04-
   - `core/…/KafkaApis.scala` (sha256 `f93449b5…`);
   - `ConfigHelper.scala` (`58c22ccf…`);
   - `KafkaConfig.scala` (`1fdcec9c…`).
+
+## 13. Landed: PROD-04.0a
+
+Branch `claude/prod-04-0a`. `logweir-kafka` keeps `#![forbid(unsafe_code)]` and gains no dependency.
+
+**The API.**
+- `RdKafkaReader::committed_positions(group, partitions, listing)` and `RdKafkaReader::commit_positions(group, positions)`, with `with_position_bound` (default 15 s, 2–300 s).
+- The contract and the code mapping are pure, in `crates/logweir-kafka/src/positions.rs`.
+- The handle is `crates/logweir-kafka/src/rdkafka_positions.rs`. It is crate-private and opened per call, so no caller can subscribe, assign or poll it.
+- Its configuration pins:
+  - `group.protocol=classic`, because librdkafka says its default will change;
+  - `isolation.level=read_committed` (RequireStable);
+  - auto-commit and auto-store off;
+  - `session.timeout.ms` and `socket.timeout.ms` at the bound.
+- `listing` is the caller's `Listed` or `NotListed`, the one fact a safe fetch cannot supply. A timeout is `PositionsUnstable` for a listed group and `NotVisibleOrUnreachable` for an unlisted one (§4.2, §5).
+- Reads carry `leader_epoch: None` (not exposed, C3). Commits carry −1 and the metadata marker `logweir:positions`.
+
+**Measured** on a PROD-01.5 slot (slot 2, `--kafka 4.3` and `--kafka 3.9`, `--profiles acl`), by `e2e/tests/consumer_positions.rs`. Every row is checked against `kafka-consumer-groups.sh` inside the broker container. The two lines agree, except that the KIP-848 row needs 4.x.
+
+| Row | Observed |
+| --- | --- |
+| classic, Empty | positions equal the CLI's; a committed 0 reads 0; a never-committed partition is `NoCommittedPosition` where the CLI prints no row; the non-member commit lands with the marker; the group stays Empty |
+| classic and KIP-848, one live member | `GroupActive` in ~165 ms, readback unchanged; once the member leaves, the same commit applies |
+| absent id | every partition `NoCommittedPosition` in ~165 ms; the read does not create the group; a commit creates it, Empty (K3) |
+| pending TxnOffsetCommit | `PositionsUnstable` (listed) and `NotVisibleOrUnreachable` (unlisted) after the 6 s bound, while a `read_uncommitted` reader returns the stale 3; after the abort, 3 |
+| group whose only ACL names another principal (`User:logweir`) | `NotVisibleToPrincipal` (unlisted) and `NotAuthorized` (listed); the commit is `NotAuthorized` after the bound and nothing changes; granting Read and Describe makes the same commit apply. A topic it may not Describe is `TopicNotAuthorized` for that partition (T15) |
+
+**What this refines in the record.**
+- **The safe route names the refusal.** When FindCoordinator answers GROUP_AUTHORIZATION_FAILED, librdkafka posts that error once on the consumer's own queue and keeps retrying (`rdkafka_cgrp.c:797-807` in rdkafka-sys 4.10.0+2.12.1). The fetch or commit still waits out its bound. The handle then reads the queue, which only errors can reach because it never subscribes, and counts GROUP_AUTHORIZATION_FAILED alone, never a transport, authentication or TLS error. §3.9 and §5 said the safe route could not separate a hidden group from an unreachable one. It can, when the broker refused the lookup. Three limits:
+  - The refusal says "this principal may not Describe this id", not "the group exists". With Kafka's default `allow.everyone.if.no.acl.found=false`, an ABSENT id without an ACL is refused the same way. That is why the label is `NotVisibleToPrincipal` ("may exist"), never `GroupNotFound`.
+  - The refusal is read only after the full bound, so a hidden group still costs one bound per call.
+  - A lookup answered after the bound (a slow SASL or TLS handshake) falls back to `NotVisibleOrUnreachable`.
+- **Three further traps, guarded** (also rows T16–T18 of §6):
+  - **T16.** A synchronous commit returns the LAST failing partition's code even when other partitions were applied (`rdkafka_request.c:1733-1750`). So a failed commit says `applied: Unknown` unless its code is one the broker returns for the whole request.
+  - **T17.** librdkafka silently leaves out a partition whose offset is negative (`rdkafka_request.c:1847-1863`). Such a request is refused before sending.
+  - **T18.** rust-rdkafka's `TopicPartitionListElem::metadata()` panics on bytes that are not UTF-8. The reader withholds such metadata (`None`). An Apache Kafka broker always returns UTF-8.
+
+**Bounds are guarded** (fix round, 2026-10-08). Broker-free unit rows time an unanswered fetch and commit against a 2 s bound: measured 2000.9–2003.3 ms and 2001.8–2007.1 ms on the development host, with margins of 1.5 s and 2.5 s. The e2e rows require every timed-out call to return within its 6 s bound plus 3 s (measured: at most 134 ms over). A fetch that waits longer than its bound fails both.
+
+**AP-04.1-6 and AP-04.2-7 were reworded in the fix round** (review L1). The first landed wording (`e63b6d6d`) named two labels for ONE case: `NotVisibleOrUnreachable` "under OD-6 (e)" and `NotVisibleToPrincipal` "through PROD-04.0a's API". Under (e) the targeted fetch IS PROD-04.0a's API, so a PROD-04.1 returning either label would have passed. The rows now name one label per case: `NotVisibleToPrincipal` whenever a targeted call carries the refusal, and `NotVisibleOrUnreachable` only for a timeout without one.
+
+**Not run here:**
+- a share group's 69 (`NotAConsumerGroup`): unit only, for lack of PROD-04.0d's `groups` fixture;
+- a per-partition 88 after librdkafka's retries: unit only;
+- coordinator outages.
+
+The ACL setup is built inside the row itself, on FX-4's `acl` profile, for PROD-04.0d to absorb.
 
 ---
 
