@@ -2460,9 +2460,16 @@ impl Pass<'_> {
         // `AWS_*` credential in this pod is the delete-capable one, and its
         // expectation is the policy's own (below).
         let dest_env = resolved.job_env();
-        env_literal.extend(dest_env.literals.iter().cloned().filter(|(name, _)| {
-            name != logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV
-        }));
+        env_literal.extend(
+            dest_env
+                .literals
+                .iter()
+                .filter(|(name, _)| {
+                    name
+                        != logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV
+                })
+                .cloned(),
+        );
         if enforcement.is_some() {
             env_literal.push((
                 logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV
