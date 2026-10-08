@@ -84,17 +84,63 @@ pub fn is_safe_method(method: &Method) -> bool {
 /// The immediate peer's address, inserted per connection by the server loop.
 ///
 /// It is the SOCKET peer, which behind an ingress is the ingress. Nothing here
-/// ever trusts `X-Forwarded-For` for it: see [`forwarded_client`].
+/// ever trusts `X-Forwarded-For` for it: see [`forwarded_client`] and
+/// [`login_rate_key`], the only two readers of that header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerAddr(pub IpAddr);
+
+/// Every `X-Forwarded-For` hop, across repeated header lines, in order. A line
+/// that is not visible ASCII is skipped, and so are empty hops.
+fn forwarded_for_hops(headers: &http::HeaderMap) -> Vec<&str> {
+    headers
+        .get_all(HeaderName::from_static("x-forwarded-for"))
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|hop| !hop.is_empty())
+        .collect()
+}
+
+/// One `X-Forwarded-For` hop as an address: a bare IP address, or a socket
+/// address (`203.0.113.5:4711`, `[2001:db8::5]:443`) with its port dropped.
+/// Some proxies append the second form (Azure Application Gateway does); a
+/// hop is written by the proxy that received it, so its form is that proxy's
+/// and choosing it gives the client nothing (FX-13 review L2). Anything else
+/// — `unknown`, a bracketed address with no port, a name — is not an address.
+fn hop_address(hop: &str) -> Option<IpAddr> {
+    hop.parse::<IpAddr>()
+        .ok()
+        .or_else(|| hop.parse::<std::net::SocketAddr>().ok().map(|s| s.ip()))
+}
+
+/// THE RIGHTMOST HOP THE TRUSTED PROXIES DID NOT ADD. A proxy APPENDS the
+/// address it received from, so everything left of its entry was sent by the
+/// client and may be invented; walking from the right past our own proxies'
+/// addresses finds the first hop none of them vouch for — the client as the
+/// outermost trusted proxy saw it (review L4). A hop that is not an address
+/// ([`hop_address`]) cannot be a trusted proxy, so the walk stops there and
+/// returns it. `None` when there are no hops, or when every hop is a trusted
+/// proxy.
+fn rightmost_untrusted_hop<'a>(
+    trusted: &crate::trusted_proxy::TrustedProxies,
+    hops: &[&'a str],
+) -> Option<&'a str> {
+    hops.iter()
+        .rev()
+        .copied()
+        .find(|hop| hop_address(hop).is_none_or(|ip| !trusted.contains(ip)))
+}
 
 /// The forwarded client address, but ONLY when the immediate peer is inside a
 /// configured trusted-proxy range.
 ///
-/// It is used for the audit line's `forwardedFor` field and for nothing else.
-/// No authentication, authorization, rate-limit key, redirect or callback reads
-/// it, whatever the peer is — a forged `X-Forwarded-For` from a client can
-/// therefore change one log field's presence and nothing about a decision.
+/// It is used for the audit line's `forwardedFor` field. The sign-in limiter
+/// chooses its bucket from the same hop, through [`login_rate_key`], under the
+/// same trust check; nothing else reads it. No authentication, authorization,
+/// redirect or callback reads it, whatever the peer is — a forged
+/// `X-Forwarded-For` from a client can therefore change one log field's
+/// presence and nothing about a decision.
 #[must_use]
 pub fn forwarded_client(
     state: &AppState,
@@ -106,32 +152,87 @@ pub fn forwarded_client(
     if !shared.trusted_proxies.contains(peer) {
         return None;
     }
-    // THE RIGHTMOST HOP THE TRUSTED PROXIES DID NOT ADD. A proxy APPENDS the
-    // address it received from, so everything left of its entry was sent by
-    // the client and may be invented; walking from the right past our own
-    // proxies' addresses finds the first hop none of them vouch for — the
-    // client as the outermost trusted proxy saw it (review L4). Every value is
-    // considered, across repeated header lines, in order.
-    let hops: Vec<String> = parts_headers
-        .get_all(HeaderName::from_static("x-forwarded-for"))
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .map(|hop| hop.trim().to_string())
-        .filter(|hop| !hop.is_empty())
-        .collect();
-    let client = hops
-        .iter()
-        .rev()
-        .find(|hop| {
-            hop.parse::<IpAddr>()
-                .map_or(true, |ip| !shared.trusted_proxies.contains(ip))
-        })
-        .or_else(|| hops.first())?;
+    let hops = forwarded_for_hops(parts_headers);
+    let client = rightmost_untrusted_hop(&shared.trusted_proxies, &hops)
+        .or_else(|| hops.first().copied())?;
     Some(crate::validate::bounded(client, 64))
 }
 
-/// The per-peer limit on `/auth/login` and `/auth/callback`.
+/// Which address a sign-in request is counted against, and why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginRateKey {
+    /// The client as the trusted proxy saw it: the rightmost `X-Forwarded-For`
+    /// hop that is not itself a trusted proxy.
+    ForwardedClient(IpAddr),
+    /// The socket peer: it is not a trusted proxy, or it is and its
+    /// `X-Forwarded-For` is absent, names only trusted proxies, or ends in a
+    /// hop that is not an address ([`hop_address`]).
+    Peer(IpAddr),
+}
+
+impl LoginRateKey {
+    /// The address the limiter counts against. The limiter folds it into its
+    /// bucket ([`crate::auth::ratelimit::bucket_of`]): an IPv4-mapped address
+    /// to IPv4, any other IPv6 address to its `/64`.
+    #[must_use]
+    pub fn address(self) -> IpAddr {
+        match self {
+            Self::ForwardedClient(ip) | Self::Peer(ip) => ip,
+        }
+    }
+
+    /// The audit note's value: which of the two the key is. Never the address.
+    #[must_use]
+    pub fn basis(self) -> &'static str {
+        match self {
+            Self::ForwardedClient(_) => "forwardedClient",
+            Self::Peer(_) => "peer",
+        }
+    }
+}
+
+/// The sign-in limiter's key for one request (FX-13).
+///
+/// THE FORWARDED CLIENT, ONLY FROM A TRUSTED PEER. When `peer` is a trusted
+/// proxy — [`crate::trusted_proxy::TrustedProxies::contains`], the very check
+/// [`entry_point`] makes, so a Service source that is not read yet or is older
+/// than its `MAX_AGE` trusts nobody here either — the key is the rightmost
+/// `X-Forwarded-For` hop that is not itself a trusted proxy. Behind one
+/// ingress that gives every client its own budget, where the peer alone made
+/// one global budget that a single client could spend for everyone.
+///
+/// EVERYTHING ELSE IS THE PEER. An untrusted peer's header is never read, so a
+/// forged one cannot move a request out of its own bucket. A trusted peer
+/// whose header is absent, names only trusted proxies (the request began
+/// inside the proxy tier) or ends in a hop that is not an address is
+/// counted against the peer, as every request was before.
+///
+/// ONLY `X-Forwarded-For`. Traefik, the supported ingress, deletes a client's
+/// `X-Forwarded-*` and appends the client's socket address, while it copies an
+/// RFC 7239 `Forwarded` header through as the client wrote it; reading
+/// `Forwarded` would let the client choose its bucket.
+///
+/// A BUCKET, NOT AN IDENTITY (D0, amended 2026-10-07). The address chooses
+/// which counter is charged, and a counter can only refuse. It is not an
+/// identity, a grant, or an audit actor.
+#[must_use]
+pub fn login_rate_key(
+    trusted: &crate::trusted_proxy::TrustedProxies,
+    headers: &http::HeaderMap,
+    peer: IpAddr,
+) -> LoginRateKey {
+    if !trusted.contains(peer) {
+        return LoginRateKey::Peer(peer);
+    }
+    let hops = forwarded_for_hops(headers);
+    match rightmost_untrusted_hop(trusted, &hops).and_then(hop_address) {
+        Some(client) => LoginRateKey::ForwardedClient(client),
+        None => LoginRateKey::Peer(peer),
+    }
+}
+
+/// The limit on `/auth/login` and `/auth/callback`, per client behind a
+/// trusted proxy and otherwise per peer ([`login_rate_key`]).
 ///
 /// # Errors
 ///
@@ -146,8 +247,32 @@ pub fn check_login_rate(state: &AppState, parts: &Parts) -> Result<(), ApiError>
         // inventing one would make the limit a coin toss.
         return Ok(());
     };
-    match shared.login_limiter.check(peer) {
+    let key = login_rate_key(&shared.trusted_proxies, &parts.headers, peer);
+    let audit = parts.extensions.get::<Arc<AuditContext>>();
+    if let Some(audit) = audit {
+        audit.note("loginRateKey", key.basis());
+    }
+    match shared.login_limiter.check(key.address()) {
         crate::auth::ratelimit::Decision::Allowed => Ok(()),
+        crate::auth::ratelimit::Decision::AllowedUntracked { announce } => {
+            // The table of keys is full of live windows: this new key is
+            // served without one rather than locked out. Many addresses are
+            // signing in at once, which an operator wants to see: on every
+            // such request's audit line, and in ONE warning a window — never
+            // a second log line per request.
+            if let Some(audit) = audit {
+                audit.note("loginRateUntracked", "tableFull");
+            }
+            if announce {
+                tracing::warn!(
+                    tracked = crate::auth::ratelimit::MAX_TRACKED_PEERS,
+                    "the sign-in limiter's table is full of live windows: new clients are \
+                     served without a window until it drains (audit note loginRateUntracked); \
+                     this is logged once a window"
+                );
+            }
+            Ok(())
+        }
         crate::auth::ratelimit::Decision::Limited {
             retry_after_seconds,
         } => {
@@ -723,6 +848,200 @@ mod tests {
         }
         // A second pass finds nothing left to do.
         assert!(strip_identity_headers(&mut headers).is_empty());
+    }
+
+    // ------------------------------------------------ the sign-in limiter's key
+
+    use crate::config::{Cidr, ServiceRef};
+    use crate::trusted_proxy::TrustedProxies;
+
+    fn addr(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// The ingress range of these tests: `10.42.0.0/16`.
+    fn ingress() -> TrustedProxies {
+        TrustedProxies::from_cidrs(vec![Cidr::parse("10.42.0.0/16").unwrap()])
+    }
+
+    fn xff(values: &[&str]) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        for value in values {
+            headers.append(
+                HeaderName::from_static("x-forwarded-for"),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers
+    }
+
+    fn key(trusted: &TrustedProxies, values: &[&str], peer: &str) -> LoginRateKey {
+        login_rate_key(trusted, &xff(values), addr(peer))
+    }
+
+    /// **Two clients behind one trusted proxy are two keys; one client through
+    /// two trusted proxies is one.** NEGATIVE CONTROL: the peer is the same
+    /// for both clients, so a key that ignored the header (the defect) makes
+    /// the first assertion fail, and one keyed on the peer makes the second's
+    /// two proxies two keys.
+    #[test]
+    fn the_key_is_the_client_behind_a_trusted_proxy() {
+        let t = ingress();
+        let a = key(&t, &["203.0.113.50"], "10.42.0.17");
+        let b = key(&t, &["203.0.113.51"], "10.42.0.17");
+        assert_eq!(a, LoginRateKey::ForwardedClient(addr("203.0.113.50")));
+        assert_eq!(b, LoginRateKey::ForwardedClient(addr("203.0.113.51")));
+        assert_ne!(a.address(), b.address());
+
+        // The same client through two ingress pods, and through a chain of
+        // two: one key.
+        let via_other = key(&t, &["203.0.113.50"], "10.42.0.18");
+        let via_chain = key(&t, &["203.0.113.50, 10.42.0.18"], "10.42.0.17");
+        assert_eq!(via_other.address(), a.address());
+        assert_eq!(via_chain.address(), a.address());
+        // An IPv4-mapped spelling of the same client is the same bucket.
+        assert_eq!(
+            crate::auth::ratelimit::bucket_of(
+                key(&t, &["::ffff:203.0.113.50"], "10.42.0.17").address()
+            ),
+            crate::auth::ratelimit::bucket_of(a.address())
+        );
+        assert_eq!(a.basis(), "forwardedClient");
+    }
+
+    /// **The rightmost untrusted hop, never the leftmost.** Everything left of
+    /// the hop the trusted proxy appended was written by the client; keying on
+    /// it would let a client choose a fresh bucket per request.
+    #[test]
+    fn the_key_is_the_rightmost_hop_the_proxies_did_not_add() {
+        let t = ingress();
+        for values in [
+            &["198.51.100.66, 203.0.113.50"][..],
+            &["198.51.100.66, 203.0.113.50, 10.42.0.9"][..],
+            // Repeated header lines are one chain, in order.
+            &["198.51.100.66", "203.0.113.50"][..],
+            // A malformed hop the CLIENT sent, left of the appended one, is
+            // never read.
+            &["not-an-address, 203.0.113.50"][..],
+            // A proxy that appends `ip:port` (review L2): the port is dropped,
+            // and a trusted hop with a port is still skipped.
+            &["198.51.100.66, 203.0.113.50:4711"][..],
+            &["198.51.100.66, 203.0.113.50:4711, 10.42.0.9:80"][..],
+        ] {
+            assert_eq!(
+                key(&t, values, "10.42.0.17"),
+                LoginRateKey::ForwardedClient(addr("203.0.113.50")),
+                "{values:?}"
+            );
+        }
+    }
+
+    /// **A bracketed IPv6 socket address is its address.** NEGATIVE CONTROL:
+    /// the same address bracketed without a port is not an address, and
+    /// falls back to the peer.
+    #[test]
+    fn a_socket_address_hop_is_keyed_on_its_address() {
+        let t = ingress();
+        assert_eq!(
+            key(&t, &["[2001:db8::5]:443"], "10.42.0.17"),
+            LoginRateKey::ForwardedClient(addr("2001:db8::5"))
+        );
+        assert_eq!(
+            key(&t, &["[2001:db8::5]"], "10.42.0.17"),
+            LoginRateKey::Peer(addr("10.42.0.17"))
+        );
+    }
+
+    /// **An untrusted peer's header is never read.** NEGATIVE CONTROL: the
+    /// same header from the trusted peer DOES choose the key, so the
+    /// assertion below fails for a limiter that reads it from anyone.
+    #[test]
+    fn an_untrusted_peers_header_is_ignored() {
+        let t = ingress();
+        assert_eq!(
+            key(&t, &["203.0.113.50"], "10.99.3.4"),
+            LoginRateKey::Peer(addr("10.99.3.4"))
+        );
+        assert_eq!(
+            key(&t, &["203.0.113.50"], "10.42.0.17"),
+            LoginRateKey::ForwardedClient(addr("203.0.113.50"))
+        );
+        // An RFC 7239 `Forwarded` header is never read, from anyone: Traefik
+        // copies it through as the client wrote it.
+        let mut forwarded = http::HeaderMap::new();
+        forwarded.insert(
+            HeaderName::from_static("forwarded"),
+            HeaderValue::from_static("for=203.0.113.50"),
+        );
+        assert_eq!(
+            login_rate_key(&t, &forwarded, addr("10.42.0.17")),
+            LoginRateKey::Peer(addr("10.42.0.17"))
+        );
+        assert_eq!(LoginRateKey::Peer(addr("10.42.0.17")).basis(), "peer");
+    }
+
+    /// **A Service source that is not ready, or older than its `MAX_AGE`,
+    /// trusts nobody here either**, exactly as the entry point's gate.
+    /// NEGATIVE CONTROL: the same source, freshly read, does choose the
+    /// client's key.
+    #[test]
+    fn a_trusted_set_not_ready_or_too_old_trusts_nobody() {
+        let service = || {
+            Some(ServiceRef {
+                namespace: "traefik".into(),
+                name: "traefik".into(),
+            })
+        };
+        let unread = TrustedProxies::new(Vec::new(), service());
+        assert!(!unread.ready());
+        assert_eq!(
+            key(&unread, &["203.0.113.50"], "10.1.0.7"),
+            LoginRateKey::Peer(addr("10.1.0.7"))
+        );
+
+        let stale = TrustedProxies::new(Vec::new(), service());
+        let old = std::time::Instant::now()
+            .checked_sub(crate::trusted_proxy::MAX_AGE + std::time::Duration::from_secs(1))
+            .expect("the clock is past the window");
+        stale.replace_at([addr("10.1.0.7")], old);
+        assert_eq!(
+            key(&stale, &["203.0.113.50"], "10.1.0.7"),
+            LoginRateKey::Peer(addr("10.1.0.7"))
+        );
+
+        let fresh = TrustedProxies::new(Vec::new(), service());
+        fresh.replace_at([addr("10.1.0.7")], std::time::Instant::now());
+        assert_eq!(
+            key(&fresh, &["203.0.113.50"], "10.1.0.7"),
+            LoginRateKey::ForwardedClient(addr("203.0.113.50"))
+        );
+    }
+
+    /// **Absent, malformed, or made only of trusted proxies: the peer.** A
+    /// chain of only proxies began inside the proxy tier, so it has no client
+    /// hop to count. NEGATIVE CONTROL: the well-formed chain from the same
+    /// peer keys on the client, so each fallback below is a real choice.
+    #[test]
+    fn a_header_without_a_client_hop_falls_back_to_the_peer() {
+        let t = ingress();
+        let peer = LoginRateKey::Peer(addr("10.42.0.17"));
+        for values in [
+            &[][..],
+            &[""][..],
+            &[" , "][..],
+            &["10.42.0.9"][..],
+            &["10.42.0.9, 10.42.0.17"][..],
+            &["203.0.113.50, not-an-address"][..],
+            &["unknown"][..],
+            &["[2001:db8::1]"][..],
+            &["203.0.113.50:not-a-port"][..],
+        ] {
+            assert_eq!(key(&t, values, "10.42.0.17"), peer, "{values:?}");
+        }
+        assert_eq!(
+            key(&t, &["203.0.113.50"], "10.42.0.17"),
+            LoginRateKey::ForwardedClient(addr("203.0.113.50"))
+        );
     }
 
     #[test]

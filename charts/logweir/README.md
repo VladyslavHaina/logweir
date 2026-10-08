@@ -630,6 +630,39 @@ remains the network boundary. There are two ways to say who the proxy is:
 
 Both may be set; a peer trusted by either is trusted.
 
+**The trusted proxy also decides whose sign-in budget a request spends**
+(FX-13). `/auth/login` and `/auth/callback` allow 20 requests a minute per
+client, per console replica. From a trusted proxy, the client is the
+rightmost `X-Forwarded-For` hop that is not itself a trusted proxy — the
+address Traefik received the request from, which Traefik appends after
+deleting whatever `X-Forwarded-*` the client sent (`forwardedHeaders.trustedIPs:
+[]`, the default and the PoC profile's setting). From any other peer it is the
+peer, and an RFC 7239 `Forwarded` header is never read. This holds whether or
+not `requireTrustedProxy` is on, so three things follow.
+
+- Without a trusted proxy configured, every sign-in through the ingress shares
+  the ingress's one budget, about ten sign-ins a minute for everyone.
+- An ingress controller that passes a client's `X-Forwarded-For` through
+  unchanged (Traefik with `forwardedHeaders.insecure: true` or the client's
+  range in `trustedIPs`), or a `trustedProxyCidrs` range wider than the
+  ingress's own pods, lets a client choose its budget — **including another
+  client's**, so it can spend that client's sign-ins. Without
+  `requireTrustedProxy` the ranges have no width floor, so a range set wide
+  "for logging" took on this meaning with FX-13: keep both as tight as the
+  gate needs them.
+- Per-client budgets need the client's own address to reach Traefik. With the
+  Traefik chart's default Service (`externalTrafficPolicy: Cluster`) on a
+  multi-node cluster, or a cloud load balancer in instance mode, kube-proxy
+  replaces it with a node address and every client through that node shares
+  one budget. Keep it with `externalTrafficPolicy: Local`, the PROXY protocol,
+  or an L7 hop in front that both Traefik (`forwardedHeaders.trustedIPs`) and
+  the console trust.
+
+The whole rule, why there is no global sign-in budget, and what to do about
+the residual it leaves at the identity provider (generous per-client limits
+there, alerts, and the in-cluster administrator mode as the break-glass path)
+are in [docs/api.md](../../docs/api.md), *Rate limits*.
+
 ### The identity provider inside the cluster: a private CA, a name, a path
 
 Three values exist for an issuer the console cannot reach with the defaults —

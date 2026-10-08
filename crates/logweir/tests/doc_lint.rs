@@ -1633,13 +1633,21 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// restore fails here, and the notes at main `19b5ecd9`, with twenty-three
 /// items, fail the twenty-four pin (FX-3 fix round, 2026-10-07).
 ///
-/// Then to twenty-five: item 25 is FX-8's runner change (a point-in-time
+/// Then to twenty-five: item 25 is FX-13's sign-in limit, counted per client
+/// behind the trusted ingress instead of per socket peer. Its token is the
+/// audit note an operator reads to tell which counter a refused sign-in
+/// spent. The notes at main's `fcaae178`, with twenty-four items, fail the
+/// twenty-five pin, and so does an item 25 without its token (FX-13, after
+/// FX-3 took 24, 2026-10-07).
+///
+/// Then to twenty-six: item 26 is FX-8's runner change (a point-in-time
 /// restore of a `LogAppendTime` topic is refused unless its plan selects by
 /// producer time). Its token is the refusal an operator will see on the
 /// `Restore`, and it is held, below, to the pre-upgrade inventory of the
-/// topics it applies to and to the opt-in. The notes at main's `3638b006`,
-/// with twenty-four items, fail the twenty-five pin (FX-8 fix round,
-/// 2026-10-07; item 23 when first written, renumbered after FX-10 and FX-3).
+/// topics it applies to and to the opt-in. The notes at main's `99e3802e`,
+/// with twenty-five items, fail the twenty-six pin (FX-8 fix round,
+/// 2026-10-07; item 23 when first written, renumbered after FX-10, FX-3 and
+/// FX-13).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1665,9 +1673,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=25).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-five operator-facing changes, `#### 1.` \
-         to `#### 25.` in order; found {numbers:?}"
+        (1..=26).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-six operator-facing changes, `#### 1.` \
+         to `#### 26.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1724,6 +1732,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
             "not-reconstructed source settings",
             "topic_parity.not_reconstructed",
         ),
+        // FX-13 (2026-10-07): the sign-in limit per client behind the
+        // trusted ingress, and the audit note that says which counter.
+        ("the sign-in limit per client", "loginRateKey"),
         // FX-8 (2026-10-07): a point-in-time restore of a LogAppendTime topic
         // is refused unless its plan selects by producer time.
         (
@@ -1824,14 +1835,14 @@ fn the_release_notes_carry_every_owed_operator_action() {
         }
     }
 
-    // ITEM 25 OWES the inventory an operator runs before the runner rolls --
+    // ITEM 26 OWES the inventory an operator runs before the runner rolls --
     // which source topics are LogAppendTime, by override or broker default,
     // printed by name (review L-4) -- and the opt-in that restores them
     // knowingly (FX-8).
     let (_, fx8) = items
         .iter()
-        .find(|(n, _)| *n == 25)
-        .expect("docs/release-notes.md carries item 25");
+        .find(|(n, _)| *n == 26)
+        .expect("docs/release-notes.md carries item 26");
     for owed in [
         // Review L-4: the inventory prints topic NAMES, and `--all` covers
         // a broker default too.
@@ -1841,7 +1852,7 @@ fn the_release_notes_carry_every_owed_operator_action() {
     ] {
         assert!(
             fx8.contains(owed),
-            "docs/release-notes.md item 25 (FX-8) no longer carries `{owed}` in its own section"
+            "docs/release-notes.md item 26 (FX-8) no longer carries `{owed}` in its own section"
         );
     }
 
