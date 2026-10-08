@@ -2774,7 +2774,7 @@ fn execute_with_validated_approval(
     // so a refused plan never opens the bucket. `set` is also what
     // `Selection::bind_backup_set` needs below — `BackupSetFacts` does not
     // carry a manifest key, so this is the only binding of it the drill has.
-    let set = pick_backup_set(c.engine.as_ref(), &c.spec)?;
+    let set = pick_backup_set(c.engine.as_ref(), &c.spec, c.bound_set.as_ref())?;
     // `describe_with_notices`, not `describe`: what the engine found that no
     // signed field carries — today an unreadable consumer-groups snapshot — is
     // told to the operator here, before any target is touched, rather than
@@ -3385,12 +3385,46 @@ fn sign_and_publish(
 /// silently falling back to the newest set — a drill that quietly restored a
 /// different backup than the approved plan named would make the whole
 /// approval chain meaningless.
-fn pick_backup_set(engine: &dyn DataEngine, spec: &DrillSpec) -> Result<BackupSetRef, DrillError> {
+///
+/// **A bound plan's set is selected by KEY (FX-16 fix round, review M-1 and
+/// L-1).** `list_backup_sets` lists every `…/manifest.json` under the prefix,
+/// recursively and sorted, naming each set by its parent directory, so two
+/// manifests can carry the bound id — a copy under a sub-prefix, a nested set.
+/// Choosing the FIRST by id let the drill describe one of them while the
+/// engine, told only the prefix and the id, restored
+/// `<prefix>/<backup_id>/manifest.json`; and let a same-id copy that sorts
+/// first refuse a truthful plan. For a bound plan `bound.manifest_key` is that
+/// engine key (the binding refuses any other), so the set chosen here, the set
+/// `describe` reads and the set the engine restores are one object. A plan
+/// bound to no point keeps the selection by id.
+fn pick_backup_set(
+    engine: &dyn DataEngine,
+    spec: &DrillSpec,
+    bound: Option<&binding::BoundSet>,
+) -> Result<BackupSetRef, DrillError> {
     let sets = engine.list_backup_sets(&spec.source.storage)?;
     if sets.is_empty() {
         return Err(DrillError::Operational(
             "the archive holds no backup set at the configured source storage location".into(),
         ));
+    }
+    if let Some(bound) = bound {
+        // The binding read this manifest moments ago, at this key; a listing
+        // that does not show it is the archive answering inconsistently, not
+        // the plan being wrong: exit 1.
+        return sets
+            .iter()
+            .find(|s| s.manifest_key == bound.manifest_key)
+            .cloned()
+            .ok_or_else(|| {
+                DrillError::Operational(format!(
+                    "the plan is bound to recovery point {} whose manifest is {}, and the \
+                     archive's listing under the plan's storage does not show it; refusing to \
+                     choose another set by id, which would restore something other than the \
+                     approved point",
+                    bound.point_id, bound.manifest_key
+                ))
+            });
     }
     if spec.source.backup == "latestCompleted" {
         // `list_manifests` returns them sorted by key, and manifest keys are
@@ -5056,20 +5090,129 @@ mod tests {
 
         spec.source.backup = "latestCompleted".into();
         assert_eq!(
-            pick_backup_set(&TwoSets, &spec).unwrap().backup_id,
+            pick_backup_set(&TwoSets, &spec, None).unwrap().backup_id,
             "newest",
             "latestCompleted takes the last set list_backup_sets returns"
         );
 
         spec.source.backup = "older".into();
-        assert_eq!(pick_backup_set(&TwoSets, &spec).unwrap().backup_id, "older");
+        assert_eq!(
+            pick_backup_set(&TwoSets, &spec, None).unwrap().backup_id,
+            "older"
+        );
 
         spec.source.backup = "a-backup-that-was-deleted".into();
-        let e = pick_backup_set(&TwoSets, &spec).unwrap_err();
+        let e = pick_backup_set(&TwoSets, &spec, None).unwrap_err();
         assert!(
             matches!(e, DrillError::Operational(ref m)
                      if m.contains("a-backup-that-was-deleted") && m.contains("refusing to fall back")),
             "the refusal must name the missing id: {e}"
+        );
+    }
+
+    /// **FX-16 fix round (review M-1, L-1): a bound plan's set is the one at
+    /// the point's key, whatever sorts first.** The listing returns three
+    /// manifests with id `nightly-7` — a copy under `0copy/`, a nested set
+    /// under `a/`, and the set at the engine's key `nightly-7/manifest.json` —
+    /// in key order. Bound to the last, the bound plan gets the last; bound to
+    /// a key the listing does not show, it is exit 1 naming the key, never
+    /// another set by id.
+    ///
+    /// KILLS: the bound selection removed (the first, `0copy/…`, is chosen —
+    /// L-1's false refusal; with a nested bound key, M-1's wrong restore).
+    /// The unbound control documents what a plan bound to no point still
+    /// does: the first by id (the class item owed in the report).
+    #[test]
+    fn a_bound_plan_picks_the_set_at_the_points_key_whatever_sorts_first() {
+        use logweir_core::engine::*;
+
+        struct SameIdSets;
+        impl DataEngine for SameIdSets {
+            fn id(&self) -> EngineId {
+                unreachable!()
+            }
+            fn list_backup_sets(&self, _l: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
+                Ok([
+                    "0copy/nightly-7/manifest.json",
+                    "a/nightly-7/manifest.json",
+                    "nightly-7/manifest.json",
+                ]
+                .iter()
+                .map(|k| BackupSetRef {
+                    backup_id: "nightly-7".into(),
+                    manifest_key: (*k).into(),
+                })
+                .collect())
+            }
+            fn describe(&self, _s: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
+                unreachable!()
+            }
+            fn preflight(&self, _p: &RestorePlan) -> Result<PreflightReport, EngineError> {
+                unreachable!()
+            }
+            fn restore(
+                &self,
+                _p: &RestorePlan,
+                _o: &mut dyn PhaseObserver,
+            ) -> Result<RestoreFacts, EngineError> {
+                unreachable!()
+            }
+            fn fingerprints(
+                &self,
+                _s: &SampleSelection,
+            ) -> Result<Vec<RecordFingerprint>, EngineError> {
+                unreachable!()
+            }
+        }
+
+        let spec: DrillSpec = serde_yaml::from_str(
+            "source:\n  storage:\n    backend: filesystem\n    path: /a\n  backup: nightly-7\n  \
+             topics: [t]\n\
+             target:\n  bootstrap_servers: [x:9092]\n  topic_mapping_prefix: \"d-\"\n\
+             sample:\n  window_start: \"2026-01-01T00:00:00Z\"\n  window_end: \"2026-01-02T00:00:00Z\"\n\
+             objectives: {}\n\
+             evidence:\n  backend: filesystem\n  path: /b\n",
+        )
+        .unwrap();
+        let bound = |key: &str| binding::BoundSet {
+            point_id: "lwp1-0123456789abcdef0123456789abcdef".into(),
+            backup_id: "nightly-7".into(),
+            manifest_key: key.into(),
+            manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+            manifest_version_id: None,
+        };
+
+        for key in [
+            "nightly-7/manifest.json",
+            "a/nightly-7/manifest.json",
+            "0copy/nightly-7/manifest.json",
+        ] {
+            assert_eq!(
+                pick_backup_set(&SameIdSets, &spec, Some(&bound(key)))
+                    .unwrap()
+                    .manifest_key,
+                key,
+                "a bound plan gets the set at its point's key"
+            );
+        }
+        let e = pick_backup_set(
+            &SameIdSets,
+            &spec,
+            Some(&bound("elsewhere/nightly-7/manifest.json")),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, DrillError::Operational(ref m)
+                     if m.contains("elsewhere/nightly-7/manifest.json")
+                         && m.contains("refusing to choose another set by id")),
+            "{e}"
+        );
+        assert_eq!(
+            pick_backup_set(&SameIdSets, &spec, None)
+                .unwrap()
+                .manifest_key,
+            "0copy/nightly-7/manifest.json",
+            "the unbound selection is unchanged: the first by id"
         );
     }
 

@@ -262,6 +262,26 @@ pub fn verify_point_binding(
             &plan.source.backup,
         )));
     }
+    // **FX-16 fix round (review M-1) — THE OBJECT THE ENGINE WILL READ IS THE
+    // ONE THE RECEIPT ATTESTS.** The engine is told only the plan's storage and
+    // the set id, and it loads `<prefix>/<backup_id>/manifest.json`
+    // (`Store::engine_manifest_key`, built from this handle, which is built
+    // from the plan's `source.storage`). The receipt names the key its backup
+    // read the manifest back at. Unless the two are one key, the restore reads
+    // an object the point does not describe — a plan whose prefix is a parent
+    // of the point's set with another same-id set at the engine's path, or a
+    // plan pointed at a copy under another prefix. Everything below (the
+    // manifest read, FX-7's pin, the digest) is then about the engine's own
+    // object, and `pick_backup_set` selects the set by this same key.
+    let engine_key = archive.engine_manifest_key(&receipt.backup_id);
+    if receipt.archive.manifest_key != engine_key {
+        return Err(refuse(engine_key_refusal(
+            &point.point_id,
+            &receipt.backup_id,
+            &receipt.archive.manifest_key,
+            &engine_key,
+        )));
+    }
 
     // **THE SIGNATURE, UNDER THE MOUNTED TRUST, BEFORE ANYTHING IS READ ON
     // THE RECEIPT'S WORD** (D3 §5.5 step 6). The digest above proves these are
@@ -401,10 +421,50 @@ fn plan_set_refusal(point_id: &str, receipt_backup_id: &str, plan_backup: &str) 
     )
 }
 
+/// **FX-16 fix round (review M-1).** The binding's refusal of a plan under
+/// whose storage the engine would read the point's set somewhere other than
+/// the manifest the receipt attests. The repair names the prefix the set was
+/// written under when the receipt's key has the engine's shape.
+fn engine_key_refusal(
+    point_id: &str,
+    backup_id: &str,
+    receipt_key: &str,
+    engine_key: &str,
+) -> String {
+    let written_under = receipt_key
+        .strip_suffix(&format!("{backup_id}/manifest.json"))
+        .map(|p| p.trim_end_matches('/'));
+    let repair = match written_under {
+        Some("") => {
+            "point source.storage at the bucket root, where the set was written".to_string()
+        }
+        Some(prefix) => {
+            format!("point source.storage at the prefix the set was written under ({prefix})")
+        }
+        None => format!(
+            "no plan storage makes the engine read it, because the receipt's manifest key is \
+             not `<prefix>/{backup_id}/manifest.json`"
+        ),
+    };
+    format!(
+        "{POINT_BINDING_SET_MISMATCH}. Recovery point {point_id}'s receipt attests set \
+         `{backup_id}`'s manifest at {receipt_key}, but under this plan's source.storage the \
+         engine would read set `{backup_id}` at {engine_key}: the restore would read an object \
+         the point does not describe. To restore this point, {repair}. No data operation was \
+         started."
+    )
+}
+
 /// **FX-16 — THE SET THE ENGINE IS ABOUT TO RESTORE IS THE SET THE BOUND
 /// RECEIPT DESCRIBES.** Called by the drill immediately after `describe`, before
 /// the time basis is decided and before phase 2, so a refused run has created
 /// no target topic of this restore and has taken no decision from the receipt.
+///
+/// Why it is the ENGINE's set (fix round, review M-1): the binding proved the
+/// receipt's manifest key is the key the engine reads under this plan
+/// (`Store::engine_manifest_key`), and `pick_backup_set` selects a bound plan's
+/// set by that exact key, so `set` is the object the engine will load — not
+/// whichever same-id manifest the recursive listing returned first.
 ///
 /// `bound` is `None` for a plan bound to no point (nothing to compare: the set
 /// is the one `source.backup` names, as it always was). Otherwise every one of
@@ -1005,17 +1065,20 @@ mod tests {
     }
 
     const RECEIPT_KEY: &str = "logweir/backups/nightly-7/run-1.receipt.json";
-    /// **A manifest under `logweir/` is a fixture concession, not a claim
-    /// about where a real archive keeps one.** `Store::in_memory` is the
+    /// **An archive prefix under `logweir/` is a fixture concession, not a
+    /// claim about where a real archive keeps one.** `Store::in_memory` is the
     /// socket-free double this repository's gate requires
     /// (`tests/no_network_in_unit_tests.rs`), and `put_create_only` asserts
     /// Global Constraint 6's root on every key it accepts — so an in-memory
-    /// archive cannot hold anything outside it. Nothing in
-    /// [`verify_point_binding`] reads the key's shape: it reads whatever
-    /// `receipt.archive.manifest_key` names, through the same `qualify`, and
-    /// `a_receipt_key_is_qualified_against_the_stores_prefix` pins the one
-    /// behaviour the location actually affects.
-    const MANIFEST_KEY: &str = "logweir/backups/nightly-7/run-1.manifest.json";
+    /// archive cannot hold anything outside it. The archive handle's prefix is
+    /// the plan's `source.storage` prefix.
+    const ARCHIVE_PREFIX: &str = "logweir";
+    /// The key the ENGINE reads set `nightly-7`'s manifest at under
+    /// [`ARCHIVE_PREFIX`] (`Store::engine_manifest_key`): since FX-16's fix
+    /// round the binding refuses a receipt that attests any other key. Until
+    /// then this fixture was `logweir/backups/nightly-7/run-1.manifest.json`,
+    /// a key no engine reads.
+    const MANIFEST_KEY: &str = "logweir/nightly-7/manifest.json";
 
     struct Archive {
         store: Store,
@@ -1129,13 +1192,13 @@ mod tests {
     }
 
     fn archive() -> Archive {
-        archive_with_a_point("", RECEIPT_KEY)
+        archive_with_a_point(ARCHIVE_PREFIX, RECEIPT_KEY)
     }
 
     /// [`archive_with_a_point`] whose receipt is edited by `edit` before it is
     /// serialised and signed — how FX-4's rows get a 1.1.0 receipt.
     fn archive_with_receipt(edit: impl FnOnce(&mut BackupReceipt)) -> Archive {
-        let store = Store::in_memory("");
+        let store = Store::in_memory(ARCHIVE_PREFIX);
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
         let mut doc = receipt(MANIFEST_KEY, &manifest_sha256);
@@ -1350,7 +1413,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// document agrees with every other, and the archive does not.
     #[test]
     fn a_manifest_the_archive_does_not_hold_is_refused() {
-        let store = Store::in_memory("");
+        let store = Store::in_memory(ARCHIVE_PREFIX);
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
         let receipt_bytes =
@@ -1387,7 +1450,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// replaced in place.
     #[test]
     fn a_manifest_whose_bytes_changed_under_an_intact_receipt_is_refused() {
-        let store = Store::in_memory("");
+        let store = Store::in_memory(ARCHIVE_PREFIX);
         let attested = br#"{"topics":[]}"#.to_vec();
         let attested_sha256 = logweir_core::ids::sha256_prefixed(&attested);
         let substituted = br#"{"topics":["swapped"]}"#.to_vec();
@@ -1433,7 +1496,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// that pinned nothing — and the handle that can rewrite the manifest the
     /// way the engine's own unconditional put does.
     fn versioned_point(pin: bool) -> (Archive, logweir_engine_oso::storage::VersionedBucket) {
-        let (store, bucket) = Store::in_memory_versioned("");
+        let (store, bucket) = Store::in_memory_versioned(ARCHIVE_PREFIX);
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
         let version = store
@@ -1642,6 +1705,127 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
+    /// One SIGNED point whose receipt (at `receipt_key`) attests its manifest
+    /// at `receipt_manifest_key`, in an archive whose handle has `prefix` (an
+    /// in-memory handle writes only under its own prefix), with every
+    /// `(key, bytes)` of `others` written beside it.
+    fn archive_at(
+        prefix: &str,
+        receipt_key: &str,
+        receipt_manifest_key: &str,
+        others: &[(&str, &[u8])],
+    ) -> Archive {
+        let store = Store::in_memory(prefix);
+        let manifest = br#"{"topics":[]}"#.to_vec();
+        let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
+        let receipt_bytes = serde_json::to_vec(&receipt(receipt_manifest_key, &manifest_sha256))
+            .expect("serialises");
+        let signer = SigningKey::generate_ed25519();
+        store
+            .put_create_only(receipt_key, &receipt_bytes)
+            .expect("the receipt is written");
+        let sidecar = sign_detached(
+            &signer,
+            logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            &receipt_bytes,
+        )
+        .expect("sign");
+        store
+            .put_create_only(
+                &crate::catalog::cli::sidecar_key_of(receipt_key),
+                &serde_json::to_vec(&sidecar).expect("serialises"),
+            )
+            .expect("the sidecar is written");
+        store
+            .put_create_only(receipt_manifest_key, &manifest)
+            .expect("the point's manifest is written");
+        for (key, bytes) in others {
+            store.put_create_only(key, bytes).expect("written");
+        }
+        Archive {
+            store,
+            binding: PointBinding {
+                point_id: crate::catalog::record::point_id(&receipt_bytes),
+                receipt_key: receipt_key.into(),
+                receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
+                manifest_sha256,
+            },
+            keys: evidence_keys(vec![(&signer, trusted(&signer))]),
+        }
+    }
+
+    /// **FX-16 fix round, review M-1 — the reviewer's layout.** The point's set
+    /// is NESTED under the plan's prefix (`logweir/a/nightly-7/`), and another
+    /// set with the same id and other bytes sits where the engine reads under
+    /// that prefix (`logweir/nightly-7/manifest.json`). The receipt, its
+    /// signature and its manifest all verify, and before the fix the
+    /// restored-set check passed too (the listing picked the nested set) while
+    /// the engine restored the other one. Now the binding refuses, before any
+    /// broker contact, naming both keys and the prefix to use.
+    ///
+    /// The control: the same layout of the point (receipt attesting the nested
+    /// manifest) in an archive read through a handle whose prefix is the one
+    /// the set was written under (`logweir/a`) — the engine then reads the
+    /// point's own manifest, and the point is proven.
+    ///
+    /// KILLS: the engine-key comparison removed (the nested point is proven
+    /// under the parent prefix); the engine key computed from anything but
+    /// this plan's handle.
+    #[test]
+    fn a_point_the_engine_would_not_read_under_this_plans_storage_is_refused() {
+        let nested = "logweir/a/nightly-7/manifest.json";
+        let a = archive_at(
+            "logweir",
+            RECEIPT_KEY,
+            nested,
+            &[(
+                "logweir/nightly-7/manifest.json",
+                br#"{"topics":[],"other":"set"}"#,
+            )],
+        );
+        let message = set_mismatch(check(
+            &plan_with(Some(a.binding.clone())),
+            &a.store,
+            &a.keys,
+        ));
+        assert!(
+            message.contains(&format!("attests set `nightly-7`'s manifest at {nested}"))
+                && message.contains(
+                    "the engine would read set `nightly-7` at logweir/nightly-7/manifest.json"
+                )
+                && message.contains("the prefix the set was written under (logweir/a)"),
+            "{message}"
+        );
+
+        let own = archive_at(
+            "logweir/a",
+            "logweir/a/receipts/run-1.receipt.json",
+            nested,
+            &[],
+        );
+        let verified = check(&plan_with(Some(own.binding.clone())), &own.store, &own.keys)
+            .expect("the same point under the prefix it was written under")
+            .expect("bound");
+        assert_eq!(verified.set.manifest_key, nested);
+    }
+
+    /// A receipt whose manifest key no plan storage maps the set id to (the
+    /// pre-fix-round fixture's shape) is refused, saying so.
+    #[test]
+    fn a_receipt_key_the_engine_never_reads_is_refused() {
+        let odd = "logweir/backups/nightly-7/run-1.manifest.json";
+        let a = archive_at(ARCHIVE_PREFIX, RECEIPT_KEY, odd, &[]);
+        let message = set_mismatch(check(
+            &plan_with(Some(a.binding.clone())),
+            &a.store,
+            &a.keys,
+        ));
+        assert!(
+            message.contains("no plan storage makes the engine read it") && message.contains(odd),
+            "{message}"
+        );
+    }
+
     fn bound_set() -> BoundSet {
         BoundSet {
             point_id: "lwp1-0123456789abcdef0123456789abcdef".into(),
@@ -1763,11 +1947,26 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
-    fn noted(result: Result<Option<VerifiedPoint>, DrillError>, id: &str) -> String {
+    /// A point proven by its digest with the [`POINT_PIN_UNCHECKED`] note, in
+    /// `bucket`. **FX-16 fix round (review L-2):** its bound set carries the
+    /// version THIS bucket's read answered — never the receipt's pin, which
+    /// this bucket does not hold — or every restore of a pinned point from a
+    /// DR copy would be refused at `check_restored_set`, whose `describe`
+    /// reads the same version this does.
+    fn noted(
+        result: Result<Option<VerifiedPoint>, DrillError>,
+        id: &str,
+        bucket: &Store,
+    ) -> String {
         let proven = result
             .expect("a copy of a signed point is that point")
             .expect("the plan is bound");
         assert_eq!(proven.point_id, id);
+        assert_eq!(
+            proven.set.manifest_version_id,
+            current_version(bucket),
+            "the bound set carries the version this bucket's read answered"
+        );
         let note = proven
             .pin_note
             .expect("the pin could not be checked here, and the runner says so");
@@ -1787,12 +1986,13 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     #[test]
     fn a_byte_identical_copy_of_a_pinned_point_in_an_unversioned_bucket_is_proven() {
         let (a, _bucket) = versioned_point(true);
-        let copy = Store::in_memory("");
+        let copy = Store::in_memory(ARCHIVE_PREFIX);
         copy_every_object(&a.store, &copy);
         let id = a.binding.point_id.clone();
         noted(
             check(&plan_with(Some(a.binding.clone())), &copy, &a.keys),
             &id,
+            &copy,
         );
         // And the original bucket, unchanged, needs no note at all.
         assert_eq!(
@@ -1813,7 +2013,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     #[test]
     fn a_pinned_point_hands_over_its_coverage_with_or_without_the_note() {
         use logweir_core::backup_receipt::{ConfigCoverage, TopicConfigCoverage};
-        let (store, _bucket) = Store::in_memory_versioned("");
+        let (store, _bucket) = Store::in_memory_versioned(ARCHIVE_PREFIX);
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
         let version = store
@@ -1854,7 +2054,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
             ConfigCoverage::CaptureDenied
         );
 
-        let copy = Store::in_memory("");
+        let copy = Store::in_memory(ARCHIVE_PREFIX);
         copy_every_object(&store, &copy);
         let copied = check(&plan_with(Some(binding)), &copy, &keys)
             .expect("a copy of a signed point is that point")
@@ -1879,7 +2079,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     #[test]
     fn a_byte_identical_copy_in_a_versioned_bucket_with_its_own_ids_is_proven() {
         let (a, _bucket) = versioned_point(true);
-        let (copy, copy_bucket) = Store::in_memory_versioned("");
+        let (copy, copy_bucket) = Store::in_memory_versioned(ARCHIVE_PREFIX);
         copy_every_object(&a.store, &copy);
         let (_, original_version) = a.store.get(MANIFEST_KEY).expect("the original reads");
         let (_, copy_version) = copy.get(MANIFEST_KEY).expect("the copy reads");
@@ -1891,6 +2091,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         noted(
             check(&plan_with(Some(a.binding.clone())), &copy, &a.keys),
             &a.binding.point_id,
+            &copy,
         );
     }
 
@@ -1899,7 +2100,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     #[test]
     fn a_copy_of_an_unpinned_point_is_proven_with_no_note() {
         let (u, _bucket) = versioned_point(false);
-        let copy = Store::in_memory("");
+        let copy = Store::in_memory(ARCHIVE_PREFIX);
         copy_every_object(&u.store, &copy);
         assert_eq!(
             check(&plan_with(Some(u.binding.clone())), &copy, &u.keys)
@@ -1917,7 +2118,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// whose pinned version is still retained.
     #[test]
     fn a_rewrite_whose_pinned_version_has_expired_degrades_to_the_digest_with_the_note() {
-        let (store, bucket) = Store::in_memory_versioned("");
+        let (store, bucket) = Store::in_memory_versioned(ARCHIVE_PREFIX);
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
         store
@@ -1947,6 +2148,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
                 &evidence_keys(vec![(&signer, trusted(&signer))]),
             ),
             &id,
+            &store,
         );
     }
 
@@ -1956,7 +2158,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     #[test]
     fn a_copy_whose_manifest_differs_is_refused_by_the_digest_with_the_note() {
         let (a, _bucket) = versioned_point(true);
-        let copy = Store::in_memory("");
+        let copy = Store::in_memory(ARCHIVE_PREFIX);
         for key in a.store.list_keys("").expect("lists") {
             let bytes = if key == MANIFEST_KEY {
                 br#"{"topics":["swapped"]}"#.to_vec()
@@ -2030,7 +2232,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// telling an operator to change an approved plan would be wrong.
     #[test]
     fn a_missing_receipt_is_operational_and_not_a_plan_refusal() {
-        let store = Store::in_memory("");
+        let store = Store::in_memory(ARCHIVE_PREFIX);
         let signer = SigningKey::generate_ed25519();
         let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
         let binding = PointBinding {
@@ -2050,7 +2252,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
 
     #[test]
     fn a_malformed_binding_is_refused_before_the_archive_is_touched() {
-        let store = Store::in_memory("");
+        let store = Store::in_memory(ARCHIVE_PREFIX);
         let signer = SigningKey::generate_ed25519();
         let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
         let binding = PointBinding {
@@ -2077,7 +2279,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// receipt: the fault is in the PLAN, so it is exit 3 and not exit 1.
     #[test]
     fn bytes_that_are_not_a_receipt_are_a_plan_refusal() {
-        let store = Store::in_memory("");
+        let store = Store::in_memory(ARCHIVE_PREFIX);
         let signer = SigningKey::generate_ed25519();
         let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
         let bytes = b"{\"not\":\"a receipt\"}".to_vec();
@@ -2151,7 +2353,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// MUTANT: treat a missing sidecar as "nothing to check".
     #[test]
     fn an_unsigned_receipt_is_refused() {
-        let store = Store::in_memory("");
+        let store = Store::in_memory(ARCHIVE_PREFIX);
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
         let receipt_bytes =
@@ -2194,7 +2396,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// revoked for compromise after the catalog synced.
     #[test]
     fn a_receipt_signed_by_a_key_revoked_for_compromise_is_refused() {
-        let store = Store::in_memory("");
+        let store = Store::in_memory(ARCHIVE_PREFIX);
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
         let receipt_bytes =

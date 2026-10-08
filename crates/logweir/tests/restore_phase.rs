@@ -486,10 +486,24 @@ evidence: {{backend: filesystem, path: {evidence}}}
         signed: bool,
         pin: Option<&str>,
     ) -> (tempfile::TempDir, String, String, SigningKey) {
+        archive_laid_out(signed, pin, "nightly-7/manifest.json", &[])
+    }
+
+    /// [`archive_with`], with the receipt attesting its manifest at
+    /// `manifest_key` and every `(key, bytes)` of `others` written beside it.
+    /// The plan's filesystem storage has no prefix, so the key the engine
+    /// reads set `nightly-7` at is `nightly-7/manifest.json` (FX-16 fix round:
+    /// the binding refuses a receipt that attests any other; this fixture
+    /// said `logweir/backups/nightly-7/run-1.manifest.json` until then).
+    fn archive_laid_out(
+        signed: bool,
+        pin: Option<&str>,
+        manifest_key: &str,
+        others: &[(&str, &[u8])],
+    ) -> (tempfile::TempDir, String, String, SigningKey) {
         let dir = tempfile::tempdir().expect("tempdir");
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = sha256_prefixed(&manifest);
-        let manifest_key = "logweir/backups/nightly-7/run-1.manifest.json";
         let mut receipt = serde_json::json!({
             "format_version": "1.0.0",
             "run_id": "run-1",
@@ -526,6 +540,9 @@ evidence: {{backend: filesystem, path: {evidence}}}
             (receipt_key, receipt_bytes.clone()),
             (manifest_key, manifest),
         ];
+        for (key, bytes) in others {
+            objects.push((key, bytes.to_vec()));
+        }
         if signed {
             let sidecar = sign_detached(
                 &signer,
@@ -758,6 +775,49 @@ evidence: {{backend: filesystem, path: {evidence}}}
         let evidence = tempfile::tempdir().expect("tempdir");
         let run = run_bound_restore(&plan(archive_dir.path(), evidence.path(), &truthful), None);
         refused_before_phase_zero(&run, "no evidence-signing keyring");
+    }
+
+    /// **FX-16 fix round (review M-1), through the real binary.** The point's
+    /// set is nested under the plan's storage (`a/nightly-7/`) and another set
+    /// with the same id and other bytes sits where the engine reads under that
+    /// storage (`nightly-7/manifest.json`). The receipt and its signature
+    /// verify; the run is refused exit 3 `PointBindingSetMismatch` naming the
+    /// engine's key, before phase 0, the bootstrap never dialled. Its control
+    /// is `a_truthful_binding_gets_past_the_check_and_fails_later` (the point's
+    /// set at the engine's key).
+    #[test]
+    fn a_point_the_engine_would_not_read_is_refused_before_phase_zero() {
+        let (archive_dir, truthful, point_id, signer) = archive_laid_out(
+            true,
+            None,
+            "a/nightly-7/manifest.json",
+            &[("nightly-7/manifest.json", br#"{"topics":[],"other":"set"}"#)],
+        );
+        let keys = evidence_keys(&signer, logweir_core::trust::KeyState::Active);
+        let evidence = tempfile::tempdir().expect("tempdir");
+        let run = run_bound_restore(
+            &plan(archive_dir.path(), evidence.path(), &truthful),
+            Some(&keys),
+        );
+        assert_eq!(run.code, 3, "{}", run.transcript);
+        for expected in [
+            "PointBindingSetMismatch",
+            point_id.as_str(),
+            "attests set `nightly-7`'s manifest at a/nightly-7/manifest.json",
+            "the engine would read set `nightly-7` at nightly-7/manifest.json",
+            "refusal-reason=GuardRefused",
+        ] {
+            assert!(
+                run.transcript.contains(expected),
+                "{expected:?} missing:\n{}",
+                run.transcript
+            );
+        }
+        assert!(
+            !run.transcript.contains("progress-phase=0:admit") && !run.transcript.contains("19098"),
+            "before phase 0, the bootstrap never dialled:\n{}",
+            run.transcript
+        );
     }
 
     /// **FX-16, through the real binary: a plan binding point A (of set

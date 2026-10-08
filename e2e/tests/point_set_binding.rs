@@ -5,18 +5,22 @@
 //! One row on the DEFAULT stack (no profile): the default broker is both the
 //! source and the target, and the archive is the stack's MinIO.
 //!
-//! | run | plan | this build | the pre-fix build (`FX16_BEFORE_BIN`) |
-//! |---|---|---|---|
-//! | `bound` | bound to point A, `backup: A` | restores A, `pass`, the target holds A's records (the control) | the same |
-//! | `other-set` | bound to A, `backup: B` (a later set beside A) | exit 3 `PointBindingSetMismatch` before phase 0; no target topic | restores B under A's receipt |
-//! | `latest` | bound to A, `backup: latestCompleted` (resolves to B) | exit 3 `PointBindingSetMismatch` before phase 0; no target topic | restores B under A's receipt |
-//! | `copy` | bound to A, `backup: A`, storage pointed at a byte-identical copy of A under another prefix | exit 3 `PointBindingSetMismatch` after `describe` (phase 0 ran) and before phase 2: the manifest key is not the receipt's; no target topic | restores the copy under A's receipt |
-//! | `edited` | as `copy`, over a copy whose manifest carries one more trailing newline (same document, other bytes) | exit 3 naming the manifest key AND digest; no target topic | restores it under A's receipt |
+//! | run | plan | this build | the build at FX-16's first round (`FX16_ROUND1_BIN`) | the build before FX-16 (`FX16_BEFORE_BIN`) |
+//! |---|---|---|---|---|
+//! | `bound` | bound to point A, `backup: A`, with a byte-identical copy of A at `<prefix>/0copy/A/` listed FIRST | restores A, `pass`, A's 30 records (the control, and review L-1) | refused `PointBindingSetMismatch` on the copy's key: L-1's false refusal | restores A |
+//! | `other-set` | bound to A, `backup: B` (a later set beside A) | exit 3 before phase 0 | exit 3 | restores B (45) under A's receipt |
+//! | `latest` | bound to A, `backup: latestCompleted` (resolves to B) | exit 3 before phase 0 | exit 3 | restores B (45) under A's receipt |
+//! | `copy` | bound to A, storage pointed at a byte-identical copy of A under another prefix | exit 3 before phase 0: the engine would read another key than the receipt's | exit 3 after `describe` | restores the copy under A's receipt |
+//! | `edited` | as `copy`, over a copy whose manifest carries one more trailing newline | exit 3 before phase 0 | exit 3 after `describe` | restores it under A's receipt |
+//! | `nested` | review M-1: point N's set NESTED under the plan's prefix (`<nest>/a/N/`), another set with the same id where the engine reads (`<nest>/N/`) | exit 3 before phase 0, naming both keys and `<nest>/a` | **restores the other set (45) under N's receipt (60)**: M-1 | the same |
 //!
 //! The binding (receipt digest, point id, signature under the mounted
 //! evidence keyring, the manifest at the receipt's key) verifies in EVERY run:
 //! each refused plan is approved, signed, and bound to a real point. What
-//! differs is only which set the run would restore.
+//! differs is only which set the run would restore. The same-id set at the
+//! engine's path in `nested` is written by a second `backup run` of the same
+//! id after the first one's execution claim is removed: another writer, as an
+//! older build or the upstream tool would be.
 //!
 //! # Running it
 //!
@@ -24,8 +28,8 @@
 //! eval "$(e2e/compose/stack-env.sh --slot N)"
 //! bash scripts/extract-engine.sh && just e2e-up
 //! cargo build -p logweir
-//! [FX16_BEFORE_BIN=<a logweir binary built before FX-16>] AWS_EC2_METADATA_DISABLED=true \
-//!   cargo test -p e2e --features e2e --test point_set_binding -- --test-threads=1 --nocapture
+//! [FX16_BEFORE_BIN=<a logweir built before FX-16>] [FX16_ROUND1_BIN=<one at FX-16's first round>] \
+//!   AWS_EC2_METADATA_DISABLED=true cargo test -p e2e --features e2e --test point_set_binding -- --test-threads=1 --nocapture
 //! just e2e-down
 //! ```
 //!
@@ -525,30 +529,24 @@ fn kept(o: &Output) -> Vec<String> {
         .collect()
 }
 
-/// Asserts `r` was refused `PointBindingSetMismatch` with every `needle`,
-/// that the binding itself had verified, and that `target` was never created.
-/// `after_phase_0`: the refusal is the restored-set half (phase 0 ran, phase 2
-/// did not); otherwise the plan half (no phase began).
-fn assert_refused(r: &Restore, target: &str, needles: &[&str], after_phase_0: bool) {
+/// Asserts `r` was refused `PointBindingSetMismatch` with every `needle`
+/// BEFORE phase 0 (no phase began, so no broker was asked anything), that the
+/// binding itself had verified, and that `target` was never created.
+fn assert_refused(r: &Restore, target: &str, needles: &[String]) {
     let t = text(&r.out);
     assert_eq!(r.out.status.code(), Some(3), "exit 3:\n{t}");
     assert!(t.contains("PointBindingSetMismatch. "), "{t}");
     assert!(t.contains("refusal-reason=GuardRefused"), "{t}");
     for needle in needles {
-        assert!(t.contains(needle), "{needle:?} missing:\n{t}");
+        assert!(t.contains(needle.as_str()), "{needle:?} missing:\n{t}");
     }
     assert!(
         !t.contains("PointBindingMismatch") && !t.contains("PointUntrusted"),
         "the binding itself verified; only the set differs:\n{t}"
     );
-    assert_eq!(
-        t.contains("progress-phase=0:admit"),
-        after_phase_0,
-        "phase 0 ran exactly when the refusal is the restored-set half:\n{t}"
-    );
     assert!(
-        !t.contains("progress-phase=2:"),
-        "phase 2 never began:\n{t}"
+        !t.contains("progress-phase="),
+        "refused before phase 0:\n{t}"
     );
     assert!(
         !harness::topic_exists(target),
@@ -557,20 +555,60 @@ fn assert_refused(r: &Restore, target: &str, needles: &[&str], after_phase_0: bo
     assert_eq!(r.scorecard, Value::Null, "a refused run signs nothing");
 }
 
+/// What one build does with one plan.
+enum Expect {
+    /// Exit 0 `pass`, the target holding this many records.
+    Passes(i64),
+    /// NOT refused by FX-16's check (the run went on to restore under the
+    /// point's receipt), and any target it created holds this many records —
+    /// another set's, not the point's.
+    RestoresOther(i64),
+    /// Exit 3 `PointBindingSetMismatch` naming every needle, nothing created.
+    Refused(Vec<String>),
+}
+
+struct Run<'a> {
+    name: &'static str,
+    point: &'a Backup,
+    prefix: String,
+    backup: String,
+    window: (i64, i64),
+    this_build: Expect,
+    round1: Expect,
+    before: Expect,
+}
+
+/// The engine's key message for `point` under `plan_prefix`.
+fn engine_key_needles(point: &Backup, plan_prefix: &str, written_under: &str) -> Vec<String> {
+    vec![
+        format!(
+            "attests set `{}`'s manifest at {}",
+            point.backup_id, point.receipt.archive.manifest_key
+        ),
+        format!(
+            "the engine would read set `{}` at {plan_prefix}/{}/manifest.json",
+            point.backup_id, point.backup_id
+        ),
+        format!("the prefix the set was written under ({written_under})"),
+    ]
+}
+
 // ============================================================ the row
 
-/// **FX-16, live.** See the module doc's table.
+/// **FX-16, live, with its fix round.** See the module doc's table.
 ///
-/// Negative controls: each refused run is a plan that a build without the
-/// check runs to completion — `FX16_BEFORE_BIN` records exactly that, and the
-/// row then asserts the pre-fix build restored the OTHER set's records under
-/// point A's receipt. Without the variable the same rows run this build only.
+/// Negative controls: `FX16_ROUND1_BIN` (the build at FX-16's first-round
+/// tip) refuses the truthful `bound` plan and restores the wrong set for
+/// `nested`; `FX16_BEFORE_BIN` (before FX-16) restores the wrong set for every
+/// refused plan. Without the variables the same rows run this build only.
 #[test]
 fn a_bound_restore_restores_its_points_set_or_nothing() {
     let n = nonce();
     let topic = format!("fx16src-{n}");
     let mut topics = Topics(vec![topic.clone()]);
     create_source_topic(&topic);
+    let bucket = harness::ARCHIVE_BUCKET;
+    let digest = logweir_core::ids::sha256_prefixed;
 
     // Point A: 30 records. Set B, beside it under the same prefix, after 15
     // more: the newest set, so `latestCompleted` resolves to B. Ids `…-a` and
@@ -584,44 +622,65 @@ fn a_bound_restore_restores_its_points_set_or_nothing() {
         a.receipt.archive.manifest_sha256, b.receipt.archive.manifest_sha256,
         "two different sets"
     );
-    let window = (a.receipt.covered.from_ms, b.receipt.covered.to_ms);
+    assert_eq!(
+        a.receipt.archive.manifest_key,
+        format!("{prefix}/{}/manifest.json", a.backup_id),
+        "the backup attests the key the engine wrote"
+    );
 
-    // A byte-identical copy of set A under another prefix, and an EDITED copy
-    // whose manifest is the same JSON with one more trailing newline: other
-    // bytes, same content, so the engine restores it as happily as the
-    // original.
+    // Review M-1's layout: set `…-n` written at `<nest>/…-n/` (45 records) by
+    // one writer, then — its execution claim removed, as another writer would
+    // never have taken it — 15 more records and point N, the same id, NESTED
+    // at `<nest>/a/…-n/` (60 records). The engine-path set comes first so
+    // neither backup's read-back lists the other.
+    let nest = format!("fx16-{n}-nest");
+    let nested_id = format!("fx16-{n}-n");
+    let engine_path_set = backup(&nested_id, &nest, &topic);
+    mc_ok(
+        &[
+            "rm",
+            &format!(
+                "local/{bucket}/{}",
+                logweir::backup::phase_run::claim_key(&nested_id)
+            ),
+        ],
+        "remove the first writer's execution claim",
+    );
+    produce(&topic, 5, "n");
+    let n_point = backup(&nested_id, &format!("{nest}/a"), &topic);
+    assert_eq!(
+        n_point.receipt.archive.manifest_key,
+        format!("{nest}/a/{nested_id}/manifest.json")
+    );
+
+    // A byte-identical copy of A LISTED FIRST under A's own prefix (`0copy`
+    // sorts before `fx16-…`: review L-1); a byte-identical copy under another
+    // prefix; and an EDITED copy whose manifest is the same JSON with one more
+    // trailing newline.
     let copy_prefix = format!("fx16-{n}-copy");
     let edit_prefix = format!("fx16-{n}-edit");
-    for p in [&copy_prefix, &edit_prefix] {
+    for dest in [
+        format!("{prefix}/0copy/{}", a.backup_id),
+        format!("{copy_prefix}/{}", a.backup_id),
+        format!("{edit_prefix}/{}", a.backup_id),
+    ] {
         mc_ok(
             &[
                 "cp",
                 "--recursive",
-                &format!(
-                    "local/{}/{prefix}/{}/",
-                    harness::ARCHIVE_BUCKET,
-                    a.backup_id
-                ),
-                &format!("local/{}/{p}/{}/", harness::ARCHIVE_BUCKET, a.backup_id),
+                &format!("local/{bucket}/{prefix}/{}/", a.backup_id),
+                &format!("local/{bucket}/{dest}/"),
             ],
-            &format!("copy set A to {p}"),
+            &format!("copy set A to {dest}"),
         );
     }
     let original_manifest = archive_get(&prefix, &a.receipt.archive.manifest_key);
-    let copy_manifest_key = a
-        .receipt
-        .archive
-        .manifest_key
-        .replacen(&prefix, &copy_prefix, 1);
-    let digest = logweir_core::ids::sha256_prefixed;
+    let first_copy_key = format!("{prefix}/0copy/{}/manifest.json", a.backup_id);
     assert_eq!(
-        digest(&archive_get(&copy_prefix, &copy_manifest_key)),
+        digest(&archive_get(&prefix, &first_copy_key)),
         digest(&original_manifest),
-        "the copy's manifest is byte-identical"
+        "the 0copy manifest is byte-identical"
     );
-    // The edit is the same document plus one trailing newline: other bytes
-    // whatever layout the engine (any engine-matrix line) writes, and JSON
-    // that every reader still parses as the same manifest.
     let mut edited = original_manifest.clone();
     edited.push(b'\n');
     assert_eq!(
@@ -630,16 +689,9 @@ fn a_bound_restore_restores_its_points_set_or_nothing() {
         "the same document"
     );
     assert_ne!(digest(&edited), digest(&original_manifest), "other bytes");
-    let edit_manifest_key = a
-        .receipt
-        .archive
-        .manifest_key
-        .replacen(&prefix, &edit_prefix, 1);
+    let edit_manifest_key = format!("{edit_prefix}/{}/manifest.json", a.backup_id);
     let piped = mc_with_stdin(
-        &[
-            "pipe",
-            &format!("local/{}/{edit_manifest_key}", harness::ARCHIVE_BUCKET),
-        ],
+        &["pipe", &format!("local/{bucket}/{edit_manifest_key}")],
         &edited,
     );
     assert!(piped.status.success(), "mc pipe:\n{}", text(&piped));
@@ -648,121 +700,138 @@ fn a_bound_restore_restores_its_points_set_or_nothing() {
         digest(&edited)
     );
 
-    // name, storage prefix, `source.backup`, the refusal's words (or none: the
-    // control), and whether phase 0 runs before it.
-    let runs: [(&str, &str, &str, Vec<String>, bool); 5] = [
-        ("bound", &prefix, &a.backup_id, vec![], false),
-        (
-            "other-set",
-            &prefix,
-            &b.backup_id,
-            vec![format!("names set `{}`", b.backup_id)],
-            false,
-        ),
-        (
-            "latest",
-            &prefix,
-            "latestCompleted",
-            vec!["names `latestCompleted`".to_string()],
-            false,
-        ),
-        (
-            "copy",
-            &copy_prefix,
-            &a.backup_id,
-            vec![format!(
-                "its manifest is {copy_manifest_key}, not the receipt's {}",
-                a.receipt.archive.manifest_key
-            )],
-            true,
-        ),
-        (
-            "edited",
-            &edit_prefix,
-            &a.backup_id,
-            vec![
-                format!(
-                    "its manifest is {edit_manifest_key}, not the receipt's {}",
-                    a.receipt.archive.manifest_key
-                ),
-                format!(
-                    "its manifest hashes to {}, not the bound {}",
-                    logweir_core::ids::sha256_prefixed(&edited),
-                    a.receipt.archive.manifest_sha256
-                ),
-            ],
-            true,
-        ),
+    let ab = (a.receipt.covered.from_ms, b.receipt.covered.to_ms);
+    let nn = (
+        engine_path_set.receipt.covered.from_ms,
+        n_point.receipt.covered.to_ms,
+    );
+    let refused_on_the_copys_key = Expect::Refused(vec![format!(
+        "its manifest is {first_copy_key}, not the receipt's {}",
+        a.receipt.archive.manifest_key
+    )]);
+    let runs = vec![
+        Run {
+            name: "bound",
+            point: &a,
+            prefix: prefix.clone(),
+            backup: a.backup_id.clone(),
+            window: ab,
+            this_build: Expect::Passes(30),
+            round1: refused_on_the_copys_key,
+            before: Expect::Passes(30),
+        },
+        Run {
+            name: "other-set",
+            point: &a,
+            prefix: prefix.clone(),
+            backup: b.backup_id.clone(),
+            window: ab,
+            this_build: Expect::Refused(vec![format!("names set `{}`", b.backup_id)]),
+            round1: Expect::Refused(vec![format!("names set `{}`", b.backup_id)]),
+            before: Expect::Passes(45),
+        },
+        Run {
+            name: "latest",
+            point: &a,
+            prefix: prefix.clone(),
+            backup: "latestCompleted".into(),
+            window: ab,
+            this_build: Expect::Refused(vec!["names `latestCompleted`".into()]),
+            round1: Expect::Refused(vec!["names `latestCompleted`".into()]),
+            before: Expect::Passes(45),
+        },
+        Run {
+            name: "copy",
+            point: &a,
+            prefix: copy_prefix.clone(),
+            backup: a.backup_id.clone(),
+            window: ab,
+            this_build: Expect::Refused(engine_key_needles(&a, &copy_prefix, &prefix)),
+            round1: Expect::Refused(vec![format!(
+                "its manifest is {copy_prefix}/{}/manifest.json",
+                a.backup_id
+            )]),
+            before: Expect::Passes(30),
+        },
+        Run {
+            name: "edited",
+            point: &a,
+            prefix: edit_prefix.clone(),
+            backup: a.backup_id.clone(),
+            window: ab,
+            this_build: Expect::Refused(engine_key_needles(&a, &edit_prefix, &prefix)),
+            round1: Expect::Refused(vec![format!("its manifest hashes to {}", digest(&edited))]),
+            before: Expect::Passes(30),
+        },
+        Run {
+            name: "nested",
+            point: &n_point,
+            prefix: nest.clone(),
+            backup: nested_id.clone(),
+            window: nn,
+            this_build: Expect::Refused(engine_key_needles(&n_point, &nest, &format!("{nest}/a"))),
+            round1: Expect::RestoresOther(45),
+            before: Expect::RestoresOther(45),
+        },
     ];
 
+    let round1 = std::env::var_os("FX16_ROUND1_BIN").map(PathBuf::from);
     let before = std::env::var_os("FX16_BEFORE_BIN").map(PathBuf::from);
     let mut evidence = serde_json::Map::new();
+    let set = |b: &Backup| {
+        json!({
+            "backup_id": b.backup_id,
+            "receipt_key": b.receipt_key,
+            "point_id": logweir::catalog::record::point_id(&b.receipt_bytes),
+            "manifest_key": b.receipt.archive.manifest_key,
+            "manifest_sha256": b.receipt.archive.manifest_sha256,
+            "records": b.receipt.records,
+        })
+    };
     evidence.insert(
         "fixture".into(),
         json!({
             "topic": topic,
-            "point_a": {
-                "backup_id": a.backup_id,
-                "receipt_key": a.receipt_key,
-                "point_id": logweir::catalog::record::point_id(&a.receipt_bytes),
-                "manifest_key": a.receipt.archive.manifest_key,
-                "manifest_sha256": a.receipt.archive.manifest_sha256,
-                "records": a.receipt.records,
-            },
-            "set_b": {
-                "backup_id": b.backup_id,
-                "manifest_sha256": b.receipt.archive.manifest_sha256,
-                "records": b.receipt.records,
-            },
-            "copy_manifest_key": copy_manifest_key,
+            "point_a": set(&a),
+            "set_b": set(&b),
+            "nested_engine_path_set": set(&engine_path_set),
+            "point_n_nested": set(&n_point),
+            "first_copy_key": first_copy_key,
             "edit_manifest_key": edit_manifest_key,
-            "edited_manifest_sha256": logweir_core::ids::sha256_prefixed(&edited),
+            "edited_manifest_sha256": digest(&edited),
             "engine": engine_version(),
             "binary": bin(),
+            "round1_binary": round1,
             "before_binary": before,
         }),
     );
 
-    for (name, storage_prefix, source_backup, needles, after_phase_0) in &runs {
-        let naming = format!("fx16{name}-{n}-");
-        let target = format!("{naming}{topic}");
-        topics.0.push(target.clone());
-        let spec = restore_spec(&a, storage_prefix, source_backup, &topic, &naming, window);
-        let r = restore(&bin(), &spec, &format!("{n}-{name}"));
-        let exists = harness::topic_exists(&target);
-        let restored = exists.then(|| records_on(&target));
-        evidence.insert(
-            format!("{name}/this-build"),
-            json!({
-                "exit": r.out.status.code(),
-                "outcome": r.scorecard["outcome"],
-                "target_topic": target,
-                "target_exists": exists,
-                "target_records": restored,
-                "lines": kept(&r.out),
-            }),
-        );
-        if needles.is_empty() {
-            // THE CONTROL: the plan that binds A and names A restores A.
-            assert_eq!(r.out.status.code(), Some(0), "{}", text(&r.out));
-            assert_eq!(r.scorecard["outcome"], "pass");
-            assert!(text(&r.out).contains("recovery point binding verified"));
-            assert_eq!(restored, Some(30), "A's 30 records, not B's 45");
-        } else {
-            let needles: Vec<&str> = needles.iter().map(String::as_str).collect();
-            assert_refused(&r, &target, &needles, *after_phase_0);
-        }
-
-        if let Some(before) = &before {
-            let naming = format!("fx16{name}-pre-{n}-");
+    for run in &runs {
+        let builds: Vec<(&str, PathBuf, &Expect)> = [
+            Some(("this-build", bin(), &run.this_build)),
+            round1.clone().map(|p| ("round1", p, &run.round1)),
+            before.clone().map(|p| ("before-fx16", p, &run.before)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for (build, binary, expect) in builds {
+            let naming = format!("fx16{}-{build}-{n}-", run.name);
             let target = format!("{naming}{topic}");
             topics.0.push(target.clone());
-            let spec = restore_spec(&a, storage_prefix, source_backup, &topic, &naming, window);
-            let r = restore(before, &spec, &format!("{n}-{name}-pre"));
+            let spec = restore_spec(
+                run.point,
+                &run.prefix,
+                &run.backup,
+                &topic,
+                &naming,
+                run.window,
+            );
+            let r = restore(&binary, &spec, &format!("{n}-{}-{build}", run.name));
             let exists = harness::topic_exists(&target);
             let restored = exists.then(|| records_on(&target));
             evidence.insert(
-                format!("{name}/before-fx16"),
+                format!("{}/{build}", run.name),
                 json!({
                     "exit": r.out.status.code(),
                     "outcome": r.scorecard["outcome"],
@@ -772,17 +841,40 @@ fn a_bound_restore_restores_its_points_set_or_nothing() {
                     "lines": kept(&r.out),
                 }),
             );
-            // The pre-fix build runs every plan to a signed pass: the
-            // control as here, and each refused plan by restoring a set the
-            // receipt does not describe (B's 45 records, or A's copy).
-            assert_eq!(r.out.status.code(), Some(0), "{name}: {}", text(&r.out));
-            assert_eq!(r.scorecard["outcome"], "pass", "{name}");
-            let expected = if *source_backup == a.backup_id {
-                30
-            } else {
-                45
-            };
-            assert_eq!(restored, Some(expected), "{name}");
+            let what = format!("{} / {build}", run.name);
+            match expect {
+                Expect::Passes(records) => {
+                    assert_eq!(r.out.status.code(), Some(0), "{what}: {}", text(&r.out));
+                    assert_eq!(r.scorecard["outcome"], "pass", "{what}");
+                    assert_eq!(restored, Some(*records), "{what}");
+                }
+                Expect::RestoresOther(records) => {
+                    let t = text(&r.out);
+                    assert!(
+                        !t.contains("PointBindingSetMismatch"),
+                        "{what}: the build under test let it through:\n{t}"
+                    );
+                    assert!(
+                        t.contains("progress-phase=0:admit"),
+                        "{what}: it went on past the binding:\n{t}"
+                    );
+                    if exists {
+                        assert_eq!(restored, Some(*records), "{what}: another set's records");
+                    }
+                }
+                Expect::Refused(needles) if build == "this-build" => {
+                    assert_refused(&r, &target, needles);
+                }
+                Expect::Refused(needles) => {
+                    let t = text(&r.out);
+                    assert_eq!(r.out.status.code(), Some(3), "{what}: {t}");
+                    assert!(t.contains("PointBindingSetMismatch. "), "{what}: {t}");
+                    for needle in needles {
+                        assert!(t.contains(needle.as_str()), "{what}: {needle:?}:\n{t}");
+                    }
+                    assert!(!exists, "{what}: nothing created");
+                }
+            }
         }
     }
 

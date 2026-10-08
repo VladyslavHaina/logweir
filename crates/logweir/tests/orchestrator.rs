@@ -1954,31 +1954,26 @@ fn refused_set_mismatch(f: &fixtures::OrchestratorFixture, err: DrillError, need
 
 /// **FX-16 — a plan binding point A while restoring set B is refused before
 /// any target exists.** The fixture engine restores its one set; the verified
-/// binding (as `Ctx::bound_set`) describes a set that differs from it in ONE
-/// respect per run: another set id (what `latestCompleted` resolving to a newer
-/// set looks like), another manifest key (a second copy of the set under
-/// another prefix, where FX-7's pin was never judged), another manifest digest
-/// (other bytes), another version (the manifest written again between the
-/// binding and `describe`). Each is exit 3 with nothing created.
+/// binding (as `Ctx::bound_set`) names that set's key, so it is the set
+/// selected, and describes it with ONE difference per run: another set id
+/// (what `latestCompleted` resolving to a newer set looks like), another
+/// manifest digest (other bytes at that key), another version (the manifest
+/// written again between the binding and `describe`). Each is exit 3 with
+/// nothing created. Another manifest KEY never reaches this check since the
+/// fix round: the set is selected by the point's key (the row below).
 ///
-/// KILLS: removing the check (all four runs pass and create the topic);
+/// KILLS: removing the check (all three runs pass and create the topic);
 /// moving it after the target-creation step (`created_topics` is not empty);
-/// ignoring the set id, the key, the digest or the version (that run passes).
+/// ignoring the set id, the digest or the version (that run passes).
 #[test]
 fn a_restored_set_that_is_not_the_bound_points_creates_no_target_topic() {
     type Edit = fn(&mut logweir::drill::binding::BoundSet);
-    let rows: [(&str, Edit, &str); 4] = [
+    let rows: [(&str, Edit, &str); 3] = [
         (
             "another set id",
             |b| b.backup_id = "backup-2026-08-31T02:00:00Z".into(),
             "it is backup set `backup-2026-08-30T02:00:00Z`, not the receipt's \
              `backup-2026-08-31T02:00:00Z`",
-        ),
-        (
-            "another manifest key",
-            |b| b.manifest_key = "copy/fixture/manifest.json".into(),
-            "its manifest is drills/fixture/manifest.json, not the receipt's \
-             copy/fixture/manifest.json",
         ),
         (
             "another manifest digest",
@@ -2001,6 +1996,199 @@ fn a_restored_set_that_is_not_the_bound_points_creates_no_target_topic() {
             .expect_err(&format!("{row}: a set that is not the point's is refused"));
         refused_set_mismatch(&f, err, needle);
     }
+}
+
+/// **FX-16 fix round (review M-1): a bound plan's set is selected by the
+/// point's key.** A point whose manifest key the archive's listing does not
+/// show (the binding read it there moments earlier) is exit 1, the archive
+/// answering inconsistently — never a substitution of another set by id. No
+/// target topic, no fingerprint, no scorecard.
+///
+/// KILLS: selecting a bound plan's set by id again (the fixture's one set is
+/// chosen, and the run is refused 3 on the key, or — without the key
+/// comparison — restores it).
+#[test]
+fn a_bound_key_the_listing_does_not_show_is_operational_and_creates_nothing() {
+    let mut f = fixtures::orchestrator_fixture(Drill::Passes);
+    let mut bound = bound_as_restored(&f);
+    bound.manifest_key = "copy/fixture/manifest.json".into();
+    f.ctx.bound_set = Some(bound);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("not selected");
+    let message = match &err {
+        DrillError::Operational(m) => m.clone(),
+        other => panic!("expected exit 1, got {other:?}"),
+    };
+    assert_eq!(ExitCode::from(err), ExitCode::Operational);
+    assert!(
+        message.contains("copy/fixture/manifest.json")
+            && message.contains("refusing to choose another set by id"),
+        "{message}"
+    );
+    assert!(fixtures::created_topics(&f).is_empty());
+    assert!(fixtures::fingerprint_calls(&f).is_empty());
+    assert!(f
+        .ctx
+        .store
+        .get(&format!("logweir/drills/{}.json", f.run_id))
+        .is_err());
+}
+
+/// The fixture engine, with a same-id COPY of its set listed FIRST (a key
+/// that sorts before the set's own, as `0copy/…` does), recording every key
+/// `describe` is asked about. Everything else is the fixture's.
+struct ListsACopyFirst {
+    inner: Box<dyn logweir_core::engine::DataEngine>,
+    copy_key: String,
+    described: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// A placeholder while the fixture's engine is moved into the wrapper.
+struct NoEngine;
+impl logweir_core::engine::DataEngine for NoEngine {
+    fn id(&self) -> logweir_core::engine::EngineId {
+        unreachable!()
+    }
+    fn list_backup_sets(
+        &self,
+        _: &logweir_core::engine::StorageUrl,
+    ) -> Result<Vec<logweir_core::engine::BackupSetRef>, logweir_core::engine::EngineError> {
+        unreachable!()
+    }
+    fn describe(
+        &self,
+        _: &logweir_core::engine::BackupSetRef,
+    ) -> Result<logweir_core::engine::BackupSetFacts, logweir_core::engine::EngineError> {
+        unreachable!()
+    }
+    fn preflight(
+        &self,
+        _: &logweir_core::engine::RestorePlan,
+    ) -> Result<logweir_core::engine::PreflightReport, logweir_core::engine::EngineError> {
+        unreachable!()
+    }
+    fn restore(
+        &self,
+        _: &logweir_core::engine::RestorePlan,
+        _: &mut dyn logweir_core::engine::PhaseObserver,
+    ) -> Result<logweir_core::engine::RestoreFacts, logweir_core::engine::EngineError> {
+        unreachable!()
+    }
+    fn fingerprints(
+        &self,
+        _: &logweir_core::engine::SampleSelection,
+    ) -> Result<Vec<logweir_core::engine::RecordFingerprint>, logweir_core::engine::EngineError>
+    {
+        unreachable!()
+    }
+}
+
+impl logweir_core::engine::DataEngine for ListsACopyFirst {
+    fn id(&self) -> logweir_core::engine::EngineId {
+        self.inner.id()
+    }
+    fn list_backup_sets(
+        &self,
+        loc: &logweir_core::engine::StorageUrl,
+    ) -> Result<Vec<logweir_core::engine::BackupSetRef>, logweir_core::engine::EngineError> {
+        let mut sets = self.inner.list_backup_sets(loc)?;
+        let copy = logweir_core::engine::BackupSetRef {
+            backup_id: sets[0].backup_id.clone(),
+            manifest_key: self.copy_key.clone(),
+        };
+        sets.insert(0, copy);
+        Ok(sets)
+    }
+    fn describe(
+        &self,
+        set: &logweir_core::engine::BackupSetRef,
+    ) -> Result<logweir_core::engine::BackupSetFacts, logweir_core::engine::EngineError> {
+        self.described
+            .lock()
+            .unwrap()
+            .push(set.manifest_key.clone());
+        self.inner.describe(set)
+    }
+    fn describe_with_notices(
+        &self,
+        set: &logweir_core::engine::BackupSetRef,
+    ) -> Result<
+        (
+            logweir_core::engine::BackupSetFacts,
+            Vec<logweir_core::engine::ArchiveNotice>,
+        ),
+        logweir_core::engine::EngineError,
+    > {
+        self.described
+            .lock()
+            .unwrap()
+            .push(set.manifest_key.clone());
+        self.inner.describe_with_notices(set)
+    }
+    fn preflight(
+        &self,
+        plan: &logweir_core::engine::RestorePlan,
+    ) -> Result<logweir_core::engine::PreflightReport, logweir_core::engine::EngineError> {
+        self.inner.preflight(plan)
+    }
+    fn restore(
+        &self,
+        plan: &logweir_core::engine::RestorePlan,
+        obs: &mut dyn logweir_core::engine::PhaseObserver,
+    ) -> Result<logweir_core::engine::RestoreFacts, logweir_core::engine::EngineError> {
+        self.inner.restore(plan, obs)
+    }
+    fn fingerprints(
+        &self,
+        sel: &logweir_core::engine::SampleSelection,
+    ) -> Result<Vec<logweir_core::engine::RecordFingerprint>, logweir_core::engine::EngineError>
+    {
+        self.inner.fingerprints(sel)
+    }
+    fn validation_run(
+        &self,
+        plan: &logweir_core::engine::RestorePlan,
+    ) -> Result<logweir_core::engine::EngineRun, logweir_core::engine::EngineError> {
+        self.inner.validation_run(plan)
+    }
+}
+
+/// **FX-16 fix round (review L-1): a same-id copy that sorts first does not
+/// refuse a truthful plan.** The listing shows a copy of the point's set
+/// (`0copy/…`) before the set itself; the plan is bound to the set itself.
+/// The run selects and describes the set at the point's key, ONLY that key,
+/// and passes as `Passes` does. Before the fix round the copy was selected by
+/// id and the run refused `PointBindingSetMismatch` on its key.
+///
+/// KILLS: selecting a bound plan's set by id (first) again.
+#[test]
+fn a_same_id_copy_listed_first_does_not_refuse_a_truthful_plan() {
+    let mut f = fixtures::orchestrator_fixture(Drill::Passes);
+    let bound = bound_as_restored(&f);
+    let described = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let inner = std::mem::replace(&mut f.ctx.engine, Box::new(NoEngine));
+    f.ctx.engine = Box::new(ListsACopyFirst {
+        inner,
+        copy_key: "0copy/fixture/manifest.json".into(),
+        described: described.clone(),
+    });
+    let listed = f
+        .ctx
+        .engine
+        .list_backup_sets(&f.ctx.spec.source.storage)
+        .unwrap();
+    assert_eq!(listed[0].manifest_key, "0copy/fixture/manifest.json");
+    assert_eq!(
+        listed[0].backup_id, bound.backup_id,
+        "the copy carries the id"
+    );
+    let bound_key = bound.manifest_key.clone();
+    f.ctx.bound_set = Some(bound);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the truthful plan restores its set");
+    assert_eq!(*described.lock().unwrap(), vec![bound_key]);
+    assert_eq!(fixtures::created_topics(&f).len(), 1);
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
 }
 
 /// **FX-16, the control.** The same run with the binding describing exactly
