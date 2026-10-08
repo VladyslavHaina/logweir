@@ -1955,6 +1955,13 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
             "two-digit retry",
             format!("{SCHEDULE_UID}-20260925-065500-r12"),
         ),
+        // The minter's separators, and only those.
+        ("not a hyphen", format!("{SCHEDULE_UID}_20260925-065500")),
+        ("not `-r`", format!("{SCHEDULE_UID}-20260925-065500-q1")),
+        (
+            "not `-r` either",
+            format!("{SCHEDULE_UID}-20260925-065500xr1"),
+        ),
         // Anything after the slot.
         (
             "a trailing word",
