@@ -204,7 +204,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-01.5c | Run PROD-01.1's and 01.4's suites on the 3.9, 4.1 and 4.3 lines | P1 | M2 | infra | 01.5 | — | compose | C | Proposed |
 | 3 | PROD-01.5d | A produce-response fault proxy profile: drop or hold one produce response deterministically (oracle for 07.1-R9 and 00.3d's A-C5-1) | P2 | M2 | infra | 01.5 | — | compose | B | Proposed |
 | 3 | PROD-01.5b | Put the `crates/` e2e rows on the per-stack variables | P2 | M3 | infra | 01.5 | — | compose | B | Proposed |
-| 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Proposed |
+| 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Done |
 | 1 | PROD-04.0c | Amendment D names the engine's group subcommands | P2 | M3 | docs | 04.0 | owner's yes on Amendment D (rule 8) | none | B | Proposed |
 | 1 | PROD-04.0d | Fixtures for groups and ACLs (`acl` profile, `groups` helper, streams-protocol variant, share-state settings) | P1 | M2 | infra | 04.0, 01.5 | — | compose | B | Done |
 | 3 | PROD-01.4b | Upstream DescribeTopics in rust-rdkafka (the exit for 01.4a) | P3 | M3 | impl | 01.4a | — | none | B | Proposed |
@@ -212,7 +212,8 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 2 | PROD-03.0 | Flag schema-dependent topics | P1 | M2 | impl | — | — | compose | A | Proposed |
 | 2 | PROD-04.2 | Translate positions; reviewed cutover | P1 | M2 | impl | 04.1, 08.1 | — | k8s | A | Proposed |
 | 2 | PROD-05.2 | Apply a reviewed target topic configuration | P1 | M2 | impl | 05.1, 08.1 | — | k8s | A | Proposed |
-| 2 | PROD-11.1 | Replay selection and safe clones | P1 | M2 | impl | 01.1, 08.1 | — | k8s | A | Proposed |
+| 2 | PROD-11.1 | Replay selection and safe clones | P1 | M2 | impl | 01.1, 08.1 | — | k8s | A | In progress |
+| 2 | PROD-11.1a | Safe clones (declared TTL and cleanup of only this execution's targets, `AllowedClusters`, explicit header handling) and the console's advanced selection behind an explicit choice, reusing PLAT-11.2's preview | P1 | M2 | impl | 11.1 | — | k8s | A | Proposed |
 | 2 | PROD-15.1 | Restore under the original name into an absent topic | P1 | M2 | impl | 01.4 | OD-2 | k8s | A | Proposed |
 | 3 | PROD-00.3 | Engine capabilities by route (child rows) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
 | 3 | PROD-00.3a | Committed-only capture (control records and READ_COMMITTED) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
@@ -438,6 +439,14 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Acceptance:** A multi-arch runner built from source produces the same drill and G-PITR results as the pinned binary; arm64 installation is documented; images carry signatures and provenance; the engine digest pin names Logweir's own build.
 - **Tests/evidence:** Both architectures on the compose drill; signature and provenance verification; a negative control where modified engine source fails the comparison.
 - **Dependencies:** PROD-00.1 and OD-3. **Handoff:** build recipe, parity evidence and rollback to the upstream image.
+
+**Signing proven (2026-10-08).** Merged as `c37024ed`. Main was red from PROD-01.3 until `daef606b`, so the first publication is main run 37838249072 at `daef606b`, with check, e2e, both platform builds, promote and sign green. Its `sign` job uploaded four SLSA provenance attestations and verified the four indexes and a platform manifest with the pinned identity. The orchestrator's own check (`claude/artifacts/prod-00-2/signing/`, cosign v2.5.2 in a container, gh 2.88.1) covered the runner index `sha256:e17aad07…` and its platform manifests (arm64 `sha256:eea0e769…`, amd64 `sha256:b706568d…`):
+- `cosign verify` passed on the index and on arm64;
+- `cosign verify-attestation --type spdxjson` passed on both platforms;
+- `gh attestation verify` passed on the index;
+- the three negative controls each failed as required: `refs/heads/other`, `attacker/logweir`, and a gh identity at `@refs/heads/other`.
+
+Provenance is attested per index by design (`images.yml`), so a platform digest has none. The engine matrix was re-dispatched on `038124d7` (run 37847365755). **Still owed for Done:** the PoC refresh that runs the built engine, with the controller and runner images rolled together (watch-list item 8).
 
 ### PROD-00.3 — Deliver engine capabilities by the recorded route
 
@@ -695,6 +704,12 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Evidence:** smokes on compose slot 1 with a negative control each: Kafka 4.3.1 47/0, 3.9.2 21/0, 3.7.1 8/0; `stack_params` 20/20; 9 mutants killed; the SIGKILL control fails the stop check.
 - **Artifacts:** `claude/artifacts/prod-04-0d/`.
 - **Rows added:** PROD-04.0a–d. PROD-04.1 now also depends on 04.0a and 04.0d, and PROD-05.3 on 04.0b and 04.0d.
+
+**Completion record — Done (2026-10-08), PROD-04.0b.**
+- **Ownership:** worker `prod-04-0b` (a run and a fix round), independent Tier-A review `claude/prod-04-0b.review.md`. The verdict was ACCEPT-WITH-FIXES, with one HIGH: a non-ignored row failed on CI's default Kafka 3.7.1 stack. The same reviewer's second pass was ACCEPT. Merged as `24ea0c9a` (PR #5, CI check and e2e green on Linux; release-notes item 37).
+- **Delivered:** OD-6 (a2). One FFI crate holds every librdkafka call the safe API lacks, and the first ones are the consumer-group and ACL reads. `[workspace.lints.rust]` makes rustc forbid `unsafe` in every other target, tests, build scripts and examples included. The gate script is a second layer, and each of its patterns has a negative control. No command uses the reads yet; PROD-04.1 is the first consumer.
+- **Evidence:** `group_admin` passed on the default 3.7.1 stack with `auth`: 3 passed, 4 ignored, and two planted wrong answers each fail the fixture row. It passed 7/7 on Kafka 3.9.2 and 4.3.1, the three-broker row included. 17 worker mutants were killed, plus the reviewer's three survivors. The decision record §14.1 sets the 3.7.1 rule for PROD-04.1.
+- **Follow-up (non-blocking):** L5, a leaked-name-listing mutant that survives the soak on macOS. PROD-04.1 and PROD-01.4a are now unblocked.
 
 ### PROD-04.1 — Archive consumer position evidence
 

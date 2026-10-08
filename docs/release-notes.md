@@ -25,8 +25,10 @@ key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
 32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the credential
 binding), 34 (FX-16, a point-bound restore restores its point's set), 35
 (PROD-00.2, the engine built from the vendored source), 36 (FX-23, an
-early-stopped restore is never signed `pass`) and 37 (FX-20, the binding
-for every other credential reference) so far. Items continue the next entry's
+early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
+one crate that may hold `unsafe` code, and the consumer-group and ACL reads
+behind it) and 38 (FX-20, the binding for every other credential reference)
+so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -65,7 +67,7 @@ Item 36 is fix-now row FX-23, proven on a compose stack by a SIGTERM to the
 engine mid-restore; it changes the runner's sampled verification and its
 signed scorecard, and the PoC upgrade that carries it runs its sampled
 rehearsal and restore rows unchanged.
-Item 37 is fix-now row FX-20, proven by unit, controller, API, console and
+Item 38 is fix-now row FX-20, proven by unit, controller, API, console and
 real-binary rows and on the compose stack (a foreign archive binding writes no
 object to MinIO; a bound one backs up); it changes the controller, every
 runner, the retention worker, the product API, the console and three CRDs'
@@ -702,7 +704,64 @@ killed) are unit rows (`crates/logweir/tests/stopped_restore.rs`).
 aggregate bound and ignores the engine report; the 1.6.0 scorecards already
 written stay valid under both readers, and an older reader ignores the field.
 
-#### 37. Every other credential reference presents only a credential bound to it (FX-20) — required action
+#### 37. One crate holds all `unsafe` code; consumer-group and ACL reads land behind it (PROD-04.0b)
+
+**Added, inside the build; no command uses it yet.** Logweir now calls the
+librdkafka functions that the safe `rdkafka` API lacks (OD-6 (a2); ADR 0004's
+amendment in [architecture](architecture.md)). The calls are the typed and
+the all-type consumer-group listings, the group description,
+DescribeCluster's authorized operations, and DescribeAcls. They go through ONE
+crate, `logweir-rdkafka-ffi`, which is the only place in the workspace where
+`unsafe` may appear.
+
+Every other package is compiled with `unsafe_code` forbidden in every target:
+library, binaries, examples, tests, benches and build scripts (the root
+`Cargo.toml`'s `[workspace.lints.rust]`). `scripts/check-unsafe-scope.sh`, in
+`just lint`, checks that and scans the tree as a second layer.
+
+On top of the calls, `logweir-kafka` decides which consumer groups a capture
+may take, and what an ACL read is worth:
+
+- **Groups.** Classic and KIP-848 consumer groups are capturable. Share,
+  streams and other-protocol groups are excluded `GroupTypeNotCaptured`. An
+  id no listing shows is `GroupNotFound` only on a complete listing, or when
+  a targeted describe answers it under this principal's filtering. It is
+  `NotVisibleToPrincipal` when that describe is refused, and failed otherwise.
+- **ACLs.** "0 bindings" is trusted only after two positive probes: the
+  broker's `authorizer.class.name`, and the principal's Describe on the
+  cluster. Bindings librdkafka cannot name are counted, never exported.
+
+PROD-04.1 (capturing positions) and PROD-05.3 (exporting access policy) build
+on this. No CLI, controller, API, console or archive behaviour changes in this
+item.
+
+**Known librdkafka behaviour, measured and recorded**
+(`docs/to-do/decisions/PROD-04.0-admin-path.md` §14):
+
+- a describe refused because the principal may not see the group leaks
+  224 bytes inside librdkafka, per call;
+- the legacy group listing reports only the last broker's error;
+- on a broker below Kafka 3.8 (ListGroups below v5, such as the 3.7.1 compose
+  default) no group has a type, so every group is excluded
+  `GroupTypeNotCaptured`.
+
+**Do:** nothing.
+**Scope:**
+- `crates/logweir-rdkafka-ffi`, with unit rows: bounded calls with no broker,
+  input refusals, and a 100,000-call soak;
+- `crates/logweir-kafka/src/{groups,acls,access,rdkafka_admin}.rs`, with unit
+  rows per trap and planted mutants, each killed;
+- the gate and its negative control `crates/logweir/tests/unsafe_scope_gate.rs`;
+- `e2e/tests/group_admin.rs`, against the brokers' own tools on 4.3.1, 3.9.2
+  and the 3.7.1 default (the `acl`, `streams-protocol` and `cluster3`
+  profiles, and a 7,000-call soak);
+- memory checks: macOS `leaks`, Guard Malloc, and (in the review) ASan on
+  Linux.
+
+**Rollback:** an older build has no FFI crate and no workspace lint table. No
+archive, catalog, evidence or API object changes in either direction.
+
+#### 38. Every other credential reference presents only a credential bound to it (FX-20) — required action
 
 **Changed.** PROD-01.3's binding (item 33) now guards every place a writable
 object names a credential Secret beside an endpoint its author chooses. A
@@ -820,7 +879,7 @@ In addition to the next entry's six, in its order:
   `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1` and its digest.
 - **Bind every destination, retention, notification and inline-archive
   credential Secret, one at a time, with `scripts/bind-credential.py`**
-  (item 37), after suspending the schedules that use them and rolling the
+  (item 38), after suspending the schedules that use them and rolling the
   controller, the runner and the console together; never in a loop. The tool's
   refusal of a Secret another object also names is an incident to investigate
   ([install.md](install.md); [kubernetes.md](kubernetes.md) §20.10).
@@ -836,7 +895,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36 and 37, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37 and 38, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -847,10 +906,11 @@ the runner, the console and the `KafkaCluster` CRD, and needs each credentialed
 connection's Secret bound; item 34 changes the runner only; item 35 changes the
 runner image (its engine and its platforms) and the controller's Job
 environment together; item 36 changes the runner's sampled verification and
-needs nothing; item 37 changes the controller, every runner, the
-retention worker, the product API, the console and the status of three CRDs,
-and needs each destination, retention, notification and inline-archive
-credential Secret bound. To roll back to
+needs nothing; item 37 changes no behaviour any binary shows (it adds
+library calls no command uses yet) and needs nothing; item 38 changes the
+controller, every runner, the retention worker, the product API, the
+console and the status of three CRDs, and needs each destination,
+retention, notification and inline-archive credential Secret bound. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -873,7 +933,7 @@ credential Secret bound. To roll back to
    (`ENGINE_SOURCE=oso`, linux/amd64; [install.md](install.md#rolling-the-engine-back))
    rather than an older runner; it declares OSO's 0.23.3, so its documents say
    which engine ran.
-5. Item 37 needs no rollback step of its own (nor does item 34, a runner
+5. Item 38 needs no rollback step of its own (nor does item 34, a runner
    change): an older controller and runner ignore the binding variables and
    the new status fields, and the bound Secrets keep working. Roll the console
    back with them (an older console offers `existing` on a create again,

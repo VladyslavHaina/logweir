@@ -9,6 +9,7 @@
 // receipt's in `crates/logweir-core` because the type does: a catalog point
 // record is built from a signed receipt, a store location and a signing key,
 // which is runner vocabulary and not the pure layer's (Global Constraint 1).
+#![forbid(unsafe_code)]
 fn main() {
     print!("{}", logweir::catalog::schema::catalog_point_schema());
 }

@@ -7,6 +7,7 @@
 //! NOT the AWS SDK chain: `~/.aws/credentials` profiles, `AWS_PROFILE` and SSO
 //! are unsupported. docs/stability.md states this in one sentence, because an
 //! adopter discovering it at drill time is a support ticket.
+#![forbid(unsafe_code)]
 use logweir_core::engine::{BackupSetRef, EngineError, StorageUrl};
 use object_store::path::Path as OPath;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutMode, PutOptions};

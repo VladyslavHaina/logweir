@@ -44,3 +44,8 @@ chrono.workspace = true
 rdkafka = { version = "0.36", default-features = false, features = ["cmake-build", "libz", "zstd", "ssl", "sasl", "tokio"] }
 serde_json.workspace = true
 serde_yaml.workspace = true
+
+# `unsafe_code = "forbid"` for every target of this package, tests and build
+# scripts included (the root Cargo.toml's `[workspace.lints.rust]`).
+[lints]
+workspace = true
