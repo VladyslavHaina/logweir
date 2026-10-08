@@ -107,12 +107,14 @@ import {
   COMPLETION_GUIDANCE,
   copyBlock,
   datagrid,
+  detailLink,
   disableKeepingFocus,
   epochMs,
   errorBox,
   esc,
   facts,
   fieldErrorLine,
+  humanInstant,
   invalidAttributes,
   mutationStatus,
   prefixOf,
@@ -134,7 +136,12 @@ import {
   when,
   windowMessage,
 } from "../render.js";
-import { defaultTopicPrefix, TARGET_MODES, preparePlanDocument } from "../plan.js";
+import {
+  defaultTopicPrefix,
+  MAX_REPLICATION_FACTOR,
+  TARGET_MODES,
+  preparePlanDocument,
+} from "../plan.js";
 import {
   clusterUid,
   filterSelectorOptions,
@@ -207,6 +214,10 @@ export const WIZARD_DRAFT_FIELDS = Object.freeze([
   // PLAT-15.2: which catalog point the draft was made for (`""` for a Backup),
   // and the topic list typed for it -- a catalog point publishes none.
   "catalogPointId", "catalogTopics",
+  // FX-5: a replication factor the operator SET (`null` while the default
+  // stands). A default is not kept: it is worked out again from what this
+  // page reads on the next mount, so it can follow the target's broker count.
+  "replicationFactor",
 ]);
 
 /** The API server's field paths, mapped to the wizard's inputs. `archive` and
@@ -2493,14 +2504,464 @@ export const PARTITION_COUNT_NOT_PUBLISHED =
   "SOURCE CLUSTER, which is a different fact: it is a probe of the cluster now, not the manifest's " +
   "count at this recovery point, and it hangs off a connection rather than off this Backup.";
 
+// ------------------------------------------------ the replication factor (FX-5)
+//
+// EVERY CONSOLE RESTORE USED TO ASK FOR ONE REPLICA. `initialState` wrote
+// `replicationFactor: 1` and step 4 printed it read-only, so a topic restored
+// into a three-broker cluster came back on one broker and nothing on screen
+// said that was a choice. The factor is now a DEFAULT worked out from what this
+// page can read, said with where it came from, and an INPUT -- and a factor the
+// target's brokers cannot hold is refused here, by the readiness check's own
+// code, before anything is sent.
+
 /** The replication factor every created topic is asked for, from the PLAN's
- *  own field. `target.default_replication_factor` in the runner's grammar,
- *  defaulted by `logweir_core::spec::rf1`; the broker refuses a factor above
- *  its broker count and the readiness check says so first
- *  (`ReplicationFactorExceedsBrokers`, D2 section 6.3). */
+ *  own field: `target.default_replication_factor` in the runner's grammar.
+ *  ONE VALUE FOR EVERY TOPIC: the runner creates each mapped topic with it,
+ *  after phase 5 and just before the restore (`create_target_topics`), so a
+ *  factor the brokers cannot hold fails an approved run there, exit 1, unless
+ *  this page or the readiness check refused it first. `null` when the field is
+ *  not a number. */
 export function replicationFactorOf(state) {
   const rf = (((state || {}).fields || {}).target || {}).replicationFactor;
   return typeof rf === "number" ? rf : null;
+}
+
+/** The plan grammar's own default (`logweir_core::spec::rf1`), and the factor
+ *  this page asks for when it knows neither fact `replicationDefault` reads --
+ *  which it then says, in `REPLICATION_UNKNOWN_WARNING`, and never silently. */
+export const GRAMMAR_REPLICATION_FACTOR = 1;
+
+/** THE MOST REPLICAS A DEFAULT ASKS FOR WHEN THE SOURCE'S FACTOR IS NOT KNOWN.
+ *
+ *  Apache Kafka's operations guide (4.0, "Adding and removing topics"): "We
+ *  recommend you use a replication factor of 2 or 3 so that you can
+ *  transparently bounce machines without interrupting data consumption."
+ *  Three is the top of that advice, and the factor a `min.insync.replicas` of 2
+ *  keeps writable through the loss of one broker. Defaulting to every broker of
+ *  a large cluster would multiply each restored topic's storage on a guess, so
+ *  a broker count above this is capped -- and the step says so. A factor read
+ *  from the SOURCE is never capped by this, only by the target's brokers. */
+export const DEFAULT_REPLICATION_CEILING = 3;
+
+/** Why the source's factor is not the default, in the words both steps print
+ *  beside the factor. */
+export const SOURCE_FACTOR_NOT_PUBLISHED =
+  "the source's replication factor is not published to this console";
+
+/** The long form, said once where the factor is chosen. */
+export const SOURCE_FACTOR_NOTE =
+  "The source's replication factor is recorded in the archive manifest, which only the restore " +
+  "Job reads. No record this console reads carries it yet -- not the backup receipt, not a " +
+  "catalog point, not the Backup's status -- so the default cannot start from it, and a topic " +
+  "discovery of the source would describe the cluster as it is now, not this recovery point.";
+
+/** Said when the factor is the grammar's 1 because nothing better is known. */
+export const REPLICATION_UNKNOWN_WARNING =
+  "This plan asks for 1 replica because this console knows neither the source's replication " +
+  "factor nor the target's broker count. Every restored record is then kept on one broker, and " +
+  "losing that broker loses the restored topic. Set the factor here, or run Discover topics on " +
+  "the target connection so this page can read its broker count.";
+
+/** What the input is, said beside it. */
+export const REPLICATION_HELP =
+  "One factor for every topic this plan creates: the plan carries one. It is editable; empty " +
+  "it to go back to the default. The readiness check in step 5 validates it against the " +
+  "target's brokers when it runs, and the restore asks for exactly this many replicas.";
+
+/** THE FACTOR CAN DIFFER FROM THE SOURCE'S, AND WHAT THAT COSTS (FX-5 review
+ *  M1). A default worked out from the TARGET's brokers knows nothing of the
+ *  source's factor: a source kept on one replica comes back on three, and every
+ *  restored byte is stored three times, or a source kept on five comes back on
+ *  three. Said beside the basis on step 4 and under the review row on step 6
+ *  whenever [`replicationMayDiffer`] -- in this build always, because no record
+ *  this console reads carries the source's factor. `ui/README.md` and
+ *  `docs/quickstart.md` (section 7) carry the same sentence, and
+ *  `ui/tests/replication-factor.spec.js` holds all three to it. */
+export const REPLICATION_DIFFERS_NOTE =
+  "This factor can differ from the source's, and the target's storage follows it: a topic the " +
+  "source kept at replication factor 1, restored at 3, takes three times the storage it took " +
+  "there, with the replication traffic on top; a factor below the source's keeps fewer copies " +
+  "than the source had.";
+
+/** Whether the plan's factor may differ from the source's: unless the
+ *  source's factor is known AND the plan asks for exactly it. */
+export function replicationMayDiffer(choice) {
+  const c = choice || {};
+  return !(Number.isInteger(c.source) && c.value === c.source);
+}
+
+/** THE SOURCE'S REPLICATION FACTOR FOR EACH SELECTED TOPIC -- and in this
+ *  build there is none to read, so the answer is `null`, by name.
+ *
+ *  WHERE IT LIVES. The backup engine records it per topic in the archive
+ *  manifest (`topics[].source_replication_factor`; the vendored struct is
+ *  `crates/logweir-engine-oso/src/vendored/manifest.rs`), and the runner reads
+ *  it after a restore, in phase 7, to say whether the target's factor differs.
+ *  Nothing this page reads carries it: the backup receipt counts records per
+ *  topic and nothing else, a catalog point's topics carry a name, a record
+ *  count and an always-absent partition count, `Backup.status` has no per-topic
+ *  block, a topic discovery lists the cluster as it is NOW, and the product
+ *  API holds no object-store credential with which to read a manifest.
+ *  Projecting it into the receipt, the catalog and the API is PROD-05.1's.
+ *
+ *  THE ONE PLACE THAT PROJECTION IS WIRED IN. When a point publishes its
+ *  topics' factors, this answers them for `selectedTopics(state)`, `null` for
+ *  a topic whose factor was not recorded, and `replicationDefault` takes the
+ *  largest. Until then the source arms below are reached by their own rows in
+ *  `ui/tests/replication-factor.spec.js` and by nothing a cluster says. */
+export function sourceReplicationFactorsOf() {
+  return null;
+}
+
+/** THE DEFAULT, from two facts and one rule. Pure: no DOM, no network.
+ *
+ *  `sourceFactors` is `sourceReplicationFactorsOf`'s answer -- one entry per
+ *  selected topic, `null` where unrecorded, or `null` for none -- and
+ *  `brokers` the target's broker count from a fresh topic discovery of it, or
+ *  `null`.
+ *
+ *   - a source factor is known: the LARGEST of the selected topics', capped at
+ *     the target's broker count when that is known and smaller (`source`,
+ *     `capped`);
+ *   - only the broker count is known: that count, at most
+ *     `DEFAULT_REPLICATION_CEILING` (`brokers`, `ceiling`);
+ *   - neither: the grammar's own 1, and said as such (`grammar`).
+ *
+ *  ONE VALUE, AND THE LARGEST, when the selected topics' factors differ. The
+ *  grammar has one `target.default_replication_factor` and the runner applies
+ *  it to every topic; a factor per topic would extend the signed plan's
+ *  grammar, which is the runner's versioned contract and not this page's. The
+ *  largest brings no topic back on fewer replicas than its source had unless
+ *  the target cannot hold them (and then the cap is said), and what a topic
+ *  that gains replicas costs is storage, never durability.
+ *
+ *  Returns `{value, basis, source, brokers}`: `source` the factor the source
+ *  side gave, `brokers` the count the cap read -- each `null` when unknown. */
+export function replicationDefault(sourceFactors, brokers) {
+  const recorded = (Array.isArray(sourceFactors) ? sourceFactors : []).filter((n) =>
+    Number.isInteger(n) && n >= 1 && n <= MAX_REPLICATION_FACTOR);
+  const count = Number.isInteger(brokers) && brokers >= 1 ? brokers : null;
+  if (recorded.length > 0) {
+    const source = recorded.reduce((a, b) => (b > a ? b : a));
+    return count !== null && count < source
+      ? { value: count, basis: "capped", source: source, brokers: count }
+      : { value: source, basis: "source", source: source, brokers: count };
+  }
+  if (count !== null) {
+    return count > DEFAULT_REPLICATION_CEILING
+      ? { value: DEFAULT_REPLICATION_CEILING, basis: "ceiling", source: null, brokers: count }
+      : { value: count, basis: "brokers", source: null, brokers: count };
+  }
+  return { value: GRAMMAR_REPLICATION_FACTOR, basis: "grammar", source: null, brokers: null };
+}
+
+/** What the page knows of the target's broker count before anything is read. */
+export const BROKERS_NOT_READ = Object.freeze({
+  count: null, fresh: false, uid: "", name: "", discovery: "", observedAt: "",
+  discoverable: false, why: "the target's topic discoveries have not been read",
+});
+
+/** THE TARGET'S BROKER COUNT, from the newest successful topic discovery of the
+ *  TARGET connection -- or no count, with the reason, and never a guess.
+ *
+ *  WHY A DISCOVERY. It is the one record of the count this console can read:
+ *  `TopicDiscovery.status.result.brokerCount`, which the product API publishes
+ *  as `brokerCount`. A `KafkaCluster`'s status records reachability and the
+ *  cluster id and no count. The readiness check reads a count too, in its
+ *  `target.authenticated` row, but the `Preflight` status keeps that only
+ *  inside the row's message, and the check is bound to a plan that already
+ *  names a factor.
+ *
+ *  OF THIS CONNECTION, AS IT IS. A discovery of a connection replaced or
+ *  edited since, or read with another principal, is `stale` about another
+ *  connection or another identity (`connectionReplaced`, `connectionChanged`,
+ *  `principalChanged`): its count is not used, and the step says so.
+ *
+ *  PAST ITS FRESHNESS ALONE, IT STILL SETS THE DEFAULT (FX-5 review L5). An
+ *  inventory goes stale in minutes (`checks.discovery.freshSeconds`, 900 s by
+ *  default) because topics come and go; a cluster's broker count rarely
+ *  changes. So when `expired` is the ONLY stale reason -- the same connection
+ *  object, generation and principal -- the count is kept with `fresh: false`:
+ *  it sets the default, said with the instant it was read, and refuses nothing
+ *  ([`replicationProblems`] refuses on a fresh count only, because an old count
+ *  could refuse a factor a cluster grown since would hold). It lasts as long
+ *  as the controller keeps the discovery: `checks.discovery.retentionSeconds`
+ *  after its observation (86400 s, a day, by default), collected on the
+ *  controller's hourly pass. That bound is the server's: this page never
+ *  compares an instant with the browser's clock.
+ *
+ *  Legacy mode has no topic discovery at all, and the read's own refusal is
+ *  the reason shown.
+ *
+ *  `answer` is `latestDiscoveries`'s answer, `{unread: <message>}` when the
+ *  read failed, or `null` when nothing was read; `cluster` is the selected
+ *  target connection. Returns `{count, fresh, uid, name, discovery, observedAt,
+ *  discoverable, why}`: `fresh` says whether the count may refuse a factor,
+ *  `discoverable` whether running a discovery would help, and `why` is empty
+ *  exactly when `count` is a number. */
+export function targetBrokerFact(answer, cluster) {
+  const name = ((((cluster || {}).metadata) || {}).name) || "";
+  const fact = Object.assign({}, BROKERS_NOT_READ, {
+    uid: cluster === null || cluster === undefined ? "" : clusterUid(cluster),
+    name: name,
+  });
+  if (name.length === 0) {
+    return Object.assign(fact, { why: "no target connection is selected" });
+  }
+  if (answer === null || answer === undefined) {
+    return fact;
+  }
+  if (typeof answer.unread === "string") {
+    return Object.assign(fact, {
+      why: "the target's topic discoveries could not be read: " + answer.unread,
+    });
+  }
+  const last = answer.lastSuccessful || null;
+  if (last === null) {
+    return Object.assign(fact, {
+      discoverable: true,
+      why: "no topic discovery of `" + name + "` has succeeded",
+    });
+  }
+  Object.assign(fact, {
+    discoverable: true,
+    discovery: typeof last.id === "string" ? last.id : "",
+    observedAt: typeof last.observedAt === "string" ? last.observedAt : "",
+  });
+  const said = "the newest successful topic discovery of `" + name + "` (`" + fact.discovery + "`)";
+  const boundUid = ((last.connection || {}).uid);
+  const reasons = Array.isArray(last.staleReasons) ? last.staleReasons : [];
+  const expiredAlone = reasons.length === 1 && reasons[0] === "expired";
+  if (last.stale === true && !expiredAlone) {
+    return Object.assign(fact, {
+      why: said + " is stale" + (reasons.length > 0 ? " (" + reasons.join(", ") + ")" : "") +
+        ", so its broker count is not used",
+    });
+  }
+  if (typeof boundUid === "string" && boundUid.length > 0 && fact.uid.length > 0 &&
+    boundUid !== fact.uid) {
+    return Object.assign(fact, {
+      why: said + " was taken of another connection under that name (uid " + boundUid +
+        "), so its broker count is not used",
+    });
+  }
+  if (!Number.isInteger(last.brokerCount) || last.brokerCount < 1) {
+    return Object.assign(fact, { why: said + " recorded no broker count" });
+  }
+  const fresh = last.stale !== true;
+  return Object.assign(fact, {
+    count: last.brokerCount, fresh: fresh, discoverable: !fresh, why: "",
+  });
+}
+
+/** The broker-count fact on the state, or the not-read one. */
+export function brokerFactOf(state) {
+  const fact = (state || {}).targetBrokers;
+  return fact !== null && typeof fact === "object" ? fact : BROKERS_NOT_READ;
+}
+
+/** THE FACTOR ON THE PLAN AND WHERE IT CAME FROM: the operator's own when they
+ *  set one, the default otherwise. One answer for step 4, step 6, the draft
+ *  and the stepper, so no two of them can describe different factors.
+ *  `brokersAsOf` is the instant a count PAST ITS FRESHNESS was read, said in
+ *  the basis; empty for a fresh count or none. */
+export function replicationChoice(state) {
+  const s = state || {};
+  const fact = brokerFactOf(s);
+  const asOf = fact.count !== null && fact.fresh !== true
+    ? (fact.observedAt.length > 0 ? fact.observedAt : "an earlier discovery")
+    : "";
+  if (s.replicationChosen === true) {
+    return {
+      value: replicationFactorOf(s), basis: "chosen", source: null, brokers: fact.count,
+      brokersAsOf: asOf,
+    };
+  }
+  return Object.assign(replicationDefault(sourceReplicationFactorsOf(s), fact.count),
+    { brokersAsOf: asOf });
+}
+
+/** Puts the default on the plan, unless the operator set a factor. The one
+ *  writer of a DEFAULT; [`setReplicationFactor`] is the one writer of a set one. */
+export function syncReplicationDefault(state) {
+  const s = state || {};
+  const target = (s.fields || {}).target;
+  if (target === undefined || target === null || s.replicationChosen === true) {
+    return;
+  }
+  target.replicationFactor = replicationChoice(s).value;
+}
+
+/** THE ONE PLACE THE INPUT WRITES THE FACTOR. Empty is the default again, as an
+ *  emptied prefix is: the field shows the default, and the plan must be what
+ *  it shows. Anything else is the operator's own value, kept as typed and
+ *  refused by [`replicationProblems`] when it is not a factor a broker places. */
+export function setReplicationFactor(state, text) {
+  const s = state || {};
+  const raw = typeof text === "string" ? text.trim() : "";
+  if (((s.fields || {}).target) === undefined) {
+    return;
+  }
+  if (raw.length === 0) {
+    s.replicationChosen = false;
+    syncReplicationDefault(s);
+    return;
+  }
+  s.replicationChosen = true;
+  s.fields.target.replicationFactor = Number(raw);
+}
+
+/** How many brokers, in words. */
+function brokersWord(count) {
+  return String(count) + (count === 1 ? " broker" : " brokers");
+}
+
+/** When a count past its freshness was read, in the words the basis appends:
+ *  ` as of 2026-10-05 09:12:00 UTC`, or nothing for a fresh count. */
+function brokersAsOfText(choice) {
+  const at = typeof (choice || {}).brokersAsOf === "string" ? choice.brokersAsOf : "";
+  return at.length === 0 ? "" : " as of " + (humanInstant(at) || at);
+}
+
+/** WHERE THE FACTOR CAME FROM, in the words both steps print -- "the
+ *  source's", "capped at the target's 2 brokers", and the rest. */
+export function replicationBasisText(choice) {
+  const c = choice || {};
+  if (c.basis === "source") {
+    return c.brokers === null
+      ? "the source's; the target's broker count is not known to this console, so it is not capped"
+      : "the source's";
+  }
+  if (c.basis === "capped") {
+    return "capped at the target's " + brokersWord(c.brokers) + brokersAsOfText(c) +
+      "; the source's is " + String(c.source);
+  }
+  if (c.basis === "brokers") {
+    return "the target's " + brokersWord(c.brokers) + brokersAsOfText(c) + "; " +
+      SOURCE_FACTOR_NOT_PUBLISHED;
+  }
+  if (c.basis === "ceiling") {
+    return "at most " + String(DEFAULT_REPLICATION_CEILING) + " by default, of the target's " +
+      brokersWord(c.brokers) + brokersAsOfText(c) + "; " + SOURCE_FACTOR_NOT_PUBLISHED;
+  }
+  if (c.basis === "chosen") {
+    return "set by you; " + (c.brokers === null
+      ? "the target's broker count is not known to this console"
+      : (brokersAsOfText(c).length > 0 ? "the target had " : "the target has ") +
+        brokersWord(c.brokers) + brokersAsOfText(c));
+  }
+  return "the plan grammar's default: neither the source's replication factor nor the " +
+    "target's broker count is known to this console";
+}
+
+/** The factor and where it came from, on one line: `3 (the source's)`. */
+export function replicationText(state) {
+  const choice = replicationChoice(state);
+  const value = typeof choice.value === "number" && Number.isFinite(choice.value)
+    ? String(choice.value)
+    : "not a number";
+  return value + " (" + replicationBasisText(choice) + ")";
+}
+
+/** The page's refusal over the factor, by input, made before anything is sent:
+ *  a value a broker cannot place at all, and -- by the readiness check's own
+ *  code -- one above the brokers a FRESH discovery of the target read. A count
+ *  past its freshness sets the default and refuses nothing (see
+ *  [`targetBrokerFact`]); the readiness check reads the target again. */
+export function replicationProblems(state) {
+  const s = state || {};
+  const problems = Object.create(null);
+  const rf = replicationFactorOf(s);
+  if (rf === null || !Number.isInteger(rf) || rf < 1 || rf > MAX_REPLICATION_FACTOR) {
+    problems.replicationFactor =
+      "a replication factor is a whole number from 1 to " + String(MAX_REPLICATION_FACTOR) +
+      ", the largest the plan carries; " +
+      (rf === null || Number.isNaN(rf) ? "what is set is not a number" : "`" + String(rf) +
+        "` is not one");
+    return problems;
+  }
+  const fact = brokerFactOf(s);
+  if (fact.count !== null && fact.fresh === true && rf > fact.count) {
+    problems.replicationFactor =
+      "`ReplicationFactorExceedsBrokers`: the target's topic discovery `" + fact.discovery +
+      "` read " + brokersWord(fact.count) + ", and a factor of " + String(rf) + " needs " +
+      String(rf) + ". A broker refuses it, and the readiness check's `target.topicCreate` row " +
+      "refuses this plan with the same code; set " + String(fact.count) + " or fewer.";
+  }
+  return problems;
+}
+
+/** The broker-count line under the input: the count and the discovery it came
+ *  from, or why there is none and where to read one. */
+export function renderBrokerFact(state) {
+  const s = state || {};
+  const fact = brokerFactOf(s);
+  if (fact.count !== null && fact.fresh === true) {
+    return "<p class=\"note\" id=\"replication-brokers\">" +
+      messageText("The target has " + brokersWord(fact.count) + ", as topic discovery `" +
+        fact.discovery + "` read them") +
+      (fact.observedAt.length > 0 ? " at " + when(fact.observedAt) : "") +
+      ". The readiness check in step 5 reads them again when it runs.</p>";
+  }
+  if (fact.count !== null) {
+    // PAST ITS FRESHNESS (`expired` alone): the count sets the default, said
+    // with when it was read, and refuses nothing.
+    return "<p class=\"note\" id=\"replication-brokers\">" +
+      messageText("The target had " + brokersWord(fact.count) + " when topic discovery `" +
+        fact.discovery + "` read them") +
+      (fact.observedAt.length > 0 ? " at " + when(fact.observedAt) : "") +
+      ". That discovery is past its freshness, so the count sets the default and refuses no " +
+      "factor" +
+      (fact.name.length > 0
+        ? ": open " + detailLink("clusters", String(s.ns || ""), fact.name) +
+          " and run Discover topics for a fresh count, which also refuses a factor above it"
+        : "") +
+      ". The readiness check in step 5 reads them again when it runs.</p>";
+  }
+  return "<p class=\"note\" id=\"replication-brokers\">" +
+    messageText("The target's broker count is not known to this page: " + fact.why + ".") +
+    (fact.discoverable && fact.name.length > 0
+      ? " Open " + detailLink("clusters", String(s.ns || ""), fact.name) +
+        " and run Discover topics; this page reads the count when it next opens."
+      : "") +
+    "</p>";
+}
+
+/** Step 4's replication-factor input, with where its value came from and what
+ *  refuses it. */
+export function renderReplicationField(state) {
+  const s = state || {};
+  const errors = errorsOf(s);
+  const rf = replicationFactorOf(s);
+  const problems = replicationProblems(s);
+  const choice = replicationChoice(s);
+  const shown = typeof rf === "number" && Number.isFinite(rf) ? String(rf) : "";
+  return (
+    "<div class=\"field\" id=\"replication\"><label for=\"replication-factor\">replication " +
+    "factor</label>" +
+    "<input id=\"replication-factor\" name=\"replicationFactor\" type=\"number\" min=\"1\" " +
+    "max=\"" + String(MAX_REPLICATION_FACTOR) + "\" step=\"1\" inputmode=\"numeric\" value=\"" +
+    esc(shown) + "\"" + invalidAttributes("replication-factor", errors.replicationFactor) + ">" +
+    fieldErrorLine("replication-factor", errors.replicationFactor) +
+    (typeof problems.replicationFactor === "string"
+      ? "<p class=\"complaint\" id=\"replication-complaint\">" +
+        messageText(problems.replicationFactor) + "</p>"
+      : "") +
+    "<p class=\"note\" id=\"replication-basis\">This plan asks for " +
+    esc(replicationText(s)) + ".</p>" +
+    (replicationMayDiffer(choice)
+      ? "<p class=\"note\" id=\"replication-differs\">" + esc(REPLICATION_DIFFERS_NOTE) + "</p>"
+      : "") +
+    (choice.basis === "grammar"
+      ? "<p class=\"complaint\" id=\"replication-unknown\">" + esc(REPLICATION_UNKNOWN_WARNING) +
+        "</p>"
+      : "") +
+    renderBrokerFact(s) +
+    (choice.source === null && choice.basis !== "chosen"
+      ? "<p class=\"note\" id=\"replication-source\">" + esc(SOURCE_FACTOR_NOTE) + "</p>"
+      : "") +
+    "<p class=\"help\">" + esc(REPLICATION_HELP) + "</p></div>"
+  );
 }
 
 /** The verification this restore will perform, from the PLAN's sample block --
@@ -2547,7 +3008,7 @@ export function renderRecoveryLimits(state) {
   return (
     "<h4 id=\"recovery-limits\">What this recovery changes, and what it does not</h4>" +
     facts([
-      ["target replication factor", cell(replicationFactorOf(s))],
+      ["target replication factor", esc(replicationText(s))],
       ["target partition counts", cell(null)],
       ["target mode", cell(mode)],
     ]) +
@@ -2643,6 +3104,7 @@ export function renderTargetStep(state) {
     "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
     "produces for this instant, so a topic name says both what it is and what point it was " +
     "recovered to. It is editable.</p></div>" +
+    renderReplicationField(s) +
     renderTopicSubset(s) +
     renderRecoveryLimits(s) +
     "</section>"
@@ -2961,10 +3423,12 @@ export { isDraftApprovalRow };
  *  clicking: nothing has looked for an existing target topic yet. */
 export const READINESS_NOT_RUN_WARNING =
   "No readiness check has run for this plan, so nothing has looked for an existing target topic " +
-  "with a mapped name, for a reachable target, or for an approver key that outlives the " +
-  "deadline. The restore may still be created: the runner's phase 0 refuses a mapped topic that " +
-  "already exists and nothing is overwritten either way. Run the check in step 5 to find out " +
-  "before an approver signs rather than after.";
+  "with a mapped name, for a reachable target, for an approver key that outlives the deadline, " +
+  "or at whether the target's brokers can hold the replication factor. The restore may still " +
+  "be created: the runner's phase 0 refuses a mapped topic that already exists and nothing is " +
+  "overwritten either way, and a factor the brokers cannot hold fails the approved run when it " +
+  "creates the topics, with nothing restored. Run the check in step 5 to find out before an " +
+  "approver signs rather than after.";
 
 /** What a restore copies, said where the plan is reviewed, above Create (FX-6).
  *
@@ -3024,6 +3488,9 @@ export function renderPlanStep(prepared, state) {
     ? "<pre class=\"plan-bytes\" id=\"plan-bytes\">" + esc(p.bytes) + "</pre>"
     : "<p class=\"complaint\" id=\"plan-problem\">The plan cannot be rendered from these values, " +
       "so there is no hash and nothing to submit: " + messageText(p.problem) + "</p>";
+  // THE FACTOR THE PLAN ASKS FOR, AND WHERE IT CAME FROM (FX-5), where the plan
+  // is reviewed -- and the refusal beside it, before Create rather than after.
+  const replicationRefused = replicationProblems(s).replicationFactor;
   return (
     "<section class=\"step\" id=\"step-plan\" tabindex=\"-1\"><h3>6. Plan, hash and names</h3>" +
     "<p class=\"blurb\">The document an approver signs, exactly as it will be sent, with " +
@@ -3033,7 +3500,18 @@ export function renderPlanStep(prepared, state) {
       ["plan hash", renderable ? "<code id=\"plan-hash-value\">" + esc(p.hash) + "</code>" : cell(null)],
       ["Restore metadata.name", renderable ? "<code>" + esc(p.restoreName) + "</code>" : cell(null)],
       ["Approval metadata.name", renderable ? "<code>" + esc(p.approvalName) + "</code>" : cell(null)],
+      ["replication factor", "<span id=\"review-replication\">" + esc(replicationText(s)) +
+        "</span>"],
     ]) +
+    (replicationMayDiffer(replicationChoice(s))
+      ? "<p class=\"note\" id=\"review-replication-differs\">" + esc(REPLICATION_DIFFERS_NOTE) +
+        "</p>"
+      : "") +
+    (typeof replicationRefused === "string"
+      ? "<p class=\"complaint\" id=\"review-replication-complaint\">Nothing is sent while the " +
+        "replication factor is refused: " + messageText(replicationRefused) + "</p>" +
+        GO_TO_TARGET
+      : "") +
     "<p class=\"note\">Both names are minted from the plan bytes before either object " +
     "exists. The Restore is created first, naming an Approval that is not there yet; the " +
     "reconciler requeues every 30 s until it arrives. Neither name is ever edited, because " +
@@ -3078,6 +3556,15 @@ const GO_TO_READINESS =
   "<p class=\"actions\"><button type=\"button\" class=\"wizard-go\" id=\"go-to-readiness\" " +
   "data-go-step=\"4\">" +
   "Go to step 5: Operation readiness</button></p>";
+
+/** The way back to the replication factor's input, beside its refusal. The
+ *  caption names the input, not the step's whole title: a caption never wraps
+ *  (MCP-8), and the step title made this button 370 px wide, past a 390 px
+ *  screen. */
+const GO_TO_TARGET =
+  "<p class=\"actions\"><button type=\"button\" class=\"wizard-go\" id=\"go-to-replication\" " +
+  "data-go-step=\"3\">" +
+  "Go to step 4: Replication factor</button></p>";
 
 /** What the one submit button does, said beside it. */
 export const GUIDED_SUBMIT_SENTENCE =
@@ -3325,6 +3812,8 @@ export function stepStates(state, prepared) {
   // create button is gated by `validateRestore` and by the readiness check,
   // not by this -- but a step whose mapping is refused must not read "done".
   const mapping = mappingProblems(s);
+  // FX-5: and the replication factor, which step 4 now carries as an input.
+  const replication = replicationProblems(s);
   const held = ((s.readiness || {}).preflight) || null;
   const readinessRefused = held !== null && readinessRefusal(s, prepared) !== null;
   const whole = [
@@ -3335,7 +3824,8 @@ export function stepStates(state, prepared) {
       TARGET_MODES.indexOf(targetFields.mode) !== -1 &&
       typeof targetFields.topicPrefix === "string" &&
       targetFields.topicPrefix.length > 0 &&
-      Object.keys(mapping).length === 0,
+      Object.keys(mapping).length === 0 &&
+      Object.keys(replication).length === 0,
     target !== null && targetStatus.reachable === true && !readinessRefused,
   ];
   const attention = [
@@ -3350,7 +3840,8 @@ export function stepStates(state, prepared) {
     (target !== null &&
       targetFields.mode === "scratch" &&
       typeof targetSpec.markerTopic !== "string") ||
-      Object.keys(mapping).length > 0,
+      Object.keys(mapping).length > 0 ||
+      Object.keys(replication).length > 0,
     (target !== null && !whole[4]) || readinessRefused,
   ];
   let firstOpen = 5;
@@ -3512,6 +4003,7 @@ export const FIELD_STEP = Object.freeze({
   targetCluster: 3,
   mode: 3,
   topics: 3,
+  replicationFactor: 3,
   ticket: 5,
   archive: 5,
   backupSet: 5,
@@ -3599,6 +4091,10 @@ export function validateRestore(state) {
   // is one of its five, and it is the identity map rather than a missing
   // value.
   Object.assign(problems, mappingProblems(s));
+  // THE REPLICATION FACTOR (FX-5): a value a broker cannot place, or one above
+  // the brokers a fresh discovery of the target read -- the readiness check's
+  // `ReplicationFactorExceedsBrokers`, refused here first and by name.
+  Object.assign(problems, replicationProblems(s));
   const resolvedTarget = resolveTarget(s);
   if (resolvedTarget.state === "recreated") {
     problems.targetCluster =
@@ -3672,7 +4168,10 @@ export function wizardDraftValues(state) {
     allowHttp: source.allowHttp === true,
     evidenceBucket: (f.evidence || {}).bucket,
     archiveSecret: s.archiveSecretName,
-    topics: selectedTopics(s),
+    // A LIST, KEPT AS TEXT (FX-5's class sweep): `keepDraft` keeps strings and
+    // booleans only, and an array here was dropped without a word -- the
+    // subset came back as every frozen topic under "your edits are back".
+    topics: draftList(selectedTopics(s)),
     evidenceDestination: evidenceDestinationName(s),
     evidenceDestinationUid: ((s.evidenceDestination || {}).uid) || "",
     evidenceSameAsArchive: s.evidenceSameAsArchive !== false,
@@ -3681,8 +4180,34 @@ export function wizardDraftValues(state) {
     evidencePathStyle: (f.evidence || {}).pathStyle === true,
     evidenceAllowHttp: (f.evidence || {}).allowHttp === true,
     catalogPointId: isCatalogPoint(s.point) ? catalogPointUid(s.point) : "",
-    catalogTopics: isCatalogPoint(s.point) ? frozenTopicsOf(s) : [],
+    catalogTopics: draftList(isCatalogPoint(s.point) ? frozenTopicsOf(s) : []),
+    // FX-5: A FACTOR THE OPERATOR SET, AS TEXT -- `keepDraft` keeps strings and
+    // booleans only, so a number here would be dropped without a word -- and
+    // the empty string while the default stands, so the next mount works the
+    // default out again from what it reads.
+    replicationFactor: s.replicationChosen === true
+      ? String(replicationFactorOf(s))
+      : "",
   };
+}
+
+/** A topic list as a draft keeps it: one name per line. A Kafka topic name
+ *  cannot hold a newline (`isKafkaTopicName`), so the text is the list. */
+function draftList(list) {
+  return (Array.isArray(list) ? list : []).map(String).join("\n");
+}
+
+/** The list a draft kept -- as [`draftList`] wrote it, or as an array from a
+ *  caller that built the draft by hand -- or `null` when it kept none. The
+ *  empty text is the EMPTY list, which is a real edit. */
+function listFromDraft(value) {
+  if (Array.isArray(value)) {
+    return value.map(String);
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  return value.length === 0 ? [] : value.split("\n");
 }
 
 /** Puts a kept draft back into a freshly built state -- only when the draft
@@ -3710,8 +4235,9 @@ export function applyWizardDraft(state, draft) {
   if ((typeof d.catalogPointId === "string" ? d.catalogPointId : "") !== pointKey) {
     return false;
   }
-  if (pointKey.length > 0 && Array.isArray(d.catalogTopics)) {
-    setCatalogTopics(state, d.catalogTopics.map(String));
+  const typedTopics = listFromDraft(d.catalogTopics);
+  if (pointKey.length > 0 && typedTopics !== null) {
+    setCatalogTopics(state, typedTopics);
   }
   if (typeof d.pointInTime === "string") {
     state.fields.pointInTime = d.pointInTime;
@@ -3736,6 +4262,12 @@ export function applyWizardDraft(state, draft) {
   }
   if (typeof d.topicPrefix === "string") {
     setTopicPrefix(state, d.topicPrefix);
+  }
+  // FX-5: a factor the operator SET comes back as set. An empty one -- or an
+  // older draft with none -- leaves the default to be worked out again from
+  // what this mount reads, which is the point of not keeping a default.
+  if (typeof d.replicationFactor === "string" && d.replicationFactor.length > 0) {
+    setReplicationFactor(state, d.replicationFactor);
   }
   // A saved destination is the frozen source of these signed-plan values.
   // Older drafts may contain legacy controls, but must never override it.
@@ -3799,8 +4331,9 @@ export function applyWizardDraft(state, draft) {
   // AN EMPTY KEPT SUBSET IS A REAL EDIT and is applied as one: it is the state
   // `mappingProblems` refuses by name, and dropping it here would silently put
   // every frozen topic back.
-  if (Array.isArray(d.topics)) {
-    state.fields.topics = d.topics.slice();
+  const keptTopics = listFromDraft(d.topics);
+  if (keptTopics !== null) {
+    state.fields.topics = keptTopics;
     state.fields.topics = selectedTopics(state);
   }
   return true;
@@ -4611,6 +5144,13 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
         dropDraft(key);
       }
     }
+    // FX-5: THE TARGET'S BROKER COUNT BEFORE THE FIRST PAINT, for the target the
+    // draft left selected, so the factor on screen is never one that moves a
+    // moment after it is read.
+    await refreshTargetBrokers(state, api, lifecycle);
+    if (!active(lifecycle)) {
+      return;
+    }
     await renderAndWire(node, state, parse, api, lifecycle);
     openAtNamedStep(node, state, selection);
   } catch (error) {
@@ -4794,6 +5334,11 @@ async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clu
       dropDraft(key);
     }
   }
+  // FX-5: the target's broker count before the first paint, as for a Backup.
+  await refreshTargetBrokers(state, api, lifecycle);
+  if (!active(lifecycle)) {
+    return;
+  }
   await renderAndWire(node, state, parse, api, lifecycle);
   openAtNamedStep(node, state, selection);
 }
@@ -4955,6 +5500,7 @@ async function readApprovalPolicy(api, ns, lifecycle) {
 export const WIZARD_TEXT_INPUTS = Object.freeze([
   "point-in-time", "topic-prefix", "store-endpoint", "store-region", "evidence-bucket",
   "archive-secret", "evidence-endpoint", "evidence-region", "catalog-topics",
+  "replication-factor",
 ]);
 
 /** Whether a control's value is not the one the last render gave it -- what
@@ -5235,6 +5781,12 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     // first thing the draft keeps is an identity rather than a label.
     targetClusterUid: clusterUid(target),
     targetClusterState: target === null ? "none" : "selected",
+    // FX-5: whether the operator SET the replication factor, and what this page
+    // knows of the target's broker count. Nothing is read yet: the mount half
+    // reads the target's latest discovery before the first paint
+    // (`refreshTargetBrokers`), and the default follows it.
+    replicationChosen: false,
+    targetBrokers: BROKERS_NOT_READ,
     editing: null,
     deadlineSeconds: 3600,
     fields: {
@@ -5269,7 +5821,11 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
         // retry's fresh prefix therefore applies in BOTH modes.
         topicMappingPrefix: prefix,
         markerTopic: "logweir.scratch",
-        replicationFactor: 1,
+        // NOT A LITERAL ANY MORE (FX-5): the default from what is known, which
+        // before any read is nothing -- so the grammar's 1, said as such on
+        // screen -- and the mount half moves it when the target's broker count
+        // is read. Never a factor nobody stated.
+        replicationFactor: replicationDefault(sourceReplicationFactorsOf(), null).value,
         teardown: "delete",
       },
       // THE SAMPLE WINDOW IS NOT THE RESTORE WINDOW. This one bounds the
@@ -5674,6 +6230,44 @@ export function selectTarget(state, uid, name) {
   const cluster = resolved.state === "selected" ? resolved.cluster : null;
   state.fields.target.bootstrapServers = ((cluster || {}).spec || {}).bootstrapServers || [];
   state.fields.target.auth = targetAuth(cluster);
+}
+
+/** READS THE SELECTED TARGET'S LATEST TOPIC DISCOVERIES for its broker count
+ *  (FX-5), puts the count -- or why there is none -- on the state, and then
+ *  the default factor on the plan, unless the operator set one.
+ *
+ *  A read that fails is a fact with a reason, never a throw: legacy mode,
+ *  which has no topic discovery, refuses it by name and that refusal is the
+ *  reason step 4 prints. Only a cancellation of the route is thrown. AN ANSWER
+ *  FOR A TARGET THE OPERATOR HAS SINCE LEFT IS DROPPED: the selection is
+ *  compared after the read, so a slower answer about the first cluster cannot
+ *  cap a factor for the second. Returns whether the answer was applied. */
+export async function refreshTargetBrokers(state, api, lifecycle) {
+  const s = state || {};
+  const asked = s.targetClusterUid;
+  const cluster = targetCluster(s);
+  let answer = null;
+  if (cluster !== null) {
+    const name = ((cluster.metadata || {}).name) || "";
+    if (typeof (api || {}).latestDiscoveries !== "function") {
+      answer = { unread: "this page was given no reader for topic discoveries" };
+    } else {
+      try {
+        answer = await api.latestDiscoveries(s.ns, name, readOptions(lifecycle));
+      } catch (unread) {
+        if (cancelled(unread, lifecycle)) {
+          throw unread;
+        }
+        answer = { unread: String(((unread || {}).message) || unread) };
+      }
+    }
+  }
+  if (!active(lifecycle) || s.targetClusterUid !== asked) {
+    return false;
+  }
+  s.targetBrokers = targetBrokerFact(answer, cluster);
+  syncReplicationDefault(s);
+  return true;
 }
 
 /** The cluster step 4 preselects: one labelled `role: target` if the namespace
@@ -6094,6 +6688,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   const evidenceInsecure = node.querySelector("#evidence-allow-insecure");
   const evidenceDestination = node.querySelector("#evidence-destination");
   const catalogTopics = node.querySelector("#catalog-topics");
+  const replication = node.querySelector("#replication-factor");
   const refresh = async () => {
     if (!active(lifecycle)) {
       return;
@@ -6126,8 +6721,31 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       // select's value alone would give a uid with no name, so a refusal --
       // which fires exactly when that uid has stopped resolving -- could then
       // only print half an identity.
+      const before = state.targetClusterUid;
       const picked = readClusterSelection(node, "target-cluster");
       selectTarget(state, picked.uid, picked.name);
+      // FX-5: ANOTHER TARGET IS ANOTHER BROKER COUNT. Its discovery is read
+      // before the repaint, so the default and the refusal describe the
+      // cluster the select now shows and never the one it showed before.
+      if (state.targetClusterUid !== before) {
+        try {
+          await refreshTargetBrokers(state, api, lifecycle);
+        } catch (unread) {
+          if (cancelled(unread, lifecycle)) {
+            return;
+          }
+          throw unread;
+        }
+        if (!active(lifecycle)) {
+          return;
+        }
+      }
+    }
+    // FX-5: THE FACTOR, ONLY WHEN THE OPERATOR TYPED ONE. The input shows the
+    // default, and every commit of any field reads every control; reading the
+    // default back as a value someone set would stop it following the target.
+    if (replication !== null && typedSinceRender(replication)) {
+      setReplicationFactor(state, valueOf(replication));
     }
     // THE ARCHIVE CONTROLS WRITE THE ARCHIVE BLOCK (PLAT-08.2). Until the
     // evidence store had controls of its own, this loop wrote the same four
@@ -6226,6 +6844,9 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       state.fields.topics = ticked;
       state.fields.topics = selectedTopics(state);
     }
+    // FX-5: a default over the SELECTED topics follows the selection; a factor
+    // the operator set does not move.
+    syncReplicationDefault(state);
     if (!active(lifecycle)) {
       return;
     }
@@ -6268,6 +6889,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     evidenceInsecure,
     evidenceDestination,
     catalogTopics,
+    replication,
   ]) {
     if (field !== null) {
       listen(field, "change", refresh, lifecycle);
