@@ -104,6 +104,14 @@ pub struct BackupRunArgs {
     /// `BackupOutcome`. Task 18 passes `<schedule>-<slot>`; nothing about a
     /// schedule is decided here.
     pub backup_id_override: Option<String>,
+    /// **PROD-05.1.** Strimzi `KafkaTopic` resources, as YAML: a named topic
+    /// one of them manages is recorded as owned by it
+    /// (`logweir_core::topic_configuration::strimzi_owners`). `None` detects
+    /// nothing; the plan's own `source.topic_owners` still apply.
+    pub kafka_topic_resources: Option<PathBuf>,
+    /// **PROD-05.1.** Only `KafkaTopic` resources labelled
+    /// `strimzi.io/cluster=<this>` count.
+    pub strimzi_cluster: Option<String>,
 }
 
 /// What one `logweir backup run` established. Task 5b turns this into the
@@ -161,6 +169,12 @@ pub struct BackupOutcome {
     /// `phase_run::build_receipt` writes it as the receipt's 1.1.0
     /// `config_coverage` block.
     pub config_coverage: BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>,
+    /// **PROD-05.1.** Per named topic, the configuration model —
+    /// `config_coverage::model` over the same read, the manifest's counts and
+    /// the run's declarative owners. One entry per named topic;
+    /// `phase_run::build_receipt` writes it as the receipt's 1.3.0
+    /// `topic_configuration` block.
+    pub topic_configuration: BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -372,6 +386,12 @@ struct Inputs {
     spec: BackupSpec,
     spec_text: String,
     allowed: AllowedClusters,
+    /// **PROD-05.1.** The declarative owner of each named topic that has one:
+    /// the plan's `source.topic_owners` (phase −1 refuses an invalid one
+    /// before anything is recorded), and over them nothing — a declaration is
+    /// what the approved plan says, so a Strimzi resource for the same topic
+    /// does not replace it; otherwise the `KafkaTopic` resources' owners.
+    owners: BTreeMap<String, logweir_core::backup_receipt::TopicOwner>,
 }
 
 fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
@@ -384,10 +404,42 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
     })?;
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
         .map_err(|e| BackupError::Operational(format!("allowed-clusters does not parse: {e}")))?;
+    let mut owners = match &args.kafka_topic_resources {
+        None => BTreeMap::new(),
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| BackupError::Operational(format!("{}: {e}", path.display())))?;
+            let mut docs = Vec::new();
+            for doc in serde_yaml::Deserializer::from_str(&text) {
+                let value =
+                    <serde_yaml::Value as serde::Deserialize>::deserialize(doc).map_err(|e| {
+                        BackupError::Operational(format!(
+                            "--kafka-topic-resources {}: not YAML: {e}",
+                            path.display()
+                        ))
+                    })?;
+                if !value.is_null() {
+                    docs.push(value);
+                }
+            }
+            logweir_core::topic_configuration::strimzi_owners(
+                &docs,
+                &spec.source.topics,
+                args.strimzi_cluster.as_deref(),
+            )
+        }
+    };
+    for declared in &spec.source.topic_owners {
+        owners.insert(
+            declared.topic.clone(),
+            logweir_core::topic_configuration::declared_owner(declared),
+        );
+    }
     Ok(Inputs {
         spec,
         spec_text,
         allowed,
+        owners,
     })
 }
 
@@ -601,6 +653,8 @@ fn execute_with_signer(
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
     let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
+    let topic_configuration =
+        config_coverage::model(&observed, &ran.manifest_layouts, &inputs.owners);
 
     let mut outcome = BackupOutcome {
         backup_id,
@@ -624,6 +678,7 @@ fn execute_with_signer(
         covered_from_ms: ran.covered_from_ms,
         covered_to_ms: ran.covered_to_ms,
         config_coverage: coverage,
+        topic_configuration,
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

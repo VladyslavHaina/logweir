@@ -112,6 +112,8 @@ fn fixture(spec: &str, allowed: &str) -> Fixture {
             out: None,
             receipt_out: None,
             backup_id_override: None,
+            kafka_topic_resources: None,
+            strimzi_cluster: None,
         },
     }
 }
@@ -1051,7 +1053,21 @@ fn backup_run_writes_a_signed_receipt() {
     // The document says what the run measured — spot-checked on the fields an
     // auditor reads first, so a receipt full of defaults cannot pass this row.
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
-    assert_eq!(receipt.format_version, "1.1.0");
+    // PROD-05.1: every receipt this build signs carries `topic_configuration`,
+    // so every one is 1.3.0.
+    assert_eq!(receipt.format_version, "1.3.0");
+    // …one model entry per named topic, and — the read having failed — NO
+    // entries: NOT RECORDED, never an empty "no configuration".
+    let model = receipt
+        .topic_configuration
+        .as_ref()
+        .expect("a 1.3.0 receipt this build signs carries topic_configuration");
+    assert_eq!(
+        model.keys().cloned().collect::<Vec<_>>(),
+        vec!["orders".to_string()]
+    );
+    assert_eq!(model["orders"].entries, None);
+    assert_eq!(model["orders"].owner, None);
     // FX-4: the block is ALWAYS written, one entry per named topic. This
     // file's `StubReader` implements no configuration read at all, so the
     // coverage it can establish is the WEAKEST: `notCaptured` because the read

@@ -110,6 +110,24 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
         .into());
     }
 
+    // 3b. **PROD-05.1.** A declared owner names one of the plan's topics, a
+    //     kind the receipt defines and a usable reference — or the plan is
+    //     refused here, exit 3, rather than recording an owner the receipt's
+    //     arm 18 would refuse after the archive exists, or silently dropping
+    //     a declaration that would have routed a restore to desired-state
+    //     export.
+    for owner in &spec.source.topic_owners {
+        if let Some(why) =
+            logweir_core::topic_configuration::refuse_declared(owner, &spec.source.topics)
+        {
+            return Err(GuardRefusal(format!(
+                "{why}; a declared owner routes the topic's restore to a desired-state export, \
+                 so a declaration this build cannot record is refused rather than dropped"
+            ))
+            .into());
+        }
+    }
+
     // 4. Interface **I6**'s refusal, LAST among the local checks.
     //
     //    Task 4's placeholder refused `--out`/`--receipt-out` outright,

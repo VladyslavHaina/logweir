@@ -853,6 +853,21 @@ pub enum BackupCmd {
         /// 18's `BackupSchedule` reconciler passes `<schedule>-<slot>`.
         #[arg(long)]
         backup_id_override: Option<String>,
+        /// Strimzi `KafkaTopic` resources, as YAML (`kubectl get kafkatopics
+        /// -A -o yaml` writes a `List`; separate documents work too). A named
+        /// topic that a resource labelled `strimzi.io/cluster` manages — and
+        /// not annotated `strimzi.io/managed: "false"` — is recorded as owned
+        /// by it in the receipt's `topic_configuration`, so a restore exports
+        /// desired state for it instead of applying settings Strimzi would
+        /// revert (PROD-05.1). A file that cannot be read or parsed fails the
+        /// run, exit 1, before anything is dialled.
+        #[arg(long)]
+        kafka_topic_resources: Option<PathBuf>,
+        /// Count only `KafkaTopic` resources labelled
+        /// `strimzi.io/cluster=<this>`: the Strimzi cluster that IS this
+        /// backup's source. Without it, any cluster label counts.
+        #[arg(long, requires = "kafka_topic_resources")]
+        strimzi_cluster: Option<String>,
     },
 }
 

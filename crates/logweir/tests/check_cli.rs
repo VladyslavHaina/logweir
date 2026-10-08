@@ -6363,6 +6363,7 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
             to_ms: started_at.timestamp_millis(),
         },
         config_coverage: None,
+        topic_configuration: None,
     }
 }
 

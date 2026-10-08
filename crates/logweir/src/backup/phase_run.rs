@@ -366,6 +366,10 @@ pub struct Ran {
     /// `config_coverage::classify` reads as `manifestDiffers`, never as "no
     /// overrides".
     pub manifest_configurations: BTreeMap<String, BTreeMap<String, String>>,
+    /// **PROD-05.1.** The manifest's `original_partition_count` and
+    /// `source_replication_factor` for each NAMED topic it mentions — the
+    /// counts `topic_configuration` records, from the same read-back.
+    pub manifest_layouts: BTreeMap<String, crate::backup::config_coverage::Layout>,
 }
 
 pub fn run(
@@ -459,6 +463,8 @@ pub fn run(
     let mut records_per_topic: BTreeMap<String, u64> =
         plan.topics.iter().map(|t| (t.clone(), 0u64)).collect();
     let mut manifest_configurations: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut manifest_layouts: BTreeMap<String, crate::backup::config_coverage::Layout> =
+        BTreeMap::new();
     let mut oldest: Option<i64> = None;
     let mut newest: Option<i64> = None;
     for topic in &archive.topics {
@@ -466,6 +472,13 @@ pub fn run(
             continue;
         };
         manifest_configurations.insert(topic.name.clone(), topic.configurations.clone());
+        manifest_layouts.insert(
+            topic.name.clone(),
+            (
+                topic.original_partition_count,
+                topic.source_replication_factor,
+            ),
+        );
         for partition in &topic.partitions {
             for segment in &partition.segments {
                 // `record_count` is `i64` on the wire. A negative count is
@@ -526,6 +539,7 @@ pub fn run(
         covered_from_ms,
         covered_to_ms,
         manifest_configurations,
+        manifest_layouts,
     })
 }
 
@@ -580,10 +594,9 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// `BackupOutcome` -> the document. A pure projection: every field is a value
 /// the outcome already carries, and nothing here measures anything.
 ///
-/// `format_version` is `RECEIPT_FORMAT_VERSION` (`1.1.0` since FX-4) of THIS
-/// document type (independent of the scorecard's), or
-/// `FORMAT_VERSION_WITH_MANIFEST_VERSION` (`1.2.0`) exactly when the receipt
-/// pins the manifest's version id (FX-7) —
+/// `format_version` is `FORMAT_VERSION_WITH_TOPIC_CONFIGURATION` (`1.3.0`,
+/// PROD-05.1) of THIS document type (independent of the scorecard's), because
+/// this build writes `topic_configuration` on every receipt, pinned or not —
 /// `logweir_core::backup_receipt::format_version_for`, the one place that
 /// decides it. `source.auth` is `BackupOutcome::source_auth` rendered as the
 /// two strings `ReceiptAuth` holds — **never a password, and no field that
@@ -600,7 +613,8 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         prefix: outcome.archive_prefix.clone(),
     };
     BackupReceipt {
-        format_version: logweir_core::backup_receipt::format_version_for(&archive).to_string(),
+        format_version: logweir_core::backup_receipt::format_version_for(&archive, true)
+            .to_string(),
         run_id: outcome.run_id.clone(),
         backup_id: outcome.backup_id.clone(),
         requested_at: outcome.requested_at,
@@ -630,6 +644,11 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
             to_ms: outcome.covered_to_ms,
         },
         config_coverage: Some(outcome.config_coverage.clone()),
+        // PROD-05.1: ALWAYS written beside `config_coverage`, so every receipt
+        // this build signs is 1.3.0 and carries its topics' configuration
+        // model — a receipt never leaves it to be read as NOT RECORDED by
+        // omission when it was observed.
+        topic_configuration: Some(outcome.topic_configuration.clone()),
     }
 }
 
