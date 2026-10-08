@@ -307,13 +307,21 @@ test("fx17_a_redacted_binding_is_one_reason_naming_the_field_and_its_cause", () 
   }), page([]));
   assert.equal(ulid.offer, false);
   assert.match(ulid.reason, /withheld the run id in the key, which runners older than v0\.2\.0-rc\.1/);
+  // An UPPER-case UUID set id is still a UUID to the redactor (review L-4):
+  // the cause is the older runner, not "two chosen components".
+  const upper = catalogPointOffer(row({
+    backupId: "3F1C9D2E-8A7B-4C6D-9E0F-1A2B3C4D5E6F", receiptKey: "[redacted].receipt.json",
+  }), page([]));
+  assert.match(upper.reason, /withheld the run id in the key/);
+  assert.doesNotMatch(upper.reason, /two chosen components/);
   // …and beside a set id someone CHOSE: that id is named, with the rule.
   const chosen = catalogPointOffer(row({
     backupId: "MyBackupSet01", receiptKey: "[redacted].receipt.json",
   }), page([]));
   assert.equal(chosen.offer, false);
   assert.match(chosen.reason, /its set id `MyBackupSet01` and the run id are two chosen components/);
-  assert.match(chosen.reason, /survives only as a UUID, or as lower-case letters/);
+  assert.match(chosen.reason,
+    /survives when it is a public form -- for example a UUID, or lower-case letters/);
 
   // NEGATIVE CONTROLS: a point that is not offered for a REAL reason keeps it,
   // redacted binding or not -- the order is the order of repair.
@@ -359,6 +367,13 @@ test("fx17_the_set_ids_the_controller_mints_are_the_redactors_identities", () =>
   }
   for (const id of ids.notMinted) {
     assert.equal(isMintedSetId(id), false, id);
+  }
+  // The edges the controller never mints but the redactor still reads as
+  // identities (review L-4): an upper-case bare UUID, years 0000 and 0099, a
+  // leap second. The explanation must not call them "chosen components".
+  assert.ok(ids.identityEdges.length >= 4);
+  for (const id of ids.identityEdges) {
+    assert.equal(isMintedSetId(id), true, id);
   }
 });
 

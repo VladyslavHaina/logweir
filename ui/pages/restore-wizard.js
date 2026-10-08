@@ -759,15 +759,20 @@ export function isRedacted(value) {
   return typeof value === "string" && value.indexOf(REDACTION_MARKER) !== -1;
 }
 
+/** A bare UUID in either case (`check_contract.rs` `is_uuid` takes any hex
+ *  digit), or a LOWER-case UID followed by a scheduled run's slot and retry
+ *  suffix (`is_scheduled_set_id`). */
 const MINTED_SET_ID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-([0-9]{8})-([0-9]{6})(?:-r[1-9])?)?$/;
+  /^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-([0-9]{8})-([0-9]{6})(?:-r[1-9])?)$/;
 
-/** Whether `id` is a backup set id the controller mints, in the two shapes
- *  the catalog sync's redactor reads as identities (`check_contract.rs`
- *  `is_set_id`): a manual run's UUID (the `Backup`'s own UID, lower case), or
- *  a scheduled run's `<schedule uid>-<yyyymmdd>-<hhmmss>`, `-r<k>` for a
- *  retry, whose slot is an instant that exists. `ui/tests/fixtures/set-ids.json`
- *  is read by this side's test and by the redactor's, so the two agree.
+/** Whether `id` is a set id the catalog sync's redactor reads as an IDENTITY
+ *  (`check_contract.rs` `is_set_id`): a UUID -- a manual run's set id is the
+ *  `Backup`'s own UID -- or a scheduled run's `<schedule uid>-<yyyymmdd>-
+ *  <hhmmss>`, `-r<k>` for a retry, whose slot is an instant chrono accepts:
+ *  a real date and time, the year `0000` and a leap second (`...60`)
+ *  included, exactly as the Rust side's round trip does (review L-4).
+ *  `ui/tests/fixtures/set-ids.json` is read by this side's test and by the
+ *  redactor's, so the two agree, edges included.
  *
  *  Used only to say WHY a binding came back redacted -- never to decide an
  *  offer: the offer is refused on the marker itself. */
@@ -782,18 +787,25 @@ export function isMintedSetId(id) {
   const n = (s, from, to) => Number(s.slice(from, to));
   const [y, mo, d] = [n(m[1], 0, 4), n(m[1], 4, 6), n(m[1], 6, 8)];
   const [h, mi, se] = [n(m[2], 0, 2), n(m[2], 2, 4), n(m[2], 4, 6)];
-  const t = new Date(Date.UTC(y, mo - 1, d, h, mi, se));
-  return t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d &&
-    t.getUTCHours() === h && t.getUTCMinutes() === mi && t.getUTCSeconds() === se;
+  // `setUTCFullYear` takes a year below 100 literally (`Date.UTC` would add
+  // 1900), and a leap second is checked as the :59 it extends.
+  const t = new Date(0);
+  t.setUTCFullYear(y, mo - 1, d);
+  t.setUTCHours(h, mi, Math.min(se, 59), 0);
+  return se <= 60 && t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 &&
+    t.getUTCDate() === d && t.getUTCHours() === h && t.getUTCMinutes() === mi &&
+    t.getUTCSeconds() === Math.min(se, 59);
 }
 
-/** The rule a set id chosen for `logweir backup run` must meet for its
- *  points to be restorable from the console: the key `backup run` writes is
+/** What a set id chosen for `logweir backup run` must be for its points to be
+ *  restorable from the console: the key `backup run` writes is
  *  `logweir/backups/<set id>/<run id>.receipt.json`, the run id already
- *  spends the key's ONE free component, so the set id must be a public form. */
+ *  spends the key's ONE free component, so the set id must be a public form.
+ *  The common ones are named, as examples (review L-4): a SHA-256 digest is
+ *  public too, and so is a scheduled run's own id. */
 const CHOSEN_SET_ID_RULE =
-  "a set id chosen for `logweir backup run` survives only as a UUID, or as lower-case " +
-  "letters, digits, `.`, `-`, `_` and `=` under 40 characters";
+  "a set id chosen for `logweir backup run` survives when it is a public form -- for " +
+  "example a UUID, or lower-case letters, digits, `.`, `-`, `_` and `=` under 40 characters";
 
 /** WHY A POINT'S PLAN BINDING CAME BACK REDACTED -- one sentence, or `null`
  *  when neither binding field carries the marker (FX-17).

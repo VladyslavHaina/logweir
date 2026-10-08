@@ -2064,7 +2064,9 @@ fn the_shared_set_id_fixture_is_what_the_redactor_keeps_and_withholds() {
         minted.len() >= 4 && not_minted.len() >= 9,
         "the fixture lost rows"
     );
-    for id in &minted {
+    let edges = list("identityEdges");
+    assert!(edges.len() >= 4, "the fixture lost its edge rows");
+    for id in minted.iter().chain(&edges) {
         let key = format!("logweir/backups/{id}/{RUN}.receipt.json");
         assert_eq!(redact(id), *id, "a minted set id was withheld");
         assert_eq!(
