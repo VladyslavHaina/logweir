@@ -188,10 +188,37 @@ pub fn sampled_pass_lines(
     verification: Option<&logweir_core::scorecard::Verification>,
     format_version: &str,
 ) -> Vec<String> {
+    sampled_pass_lines_over(outcome, verification, format_version, None)
+}
+
+/// [`sampled_pass_lines`] for a document that may carry `source.selection`
+/// (PROD-11.1 review H1): over a narrowed window the guarantee is QUALIFIED
+/// by that window — the count bound, the per-partition presence and the
+/// engine-report check were judged over `[start, end]`, and a record before
+/// the start was neither restored nor expected — so the line a 1.7.0 reader
+/// prints never reads as a pass over the whole archive.
+/// `docs/verify_scorecard.py::_sampled_pass_lines` prints the same line.
+#[must_use]
+pub fn sampled_pass_lines_over(
+    outcome: Outcome,
+    verification: Option<&logweir_core::scorecard::Verification>,
+    format_version: &str,
+    selection: Option<&logweir_core::scorecard::SelectionLabel>,
+) -> Vec<String> {
     let sampled =
         verification.is_none_or(|v| v.coverage == logweir_core::scorecard::COVERAGE_SAMPLED);
     if outcome != Outcome::Pass || !sampled {
         return Vec::new();
+    }
+    if let Some(window) = selection {
+        return vec![format!(
+            "sample coverage: a sampled pass over a replay selection from epoch-ms {} to \
+             epoch-ms {}: every mapped partition was held to its own count bound over that \
+             window, max_partitions reached every topic before a second partition of any, and a \
+             readable engine report lacking a partition with records in that window was \
+             refused; no record before the start was restored or expected",
+            window.window_start_ms, window.window_end_ms
+        )];
     }
     if logweir_core::scorecard::proves_fx23_sampled_checks(format_version) {
         vec![
@@ -863,7 +890,12 @@ fn print_report(r: &VerifyReport) {
     }
     // FX-23: what a sampled pass proves at this document's version (review
     // M2), and the topics the cap left out.
-    for line in sampled_pass_lines(r.outcome, r.verification.as_deref(), &r.format_version)
+    for line in sampled_pass_lines_over(
+        r.outcome,
+        r.verification.as_deref(),
+        &r.format_version,
+        r.selection.as_ref(),
+    )
         .into_iter()
         .chain(unsampled_lines(r.unsampled_topics.as_deref()))
     {

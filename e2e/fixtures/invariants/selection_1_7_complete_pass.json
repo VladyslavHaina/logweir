@@ -25,18 +25,8 @@
     "manifest_version_id": null,
     "captured_by_logweir": false,
     "selection": {
-      "window_end_ms": 1788055200000,
-      "partitions": [
-        {
-          "topic": "orders",
-          "partitions": [
-            0,
-            1
-          ]
-        }
-      ],
-      "engine_runs": 1,
-      "window_start_ms": 1788000000000
+      "window_start_ms": 1788000000000,
+      "window_end_ms": 1788055200000
     }
   },
   "target": {

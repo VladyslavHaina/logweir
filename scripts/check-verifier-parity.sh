@@ -1553,20 +1553,24 @@ done
 echo "check-verifier-parity: both readers accept $SCORECARD_UNSAMPLED_VERSION scorecards, say the same about what a sampled pass proves at each version and the topics the sample left out, and refuse each of the three unsampled-topics arms with the same words"
 
 # ---------------------------------------------------------------------------
-# SELECTION LOOP (PROD-11.1): the scorecard's `source.selection`, and what an
-# exit 0 says about what a narrowed restore restored.
+# SELECTION LOOP (PROD-11.1): the scorecard's `source.selection` (a stated
+# window START; partition subsets are refused by the runner until OD-9), and
+# what an exit 0 says about a narrowed restore.
 # ---------------------------------------------------------------------------
 #
-# Four documents both readers ACCEPT, and the `replay selection:` lines each
-# must print — the SAME lines from both, compared WHOLE:
+# Three documents both readers ACCEPT, and the `replay selection:` and
+# `sample coverage:` lines each must print — the SAME lines from both,
+# compared WHOLE:
 #
-#   both      a 1.7.0 sampled pass narrowed by a start and a subset
-#   subset    the same, a subset only (the archive's floor)
-#   start     the same, a start only (every partition)
-#   absent    a 1.7.0 sampled pass with no block: no line (a full restore)
+#   sampled   a 1.7.0 sampled pass narrowed by a start: the selection line and
+#             the sampled-pass line QUALIFIED by the window (review H1)
+#   complete  a 1.7.0 complete pass narrowed by a start: the selection line,
+#             no sampled-pass line
+#   absent    a 1.7.0 sampled pass with no block: no selection line, the
+#             unqualified 1.6.0-or-later sampled-pass line
 #
-# and seven both readers REFUSE with the same full text, one per arm SEL-1 to
-# SEL-7. Generated and signed here with the throwaway fixture key, like the
+# and three both readers REFUSE with the same full text, one per arm SEL-1 to
+# SEL-3. Generated and signed here with the throwaway fixture key, like the
 # loops above.
 #
 # The scorecard format that defines `source.selection` —
@@ -1593,16 +1597,12 @@ sampled = {"coverage": "sampled", "comparison_basis": "archive",
 complete = json.loads(
     (root / "e2e" / "fixtures" / "invariants" / "verification_1_4_complete_pass.json")
     .read_text())["integrity"]["verification"]
-complete_topic = complete["complete"]["partitions"][0]["topic"]
-complete_parts = sorted({p["partition"] for p in complete["complete"]["partitions"]})
+END = complete["complete"]["window"]["end_ms"]
+START = END - 55_200_000
 
 
-def sel(start=1760000001000, end=1760000005000, subsets=None, runs=1):
-    s = {"window_end_ms": end, "engine_runs": runs,
-         "partitions": [{"topic": "orders", "partitions": [0, 2]}] if subsets is None else subsets}
-    if start is not None:
-        s["window_start_ms"] = start
-    return s
+def sel(start=START, end=END):
+    return {"window_start_ms": start, "window_end_ms": end}
 
 
 def doc(selection, version=current, block=None):
@@ -1614,26 +1614,19 @@ def doc(selection, version=current, block=None):
     return d
 
 
-def windowed(start, end):
+def windowed(start):
     b = json.loads(json.dumps(complete))
-    b["complete"]["window"] = {"end_ms": end} if start is None else {"start_ms": start, "end_ms": end}
+    b["complete"]["window"] = {"end_ms": END} if start is None else {"start_ms": start, "end_ms": END}
     return b
 
 
 cases = {
-    "both": doc(sel()),
-    "subset": doc(sel(start=None)),
-    "start": doc(sel(subsets=[], runs=1)),
+    "sampled": doc(sel()),
+    "complete": doc(sel(), block=windowed(START)),
     "absent": doc(None),
     "sel1-under-1.6.0": doc(sel(), version="1.6.0"),
-    "sel2-narrows-nothing": doc(sel(start=None, subsets=[])),
-    "sel3-start-at-end": doc(sel(start=1760000005000)),
-    "sel4-unsorted": doc(sel(subsets=[{"topic": "orders", "partitions": [2, 0]}])),
-    "sel5-no-run": doc(sel(runs=0)),
-    "sel6-window": doc(sel(subsets=[{"topic": complete_topic, "partitions": complete_parts}]),
-                       block=windowed(None, 1760000005000)),
-    "sel7-unselected": doc(sel(subsets=[{"topic": complete_topic, "partitions": complete_parts[:1]}]),
-                           block=windowed(1760000001000, 1760000005000)),
+    "sel2-start-at-end": doc(sel(start=END)),
+    "sel3-window": doc(sel(), block=windowed(None)),
 }
 for name, d in cases.items():
     payload = (json.dumps(d, indent=2) + "\n").encode()
@@ -1645,9 +1638,11 @@ for name, d in cases.items():
     (out / f"{name}.sig").write_text(json.dumps(
         {"payloadType": pt,
          "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+(out / "window.txt").write_text(f"{START} {END}\n")
 PYEOF
+read -r SEL_START SEL_END <"$tmp/scorecard-sel/window.txt"
 
-for name in both subset start absent; do
+for name in sampled complete absent; do
     doc="$tmp/scorecard-sel/$name.json"
     sig="$tmp/scorecard-sel/$name.sig"
     set +e
@@ -1663,21 +1658,23 @@ for name in both subset start absent; do
     [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 0"; }
     cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
     cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
-    rust_lines="$(grep -oE 'replay selection: .*' "$tmp/rust.all" || true)"
-    py_lines="$(grep -oE 'replay selection: .*' "$tmp/py.all" || true)"
+    rust_lines="$(grep -oE '(replay selection|sample coverage): .*' "$tmp/rust.all" || true)"
+    py_lines="$(grep -oE '(replay selection|sample coverage): .*' "$tmp/py.all" || true)"
     if [ "$rust_lines" != "$py_lines" ]; then
         fail "scorecard/$name: the two readers say different things about the selection.
   rust:   $rust_lines
   python: $py_lines"
     fi
+    selection_line="replay selection: every partition of every restored topic, from epoch-ms $SEL_START (the plan's stated window start, inclusive) to epoch-ms $SEL_END (inclusive); no record before the start was restored or expected"
+    narrowed_pass="sample coverage: a sampled pass over a replay selection from epoch-ms $SEL_START to epoch-ms $SEL_END: every mapped partition was held to its own count bound over that window, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in that window was refused; no record before the start was restored or expected"
     case "$name" in
-        both) want="replay selection: ONLY orders partitions [0, 2] (every partition of any other restored topic); no other partition of these topics was restored, from epoch-ms 1760000001000 (the plan's restore.window_start, inclusive) to epoch-ms 1760000005000 (inclusive), in 1 engine run(s)" ;;
-        subset) want="replay selection: ONLY orders partitions [0, 2] (every partition of any other restored topic); no other partition of these topics was restored, from the archive's floor to epoch-ms 1760000005000 (inclusive), in 1 engine run(s)" ;;
-        start) want="replay selection: every partition of every restored topic, from epoch-ms 1760000001000 (the plan's restore.window_start, inclusive) to epoch-ms 1760000005000 (inclusive), in 1 engine run(s)" ;;
-        absent) want="" ;;
+        sampled) want="$narrowed_pass
+$selection_line" ;;
+        complete) want="$selection_line" ;;
+        absent) want="sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition was held to its own count bound, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in the window was refused" ;;
     esac
     if [ "$rust_lines" != "$want" ]; then
-        fail "scorecard/$name: expected the replay selection lines to be
+        fail "scorecard/$name: expected the selection and sample coverage lines to be
 $want
 got:
 $rust_lines"
@@ -1685,7 +1682,7 @@ $rust_lines"
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (selection)"
 done
 
-for name in sel1-under-1.6.0 sel2-narrows-nothing sel3-start-at-end sel4-unsorted sel5-no-run sel6-window sel7-unselected; do
+for name in sel1-under-1.6.0 sel2-start-at-end sel3-window; do
     doc="$tmp/scorecard-sel/$name.json"
     sig="$tmp/scorecard-sel/$name.sig"
     set +e
@@ -1705,12 +1702,8 @@ for name in sel1-under-1.6.0 sel2-narrows-nothing sel3-start-at-end sel4-unsorte
     py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
     case "$name" in
         sel1-under-1.6.0) want_msg="source.selection is present but format_version \"1.6.0\" predates it: the block is defined from $SCORECARD_SELECTION_VERSION" ;;
-        sel2-narrows-nothing) want_msg="source.selection states neither a window start nor a partition subset; a restore that selects every partition from the archive's floor carries no selection block" ;;
-        sel3-start-at-end) want_msg="source.selection.window_start_ms is not before window_end_ms; a selection's window holds at least one instant after its start" ;;
-        sel4-unsorted) want_msg="source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative" ;;
-        sel5-no-run) want_msg="source.selection.engine_runs is 0; a restore is at least one engine run" ;;
-        sel6-window) want_msg="integrity.verification.complete.window is not source.selection's window; the expected output is selected by the plan's own start and end" ;;
-        sel7-unselected) want_msg="integrity.verification.complete.partitions expects records from a partition source.selection does not select" ;;
+        sel2-start-at-end) want_msg="source.selection.window_start_ms is not before window_end_ms; a selection's window holds at least one instant after its start" ;;
+        sel3-window) want_msg="integrity.verification.complete.window is not source.selection's window; the expected output is selected by the plan's own start and end" ;;
     esac
     if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
         fail "scorecard/$name: the refusal differs between the two readers or from its arm.
@@ -1720,4 +1713,4 @@ for name in sel1-under-1.6.0 sel2-narrows-nothing sel3-start-at-end sel4-unsorte
     fi
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (selection refused)"
 done
-echo "check-verifier-parity: both readers accept $SCORECARD_SELECTION_VERSION scorecards, say the same about the replay selection, and refuse each of the seven selection arms with the same words"
+echo "check-verifier-parity: both readers accept $SCORECARD_SELECTION_VERSION scorecards, say the same about the selection and what a narrowed sampled pass proves, and refuse each of the three selection arms with the same words"

@@ -927,37 +927,22 @@
       }
     },
     "SelectionLabel": {
-      "description": "**PROD-11.1, scorecard format 1.7.0.** What a narrowed restore selected: the contract is `docs/to-do/decisions/PROD-11.1-replay-selection.md`.\n\nEvery verdict of such a document is judged over this selection only: samples come only from selected partitions and from the stated start, the count bound and the per-partition presence check are the selected partitions' over `[window_start_ms, window_end_ms]`, a record in a partition the plan did not select fails the run, and a complete verification expects records only from selected partitions. The EXISTING fields name the selection too, so a reader that predates this block never reads a narrowed restore as a full one: `sample.window_start` is never earlier than the stated start, `sample.coverage_note` opens with the selection, and a complete block's `window.start_ms` and `partitions[]` are the selection's.",
+      "description": "**PROD-11.1, scorecard format 1.7.0.** A narrowed restore's window: the plan's stated inclusive start and its end. The contract is `docs/to-do/decisions/PROD-11.1-replay-selection.md`.\n\n**A START ONLY.** Every partition of every restored topic is restored and judged; only the window's start moved. A partition-subset restore is refused by name (`PartitionSubsetsAwaitOwnerDecision`) until the owner decides OD-9, because a reader that predates its scorecard would read it as a full restore.\n\nEvery verdict of such a document is judged over `[window_start_ms, window_end_ms]`: samples start no earlier than the start, the count bound and the per-partition presence check are over that window, and a complete verification expects every archived record whose own timestamp is in it. The EXISTING fields name the start too: `sample.window_start` is never earlier than it, `sample.coverage_note` opens with it, and a complete block's `window.start_ms` (1.4.0) is it.",
       "type": "object",
       "required": [
-        "engine_runs",
-        "partitions",
-        "window_end_ms"
+        "window_end_ms",
+        "window_start_ms"
       ],
       "properties": {
-        "engine_runs": {
-          "description": "How many engine runs restored it: the engine's partition filter applies to every topic of one run, so topics with different subsets are different runs.",
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0.0
-        },
-        "partitions": {
-          "description": "The per-topic partition subsets, one entry per topic in ascending order, each list ascending and distinct. A restored topic not listed was restored on every partition the archive lists for it.",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/TopicPartitions"
-          }
-        },
         "window_end_ms": {
-          "description": "The window's INCLUSIVE end, epoch milliseconds: `restore.point_in_time`, or `sample.window_end` when the plan states none.",
+          "description": "The window's INCLUSIVE end, epoch milliseconds: the end of the plan's `restore.point_in_time` interval.",
           "type": "integer",
           "format": "int64"
         },
         "window_start_ms": {
-          "description": "The plan's stated INCLUSIVE window start, epoch milliseconds. ABSENT means the window started at the archive set's floor (guard G-WIN).",
+          "description": "The plan's stated INCLUSIVE window start, epoch milliseconds.",
           "type": "integer",
-          "format": "int64",
-          "nullable": true
+          "format": "int64"
         }
       }
     },
@@ -985,7 +970,7 @@
           "nullable": true
         },
         "selection": {
-          "description": "**Format 1.7.0 (PROD-11.1).** The plan's REPLAY SELECTION — its stated inclusive window start and per-topic partition subsets — when it states one: see [`SelectionLabel`].\n\nABSENT means the restore selected EVERY partition of every restored topic from the archive's floor, which is what every restore before 1.7.0 did. A runner built before PROD-11.1 ignores a plan's selection and restores everything, and its document, without this block, says exactly that. Nested optional (Global Constraint 12 as amended); `skip_serializing_if`, so every document without a selection keeps its bytes.",
+          "description": "**Format 1.7.0 (PROD-11.1).** The plan's stated INCLUSIVE window start, when it states one: see [`SelectionLabel`].\n\nABSENT means the restore selected every record of every partition of every restored topic from the archive's floor, which is what every restore before 1.7.0 did. Partition subsets are refused until the owner decides OD-9, so no format-1 document narrows partitions. Nested optional (Global Constraint 12 as amended); `skip_serializing_if`, so every document without a start keeps its bytes.",
           "allOf": [
             {
               "$ref": "#/definitions/SelectionLabel"
@@ -1178,28 +1163,6 @@
           "items": {
             "type": "string"
           }
-        }
-      }
-    },
-    "TopicPartitions": {
-      "description": "One topic's partition subset in a [`SelectionLabel`].",
-      "type": "object",
-      "required": [
-        "partitions",
-        "topic"
-      ],
-      "properties": {
-        "partitions": {
-          "description": "Its selected partitions, ascending and distinct.",
-          "type": "array",
-          "items": {
-            "type": "integer",
-            "format": "int32"
-          }
-        },
-        "topic": {
-          "description": "The SOURCE topic.",
-          "type": "string"
         }
       }
     },
