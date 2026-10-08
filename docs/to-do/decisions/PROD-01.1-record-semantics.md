@@ -837,7 +837,7 @@ and `runs/c2-*/`.
 
 | Row | On 0.23.3 |
 |---|---|
-| The eight live rows (TXN, which also writes txn-late; ts-pit; ts-floor; ts-bound; LAT; shapes; compaction; recreate) | **8 passed with the contract asserted** (no row printed "contract not asserted"); every outcome file names engine 0.23.3. The broker's time retention deleted no segment during the run (A-C20-2 holds) |
+| The eight live rows (TXN, which also writes txn-late; ts-pit; ts-floor; ts-bound; LAT; shapes; compaction; recreate) | **8 passed with the contract asserted**: every outcome file names engine 0.23.3, which equals `CONTRACT_ENGINE`, so `contract_applies` held. The broker's time retention deleted no segment during the run (A-C20-2 holds) |
 | Ack fault (§5.1) | sample 6: one resent batch, 1,000 duplicates, and for the first time a completed run, which Logweir signed `fail-integrity` on the count bound |
 | Kill (§5.2) | sample 5: the engine outlived `logweir` and finished the restore, as on 0.21.0 |
 
