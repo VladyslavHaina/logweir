@@ -46,16 +46,16 @@ the GitHub Release asset, after the tag, together with the run rows
 
 | What | Value |
 |---|---|
-| Candidate commit (the tagged commit) | — |
-| Version tag | — |
-| Publication commit (`release.json` `.images.publication`: the `sha-<commit>` images and chart the tag promotes) | — |
-| CI run (`ci.yml`) for the publication commit, its `publish` job green | — |
-| Release dry run (`release.yml` dispatched on the candidate) | — |
+| Candidate commit (the tagged commit) | the commit `v0.2.0-rc.1` names: this record's commit, docs-only on top of the publication commit |
+| Version tag | `v0.2.0-rc.1` (pushed 2026-10-08 with the owner's standing approval of 2026-10-07) |
+| Publication commit (`release.json` `.images.publication`: the `sha-<commit>` images and chart the tag promotes) | `2c277dc11521c337748fbf9059cbaff76c36e82c` |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | [37725467323](https://github.com/VladyslavHaina/logweir/actions/runs/37725467323): `check`, `e2e` and `publish` (build amd64, build arm64, promote) green |
+| Release dry run (`release.yml` dispatched on the candidate) | [37730468445](https://github.com/VladyslavHaina/logweir/actions/runs/37730468445) on `2c277dc1`, every job green; `release.sh verify` on its `release-assets`: 14 assets verified, `SHA256SUMS` 14/14 |
 | Release run (`release.yml` on the tag) and release drill | — |
-| Runner image digest (`linux/amd64`) | — |
-| Controller image digest (manifest list; amd64 and arm64) | — |
-| Console image digest (`logweir-console`) | — |
-| UI image digest (`logweir-ui`) | — |
+| Runner image digest (`linux/amd64`) | `docker.io/vladyslavhaina/logweir@sha256:affa8075492614ff0964bf29ca79a0caa61aa2f8aa47d022460f855e92024054` |
+| Controller image digest (manifest list; amd64 and arm64) | `docker.io/vladyslavhaina/weirkeeper@sha256:fac312ba31df831e4cf96dd4546266ee47766528752f97a931eb125974dd56c6` |
+| Console image digest (`logweir-console`) | `docker.io/vladyslavhaina/logweir-console@sha256:b7402cb143aee14356707ee10fb644e5f5c25a4993ff285315adfccf5b13b0a7` |
+| UI image digest (`logweir-ui`) | `docker.io/vladyslavhaina/logweir-ui@sha256:2a43b5c0a7ec42688076986c96f63d34449060981fc746a9c8e4ac397e305daf` |
 | Chart (`logweir-chart` version and package sha256 from the tag run's `release.json` `.chart`; OCI digest from the release's notes, as an anonymous `helm pull` reports it) | — |
 | CLI archives (three; the tag run's `release.json` `.archives`, each with its sha256 and run-time needs) | — |
 | `ui/` bundle, file by file | the output of the command below, which the release asset `ui-files.sha256` also carries |
