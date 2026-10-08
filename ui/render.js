@@ -2203,6 +2203,39 @@ export function planEvidenceBucket(planBytes) {
   return "";
 }
 
+/** The plan's `restore.time_basis` (FX-8): `"producerTime"` when the approved
+ *  plan bytes state it, `""` otherwise. A line reader like
+ *  [`planEvidenceBucket`]: the block is the one the console renders (two-space
+ *  indentation, JSON-quoted values), and any other shape or value reads as
+ *  `""` -- "not stated", which is what the runner reads it as too, since its
+ *  grammar has one value and refuses every other spelling. */
+export function planTimeBasis(planBytes) {
+  if (typeof planBytes !== "string" || planBytes.length === 0) {
+    return "";
+  }
+  let inRestore = false;
+  for (const raw of planBytes.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (/^\S/.test(line)) {
+      if (inRestore) {
+        return "";
+      }
+      inRestore = /^restore:\s*$/.test(line);
+      continue;
+    }
+    if (!inRestore) {
+      continue;
+    }
+    const match = /^ {2}time_basis:\s*(.*?)\s*$/.exec(line);
+    if (match !== null) {
+      const quoted = /^"(.*)"$/.exec(match[1]) || /^'(.*)'$/.exec(match[1]);
+      const value = quoted !== null ? quoted[1] : match[1];
+      return value === "producerTime" ? value : "";
+    }
+  }
+  return "";
+}
+
 /** The S3 bucket-name grammar the destination form and the API enforce:
  *  3-63 characters, lowercase letters, digits, dots and hyphens, beginning and
  *  ending with a letter or digit. */

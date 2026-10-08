@@ -48,6 +48,7 @@ import {
   independentCheck,
   listFooter,
   planEvidenceBucket,
+  planTimeBasis,
   runPhaseBadge,
   QUEUED_RUN_SENTENCE,
   replace,
@@ -357,6 +358,15 @@ export function renderRestoreDetail(object, operation) {
       ["target mode", cell((spec.target || {}).mode)],
       ["operation", rowOperationCell(object, (object.metadata || {}).namespace)],
       ["point in time", when(spec.pointInTime)],
+      // FX-8: WHICH CLOCK THAT POINT WAS READ ON, from the approved plan bytes.
+      // A `LogAppendTime` topic at a point is refused unless the plan accepted
+      // producer time; when it did, the signed scorecard lists the topic.
+      ["time basis", "<span id=\"restore-time-basis\">" +
+        esc(planTimeBasis(spec.planBytes) === "producerTime"
+          ? "producer time (restore.time_basis: producerTime): a LogAppendTime topic was " +
+            "selected by its producers' clocks"
+          : "not stated in the plan: a LogAppendTime topic at this point is refused") +
+        "</span>"],
       ["backup set", cell(spec.backupSetRef)],
     ]) +
     (verified

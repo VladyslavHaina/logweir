@@ -140,6 +140,7 @@ import {
   defaultTopicPrefix,
   MAX_REPLICATION_FACTOR,
   TARGET_MODES,
+  TIME_BASIS_PRODUCER_TIME,
   preparePlanDocument,
 } from "../plan.js";
 import {
@@ -218,6 +219,9 @@ export const WIZARD_DRAFT_FIELDS = Object.freeze([
   // stands). A default is not kept: it is worked out again from what this
   // page reads on the next mount, so it can follow the target's broker count.
   "replicationFactor",
+  // FX-8: whether the plan accepts a point-in-time selection by producer
+  // time -- `producerTime` or the empty string. A choice like any other.
+  "timeBasis",
 ]);
 
 /** The API server's field paths, mapped to the wizard's inputs. `archive` and
@@ -2127,8 +2131,53 @@ export function renderPointInTimeStep(state) {
       ? ""
       : "<p class=\"complaint\" id=\"point-in-time-complaint\">" + complaint + "</p>") +
     "<p class=\"note\">" + WINDOW_REFUSAL_SENTENCE + "</p>" +
+    renderTimeBasisField(s) +
     "</section>"
   );
+}
+
+/** Step 3's time-basis box (FX-8): whether this plan accepts a point-in-time
+ *  selection by PRODUCER time over a `LogAppendTime` topic, written into the
+ *  plan as `restore.time_basis: producerTime` and nowhere else.
+ *
+ *  UNTICKED BY DEFAULT, AND NEVER TICKED BY THIS PAGE. Ticking it is the
+ *  operator's acceptance, which the approver then signs with the plan; a page
+ *  that set it would put a consent nobody gave into a signed document.
+ *
+ *  THE NOTE IS PRINTED WHETHER OR NOT IT IS TICKED, and says what this page
+ *  cannot know: the timestamp type of each topic is recorded in the archive
+ *  manifest and the backup receipt, which the runner reads and this page does
+ *  not, so the page cannot name the topics the rule applies to. */
+export function renderTimeBasisField(state) {
+  const s = state || {};
+  const ticked = ((s.fields || {}).timeBasis) === TIME_BASIS_PRODUCER_TIME;
+  return (
+    "<label class=\"inline\" for=\"time-basis\">" +
+    "<input type=\"checkbox\" id=\"time-basis\" name=\"timeBasis\"" +
+    (ticked ? " checked" : "") +
+    "> Select by producer time (<code>restore.time_basis: producerTime</code>)</label>" +
+    "<p class=\"note\" id=\"time-basis-note\">" + messageText(TIME_BASIS_NOTE) + "</p>"
+  );
+}
+
+/** What the time-basis box means, under it (FX-8). Code spans render through
+ *  `messageText`. */
+export const TIME_BASIS_NOTE =
+  "The archive holds each record's producer timestamp, not the broker's append time. If a " +
+  "topic of this plan is `LogAppendTime` -- by its own setting or the broker's default -- " +
+  "the runner refuses this point in time (`PointInTimeByProducerTime`) before it creates " +
+  "anything, unless this box is ticked; ticked, it restores that topic by its producers' " +
+  "clocks and the signed scorecard says so. This page cannot see each topic's timestamp " +
+  "type: the run reads it from the archive and its backup receipt.";
+
+/** The review step's time-basis line (FX-8), from the plan's own value. */
+export function timeBasisText(state) {
+  const s = state || {};
+  return ((s.fields || {}).timeBasis) === TIME_BASIS_PRODUCER_TIME
+    ? "producer time (restore.time_basis: producerTime): a LogAppendTime topic is selected " +
+      "by its producers' clocks, and the signed scorecard lists it"
+    : "not stated: a LogAppendTime topic at this point is refused before anything is created " +
+      "(PointInTimeByProducerTime)";
 }
 
 /** The sentence step 4 prints when no `KafkaCluster` in the namespace carries
@@ -3502,6 +3551,8 @@ export function renderPlanStep(prepared, state) {
       ["Approval metadata.name", renderable ? "<code>" + esc(p.approvalName) + "</code>" : cell(null)],
       ["replication factor", "<span id=\"review-replication\">" + esc(replicationText(s)) +
         "</span>"],
+      // FX-8: THE CLOCK THE POINT IS READ ON, beside the plan that states it.
+      ["time basis", "<span id=\"review-time-basis\">" + esc(timeBasisText(s)) + "</span>"],
     ]) +
     (replicationMayDiffer(replicationChoice(s))
       ? "<p class=\"note\" id=\"review-replication-differs\">" + esc(REPLICATION_DIFFERS_NOTE) +
@@ -4188,6 +4239,8 @@ export function wizardDraftValues(state) {
     replicationFactor: s.replicationChosen === true
       ? String(replicationFactorOf(s))
       : "",
+    // FX-8: the opt-in, as the one value or the empty string.
+    timeBasis: f.timeBasis === TIME_BASIS_PRODUCER_TIME ? TIME_BASIS_PRODUCER_TIME : "",
   };
 }
 
@@ -4269,6 +4322,9 @@ export function applyWizardDraft(state, draft) {
   if (typeof d.replicationFactor === "string" && d.replicationFactor.length > 0) {
     setReplicationFactor(state, d.replicationFactor);
   }
+  // FX-8: the opt-in comes back only as the one value it can be; an older
+  // draft with none, or anything else, leaves the box unticked.
+  state.fields.timeBasis = d.timeBasis === TIME_BASIS_PRODUCER_TIME ? TIME_BASIS_PRODUCER_TIME : "";
   // A saved destination is the frozen source of these signed-plan values.
   // Older drafts may contain legacy controls, but must never override it.
   const legacyStorage = savedDestinationName(state).length === 0;
@@ -6689,6 +6745,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   const evidenceDestination = node.querySelector("#evidence-destination");
   const catalogTopics = node.querySelector("#catalog-topics");
   const replication = node.querySelector("#replication-factor");
+  const timeBasis = node.querySelector("#time-basis");
   const refresh = async () => {
     if (!active(lifecycle)) {
       return;
@@ -6707,6 +6764,10 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     }
     if (point !== null) {
       state.fields.pointInTime = valueOf(point);
+    }
+    // FX-8: the box and only the box writes the opt-in.
+    if (timeBasis !== null) {
+      state.fields.timeBasis = timeBasis.checked === true ? TIME_BASIS_PRODUCER_TIME : "";
     }
     if (mode !== null) {
       state.fields.target.mode = valueOf(mode);
@@ -6890,6 +6951,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     evidenceDestination,
     catalogTopics,
     replication,
+    timeBasis,
   ]) {
     if (field !== null) {
       listen(field, "change", refresh, lifecycle);
