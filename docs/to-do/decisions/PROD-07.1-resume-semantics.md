@@ -12,12 +12,20 @@
    - it is a pod-local JSON list of segment keys whose every produce request was acknowledged, plus one hash;
    - it is saved once per topic, and `checkpoint_interval_secs` is read by nothing;
    - the save truncates and then writes, so it is not atomic;
-   - the hash covers every `restore:` key, Logweir's per-run paths included, and nothing about the target cluster, the target topics or the archive;
+   - the hash covers every `restore:` key, Logweir's per-run paths included, and nothing about the target cluster, the target topics or the archive. For two or more topics it is not even deterministic across processes;
    - shutdown is seen only between topics, and a stopped restore exits 0;
    - skipped segments add nothing to the offset report;
    - restore produces without idempotence and re-sends a request whose response was lost.
-2. **Measured on slot 1** (§4), the checkpoint, carried with a stable path, behaves as the source predicts. ⟪SUMMARY-MEASURED⟫
-3. **Logweir today never resumes, and that is what keeps it safe** (§3). Per-run paths, a pod-local file and phase 0's existing-target refusal each prevent a resume; the first and third also prevent F13 and F16 of §6.
+2. **Measured on slot 1** (§4; 10 rows, 52 predictions held), running the engine's own next attempt the way a naive resume would:
+   - a kill before the first commit duplicates every landed record (1,500), and after a commit the landed part of the next topic (1,200);
+   - SIGTERM exits 0 with a whole topic unrestored;
+   - a stale file over a recreated target exits 0 having restored nothing;
+   - a truncated file stops the engine (exit 1);
+   - two writers duplicate the whole archive;
+   - a kill with requests in flight leaves one unacknowledged request per partition in the target (100 records each).
+
+   **New:** the hash is not deterministic for a document of two or more topics, because `topic_mapping` is a `HashMap`. One two-topic document gave 2 distinct hashes over 8 processes (D1), so the same document's checkpoint is accepted or discarded at random (K2 against T1). A tail-resume prototype, run after the in-flight kill, gave an exact target: 0 duplicates, 0 missing.
+3. **Logweir today never resumes, and that is what keeps it safe** (§3). Per-run paths, a pod-local file and phase 0's existing-target refusal each prevent a resume. The per-run paths also make a stale file unreachable (F13 of §6), and the refusal stops a second execution from writing into the first one's target.
 4. **Default contract, now (PROD-07.2): resume means reconcile, or a fresh target** (§5.2).
    - An interrupted restore is a state, never a generic failure.
    - Its partial targets are listed with PROD-08.1's complete-verification counts.
@@ -38,10 +46,10 @@
 |---|---|
 | Engine source | `third_party/kafka-backup-v0.23.3.tar.gz`, sha256 `bf5544bd521f0a0f343c402bbbde5d6dc0d9b45d70eb1a1efb447ca4f2fda0bd`, tag `v0.23.3` = commit `afb160e7f2c69b7c3c28e1b868dd952835a5b0af` ([PROD-00 §12.1](PROD-00-engine-route.md#121-the-target)) |
 | Engine image (runs) | `osodevops/kafka-backup@sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`, linux/amd64; `bash scripts/extract-engine.sh` on this branch verified the revision label and printed `kafka-backup 0.23.3` |
-| Lab | TODO-LAB |
+| Lab | Compose slot 1 (`eval "$(e2e/compose/stack-env.sh --slot 1)"`, project `logweir-e2e-s1`), broker `apache/kafka:3.7.1` read back from the container, slot MinIO; `just e2e-up`, then `just e2e-down` (`down -v`) after each run, which left 0 containers, volumes and networks |
 | Harness | `e2e/tests/resume_semantics.rs`, `the_pinned_engines_restore_checkpoint_under_interruption` |
 | Oracle | PROD-08.1's complete verification: `logweir::drill::phase7_verify::run_with_coverage(…, Coverage::Complete, …)` over the slot's broker and MinIO |
-| Artifacts | `/tmp/logweir-roadmap-run/claude/artifacts/prod-07-1/` on the worker host: one outcome file per row, the run log, the engine logs |
+| Artifacts | `/tmp/logweir-roadmap-run/claude/artifacts/prod-07-1/{r1,r2}/` on the worker host: `session.log`, `test.log`, `outcomes/<row>.json` and `outcomes/engine-logs/<container>.log` (every engine's full log) |
 
 **Citation form.** `C23/<path>:<line>` is `crates/kafka-backup-core/src/<path>` and `CLI23/<path>:<line>` is `crates/kafka-backup-cli/src/<path>`, both in the vendored 0.23.3 tarball (the form [PROD-00 §12](PROD-00-engine-route.md#12-prod-003f-the-move-to-0233-2026-10-07) uses). `L/<path>:<line>` is this repository at `740a4875`.
 
@@ -68,8 +76,9 @@ Wherever `restore.checkpoint_state` points; absent, the engine keeps no checkpoi
 
 - **In the hash, and should not be:** the two paths. Every Logweir attempt renders a different run id into both, so every attempt's hash differs and a carried checkpoint is discarded (C4).
 - **Not in the hash, and should be:** the target cluster (bootstrap servers, cluster id, credentials are under `target:`, not `restore:`), the target topics' identity, the archive's manifest digest, and any execution identity. A checkpoint is therefore accepted against a different cluster, a recreated topic of the same name, or a rewritten archive under the same backup id, as long as the `restore:` block is byte-identical.
+- **Not a function of the document.** `topic_mapping` is a `std::collections::HashMap<String, String>` (`C23/config.rs:869`; so are `partition_mapping` at `:865`, `repartitioning` at `:975` and `schema_id_mapping` at `:1027`). `serde_json` writes a `HashMap` in iteration order, and std seeds that order randomly per process. Logweir renders one mapping entry per restored topic, so for any restore of two or more topics two processes running the SAME document can compute different hashes. The second then discards a checkpoint that was written for exactly its document. Found by run r1 (T1's second attempt) and measured by D1 (§4).
 - **On a mismatch** the engine logs `Restore configuration changed since the checkpoint was written (config hash mismatch); restarting from the beginning` at WARN and starts over (`:750-760`). It does not refuse.
-- **A file that does not parse** fails the run before anything is produced: `load_checkpoint` reads and deserialises with `?` (`:1361-1373`), and that error ends `run_internal` (`:747`).
+- **A file that does not parse** fails the run before anything is produced: `load_checkpoint` reads and deserialises with `?` (`:1361-1373`), and that error ends `run_internal` (`:747`). Measured: C1, exit 1.
 
 ### 2.4 When it is saved
 
@@ -133,7 +142,43 @@ Nothing. A skipped segment `continue`s before the offset-mapping update, the rec
 
 So a crashed restore is not resumable today, by three independent mechanisms (per-run paths, a pod-local file, the existing-target refusal). Two of them are also what keep it safe: §4 shows what the engine's checkpoint does when it IS carried with a stable path.
 
-TODO-MEASURED
+## 4. Measured on compose slot 1
+
+**How.** `e2e/tests/resume_semantics.rs`, run r2 at `6babf9f1`, 2026-10-08 12:58–13:10Z:
+
+- the stack: project `logweir-e2e-s1`, broker `apache/kafka:3.7.1` (read back from the container: `kafka_2.13-3.7.1.jar`), engine image `sha256:cc7d5a8a…32db` with revision `afb160e7`;
+- the fixture: two topics of three partitions with 1,200 records each (about 105-byte values), backed up by `logweir backup run` in 300-record segments, so each topic has 12 segments;
+- the attempts: the engine runs Logweir's rendered document directly, with the two pacing keys of §9 (100-record batches, 300 records/s per partition);
+- the oracle: every outcome below is PROD-08.1's complete verification of the targets against the archive, never the engine's exit code.
+
+**Result:** one test, 10 rows, 52 predictions, all held (`test result: ok`, 664 s). `just e2e-down` then left 0 containers, volumes and networks. The outcome files and every engine's log are in the run artifacts (`r2/outcomes/`).
+
+**Run r1** (at `676d990d`) gave the same outcomes for K1, K2, H1, K3, W1 and M1.
+
+- **Its T1 prediction failed.** The prediction "after attempt 2 both topics are exact" was false, because attempt 2 discarded its own document's checkpoint on the hash. That is how §2.3's nondeterministic hash was found; D1 now measures it.
+- **Its S1 row panicked.** It met phase 7's refusal of an empty target, which r2 records as an outcome.
+
+In the table, "first" and "second" are the topics in the engine's restore order (manifest order).
+
+| Row | What was done | Engine | Complete verification after the last attempt |
+|---|---|---|---|
+| **K1** kill before a checkpoint commit | SIGKILL with 1,500 of the first topic's 3,600 records landed (500 per partition). Every landed record was acknowledged (the acknowledged end equals the end offset on all three partitions), and no checkpoint file existed. Attempt 2: the same document and path | Attempt 1 exit 137; attempt 2 loads nothing, exit 0 | first: **1,500 duplicates**, 0 missing; second: exact |
+| **K2** kill after a checkpoint commit | SIGKILL with the first topic done and its checkpoint saved (12 keys, all of the first topic), 1,200 of the second topic landed. Attempt 2: the same document and path | Attempt 2: "Loaded checkpoint: 12 segments completed", accepted, exit 0. Its offset report has entries for the second topic's three partitions only | first: exact (skipped); second: **1,200 duplicates** |
+| **H1** the same, rendered as Logweir renders | As K2 (1,000 of the second topic landed), then attempt 2 with a new per-attempt path and attempt 1's file copied to it | "Loaded checkpoint: 12 …", then "config hash mismatch; restarting from the beginning", exit 0 | first: **3,600 duplicates**; second: 1,000 duplicates |
+| **T1** SIGTERM | SIGTERM with 900 of the first topic landed | Finished the first topic, "Shutdown signal received, stopping restore", **exit 0** with the second topic never started; checkpoint of 12 | after attempt 1: first exact, second **3,600 missing**, verdict `fail`. Attempt 2 (same document, same path): loaded, then **"config hash mismatch"** and a restart: first 3,600 duplicates, second exact |
+| **K3** kill with requests in flight | With 1,500 landed: froze the broker, slept 1.5 s, SIGKILL, thawed after 0.5 s | Acknowledged end 600 per partition; end offsets 700 per partition after the thaw: **100 records per partition appended unacknowledged** (one request each, 300 in all). r1: 800 acknowledged, 900 landed | after the tail-resume prototype (tail 699, then the remaining 500 per partition, and all of the second topic): **`pass`, 0 duplicates, 0 missing** |
+| **W1** two writers | Two attempts at once, the same document, each with its own per-attempt path | Both exit 0 | **3,600 + 3,600 duplicates** (the whole archive twice), 0 missing, 0 out of order |
+| **M1** foreign write | SIGKILL with 1,800 landed, then 5 records without lineage produced into the first target's partition 0 | The prototype **refused**: "…/0@600 carries no x-original-offset". The engine's re-run of the same document: exit 0 | after the re-run: first **5 unexpected**, 1,800 duplicates |
+| **D1** hash determinism | One two-topic document run by 8 processes, one one-topic document by 4, with a window selecting nothing (nothing produced; every attempt exits 0 and saves its own hash) | Two topics: **2 distinct hashes** (`30c5de72…` ×5, `a347f134…` ×3). One topic: 1 hash (`0db8533f…` ×4) | n/a |
+| **S1** stale checkpoint, new target | One topic restored completely (`pass`, 3,600), checkpoint of 12; the target topic deleted and recreated empty; attempt 2: the same document and path | "Loaded checkpoint: 12 segments completed", no mismatch, **exit 0, 0 records produced** | the target stays empty. Phase 7 refuses it: `Operational("no restored records found on any mapped target topic …")`, which is exit 1 with nothing signed |
+| **C1** corrupt checkpoint | S1's file truncated to 839 bytes | **exit 1**, "Error: Serialization error: EOF while parsing a string at line 12 column 12"; 0 records produced | n/a |
+
+**What the runs establish:**
+
+- **The kill boundary is exactly where the source puts it.** With no checkpoint commit, a re-run duplicates every landed record (K1). After a commit it duplicates the landed part of the topic in progress (K2). The acknowledged prefix equals the target when the kill lands between requests (K1). The target exceeds it by exactly one request per partition when the kill lands with requests in flight (K3).
+- **A checkpoint carried with a stable path works only by chance.** For a single topic the hash is deterministic, and the stale file is trusted against a recreated target: exit 0, nothing restored (S1). For two topics, the same document is accepted (K2) or discarded (T1) depending on the process (D1). Logweir's per-attempt paths discard it always (H1).
+- **The engine's exit code says nothing about completeness.** Exit 0 came with a whole topic missing (T1), a target left empty (S1), a target duplicated twice over (W1) and 5 foreign records (M1).
+- **The target is a better checkpoint than the checkpoint.** A tail scan after a kill with requests in flight saw the unacknowledged batch and resumed with 0 duplicates and 0 missing (K3). The same scan refused a target with a foreign record (M1).
 
 ## 5. The contract
 
@@ -238,7 +283,7 @@ The rules:
 
 - The engine's checkpoint cannot: it lists only fully acknowledged segments (2.5), so a checkpoint-driven resume re-produces the window.
 - The target can, once R2's quiet period has passed: a tail scan reads every appended record, acknowledged or not.
-- Measured (K3): ⟪K3-WINDOW⟫.
+- Measured (K3): the engine had seen 600 records per partition acknowledged (r1: 800). After the thaw the target held 700 per partition (r1: 900): exactly one 100-record request per partition, appended with no acknowledgement, 300 records in all. The tail scan saw them, and the prototype resumed after them with 0 duplicates.
 
 ### 5.6 What per-segment checkpoints, path-free hashing and a persisted mapping would buy (option B), and why it is not recommended
 
@@ -246,7 +291,7 @@ OD-3 now funds engine patches. So the alternative is real: make the engine's own
 
 **It would need five patches:**
 
-- PROD-00.3g: save per segment or per `checkpoint_interval_secs`, and hash without the file paths (~2 days, PROD-00 §9);
+- PROD-00.3g: save per segment or per `checkpoint_interval_secs`, and hash without the file paths and over a canonical (sorted) encoding, because D1 shows today's hash differs between processes for one document (~2 days, PROD-00 §9);
 - an atomic save, write then rename (C1 shows the hazard; ~0.5 day);
 - target cluster id, topic ids and the manifest digest in the hash (S1 shows the hazard; ~1 day);
 - skipped segments' mappings re-added from the checkpoint (K2; ~0.5 day);
@@ -286,22 +331,22 @@ Every event is a row of §6. In short:
 
 | # | Event | Engine next attempt (0.23.3) | Today | 5.2 (PROD-07.2) | 5.3 (PROD-07.3) |
 |---|---|---|---|---|---|
-| F1 | Runner or engine killed (SIGKILL, OOM, pod deleted) inside the first topic, before any checkpoint commit | No file was saved, so it starts over. Duplicates = every record already landed (K1: ⟪K1-DUP⟫) | Killed `logweir`: the engine finishes unrecorded (PROD-01.1 §5.2). Killed pod: no scorecard; a retry of the same spec is refused at phase 0 | Interrupted; reconcile; fresh-target retry | Resume after R2: 0 added duplicates, nothing missing |
-| F2 | Killed after a topic's checkpoint commit, inside a later topic | Skips the committed topic's segments. Duplicates = the later topic's landed records (K2: ⟪K2-DUP⟫); its offset report omits the skipped topic | As F1 | As F1 | As F1 |
-| F3 | As F2, with Logweir's per-attempt path and the file carried | Discards it on the hash ("config hash mismatch") and starts over; duplicates = everything landed (H1: ⟪H1-DUP⟫) | Not carried: as F1 | As F1 | As F1 (the engine file is irrelevant) |
+| F1 | Runner or engine killed (SIGKILL, OOM, pod deleted) inside the first topic, before any checkpoint commit | No file was saved, so it starts over. Duplicates = every record already landed (K1: 1,500) | Killed `logweir`: the engine finishes unrecorded (PROD-01.1 §5.2). Killed pod: no scorecard; a retry of the same spec is refused at phase 0 | Interrupted; reconcile; fresh-target retry | Resume after R2: 0 added duplicates, nothing missing |
+| F2 | Killed after a topic's checkpoint commit, inside a later topic | If the hash matches, it skips the committed topic's segments: duplicates = the later topic's landed records (K2: 1,200), and its offset report omits the skipped topic. For two or more topics the hash matches only by chance (D1); otherwise as F3 (T1) | As F1 | As F1 | As F1 |
+| F3 | As F2, with Logweir's per-attempt path and the file carried | Discards it on the hash ("config hash mismatch") and starts over; duplicates = everything landed (H1: 3,600 + 1,000) | Not carried: as F1 | As F1 | As F1 (the engine file is irrelevant) |
 | F4 | Graceful stop (SIGTERM) mid-topic | Finishes the topic, saves, stops before the next and **exits 0** with later topics absent (T1) | No cancel reaches the engine (Later #13) | SIGTERM then SIGKILL; Interrupted whatever the exit (5.2 items 5–6) | As F1 |
-| F5 | Killed with produce requests in flight (the ambiguity window) | Re-produces the in-flight batches with everything else (no file) | As F1 | As F1; the reconciliation counts what landed, acknowledged or not | Tail scan after the quiet period: 0 duplicates (K3: ⟪K3-RESULT⟫) |
+| F5 | Killed with produce requests in flight (the ambiguity window) | Re-produces the in-flight batches with everything else (no file) | As F1 | As F1; the reconciliation counts what landed, acknowledged or not | Tail scan after the quiet period: 0 duplicates (K3: `pass`, 0 duplicates, 0 missing) |
 | F6 | A response lost inside an attempt (C5) | Re-sends: one batch appended twice; can exit 0 (PROD-01.1 §5.1 samples 3, 5, 6) | Count bound or complete verification fails the run (PROD-01.1 §5.1 sample 6; PROD-08.1) | Same; the reconciliation names the duplicates | R4 lets them through, disclosed; the final verdict fails on them; 00.3d removes them |
 | F7 | Broker outage past the retry budget: the engine exits 1 with a partial target | Errored topics are still checkpointed (2.4); the next attempt skips their completed segments | Exit 1, no scorecard; the partial target stays (PROD-01.1 §5.1 sample 3) | Interrupted, partial targets listed (07-1b) | Resume after R2–R4 |
 | F8 | Engine exits 0, then Logweir's own read fails (07-1c) | n/a | Exit 1, no scorecard over a complete target (PROD-01.1 §5.1 samples 4, 5) | "Restore finished, verification not completed"; re-verify without re-restoring | Re-verify; nothing to resume |
 | F9 | Controller restarted | n/a: the Job runs on | The Job is unaffected | Unaffected: state is in the attempt record and the Job | Unaffected |
 | F10 | Node lost (runner pod `Unknown`) | n/a | The checkpoint is gone with the `emptyDir`; nothing to resume | Interrupted once the pod is proved terminated | Blocked until the pod is proved terminated (R2); then as F1 |
 | F11 | Checkpoint storage lost | Starts over: the same as F1 | No effect (never read) | No effect: no file is rendered | No effect |
-| F12 | Checkpoint file truncated (killed during the non-atomic save) | **Refuses to start**: exit ⟪C1-EXIT⟫, nothing produced (C1) | Unreachable: per-attempt paths | Unreachable: no file | Unreachable |
-| F13 | A stale checkpoint and a target deleted and recreated under the same names | **Trusts the file: skips every segment, exits 0, the target stays empty** (S1: ⟪S1-MISSING⟫ missing) | Unreachable: per-attempt paths and phase 0 | Unreachable: no file | R3 refuses: `TargetGenerationChanged`, fresh target (TI-07.1-1) |
+| F12 | Checkpoint file truncated (killed during the non-atomic save) | **Refuses to start**: exit 1, nothing produced (C1) | Unreachable: per-attempt paths | Unreachable: no file | Unreachable |
+| F13 | A stale checkpoint and a target deleted and recreated under the same names | **Trusts the file whenever the hash matches (always for one topic): skips every segment, exits 0, and the target stays empty** (S1: 0 records; phase 7 refuses it, exit 1) | Unreachable: per-attempt paths and phase 0 | Unreachable: no file | R3 refuses: `TargetGenerationChanged`, fresh target (TI-07.1-1) |
 | F14 | Target truncated (delete-records, a retention change) | Skips segments it already wrote; the truncated records stay missing | n/a: the retry is a fresh target | Reconciliation reports them missing | R3 (end below the recorded end) or R4 (missing below the tail) refuses (TI-07.1-3) |
-| F15 | A foreign writer appends to the target | Re-produces around it; the foreign records stay (M1: ⟪M1-UNEXP⟫ unexpected after the re-run) | n/a | Reconciliation reports them unexpected | R4 refuses (M1: the prototype refused) |
-| F16 | Two writers for one execution: a second attempt, or the orphaned engine of a killed `logweir` | Both produce everything: duplicates = the whole archive (W1: ⟪W1-DUP⟫) | Possible today only through the orphan (PROD-01.1 §5.2) into the same target | The cancel must stop the writer before Interrupted (5.2 item 6) | R2 and R5 refuse until one writer remains |
+| F15 | A foreign writer appends to the target | Re-produces around it; the foreign records stay (M1: 5 unexpected, 1,800 duplicates after the re-run) | n/a | Reconciliation reports them unexpected | R4 refuses (M1: the prototype refused) |
+| F16 | Two writers for one execution: a second attempt, or the orphaned engine of a killed `logweir` | Both produce everything: duplicates = the whole archive (W1: 7,200) | Possible today only through the orphan (PROD-01.1 §5.2) into the same target | The cancel must stop the writer before Interrupted (5.2 item 6) | R2 and R5 refuse until one writer remains |
 | F17 | Archive changed under the same backup id, or unreadable | Skips by key, so it trusts a rewritten archive (the hash does not cover the manifest, 2.3) | n/a | Reconciliation cannot compute the expected set: "not compared" (PROD-08.1 §2) | R1 refuses |
 | F18 | Plan changed between attempts | The hash differs, so it starts over | n/a | A new execution (PLAT-12.2) | A new execution; never a resume |
 | F19 | Cancel or SIGTERM before the engine subscribes to its shutdown channel | Lost: the restore runs to completion (2.6, from source; not measured) | n/a | SIGKILL after the grace (5.2 item 6) | As 5.2 |
@@ -344,7 +389,7 @@ A-C4-4 stays. The rows below are added. None is a PROD-07.3 dependency.
 | # | Pass predicate | Negative control | Fixture |
 |---|---|---|---|
 | 07.1-G1 | A kill during a checkpoint save leaves the previous complete file (write to a temporary file, then rename). | C1: a truncated file stops the next attempt. | resume_semantics c1, with the kill injected during the save |
-| 07.1-G2 | The hash excludes `checkpoint_state` and `offset_report`, and includes the target cluster id and the archive's manifest digest. | H1: per-attempt paths discard the file. S1: a recreated target on the same cluster is not caught by the hash alone, and needs topic ids or the identity reads. | resume_semantics h1, s1 |
+| 07.1-G2 | The hash is a function of the document: the same two-topic document hashes identically in every process. It excludes `checkpoint_state` and `offset_report`, and includes the target cluster id and the archive's manifest digest. | D1: 2 hashes over 8 processes today. H1: per-attempt paths discard the file. S1: a recreated target on the same cluster is not caught by the hash alone, and needs topic ids or the identity reads. | resume_semantics d1, h1, s1 |
 | 07.1-G3 | Skipped segments' mappings are re-added from the checkpoint, so the report covers every restored record. | K2's report without topic a. | resume_semantics k2 |
 
 ### 7.4 PROD-00.3i (its offset-range rule, for PROD-07.3)
@@ -370,7 +415,8 @@ A-C4-4 stays. The rows below are added. None is a PROD-07.3 dependency.
 - **One broker, no replication.** Slot 1 is one combined KRaft node, so an appended but uncommitted record (R2's quiet period) never occurs here; the bound comes from source and Kafka's acknowledgement semantics, not from a run.
 - **The engine runs in a container under `--platform linux/amd64`** on an arm64 host, through a copy of `engine-docker.sh`'s invocation with a container name. The engine binary and image are the pin's.
 - **Pacing keys.** Two keys Logweir does not render (`produce_batch_size: 100`, `rate_limit_records_per_sec: 300`) were appended to every document, identically across a scenario's attempts. They change timing and batch size, not the checkpoint or produce semantics. The defaults' window (4 × 1,000) is from source.
-- **One run per row,** small fixtures (7,200 records). They establish the behaviours, not rates.
+- **Few runs, small fixtures** (7,200 records). K1, K2, H1, T1, K3, W1 and M1 ran twice (r1, r2) with the same behaviour; the counts follow where each kill landed. The exception is T1's second attempt, which is D1's randomness. D1, S1 and C1 ran once. They establish the behaviours, not rates.
+- **D1's split** (5 and 3 of 8 processes) is a property of std's `HashMap` seeding. How often a document of more than two topics keeps its hash was not measured.
 - **The resume is a prototype.** It produces the remaining archived records through librdkafka with idempotence on, not through the engine with an offset floor, which does not exist until PROD-00.3i. It shows what a tail-driven resume yields. It does not test 00.3i.
 - **Not run:**
   - a lost node or a Kubernetes runner (F10 is from source and Kubernetes semantics);
