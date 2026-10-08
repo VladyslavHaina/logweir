@@ -1934,6 +1934,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "logweir-rdkafka-ffi"
+version = "0.1.0"
+dependencies = [
+ "rdkafka",
+]
+
+[[package]]
 name = "logweir-reaper"
 version = "0.1.0"
 dependencies = [
