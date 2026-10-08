@@ -181,6 +181,10 @@ The current scorecard checks include:
   output exactly the expected one, in total and in every partition; and its
   totals are its partitions' sums
   ([the arms](formats/drill-scorecard.md#integrityverification-format-140)).
+- A `sample.unsampled_topics` list (format 1.6.0) appears only under a version
+  that defines it; it is never empty, names no blank topic, is sorted with no
+  repeat, and never sits beside a complete verification
+  ([the arms](formats/drill-scorecard.md#sampleunsampled_topics-format-160)).
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
 
@@ -248,6 +252,19 @@ or `INCOMPLETE` followed by an `incomplete because …` line when a bound stoppe
 it or a partition could not be compared; a sampled one says header order was
 not verified; every document before 1.4.0 prints the last line. None changes
 the exit code. See [sampled and complete coverage](#the-sample-window-is-not-a-claim-about-the-whole-archive).
+
+And both name the topics a sampled verification's `sample.max_partitions` left
+without a sampled partition (`sample.unsampled_topics`, format 1.6.0):
+
+```
+sample coverage: no partition of 1 topic(s) was sampled, because sample.max_partitions is below the number of topics with records in the window: payments; their partitions were held to the count bound only, never reconciled record by record
+```
+
+Nothing is printed for a document that names none, which is every document
+before 1.6.0 (a build whose cap kept the first partitions in manifest order
+and recorded nothing about the rest, so there the absence says nothing). It
+never changes the exit code. See
+[what the sampled lane guarantees](#what-a-sampled-pass-guarantees-and-what-it-does-not).
 
 Backup receipts have their own shape and invariants — eleven arms since format
 1.1.0 ([the list](formats/backup-receipt.md#the-eleven-arms)). For an accepted
@@ -441,6 +458,7 @@ topic parity and evidence. The footer adds qualifications:
 | `objectives.met` | `yes`, `NO` or `unmeasurable`; the last means a requested pass rate could not be measured. |
 | `integrity.partial_reason` | Verbatim reason. |
 | `engine_subreport.caveat` | Verbatim caveat, or an explicit notice that the block is null. |
+| `sample.unsampled_topics` (format 1.6.0) | The topics a sampled verification's `max_partitions` left without a sampled partition — counted, not reconciled. Printed only when the document names one. |
 
 The footer states that the table is a summary; `--format json` prints the signed
 bytes. Read the JSON for details the summary omits:
@@ -550,6 +568,75 @@ which, and such a document is never a `pass`. A document without the block
 (every one before 1.4.0) covered a sample. Complete coverage still compares
 with the archive, not the source (the section above), and validates no
 application ([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
+### What a sampled `pass` guarantees, and what it does not
+
+A sampled verification (`coverage: sampled`, and every document before 1.4.0)
+reconciles a canary — the first `records_per_partition` records of each
+SELECTED partition — and holds the restored COUNTS to the archive manifest.
+
+**Only a scorecard of format 1.6.0 or later carries the guarantees below.**
+Only a build with FX-23's checks writes 1.6.0, and it writes 1.6.0 for every
+SAMPLED scorecard it signs, so the version marks that build. A sampled 1.4.0 or
+1.5.0 document comes from an earlier build — the scorecard names the engine,
+not the `logweir` build, and the version is the mark — so it proves what it
+always proved: the canary, and one count bound over every topic together.
+Read it as a pre-FX-23 document (the last paragraph of this section). Both readers say which, in a
+`sample coverage:` line printed for every sampled `pass`:
+
+```
+sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition was held to its own count bound, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in the window was refused
+sample coverage: a sampled pass at format 1.4.0, before 1.6.0: it proves the canary and one count bound over every topic together, not a per-partition count bound, a sample of every topic or an engine-report check (a build from before FX-23 may have signed it)
+```
+
+A sampled `pass` of format 1.6.0 or later also means all of this held:
+
+- **Every mapped partition is inside its own count bound**, not only the sum
+  over every topic. The bound comes from the partition's own segments: those
+  wholly inside the restore window count in full, and a segment the window cuts
+  across counts as at least ONE record when its first or its last record's
+  timestamp is inside the window (the manifest records each segment's first
+  and last record timestamps, so that record was in the window and is
+  restored), and as at most its whole count. So a partition the manifest
+  proves holds records in the window is never empty in a `pass`, and one
+  partition cannot borrow another's slack. A failure names the partition:
+  `orders/0: drill-orders/0 holds no record but the manifest proves at least 1
+  in the window [...]`.
+- **The engine's own offset report names every such partition.** The engine
+  writes it after a restore that returned success, and an engine stopped by a
+  SIGTERM returns success too: it finishes the topic it is on, exits 0 and
+  never starts the rest, so its report lacks them (`the engine's offset report
+  has no entry for N mapped partition(s) ...`). A run with no readable report
+  checks nothing here and says so in its log; the two other guarantees still
+  hold.
+- **`sample.max_partitions` reaches every topic before a second partition of
+  any.** The cap keeps one partition of each restored topic with records in the
+  window, in manifest order, then a second of each, and so on. When it is
+  below the number of such topics, the topics it could not reach are named in
+  `sample.unsampled_topics`: they were COUNTED (the first two guarantees) and
+  never reconciled record by record.
+
+What a sampled `pass` still does not establish: that every record of a
+partition is the archive's (only the canary is compared), that header order
+was kept, or anything about a straddling segment's records beyond its one
+proved record. Ask for `sample.coverage: complete` for that. And the bounds read
+the manifest's first and last record timestamps per segment, so they assume a
+segment's timestamps do not run backwards: a record older than every segment's
+first record (several producers with skewed clocks, `CreateTime`) is dropped
+by every restore of that archive, and the per-partition bound then fails a
+restore the engine performed faithfully — the safer verdict, but a failure the
+archive caused, not the restore
+([the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+
+A sampled document signed by a build from before FX-23 — any sampled 1.4.0 or
+1.5.0 document — was judged by one count bound over all topics together, and its `max_partitions` kept the first partitions in
+manifest order — the order the engine restores in. An engine stopped early
+restores a manifest-order prefix of the topics, so such a `pass` can cover a
+restore whose later topics are empty when the plan set `max_partitions` below
+the number of partitions with records in the window (measured on the compose
+stack: a SIGTERM to the engine mid-restore was signed `pass` with the second
+topic empty; the same restore is now `fail-integrity`). Read such a document's
+`sample.partitions` against the partitions the archive holds in the window.
 
 ### The `evidence` block is not a finding about your bucket
 
@@ -690,11 +777,12 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.21.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.22.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
-since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, or `1.5.0` for a
-restore into a target whose auth mode is one PROD-01.3 added). It
+since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, `1.5.0` for a
+restore into a target whose auth mode is one PROD-01.3 added, or `1.6.0` for
+every sampled drill since FX-23). It
 changes when the reader's accepted-document set changes. The compatibility
 history is:
 
@@ -721,10 +809,16 @@ history is:
 | `1.19.0` | Knows scorecard format `1.4.0` (PROD-08.1). Adds `integrity.verification`'s seven arms (IV-1 to IV-7), its shape check and the domain of its 25 nested counts (24 refuse null), and prints the `integrity coverage:` lines. Every blank test (ruling R-A) now strips exactly the set Rust's `trim` strips: before, a reason, key, mode or marker made only of U+001C–U+001F was blank here and not in `logweir drill verify`, so the two readers split on it (the writer never produces one). Apart from such a value, every document without the block is decided exactly as before. |
 | `1.20.0` | Knows backup-receipt and catalog-point format `1.3.0` (PROD-05.1). Adds the backup receipt's eight `topic_configuration` arms (12–19) and two `owner_detection` arms (20–21), their shape checks (the counts are `u32`, an entry's value a string or absent, `owner_detection` a list of strings) and the `topic_configuration` lines: per topic the recorded partition count, replication factor, entry counts by portability class and the apply route — never a configuration value. The route is the admin API only where `owner_detection` says the run looked for an owner; otherwise the line says the owner was not checked. Every document without the block is decided exactly as before. |
 | `1.21.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.4.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.4.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
+| `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line naming them; for every sampled `pass` it also prints a `sample coverage:` line saying whether the document's version proves FX-23's checks ran (only 1.6.0 or later does). Every document without the field is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
 reports `run_id`. Both refuse; this is not an acceptance disagreement.
+
+A verifier older than `1.22.0`, and a `logweir` built before FX-23, accept a
+1.6.0 scorecard — the major is unchanged — ignore `sample.unsampled_topics`
+and print no `sample coverage:` line, so they say nothing about the topics the
+sample left out; every other check applies as before.
 
 A verifier older than `1.21.0`, and a `logweir` built before PROD-01.3,
 **refuse** a 1.5.0 scorecard or a 1.4.0 receipt that names `scramSha256`,

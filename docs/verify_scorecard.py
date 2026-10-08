@@ -459,7 +459,23 @@ FORMAT_VERSION = "1.4.0"
 # that predates it, and the closed five from the new version. Every document
 # that predates PROD-01.3 is decided exactly as before; an older script refuses
 # a document naming a new mode, which is the safer verdict (OD-7, third case).
-SCRIPT_VERSION = "1.21.0"
+#
+# 1.22.0 (FX-23) knows scorecard format 1.6.0 and its optional
+# `sample.unsampled_topics`: the restored topics with records in the window
+# that `sample.max_partitions` left without a sampled partition. Three arms,
+# US-1 to US-3, mirrored byte for byte and in position from
+# `Scorecard::validate_invariants`: the field only under a version of at least
+# 1.6.0, a non-empty, sorted list of non-blank names with no repeat, and never
+# beside a complete verification. They fire only on a document carrying the
+# field, so every document without it is decided exactly as before (OD-7 (a)).
+# The shape layer refuses a field that is not an array of strings, and the
+# `sample coverage:` line names the unsampled topics in the Rust reader's
+# words. A second `sample coverage:` line, for a sampled `pass` (FX-23 review
+# M2), says what that pass proves at the document's version: from 1.6.0 the
+# per-partition bound, every-topic sampling and the engine-report check;
+# before 1.6.0 only the canary and one count bound over every topic together,
+# because such a document is the same bytes whichever build signed it.
+SCRIPT_VERSION = "1.22.0"
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
 # `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
@@ -477,6 +493,12 @@ RECEIPT_AUTH_MODES_SINCE_MINOR = 4
 # `crates/logweir-core/src/connection.rs`, which they must equal.
 ORIGINAL_AUTH_MODES = ("plaintext", "scramSha512")
 PROD_01_3_AUTH_MODES = ("scramSha256", "plain", "mtls")
+
+# The first minor of SCORECARD format 1 that defines `sample.unsampled_topics`
+# (arm US-1, FX-23) -- `UNSAMPLED_TOPICS_SINCE_MINOR` in
+# `crates/logweir-core/src/scorecard.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_unsampled_topics_minor_is_the_rust_readers`).
+SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR = 6
 
 # The first minor of SCORECARD format 1 that defines `integrity.verification`
 # (arm IV-1) -- `VERIFICATION_SINCE_MINOR` in
@@ -1328,6 +1350,18 @@ def check_invariants(doc) -> str:
     if not isinstance(expected, int) or isinstance(expected, bool):
         return "sample.records_expected is not an integer"
 
+    # Also shape (FX-23, scorecard 1.6.0): `sample.unsampled_topics` is an
+    # `Option<Vec<String>>` over there, so `null` is ABSENT and anything that
+    # is not an array of strings is refused at DESERIALISATION. Arms US-1 to
+    # US-3 below compare its items, and `<` over mixed types raises here, so
+    # the shape is asserted first. The bad shape is a case in
+    # `shape-index.json`.
+    unsampled = sample.get("unsampled_topics")
+    if unsampled is not None and (
+        not isinstance(unsampled, list) or not all(isinstance(t, str) for t in unsampled)
+    ):
+        return "sample.unsampled_topics is not an array of strings"
+
     # Also shape (FX-4 fix round, scorecard 1.1.0): `target_diff.not_assessed`
     # is the same `Option<Vec<String>>` as `topic_parity.not_assessed` below —
     # phase 3's collisions whose configuration difference was not assessed,
@@ -1940,6 +1974,46 @@ def check_invariants(doc) -> str:
                     "integrity.verification.complete's totals are not the sums of its "
                     "partitions, or its segments are not each verified, failed or unverified"
                 )
+
+    # `sample.unsampled_topics` (format 1.6.0, FX-23): arms US-1 to US-3,
+    # mirrored ARM FOR ARM, IN THIS POSITION (after `integrity.verification`,
+    # before `redactions`) and with the same words from
+    # `Scorecard::validate_invariants`. They fire ONLY on a document carrying
+    # the field, so every document before 1.6.0 is decided exactly as before.
+    # Not interpolated except US-1's version: the list names topics. The shape
+    # layer above has proved it is an array of strings. Python compares `str`
+    # by code point and Rust `String` by UTF-8 byte, which order alike.
+    if unsampled is not None:
+        # US-1. A version before 1.6.0 cannot carry the 1.6.0 field.
+        minor = _minor(version)
+        if not (
+            doc_major == 1
+            and minor is not None
+            and minor >= SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR
+        ):
+            return (
+                f"sample.unsampled_topics is present but format_version "
+                f"{_rust_debug_str(version)} predates it: the field is defined from "
+                f"1.{SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR}.0"
+            )
+        # US-2. Each topic once, in order, and absent rather than empty.
+        if (
+            not unsampled
+            or any(not t.strip(RUST_WHITESPACE) for t in unsampled)
+            or any(a >= b for a, b in zip(unsampled, unsampled[1:]))
+        ):
+            return (
+                "sample.unsampled_topics is empty, names a blank topic, or is not sorted and "
+                "free of repeats; it names each topic max_partitions left unsampled once, in "
+                "order, and is absent when there is none"
+            )
+        # US-3. A complete verification leaves no topic unsampled.
+        if verification is not None and verification.get("coverage") == "complete":
+            return (
+                "sample.unsampled_topics is present but integrity.verification.coverage is "
+                "\"complete\"; a complete verification compares every restored partition and "
+                "leaves no topic unsampled"
+            )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -2613,6 +2687,50 @@ def _verification_lines(block):
     return lines
 
 
+def _sampled_pass_lines(doc):
+    """What a SAMPLED `pass` proves at this document's version -- the twin of
+    `crates/logweir/src/verify.rs::sampled_pass_lines` (FX-23 review M2), in
+    the same words. Only a build with FX-23's checks writes 1.6.0; a 1.4.0 or
+    1.5.0 document is the same bytes whichever build signed it. Nothing for a
+    non-pass or a complete verification."""
+    block = doc["integrity"].get("verification")
+    sampled = block is None or block.get("coverage") == "sampled"
+    if doc.get("outcome") != "pass" or not sampled:
+        return []
+    version = doc.get("format_version")
+    if (
+        _major(version) == 1
+        and (_minor(version) is not None)
+        and _minor(version) >= SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR
+    ):
+        return [
+            "sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition "
+            "was held to its own count bound, max_partitions reached every topic before a "
+            "second partition of any, and a readable engine report lacking a partition with "
+            "records in the window was refused"
+        ]
+    return [
+        f"sample coverage: a sampled pass at format {version}, before 1.6.0: it proves the "
+        "canary and one count bound over every topic together, not a per-partition count "
+        "bound, a sample of every topic or an engine-report check (a build from before FX-23 "
+        "may have signed it)"
+    ]
+
+
+def _unsampled_lines(topics):
+    """`sample.unsampled_topics` as lines -- the twin of `crates/logweir/src/
+    verify.rs::unsampled_lines` (FX-23), in the same words. Absent or empty
+    prints nothing: absent names no unsampled topic."""
+    if not topics:
+        return []
+    return [
+        f"sample coverage: no partition of {len(topics)} topic(s) was sampled, because "
+        "sample.max_partitions is below the number of topics with records in the window: "
+        f"{', '.join(topics)}; their partitions were held to the count bound only, never "
+        "reconciled record by record"
+    ]
+
+
 def _time_basis_lines(block):
     """`source.time_basis` as lines -- the twin of `crates/logweir/src/
     verify.rs::time_basis_lines` (FX-8), in the same words from the same cases.
@@ -2932,6 +3050,14 @@ def main(
         # (`crates/logweir/src/verify.rs::verification_lines`).
         for line in _verification_lines(doc["integrity"].get("verification")):
             print(f"       coverage: {line}")
+        # FX-23: what a sampled pass proves at this document's version (review
+        # M2), and the topics the cap left out. The same lines `logweir drill
+        # verify` prints (`crates/logweir/src/verify.rs::sampled_pass_lines`,
+        # `unsampled_lines`).
+        for line in _sampled_pass_lines(doc) + _unsampled_lines(
+            doc["sample"].get("unsampled_topics")
+        ):
+            print(f"       coverage: {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -2974,6 +3100,8 @@ def main(
             "with complete coverage, an incomplete reason exactly when not covered, a pass "
             "only over a covered and clean complete block, and totals that are its "
             "partitions' sums; "
+            "sample.unsampled_topics only from 1.6.0, never empty, sorted, each topic once and "
+            "not blank, and never beside a complete verification; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

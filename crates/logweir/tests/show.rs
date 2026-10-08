@@ -680,3 +680,25 @@ fn show_names_the_verification_coverage_in_the_qualifiers_footer() {
         "{line}"
     );
 }
+
+// ------------------------------------------------------------------ FX-23
+
+/// Guarantee: the footer names the topics a sampled verification's
+/// `max_partitions` left without a sampled partition
+/// (`sample.unsampled_topics`, scorecard 1.6.0), and prints nothing for a
+/// document that names none, so every other table is unchanged.
+///
+/// KILLS: deleting the footer line; printing it for an absent field.
+#[test]
+fn show_names_the_unsampled_topics_in_the_qualifiers_footer() {
+    let mut sc = fixtures::scorecard_pass();
+    let table = logweir::show::render_table(&sc);
+    assert!(!table.contains("sample.unsampled_topics"), "{table}");
+    sc.sample.unsampled_topics = Some(vec!["audit".into(), "payments".into()]);
+    let table = logweir::show::render_table(&sc);
+    assert_eq!(
+        footer_line(&table, "sample.unsampled_topics").trim_start(),
+        "sample.unsampled_topics   audit, payments — no partition sampled (max_partitions); \
+         counted, not reconciled"
+    );
+}

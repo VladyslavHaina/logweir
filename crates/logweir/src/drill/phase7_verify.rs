@@ -219,8 +219,8 @@
 use crate::drill::DrillError;
 use logweir_core::backup_receipt::{ConfigCoverage, SourceConfigCoverage};
 use logweir_core::engine::{
-    expected_restored_count, BackupSetFacts, DataEngine, EngineError, EngineRun, RecordFingerprint,
-    RestorePlan, SampleSelection, SegmentFacts,
+    expected_restored_count, partition_count_bound, BackupSetFacts, DataEngine, EngineError,
+    EngineReport, EngineRun, RecordFingerprint, RestorePlan, SampleSelection, SegmentFacts,
 };
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::scorecard::{Integrity, TopicParity};
@@ -623,6 +623,12 @@ impl SelectionVerdict {
 /// text `partial_reason` carries), `None` when it did not. It can only make the
 /// result worse — there is no arm in which a `None` bound turns a non-pass into
 /// a pass — and `check_restored_count` is the one place that decides it.
+///
+/// FX-23: the argument carries every WHOLE-DRILL finding, joined: the count
+/// bound (the sum, then each mapped partition outside its own bound) and the
+/// engine report's missing partitions (`check_engine_report`). Each is a
+/// measured contradiction about the restore as a whole, never missing
+/// coverage, so each is a `Fail`, through this one argument.
 fn roll_up(verdicts: &[SelectionVerdict], count_bound: Option<&str>) -> Integrity {
     if verdicts.is_empty() {
         // Still folds the bound in: an empty ledger is already not a pass, but
@@ -1675,6 +1681,20 @@ fn newest_ts(
 /// Logweir created in this run (phase 6; Task 8), so it starts at offset 0 and
 /// its high watermark IS its record count. A negative watermark is impossible
 /// from a broker and contributes 0 rather than wrapping.
+///
+/// # And per mapped partition (FX-23)
+///
+/// The sum is still reported first, in its own words, when it is outside its
+/// bound. Each mapped partition is then held to its OWN bound
+/// (`logweir_core::engine::partition_count_bound`), and every partition
+/// outside it is named after the sum: an empty target partition the manifest
+/// proves holds records in the window ("holds no record but the manifest
+/// proves at least N"), a count outside the partition's bound, and records in
+/// a target partition the manifest lists no source partition for. The engine
+/// does not repartition (Logweir renders no partition mapping), so target
+/// partition `p` holds exactly source partition `p`'s window. This is what
+/// catches a restore an engine stopped early regardless of which partitions
+/// the sample happened to select.
 fn check_restored_count(
     reader: &dyn ClusterReader,
     facts: &BackupSetFacts,
@@ -1724,19 +1744,128 @@ fn check_restored_count(
     };
     let (lower, upper) = expected_restored_count(&named, floor_ms, pit_ms);
 
+    // FX-23: the same bound PER MAPPED PARTITION (`partition_count_bound`), read
+    // off the same end-offset reads. The sum alone had slack: a topic an engine
+    // never restored (a SIGTERM stops it between topics, exit 0) hid inside it
+    // whenever its segments straddled the point in time or the restored topics'
+    // straddling records made up its count. A partition has no sibling to
+    // borrow from, and a straddler whose first or last record is inside the
+    // window proves at least one record, so an empty partition the manifest
+    // proves non-empty is outside its own bound.
     let mut restored = 0u64;
-    for target in mapping.values() {
-        for (_partition, hi) in reader.end_offsets(target)? {
-            restored += hi.max(0) as u64;
+    let mut per_partition = Vec::new();
+    for (src, target) in mapping {
+        let ends: BTreeMap<i32, u64> = reader
+            .end_offsets(target)?
+            .into_iter()
+            .map(|(p, hi)| (p, hi.max(0) as u64))
+            .collect();
+        restored += ends.values().sum::<u64>();
+        let mut listed = std::collections::BTreeSet::new();
+        for p in named
+            .topics
+            .iter()
+            .filter(|t| &t.name == src)
+            .flat_map(|t| t.partitions.iter())
+        {
+            listed.insert(p.partition_id);
+            let (lo, up) = partition_count_bound(p, floor_ms, pit_ms);
+            let hi = ends.get(&p.partition_id).copied().unwrap_or(0);
+            let id = p.partition_id;
+            if hi == 0 && lo > 0 {
+                per_partition.push(format!(
+                    "{src}/{id}: {target}/{id} holds no record but the manifest proves at least \
+                     {lo} in the window [{floor_ms}, {pit_ms}]"
+                ));
+            } else if hi < lo || hi > up {
+                per_partition.push(format!(
+                    "{src}/{id}: {target}/{id} holds {hi} records but the manifest bounds this \
+                     partition's window [{floor_ms}, {pit_ms}] at [{lo}, {up}]"
+                ));
+            }
+        }
+        for (id, hi) in &ends {
+            if *hi > 0 && !listed.contains(id) {
+                per_partition.push(format!(
+                    "{target}/{id} holds {hi} records but the manifest lists no partition {id} \
+                     of {src}"
+                ));
+            }
         }
     }
 
-    Ok((restored < lower || restored > upper).then(|| {
-        format!(
+    let mut findings = Vec::new();
+    if restored < lower || restored > upper {
+        findings.push(format!(
             "restored {restored} records but the manifest bounds the window \
              [{floor_ms}, {pit_ms}] at [{lower}, {upper}]"
+        ));
+    }
+    findings.extend(per_partition);
+    Ok((!findings.is_empty()).then(|| findings.join("; ")))
+}
+
+/// **FX-23 (c), the trigger's detector.** The engine's offset report against
+/// the partitions the manifest PROVES hold records in the restore window
+/// (`partition_count_bound`'s `lower` above 0): `Some(text)` naming every
+/// such mapped partition the report has no entry for.
+///
+/// The pinned engine writes its report only from a restore that returned
+/// `Ok`, and a SIGTERM makes it return `Ok` after the topic it is on, so the
+/// report of an early-stopped restore exists and lacks every topic it never
+/// started (`logweir_core::engine::EngineReport`). The report keys its
+/// entries by the TARGET topic, so the lookup is `(mapping[src], partition)`.
+///
+/// Only a negative signal: an entry vouches for nothing, and a report this
+/// build could not read, or none at all, checks nothing and is logged — the
+/// per-partition bound and the sample are still the checks that bind.
+fn check_engine_report(
+    facts: &BackupSetFacts,
+    mapping: &BTreeMap<String, String>,
+    floor_ms: i64,
+    pit_ms: i64,
+    report: &EngineReport,
+) -> Option<String> {
+    let entries = match report {
+        EngineReport::Read(entries) => entries,
+        EngineReport::Absent => {
+            tracing::warn!(target: "logweir::verify",
+                           "no engine offset report to check; whether the engine stopped \
+                            before a mapped topic rests on the count bound and the sample");
+            return None;
+        }
+        EngineReport::Unreadable(why) => {
+            tracing::warn!(target: "logweir::verify", reason = %why,
+                           "the engine offset report could not be read and checks nothing; \
+                            whether the engine stopped before a mapped topic rests on the \
+                            count bound and the sample");
+            return None;
+        }
+    };
+    let mut missing = Vec::new();
+    for (src, target) in mapping {
+        for p in facts
+            .topics
+            .iter()
+            .filter(|t| &t.name == src)
+            .flat_map(|t| t.partitions.iter())
+        {
+            let (lo, _) = partition_count_bound(p, floor_ms, pit_ms);
+            if lo > 0 && !entries.contains(&(target.clone(), p.partition_id)) {
+                missing.push(format!("{src}/{id} -> {target}/{id}", id = p.partition_id));
+            }
+        }
+    }
+    (!missing.is_empty()).then(|| {
+        format!(
+            "the engine's offset report has no entry for {} mapped partition(s) the manifest \
+             proves hold records in the window [{floor_ms}, {pit_ms}]: {}; an engine that \
+             stopped early (it honours a SIGTERM between topics and exits 0) reports only the \
+             topics it finished",
+            missing.len(),
+            missing.join(", ")
         )
-    }))
+    })
 }
 
 /// Phase 7's four checks, routed through ONE ledger and ONE roll-up.
@@ -1808,6 +1937,44 @@ pub fn run_with_coverage(
     mode: TargetMode,
     verify: Coverage,
     complete_max_records: Option<u64>,
+) -> Result<VerifyOutcome, DrillError> {
+    run_after_restore(
+        engine,
+        reader,
+        store,
+        facts,
+        sel,
+        mapping,
+        plan,
+        coverage,
+        mode,
+        verify,
+        complete_max_records,
+        &EngineReport::Absent,
+    )
+}
+
+/// [`run_with_coverage`], with the engine's offset report as phase 6 read it
+/// (FX-23) — what the drill orchestrator calls. A report that lacks a mapped
+/// partition the manifest proves holds records in the restore window
+/// (`check_engine_report`) is a whole-drill finding beside the count bound, on
+/// both lanes: `Fail`, first in `partial_reason`. `run_with_coverage` is this
+/// with no report (`EngineReport::Absent`), for callers that verify a target
+/// no engine of theirs wrote.
+#[allow(clippy::too_many_arguments)]
+pub fn run_after_restore(
+    engine: &dyn DataEngine,
+    reader: &dyn ClusterReader,
+    store: &Store,
+    facts: &BackupSetFacts,
+    sel: &[SampleSelection],
+    mapping: &BTreeMap<String, String>,
+    plan: &RestorePlan,
+    coverage: &SourceConfigCoverage,
+    mode: TargetMode,
+    verify: Coverage,
+    complete_max_records: Option<u64>,
+    engine_report: &EngineReport,
 ) -> Result<VerifyOutcome, DrillError> {
     // OSO's own rule, adopted throughout this codebase (phase4_sample's own
     // empty-candidates guard is the precedent): zero selections scanned is
@@ -1938,7 +2105,24 @@ pub fn run_with_coverage(
         }
     };
 
-    let mut integrity = roll_up(&verdicts, count_bound.as_deref());
+    // FX-23 (c): the engine's own report, on both lanes, AFTER the count bound
+    // in the joined text — both are whole-drill findings `roll_up` takes as
+    // one argument and can only turn into a `Fail`.
+    let report_finding = check_engine_report(
+        facts,
+        mapping,
+        plan.time_window.0.timestamp_millis(),
+        plan.time_window.1.timestamp_millis(),
+        engine_report,
+    );
+    if let Some(why) = &report_finding {
+        tracing::error!(target: "logweir::verify", detail = %why,
+                        "the engine's offset report lacks a mapped partition with records in \
+                         the window");
+    }
+    let whole_drill: Vec<String> = count_bound.into_iter().chain(report_finding).collect();
+    let whole_drill = (!whole_drill.is_empty()).then(|| whole_drill.join("; "));
+    let mut integrity = roll_up(&verdicts, whole_drill.as_deref());
     integrity.verification = Some(block);
     for v in &verdicts {
         tracing::info!(target: "logweir::verify", selection = %v.id, claimed = v.claimed,

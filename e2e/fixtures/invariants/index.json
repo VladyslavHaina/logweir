@@ -693,5 +693,67 @@
   "python_exit": 1,
   "reason": "integrity.verification.complete.incomplete_reason is required exactly when complete.covered is false",
   "arm": "integrity.verification.complete.incomplete_reason is required exactly when complete.covered is false"
+ },
+ {
+  "id": "unsampled_topics_1_6_sampled",
+  "file": "unsampled_topics_1_6_sampled.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "unsampled_topics_1_6_none_named",
+  "file": "unsampled_topics_1_6_none_named.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "unsampled_topics_under_format_1_5_0",
+  "file": "unsampled_topics_under_format_1_5_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "sample.unsampled_topics is present but format_version \"1.5.0\" predates it: the field is defined from 1.6.0",
+  "arm": "sample.unsampled_topics is present but format_version "
+ },
+ {
+  "id": "unsampled_topics_empty",
+  "file": "unsampled_topics_empty.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "sample.unsampled_topics is empty, names a blank topic, or is not sorted and free of repeats; it names each topic max_partitions left unsampled once, in order, and is absent when there is none",
+  "arm": "sample.unsampled_topics is empty, names a blank topic, or is not sorted "
+ },
+ {
+  "id": "unsampled_topics_unordered",
+  "file": "unsampled_topics_unordered.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "sample.unsampled_topics is empty, names a blank topic, or is not sorted and free of repeats; it names each topic max_partitions left unsampled once, in order, and is absent when there is none",
+  "arm": "sample.unsampled_topics is empty, names a blank topic, or is not sorted "
+ },
+ {
+  "id": "unsampled_topics_repeated",
+  "file": "unsampled_topics_repeated.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "sample.unsampled_topics is empty, names a blank topic, or is not sorted and free of repeats; it names each topic max_partitions left unsampled once, in order, and is absent when there is none",
+  "arm": "sample.unsampled_topics is empty, names a blank topic, or is not sorted "
+ },
+ {
+  "id": "unsampled_topics_blank",
+  "file": "unsampled_topics_blank.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "sample.unsampled_topics is empty, names a blank topic, or is not sorted and free of repeats; it names each topic max_partitions left unsampled once, in order, and is absent when there is none",
+  "arm": "sample.unsampled_topics is empty, names a blank topic, or is not sorted "
+ },
+ {
+  "id": "unsampled_topics_beside_complete",
+  "file": "unsampled_topics_beside_complete.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "sample.unsampled_topics is present but integrity.verification.coverage is \"complete\"; a complete verification compares every restored partition and leaves no topic unsampled",
+  "arm": "sample.unsampled_topics is present but integrity.verification.coverage is "
  }
 ]

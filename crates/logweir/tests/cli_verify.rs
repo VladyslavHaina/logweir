@@ -15,9 +15,10 @@ fn schema_scorecard_prints_the_schema() {
     assert!(
         s.contains(&format!(
             r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json""#,
-            // The newest minor (PROD-01.3's 1.5.0); the writer still writes
-            // `FORMAT_VERSION` (1.4.0) for every original auth mode.
-            logweir_core::scorecard::FORMAT_VERSION_WITH_AUTH_MODES
+            // The newest minor (FX-23's 1.6.0); the writer still writes
+            // `FORMAT_VERSION` (1.4.0) for every original auth mode, and 1.6.0
+            // only for a scorecard that names an unsampled topic.
+            logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
         )),
         "{s}"
     );
@@ -926,10 +927,64 @@ fn drill_verify_prints_what_the_verdict_covered() {
             String::from_utf8_lossy(&out.stderr)
         );
         let stdout = String::from_utf8(out.stdout).unwrap();
+        // The `integrity coverage:` lines only: FX-23 adds `sample coverage:`
+        // lines under the same printed prefix, pinned by their own test.
         let got: Vec<&str> = stdout
             .lines()
             .filter_map(|l| l.strip_prefix("coverage:  "))
+            .filter(|l| l.starts_with("integrity coverage:"))
             .collect();
         assert_eq!(got, want, "{block:?}:\n{stdout}");
     }
+}
+
+/// **FX-23 review M2.** What a SAMPLED `pass` proves depends on the document's
+/// version: only a build with FX-23's checks writes 1.6.0, and a 1.4.0 or 1.5.0
+/// document is the same bytes whichever build signed it. So 1.6.0 and later
+/// say the per-partition bound, every-topic sampling and the engine-report
+/// check held; an earlier sampled pass says it proves only the canary and one
+/// count bound; a non-pass or a complete verification prints nothing.
+/// KILLS: printing the 1.6.0 line for an earlier version (old evidence read as
+/// stronger); dropping the line; printing it for a non-pass.
+#[test]
+fn a_sampled_pass_says_what_it_proves_at_its_version() {
+    use logweir::verify::sampled_pass_lines;
+    use logweir_core::outcome::Outcome;
+    use logweir_core::scorecard::*;
+    let sampled = Verification {
+        coverage: COVERAGE_SAMPLED.into(),
+        comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
+        header_order: HEADER_ORDER_NOT_VERIFIED.into(),
+        application: APPLICATION_NOT_ATTEMPTED.into(),
+        gaps: vec![],
+        pruned: vec![],
+        complete: None,
+    };
+    let new = sampled_pass_lines(Outcome::Pass, Some(&sampled), "1.6.0");
+    assert_eq!(new.len(), 1);
+    assert!(
+        new[0].starts_with("sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition was held to its own count bound"),
+        "{new:?}"
+    );
+    for (v, block) in [
+        ("1.4.0", Some(&sampled)),
+        ("1.5.0", Some(&sampled)),
+        ("1.0.0", None),
+    ] {
+        let old = sampled_pass_lines(Outcome::Pass, block, v);
+        assert_eq!(
+            old,
+            vec![format!(
+                "sample coverage: a sampled pass at format {v}, before 1.6.0: it proves the \
+                 canary and one count bound over every topic together, not a per-partition count \
+                 bound, a sample of every topic or an engine-report check (a build from before \
+                 FX-23 may have signed it)"
+            )],
+            "{v}"
+        );
+    }
+    assert!(sampled_pass_lines(Outcome::FailIntegrity, Some(&sampled), "1.6.0").is_empty());
+    let mut complete = sampled.clone();
+    complete.coverage = COVERAGE_COMPLETE.into();
+    assert!(sampled_pass_lines(Outcome::Pass, Some(&complete), "1.6.0").is_empty());
 }

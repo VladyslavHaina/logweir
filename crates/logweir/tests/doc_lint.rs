@@ -2011,6 +2011,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the engine is built from the vendored source",
             "ENGINE_SOURCE=oso",
         ),
+        // FX-23 (2026-10-08): an early-stopped restore is never signed pass,
+        // and a sampled scorecard names the topics its cap left unsampled.
+        (
+            "an early-stopped restore is never signed pass",
+            "sample.unsampled_topics",
+        ),
         // FX-21 (2026-10-08): an unrecorded replication factor is not
         // assessed, never matching; the engine's first patch, build 2.
         (

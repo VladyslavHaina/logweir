@@ -340,10 +340,10 @@ fn plan_orders_to_drill_orders() -> RestorePlan {
     }
 }
 
-/// The same plan with its point-in-time moved ONE MILLISECOND inside the
+/// The same plan with BOTH ends of its window moved ONE MILLISECOND inside the
 /// segment every fixture here spans — which makes guard **G-WIN**'s
 /// restored-count bound deliberately non-binding, `[0, Σ record_count]`
-/// instead of `[Σ, Σ]`.
+/// instead of `[Σ, Σ]`, for the whole drill and for every partition.
 ///
 /// Task 10. Every test that reaches for this one is about a SHORT or EMPTY
 /// read-back — an archive that offered one fingerprint where the manifest
@@ -355,15 +355,20 @@ fn plan_orders_to_drill_orders() -> RestorePlan {
 /// exists to kill, because the property it pins would no longer be the cause
 /// of what it asserts.
 ///
-/// Moving the point-in-time inside the segment is not a fixture dodge; it is
-/// the case the bound exists to be honest about. A `point_in_time` landing
-/// inside a segment is the NORMAL case for a point-in-time restore, and it is
-/// exactly when the manifest cannot say how many records precede it — the
-/// segment straddles, so it counts towards `upper` and not `lower`, and any
-/// count from zero to the whole segment is inside the bound. The count check
-/// is therefore silent here BY CONSTRUCTION, and the selection lane is left as
-/// the single decider it is meant to be.
-fn with_pit_inside_the_segment(mut plan: RestorePlan) -> RestorePlan {
+/// A `point_in_time` landing inside a segment is the NORMAL case for a
+/// point-in-time restore, and it is exactly when the manifest cannot say how
+/// many records precede it. FX-23 made one more thing provable: a segment whose
+/// FIRST or LAST record's timestamp lies inside the window proves that record
+/// is restored, so moving only the point in time now leaves its partition's
+/// lower bound at 1, and an EMPTY target partition fails the per-partition
+/// bound (`logweir_core::engine::partition_count_bound`) — correctly, and for
+/// a reason that is not the one these tests pin. So the floor moves too: a
+/// segment that covers the window from both sides proves no record inside it,
+/// any count from zero to the whole segment is inside its bound, and the count
+/// check is silent here BY CONSTRUCTION, leaving the selection lane the single
+/// decider it is meant to be. The selections' own `window` is untouched.
+fn with_window_inside_the_segment(mut plan: RestorePlan) -> RestorePlan {
+    plan.time_window.0 += chrono::Duration::milliseconds(1);
     plan.time_window.1 -= chrono::Duration::milliseconds(1);
     plan
 }
@@ -1617,8 +1622,8 @@ fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passi
     let mut mapping = fixtures::mapping("orders", "drill-orders");
     mapping.insert("payments".to_string(), "drill-payments".to_string());
     // Task 10: the count bound is deliberately non-binding here — see
-    // `with_pit_inside_the_segment`.
-    let mut plan = with_pit_inside_the_segment(plan_orders_to_drill_orders());
+    // `with_window_inside_the_segment`.
+    let mut plan = with_window_inside_the_segment(plan_orders_to_drill_orders());
     plan.topic_mapping = mapping.clone();
 
     let out = run(
@@ -1693,8 +1698,8 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
     // Task 10: the count bound is deliberately non-binding here — see
-    // `with_pit_inside_the_segment`.
-    let plan = with_pit_inside_the_segment(plan_orders_to_drill_orders());
+    // `with_window_inside_the_segment`.
+    let plan = with_window_inside_the_segment(plan_orders_to_drill_orders());
 
     let out = run(
         &engine,
@@ -1773,8 +1778,8 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
         &sel_orders(), // count 50
         &fixtures::mapping("orders", "drill-orders"),
         // Task 10: the count bound is deliberately non-binding here — see
-        // `with_pit_inside_the_segment`.
-        &with_pit_inside_the_segment(plan_orders_to_drill_orders()),
+        // `with_window_inside_the_segment`.
+        &with_window_inside_the_segment(plan_orders_to_drill_orders()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
         logweir_core::spec::TargetMode::Scratch,
     )
@@ -2440,8 +2445,8 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
         // Task 10: the count bound is deliberately non-binding here — see
-        // `with_pit_inside_the_segment`.
-        &with_pit_inside_the_segment(two_topic_plan()),
+        // `with_window_inside_the_segment`.
+        &with_window_inside_the_segment(two_topic_plan()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
         logweir_core::spec::TargetMode::Scratch,
     )
@@ -2585,7 +2590,14 @@ fn a_wholly_corrupt_topic_beside_an_unrestored_one_fails_and_never_reconciles_ag
 #[test]
 fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
     let (store, sha) = store_with_matching_segment();
-    let facts = facts_with_segment(&sha);
+    let mut facts = facts_with_segment(&sha);
+    // FX-23: the manifest lists partition 1 too (the same segment shape), so
+    // the records the target holds there are records the archive accounts
+    // for; a target partition the manifest has no partition for is now a
+    // count-bound failure of its own, which is not what this test pins.
+    let mut p1 = facts.topics[0].partitions[0].clone();
+    p1.partition_id = 1;
+    facts.topics[0].partitions.push(p1);
     // Partition 1 of the SAME target topic was restored; partition 0 — the
     // one this drill actually sampled — was not.
     let (_, cons_p1) = distinct_pair_for_partition(1, 5);
@@ -2613,8 +2625,8 @@ fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
         &sel_orders(),
         &fixtures::mapping("orders", "drill-orders"),
         // Task 10: the count bound is deliberately non-binding here — see
-        // `with_pit_inside_the_segment`.
-        &with_pit_inside_the_segment(plan_orders_to_drill_orders()),
+        // `with_window_inside_the_segment`.
+        &with_window_inside_the_segment(plan_orders_to_drill_orders()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
         logweir_core::spec::TargetMode::Scratch,
     )
@@ -2695,8 +2707,8 @@ fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_success
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
         // Task 10: the count bound is deliberately non-binding here — see
-        // `with_pit_inside_the_segment`.
-        &with_pit_inside_the_segment(two_topic_plan()),
+        // `with_window_inside_the_segment`.
+        &with_window_inside_the_segment(two_topic_plan()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
         logweir_core::spec::TargetMode::Scratch,
     )

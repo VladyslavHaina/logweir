@@ -624,6 +624,31 @@ deserialisation: `verification_not_an_object`,
 `verification_coverage_not_a_string`, `verification_gaps_absent`,
 `verification_covered_not_a_bool` and `verification_partitions_not_an_array`.
 
+## FX-23: `sample.unsampled_topics` (scorecard format 1.6.0)
+
+Three arms, US-1 to US-3, which both readers state in the same position (after
+`integrity.verification`, before `redactions`). Every case is
+`verification_1_4_sampled.json` (or, for US-3,
+`verification_1_4_complete_pass.json`) with `format_version` and
+`sample.unsampled_topics` set and nothing else touched.
+
+| case | what it pins |
+|---|---|
+| `unsampled_topics_1_6_sampled` | ACCEPT: two topics `max_partitions` left unsampled, sorted, under 1.6.0, beside a sampled verification |
+| `unsampled_topics_1_6_none_named` | ACCEPT: a 1.6.0 sampled document with no field — what this build writes for every sampled drill whose sample reached every topic |
+| `unsampled_topics_under_format_1_5_0` | US-1: the field under `1.5.0` |
+| `unsampled_topics_empty` | US-2: `[]` (absent is the spelling of none) |
+| `unsampled_topics_unordered` | US-2: two topics out of order |
+| `unsampled_topics_repeated` | US-2: one topic twice |
+| `unsampled_topics_blank` | US-2: a name made of U+2003, blank to both readers |
+| `unsampled_topics_beside_complete` | US-3: the field beside a complete verification |
+
+US-1's message interpolates the document's `format_version`, so its `arm` is the
+literal text before the placeholder; US-3's quotes `"complete"`, so its `arm` is
+the text before the quote. One `shape-index.json` case,
+`unsampled_topics_not_an_array` (`"orders"`), is a `message:` case: `drill
+verify` refuses it at deserialisation.
+
 ---
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
