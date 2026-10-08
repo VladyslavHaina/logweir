@@ -365,13 +365,13 @@ mod tests {
     /// **The scope is mixed in, and the replay semantics hold.**
     ///
     /// The request hash is taken under the scope, so a different key gives a
-    /// different hash and both sides of a comparison always share it: same key
-    /// + same request replays, same key + different request is
-    /// `idempotency_conflict`. THIS IS NOT THE ORACLE DEFENCE: the scope
-    /// digest is published (`idempotency-scope-sha256`). That defence is that
-    /// no credential value reaches `canonical_request` at all — the
+    /// different hash and both sides of a comparison always share it: the same
+    /// key with the same request replays, and the same key with a different
+    /// request is `idempotency_conflict`. THIS IS NOT THE ORACLE DEFENCE: the
+    /// scope digest is published (`idempotency-scope-sha256`). That defence is
+    /// that no credential value reaches `canonical_request` at all — the
     /// write-only DTOs serialize a placeholder — proven route by route in
-    /// `tests/connection_credentials_log.rs::no_stored_or_logged_digest_moves_when_only_the_credential_moves`.
+    /// `tests/credential_digests.rs::no_stored_or_logged_digest_moves_when_only_the_credential_moves`.
     #[test]
     fn the_scope_is_mixed_in_and_the_replay_semantics_hold() {
         let body = br#"{"name":"primary","access":{"secretAccessKey":"<write-only>"}}"#;
