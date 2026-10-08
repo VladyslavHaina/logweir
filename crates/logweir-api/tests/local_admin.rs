@@ -989,6 +989,12 @@ fn an_oversized_request_head_is_refused() {
 /// The test is deterministic rather than timing-based in the part that matters:
 /// the pending request is unanswered while every permit is held, and answered
 /// after exactly one connection is dropped.
+///
+/// The held connections send nothing, and since FX-24 the server closes such
+/// a connection at the header deadline ([`HEADER_DEADLINE`], counted from its
+/// accept), which frees its permit by itself. So the release must be seen
+/// before the FIRST held connection's deadline: until then every permit is
+/// held by a connection this test opened, and only this test can free one.
 #[test]
 fn the_connection_ceiling_holds_and_then_releases() {
     const CEILING: usize = 256;
@@ -998,6 +1004,7 @@ fn the_connection_ceiling_holds_and_then_releases() {
 
     // Fill every permit with connections that are accepted and then idle.
     let mut held = Vec::with_capacity(CEILING);
+    let first = Instant::now();
     for i in 0..CEILING {
         let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
             .unwrap_or_else(|e| panic!("connection {i}: {e}"));
@@ -1029,15 +1036,20 @@ fn the_connection_ceiling_holds_and_then_releases() {
     // Free exactly one permit.
     drop(held.pop().expect("one to drop"));
 
-    // Now it is served. The read timeout is the assertion: a permit that never
+    // Now it is served, before any held connection's own deadline could have
+    // freed a permit. The read timeout is the assertion: a permit that never
     // came back would fail here.
+    let before_deadline = HEADER_DEADLINE.saturating_sub(first.elapsed());
     pending
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(before_deadline.max(Duration::from_millis(1))))
         .unwrap();
     let mut response = Vec::new();
-    pending
-        .read_to_end(&mut response)
-        .expect("the freed permit lets the waiting connection through");
+    pending.read_to_end(&mut response).unwrap_or_else(|e| {
+        panic!(
+            "the freed permit did not let the waiting connection through within \
+             {before_deadline:?}, before the held connections' own deadline: {e}"
+        )
+    });
     let text = String::from_utf8_lossy(&response);
     assert!(text.starts_with("HTTP/1.1 200"), "{text}");
     assert!(text.contains("\"status\":\"ok\""), "{text}");
