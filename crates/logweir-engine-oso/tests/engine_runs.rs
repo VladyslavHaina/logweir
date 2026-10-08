@@ -287,16 +287,30 @@ fn engine_reports_merge_to_a_union_only_when_every_run_was_read() {
 }
 
 /// Review L5: a run's report path equal to the composed report's is refused,
-/// never copied into itself (which never ends). The control composes two
-/// distinct paths. KILLS: deleting the guard (the test would not finish).
+/// never copied into itself (which never ends: the fix round's mutant without
+/// the guard grew the file to 368 MB in 28 minutes). The call runs on a
+/// thread with a 30-second bound, so a missing guard FAILS this row instead of
+/// hanging it; the stray thread dies with the test process. The control
+/// composes two distinct paths. KILLS: deleting the guard.
 #[test]
 fn composing_a_report_into_itself_is_refused() {
     let dir = unique_dir("self");
     let out = dir.join("offsets.json");
     std::fs::write(&out, b"{}").unwrap();
-    let err = compose_offset_reports(std::slice::from_ref(&out), &out)
-        .unwrap_err()
-        .to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let same = out.clone();
+    std::thread::spawn(move || {
+        let r = compose_offset_reports(std::slice::from_ref(&same), &same);
+        let _ = tx.send(r.map_err(|e| e.to_string()));
+    });
+    let err = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(r) => r.unwrap_err(),
+        Err(_) => {
+            // Stop the copy from filling the disk before failing the row.
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("compose_offset_reports did not return in 30 s: it is copying the report into itself")
+        }
+    };
     assert!(err.contains("copied into itself"), "{err}");
     let a = dir.join("offsets.run-0.json");
     std::fs::write(&a, b"{\"entries\": {}}").unwrap();
