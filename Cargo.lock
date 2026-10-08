@@ -1900,6 +1900,7 @@ dependencies = [
  "logweir-kafka",
  "logweir-store",
  "lz4_flex",
+ "nix",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

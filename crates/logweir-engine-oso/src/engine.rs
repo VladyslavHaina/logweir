@@ -178,6 +178,16 @@ pub fn merge_engine_reports(reports: Vec<EngineReport>) -> EngineReport {
 pub fn compose_offset_reports(runs: &[PathBuf], out: &std::path::Path) -> Result<(), EngineError> {
     use std::io::Write as _;
     let op = |e: std::io::Error| EngineError::Operational(format!("{}: {e}", out.display()));
+    // A run's report IS the output (review L5): copying a file into itself
+    // never ends. `RestoreRun::path` gives every run of a multi-run plan its
+    // own `.run-<i>` path, so this is a guard against a future caller.
+    if let Some(same) = runs.iter().find(|p| p.as_path() == out) {
+        return Err(EngineError::Operational(format!(
+            "{}: an engine run's offset report is the composed report's own path, so it would \
+             be copied into itself; refusing",
+            same.display()
+        )));
+    }
     let mut f = std::io::BufWriter::new(std::fs::File::create(out).map_err(op)?);
     f.write_all(b"[").map_err(op)?;
     for (i, path) in runs.iter().enumerate() {

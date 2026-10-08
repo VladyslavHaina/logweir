@@ -219,9 +219,17 @@ pub fn decide(
     if refused.is_empty() {
         return Ok(label);
     }
-    let selection = match spec.restore.point_in_time {
-        Some(point) => format!("restore.point_in_time {}", point.to_rfc3339()),
-        None => format!(
+    // PROD-11.1 (review L2): a stated window start is a time selection too,
+    // and is written inside `point_in_time`, so the refusal names the whole
+    // interval when there is one.
+    let selection = match (spec.restore.window_start, spec.restore.point_in_time) {
+        (Some(start), Some(point)) => format!(
+            "restore.point_in_time {}/{}, a window with a stated start",
+            start.to_rfc3339(),
+            point.to_rfc3339()
+        ),
+        (_, Some(point)) => format!("restore.point_in_time {}", point.to_rfc3339()),
+        (_, None) => format!(
             "sample.window_end {}, which is earlier than the newest timestamp the archive \
              manifest records for the topic",
             spec.sample.window_end.to_rfc3339()
@@ -471,6 +479,35 @@ mod tests {
             err.contains(&format!("restore.point_in_time {}", point.to_rfc3339())),
             "{err}"
         );
+    }
+
+    /// **PROD-11.1 (review L2).** A stated window start — the interval form
+    /// of `restore.point_in_time` — is a selection by time, and the refusal
+    /// names the whole interval, never `sample.window_end`. KILLS: the start
+    /// not counted as a time selection; the refusal naming only the end.
+    #[test]
+    fn a_window_start_over_a_log_append_time_topic_is_refused_and_named() {
+        let mut spec = plan(&["lat"], Some(T0 + 1_500), None, T1);
+        spec.restore.window_start = chrono::DateTime::from_timestamp_millis(T0 + 500);
+        let f = facts(vec![topic("lat", &[(TIMESTAMP_TYPE_KEY, LOG_APPEND_TIME)])]);
+        let err = decide(
+            &spec,
+            &f,
+            &SourceConfigCoverage::unknown(),
+            &names(&["lat"]),
+        )
+        .expect_err("a window start over a LogAppendTime topic is refused");
+        let start = chrono::DateTime::from_timestamp_millis(T0 + 500).unwrap();
+        let point = chrono::DateTime::from_timestamp_millis(T0 + 1_500).unwrap();
+        assert!(
+            err.contains(&format!(
+                "restore.point_in_time {}/{}, a window with a stated start",
+                start.to_rfc3339(),
+                point.to_rfc3339()
+            )),
+            "{err}"
+        );
+        assert!(!err.contains("sample.window_end 2"), "{err}");
     }
 
     /// **The broker-default arm.** No override in the manifest; the verified

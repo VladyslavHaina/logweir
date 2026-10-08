@@ -6,7 +6,9 @@ use logweir_core::engine::{
     BackupSetRef, CoverageState, DataEngine, EngineReport, PartitionCoverage, PhaseObserver,
     PreflightReport, RestorePlan, StorageUrl, WindowFloorSource,
 };
-use logweir_engine_oso::engine::{merge_engine_reports, merge_preflight_reports, OsoCliEngine};
+use logweir_engine_oso::engine::{
+    compose_offset_reports, merge_engine_reports, merge_preflight_reports, OsoCliEngine,
+};
 use logweir_engine_oso::storage::Store;
 use std::path::{Path, PathBuf};
 
@@ -281,5 +283,26 @@ fn engine_reports_merge_to_a_union_only_when_every_run_was_read() {
             EngineReport::Unreadable("x".into())
         ]),
         EngineReport::Unreadable("x".into())
+    );
+}
+
+/// Review L5: a run's report path equal to the composed report's is refused,
+/// never copied into itself (which never ends). The control composes two
+/// distinct paths. KILLS: deleting the guard (the test would not finish).
+#[test]
+fn composing_a_report_into_itself_is_refused() {
+    let dir = unique_dir("self");
+    let out = dir.join("offsets.json");
+    std::fs::write(&out, b"{}").unwrap();
+    let err = compose_offset_reports(std::slice::from_ref(&out), &out)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("copied into itself"), "{err}");
+    let a = dir.join("offsets.run-0.json");
+    std::fs::write(&a, b"{\"entries\": {}}").unwrap();
+    compose_offset_reports(&[a, dir.join("offsets.run-1.json")], &out).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        "[{\"entries\": {}},\nnull]\n"
     );
 }

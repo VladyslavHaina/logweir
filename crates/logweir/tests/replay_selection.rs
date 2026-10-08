@@ -1,15 +1,17 @@
 //! **PROD-11.1 — replay selection, the plan side** (guard G-WIN as amended:
 //! `docs/to-do/decisions/PROD-11.1-replay-selection.md` §2).
 //!
-//! 1. **Plan construction** binds a stated `restore.window_start` as the
-//!    plan's own start (`InheritedFromSpec`), refuses it before the archive's
-//!    floor (never moves it there) and carries the per-topic subsets.
-//! 2. **Phase 5** re-derives the start and the engine runs from the SPEC and
+//! 1. **Plan construction** binds a stated window start (the interval form of
+//!    `restore.point_in_time`) as the plan's own start (`InheritedFromSpec`)
+//!    and refuses it before the archive's floor (never moves it there).
+//! 2. **Partition subsets are refused by name** (`PartitionSubsetsAwaitOwnerDecision`,
+//!    OD-9) on every path that turns a plan into a selection.
+//! 3. **Phase 5** re-derives the start and the engine runs from the SPEC and
 //!    the manifest — never from the plan's claim — and refuses a rendered
 //!    document that disagrees: a start moved to the floor (a silent widening),
-//!    a subset dropped, merged or swapped between topics.
-//! 3. **Resolution before phase 2**: a partition the archive does not list and
-//!    a selection no segment overlaps are exit 3.
+//!    and (for a plan built by hand, the only way a subset reaches it) a
+//!    subset the spec does not state.
+//! 4. **Resolution before phase 2**: a window no segment overlaps is exit 3.
 //!
 //! No dial token: a filesystem archive URL and `kafka-broker-1:9094` only. No
 //! socket, no subprocess, no archive read; every row is in-memory.
@@ -28,7 +30,7 @@ use std::collections::BTreeMap;
 const FLOOR_MS: i64 = 1_700_000_000_000;
 /// A stated start, ten minutes after the floor.
 const START_MS: i64 = FLOOR_MS + 600_000;
-/// The window's end (`sample.window_end`; no point in time is stated).
+/// The window's end: `sample.window_end`, and the end of the plan's interval.
 const END_MS: i64 = FLOOR_MS + 3_600_000;
 
 fn ts(ms: i64) -> chrono::DateTime<chrono::Utc> {
@@ -63,11 +65,17 @@ fn spec(restore_block: &str) -> DrillSpec {
     serde_yaml::from_str(&spec_yaml(restore_block)).expect("the approved spec bytes parse")
 }
 
+/// `restore.point_in_time: "<start>/<end>"`.
+fn window(start_ms: i64, end_ms: i64) -> String {
+    format!(
+        "restore:\n  point_in_time: \"{}/{}\"\n",
+        rfc3339(start_ms),
+        rfc3339(end_ms)
+    )
+}
+
 fn selecting() -> DrillSpec {
-    spec(&format!(
-        "restore:\n  window_start: \"{}\"\n  partitions:\n    orders: [2, 0]\n    payments: [1]\n",
-        rfc3339(START_MS)
-    ))
+    spec(&window(START_MS, END_MS))
 }
 
 fn set() -> BackupSetRef {
@@ -143,10 +151,10 @@ fn check(plan: &logweir_core::engine::RestorePlan, spec: &DrillSpec) -> Result<(
     )
 }
 
-/// The plan binds the STATED start as its own, says so, and carries the
-/// subsets sorted; phase 5 accepts what plan construction built.
+/// The plan binds the STATED start as its own and says so; phase 5 accepts
+/// what plan construction built. No subset is carried.
 #[test]
-fn a_stated_start_and_subsets_are_bound_into_the_plan() {
+fn a_stated_start_is_bound_into_the_plan() {
     let s = selecting();
     let plan = build_plan(&s, &set(), &mapping(), &facts(), "01J9X", None).expect("builds");
     assert_eq!(plan.time_window.0.timestamp_millis(), START_MS);
@@ -155,15 +163,7 @@ fn a_stated_start_and_subsets_are_bound_into_the_plan() {
         plan.window_floor_source,
         WindowFloorSource::InheritedFromSpec
     );
-    assert_eq!(
-        plan.source_partitions,
-        [
-            ("orders".to_string(), vec![0, 2]),
-            ("payments".to_string(), vec![1])
-        ]
-        .into_iter()
-        .collect::<BTreeMap<_, _>>()
-    );
+    assert!(plan.source_partitions.is_empty());
     assert_eq!(exit_of(&check(&plan, &s)), ExitCode::Ok);
 }
 
@@ -182,16 +182,40 @@ fn no_selection_is_the_archive_floor_as_before() {
     assert_eq!(exit_of(&check(&plan, &s)), ExitCode::Ok);
 }
 
+/// **A partition subset is refused BY NAME on every path** (the review's H1,
+/// OD-9): resolution, plan construction and phase 0's shape check all go
+/// through `ReplaySelection::from_spec`, which refuses `restore.partitions`
+/// with or without a start. KILLS: the refusal deleted (a subset would be
+/// restored and signed under a format a verifier that predates it misreads).
+#[test]
+fn a_partition_subset_is_refused_by_name_on_every_path() {
+    for restore in [
+        "restore:\n  partitions:\n    orders: [0, 2]\n".to_string(),
+        format!(
+            "{}  partitions:\n    orders: [1]\n",
+            window(START_MS, END_MS)
+        ),
+    ] {
+        let s = spec(&restore);
+        let resolved = resolve_selection(&s, &mapping(), &facts());
+        assert_eq!(exit_of(&resolved), ExitCode::GuardRefused, "{restore}");
+        let msg = guard_message(&resolved.unwrap_err());
+        assert!(
+            msg.starts_with("PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition subset of orders"),
+            "{msg}"
+        );
+        let built = build_plan(&s, &set(), &mapping(), &facts(), "01J9X", None);
+        assert_eq!(exit_of(&built), ExitCode::GuardRefused, "{restore}");
+    }
+}
+
 /// **A start before the archive's coverage is refused, never widened to the
 /// floor**: at plan construction, at resolution and at phase 5, each from its
 /// own reading. KILLS: clamping the start to the floor, comparing with `<=`
 /// (a start AT the floor is admitted), reading the floor of all topics.
 #[test]
 fn a_start_before_coverage_is_refused_everywhere_and_never_moved() {
-    let early = spec(&format!(
-        "restore:\n  window_start: \"{}\"\n",
-        rfc3339(FLOOR_MS - 1)
-    ));
+    let early = spec(&window(FLOOR_MS - 1, END_MS));
     let built = build_plan(&early, &set(), &mapping(), &facts(), "01J9X", None);
     assert_eq!(exit_of(&built), ExitCode::GuardRefused);
     let msg = guard_message(&built.unwrap_err());
@@ -208,10 +232,7 @@ fn a_start_before_coverage_is_refused_everywhere_and_never_moved() {
         ExitCode::GuardRefused
     );
     // At the floor exactly: admitted, and the plan's own.
-    let at = spec(&format!(
-        "restore:\n  window_start: \"{}\"\n",
-        rfc3339(FLOOR_MS)
-    ));
+    let at = spec(&window(FLOOR_MS, END_MS));
     let plan = build_plan(&at, &set(), &mapping(), &facts(), "01J9X", None).expect("at the floor");
     assert_eq!(
         plan.window_floor_source,
@@ -227,23 +248,32 @@ fn a_start_before_coverage_is_refused_everywhere_and_never_moved() {
 }
 
 /// The other arm of the enum check: a plan that claims its start came from
-/// the spec may not hold one earlier than the manifest floor it was handed.
+/// the spec may not hold one earlier than the manifest floor it was handed —
+/// by a minute, and by ONE millisecond (review L1: the boundary row that
+/// kills `< floor - 1`). The control at the floor itself is admitted.
 #[test]
 fn an_inherited_start_before_the_floor_is_refused_at_construction() {
-    let r = build_plan_with_floor(
-        &selecting(),
-        &set(),
-        &mapping(),
-        "01J9X",
-        WindowFloor {
-            start: ts(FLOOR_MS - 60_000),
-            source: WindowFloorSource::InheritedFromSpec,
-            manifest_floor_ms: FLOOR_MS,
-        },
-        None,
-    );
-    assert_eq!(exit_of(&r), ExitCode::GuardRefused);
-    assert!(guard_message(&r.unwrap_err()).contains("Refused rather than moved"));
+    let build = |start_ms: i64| {
+        build_plan_with_floor(
+            &selecting(),
+            &set(),
+            &mapping(),
+            "01J9X",
+            WindowFloor {
+                start: ts(start_ms),
+                source: WindowFloorSource::InheritedFromSpec,
+                manifest_floor_ms: FLOOR_MS,
+            },
+            None,
+        )
+    };
+    for start_ms in [FLOOR_MS - 60_000, FLOOR_MS - 1] {
+        let r = build(start_ms);
+        assert_eq!(exit_of(&r), ExitCode::GuardRefused, "start {start_ms}");
+        assert!(guard_message(&r.unwrap_err()).contains("Refused rather than moved"));
+    }
+    let at = build(FLOOR_MS).expect("a start AT the floor is admitted");
+    assert_eq!(at.time_window.0.timestamp_millis(), FLOOR_MS);
 }
 
 /// **The silent widening, caught at phase 5.** A plan whose start was moved
@@ -275,57 +305,86 @@ fn phase5_refuses_a_rendered_start_that_is_not_the_approved_one() {
     assert!(guard_message(&r.unwrap_err()).contains("is not the archive floor"));
 }
 
-/// **The partition filter, caught at phase 5.** A plan that dropped a subset
-/// (the topic would restore every partition), merged two subsets into one run
-/// (the engine would filter both topics by one list) or swapped them between
-/// topics is refused before the engine is handed it. KILLS: phase 5 checking
-/// the start only; checking the count of runs only.
+/// **A subset only a hand-built plan can carry is refused at phase 5 too.**
+/// No spec can state one (refused by name), so phase 5's per-run check is the
+/// second wall: a plan whose `source_partitions` the approved spec does not
+/// state — added, or merged across topics, or swapped — is refused before the
+/// engine is handed it; and a stated subset (`StatedSelection` built by hand,
+/// the shape OD-9's decision would reach) is checked run by run. KILLS: phase
+/// 5 checking the start only; checking the count of runs only.
 #[test]
 fn phase5_refuses_a_rendered_partition_selection_that_is_not_the_approved_one() {
     let s = selecting();
     let good = build_plan(&s, &set(), &mapping(), &facts(), "01J9X", None).unwrap();
-    // Two different subsets and one unrestricted topic: three runs.
-    assert_eq!(logweir_engine_oso::render_restore::runs(&good).len(), 3);
+    let mut added = good.clone();
+    added.source_partitions.insert("payments".into(), vec![1]);
+    let r = check(&added, &s);
+    assert_eq!(
+        exit_of(&r),
+        ExitCode::GuardRefused,
+        "a subset the spec does not state"
+    );
 
-    let mut dropped = good.clone();
+    let mut stated = phase5_preflight::StatedSelection::of(&s);
+    stated.partitions = [
+        ("orders".to_string(), vec![2, 0]),
+        ("payments".to_string(), vec![1]),
+    ]
+    .into_iter()
+    .collect();
+    let check_stated = |plan: &logweir_core::engine::RestorePlan| {
+        phase5_preflight::check_rendered_selection(plan, &facts(), &stated)
+    };
+    let mut hand = good.clone();
+    hand.source_partitions = [
+        ("orders".to_string(), vec![0, 2]),
+        ("payments".to_string(), vec![1]),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(logweir_engine_oso::render_restore::runs(&hand).len(), 3);
+    assert_eq!(exit_of(&check_stated(&hand)), ExitCode::Ok);
+
+    let mut dropped = hand.clone();
     dropped.source_partitions.remove("payments");
-    let r = check(&dropped, &s);
+    let r = check_stated(&dropped);
     assert_eq!(exit_of(&r), ExitCode::GuardRefused, "a dropped subset");
     assert!(guard_message(&r.unwrap_err()).contains("engine run(s) where the approved"));
 
-    let mut merged = good.clone();
+    let mut merged = hand.clone();
     merged
         .source_partitions
         .insert("payments".into(), vec![0, 2]);
-    let r = check(&merged, &s);
-    assert_eq!(exit_of(&r), ExitCode::GuardRefused, "two subsets merged");
+    assert_eq!(
+        exit_of(&check_stated(&merged)),
+        ExitCode::GuardRefused,
+        "merged"
+    );
 
-    let mut swapped = good.clone();
+    let mut swapped = hand.clone();
     swapped.source_partitions.insert("orders".into(), vec![1]);
     swapped
         .source_partitions
         .insert("payments".into(), vec![0, 2]);
-    let r = check(&swapped, &s);
-    assert_eq!(exit_of(&r), ExitCode::GuardRefused, "subsets swapped");
-    assert!(
-        guard_message(&r.unwrap_err()).contains("selection nobody approved"),
-        "the refusal names the partition selection"
-    );
+    let r = check_stated(&swapped);
+    assert_eq!(exit_of(&r), ExitCode::GuardRefused, "swapped");
+    assert!(guard_message(&r.unwrap_err()).contains("selection nobody approved"));
 }
 
-/// **Refused as soon as the manifest is read**: a subset partition the
-/// archive does not list, and a selection no segment of a selected partition
-/// overlaps — an empty restore is never a pass. Both exit 3 from the same
-/// function plan construction binds with.
+/// **Refused as soon as the manifest is read**: a window no segment of a
+/// selected partition overlaps — an empty restore is never a pass. Exit 3
+/// from the same function plan construction binds with.
 #[test]
-fn an_unlisted_partition_and_an_empty_selection_are_refused_on_resolution() {
-    let unlisted = spec("restore:\n  partitions:\n    orders: [0, 7]\n");
-    let r = resolve_selection(&unlisted, &mapping(), &facts());
+fn an_empty_selection_is_refused_on_resolution() {
+    // Every segment ends by FLOOR + 32 min; a window starting at FLOOR + 40
+    // min selects nothing.
+    let empty = spec(&window(FLOOR_MS + 2_400_000, END_MS));
+    let r = resolve_selection(&empty, &mapping(), &facts());
     assert_eq!(exit_of(&r), ExitCode::GuardRefused);
-    assert!(guard_message(&r.unwrap_err()).contains("names partition 7"));
+    assert!(guard_message(&r.unwrap_err()).contains("the selection is empty"));
     assert_eq!(
         exit_of(&build_plan(
-            &unlisted,
+            &empty,
             &set(),
             &mapping(),
             &facts(),
@@ -334,16 +393,6 @@ fn an_unlisted_partition_and_an_empty_selection_are_refused_on_resolution() {
         )),
         ExitCode::GuardRefused
     );
-
-    // Every segment ends by FLOOR + 32 min; a window starting at FLOOR + 40
-    // min selects nothing.
-    let empty = spec(&format!(
-        "restore:\n  window_start: \"{}\"\n",
-        rfc3339(FLOOR_MS + 2_400_000)
-    ));
-    let r = resolve_selection(&empty, &mapping(), &facts());
-    assert_eq!(exit_of(&r), ExitCode::GuardRefused);
-    assert!(guard_message(&r.unwrap_err()).contains("the selection is empty"));
 }
 
 /// Inclusive at the start: a start equal to a segment's LAST timestamp still
@@ -351,35 +400,29 @@ fn an_unlisted_partition_and_an_empty_selection_are_refused_on_resolution() {
 /// millisecond later does not. KILLS: `<` for `<=` in the overlap.
 #[test]
 fn a_start_at_a_segments_last_record_still_selects_it() {
-    // orders/0's segment ends at FLOOR + 30 min; orders/1's at +31, /2's at
-    // +32. Restrict to orders/0 and start exactly at its end.
-    let at_end = spec(&format!(
-        "restore:\n  window_start: \"{}\"\n  partitions:\n    orders: [0]\n    payments: [0]\n    audit: [0]\n",
-        rfc3339(FLOOR_MS + 1_800_000)
-    ));
+    // Partition 2's segments end at FLOOR + 32 min, the last of all; a start
+    // exactly there still selects them, one millisecond later nothing does.
+    let at_end = spec(&window(FLOOR_MS + 1_920_000, END_MS));
     let r = resolve_selection(&at_end, &mapping(), &facts())
         .unwrap()
         .expect("a selection");
     assert_eq!(r.segment_keys().len(), 3, "{:?}", r.segment_keys());
-    let after = spec(&format!(
-        "restore:\n  window_start: \"{}\"\n  partitions:\n    orders: [0]\n    payments: [0]\n    audit: [0]\n",
-        rfc3339(FLOOR_MS + 1_800_001)
-    ));
+    let after = spec(&window(FLOOR_MS + 1_920_001, END_MS));
     assert_eq!(
         exit_of(&resolve_selection(&after, &mapping(), &facts())),
         ExitCode::GuardRefused
     );
 }
 
-/// **Phase 4 samples only the selection.** With a selection, no sample comes
-/// from a partition the plan did not select, and the sample window starts at
-/// the stated start when the spec's sample window starts earlier — the window
-/// the scorecard signs as `sample.window_start`. The control is the same
-/// archive with no selection: every partition, the spec's own window.
-/// KILLS: a candidate from an unselected partition; the archive's or the
-/// spec's start signed for a narrowed restore.
+/// **Phase 4 samples from the stated start, and (for a hand-built subset
+/// selection, the shape OD-9's decision would reach) only from selected
+/// partitions.** The sample window starts at the stated start when the spec's
+/// sample window starts earlier — the window the scorecard signs as
+/// `sample.window_start`. The control is the same archive with no selection.
+/// KILLS: the archive's or the spec's start signed for a narrowed restore; a
+/// candidate from an unselected partition.
 #[test]
-fn phase4_samples_only_selected_partitions_from_the_stated_start() {
+fn phase4_samples_from_the_stated_start_and_only_selected_partitions() {
     use logweir::drill::phase4_sample;
     let s = selecting();
     let r = resolve_selection(&s, &mapping(), &facts())
@@ -388,6 +431,26 @@ fn phase4_samples_only_selected_partitions_from_the_stated_start() {
     let topics: Vec<String> = mapping().keys().cloned().collect();
     let sel =
         phase4_sample::run_selected(&facts(), &s.sample, &topics, Some(&r.selection)).unwrap();
+    assert_eq!(
+        sel.per_partition.len(),
+        9,
+        "every partition: a start narrows no partition"
+    );
+    assert_eq!(
+        sel.window.0.timestamp_millis(),
+        START_MS,
+        "the stated start"
+    );
+    assert!(sel.per_partition.iter().all(|p| p.window.0 == START_MS));
+
+    let mut subset = r.selection.clone();
+    subset.partitions = [
+        ("orders".to_string(), [0, 2].into_iter().collect()),
+        ("payments".to_string(), [1].into_iter().collect()),
+    ]
+    .into_iter()
+    .collect();
+    let sel = phase4_sample::run_selected(&facts(), &s.sample, &topics, Some(&subset)).unwrap();
     let picked: Vec<(String, i32)> = sel
         .per_partition
         .iter()
@@ -404,12 +467,6 @@ fn phase4_samples_only_selected_partitions_from_the_stated_start() {
             ("payments".to_string(), 1),
         ]
     );
-    assert_eq!(
-        sel.window.0.timestamp_millis(),
-        START_MS,
-        "the stated start"
-    );
-    assert!(sel.per_partition.iter().all(|p| p.window.0 == START_MS));
 
     let full = phase4_sample::run(&facts(), &s.sample, &topics).unwrap();
     assert_eq!(full.per_partition.len(), 9, "the control: every partition");

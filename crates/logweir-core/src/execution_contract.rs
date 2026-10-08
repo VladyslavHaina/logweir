@@ -862,6 +862,12 @@ pub struct PlanScopeFacts {
     /// compared against a signed ceiling. See [`plan_within_scope`] for why
     /// absent is a MISMATCH here rather than a pass.
     pub max_partitions: Option<u32>,
+    /// **PROD-11.1 (review M1).** The replay-selection keys the plan states,
+    /// in words (`restore.point_in_time` with a start, `restore.partitions`);
+    /// empty for a plan that restores everything from the archive's floor.
+    /// A standing rehearsal restores everything, and no approver saw a
+    /// narrowing in its plan bytes, so [`plan_within_scope`] refuses any.
+    pub replay_selection: Vec<String>,
 }
 
 /// The facts a mounted restore plan and its allowlist state.
@@ -889,6 +895,16 @@ pub fn plan_scope_facts(
         mode: plan.target.mode.to_string(),
         records_per_partition: plan.sample.records_per_partition as u64,
         max_partitions: plan.sample.max_partitions,
+        replay_selection: {
+            let mut keys = Vec::new();
+            if plan.restore.window_start.is_some() {
+                keys.push("a window start (restore.point_in_time \"<start>/<end>\")".to_string());
+            }
+            if !plan.restore.partitions.is_empty() {
+                keys.push("partition subsets (restore.partitions)".to_string());
+            }
+            keys
+        },
     }
 }
 
@@ -1028,6 +1044,19 @@ pub fn plan_within_scope(
             scope.max_partitions
         )),
         Some(_) => {}
+    }
+    // PROD-11.1 (review M1): a standing rehearsal restores every partition
+    // from the archive's floor. A plan stating a replay selection would sign a
+    // narrowed verdict no approver saw — the plan bytes are not hash-bound to
+    // the standing authorization, only checked against its scope — so any
+    // selection is outside every signed scope.
+    if !facts.replay_selection.is_empty() {
+        mismatches.push(format!(
+            "the plan states a replay selection ({}); a standing rehearsal authorization \
+             restores every partition from the archive's floor and admits no narrowing \
+             nobody approved",
+            facts.replay_selection.join(", ")
+        ));
     }
     // The target cluster id, through the allowlist — see this function's doc
     // comment for why that is the strongest form available before a broker
@@ -1193,7 +1222,63 @@ mod tests {
             mode: MODE_SCRATCH.to_string(),
             records_per_partition: 25,
             max_partitions: Some(200),
+            replay_selection: Vec::new(),
         }
+    }
+
+    /// **PROD-11.1 (review M1).** A standing rehearsal authorization admits no
+    /// replay selection: a plan stating a window start (the interval form of
+    /// `restore.point_in_time`) or `restore.partitions` is outside every
+    /// signed scope, named, whatever else it matches. The control is the same
+    /// plan with a plain point in time, which is inside. KILLS: the mismatch
+    /// deleted (a narrowed rehearsal would sign a verdict no approver saw),
+    /// `plan_scope_facts` not reading the start.
+    #[test]
+    fn a_plan_stating_a_replay_selection_is_outside_every_standing_scope() {
+        let plan = |restore: &str| -> crate::spec::DrillSpec {
+            serde_yaml::from_str(&format!(
+                "source:\n  storage: {{backend: filesystem, path: /a}}\n  topics: [orders]\n\
+                 target:\n  bootstrap_servers: [k:9092]\n  topic_mapping_prefix: rehearsal-3f2a91c7-\n\
+                 sample:\n  window_start: \"2026-01-01T00:00:00Z\"\n  window_end: \"2026-01-02T00:00:00Z\"\n  \
+                 max_partitions: 200\n\
+                 restore:\n{restore}\
+                 objectives: {{}}\n\
+                 evidence: {{backend: filesystem, path: /e}}\n"
+            ))
+            .expect("the plan parses")
+        };
+        let allowed: crate::spec::AllowedClusters =
+            serde_json::from_str(r#"{"allowed_cluster_ids": ["TARGET00000000000000000"]}"#)
+                .expect("the allowlist parses");
+        let control = plan_scope_facts(
+            &plan("  point_in_time: \"2026-01-01T12:00:00Z\"\n"),
+            &allowed,
+        );
+        assert!(control.replay_selection.is_empty());
+        plan_within_scope(&control, &scope()).expect("a plain point in time is inside the scope");
+
+        let narrowed = plan_scope_facts(
+            &plan("  point_in_time: \"2026-01-01T06:00:00Z/2026-01-01T12:00:00Z\"\n"),
+            &allowed,
+        );
+        let refusal =
+            plan_within_scope(&narrowed, &scope()).expect_err("a window start is refused");
+        assert_eq!(refusal.mismatches.len(), 1, "{refusal}");
+        assert!(
+            refusal.mismatches[0].starts_with(
+                "the plan states a replay selection (a window start (restore.point_in_time"
+            ),
+            "{refusal}"
+        );
+        let subset = plan_scope_facts(
+            &plan("  point_in_time: \"2026-01-01T12:00:00Z\"\n  partitions: {orders: [1]}\n"),
+            &allowed,
+        );
+        let refusal = plan_within_scope(&subset, &scope()).expect_err("a subset is refused");
+        assert!(
+            refusal.mismatches[0].contains("partition subsets (restore.partitions)"),
+            "{refusal}"
+        );
     }
 
     #[test]

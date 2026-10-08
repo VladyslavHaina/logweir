@@ -2904,20 +2904,26 @@ fn execute_with_validated_approval(
     sc.source = source_info(&facts, time_basis);
     // **PROD-11.1: THE REPLAY SELECTION, resolved against the archive here**,
     // the first point at which the manifest is in hand, and BEFORE phase 2:
-    // a window start before the archive's coverage, a subset partition the
-    // archive does not list and a selection no segment overlaps are refused
-    // exit 3 with no target topic created and no engine started. `None` for a
-    // plan that states no selection, which runs exactly as before. The same
-    // function `build_plan` binds the window with, and the restore preflight
-    // previews it with (`logweir_core::replay_selection`).
+    // a window start before the archive's coverage and a window no segment
+    // overlaps are refused exit 3 with no target topic created and no engine
+    // started (a partition subset never gets here: phase 0 refused it by
+    // name, OD-9). `None` for a plan that states no start, which runs exactly
+    // as before. The same function `build_plan` binds the window with, and
+    // the restore preflight previews it with (`logweir_core::replay_selection`).
     let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &facts)?;
-    // PROD-11.1: the selection is SIGNED (`source.selection`, format 1.7.0)
+    // PROD-11.1: the window start is SIGNED (`source.selection`, format 1.7.0)
     // in every document this run writes from here on, and every phase below
-    // judges it: phase 4 samples only selected partitions from the stated
-    // start, phase 5 checks every engine run's document against the spec,
-    // phase 6 runs the engine once per distinct subset, and phase 7 judges
-    // the count bound, presence and records over the selection only.
-    sc.source.selection = replay_selection.as_ref().map(selection_label);
+    // judges it: phase 4 samples from the stated start, phase 5 checks the
+    // rendered start against the spec, and phase 7 judges the count bound,
+    // presence and records over the window. The version is raised HERE, with
+    // the block, and every later version step is monotonic, so no document
+    // this run signs carries the block under an older minor.
+    sc.source.selection = replay_selection.as_ref().and_then(selection_label);
+    sc.format_version = logweir_core::scorecard::format_version_with_selection(
+        &sc.format_version,
+        sc.source.selection.as_ref(),
+    )
+    .to_string();
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -2961,12 +2967,24 @@ fn execute_with_validated_approval(
         c.spec.sample.coverage,
     )
     .to_string();
-    // PROD-11.1: a narrowed restore is a 1.7.0 document, AFTER the step above
-    // (which would otherwise write 1.6.0 over it), and its EXISTING
-    // `sample.coverage_note` opens with the selection, so a reader that
-    // predates `source.selection` reads what was restored.
+    // PROD-11.1: a narrowed restore's EXISTING `sample.coverage_note` opens
+    // with its window, so a reader that predates `source.selection` reads
+    // what was restored; under the sampled lane it also names the one limit
+    // a start adds (review L6). The version step above is monotonic, and so
+    // is this one, so the 1.7.0 chosen with the block stands.
     if let Some(label) = &sc.source.selection {
-        sc.sample.coverage_note = format!("{}; {}", label.coverage_note(), sc.sample.coverage_note);
+        let limit = if c.spec.sample.coverage == logweir_core::spec::Coverage::Sampled {
+            "; a sampled check does not find an in-window record held in a segment whose last \
+             record is before the start (the engine skips that segment); sample.coverage: \
+             complete does"
+        } else {
+            ""
+        };
+        sc.sample.coverage_note = format!(
+            "{}{limit}; {}",
+            label.coverage_note(),
+            sc.sample.coverage_note
+        );
     }
     sc.format_version = logweir_core::scorecard::format_version_with_selection(
         &sc.format_version,
@@ -3712,25 +3730,19 @@ pub fn resolve_selection(
 }
 
 /// **PROD-11.1.** The signed `source.selection` block of a resolved
-/// selection: its stated start (absent for the archive's floor), its end,
-/// its subsets over the mapped topics and its engine runs.
+/// selection: its stated start and its end. `None` unless the plan states its
+/// own start (`InheritedFromSpec`); a partition subset never reaches here
+/// (refused by name at phase 0, OD-9).
+#[must_use]
 pub fn selection_label(
     r: &logweir_core::replay_selection::ResolvedSelection,
-) -> logweir_core::scorecard::SelectionLabel {
-    logweir_core::scorecard::SelectionLabel {
-        window_start_ms: r.selection.window_start_ms,
-        window_end_ms: r.end_ms,
-        partitions: r
-            .selection
-            .partitions
-            .iter()
-            .map(|(topic, set)| logweir_core::scorecard::TopicPartitions {
-                topic: topic.clone(),
-                partitions: set.iter().copied().collect(),
-            })
-            .collect(),
-        engine_runs: u32::try_from(r.runs.len()).unwrap_or(u32::MAX),
-    }
+) -> Option<logweir_core::scorecard::SelectionLabel> {
+    (r.start_source == WindowFloorSource::InheritedFromSpec).then_some(
+        logweir_core::scorecard::SelectionLabel {
+            window_start_ms: r.start_ms,
+            window_end_ms: r.end_ms,
+        },
+    )
 }
 
 /// The window's floor, and the CLAIM the plan is about to make about where it

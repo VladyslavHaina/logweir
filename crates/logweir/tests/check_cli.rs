@@ -8913,12 +8913,17 @@ fn the_catalog_sync_body_is_pinned_for_the_controllers_parser() {
 // PROD-11.1 — the replay selection's PREVIEW, through the shared function
 // ===========================================================================
 
-/// `restore_yaml` with extra `restore:` keys (a window start, partitions).
-fn selecting_yaml(point_in_time_ms: i64, extra: &str) -> String {
+/// `restore_yaml` whose `restore:` block states `point_in_time` as the
+/// interval `"<start>/<end>"` when `start_ms` is given, plus `extra` keys.
+fn selecting_yaml(start_ms: Option<i64>, point_in_time_ms: i64, extra: &str) -> String {
     let pit = ms_to_rfc3339(point_in_time_ms);
+    let written = match start_ms {
+        Some(start) => format!("\"{}/{pit}\"", ms_to_rfc3339(start)),
+        None => pit.clone(),
+    };
     restore_yaml(&pit, &["orders"], "scratch").replace(
         &format!("  point_in_time: {pit}\n"),
-        &format!("  point_in_time: {pit}\n{extra}"),
+        &format!("  point_in_time: {written}\n{extra}"),
     )
 }
 
@@ -8940,6 +8945,19 @@ fn two_partition_manifest() -> serde_json::Value {
     m
 }
 
+/// One partition whose two segments leave a gap: `[t0, t0 + 1 h]` and
+/// `[t0 + 2 h, t0 + 3 h]` (t0 = epoch-ms 1_757_898_000_000).
+fn gapped_manifest() -> serde_json::Value {
+    serde_json::json!({
+        "topics": [{"name": "orders", "partitions": [{"partition_id": 0, "segments": [
+            {"key": "20260915T030000Z/topics/orders/partition=0/segment-0.bin",
+             "start_timestamp": 1_757_898_000_000i64, "end_timestamp": 1_757_901_600_000i64},
+            {"key": "20260915T030000Z/topics/orders/partition=0/segment-1.bin",
+             "start_timestamp": 1_757_905_200_000i64, "end_timestamp": 1_757_908_800_000i64}
+        ]}]}]
+    })
+}
+
 /// **A stated start before the archive's coverage is previewed as refused**
 /// (`WindowStartBeforeCoverage`), and one AT the floor is covered — the
 /// execution guard's rule, from the same function. KILLS: `<=` for `<`, a
@@ -8950,10 +8968,7 @@ fn the_preview_refuses_a_window_start_before_coverage() {
         (1_757_897_999_999i64, CheckCode::WindowStartBeforeCoverage),
         (1_757_898_000_000, CheckCode::PointInTimeCovered),
     ] {
-        let yaml = selecting_yaml(
-            INSIDE_MS,
-            &format!("  window_start: {}\n", ms_to_rfc3339(start_ms)),
-        );
+        let yaml = selecting_yaml(Some(start_ms), INSIDE_MS, "");
         let m = mount(&restore_plan(&yaml, None));
         let run = drive(
             &m,
@@ -8972,63 +8987,55 @@ fn the_preview_refuses_a_window_start_before_coverage() {
     }
 }
 
-/// A partition the archive does not list, an empty selection and a malformed
-/// subset are each refused by name in the preview, exactly as execution
-/// refuses them. The malformed one stops at `plan.parse`: every later check
-/// is a claim about bytes that state no executable selection.
+/// A partition subset is refused BY NAME at `plan.parse` (OD-9: the preview's
+/// `SelectionInvalid`, its message opening `PartitionSubsetsAwaitOwnerDecision`),
+/// and nothing after it runs; a window no segment overlaps is `SelectionEmpty`.
 #[test]
-fn the_preview_names_an_unlisted_partition_an_empty_selection_and_a_malformed_subset() {
-    let yaml = selecting_yaml(INSIDE_MS, "  partitions:\n    orders: [0, 3]\n");
-    let m = mount(&restore_plan(&yaml, None));
-    let run = drive(
-        &m,
-        &restore_wiring(&yaml, &manifest_json(), FakeProbe::new()),
-    );
-    assert_eq!(
-        run.row(CheckId::ArchiveCoverage).code,
-        CheckCode::PartitionNotInBackupSet
-    );
+fn the_preview_refuses_a_partition_subset_by_name_and_names_an_empty_selection() {
+    for extra in [
+        "  partitions:\n    orders: [0]\n",
+        "  partitions:\n    orders: [0, 3]\n",
+    ] {
+        let yaml = selecting_yaml(None, INSIDE_MS, extra);
+        let m = mount(&restore_plan(&yaml, None));
+        let run = drive(
+            &m,
+            &restore_wiring(&yaml, &manifest_json(), FakeProbe::new()),
+        );
+        let row = run.row(CheckId::PlanParse);
+        assert_eq!(row.code, CheckCode::SelectionInvalid, "{extra}");
+        assert_eq!(row.state, CheckState::NotReady);
+        assert!(
+            row.message
+                .starts_with("PartitionSubsetsAwaitOwnerDecision: restore.partitions names"),
+            "{}",
+            row.message
+        );
+        assert!(
+            !run.has(CheckId::ArchiveCoverage),
+            "nothing after plan.parse runs"
+        );
+    }
 
-    // orders/1's only segment ends at epoch-ms 1_757_898_100_000; the window
-    // starts at INSIDE_MS, so a selection of orders/1 alone is empty.
-    let yaml = selecting_yaml(
-        INSIDE_MS + 1_000,
-        &format!(
-            "  window_start: {}\n  partitions:\n    orders: [1]\n",
-            ms_to_rfc3339(INSIDE_MS)
-        ),
-    );
+    // The gap between the two segments: a window inside it selects nothing.
+    let yaml = selecting_yaml(Some(1_757_902_000_000), 1_757_904_000_000, "");
     let m = mount(&restore_plan(&yaml, None));
     let run = drive(
         &m,
-        &restore_wiring(&yaml, &two_partition_manifest(), FakeProbe::new()),
+        &restore_wiring(&yaml, &gapped_manifest(), FakeProbe::new()),
     );
     assert_eq!(
         run.row(CheckId::ArchiveCoverage).code,
         CheckCode::SelectionEmpty
     );
-
-    let yaml = selecting_yaml(INSIDE_MS, "  partitions:\n    orders: []\n");
-    let m = mount(&restore_plan(&yaml, None));
-    let run = drive(
-        &m,
-        &restore_wiring(&yaml, &manifest_json(), FakeProbe::new()),
-    );
-    let row = run.row(CheckId::PlanParse);
-    assert_eq!(row.code, CheckCode::SelectionInvalid);
-    assert_eq!(row.state, CheckState::NotReady);
-    assert!(
-        !run.has(CheckId::ArchiveCoverage),
-        "nothing after plan.parse runs"
-    );
 }
 
 /// **The segments row checks the SELECTION's segments.** With a start after
-/// segment 0, a missing segment 0 is not the selection's and the row is
-/// ready; the same archive previewed with no start (the control) reports it
-/// missing. And a partition subset that excludes partition 1 does not look
-/// for its segment. KILLS: the segments row reading the archive's floor or
-/// every partition when the plan states a selection.
+/// segment 0 and after partition 1's only segment, a missing segment 0 and a
+/// missing partition-1 segment are not the selection's and the row is ready;
+/// the same archive previewed with no start (the control) reports them
+/// missing. KILLS: the segments row reading the archive's floor when the plan
+/// states a start.
 #[test]
 fn the_preview_checks_only_the_segments_the_selection_reads() {
     let manifest = two_partition_manifest();
@@ -9053,21 +9060,15 @@ fn the_preview_checks_only_the_segments_the_selection_reads() {
             .with_probe(FakeProbe::new())
             .with_role(DestinationRole::ArchiveRead, objects)
     };
-    let missing0 = archive(&[
+    let missing = archive(&[
         "topics/orders/partition=0/segment-0.bin",
         "topics/orders/partition=1/segment-0.bin",
     ]);
 
-    let selecting = selecting_yaml(
-        INSIDE_MS,
-        &format!(
-            "  window_start: {}\n  partitions:\n    orders: [0]\n",
-            ms_to_rfc3339(1_757_901_600_001)
-        ),
-    );
+    let selecting = selecting_yaml(Some(1_757_901_600_001), INSIDE_MS, "");
     let run = drive(
         &mount(&restore_plan(&selecting, None)),
-        &wiring(&selecting, missing0.clone()),
+        &wiring(&selecting, missing.clone()),
     );
     let row = run.row(CheckId::ArchiveSegments);
     assert_eq!(row.code, CheckCode::SegmentsPresent, "{:?}", row.message);
@@ -9077,10 +9078,10 @@ fn the_preview_checks_only_the_segments_the_selection_reads() {
         row.message
     );
 
-    let control = selecting_yaml(INSIDE_MS, "");
+    let control = selecting_yaml(None, INSIDE_MS, "");
     let run = drive(
         &mount(&restore_plan(&control, None)),
-        &wiring(&control, missing0),
+        &wiring(&control, missing),
     );
     assert_eq!(
         run.row(CheckId::ArchiveSegments).code,
@@ -9093,8 +9094,9 @@ fn the_preview_checks_only_the_segments_the_selection_reads() {
 /// answer.** The restore preflight's projection of the manifest JSON
 /// (`check::archive::topic_facts`) and execution's `OsoCliEngine::describe`
 /// of the SAME archive go through `ReplaySelection::resolve` and name the
-/// same segments, partitions, bounds and engine runs, for a start-and-subset
-/// plan and for a full one.
+/// same segments, partitions, bounds and engine runs, for three window starts
+/// (inside the first segment, just after it, and inside a later partition's
+/// only segment).
 #[test]
 fn the_preview_and_execution_resolve_the_same_selection() {
     use logweir_core::engine::{BackupSetRef, DataEngine};
@@ -9157,15 +9159,8 @@ fn the_preview_and_execution_resolve_the_same_selection() {
     let mapping: BTreeMap<String, String> = [("orders".to_string(), "restore-orders".to_string())]
         .into_iter()
         .collect();
-    for extra in [
-        format!(
-            "  window_start: {}\n  partitions:\n    orders: [2, 0]\n",
-            ms_to_rfc3339(1_757_900_000_000)
-        ),
-        "  partitions:\n    orders: [1]\n".to_string(),
-        format!("  window_start: {}\n", ms_to_rfc3339(1_757_901_600_001)),
-    ] {
-        let yaml = selecting_yaml(1_757_908_000_000, &extra);
+    for start in [1_757_900_000_000i64, 1_757_901_600_001, 1_757_906_500_000] {
+        let yaml = selecting_yaml(Some(start), 1_757_908_000_000, "");
         let spec: logweir_core::spec::DrillSpec = serde_yaml::from_str(&yaml).unwrap();
         let execution = logweir::drill::resolve_selection(&spec, &mapping, &facts)
             .expect("execution resolves")
@@ -9179,7 +9174,7 @@ fn the_preview_and_execution_resolve_the_same_selection() {
             .iter()
             .map(|k| ObjectAccess::qualify(&preview_store, k))
             .collect();
-        assert_eq!(qualified, execution.segment_keys(), "{extra}");
+        assert_eq!(qualified, execution.segment_keys(), "start {start}");
         let shape = |r: &logweir_core::replay_selection::ResolvedSelection| {
             (
                 r.floor_ms,
@@ -9200,6 +9195,6 @@ fn the_preview_and_execution_resolve_the_same_selection() {
                     .collect::<Vec<_>>(),
             )
         };
-        assert_eq!(shape(&preview), shape(&execution), "{extra}");
+        assert_eq!(shape(&preview), shape(&execution), "start {start}");
     }
 }

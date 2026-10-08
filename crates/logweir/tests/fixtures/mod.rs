@@ -878,9 +878,14 @@ pub enum Drill {
     /// every objective is met, so a non-pass here can only come from the
     /// orchestrator handing phase 7 the report phase 6 read.
     EngineReportLacksTheTopic,
-    /// **PROD-11.1.** `Passes`, with the approved plan stating a replay
-    /// selection the archive satisfies: `restore.partitions: {orders: [0]}`.
+    /// **PROD-11.1.** `Passes`, with the approved plan stating a partition
+    /// subset the archive satisfies, `restore.partitions: {orders: [0]}`:
+    /// refused by name at phase 0 until the owner decides OD-9.
     StatesAPartitionSelection,
+    /// **PROD-11.1.** `Passes`, with the approved plan stating a window start
+    /// AT the archive's floor (`restore.point_in_time: "<window start>/<window
+    /// end>"`): the restore is the archive's, and the run signs the start.
+    StatesAWindowStart,
 }
 
 /// **PROD-08.1.** CRC-32 (IEEE, reflected), bitwise: the KBAK footer's
@@ -1388,6 +1393,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         ),
         // PROD-11.1: a selection the fixture archive satisfies.
         Drill::StatesAPartitionSelection => "restore:\n  partitions:\n    orders: [0]\n".into(),
+        Drill::StatesAWindowStart => {
+            format!("restore:\n  point_in_time: \"{FIXTURE_WINDOW_START}/{FIXTURE_WINDOW_END}\"\n")
+        }
         _ => String::new(),
     };
     // PROD-08.1: the complete shapes ask for complete coverage; every other
@@ -1635,6 +1643,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // PROD-11.1. The engine is the passing one: the variable is the
         // plan's `restore.partitions`.
         | Drill::StatesAPartitionSelection
+        | Drill::StatesAWindowStart
         | Drill::LeavesATopicBehind => {}
     }
 
