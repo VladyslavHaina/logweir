@@ -21,7 +21,8 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10) and 24 (FX-3), from
-the product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do
+the product-expansion tracker's fix-now rows, and item 25 (PROD-00.3f, the
+engine pin), land after `fdb48cd8`, and so do
 FX-7's additions to item 11 (the execution-claim set check, receipt and
 catalog format 1.2.0, the pin's read by version id) and FX-4's format 1.1.0,
 which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
@@ -985,6 +986,52 @@ and script 1.15.0 at main `b8b9263f`, FX-7's script 1.16.0, and `v0.1.5`
 (measured).
 **Rollback:** an older runner writes 1.1.0 scorecards with the old labels again.
 The 1.2.0 scorecards already written stay valid under older and newer readers.
+
+#### 25. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
+
+**Changed.** The runner image carries `kafka-backup` **0.23.3** (image digest
+`sha256:cc7d5a8a…`, upstream commit `afb160e7`), OSO's newest release on
+2026-10-07, in place of 0.21.0. The segment format, the three engine commands
+Logweir runs and every key it renders are unchanged, and archives written by
+either engine read and restore with the other. `logweir doctor` accepts exactly
+0.23.3, as a whole token: 0.21.0 is now a version mismatch, and so is a suffixed
+`0.23.3+build`. Receipts and scorecards name the engine that ran, so new ones
+say 0.23.3. Two engine behaviours since 0.22.0 are refused instead of
+inherited. A storage location with a plain `http://` endpoint and
+`allow_http: false` is refused at phase 0 with exit 3 (`refusal-reason=GuardRefused`),
+by `drill run`, `restore run` and `backup run` alike, and no engine document
+is rendered with it: the engine now derives plaintext from the scheme and
+would dial the archive in the clear. `VirtualHosted` addressing with a custom
+endpoint stays refused (`AddressingUnsupportedByEngine` /
+`addressing_unsupported_by_engine`); its message no longer names an engine
+version. The full-drill floor stays 0.21.0.
+**Do:** nothing with the chart: the controller stamps the new version into
+every runner Job, so roll the controller **and** runner image together (the
+existing upgrade order). A standalone CLI install replaces its engine binary
+with 0.23.3 (the digest in `third_party/kafka-backup-binary.digest`) and its
+`LOGWEIR_ENGINE_VERSION` / `LOGWEIR_ENGINE_DIGEST` with the new pair
+([quickstart.md](quickstart.md), step 4; `examples/cronjob-drill.yaml`). A spec
+that names an `http://` endpoint must say `allow_http: true`; a saved
+destination already cannot combine the two (rule R3).
+**Scope:** source evaluation of every change from 0.21.0 to 0.23.3
+([decision record](to-do/decisions/PROD-00-engine-route.md) §12: no capability gap
+it lists is fixed, and nothing Logweir reads or renders changed shape). On a
+compose stack (slot 4, Kafka 3.7.1, the engine under `linux/amd64` emulation)
+CI's e2e command passed 177 tests, PROD-01.1's record-semantics contract
+asserted on 0.23.3 included; the demo drill passed with both readers VALID; an
+archive 0.21.0 wrote drilled with 0.23.3, and an archive 0.23.3 wrote drilled
+with 0.21.0, both `pass`. On Kafka 4.3.1 the record-semantics, G-PITR, FX-1,
+FX-7 and full-drill rows passed with the pin as well (34 tests). Unit rows refuse the `http://` combination in each
+of the three engine documents and at phase 0 for drill and backup specs, with
+mutants on those guards and on `doctor`'s pin, and `e2e/tests/engine_pin.rs`
+(default test set) holds every place that names the pin to one version. The
+weekly `engine-matrix` rows for 0.23.3 have not run on GitHub yet, and the
+controller's `LOGWEIR_ENGINE_VERSION` reaches a live runner Job only at the
+next PoC upgrade.
+**Rollback:** an older runner and controller run 0.21.0 again; `doctor` from
+that build refuses 0.23.3. Archives and receipts written by 0.23.3 stay
+readable and verifiable by older builds: the manifest and segment bytes are the
+shapes 0.21.0 reads.
 
 ### Verification scope: what "verified" means in this release
 

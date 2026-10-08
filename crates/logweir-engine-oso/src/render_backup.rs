@@ -252,8 +252,8 @@ pub fn render(plan: &BackupPlan) -> Result<String, RenderError> {
     // `RestoreOptions` [U:crates/kafka-backup-core/src/config.rs:793-801] and
     // of nothing else; `BackupOptions` (`:404-541`) has exactly one
     // offset-header field, `include_offset_headers` (`:455-458`). The engine
-    // at the GC8 floor (`kafka-backup` 0.21.0, the digest in
-    // `third_party/kafka-backup-binary.digest`) therefore reads
+    // at the GC8 floor (`kafka-backup` 0.21.0), and the 0.23.3 pin in
+    // `third_party/kafka-backup-binary.digest` alike, therefore reads
     // `backup.strip_offset_headers` as an UNKNOWN key and drops it with
     // *"Ignoring unknown config key"*
     // [U:crates/kafka-backup-cli/src/commands/config.rs:46] — and

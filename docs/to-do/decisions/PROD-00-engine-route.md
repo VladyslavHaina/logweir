@@ -948,6 +948,130 @@ Proposed new rows, lettered from **f**:
 - **The source-fixture retention race (§4.4, A-C20-2) is done on this branch** (`d795bae4`), as an out-of-ownership edit the orchestrator authorized in round 4 (§4.5). It stays listed because the files belong to PROD-01.1 and G-PITR: `e2e/tests/harness/mod.rs` (the helper), `e2e/tests/record_semantics.rs` (`Row::source_topic` and the recreate row), `e2e/tests/pitr_boundary.rs`, and the new guard `e2e/tests/fixture_retention.rs`. PROD-01.1's precondition assertion is not engine-gated; that was the orchestrator's ruling.
 - `docs/quickstart.md` Path 3 invited any compatible producer's archive without saying that a pre-0.21 archive drills as `fail-integrity`/`partial` (exit 2). The fix round added one sentence there and a link to `support-matrix.md`, an out-of-ownership edit (review L8).
 
+## 12. PROD-00.3f: the move to 0.23.3 (2026-10-07)
+
+OD-3 (decided 2026-10-07) re-targeted PROD-00.3f from 0.22.0 to the newest OSO release. This section is that row's evaluation, from source first and then on compose slot 4, and the record of what the bump changed in Logweir. Branch `claude/prod-00-3f`, from main `fcaae178`.
+
+**Citation form here.** `C23/<path>:<line>` is `crates/kafka-backup-core/src/<path>` in `third_party/kafka-backup-v0.23.3.tar.gz`, the tarball the tree now vendors. `L/<path>` is this repository at the branch tip.
+
+### 12.1 The target
+
+| Release | Tag commit | Published (GitHub release) | Image (`linux/amd64`, pulled 2026-10-07) | Revision label |
+|---|---|---|---|---|
+| v0.23.3 | `afb160e7f2c69b7c3c28e1b868dd952835a5b0af` | 2026-10-07T12:25:31Z | `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db` | equals the tag commit |
+| v0.23.2 | `7708fc0a56ece8d5ac8b44e77004be75ec1b1749` | 2026-10-06T15:12:42Z | `sha256:5e5532f65b32a45cbec8efc28c03e8f23556f0dd64ff7fe4f3384d27da7f26e5` | equals the tag commit |
+| v0.23.1 | `3746e993693d4f9dce3994ab41b01c57f582e0fc` | 2026-10-06T11:05:14Z | `sha256:a4f5ba4d93149f4ba86f92e94258cad716f9816659ca0662fd7a6bdde6de68cf` | equals the tag commit |
+| v0.23.0 | `ea573a3e161f964c7abc160f724e97149ffb4d14` | 2026-09-29T09:28:28Z | `sha256:828c62e970464b8c9a449293c78276488bb4a9c2a5f5f014c19fe4edaeb4ac9c` | equals the tag commit |
+| v0.22.0 | `cc10aa4ada2ab11fcd8679c01aac13d7b5139949` | 2026-09-07 | §1 | §1 |
+
+- **The choice is v0.23.3**, the newest release on 2026-10-07 (`git ls-remote --tags`, the releases API). No newer tag appeared while this row ran.
+- Its image is still `linux/amd64` only (an OCI index with one platform and one attestation manifest), so C19 is unchanged. `kafka-backup --version` prints `kafka-backup 0.23.3`.
+- The vendored source is GitHub's tag archive, sha256 `bf5544bd521f0a0f343c402bbbde5d6dc0d9b45d70eb1a1efb447ca4f2fda0bd`, byte-identical in content to a clone of the tag (`diff -r`, no difference).
+- `kafka-protocol` is still 0.18.0 in the engine's `Cargo.lock`; `object_store` moved from 0.14.1 to 0.14.2.
+- **The operators moved too.** `kafka-backup-operator` v1.4.0, v1.4.1 and v1.4.2 (2026-10-06/07) link `kafka-backup-core` 0.23.0, 0.23.1 and 0.23.3. `strimzi-backup-operator` v0.4.0 (2026-10-06, tag commit `e804c9ff`) still defaults to `osodevops/kafka-backup:v0.22.0`. §7's table is otherwise unchanged.
+
+### 12.2 What changed between 0.21.0 and 0.23.3, and what it means for Logweir
+
+0.21.0 → 0.22.0 is §4.1. 0.22.0 → 0.23.3 is four releases (`git diff --stat v0.22.0 v0.23.3`: 55 files, +5810/−652; the diff is the artifact `upstream-v0.22.0..v0.23.3.diff`). The files that hold every behaviour Logweir depends on are byte-identical across the whole span 0.21.0 → 0.23.3: `segment/` (format, reader, writer), `kafka/fetch.rs`, `kafka/produce.rs`, `restore/preflight.rs`, `restore/filter.rs`, `restore/repartition.rs`, the CLI's `commands/{config,backup,restore,validate_restore}.rs` and the upstream `Dockerfile`.
+
+| Change (release) | Source at v0.23.3 | Effect on Logweir |
+|---|---|---|
+| `backup.circuit_breaker` / `restore.circuit_breaker` YAML keys, advisory only: the engines record successes and failures and never gate a request on the breaker (0.23.0, #197) | `C23/config.rs:424-484`, `:637`, `:1073`; `C23/circuit_breaker.rs:1-12` | Logweir renders neither key, so the defaults (5 / 30 s / 2) apply, as before. The field is serialised in `RestoreOptions`, so the restore checkpoint hash (`restore_config_hash`, `C23/restore/engine.rs:2134-2143`) differs from a 0.22.0 hash over the same document. Logweir never resumes a restore (C4: per-run paths), so nothing reads that hash across versions |
+| The restore-stall fix: the offset mapping is updated once per segment and once per produce batch instead of once per record under a shared mutex; detailed mappings stay sorted (0.23.0, #197) | `C23/manifest.rs:834-894`; `C23/restore/engine.rs:1774-1813`, `:1872-1907` | The offset report (`offsets.json`) is stored and hashed by Logweir, never parsed (`L/crates/logweir/src/drill/phase8_score.rs:351-371`). One byte-level difference is possible: for records whose timestamps are not monotonic within the first segment, `first_timestamp` is now the segment's minimum rather than the first record's. The pairs and their order are unchanged for an unfiltered restore |
+| `partition_router.rs`: a connection error evicts only the pool of the broker the failed request went to; NOT_LEADER refreshes metadata and keeps every pool; a concurrent rebuild keeps an installed full pool (0.23.0, #197). Group-coordinator routing moved to `consumer_groups.rs` (0.23.3, #224) | `C23/kafka/partition_router.rs:259-365` (`get_broker_connection`, `evict_failed_broker`, `route`), `:566-642` (produce: `MAX_CONNECTION_RETRIES = 5`, `MAX_LEADER_RETRIES = 20`, unchanged), `:1018-1047` | Fewer reconnects on a multi-broker target; one broker on compose sees none of it. A produce that fails with a connection error is still re-sent without a producer id or sequence (`C23/kafka/produce.rs:79-110` unchanged), so **C5 is unchanged** |
+| OffsetFetch and OffsetCommit go to the group's coordinator (FindCoordinator on NOT_COORDINATOR, 12 attempts); `fetch_offsets` fails on a group-level error instead of returning "no offsets"; `snapshot-groups` refuses to save an incomplete snapshot; validation lists groups on every broker (0.23.3, #224) | `C23/kafka/consumer_groups.rs:202-254`, `:457-555`; `C23/kafka/client.rs:62-66`, `:121-145` | The backup engine's consumer-group snapshot keeps its shape: `snapshot_time` plus `groups[].offsets` as topic → partition → offset (`C23/backup/engine.rs:903-988`, structs at `:926-936`). A group whose offsets cannot be read is skipped with a `warn` (`C23/kafka/partition_router.rs:824`; it was a `debug`). So **FX-1's parser and its drift gate are unchanged**, and on a multi-broker cluster the snapshot is now complete where 0.22.0 silently dropped groups coordinated elsewhere. Logweir renders `consumer_group_snapshot` off and never runs `snapshot-groups` |
+| Phase 3 offset reset translates explicit `consumer_groups` through `topic_mapping` (0.23.1, #214) | `C23/restore/offset_reset.rs`, `C23/restore/three_phase.rs:372-376` | None: Logweir renders `reset_consumer_offsets: false`, `consumer_group_strategy: skip` and `auto_consumer_groups: false` (`L/crates/logweir-engine-oso/tests/snapshots/render__restore_yaml.snap`) |
+| `offset-rollback`, `offset-reset`, `show-offset-mapping`, `status` honour storage URLs in `--path` (0.23.2, #174); `--help` text | `crates/kafka-backup-cli/src/commands/storage_path.rs`, `main.rs` | None: Logweir runs `backup`, `restore` and `validate-restore` only, whose arguments and handlers are unchanged |
+| "Created S3/Azure/GCS backend" moves from `info` to `debug` and names the effective endpoint (0.23.2) | `C23/storage/s3.rs:94-112` (the log line at `:109-112`) | None: the only engine line Logweir parses is "Ignoring unknown config key" (`L/crates/logweir-engine-oso/src/subprocess.rs:160-190`), still emitted by `crates/kafka-backup-cli/src/commands/config.rs:46` |
+| `p256` 0.14 and a routine dependency refresh (0.23.0) | `C23/evidence/signing.rs`, `envelope.rs` (test code only) | None: Logweir never consumes engine evidence (C17) |
+| `storage/config.rs` and `storage/mod.rs` | unchanged since 0.22.0 (`C23/storage/config.rs:116-118`, `C23/storage/mod.rs:56-73`) | **C15 still applies on the new pin**, so its guard lands with the bump (12.4) |
+| `use_path_style(endpoint, path_style) = path_style \|\| endpoint.is_some()` | unchanged since 0.22.0 (`C23/storage/s3.rs:55-57`, applied at `:78-80`) | **C16 still applies**: VirtualHosted addressing with a custom endpoint stays refused, with a version-neutral message (12.4) |
+| The manifest | `BackupManifest`, `TopicBackup`, `PartitionBackup` and `SegmentMetadata` unchanged since 0.22.0 (`missing_topics`, skipped when empty) | The vendored shapes still read it; the drift gate passes against the new tarball (12.4) |
+
+### 12.3 The capability rows on 0.23.3
+
+**No row moves to "fixed upstream".** In particular, none of C1, C4, C5, C6, C12, C13 or C14 is fixed by 0.23.3, so none of 00.3a–e, 00.3g or 00.3h gets smaller:
+
+| Row | Evidence at v0.23.3 |
+|---|---|
+| C1 control records, READ_COMMITTED | `kafka/fetch.rs` is byte-identical to 0.21.0: `with_isolation_level(0)` at `C23/kafka/fetch.rs:53`, `:263`, `:337`; no reference to `aborted_transactions` in the crate |
+| C4 restore checkpoint | Saved once per topic (`C23/restore/engine.rs:936`), shutdown seen between topics (`:907`); `checkpoint_interval_secs` is parsed (`C23/config.rs:944-945`) and still read nowhere under `restore/`; the hash covers the whole `RestoreOptions` (`:2134-2143`), now including `circuit_breaker` |
+| C5 idempotent produce | No InitProducerId; `NO_PRODUCER_ID` at `C23/kafka/produce.rs:99`; the router still re-sends on a connection error (`C23/kafka/partition_router.rs:566-627`). PROD-01.1's ack-fault row ran on 0.23.3 (12.5) |
+| C6 min/max segment timestamps | `segment/writer.rs` byte-identical to 0.21.0 (first/last record, `:236-242`); `overlaps_time_window` at `C23/manifest.rs:398` unchanged |
+| C12 byte-rate limit | `rate_limit_bytes_per_sec` parsed (`C23/config.rs:908`) and only checked for zero (`:1368-1373`) |
+| C13 duplicate header keys | `kafka-protocol` 0.18.0 unchanged; the produce path still rebuilds an `IndexMap` (`C23/kafka/produce.rs:84`) |
+| C14 LogAppendTime | `kafka/fetch.rs` byte-identical: no batch max timestamp, `TimestampType::Creation` on produce |
+
+The other rows: C2 (`C23/backup/engine.rs:1396-1399`), C3 (`:1663`, `:1671`), C7 and C8 (`get_api_version` is byte-identical, `C23/kafka/client.rs:625-648`), C9 (`C23/config.rs:264`, `:328-336`), C10/C11 (`C23/config.rs:1059-1066`, `#[serde(skip)]`; 0.23.0 only keeps the filter's detailed mappings sorted), C17 (`C23/evidence/emit.rs:109`, `checksums_valid: true`) and C20 (`C23/backup/engine.rs:1249-1250`) are unchanged. C18 is unchanged in shape and better in completeness (12.2). C15 and C16 are unchanged upstream and closed in Logweir by this row.
+
+### 12.4 What the bump changed in Logweir
+
+- **The pin, by the refresh procedure.** `scripts/extract-engine.sh` defaults to `TAG=v0.23.3` with `EXPECTED_REVISION=afb160e7…`; `OSO_REFRESH=1` resolved the digest, verified the revision label, and rewrote `third_party/kafka-backup-binary.digest`, the `Dockerfile` engine stage and `e2e/compose/.env`. It re-fetched `third_party/LICENSE-MIT` (unchanged) and vendored the v0.23.3 tarball and its `.sha256`. The v0.21.0 tarball is removed, because xtask's drift gate requires exactly one.
+- **`doctor`'s pin** is `logweir::doctor::ENGINE_PIN = "0.23.3"`, matched as a whole whitespace-delimited token. The adjacency test it replaces still accepted `0.21.0+anything`. The controller's `job::ENGINE_VERSION` and `ENGINE_DIGEST` moved with it.
+- **A-3f-1.** `CONTRACT_ENGINE` is `0.23.3`. It stays a literal, because the contract is what was measured on one engine. `e2e/tests/engine_pin.rs`, in the default test set, compares every place that names the pin with `ENGINE_PIN`: the script's tag, the single tarball and its checksum, the controller's two constants, the Dockerfile, `CONTRACT_ENGINE`, `doctor`'s accepting fixture, the CronJob example and the quickstart's `export` lines. Each check is also run over a copy lagging to 0.21.0, which it must refuse.
+- **C15 (A-C15-1).** `StorageUrl::plaintext_endpoint_without_allow_http` is the one predicate. `render_storage_block`, which the backup, restore and validate-restore documents all go through, returns `RenderError::PlaintextEndpointWithoutAllowHttp`; drill phase 0 and backup phase −1 refuse the same spec with exit 3 (`guard::reject_plaintext_endpoint_without_allow_http`). Neither message echoes the endpoint.
+- **C16 (A-C16-1).** The ENGINE-PATHSTYLE refusal is the version-neutral `destination::ENGINE_PATHSTYLE_MESSAGE`, asserted digit-free in the core, controller and API tests.
+- **The drift gate** (`cargo test -p xtask`) passes against the v0.23.3 tarball with no new divergence.
+
+### 12.5 Runs on 0.23.3
+
+Compose slot 4 (`logweir-e2e-s4`, PROD-01.5), Kafka 3.7.1 read back from the running container (`apache/kafka:3.7.1`, image `sha256:ed74d7d1…`, "Kafka version: 3.7.1"), the engine image above through `e2e/fixtures/engine-docker.sh` under `linux/amd64` emulation. Artifacts under `claude/artifacts/prod-00-3f/runs/`.
+
+| Cycle | What ran | Result |
+|---|---|---|
+| c1 | `just e2e-up`; `scripts/e2e-seed.sh` (digests `required`); `cargo build --locked -p logweir`; CI's e2e command, `cargo test --locked -p e2e --features e2e -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener` | Exit 0; the cycle took 25.8 min from the build to the last suite: **177 passed, 0 failed, 19 ignored**. `record_semantics` 8 passed, 2 ignored, **with the contract asserted on 0.23.3** (no row printed "contract not asserted"); `pitr_boundary` 1 (G-PITR: six of nine, both readers VALID); `full_drill` 15, the deleted-segment control included; `consumer_group_snapshot` 2 (FX-1: a snapshot the 0.23.3 engine wrote parses and the drill passes); `backup_argv` 8 (FX-7: a backup over a set an earlier run wrote is refused before the engine); `mvp_demo` 3 (the receipt path); `topic_identity` 52 (1 ignored); `scram` 9; `stack_params` 17; `guards` 22; `offset_side` 4. The broker's time retention deleted no segment (`engine-matrix-broker.sh --retention`) |
+| c2 | PROD-01.1's two `#[ignore]`d rows, each alone | Ack fault: one produce request timed out after 60 s and was resent; 1,000 duplicates (p0@19000–19999); Logweir signed `fail-integrity`, exit 2, on the count bound (61,000 against 60,000). Kill: the engine container outlived `logweir` and wrote all 60,000 records. PROD-01.1 §5.1 sample 6 and §5.2 sample 5 |
+| d1 | A fresh stack, seeded by the pin; `scripts/demo.sh` steps 4–6 with `target/debug/logweir` | `doctor` all ok (`engine version kafka-backup 0.23.3`); `outcome: pass`, `integrity: byte-fingerprint/pass` 150/150, `header_preflight: honoured`, objectives met (RTO 8 s, RPO 14 s); `logweir drill verify` and `docs/verify_scorecard.py` VALID. The 0.23.3 manifest has the same top-level keys as a 0.21.0 one (no `missing_topics`), six segments, every one with a sha256 |
+| d2 (upgrade) | A fresh stack seeded by **0.21.0** (the shell's `OSO_DIGEST` overrides `.env` for compose only), then drilled by the pin | `pass`, 150/150, VALID in both readers. That 0.21.0 wrote this archive shows in its seed log: the INFO line "Created S3 backend", which 0.23.x logs only at debug (`C23/storage/s3.rs:109`) and the two pin-seeded cycles do not print |
+| d3 (rollback) | A fresh stack seeded by the pin, then drilled by a **0.21.0** engine (a scratch copy of `engine-docker.sh` pinned to the old digest) | `doctor` FAIL "version mismatch: expected 0.23.3, engine reports `kafka-backup 0.21.0`", as it must; the drill itself `pass`, 150/150, VALID in both readers. An archive the new pin writes is restorable by the old engine |
+| C15 | Negative control 2 of A-C15-1 on the pin: `docker run --network none` with §3.15's `c15-allow-http/restore.yaml` (`endpoint: "http://127.0.0.1:1"`, `allow_http: false`) | 0.23.3 logs "storage.endpoint uses http://; enabling allow_http" and makes ten plaintext "transport error of kind Connect" attempts; 0.21.0 stops with "HTTP error: builder error" before any connection. The guard is load-bearing on the pin (artifact `c15-allow-http/`) |
+| c3 | The same compose slot on **Kafka 4.3.1** (`stack-env.sh --kafka 4.3`, read back as `apache/kafka:4.3.1`, image `sha256:77e3df90…`): seed, then `record_semantics`, `pitr_boundary`, `consumer_group_snapshot`, `backup_argv` and `full_drill` | Exit 0: 34 passed, 0 failed, 2 ignored. `record_semantics` 8 passed with the contract asserted, G-PITR 1, FX-1 2, FX-7 8, `full_drill` 15. Retention deleted nothing. This is the local twin of the declared `v0.23.3 × 4.3.1` row |
+
+
+### 12.6 The acceptance rows of PROD-00.3f
+
+| Row | Status | Evidence |
+|---|---|---|
+| A-C15-1 | **pass** | One `RenderError::PlaintextEndpointWithoutAllowHttp` row per engine document (`L/crates/logweir-engine-oso/tests/transport_c15.rs`); drill phase 0 exits 3 with `refusal-reason=GuardRefused` (`L/crates/logweir/tests/guard_cli.rs`) and backup phase −1 refuses before any client exists (`L/crates/logweir/tests/backup_run.rs`). Negative control 1: the mutant that deletes the check in `render_storage_block` turns the renderer rows red (artifact `mutants.log`). Negative control 2: the differential in 12.5, row C15 |
+| A-C16-1 | **pass** | On the 0.23.3 pin `VirtualHosted` with a custom endpoint is still refused as `addressing_unsupported_by_engine` / `AddressingUnsupportedByEngine`, and the message holds no digit (core, controller and API tests) |
+| A-3f-1 | **pass** | `CONTRACT_ENGINE = "0.23.3"`; `e2e/tests/engine_pin.rs` asserts it equals `logweir::doctor::ENGINE_PIN`, and refuses the old constant on the new pin (in-file control and mutant). PROD-01.1's rows re-ran on 0.23.3 with the contract asserted on two broker lines (12.5, c1 and c3); no difference from their 0.21.0 outcomes, recorded in PROD-01.1's record §11 |
+| P-3f-1 | **first condition met, second pending** | The fixture race is closed (A-C20-2, §4.5), and no retention deletion occurred in any run here. The matrix's v0.23.3 rows have not yet recorded `pass` on GitHub: the dispatch in 12.7 is the orchestrator's |
+
+The ENGINE-PATHSTYLE item of §11's class sweep is done by this row (12.4).
+
+### 12.7 engine-matrix after the bump
+
+| Engine | Kafka | Floor | Declared outcome | Why this row |
+|---|---|---|---|---|
+| v0.23.3 | 3.7.1 | full | `pass` | The pin, on the compose stack's default broker |
+| v0.23.3 | 4.3.1 | full | `pass` | The pin on the newest supported Apache Kafka line: the C8 tripwire |
+| v0.22.0 | 3.7.1 | full | `pass` | The default of `strimzi-backup-operator` v0.3.0–v0.4.0 |
+| v0.21.0 | 3.7.1 | full | `pass` | The full-drill floor, and the previous pin |
+| v0.20.0 | 3.7.1 | below | `unsupported(lever-absent)` | The fourth-newest minor |
+| v0.19.2 | 3.7.1 | below | `unsupported(lever-absent)` | `kafka-backup-operator` 1.3.0's library version |
+| v0.19.1 | 3.7.1 | below | `unsupported(lever-absent)` | `strimzi-backup-operator` v0.2.22–v0.2.25 default |
+
+- **Retired:** `v0.21.0 × 4.3.1`. It was the pin's tripwire on the newest broker. The engine's protocol-version table is byte-identical in 0.21.0 and 0.23.3 (`C23/kafka/client.rs:625-648`), so the pin's own 4.3.1 row watches exactly what it watched, and 0.21.0 is no longer what Logweir ships. `the_declared_rows_follow_the_documented_floor` now requires the pin itself on a broker newer than the default, so the tripwire cannot be left behind on an old engine again.
+- **Kept:** every other row. v0.22.0 stays as an operator default, and v0.21.0 × 3.7.1 as the floor.
+- `publish` expects 7 rows (`--expect 7`). PROD-01.1's contract rows assert on the v0.23.3 rows and record outcomes on the others (`CONTRACT_ENGINE`).
+- **The dispatch** is the orchestrator's, after the branch is pushed. `workflow_dispatch` takes no inputs:
+
+  ```sh
+  gh workflow run engine-matrix.yml --repo VladyslavHaina/logweir --ref claude/prod-00-3f
+  gh run list --repo VladyslavHaina/logweir --workflow engine-matrix.yml --branch claude/prod-00-3f --limit 1
+  gh run watch <run-id> --repo VladyslavHaina/logweir
+  gh run view <run-id> --repo VladyslavHaina/logweir --log-failed
+  ```
+
+  Expected: seven `matrix` jobs, each ending `recorded '<outcome>' as declared`; `publish` green with seven rows; `open-pr` skipped (not `main`). P-3f-1's second condition (a recorded `pass` for the new pin's row on GitHub with PROD-01.1's rows included) is met by this run's two v0.23.3 rows and by nothing earlier.
+
+### 12.8 Limits of this section
+
+- **Local runs used amd64 emulation** on an arm64 host, as in §10. Durations are not evidence.
+- **One broker per run.** The compose stack is one combined KRaft broker. 0.23.0's router changes (scoped pool eviction, NOT_LEADER without eviction) and 0.23.3's coordinator routing act on multi-broker clusters; none of them was exercised by a run here. The `cluster3` profile can, and the ack-fault fixture PROD-07 owns is where a router difference would show.
+- **0.23.0–0.23.2 were read, not run.** Only 0.23.3 ran.
+- **The engine-matrix rows have not run on GitHub at this tip**; the dispatch above is pending.
+
 ---
 
 Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).

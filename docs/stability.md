@@ -1922,6 +1922,12 @@ used engine **0.21.0**, digest
 `sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`,
 and Apache Kafka **3.7.1** (KRaft).
 
+On 2026-10-08 PROD-00.3f re-ran the row with the **0.23.3** pin (digest
+`sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`, Kafka
+3.7.1, compose slot 4): 1 passed, the same six of nine records, and both readers
+accept the signed result. Upstream's `pitr_accuracy.rs` at v0.23.3 still
+contains zero assertions.
+
 At the fixed recovery point `T = 1_760_000_000_000`, each of three partitions
 contains records at `T − 1 ms`, `T` and `T + 1 ms`. The restore returns
 **six of the nine records**: the first two from each partition. The boundary
