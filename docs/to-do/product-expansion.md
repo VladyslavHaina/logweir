@@ -180,7 +180,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | PROD-08.4 | Publish a control-evidence mapping | P1 | M2 | docs | — | — | none | B | Done |
 | 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | Done |
 | — | PROD-14.3 | Positioning and design-partner kit | — | — | docs | — | Business (B-5) | none | C | Deferred |
-| 1 | PROD-00.2 | Build the engine from the vendored source, with a patch folder (amd64 and arm64) | P1 | M1 | infra | 00.1 | — | compose | A | Proposed |
+| 1 | PROD-00.2 | Build the engine from the vendored source, with a patch folder (amd64 and arm64) | P1 | M1 | infra | 00.1 | — | compose | A | In progress |
 | 1 | PROD-01.3 | Reach managed and mTLS clusters | P1 | M1 | impl | 01.5 | — | k8s | A | In progress |
 | 1 | PROD-01.2 | Publish a tested compatibility contract | P1 | M1 | research | 00.1, 01.1, 01.3, 01.5 | OD-4 (provider rows) | compose | B | Proposed |
 | 1 | PROD-14.1 | Simple install and emergency recovery kit | P1 | M1 | impl | 14.0, 01.2, 16.1 | — | k8s | A | Proposed |
