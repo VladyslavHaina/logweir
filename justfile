@@ -57,7 +57,7 @@ golden:
 # as revised): the drill scorecard and the backup receipt; PLAT-17.1 adds a
 # THIRD, `schemas/logweir-api-v1.openapi.json`, the product API's OpenAPI
 # document generated from `crates/logweir-api`'s DTOs; PLAT-15.1 adds a
-# FOURTH, `schemas/logweir-catalog-point-1.1.0.json` (1.0.0 frozen beside it), the recovery catalog's
+# FOURTH, `schemas/logweir-catalog-point-1.2.0.json` (1.0.0 and 1.1.0 frozen beside it), the recovery catalog's
 # point record, generated from `crates/logweir`'s own type (the type is runner
 # vocabulary, so its emitter lives beside it rather than in `logweir-core`).
 # `logweir schema` still accepts exactly the two names Global Constraint 13
@@ -80,19 +80,24 @@ golden:
 #
 # FX-4 moved the scorecard, the receipt and the catalog point to 1.1.0 (the
 # first fields added after the v0.1 tags: a MINOR bump "with a new schema file
-# beside the old one", docs/stability.md). The three `-1.0.0.json` files are
-# FROZEN beside the new ones and are NOT regenerated here: they describe every
-# document written before the bump. Their own tests
-# (`the_frozen_1_0_0_*_schema_is_still_the_1_0_0_schema`) keep them what they were.
+# beside the old one", docs/stability.md). FX-7, which merged after it, adds the
+# receipt's and the catalog record's optional `archive.manifest_version_id` at
+# 1.2.0. The older files are FROZEN beside the current ones and are NOT
+# regenerated here: the three `-1.0.0.json` files describe every document
+# written before FX-4, and FX-4's receipt and catalog-point `-1.1.0.json` files
+# every one written without a pin. Their own tests
+# (`the_frozen_1_0_0_*_schema_is_still_the_1_0_0_schema`,
+# `the_frozen_1_1_0_*_schema_is_still_fx4s`) keep them what they were.
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's constant (`logweir_core::FORMAT_VERSION`,
-# `backup_receipt::RECEIPT_FORMAT_VERSION`, `catalog::record::FORMAT_VERSION`),
-# which also builds the schema's `$id`. A renumber (for instance 1.1.0 -> 1.2.0)
-# moves the constant and this line, keeps the old file frozen beside the new.
+# `backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION`,
+# `catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION`), which also builds
+# the schema's `$id`. A renumber moves the constant and this line, and keeps
+# the old file frozen beside the new.
 scorecard_schema_version := "1.1.0"
-receipt_schema_version := "1.1.0"
-catalog_schema_version := "1.1.0"
+receipt_schema_version := "1.2.0"
+catalog_schema_version := "1.2.0"
 
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json

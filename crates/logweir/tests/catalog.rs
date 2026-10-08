@@ -78,6 +78,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
         archive: ReceiptArchive {
             manifest_key: format!("prod/{backup_id}/manifest.json"),
             manifest_sha256: "sha256:".to_string() + &"b".repeat(64),
+            manifest_version_id: None,
             prefix: "prod".into(),
         },
         records: BTreeMap::from([("orders".to_string(), 1234u64)]),
@@ -1522,14 +1523,47 @@ fn the_catalog_commands_exit_with_the_existing_contract_and_no_new_variant() {
 // The published schema
 // ---------------------------------------------------------------------------
 
+/// **The 1.0.0 catalog-point schema is FROZEN** (FX-4, and FX-7's fix round,
+/// review M-2) beside the newer ones and still describes every record written
+/// before FX-4: it names itself 1.0.0, its `RecordTopic` has no
+/// `config_coverage`, and its `RecordArchive` has no `manifest_version_id`.
+#[test]
+fn the_frozen_1_0_0_catalog_point_schema_is_still_the_1_0_0_schema() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../schemas/logweir-catalog-point-1.0.0.json");
+    let frozen: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display())),
+    )
+    .expect("the frozen schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-catalog-point-1.0.0.json"
+    );
+    let topic = &frozen["definitions"]["RecordTopic"]["properties"];
+    assert!(topic["records"].is_object());
+    assert!(
+        topic.get("config_coverage").is_none(),
+        "the frozen 1.0.0 schema must not describe the 1.1.0 field"
+    );
+    let archive = &frozen["definitions"]["RecordArchive"]["properties"];
+    assert!(archive["manifest_sha256"].is_object());
+    assert!(
+        archive.get("manifest_version_id").is_none(),
+        "the frozen 1.0.0 schema must not describe the 1.2.0 field"
+    );
+}
+
 #[test]
 fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // The drift arm, IN PROCESS, so the gate holds with no subprocess — the
     // shape `crates/logweir-api/tests/contract.rs` uses for the OpenAPI
     // document. `just schema` is the only sanctioned way to change the file.
-    // The CURRENT file is named by the writer's constant (FX-4), so a renumber
-    // moves `record::FORMAT_VERSION` and the justfile, not this test.
-    let version = logweir::catalog::record::FORMAT_VERSION;
+    // The CURRENT file is the newest MINOR's, named by the writer's constant
+    // (FX-7 fix round, review M-2; 1.2.0 since FX-7 merged after FX-4), so a
+    // renumber moves the constant and the justfile, not this test; the 1.0.0
+    // and 1.1.0 files are frozen beside it.
+    let version = logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION;
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../schemas/logweir-catalog-point-{version}.json"
     ));
@@ -1548,7 +1582,7 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
         justfile
             .lines()
             .any(|l| l == format!("catalog_schema_version := \"{version}\"")),
-        "the justfile's catalog_schema_version must be record::FORMAT_VERSION ({version}): \
+        "the justfile's catalog_schema_version must be the writer's constant ({version}): \
          `just schema` writes the file that variable names"
     );
     // The major is pinned by a PATTERN as well as by the reader, so a
@@ -1910,13 +1944,15 @@ fn a_listing_walks_days_backwards_and_stops_once_the_page_is_full() {
     );
 }
 
-/// FX-4: the 1.0.0 catalog-point schema is FROZEN beside the 1.1.0 one and
-/// still describes every record written before the bump: it names itself
-/// 1.0.0, and its `RecordTopic` has no `config_coverage`.
+/// **FX-4's 1.1.0 catalog-point schema is FROZEN** beside the 1.2.0 one (FX-7
+/// merged after FX-4 and took the next MINOR). It still describes every record
+/// this build writes WITHOUT a pin — the `record::FORMAT_VERSION` document: it
+/// names itself 1.1.0, its `RecordTopic` carries `config_coverage`, and its
+/// `RecordArchive` has no `manifest_version_id`.
 #[test]
-fn the_frozen_1_0_0_catalog_point_schema_is_still_the_1_0_0_schema() {
+fn the_frozen_1_1_0_catalog_point_schema_is_still_fx4s() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../schemas/logweir-catalog-point-1.0.0.json");
+        .join("../../schemas/logweir-catalog-point-1.1.0.json");
     let frozen: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display())),
@@ -1924,13 +1960,28 @@ fn the_frozen_1_0_0_catalog_point_schema_is_still_the_1_0_0_schema() {
     .expect("the frozen schema parses");
     assert_eq!(
         frozen["$id"],
-        "https://logweir.dev/schemas/logweir-catalog-point-1.0.0.json"
+        "https://logweir.dev/schemas/logweir-catalog-point-1.1.0.json"
     );
     let topic = &frozen["definitions"]["RecordTopic"]["properties"];
-    assert!(topic["records"].is_object());
     assert!(
-        topic.get("config_coverage").is_none(),
-        "the frozen 1.0.0 schema must not describe the 1.1.0 field"
+        topic["config_coverage"].is_object(),
+        "the 1.1.0 schema is FX-4's: it describes topics[].config_coverage"
+    );
+    let archive = &frozen["definitions"]["RecordArchive"]["properties"];
+    assert!(archive["manifest_sha256"].is_object());
+    assert!(
+        archive.get("manifest_version_id").is_none(),
+        "the frozen 1.1.0 schema must not describe the 1.2.0 field"
+    );
+    assert_eq!(
+        logweir::catalog::record::FORMAT_VERSION,
+        "1.1.0",
+        "an unpinned record is FX-4's 1.1.0 document, which this file describes"
+    );
+    assert_ne!(
+        logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        logweir::catalog::record::FORMAT_VERSION,
+        "the pin is a MINOR bump over FX-4's 1.1.0, so its schema is a NEW file"
     );
 }
 

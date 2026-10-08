@@ -8,6 +8,14 @@
     "arm": ""
   },
   {
+    "id": "unmodified_receipt_pinned",
+    "file": "unmodified_receipt_pinned.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
     "id": "format_version_major_2",
     "file": "format_version_major_2.json",
     "rust_exit": 4,

@@ -3,12 +3,15 @@
 `application/vnd.logweir.backup-receipt+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-backup-receipt-1.1.0.json`](../../schemas/logweir-backup-receipt-1.1.0.json)
+[`schemas/logweir-backup-receipt-1.2.0.json`](../../schemas/logweir-backup-receipt-1.2.0.json)
 and CI regenerates it from the Rust type and `diff -u`s it against the checked-in
 file on every build, so this document and the schema cannot drift apart
-silently. [`schemas/logweir-backup-receipt-1.0.0.json`](../../schemas/logweir-backup-receipt-1.0.0.json)
-is FROZEN beside it: it describes every receipt written before format 1.1.0 and
-is no longer regenerated. The payload type keeps `version=1.0.0`: it names the
+silently. A MINOR bump is a new schema file beside the old one: the
+[`1.1.0` schema](../../schemas/logweir-backup-receipt-1.1.0.json), which
+describes every receipt written without the manifest-version pin (FX-4's
+format), and the [`1.0.0` schema](../../schemas/logweir-backup-receipt-1.0.0.json),
+which describes every receipt written before format 1.1.0, are FROZEN beside it
+and never regenerated. The payload type keeps `version=1.0.0`: it names the
 major-1 envelope, and a new value would make every existing reader refuse every
 new receipt at the payload-type comparison. A signed worked example is
 [`e2e/fixtures/signed/backup-receipt.json`](../../e2e/fixtures/signed/backup-receipt.json)
@@ -36,9 +39,12 @@ scorecard ever written claiming, by the shape of its own schema, to say
 something about a backup it never observed.
 
 So the receipt has its own media type, its own schema, its own
-`format_version` — **independent of the scorecard's**, `1.1.0` since FX-4 — and
-its own arms: five in 1.0.0, and six more that read only 1.1.0's
+`format_version` — **independent of the scorecard's**: `1.1.0` since FX-4, or
+`1.2.0` for a receipt that pins its manifest's version
+([below](#the-pinned-manifest-version-versioned-buckets)) — and its own arms:
+five in 1.0.0, and six more that read only 1.1.0's
 [`config_coverage`](#config_coverage--topic-configuration-capture-coverage-format-110).
+The pin adds no arm.
 
 ## Reading rules a consumer must honour
 
@@ -67,7 +73,7 @@ its own arms: five in 1.0.0, and six more that read only 1.1.0's
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of **this** format. `1.1.0` since FX-4 (`1.0.0` before it). Independent of the scorecard's. |
+| `format_version` | string | Semver of **this** format. `1.1.0` since FX-4 (`1.0.0` before it), or `1.2.0` for a receipt that pins [`archive.manifest_version_id`](#the-pinned-manifest-version-versioned-buckets). Independent of the scorecard's. |
 | `run_id` | string | ULID of the run that produced this receipt. Also the object key stem in the evidence bucket. |
 | `backup_id` | string | The engine's identifier for the archive this run wrote — the **execution** id under Kubernetes. **Not** `run_id`: `archive.manifest_key` is keyed on this, and a set written by an older build can carry receipts from two runs. Since RECEIPT-DUP was fixed, at most one run per `backup_id` reaches the engine (see [the execution claim](#the-execution-claim-one-engine-run-per-backup_id)), so a new execution signs exactly one receipt. |
 | `requested_at` | RFC 3339 | When the run was requested. |
@@ -113,6 +119,7 @@ claiming that version.
 |---|---|---|
 | `archive.manifest_key` | string | The manifest's object key. Empty **if and only if** the backup did not exit 0 — invariant 2. |
 | `archive.manifest_sha256` | string | `sha256:<hex>` over the manifest bytes **this run read back** — not over bytes Logweir remembers writing. |
+| `archive.manifest_version_id` | string, **optional** (format `1.2.0`) | The object store's version id for those exact bytes — present only on a bucket with versioning enabled, where the read-back was answered with one. **Absent** means no version was pinned: an unversioned bucket, S3's `null` version, or a receipt from before the field. See [the pinned manifest version](#the-pinned-manifest-version-versioned-buckets). |
 | `archive.prefix` | string | The object-store prefix everything this run wrote lives under. Logweir writes only under its own `logweir/` prefix. |
 
 ## `records` — per-topic counts
@@ -242,7 +249,7 @@ over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` over arm 5,
 one `arm_N_…` test per arm 6–11, and
 `validate_invariants_has_exactly_eleven_return_err_statements` over the total),
 by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
-over the seventeen documents in `e2e/fixtures/invariants/backup-receipt-index.json`,
+over the eighteen documents in `e2e/fixtures/invariants/backup-receipt-index.json`,
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
 from both readers' source and refuses to balance if they are not the same eleven
@@ -369,13 +376,17 @@ would break every existing invocation, every document and
 > together in FX-4, so the two readers never disagreed in between.
 > `logweir drill verify` prints `checked:   the signature AND all eleven
 > backup-receipt invariants …`; `docs/verify_scorecard.py` prints `verifier:
-> verify_scorecard.py 1.15.0 (backup-receipt invariant set: …)`. Both also print
+> verify_scorecard.py 1.16.0 (backup-receipt invariant set: …)`. Both also print
 > the configuration capture coverage in the same words, one
 > `config_coverage["<topic>"]: <coverage>[ (<reason>)], message.timestamp.type
 > <value> from <source>` line per topic — or `config_coverage: not recorded, so
 > every topic's configuration capture is UNKNOWN, never captured`, for every
 > receipt without the block — and `scripts/check-verifier-parity.sh` compares those lines
-> between the two readers on every accepted receipt. Both compare the sidecar's `payloadType`
+> between the two readers on every accepted receipt. Both print a pinned
+> `archive.manifest_version_id` when the receipt carries one (`manifest version:`
+> and `manifest_version_id=`), and both refuse one that is not a string — Rust
+> at deserialisation, the script in its shape layer (FX-7; verdict parity in
+> `scripts/check-verifier-parity.sh`). Both compare the sidecar's `payloadType`
 > **in full**, so a genuinely-signed scorecard presented as a receipt is refused
 > as a substitution rather than accepted — `drill verify` exits 4 and says
 > `PAYLOAD TYPE MISMATCH`, which is deliberately not `SIGNATURE INVALID`: the
@@ -449,6 +460,20 @@ archive back (a point-bound drill, the `catalogSync` deep check, an auditor with
 longer there. Logweir cannot make the engine's write conditional, so it makes
 sure the second engine run never starts.
 
+**It is worse than a changed digest (FX-7, measured on engine 0.21.0).** The
+engine keys each segment by its start offset —
+`<backup_id>/topics/<topic>/partition=<n>/segment-<start offset>.bin…` — so a
+second run over the same set REWRITES the first run's segment objects in place,
+and its get-merge-put keeps the first run's manifest entry for every key it
+already had ("existing wins"). When the new records fall inside an existing
+segment, the manifest bytes come out IDENTICAL while the segment under them now
+holds different records: measured on compose slot 3 (MinIO unversioned and
+SeaweedFS versioned), 100 records backed up, 50 produced, a second run over the
+set — the first receipt's manifest digest still matched, and the segment's
+recorded `sha256` no longer matched the object (150 records under an entry for
+100). No manifest check can see that afterwards; only a run that never starts
+keeps the first point true.
+
 **What the runner does.** After every local and read-only check and
 immediately before the engine starts, `logweir backup run` puts the claim with a
 conditional create (`If-None-Match: *`) and then puts it a second time: the
@@ -461,6 +486,9 @@ second put must be refused as `AlreadyExists`. Only then does the engine start.
 | the first create is refused for any other reason (a missing `s3:PutObject` on `logweir/*`, a transport error) | **4** | `ExecutionClaimUnproven` | lock-proof failed, nothing uploaded — the engine never started |
 | the backend reports conditional put unsupported (the store falls back to HEAD-then-PUT) | **4** | `ExecutionClaimUnproven` | a HEAD-then-PUT is not exclusive, so the claim is no lock |
 | the **second** create succeeds | **4** | `ExecutionClaimUnproven` | the store accepts `If-None-Match: *` and overwrites anyway; a claim on it is no lock |
+| the claim is won, but the archive already holds `<prefix>/<backup_id>/manifest.json` or a segment under `<prefix>/<backup_id>/topics/` (FX-7) | **1** | `ExecutionAlreadyClaimed` | an earlier run of this `backup_id` — by a build **without** the claim — wrote this set (or wrote a segment of it and died, or is still running). **No engine run, no receipt.** The same state and remedy as a claim that exists: a new `backup_id` |
+| the claim is won, but a read of the archive to prove the set is new failed TRANSIENTLY — a transport error, a timeout, or a 5xx/429 the client had already retried for three minutes (FX-7 fix round) | **1** | — (`operational`) | nothing is proven about the set, so the engine never started. Retryable: a schedule with `spec.retry` starts a NEW execution `-r<k>`, which is a different set; a manual retry needs a new `backup_id` too, because this run's claim is taken |
+| the claim is won, but that read failed for any other reason — a 401/403, a wrong bucket, region or CA, or an error this build cannot classify | **4** | `ExecutionClaimUnproven` | nothing is proven about the set and no retry changes it, so the engine never started; grant `s3:ListBucket` and `s3:GetObject` on the archive prefix (the read-back needs both too), then run again under a new `backup_id` |
 
 Both refusals end with a final stdout line `failure-reason=ExecutionAlreadyClaimed` (exit 1) or
 `failure-reason=ExecutionClaimUnproven` (exit 4), the exit-1/4 twin of exit 3's `refusal-reason=`.
@@ -492,13 +520,140 @@ It is never deleted by Logweir: the retention worker refuses every key under
 `logweir/`, and a deleted claim would let a later run of the same execution
 overwrite an attested manifest again.
 
-**What it does not cover.** A set whose first run was made by a build without
-the claim has no claim, so a later run of that same `backup_id` by a new build
-is not stopped. That is a window at upgrade (a Backup Job lost while the
-controller is upgraded) and for a standalone `backup run` re-using a
-`backup_id` an older build already wrote to; sets written before the fix may
-therefore carry two receipts, and the catalog keeps both as two points (see
+**The set must be new, too (FX-7).** A set whose first run was made by a
+build without the claim carries none, so the claim alone let a later run of that
+`backup_id` start — at upgrade (a Backup Job lost while the controller was
+upgraded, re-created with the new runner image) and for a standalone
+`backup run` re-using a `backup_id` an older build wrote to
+(RECEIPT-DUP-UPGRADE-WINDOW). So after winning the claim, as the last refusal
+before the engine (only the topic-configuration read above, which writes
+nothing and is never fatal, follows it), the runner reads the set through its read-only archive
+handle — a one-key LIST of `<prefix>/<backup_id>/topics/` and a GET of
+`<prefix>/<backup_id>/manifest.json` — and refuses when either exists: a
+finished set, or the segments of a run that died or is still running. Anything
+else under the directory is not the engine's output in the configuration
+Logweir renders (`offsets.db` and `consumer-groups-snapshot.json` are written
+only by continuous backups and an enabled snapshot, which `render_backup` never
+turns on), so an upstream archive's snapshot planted beside a new set does not
+refuse it. Both reads are under the prefix the run's read-back already reads, so
+no permission is added. Between two runs of this build the claim still answers
+first, with its own message.
+
+**What it still does not cover.** A runner that ignores the claim and the set
+check — a build from before them, after a ROLLBACK — can still run the engine
+over a set this build wrote. On a versioned bucket that is DETECTED **for the
+points this build signed**: their receipts pin the manifest version, and a
+pinned version the bucket still holds that is no longer the current one is
+refused by a point-bound restore and reported `Conflict` by the catalog
+([below](#the-pinned-manifest-version-versioned-buckets)). **The rewriting
+run's own point is not flagged**: the older runner signs a receipt that pins
+nothing over the same, identical manifest, so that second point of the set stays
+`Available` and selectable while the segments under it no longer match the
+entries its manifest lists (measured, FX-7: a SeaweedFS versioned bucket). On an
+unversioned bucket nothing is pinned, and an identical manifest over rewritten
+segments is visible only to a check of the segment digests the manifest
+records — no check this build runs reports it. **So before rolling the runner
+back to a build without the execution claim, let in-flight Backups finish**
+([release notes](../release-notes.md), "Before a rollback"). An older runner that is STILL RUNNING when its Job is
+re-created, and has written nothing yet, is not seen by either check; let such
+a Job finish before upgrading. Sets written before RECEIPT-DUP may carry two
+receipts, and the catalog keeps both as two points (see
 [`catalog-point.md`](catalog-point.md)).
+
+### The pinned manifest version (versioned buckets)
+
+**FX-7, receipt format `1.2.0`** (the MINOR after FX-4's `1.1.0`). On a bucket with versioning enabled the store
+answers every read with the object's version id. `logweir backup run` keeps the
+one its read-back of the manifest was answered with — the version of exactly the
+bytes `archive.manifest_sha256` is over, i.e. the LAST manifest the engine wrote
+(it re-puts the manifest several times in one run: five versions per run were
+measured on SeaweedFS) — and signs it as `archive.manifest_version_id`, at
+`format_version` `1.2.0`, beside the `config_coverage` block every receipt
+carries. The catalog point record copies it, at its own `1.2.0`
+([catalog-point.md](catalog-point.md)).
+
+| The store answered the read-back with | The receipt |
+|---|---|
+| a version id | `format_version: 1.2.0`, `archive.manifest_version_id: <id>` |
+| no version id (MinIO and SeaweedFS unversioned buckets; any filesystem store) | `format_version: 1.1.0`, no `manifest_version_id` key — byte-for-byte the document FX-4's build writes |
+| S3's literal `null` (versioning never enabled, or suspended) | as above: a `null` version is replaced in place by the next write, so it pins nothing |
+
+Measured on SeaweedFS 4.48 (versioned, Object Lock) and on MinIO and SeaweedFS
+unversioned buckets; AWS S3
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source].
+
+**What a reader does with it.** The engine restores from the key's CURRENT
+version and knows no other, so a pin is compared with the current version
+first. **But a version id belongs to one object in ONE bucket**, and the
+catalog makes an archive copied to a second bucket one point in two places
+([catalog-point.md](catalog-point.md)): a copy made by anything but
+version-preserving replication — `aws s3 sync`, `mc mirror`, rclone, a
+migration to another store, any unversioned destination — carries the pin and
+not the pinned version. So when the current version is not the pin, both
+readers read the pinned version BY ID (one more read, made only then) and let
+its answer decide (FX-7 fix round; one rule for both, `catalog::pin`):
+
+| The read of the pinned version | Point-bound restore | `catalogSync` deep check |
+|---|---|---|
+| **the bucket holds it** and it is not current: the set was written again in this bucket after the point was signed | exit 3 `PointBindingMismatch`, saying whether the attested manifest is still retained at that version | `Conflict`, not selectable; the remedy says the set was written again in this bucket |
+| **the bucket does not hold it**: `404 NoSuchVersion`; `400 InvalidArgument` for an id the store could never have issued (MinIO answers that for any id that is not a UUID, measured); or a store that does not read by version at all — a copy, an unversioned bucket, a version that was expired or deleted | the manifest digest decides, as for a point without a pin; the run goes on and the runner logs `PointPinUnchecked`, "the pin could not be checked in this bucket" | the digest decides; the entry's `remedy` carries the same note after the state's own remedy |
+| **any other failure** — a 403 (the principal lacks `s3:GetObjectVersion`), an outage | exit 1: could not tell, nothing restored | `Unreadable`: could not tell; the remedy names `s3:GetObjectVersion` |
+
+The deep check takes the pin from the verified RECEIPT, never from the record
+(an older writer's record may lack it), and reserves the extra read in its
+per-point object budget. A pinned point whose version IS the current one is
+exactly as before, and costs no extra read. The read by id needs
+`s3:GetObjectVersion` on the archive prefix, beside the `s3:GetObject` the
+manifest read already needs.
+
+**The cost of reading a copy as a copy.** The pin is checked only where the
+bucket being read still HOLDS the pinned version and serves it by id: "not this
+bucket's history" and "this bucket's history, gone" are one answer to a reader.
+So a set that really WAS written again reads like a copy — the digest alone,
+which an identical manifest over rewritten segments passes, with the note and
+never a refusal — by three routes:
+
+- the pinned version is gone from the bucket that signed the point: a
+  lifecycle rule expired it, or a principal holding `s3:DeleteObjectVersion`
+  deleted it (measured, FX-7 re-check: deleting the pinned version turned that
+  bucket's `Conflict` into `Available` with the note);
+- the copy never held it: a copy synced AFTER the set was written again, or a
+  copy rewritten after it was made (measured: both copies read `Available` with
+  the note while the signing bucket read `Conflict`);
+- the store cannot serve a version it holds (a misbehaving S3-compatible store,
+  or a proxy that drops `?versionId=`; seen on neither MinIO nor SeaweedFS).
+
+Keep noncurrent manifest versions at least as long as the points that pin them;
+Object Lock retention covering a point's lifetime keeps its pinned version.
+Measured on SeaweedFS 4.48 (FX-7 renumber, compose slot 2): a `GOVERNANCE`
+retention on a rewritten point's pinned version refused that version's delete
+(`AccessDenied`, the version count unchanged) and the point stayed `Conflict`.
+Governance mode yields to a principal holding `s3:BypassGovernanceRetention`,
+compliance mode to nobody; that a lifecycle rule cannot expire a retained
+version, and AWS S3 itself, are
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source]. When the
+signing bucket's catalog says `Conflict` and a copy's says `Available`, believe
+the `Conflict`: it is evidence about the set, not about the place. Only a check
+of the segment digests the manifest records closes all three routes, and this
+build runs none.
+
+The digest alone cannot give that answer: an identical manifest over rewritten
+segments hashes the same. **An auditor** reads the attested bytes by version and
+hashes them:
+
+```
+aws s3api get-object --bucket <bucket> --key <archive.manifest_key> \
+  --version-id <archive.manifest_version_id> manifest.json
+sha256sum manifest.json    # equals archive.manifest_sha256
+```
+
+**Limits.** Only the MANIFEST is pinned: segments are not, so a rewrite is
+detected, not undone, and a restore of a superseded point is refused rather than
+attempted — the attested version is still in the bucket's history (the refusal
+says so) for a recovery by hand. A pin is checked only in a bucket that holds
+the pinned version. An unversioned bucket gets no pin. Absent never means
+"version zero", and a pin is never inferred for a receipt that does not carry
+one: `logweir catalog sync` copies the receipt's pin or writes none.
 
 `--receipt-out <path>` additionally writes the same bytes to `<path>` and the
 DSSE sidecar to `<path>` with the extension replaced by `.sig` — the pairing
@@ -528,15 +683,19 @@ just schema
 
 Regenerates the checked-in schemas from their Rust types. The CI drift arm
 fails on any difference, so `just schema` is the only sanctioned way to change
-`schemas/logweir-backup-receipt-1.1.0.json`. The 1.0.0 file is frozen and is not
-regenerated; `crates/logweir-core/tests/schema_drift.rs::
-the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema` keeps it what it was.
+the current receipt schema, `schemas/logweir-backup-receipt-1.2.0.json`. The
+1.0.0 and FX-4's 1.1.0 files beside it are frozen and are not regenerated;
+`crates/logweir-core/tests/schema_drift.rs::
+the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema` and
+`::the_frozen_1_1_0_receipt_schema_is_still_fx4s` keep them what they were.
 
 ## Upgrade, rollback and old receipts (format 1.1.0)
 
-- **Every receipt this build signs is 1.1.0** and carries `config_coverage`.
-  The payload type is unchanged, so every reader that verifies a receipt today
-  still verifies a new one.
+- **Every receipt this build signs carries `config_coverage`**, at 1.1.0 — or
+  at 1.2.0 when it also pins its manifest's version (FX-7,
+  [below](#upgrade-rollback-and-old-receipts-format-120)). The payload type is
+  unchanged, so every reader that verifies a receipt today still verifies a new
+  one.
 - **Readers built before FX-4 accept 1.1.0 receipts**: they compare majors only
   and ignore the unknown field. Measured for FX-4 with both readers at
   `ac76cd0d` (`git show ac76cd0d:docs/verify_scorecard.py`, script 1.14.0, and
@@ -563,6 +722,33 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema` keeps it what it was.
   `notCaptured` (`manifestDiffers`), because the engine's capture is
   all-or-nothing and its record for them is empty. Measured on the compose
   stack in `e2e/tests/config_coverage.rs`.
+
+## Upgrade, rollback and old receipts (format 1.2.0)
+
+- **A pinned receipt is 1.2.0; every other receipt is FX-4's 1.1.0.** The pin
+  is the only difference: `schemas/logweir-backup-receipt-1.2.0.json` is the
+  frozen 1.1.0 schema plus the optional `archive.manifest_version_id`, with no
+  other property, type or required field moved. The payload type keeps
+  `version=1.0.0`, and no arm reads the pin.
+- **Readers built before FX-7 accept 1.2.0 receipts and ignore the pin** —
+  FX-4's (script 1.15.0, a `logweir` built after FX-4 and before FX-7) and the ones before
+  them: they compare majors only, arm 6 reads the 1.2 minor as "at least 1",
+  and none of the receipt's types refuses an unknown field. They print no
+  manifest version, so an auditor who needs the pin verifies with script 1.16.0
+  or a `logweir` built from FX-7 on. Measured (FX-7 renumber, 2026-10-05): a
+  `logweir` built at main `b8b9263f` with script 1.15.0, and the released
+  `v0.1.5` runner's `logweir` with script 1.14.0, each exit 0 on
+  `unmodified_receipt_pinned.json` signed with the fixture key and print for it
+  exactly what they print for the same document without the pin at 1.1.0
+  (FX-4's two read and print its coverage too); all four exit 0 on a real 1.2.0
+  receipt a run signed on a versioned SeaweedFS bucket. A 1.2.0 catalog point is
+  accepted by the three that know the type; `v0.1.5` has no `catalog-point`
+  payload type at all.
+- **Rollback.** A build from before FX-7 writes unpinned receipts again (1.1.0
+  from FX-4's build, 1.0.0 before it), and its readers neither print nor check
+  a pin. The 1.2.0 receipts already written stay valid and verifiable under
+  every major-1 reader. Before rolling the runner back past the execution
+  claim, read [what it still does not cover](#the-execution-claim-one-engine-run-per-backup_id).
 
 ---
 

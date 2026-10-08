@@ -146,6 +146,9 @@ pub struct BackupOutcome {
     pub manifest_key: String,
     /// `"sha256:<hex>"`, over the exact manifest bytes this run READ back.
     pub manifest_sha256: String,
+    /// **FX-7.** The version id of those exact bytes, when the store keeps
+    /// versions; `None` otherwise. Becomes `archive.manifest_version_id`.
+    pub manifest_version_id: Option<String>,
     pub records_per_topic: BTreeMap<String, u64>,
     pub covered_from_ms: i64,
     /// **EXCLUSIVE** (interface I22) — see `phase_run::Ran::covered_to_ms`,
@@ -225,7 +228,11 @@ pub enum BackupError {
     /// **RECEIPT-DUP.** The execution claim could not be PROVEN exclusive —
     /// the evidence store refused the create-only put, answered it without
     /// enforcing it, or accepted a second create of the same key
-    /// (`phase_run::claim_execution`). **Exit 4**, GC11's "lock-proof failed,
+    /// (`phase_run::claim_execution`) — or (**FX-7**) the archive could not be
+    /// read to prove the backup set is new, for a reason no retry changes (a
+    /// denial, a wrong bucket, region or CA, an unclassified failure; a
+    /// TRANSIENT failure there is `Operational`, exit 1, retried under a new
+    /// execution id: `phase_run::refuse_an_existing_set`). **Exit 4**, GC11's "lock-proof failed,
     /// nothing uploaded": no engine run was started, so there is no archive
     /// and no receipt, and a store that does not honour `If-None-Match: *` is
     /// a configuration no retry changes.
@@ -236,7 +243,9 @@ pub enum BackupError {
     #[error("lock: {0}")]
     Lock(String),
     /// **RECEIPT-DUP.** An earlier run of this execution already holds its
-    /// claim (`phase_run::claim_execution`): no engine run, nothing signed.
+    /// claim (`phase_run::claim_execution`) — or (**FX-7**) already wrote its
+    /// backup set without one (`phase_run::refuse_an_existing_set`, a set an
+    /// older build wrote): no engine run, nothing signed.
     /// **Exit 1** — retryable under D1 §4.6, because a retry is a NEW
     /// execution id with its own claim. Its own variant, not `Operational`,
     /// so the one place that names a failure's state
@@ -564,11 +573,19 @@ fn execute_with_signer(
     // before the engine could overwrite the manifest the earlier receipt
     // attests. See `phase_run::claim_execution`.
     let claim_key = phase_run::claim_execution(&backup_id, run_id, requested_at, evidence)?;
+    // **FX-7 — AND THE SET MUST BE NEW.** A set an OLDER build wrote carries
+    // no claim, so the claim above admits a second run of it; this check of
+    // the set's manifest and segments does not. After the claim, so a second run of THIS build is still
+    // answered by the claim, and the LAST REFUSAL before the engine: only
+    // FX-4's configuration read below, which writes nothing and is never
+    // fatal, stands between it and the engine's first write. See
+    // `phase_run::refuse_an_existing_set`.
+    phase_run::refuse_an_existing_set(&backup_id, &plan.storage, store)?;
     tracing::info!(
         run_id = %run_id,
         backup_id = %backup_id,
         claim_key = %claim_key,
-        "execution claimed; starting the engine"
+        "execution claimed and its backup set is new; starting the engine"
     );
 
     // **FX-4: the topic configuration, read by LOGWEIR, immediately before
@@ -602,6 +619,7 @@ fn execute_with_signer(
         source_auth: source_auth_render(&inputs.spec.source.auth),
         manifest_key: ran.manifest_key,
         manifest_sha256: ran.manifest_sha256,
+        manifest_version_id: ran.manifest_version_id,
         records_per_topic: ran.records_per_topic,
         covered_from_ms: ran.covered_from_ms,
         covered_to_ms: ran.covered_to_ms,
