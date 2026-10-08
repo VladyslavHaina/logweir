@@ -25,6 +25,20 @@
 //! purpose: the contract is what was MEASURED on one engine, and it moves only
 //! after its rows have been re-run on the new one. This test is what makes
 //! that re-run impossible to forget.
+//!
+//! **WHY IT LIVES IN `logweir`'s TESTS AND NEVER IN THE `e2e` PACKAGE.**
+//! `third_party/kafka-backup-binary.digest` is the pin only in a checked-out
+//! tree. Each `engine-matrix` row overwrites it, and `.engine/`, with ITS
+//! engine (`.github/workflows/engine-matrix.yml`, "Extract this engine and
+//! point the stack at it") and then runs `cargo test -p e2e --features e2e`.
+//! This file first lived at `e2e/tests/engine_pin.rs`, and run 37728540932
+//! recorded the floor row (v0.21.0) and the operator-default row (v0.22.0)
+//! as `fail(e2e suite)`: the guard failed on the row's digest and cargo
+//! stopped before a single drill suite ran (review H1). CI's workspace job
+//! runs this crate's tests on the committed tree; the matrix never runs them.
+//! `crates/logweir/tests/engine_matrix.rs`'s
+//! `no_e2e_test_compares_the_engine_with_a_committed_pin` keeps every pin
+//! statement out of `e2e/tests/`.
 
 use std::path::{Path, PathBuf};
 
@@ -35,7 +49,7 @@ const OLD_PIN: &str = "0.21.0";
 const OLD_DIGEST: &str = "sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317";
 
 fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn read(rel: &str) -> String {

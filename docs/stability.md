@@ -2113,7 +2113,7 @@ spend).
   by the [support matrix](support-matrix.md). Moving the pin is a recorded
   decision (OD-3, decided 2026-10-07: Logweir follows the newest OSO release,
   and builds from source with its own patches once PROD-00.2 lands), never a
-  routine bump: the guard `e2e/tests/engine_pin.rs` fails until every place
+  routine bump: the guard `crates/logweir/tests/engine_pin.rs` fails until every place
   that names the pin, PROD-01.1's measured contract included, names the new
   one.
 

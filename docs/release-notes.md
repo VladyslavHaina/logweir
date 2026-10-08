@@ -1273,15 +1273,23 @@ archive 0.21.0 wrote drilled with 0.23.3, and an archive 0.23.3 wrote drilled
 with 0.21.0, both `pass`. On Kafka 4.3.1 the record-semantics, G-PITR, FX-1,
 FX-7 and full-drill rows passed with the pin as well (34 tests). Unit rows refuse the `http://` combination in each
 of the three engine documents and at phase 0 for drill and backup specs, with
-mutants on those guards and on `doctor`'s pin, and `e2e/tests/engine_pin.rs`
-(default test set) holds every place that names the pin to one version. The
-weekly `engine-matrix` rows for 0.23.3 have not run on GitHub yet, and the
-controller's `LOGWEIR_ENGINE_VERSION` reaches a live runner Job only at the
-next PoC upgrade.
+mutants on those guards and on `doctor`'s pin, and `crates/logweir/tests/engine_pin.rs`
+(CI's workspace run) holds every place that names the pin to one version.
+`engine-matrix` run 37728540932 recorded `pass` for both 0.23.3 rows (Kafka
+3.7.1 and 4.3.1) with PROD-01.1's rows asserted. Its 0.21.0 and 0.22.0 rows
+recorded `fail(e2e suite)` because the pin guard then ran in the package the
+matrix runs with each row's own engine, and stopped those rows before their
+drill suites; it is not an engine finding, and the guard has moved. The
+re-dispatch at the fix tip is pending, and the controller's
+`LOGWEIR_ENGINE_VERSION` reaches a live runner Job only at the next PoC
+upgrade.
 **Rollback:** an older runner and controller run 0.21.0 again; `doctor` from
-that build refuses 0.23.3. Archives and receipts written by 0.23.3 stay
-readable and verifiable by older builds: the manifest and segment bytes are the
-shapes 0.21.0 reads.
+that build refuses 0.23.3. Measured: an archive 0.23.3 wrote restores and
+verifies `pass` when this build drives the 0.21.0 engine. Not run, and reasoned
+from source only: an OLDER Logweir build reading a 0.23.3 archive or receipt.
+The manifest has the keys a 0.21.0 manifest has (`missing_topics` is omitted
+when empty), the segment container is unchanged since 0.18.0, and the vendored
+structs ignore unknown keys.
 
 ### Verification scope: what "verified" means in this release
 

@@ -441,10 +441,12 @@ fn kill_own_restores() {
 ///
 /// It is a LITERAL on purpose, and it moves with the pin only after the rows
 /// have been re-run on the new engine (A-3f-1): PROD-00.3f moved it from
-/// `0.21.0` to `0.23.3` with that run. `e2e/tests/engine_pin.rs`, in the
-/// default test set, fails when it differs from `logweir::doctor::ENGINE_PIN`,
-/// so a bump cannot leave every contract row recording outcomes on the new
-/// engine while asserting nothing.
+/// `0.21.0` to `0.23.3` with that run. `crates/logweir/tests/engine_pin.rs`
+/// fails when it differs from the pin `doctor` accepts, so a bump cannot leave
+/// every contract row recording outcomes on the new engine while asserting
+/// nothing. That guard runs in CI's workspace job and never in this package:
+/// `engine-matrix` runs this package with each row's own engine, so nothing
+/// here may compare the engine with the pin.
 const CONTRACT_ENGINE: &str = "0.23.3";
 
 fn contract_applies(row: &str) -> bool {

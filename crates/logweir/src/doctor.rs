@@ -208,8 +208,8 @@ fn evaluate_engine_version(
 /// It moves with the pin and only with it: `scripts/extract-engine.sh`'s
 /// default `TAG`, the single vendored tarball under `third_party/`,
 /// `weirkeeper::job::ENGINE_VERSION` and PROD-01.1's `CONTRACT_ENGINE` must all
-/// name this version, and `e2e/tests/engine_pin.rs` (in the default test set)
-/// fails when any of them does not.
+/// name this version, and `crates/logweir/tests/engine_pin.rs` fails when any
+/// of them does not.
 pub const ENGINE_PIN: &str = "0.23.3";
 
 /// Whether the engine's `--version` output names exactly [`ENGINE_PIN`].
@@ -918,6 +918,21 @@ mod tests {
         assert!(!version_matches("kafka-backup 0.21.0"));
         assert!(!version_matches("kafka-backup 0.22.0"));
         assert!(!version_matches("kafka-backup 0.19.1"));
+        // So are the pin's sibling patch releases, released or not, and the
+        // same patch number on the next minor: "exactly 0.23.3" is not "any
+        // 0.23.x" (review M1: a matcher accepting any released 0.23.<digit>
+        // passed every row above).
+        for sibling in [
+            "kafka-backup 0.23.0",
+            "kafka-backup 0.23.1",
+            "kafka-backup 0.23.2",
+            "kafka-backup 0.23.4",
+            "kafka-backup 0.23.9",
+            "kafka-backup 0.24.3",
+            "kafka-backup 1.23.3",
+        ] {
+            assert!(!version_matches(sibling), "must reject `{sibling}`");
+        }
         // Every neighbour that makes a different version string.
         for other in [
             "kafka-backup 0.23.31",

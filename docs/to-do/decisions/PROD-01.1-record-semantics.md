@@ -815,7 +815,7 @@ PROD-00.1's to propose and OD-3's to decide — this record supplies each one's 
 - **Contract gating** (review L4): the rows assert this record's contract only on the pinned
   engine (`CONTRACT_ENGINE`, 0.21.0 until PROD-00.3f, 0.23.3 since); `engine-matrix` runs of other
   releases record outcome files and assert nothing (on v0.19.2 the manifest carries no
-  `configurations`, which arrived in 0.20.0). `e2e/tests/engine_pin.rs` fails when the constant
+  `configurations`, which arrived in 0.20.0). `crates/logweir/tests/engine_pin.rs` fails when the constant
   and the pin disagree (PROD-00 decision record, A-3f-1).
 - **Routes are not decided here.** Which of PROD-00.3a–d is an upstream PR, a fork patch or a
   Logweir-native path is PROD-00.1's proposal and OD-3's decision.
