@@ -92,7 +92,9 @@ client is constructed and before anything is written, the runner:
    point id that had to be taken on trust would be a label anyone could
    relabel;
 4. checks the receipt's own `archive.manifest_sha256` equals `manifest_sha256`,
-   and its `backup_id` equals `source.backup` (FX-16);
+   its `backup_id` equals `source.backup`, and its `archive.manifest_key` is the
+   key the engine reads that set at under `source.storage`,
+   `<prefix>/<backup_id>/manifest.json` (FX-16);
 5. verifies the receipt's **signature** (its `.sig` sidecar, DSSE, payload
    type `application/vnd.logweir.backup-receipt+json;version=1.0.0`) against the
    evidence-signing keyring passed as `--evidence-keys`, and judges the key
@@ -107,9 +109,11 @@ The receipt, its signature and the manifest are read through the same archive
 handle the restore uses (under the store contract, the controller-named
 credential and CA). And once the set chosen by `source.backup` has been
 described — after phase 0, before phase 2 — the runner checks it is the set the
-receipt describes: the same set id, the same manifest key, the digest of the
-manifest it just read equal to `manifest_sha256`, and the same version id the
-binding's read answered. Everything the run takes from the receipt (FX-4's
+receipt describes: the same set id, the digest of the manifest it just read
+equal to `manifest_sha256`, and the same version id the binding's read
+answered. That set is selected by the receipt's manifest key, not as the first
+set the listing shows with the id, so the set described is the set the engine
+restores. Everything the run takes from the receipt (FX-4's
 capture coverage, FX-8's recorded timestamp types, FX-7's pin) is about that
 set alone.
 

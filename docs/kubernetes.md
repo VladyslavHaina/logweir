@@ -1607,10 +1607,11 @@ no configuration is reconstructed by hand.**
    way no data moves and no target topic is created. The source cluster is
    never contacted. **The run then restores the point's own set or nothing
    (FX-16):** a plan whose `source.backup` is not the receipt's set
-   (`latestCompleted` included) is refused before any broker is contacted,
-   and once the set is described the runner refuses one whose set id,
-   manifest key, manifest digest or manifest version is not the one the
-   binding verified — both exit 3 `PointBindingSetMismatch`, before any target
+   (`latestCompleted` included), or under whose storage the engine would
+   read another manifest than the one the receipt attests, is refused before
+   any broker is contacted; the set is then selected by the point's manifest
+   key, and once it is described the runner refuses one whose set id,
+   manifest digest or manifest version is not the one the binding verified — both exit 3 `PointBindingSetMismatch`, before any target
    topic of the restore exists. The `Restore` this step creates names the
    point's set (`backupSetRef`), so it is never refused for that; the
    readiness check above refuses the same plan as

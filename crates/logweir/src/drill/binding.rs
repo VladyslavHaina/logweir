@@ -118,7 +118,9 @@ pub struct BoundSet {
     pub backup_id: String,
     /// The receipt's `archive.manifest_key`: the key the binding read the
     /// manifest back through and judged FX-7's pin at — bucket-absolute, the
-    /// space `list_manifests` returns keys in.
+    /// space `list_manifests` returns keys in — and, since the fix round, the
+    /// key the engine reads this set at under the plan's storage
+    /// (`Store::engine_manifest_key`), which `pick_backup_set` selects by.
     pub manifest_key: String,
     /// The bound `manifest_sha256`, which the binding proved that key's bytes
     /// hash to.

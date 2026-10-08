@@ -1514,12 +1514,19 @@ refuses it, exit 3, the message opening `PointBindingSetMismatch` (the general
   happens to be the newest: it names whichever set is newest when the run starts, so the same
   approved plan would restore another set after the next backup. A bound plan names its point's
   own set, `source.backup: <the receipt's backup_id>` — what the console, the catalog route and
-  every rehearsal already render.
+  every rehearsal already render. **And there too when, under the plan's `source.storage`, the
+  engine would read the set somewhere other than the manifest the receipt attests** (fix round,
+  review M-1). The engine is told only the storage and the set id and loads
+  `<prefix>/<backup_id>/manifest.json`, so a plan whose prefix is a parent of the point's set (with
+  another same-id set at that path), or a plan pointed at a copy under another prefix, would
+  restore an object the point does not describe; the refusal names both keys and the prefix the
+  set was written under.
 - **After the set is described and before phase 2**, when the set the engine is about to restore
-  is not the one the binding verified: its set id, its manifest key (a second copy of the set
-  under another prefix, where the pin was never judged), the digest of the manifest just read, or
-  the version that read answered (the manifest written again between the binding and the restore's
-  read). Phase 0 has run by then, so on a target whose own default is `LogAppendTime` its probe
+  is not the one the binding verified: its set id, the digest of the manifest just read, or the
+  version that read answered (the manifest written again between the binding and the restore's
+  read). The set is selected by the point's manifest key — the engine's key — never as the first
+  listed set carrying the id, so a same-id copy listed first neither refuses a truthful plan nor is
+  described in its place (review L-1); a listing that does not show that key is exit 1. Phase 0 has run by then, so on a target whose own default is `LogAppendTime` its probe
   topic has been created and deleted, the documented exception
   ([above](#exit-3-has-one-documented-exception-phase-0s-logappendtime-override-probe)); no target
   topic of the restore is created and the engine never starts.
@@ -1534,7 +1541,9 @@ instead of restoring another set under the point's word): MINOR under OD-7's thi
 format changes. A plan without `source.point` is untouched.
 **Migration.** A hand-written point-bound plan (the standalone disaster path) that says
 `backup: latestCompleted` is refused after the upgrade: name the point's set instead, which needs a
-new approval because the plan bytes change. Console, catalog and rehearsal plans already name it.
+new approval because the plan bytes change. So is one whose `source.storage` prefix is not the one
+the set was written under (the refusal names it); a copy of the archive that keeps the original
+keys, in another bucket, restores as before. Console, catalog and rehearsal plans already name it.
 **Rollback.** An older runner restores whatever `source.backup` names again; no archive, catalog
 or evidence object changes in either direction.
 
@@ -1632,7 +1641,7 @@ controller pinned, and that the key may authorise.
 | a standing authorization outside its validity window | 3 | `GuardRefused`, message opens `AuthorizationExpired` |
 | a mounted keyring or sidecar that does not parse | 1 | — (structural corruption of a file, not a statement about authorisation) |
 | a bound point whose receipt or manifest digest differs | 3 | `GuardRefused`, message opens `PointBindingMismatch` |
-| a bound point that verifies, in a plan whose `source.backup` is not the point's set (`latestCompleted` included), or whose restored set's id, manifest key, manifest digest or manifest version is not the one the binding verified (FX-16) | 3 | `GuardRefused`, message opens `PointBindingSetMismatch` |
+| a bound point that verifies, in a plan whose `source.backup` is not the point's set (`latestCompleted` included), under whose storage the engine would read another manifest than the receipt's, or whose restored set's id, manifest digest or manifest version is not the one the binding verified (FX-16) | 3 | `GuardRefused`, message opens `PointBindingSetMismatch` |
 | a bound point whose receipt carries no signature, a signature no mounted evidence key verifies, or a key whose lifecycle or usage refuses it — or a point-bound plan with no evidence keyring | 3 | `GuardRefused`, message opens `PointUntrusted` |
 | a bound point whose receipt or manifest is missing or unreadable | 1 | — (no refusal line; nothing about the plan was found wanting) |
 

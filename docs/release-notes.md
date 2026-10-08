@@ -429,13 +429,19 @@ such a run, exit 3, the message opening `PointBindingSetMismatch`
 GuardRefused`):
 
 - **before any broker is contacted**, when `source.backup` is not the
-  receipt's set. `backup: latestCompleted` beside a bound point is always
-  refused: it names whichever set is newest when the run starts;
+  receipt's set (`backup: latestCompleted` beside a bound point is always
+  refused: it names whichever set is newest when the run starts), or when,
+  under the plan's storage, the engine would read the set's manifest anywhere
+  but where the receipt attests it: the engine loads
+  `<prefix>/<backup_id>/manifest.json`, so a plan pointed at a copy under
+  another prefix, or at a parent of the point's prefix with another same-id
+  set there, is refused, naming the prefix the set was written under;
 - **after the set is described and before any target topic exists**, when the
   set about to be restored is not the one the binding verified: another set
-  id, another manifest key (a copy of the set under another prefix), another
-  manifest digest, or another manifest version (the manifest written again
-  during the run).
+  id, another manifest digest, or another manifest version (the manifest
+  written again during the run). The set is chosen by the point's manifest
+  key, never as the first listed set with the id, so a same-id copy elsewhere
+  under the prefix is neither restored nor a reason to refuse.
 
 The binding also reads the receipt, its signature and the manifest through the
 restore's own archive handle: under the store contract, the controller-named
@@ -449,6 +455,10 @@ What changes on the upgrade:
   standalone disaster path) is refused. Name the point's set instead
   (`source.backup: <the receipt's backup_id>`, which `logweir catalog list`
   shows) and approve the new plan.
+- **A standalone point-bound plan whose `source.storage` prefix is not the one
+  the point's set was written under** (a copy of the archive under another
+  prefix, or a parent prefix) is refused; the refusal names the prefix. A copy
+  that keeps the original keys, in another bucket, restores as before.
 
 **Do:** before the runner image rolls, change every standalone point-bound
 plan that says `backup: latestCompleted` to name its point's set, and approve
@@ -459,17 +469,21 @@ restored-set disagreements refused alone, naming itself),
 `crates/logweir/tests/orchestrator.rs` (each disagreement refused with no target
 topic, no fingerprint and no scorecard; the matching set runs; the set check
 comes before FX-8's time basis), `crates/logweir/tests/restore_phase.rs` (the
-real binary refuses both plan shapes before phase 0, the bootstrap never
-dialled), source guards in `crates/logweir/src/drill/mod.rs` (where the check
-sits; the verified set travels with the coverage; one archive-handle
-constructor), and planted mutants, each killed (FX-16). Live, on compose slot 4
-with engine 0.23.3 (`e2e/tests/point_set_binding.rs`): the plan bound to point
-A and naming A restored A's 30 records; naming a later set B or
-`latestCompleted` was refused before phase 0, and a byte-identical copy of A
-under another prefix and a copy with an edited manifest were refused after
-phase 0 and before phase 2, with no target topic in any refused run; the build
-before FX-16 restored all four under A's receipt (B's 45 records, or the
-copy), signed `pass`. Not yet proven on the PoC: a catalog-point restore after
+real binary refuses both plan shapes and a nested point before phase 0, the
+bootstrap never dialled), `crates/logweir-store/tests/storage.rs` (the engine's
+manifest key), source guards in `crates/logweir/src/drill/mod.rs` (where the
+check sits; the verified set travels with the coverage; one archive-handle
+constructor), and planted mutants, each killed (FX-16 and its fix round). Live,
+on compose slot 4 with engine 0.23.3 (`e2e/tests/point_set_binding.rs`): the
+plan bound to point A and naming A restored A's 30 records although a same-id
+copy of A was listed first; naming a later set B or `latestCompleted`, a copy
+of A under another prefix, an edited copy, and a point whose set is nested
+under the plan's prefix with another same-id set where the engine reads were
+all refused before phase 0, with no target topic. The build before FX-16
+restored each of them under the point's receipt (B's 45 records, a copy, or
+the other same-id set's 45 under a 60-record point, signed `fail-integrity`);
+the build at FX-16's first round still restored that last one, and refused
+the truthful plan because of the copy listed first. Not yet proven on the PoC: a catalog-point restore after
 the upgrade that carries FX-16.
 **Rollback:** an older runner restores whatever `source.backup` names again,
 `latestCompleted` included, and reads the binding through the environment's
