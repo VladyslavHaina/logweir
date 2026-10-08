@@ -180,7 +180,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-01.3 | Reach managed and mTLS clusters | P1 | M1 | impl | 01.5 | — | k8s | A | Proposed |
 | 1 | PROD-01.2 | Publish a tested compatibility contract | P1 | M1 | research | 00.1, 01.1, 01.3, 01.5 | OD-4 (provider rows) | compose | B | Proposed |
 | 1 | PROD-14.1 | Simple install and emergency recovery kit | P1 | M1 | impl | 14.0, 01.2, 16.1 | — | k8s | A | Proposed |
-| 1 | PROD-16.1 | No key by default: one-person console confirmation, console key generated at install | P1 | M1 | impl | — | — | k8s | A | Proposed |
+| 1 | PROD-16.1 | No key by default: one-person console confirmation, console key generated at install | P1 | M1 | impl | — | — | k8s | A | In progress |
 | 1 | PROD-16.2 | Two-person approval in the console: the second person clicks Approve | P1 | M1 | impl | 16.1 | — | k8s | A | Proposed |
 | 1 | PROD-16.4 | Auth follow-ups: IdP groups mapped to roles proven live; an audit-log retention recipe | P2 | M1 | impl | — | — | k8s | B | Proposed |
 | 1 | PROD-08.1 | Complete archive integrity and exact counts | P1 | M2 | impl | 01.1 | — | compose | A | Done |
