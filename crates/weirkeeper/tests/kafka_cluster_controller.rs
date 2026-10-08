@@ -2024,3 +2024,276 @@ async fn a_conflicting_cluster_status_write_is_surfaced() {
         "the conflict reaches the reconciler verbatim; got {error}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FX-11 — a probe pod the namespace refuses at creation
+// ---------------------------------------------------------------------------
+
+/// The admission's words for a quota-refused probe pod.
+const QUOTA_REFUSAL: &str = "Error creating: pods \\\"logweir-probe-orders-prod-x2b9c\\\" is \
+     forbidden: exceeded quota: compute, requested: limits.cpu=1, used: limits.cpu=4, \
+     limited: limits.cpu=4";
+
+/// A probe Job with NO pod, created at `created`, owned by the cluster:
+/// still running (`status: {}` — the Job controller counts nothing), or
+/// failed on its deadline.
+fn podless_probe_job(created: &str, failed: bool) -> String {
+    let status = if failed {
+        r#"{"conditions":[{"type":"Failed","status":"True","reason":"DeadlineExceeded",
+           "lastProbeTime":"2026-09-10T11:59:50Z","lastTransitionTime":"2026-09-10T11:59:50Z"}]}"#
+    } else {
+        "{}"
+    };
+    format!(
+        r#"{{"apiVersion":"batch/v1","kind":"Job",
+  "metadata":{{"name":"{JOB}","namespace":"{NS}","uid":"{JOB_UID}",
+    "creationTimestamp":"{created}",
+    "ownerReferences":[{{"apiVersion":"logweir.dev/v1alpha1","kind":"KafkaCluster",
+      "name":"{NAME}","uid":"{UID}","controller":true,"blockOwnerDeletion":true}}]}},
+  "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
+  "status":{status}}}"#
+    )
+}
+
+fn probe_events(message: Option<&str>) -> String {
+    let items = message.map_or_else(String::new, |m| {
+        format!(
+            r#"{{"apiVersion":"v1","kind":"Event",
+    "metadata":{{"name":"{JOB}.17f","namespace":"{NS}"}},
+    "involvedObject":{{"apiVersion":"batch/v1","kind":"Job","name":"{JOB}","namespace":"{NS}","uid":"{JOB_UID}"}},
+    "reason":"FailedCreate","type":"Warning","message":"{m}"}}"#
+        )
+    });
+    format!(r#"{{"apiVersion":"v1","kind":"EventList","metadata":{{}},"items":[{items}]}}"#)
+}
+
+fn podless_probe_routes(job: String, events: String) -> Vec<Route> {
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: "/jobs/logweir-probe-orders-prod",
+            status: 200,
+            body: job.clone(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/pods",
+            status: 200,
+            body: r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#.to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/events",
+            status: 200,
+            body: events,
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/kafkaclusters/orders-prod/status",
+            status: 200,
+            body: cluster_json(NAME, PLAINTEXT_AUTH, "{}"),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/jobs/logweir-probe-orders-prod",
+            status: 200,
+            body: job,
+        },
+    ]
+}
+
+/// The JSON bodies of every `PATCH` to the probe Job.
+fn job_patches(bodies: &[SeenBody]) -> Vec<Value> {
+    bodies
+        .iter()
+        .filter(|b| {
+            b.method == "PATCH" && path(&b.uri).ends_with("/jobs/logweir-probe-orders-prod")
+        })
+        .map(|b| serde_json::from_str::<Value>(&b.body).expect("JSON"))
+        .collect()
+}
+
+/// **FX-11: A QUOTA-REFUSED PROBE IS `PodCreationForbidden` 30 SECONDS AFTER
+/// THE JOB, NAMING THE QUOTA, WITH `reachable` UNTOUCHED.** Before FX-11 the
+/// cluster read `ProbeRunning` for the probe's whole 120-second deadline and
+/// then `NoExitCode`.
+///
+/// Pass 1: the running Job is 45 s old, counts no pod and has a `FailedCreate`
+/// Event — it is cancelled, and the status names the refusal. Pass 2: the
+/// cancelled Job has failed — the same status, and NOW the TTL, which is the
+/// re-probe timer: one refused Job per cadence, never a retry storm.
+///
+/// KILLS: the Events read dropped at either step; the message not propagated;
+/// the early cancel dropped; the TTL dropped (a status that would flip to
+/// `NoExitCode` once the Event ages out, and a cluster never re-probed).
+#[tokio::test]
+async fn fx11_a_probe_pod_the_quota_refuses_names_the_quota_and_leaves_reachable_alone() {
+    // ---- pass 1: running, refused ---------------------------------------
+    let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
+        podless_probe_job("2026-09-10T11:59:15Z", false),
+        probe_events(Some(QUOTA_REFUSAL)),
+    ));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("PodCreationForbidden"),
+        "{seen:?}"
+    );
+    assert_eq!(outcome.reachable, None);
+    assert_eq!(outcome.requeue, Requeue::After(REQUEUE_SECS));
+    let patches = job_patches(&seen);
+    assert_eq!(patches.len(), 1, "{seen:?}");
+    assert_eq!(
+        patches[0]["spec"]["activeDeadlineSeconds"],
+        serde_json::json!(1),
+        "the Job is cancelled, not left to its 120-second deadline"
+    );
+    let status = &patched_statuses(&seen)[0];
+    assert_eq!(status["reason"], "PodCreationForbidden");
+    assert_eq!(
+        conditions_of(status),
+        vec![(
+            CONDITION_REACHABLE.to_string(),
+            "Unknown".to_string(),
+            "PodCreationForbidden".to_string()
+        )]
+    );
+    let said = status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        said.contains("exceeded quota: compute") && said.contains("limits.cpu=1"),
+        "the admission's own words: {said}"
+    );
+    assert!(
+        status.get("reachable").is_none() && status.get("clusterId").is_none(),
+        "a probe that never ran observed nothing: {status}"
+    );
+    let lists: Vec<String> = seen
+        .iter()
+        .filter(|b| path(&b.uri).ends_with("/events"))
+        .map(|b| b.uri.replace("%3D", "="))
+        .collect();
+    assert_eq!(lists.len(), 1, "{lists:?}");
+    assert!(
+        lists[0].contains(&format!("involvedObject.uid={JOB_UID}")),
+        "{lists:?}"
+    );
+
+    // ---- pass 2: the cancelled Job has failed ----------------------------
+    let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
+        podless_probe_job("2026-09-10T11:59:15Z", true),
+        probe_events(Some(QUOTA_REFUSAL)),
+    ));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("PodCreationForbidden"),
+        "{seen:?}"
+    );
+    assert!(outcome.ttl_patched, "the usual TTL, so the next probe runs");
+    assert_eq!(outcome.requeue, Requeue::After(RE_PROBE_SECS));
+    let status = &patched_statuses(&seen)[0];
+    assert_eq!(
+        status["reason"], "PodCreationForbidden",
+        "not NoExitCode: {status}"
+    );
+    assert!(status.get("reachable").is_none());
+    let patches = job_patches(&seen);
+    assert_eq!(patches.len(), 1, "{seen:?}");
+    assert_eq!(
+        patches[0]["spec"]["ttlSecondsAfterFinished"],
+        serde_json::json!(PROBE_TTL_SECONDS)
+    );
+    let status_at = seen
+        .iter()
+        .position(|b| path(&b.uri).ends_with("/status"))
+        .expect("a status write");
+    let ttl_at = seen
+        .iter()
+        .position(|b| {
+            b.method == "PATCH" && path(&b.uri).ends_with("/jobs/logweir-probe-orders-prod")
+        })
+        .expect("a TTL patch");
+    assert!(status_at < ttl_at, "the status lands before the TTL");
+}
+
+/// **FX-11 NEGATIVE CONTROL.** The same podless probe with no `FailedCreate`
+/// Event keeps the pre-FX-11 path: `ProbeRunning` and no cancel while it runs,
+/// `NoExitCode` and no TTL once it has failed.
+#[tokio::test]
+async fn fx11_control_a_podless_probe_with_no_event_keeps_no_exit_code() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
+        podless_probe_job("2026-09-10T11:59:15Z", false),
+        probe_events(None),
+    ));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some(REASON_PROBE_RUNNING),
+        "{seen:?}"
+    );
+    assert!(
+        job_patches(&seen).is_empty(),
+        "nothing is cancelled: {seen:?}"
+    );
+    assert_eq!(count(&seen, "GET", "/events"), 1, "the Events were read");
+
+    let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
+        podless_probe_job("2026-09-10T11:59:15Z", true),
+        probe_events(None),
+    ));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(outcome.reason.as_deref(), Some("NoExitCode"), "{seen:?}");
+    assert!(!outcome.ttl_patched);
+    assert!(job_patches(&seen).is_empty());
+}
+
+/// **FX-11, THE GRACE AND THE COST BOUND.** A podless probe Job 15 s old is
+/// not judged even with a refusal on record — the 30 s `Preflight` grace — and
+/// neither a pod list nor an events list is made. A Job whose own status counts
+/// a pod (`active: 1`) costs nothing either, however old.
+///
+/// KILLS: the grace period ignored; a pod or events list on every pass of a
+/// healthy probe.
+#[tokio::test]
+async fn fx11_a_young_or_counted_probe_job_costs_no_read() {
+    for job in [
+        podless_probe_job("2026-09-10T11:59:45Z", false),
+        podless_probe_job("2026-09-10T11:59:15Z", false)
+            .replace(r#""status":{}"#, r#""status":{"active":1}"#),
+    ] {
+        assert!(
+            job.contains("11:59:45Z") || job.contains(r#""active":1"#),
+            "each variant is what it says: {job}"
+        );
+        let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
+            job,
+            probe_events(Some(QUOTA_REFUSAL)),
+        ));
+        let outcome = reconcile_cluster(&cluster(), &client, now())
+            .await
+            .expect("the reconcile completes");
+        let seen = bodies.lock().expect("readable").clone();
+        assert_eq!(
+            outcome.reason.as_deref(),
+            Some(REASON_PROBE_RUNNING),
+            "{seen:?}"
+        );
+        assert_eq!(count(&seen, "GET", "/pods"), 0, "{seen:?}");
+        assert_eq!(count(&seen, "GET", "/events"), 0, "{seen:?}");
+        assert!(job_patches(&seen).is_empty());
+    }
+}
