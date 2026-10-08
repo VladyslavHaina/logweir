@@ -1784,7 +1784,13 @@ fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
         .config_coverage
         .clone()
         .expect("receipt A carries the block");
-    assert_eq!(a.receipt.format_version, "1.1.0");
+    // Every receipt this build signs carries PROD-05.1's `topic_configuration`
+    // (1.3.0); FX-4's 1.1.0 is what a receipt without it would say. Backup A
+    // authenticates with SCRAM-SHA-512, which is not one of PROD-01.3's modes.
+    assert_eq!(
+        a.receipt.format_version,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
+    );
     assert_eq!(ca[&denied].coverage, "captureDenied", "{ca:?}");
     assert_eq!(ca[&denied].timestamp_type, None);
     assert_eq!(ca[&ovr].coverage, "notCaptured", "{ca:?}");
@@ -1836,8 +1842,54 @@ fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
         );
         assert_eq!(v["rust_coverage_lines"], v["python_coverage_lines"], "{v}");
     }
-    // Drill parity.
-    let na = |r: &Restore| r.scorecard["topic_parity"]["not_assessed"].clone();
+    // Drill parity. `na` is this row's subject, the CONFIGURATION entries
+    // (FX-4). FX-21's `replication_factor (notRecorded)` and
+    // `partition_count (notRecorded)` entries depend on the engine: patch 0002
+    // (`0.23.3+logweir.2`) records every topic's factor, OSO's 0.23.3 and the
+    // rollback the first saved topic's only, and a bound restore reads the
+    // receipt's factor where the manifest has none. `layout_na` holds them to
+    // their shape; `replication_factor_parity.rs` is their row.
+    let all_na = |r: &Restore| -> Vec<String> {
+        r.scorecard["topic_parity"]["not_assessed"]
+            .as_array()
+            .expect("not_assessed")
+            .iter()
+            .map(|e| e.as_str().expect("a string").to_string())
+            .collect()
+    };
+    let na = |r: &Restore| -> Value {
+        json!(all_na(r)
+            .into_iter()
+            .filter(|e| e.contains(": configuration ("))
+            .collect::<Vec<_>>())
+    };
+    let layout_na = |r: &Restore| -> Vec<String> {
+        all_na(r)
+            .into_iter()
+            .filter(|e| !e.contains(": configuration ("))
+            .collect()
+    };
+    for r in [&ra, &rb, &ru, &rt] {
+        for e in layout_na(r) {
+            assert!(
+                e.ends_with(": replication_factor (notRecorded)")
+                    || e.ends_with(": partition_count (notRecorded)"),
+                "an entry of neither FX-4's nor FX-21's shape: {e}: {}",
+                parity(r)
+            );
+        }
+    }
+    // Bound to a 1.3.0 receipt, which records every factor, a restore names
+    // none `notRecorded` whatever the engine (FX-21's receipt fallback).
+    for r in [&ra, &rb, &rt] {
+        assert!(
+            !layout_na(r)
+                .iter()
+                .any(|e| e.contains("replication_factor")),
+            "{}",
+            parity(r)
+        );
+    }
     assert_eq!(
         na(&ra),
         json!([
@@ -1908,13 +1960,15 @@ fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
     // reader shows.
     for r in [&ra, &rb, &ru, &rt] {
         let unexpected = &r.scorecard["topic_parity"]["unexpected_divergence"];
-        for entry in na(r).as_array().expect("not_assessed").iter() {
-            let entry = entry.as_str().expect("a string");
-            let (topic, why) = entry
-                .split_once(": configuration (")
-                .and_then(|(t, w)| Some((t, w.strip_suffix(')')?)))
+        // Every entry, FX-21's included: `"<topic>: <what> (<why>)"`, whose
+        // twin is `"<topic>: <what> not assessed (<why>)"`.
+        for entry in all_na(r) {
+            let (head, why) = entry
+                .rsplit_once(" (")
+                .and_then(|(h, w)| Some((h, w.strip_suffix(')')?)))
                 .expect("the not_assessed shape");
-            let marker = format!("{topic}: configuration not assessed ({why})");
+            let (topic, what) = head.rsplit_once(": ").expect("the not_assessed shape");
+            let marker = format!("{topic}: {what} not assessed ({why})");
             assert!(
                 unexpected
                     .as_array()

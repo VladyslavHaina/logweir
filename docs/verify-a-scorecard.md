@@ -669,9 +669,12 @@ assessed (notRecorded)"` (or `partition_count`).
 7 compares it from the archive's manifest, else from the bound receipt's
 `topic_configuration`; a scorecard written before FX-21 compared the target's
 own factor with itself where the manifest lacked the source's, which engine
-0.23.3 does for every topic after the first one a backup saves. For such a
-document, read `topics[].source_replication_factor` in the archive's manifest:
-a topic without one has no replication-factor finding, whatever the scorecard
+0.23.3 does for every topic after the first one a backup saves. No field marks
+FX-21: a runner-signed document whose `engine.version` is
+`0.23.3+logweir.2` or a later `+logweir.<n>` was written with it; for any
+other (and for a standalone CLI's), read `topics[].source_replication_factor`
+in the archive's manifest (`source.backup_id`, `source.manifest_sha256`): a
+topic without one has no replication-factor finding, whatever the scorecard
 lists
 ([stability](stability.md#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
 

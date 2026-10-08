@@ -75,8 +75,21 @@ EOF
   exit 1
 }
 
-echo "==> 1/6 extracting the pinned kafka-backup engine"
-./scripts/extract-engine.sh
+# Step 1 KEEPS Logweir's engine build when one is already in place (FX-21
+# review L6): `.engine/kafka-backup` that runs here and prints the build env's
+# ENGINE_VERSION is what `scripts/engine-source.sh build` left, and
+# re-extracting would put OSO's release over it, so a parity run meant to
+# compare the two would silently run OSO's twice. Anything else (OSO's ELF,
+# which cannot exec on a Mac, or nothing) is replaced by the digest-pinned
+# extraction, as before. Step 4 prints which engine ran.
+build_version=$(sed -n 's/^ENGINE_VERSION=//p' third_party/kafka-backup-build.env)
+present_version=$(.engine/kafka-backup --version 2>/dev/null | awk '{print $NF}' || true)
+if [ -n "$build_version" ] && [ "$present_version" = "$build_version" ]; then
+  echo "==> 1/6 keeping Logweir's engine build at .engine/kafka-backup ($build_version)"
+else
+  echo "==> 1/6 extracting the pinned kafka-backup engine"
+  ./scripts/extract-engine.sh
+fi
 
 echo "==> 2/6 starting Kafka (KRaft) and MinIO"
 # `--wait` blocks until both servers report HEALTHY. The two one-shot setup
@@ -115,10 +128,10 @@ printf '{"allowed_cluster_ids":["%s"],"source_cluster_id":null}\n' "$CLUSTER_ID"
   > "$DEMO/allowed-clusters.json"
 echo "    target cluster: $CLUSTER_ID"
 
-# The engine ROUTE is probed, never assumed. `.engine/kafka-backup` is a Linux
-# ELF: OSO's release from `just engine`, or Logweir's build from
-# `scripts/engine-source.sh build` on a Linux host. On a Linux host it runs
-# directly. On the darwin/arm64 laptop this repository is developed on it
+# The engine ROUTE is probed, never assumed. `.engine/kafka-backup` is OSO's
+# release (a Linux ELF) from step 1's extraction, or Logweir's build from
+# `scripts/engine-source.sh build`, which step 1 keeps. A Linux ELF runs
+# directly on a Linux host, and a native build on any host. On the darwin/arm64 laptop this repository is developed on it
 # cannot exec at all (ENOEXEC — `logweir doctor` reports exit 126), so the demo
 # falls back to the container shim: OSO's digest-pinned image under
 # `--platform linux/amd64`, or the image and platform named by

@@ -499,12 +499,29 @@ all.
   must name (a unit row in each reader). FX-21 adds no format version of
   its own: the scorecard carries whatever version the rest of the run writes
   (1.4.0; 1.5.0 for PROD-01.3's auth modes; 1.6.0 for a sampled run since FX-23).
-- **Old evidence is not re-read.** A scorecard written before FX-21 carries
-  no marker that tells it apart: where its archive's manifest lacks a topic's
-  `source_replication_factor`, its silence about that topic's factor is the
-  defect, not parity. The manifest says which topics: read
-  `topics[].source_replication_factor` in the archive the scorecard's
-  `source.backup` names.
+- **No new marker; the writer identity and the manifest tell the documents
+  apart** (the orchestrator's decision on FX-21's review M2). Old evidence is
+  not re-read. A reader decides which writer signed a scorecard from fields
+  every scorecard already carries, then reads the archive:
+  - `engine.version` and `engine.digest`. A runner image declares them from
+    its `/etc/logweir/engine-identity` (PROD-00.2), and its engine and its
+    `logweir`, whose phase 7 wrote the document, are built from one commit.
+    `engine.version` `0.23.3+logweir.2` (build-input digest
+    `sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8`,
+    `third_party/kafka-backup-builds.txt`) or a later `+logweir.<n>` names a
+    runner with FX-21's phase 7: its silence about a topic's replication
+    factor is parity, because a factor it could not compare is named
+    `notRecorded`. Any other value (`0.23.3+logweir.1`, OSO's `0.23.3`, an
+    older release) names a writer before FX-21. The scorecard carries no
+    `logweir` version of its own, so a standalone CLI install that pairs a
+    `logweir` and an engine of different builds is told apart by neither
+    field: read the manifest.
+  - The archive's manifest, named by `source.backup_id` and pinned by
+    `source.manifest_sha256` (and `source.manifest_version_id` on a versioned
+    bucket). For a document from a writer before FX-21, a topic whose
+    `topics[].source_replication_factor` the manifest lacks (absent or `null`)
+    has no replication-factor finding, whatever `topic_parity` lists for it:
+    its silence there is the defect, not parity.
 - **Rollback.** An older `logweir` writes the old documents again (the
   silence above); the documents this build wrote stay valid for every reader.
   Rolling the engine back to `+logweir.1` or to OSO's 0.23.3

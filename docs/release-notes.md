@@ -866,16 +866,21 @@ under OD-7's third case, [stability](stability.md#a-source-replication-factor-th
 **Do:** roll the controller and the runner image together, as for item 35. A
 standalone CLI install replaces its engine with build 2 and exports
 `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest
-([quickstart.md](quickstart.md), step 4). Read a scorecard written before this
-change against its archive's manifest: a topic whose
-`source_replication_factor` the manifest lacks has no replication-factor
-finding, whatever the scorecard lists.
+([quickstart.md](quickstart.md), step 4). No field marks FX-21's documents:
+a reader tells them apart by the writer identity every scorecard carries,
+`engine.version` (`0.23.3+logweir.2`, or a later `+logweir.<n>`) with
+`engine.digest` (`sha256:2bca49d7…`), which a runner image declares and ships
+beside the `logweir` that wrote the document, plus the archive's manifest
+(`source.backup_id`, `source.manifest_sha256`). For a scorecard with any other
+`engine.version`, or one a standalone CLI signed, a topic whose
+`topics[].source_replication_factor` the manifest lacks has no
+replication-factor finding, whatever the scorecard lists.
 **Scope:** unit rows over the rule (not recorded, recorded as 0 or less, only
 the factor missing) in both modes, phase-7 rows through `run` (no record, the
 receipt's factor where the manifest has none, the manifest's first where both
 do, the partition count, a `newTopic` document phase 8 signs), the arm NR-5
-row in both readers and the parity script's new case, and nine mutants
-(`claude/artifacts/fx-21/mutants/`). Live, on compose slot 1 with `cluster3`
+row in both readers and the parity script's new case, and ten mutants, all
+killed (`claude/artifacts/fx-21/mutants/`). Live, on compose slot 1 with `cluster3`
 (Kafka 3.7.1): three topics at factors 3, 2 and 3 backed up in one run and
 restored by `newTopic` restores, unbound and bound to the point, on three
 engines. OSO's 0.23.3 (the container route) and Logweir's `0.23.3+logweir.1`
@@ -889,9 +894,11 @@ rows (contract asserted on build 2) compared SAME between builds 1 and 2, and
 the demo drill, the suites and the record-semantics files compared SAME
 between OSO's 0.23.3 (container route) and build 2; the replication factor
 the patch now records appears in none of those outputs. On a loaded host a
-natively built engine once failed a restore it started within a second of
-phase 0 creating the target topics (`Partition N not available`), so the
-native runs wait 5 s before a restore (a test shim; e2e/README.md).
+natively built engine can fail a restore it starts within a second of phase
+0 creating the target topics (`Partition N not available`; measured 1 restore
+in 7 and, in the review, 1 in 17), so the parity runs waited 5 s before a
+restore (a test shim; [e2e/README.md](../e2e/README.md)); the race is its own
+tracker row.
 **Rollback:** an older `logweir` writes the old silence again; the documents
 this build wrote stay valid for every reader. An engine rollback (to
 `+logweir.1`, or OSO's 0.23.3 with `ENGINE_SOURCE=oso`) records one factor per

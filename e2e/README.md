@@ -161,10 +161,11 @@ same way.
 
 **A native engine can outrun the target's metadata.** Built natively on the
 host (`scripts/engine-source.sh build` on macOS), the engine starts a restore
-within a second of phase 0 creating the target topics, and once in four runs
-on a loaded host (FX-21, 2026-10-08) it failed every topic with `Partition N
-not available for topic …` before the broker's metadata named the new
-partitions' leaders: the drill exits 1 and signs nothing. The container route
+within a second of phase 0 creating the target topics, and it can fail every
+topic with `Partition N not available for topic …` before the broker's
+metadata names the new partitions' leaders: the drill exits 1 and signs
+nothing. Measured on 2026-10-08, without a delay: 1 failed restore in 7
+(FX-21's runs) and 1 in 17 (its review's), on a loaded host. The container route
 starts slowly enough not to meet it. Phase 0 does not wait for the leaders it
 just asked for; until it does, a native run that meets this is rerun.
 

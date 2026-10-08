@@ -273,8 +273,6 @@ impl Inputs {
         Ok(())
     }
 
-    /// A NEW BUILD, the way the README says to make one: bump `n`, record
-    /// the digest the inputs then give, and append the pair to the ledger.
     /// The version the NEXT build of the shipped inputs would carry:
     /// `<release>+logweir.<n + 1>`. The planted cases bump from whatever the
     /// build env names, so a real build landing (FX-21's `+logweir.2`) does
@@ -289,6 +287,8 @@ impl Inputs {
         format!("{release}+logweir.{}", n.parse::<u64>().unwrap() + 1)
     }
 
+    /// A NEW BUILD, the way the README says to make one: bump `n`, record
+    /// the digest the inputs then give, and append the pair to the ledger.
     fn with_new_build(self) -> Self {
         let version = env_value(&self.env, "ENGINE_VERSION").unwrap();
         let (release, n) = version.split_once("+logweir.").unwrap();
@@ -834,6 +834,56 @@ fn check_sources_policy(policy: &str, gate_line: &str) -> Result<(), String> {
         return Err(format!("the gate does not check sources: `{gate_line}`"));
     }
     Ok(())
+}
+
+/// FX-21 review L2: a patch's oracle that lives in the engine's own tests runs
+/// in `scripts/ci-check.sh`, over the tree it prepares for `cargo deny`, and
+/// each named test must report `ok` there. Patch 0002 brings three; every one
+/// is in the patch AND in the gate's list, so dropping a test from either, or
+/// the gate's `cargo test`, fails here. The gate's live negative control (the
+/// hunk removed from a prepared tree: two of the three FAILED, exit 1) is
+/// `claude/artifacts/fx-21/gates/ci-oracle-negative-hunk-removed.log`.
+#[test]
+fn ci_check_runs_patch_0002s_engine_oracle() {
+    const ORACLE: [&str; 3] = [
+        "test_merge_manifests_updates_replication_factor",
+        "test_merge_manifests_preserves_replication_factor_when_none",
+        "test_manifest_persistence_keeps_every_topics_replication_factor",
+    ];
+    let check = |ci: &str, patch: &str| -> Result<(), String> {
+        let runs = ci.lines().any(|l| {
+            l.contains("cargo test --locked --release") && !l.trim_start().starts_with('#')
+        }) && ci
+            .contains("--manifest-path \"$engine_src/Cargo.toml\" -p kafka-backup-core --lib");
+        if !runs {
+            return Err("ci-check.sh does not run the engine's library tests".into());
+        }
+        for t in ORACLE {
+            if !patch.contains(&format!("fn {t}()")) {
+                return Err(format!("patch 0002 no longer carries {t}"));
+            }
+            if !ci.contains(t) {
+                return Err(format!("ci-check.sh does not require {t} to pass"));
+            }
+        }
+        Ok(())
+    };
+    let ci = read("scripts/ci-check.sh");
+    let patch = read("third_party/kafka-backup-patches/0002-manifest-replication-factor.patch");
+    check(&ci, &patch).unwrap();
+    // Negative controls: the gate's run dropped, a test dropped from the
+    // gate's list, a test dropped from the patch.
+    let no_run = ci.replace(
+        "cargo test --locked --release",
+        "cargo build --locked --release",
+    );
+    assert!(check(&no_run, &patch).is_err());
+    for t in ORACLE {
+        let unlisted = ci.replace(t, "test_something_else");
+        assert!(check(&unlisted, &patch).unwrap_err().contains(t));
+        let untested = patch.replace(&format!("fn {t}()"), "fn renamed()");
+        assert!(check(&ci, &untested).unwrap_err().contains(t));
+    }
 }
 
 /// REVIEW M2: both graphs — the engine's own lockfile and Logweir's — admit
