@@ -56,6 +56,7 @@
 //! records `tests/doctor.rs::check_7_…` at **26.60 s** for one dialling test.
 //! A binary CANNOT be handed an in-process double, which is why the one
 //! binary-level argv assertion lives under `e2e/` (`e2e/tests/backup_argv.rs`).
+pub mod config_coverage;
 pub mod phase_minus1_admit;
 pub mod phase_run;
 
@@ -145,11 +146,21 @@ pub struct BackupOutcome {
     pub manifest_key: String,
     /// `"sha256:<hex>"`, over the exact manifest bytes this run READ back.
     pub manifest_sha256: String,
+    /// **FX-7.** The version id of those exact bytes, when the store keeps
+    /// versions; `None` otherwise. Becomes `archive.manifest_version_id`.
+    pub manifest_version_id: Option<String>,
     pub records_per_topic: BTreeMap<String, u64>,
     pub covered_from_ms: i64,
     /// **EXCLUSIVE** (interface I22) — see `phase_run::Ran::covered_to_ms`,
     /// which is where the manifest's inclusive bound is converted.
     pub covered_to_ms: i64,
+    /// **FX-4.** Per named topic, whether the manifest's configuration record
+    /// was captured, and the effective `message.timestamp.type` with its
+    /// source — `config_coverage::classify` over Logweir's own read before
+    /// the engine and the manifest after it. One entry per named topic;
+    /// `phase_run::build_receipt` writes it as the receipt's 1.1.0
+    /// `config_coverage` block.
+    pub config_coverage: BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -217,7 +228,11 @@ pub enum BackupError {
     /// **RECEIPT-DUP.** The execution claim could not be PROVEN exclusive —
     /// the evidence store refused the create-only put, answered it without
     /// enforcing it, or accepted a second create of the same key
-    /// (`phase_run::claim_execution`). **Exit 4**, GC11's "lock-proof failed,
+    /// (`phase_run::claim_execution`) — or (**FX-7**) the archive could not be
+    /// read to prove the backup set is new, for a reason no retry changes (a
+    /// denial, a wrong bucket, region or CA, an unclassified failure; a
+    /// TRANSIENT failure there is `Operational`, exit 1, retried under a new
+    /// execution id: `phase_run::refuse_an_existing_set`). **Exit 4**, GC11's "lock-proof failed,
     /// nothing uploaded": no engine run was started, so there is no archive
     /// and no receipt, and a store that does not honour `If-None-Match: *` is
     /// a configuration no retry changes.
@@ -228,7 +243,9 @@ pub enum BackupError {
     #[error("lock: {0}")]
     Lock(String),
     /// **RECEIPT-DUP.** An earlier run of this execution already holds its
-    /// claim (`phase_run::claim_execution`): no engine run, nothing signed.
+    /// claim (`phase_run::claim_execution`) — or (**FX-7**) already wrote its
+    /// backup set without one (`phase_run::refuse_an_existing_set`, a set an
+    /// older build wrote): no engine run, nothing signed.
     /// **Exit 1** — retryable under D1 §4.6, because a retry is a NEW
     /// execution id with its own claim. Its own variant, not `Operational`,
     /// so the one place that names a failure's state
@@ -556,15 +573,34 @@ fn execute_with_signer(
     // before the engine could overwrite the manifest the earlier receipt
     // attests. See `phase_run::claim_execution`.
     let claim_key = phase_run::claim_execution(&backup_id, run_id, requested_at, evidence)?;
+    // **FX-7 — AND THE SET MUST BE NEW.** A set an OLDER build wrote carries
+    // no claim, so the claim above admits a second run of it; this check of
+    // the set's manifest and segments does not. After the claim, so a second run of THIS build is still
+    // answered by the claim, and the LAST REFUSAL before the engine: only
+    // FX-4's configuration read below, which writes nothing and is never
+    // fatal, stands between it and the engine's first write. See
+    // `phase_run::refuse_an_existing_set`.
+    phase_run::refuse_an_existing_set(&backup_id, &plan.storage, store)?;
     tracing::info!(
         run_id = %run_id,
         backup_id = %backup_id,
         claim_key = %claim_key,
-        "execution claimed; starting the engine"
+        "execution claimed and its backup set is new; starting the engine"
     );
+
+    // **FX-4: the topic configuration, read by LOGWEIR, immediately before
+    // the engine** — through the same reader (the same principal and the same
+    // source cluster) that admitted the run, and as close in time to the
+    // engine's own capture as this process can get. Never fatal: every
+    // per-topic outcome, a denied read included, is a value the receipt
+    // records. See `config_coverage`'s module doc for why the engine's own
+    // capture cannot answer this.
+    let observed = config_coverage::observe(reader, &plan.topics);
+    config_coverage::log(&observed);
 
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
+    let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
 
     let mut outcome = BackupOutcome {
         backup_id,
@@ -583,9 +619,11 @@ fn execute_with_signer(
         source_auth: source_auth_render(&inputs.spec.source.auth),
         manifest_key: ran.manifest_key,
         manifest_sha256: ran.manifest_sha256,
+        manifest_version_id: ran.manifest_version_id,
         records_per_topic: ran.records_per_topic,
         covered_from_ms: ran.covered_from_ms,
         covered_to_ms: ran.covered_to_ms,
+        config_coverage: coverage,
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

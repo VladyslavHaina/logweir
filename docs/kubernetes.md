@@ -587,6 +587,18 @@ listing was refused relays no body and lands `ResultUnreadable`. **If you
 separate the two, give the destination a `archiveRead` grant wide enough for
 the catalog, or accept that `RecoveryCatalog` will not sync.**
 
+**A pinned point's read BY VERSION (FX-7) is one action the rows above do not
+name.** A point whose receipt pins its manifest's version is checked, wherever
+the manifest's current version is not the pin — on every copy of the archive,
+and after a set was written again — by reading the pinned version by id
+(`GET ?versionId=`). AWS S3 authorises that read as `s3:GetObjectVersion` on
+`<bucket>/<prefix>/*`, for the `catalogSync` reader and for a point-bound
+restore's runner alike
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source]; the rows
+above were measured before FX-7. Without it such a point is `Unreadable` in the
+catalog and its point-bound restore exits 1 ("could not tell"), never a silent
+pass ([the pin](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+
 **SUPERSEDED — the retention enforcer now needs `s3:GetObject`.** When this
 row was measured the worker listed a set's objects and deleted them by the key
 list its approved plan carries, never reading one, and removing
@@ -1192,13 +1204,26 @@ list` still reads the durable catalog.
 
 | `availability` | meaning |
 |---|---|
-| `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's |
+| `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's, and — for a point whose receipt pins a manifest version (FX-7, versioned buckets) — the manifest's current version is the pinned one, or this bucket does not hold the pinned version at all (a copy of the archive, an unversioned bucket, a version that was expired or deleted): then the digest decided — which an identical manifest over rewritten segments passes — and the entry's `remedy` says the pin could not be checked in this bucket |
 | `Missing` | a definite `NotFound` |
-| `Unreadable` | any other storage error — 403, timeout, truncated. **"Could not tell", never "is not there".** |
+| `Unreadable` | any other storage error — 403, timeout, truncated, or a failed read of a pinned manifest version (FX-7; a 403 there is a principal without `s3:GetObjectVersion`, and the entry's remedy names it). **"Could not tell", never "is not there".** |
 | `Deleted` | a completed retention tombstone exists |
-| `Conflict` | two records disagree for one identity, or a record's facts contradict the receipt |
+| `Conflict` | two records disagree for one identity, a record's facts contradict the receipt, or this bucket holds the manifest version the receipt pins and it is no longer the current one — the set was written again in this bucket after the point was signed (FX-7; the entry's remedy says so) |
 | `UnsupportedFormat` | the record's major version is above this build's |
 | `Partial` | a sampled segment the manifest lists is missing |
+
+**What the pin cannot see (FX-7).** The pin is checked only where the bucket
+still holds the pinned version and serves it by id. A version that was expired
+or DELETED, a copy synced after the set was written again, or a store that
+cannot read by version leaves the digest alone, which an identical manifest
+over rewritten segments passes
+([the three routes](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+Object Lock retention covering a point's lifetime keeps its pinned version, and
+when the signing bucket's catalog says `Conflict` while a copy's says
+`Available`, believe the `Conflict`: it is evidence about the set, not about
+the place. Where ONE catalog lists a point at two locations, the locations merge
+best-of, so there the copy's `Available` is the entry's and the signing
+bucket's verdict survives only as "<location> is Conflict" in its `remedy`.
 
 | `verification` | meaning |
 |---|---|
@@ -1557,7 +1582,17 @@ no configuration is reconstructed by hand.**
    verifies the receipt's signature against the evidence keyring the
    controller mounts in the approval bundle (`evidence-keys.json`, every key
    of the namespace's resolved trust with its lifecycle, digest-pinned) and
-   reads the manifest back. A digest mismatch is exit 3 `PointBindingMismatch`;
+   reads the manifest back — and, when the receipt pins the manifest's version
+   (FX-7, a versioned bucket), compares it with the current one, since the
+   engine restores only the current one. When they differ it reads the pinned
+   version by id: a version this bucket still holds is a rewrite here; one it
+   does not hold — every copy of the archive, an unversioned bucket, a version
+   that was expired or deleted — leaves the decision to the digest (which an
+   identical manifest over rewritten segments passes), and the runner logs
+   `PointPinUnchecked` and goes on. A digest mismatch, or a pinned version
+   the bucket holds that is no longer current, is exit 3 `PointBindingMismatch`;
+   a pinned version that cannot be read at all (a 403 without
+   `s3:GetObjectVersion`, an outage) is exit 1;
    an unsigned receipt, a signature no trusted key verifies, or a signer the
    trust refuses (revoked for compromise, retired before the receipt was
    written, not an `EvidenceSigning` key) is exit 3 `PointUntrusted`. Either
@@ -2531,12 +2566,22 @@ skip with no `Restore`:
 | the slot is inside `spec.bounds.startingDeadlineSeconds` | `ConcurrencyBlocked` |
 | this schedule's own previous rehearsal finished | `ConcurrencyBlocked` |
 | no other schedule is rehearsing against the same target cluster | `TargetBusy` |
+| `spec.bounds.runnerResources` is one the controller applies: whole millicores and bytes, at most 4 CPUs and 8Gi, no zero limit, a memory limit of at least 32Mi, no request above its limit (FX-2, §12) | `AuthorizationInvalid` |
 | the `Approval` is `Verified=True`, bound to **this object's UID**, its `planHash` is the recomputed digest, its key may still authorise and carries an approver usage | `AuthorizationInvalid` |
 | the signed document has not expired and was not minted for more than 90 days | `AuthorizationExpired` |
 | the target `KafkaCluster` reports `reachable: true` and a `clusterId`, and its saved connection resolves (the same `RestoreTarget` resolution the `Restore` admission makes — a SCRAM connection with no `secretRef`, say, is refused here by field) | `TargetUnavailable` |
 | the signed scope's `templateDigest`, `targetClusterId` and `deadlineSeconds` agree with the sealed spec | `AuthorizationInvalid` |
 | a point qualifies: covered by `spec.point.topics`, old enough, with a non-empty window, inside `maxPartitions`, not captured from the target cluster, not inside a retention lease | `NoQualifyingPoint`, `TargetUnavailable` or `PointRetentionInProgress` |
 | the RENDERED plan falls inside the signed scope | `AuthorizationInvalid` |
+
+**`spec.bounds.runnerResources` reaches the runner container.** It is copied
+verbatim onto each child `Restore`'s `spec.runnerResources`, and from there
+onto the runner container (§12, *The runner's requests and limits*). A block
+outside the bounds can never run under the authorization that binds it, so
+every slot is skipped as `AuthorizationInvalid` — the `Authorized` condition's
+message names the field — and no child is created; the spec is sealed, so the
+remedy is a new schedule under a new authorization. Before FX-2 the block was
+copied onto the child and then dropped at the Job.
 
 **A slot that came due before the `RehearsalSchedule` was created is not its
 slot.** The controller never rehearses a slot whose due time is before the
@@ -4345,10 +4390,10 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | Exit | `status.phase` | `status.exitReason` | Condition | What it means |
 |---|---|---|---|---|
 | **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
-| **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine, so this one did not start it (RECEIPT-DUP). |
+| **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine — it holds the claim (RECEIPT-DUP), or, with no claim, its backup set already exists in the archive (FX-7) — so this one did not start it. With no reason: among others, a backup runner whose read of the archive to prove its set is new failed TRANSIENTLY (a transport error, a timeout, a 5xx the client had already retried; FX-7) — retryable, and a retry is a new execution id. |
 | **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
 | **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. |
-| **4** | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. `ExecutionClaimUnproven`: the evidence store refused the execution claim or does not enforce conditional create; the engine never started. |
+| **4** | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. `ExecutionClaimUnproven`: the evidence store refused the execution claim or does not enforce conditional create, or (FX-7) the archive could not be read to prove the backup set is new for a reason no retry changes (a 401/403, a wrong bucket, region or CA); the engine never started. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` | The Job finished and no container named `runner` reported a terminated state. See "the crashed Job" below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `NameTooLong` | The `Backup`'s own name is longer than 63 characters, so **nothing was created**. See below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `ExecutionSpecInvalid` | The typed spec states no runnable run identity (see "Manual backups" below), so **nothing was created**. |
@@ -4433,6 +4478,12 @@ Four things about it are worth knowing before you debug one:
   returned 200. The TTL controller deletes the Job *and its pods*, and the code
   lives on the pod, so a TTL that existed earlier would be a race pod garbage
   collection can win.
+
+There is **no `resources` block**: `Backup.spec` has no requests-or-limits
+field, so a backup's runner states none and the namespace's `LimitRange`
+supplies them or nothing does. A `ResourceQuota` that requires limits rejects
+the pod, and the `Backup` reports `RunnerReady=False`, `PodCreationForbidden`.
+(`Restore.spec.runnerResources` is the `Restore`'s field — §12.)
 
 ### Manual backups: the typed contract, and no annotation anywhere
 
@@ -4954,7 +5005,13 @@ the engine starts ([the execution claim](formats/backup-receipt.md#the-execution
 If the lost Job's pod got that far, the re-created Job finds the claim and exits
 **1** naming `ExecutionAlreadyClaimed`, with no engine run and no receipt: a
 second engine run would have overwritten the manifest the first run's signed
-receipt attests. The `Backup` ends `Failed` with `status.exitReason:
+receipt attests. **The same holds for a Job whose lost pod was an OLDER runner
+without the claim** (FX-7): the re-created Job wins a fresh claim, reads
+`<prefix>/<backupId>/`, finds the older run's manifest or segments there and
+stops with the same exit and reason — the engine would otherwise rewrite that
+run's segments in place
+([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
+The `Backup` ends `Failed` with `status.exitReason:
 ExecutionAlreadyClaimed` (the runner's final `failure-reason=` line, lifted by
 the controller; `kubectl describe backup` shows it on `status.exitReason` and
 the `Failed` condition's message, and the console in the run's exit reason and
@@ -4969,6 +5026,18 @@ and runs normally. An evidence store that does not honour conditional create
 ExecutionClaimUnproven` before the engine starts — and a destination whose
 `writeProbe` is on reports that store `notReady / ConditionalCreateUnsupported`
 before the first backup (§21.5).
+
+**Rolling the runner back re-opens this window, and on an unversioned bucket
+nothing reports it** (FX-7). A runner from before the claim (`v0.1.5` is the
+measured one) ignores the claim and the set check: if a `Backup`'s Job is
+re-created with it, it re-runs the engine over the set, exits 0 and signs a
+second receipt. On a versioned bucket the first point is then reported
+`Conflict` (its pinned manifest version was superseded), though the older
+runner's own, unpinned point over the same set stays selectable. On an
+unversioned bucket the first point keeps verifying — the manifest bytes can
+come out identical — while the segments under it were rewritten, and no check
+this build runs sees it. **Let in-flight `Backup`s finish before rolling the
+runner back** ([release notes](release-notes.md), *Before a rollback*).
 
 The source connection is configured once on `KafkaCluster`, and one resolver
 (§20) turns it into every Job: the probe and each backup reuse that object's
@@ -5548,11 +5617,12 @@ the same spec exits `1` — so a UI that maps exit 3 to *"your approval does not
 match this spec"* mislabels that case every time the scratch cluster is down.
 
 The controller removes the ambiguity **at the source**. Before any pod exists
-it runs four checks, in this order:
+it runs these six checks, in this order:
 
 | # | Check | `reason`, and what happens |
 |---|---|---|
 | 0 | The object's own name is at most 63 characters | `NameTooLong`, terminal. Nothing is created |
+| 0b | `spec.runnerResources`, when set, is a block the controller applies (*The runner's requests and limits*, below) | `ExecutionSpecInvalid`, **terminal**, naming every refused field. Nothing is created, and the `Approval` is not read |
 | 1 | `spec.approvalRef` names something | `ApprovalNotReceived`, **terminal** |
 | 2 | That `Approval` exists and is `Verified=True` | `ApprovalNotVerified`, **held and retried in 30 s** |
 | 3 | `sha256(spec.planBytes)` equals the `plan_hash` **inside** `Approval.spec.approvalBytes` | `PlanHashMismatch`, terminal, naming both hashes |
@@ -5763,6 +5833,145 @@ A `scramSha512` target additionally gets `LOGWEIR_TARGET_PASSWORD` from that
 the same connection the `clusterRef` resolves to, or the Restore is refused
 with `ConnectionPlanMismatch` before any Job exists: the runner dials the
 PLAN's address with THIS connection's credential.
+
+### The runner's requests and limits: `spec.runnerResources` (FX-2)
+
+`spec.runnerResources` is what the runner pod asks for and is capped at. It
+reaches the one `runner` container's `resources` **exactly as written** —
+requests as requests, limits as limits, in the spelling the object carries (the
+API server stores the canonical form, so `0.5` reads back as `500m`). Absent,
+or with no quantity in it, the container states no `resources` at all, which is
+the Job every `Restore` had before FX-2, and the namespace's `LimitRange`
+defaults apply unchanged. A `RehearsalSchedule`'s `spec.bounds.runnerResources`
+is copied onto each child `Restore` verbatim and arrives the same way (§7g).
+The console never sets the field; it is set with `kubectl` or by a
+`RehearsalSchedule`. Neither the console nor the product API shows it yet, so an
+approver does not see it beside the plan: read it with the `kubectl` line at the
+end of this section. Showing it on the `Restore` view is owed to PROD-10.1,
+which exposes the control.
+
+Before FX-2 the field was accepted, documented and **dropped**: the container
+carried no `resources` whatever the object said, so every runner pod was
+`BestEffort`.
+
+**The decision: apply it, and refuse rather than clamp.** D3 §4.5 designed the
+field and the CRD documented it. Withdrawing it would have left every runner
+pod `BestEffort` — the first pod the kubelet evicts under node pressure, and a
+restore evicted mid-write leaves a half-written target — and unable to run at
+all in a namespace whose `ResourceQuota` requires limits. A clamped value would
+be a Job nobody asked for, and a run OOM-killed at a limit the controller chose
+would read as a runner defect, so a value the controller will not apply is
+refused, never adjusted. Every quantity is checked before anything else about
+the object is read:
+
+| Rule | Refused, for example |
+|---|---|
+| a Kubernetes quantity in the grammar the schema's pattern admits | `abc`; `1K` (the decimal kilo is `k`) |
+| memory is a whole number of bytes, CPU a whole number of millicores | `memory: 100m` (a tenth of a byte — `Mi` was meant); `cpu: 100u` |
+| nothing above the ceiling, requests included: **4** CPUs and **8Gi** of memory | `limits.memory: 16Gi`; `requests.cpu: "8"`; `cpu: 5Gi` |
+| a limit is a cap: never zero, and a memory limit is at least **32Mi** | `limits.cpu: "0"` (a runtime reads zero as "no limit"); `limits.memory: "512"` (512 bytes) |
+| a request is at most its limit, per resource | `requests.memory: 4Gi` beside `limits.memory: 2Gi` |
+
+The ceilings are D3 §4.1's and are compiled in: no chart value configures them,
+and the schema cannot state them because comparing quantities in CEL needs a
+library the 1.29 floor cannot be relied on to have. The memory floor is not a
+measured minimum for a working run (PROD-10.1 measures that); it stops a
+missing unit before it becomes a pod the runtime cannot create. A `Restore`
+that breaks any rule ends `phase: Failed` with `reason: ExecutionSpecInvalid`
+(`Failed=True`, same reason) **before its approval is read, a manual-run pool
+slot is taken, or anything is created**, and the message names every refused
+field at once, because `spec` is immutable and the remedy is a new `Restore`. A
+`RehearsalSchedule` skips each slot as `AuthorizationInvalid` instead and
+creates no child (§7g).
+
+**`LimitRange`, `ResourceQuota` and the scheduler decide the rest, and each
+answer lands on the `Restore`.** The Job is created with the values above; what
+happens next is the namespace's:
+
+- a `LimitRange` fills in what the block leaves out. With only
+  `requests.memory` set its default limit applies, and a default below the
+  request gets the pod rejected;
+- a `LimitRange` minimum or maximum, or a `ResourceQuota` (including one that
+  requires every pod to state limits), rejects the pod at creation. The Job
+  controller's only trace is a `FailedCreate` event on the Job, and the
+  `Restore` reports it: `RunnerReady=False` with reason `PodCreationForbidden`,
+  the same value in `status.reason` (the `REASON` column), and a
+  `status.progress.diagnostics[]` entry `PodCreateRejected` carrying the
+  admission's own words (`exceeded quota: …`). Once that has held for
+  `failFastSeconds` (§10, *Failing fast, and what it costs*) the Job's deadline
+  is collapsed and the run ends `PodCreationForbidden` — never a Job silently
+  waiting out its deadline;
+- requests no node can hold leave the pod `Pending`: `RunnerReady=False` with
+  `PodUnschedulable`, left to `activeDeadlineSeconds` because a node can still
+  join.
+
+A namespace whose `ResourceQuota` covers compute and which has no `LimitRange`
+defaults refuses every pod that states no limits, and `spec.runnerResources` is
+how a `Restore` runs there. `Backup`, check, probe, delivery and retention Jobs
+have no such field and state no resources; their requests and limits come from
+the namespace's `LimitRange` or not at all. When such a Job's pod is rejected
+at creation, what its object reports depends on whether that controller reads
+the Job's `FailedCreate` event:
+
+| The Job | What the object reports for a pod rejected at creation |
+|---|---|
+| A `Backup`'s runner, and a `Restore`'s (with a block or without) | `RunnerReady=False` / `PodCreationForbidden`, a `PodCreateRejected` diagnostic quoting the admission, then terminal `PodCreationForbidden` after `failFastSeconds` |
+| A `Preflight`, and a run's evidence-fetch Job | `PodCreateRejected` once the Job has had no pod for 30 seconds, and the Job is cancelled |
+| A `TopicDiscovery`, a `RecoveryCatalog` sync, and a dynamic `Backup`'s topic discovery | These read no Events. `PodNotStarted` (on the `Backup`, `Resolving`) until the Job's own deadline, then `DeadlineExceeded`: `Synced=False` on the catalog, and the `Backup` ends `DiscoveryFailed` |
+| A `KafkaCluster` probe | `Reachable=Unknown` / `ProbeRunning` until the probe's 120-second deadline, then `Reachable=Unknown` / `NoExitCode`; `reachable` and `clusterId` keep their last values |
+| A `ProtectionPolicy` delivery | After the delivery Job's 120-second deadline the attempt is recorded `Failed` ("the delivery Job finished with no exit code") and `NotificationsDelivered=False` / `DeliveryFailed`; it is retried, three attempts in all |
+| A `RetentionPolicy` enforcement run | `Enforced=True` / `RunInProgress` until `enforcement.deadlineSeconds`, then `Enforced=False` / `RunFailed` ("produced no exit code"); three failed runs in a row turn `Degraded=True` |
+
+**What binds it.** `spec.runnerResources` is not part of `planBytes` and not a
+member of the approval bundle, so a per-run approver signs the data operation
+and not its container bounds — the same position as a per-run `Restore`'s
+`deadlineSeconds`. `spec` is immutable, so the value cannot change after the
+object is created, and a Job's pod template is immutable too: nothing changes it
+after admission. For a rehearsal the value is inside the `RehearsalSchedule`'s
+sealed spec, whose digest (`templateDigest`) the standing authorization signs,
+so a different value is a different schedule under a different authorization.
+
+**That binds the schedule, not every `Restore` the authorization admits.** The
+signed `RehearsalScope` carries no `runnerResources`. The `Restore` controller's
+standing admission checks a `Restore`'s plan and its `deadlineSeconds` against
+the signed scope, and the schedule's digest is out of its reach. So a standing
+`Restore` written by hand (anyone with `create` on `restores` may name the
+authorization) is held only to the controller's compiled-in bounds above, not to
+the schedule's sealed value; the `Restore`s the schedule creates carry that value
+verbatim. Carrying `runnerResources` in the signed `RehearsalScope`, a versioned
+change to a signed document, is owed to PROD-10.1.
+
+**Upgrade and rollback.** The CRD change is descriptions only; the field and its
+pattern have been served since the D3 W0 schemas. Before the upgrade, list the
+objects it changes, those that already carry a block, with the inventory in
+[the release notes](release-notes.md), item 21.
+
+- A `Restore` that already has a Job keeps it: the pod template is immutable,
+  and the upgraded controller observes the run and never refuses it
+  mid-flight. That pod has no `resources`.
+- A terminal `Restore` is untouched.
+- A `Restore` with no Job yet (held for approval, queued, or created during
+  the upgrade) is checked on its next pass. A valid block gives it a Job whose
+  container carries it, which is a behaviour change: the pod now asks for, and
+  is capped at, what the object said, so it can meet a quota or an OOM limit it
+  never met before. A block outside the bounds ends it
+  `Failed`/`ExecutionSpecInvalid`.
+- A `RehearsalSchedule` with the block set applies it from its next slot, or
+  skips every slot as `AuthorizationInvalid` when it is outside the bounds.
+- **Rolling back** to a controller from before FX-2 ignores the field again:
+  the Jobs it creates carry no `resources`. A `Restore` this build refused stays
+  `Failed` (no controller acts on a terminal `Restore`); a schedule's next slot
+  fires under the older controller and drops the block, as it always did. A
+  schedule this build skipped for its block therefore runs again, uncapped:
+  suspend it first (`spec.suspend`, its one mutable field) if it must not.
+  Nothing has to be deleted in either direction.
+
+What a runner Job actually carries:
+
+```bash
+kubectl --context "$LOGWEIR_CONTEXT" -n <namespace> get job <restore-name> \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="runner")].resources}'
+```
 
 ### The credential is validated by the RUNNER, and the controller checks nothing
 
@@ -8067,6 +8276,24 @@ conversion: the field appears on the next reconcile of each one, which the
 five-minute heartbeat guarantees. Nothing reads the window to decide
 authorisation, so a cluster that never publishes one keeps working.
 
+### 21.6b A refused configuration read is `unknown`, never `ready` (FX-4)
+
+`target.timestampBound` reads the target's broker configuration with the
+restore's own credential. A credential without DescribeConfigs on the Cluster
+resource (Describe does not imply it) now gets `unknown` with code
+`BrokerConfigsNotReadable`. Builds before FX-4 answered `ready` with
+`TimestampWithinBound`: rust-rdkafka returned the refused read as an EMPTY
+configuration, and an empty configuration declares no bound (PROD-04.0 T13,
+[the ruling](stability.md#an-empty-configuration-answer-is-a-refused-read-never-no-overrides-prod-040-t13-fx-4)).
+The Restore itself needs the same grant: phase 0 of a run with that credential
+exits 1 instead of assuming the broker is on `CreateTime`.
+
+A `Backup`'s source credential needs DescribeConfigs on every backed-up topic
+for the receipt to record the topic's configuration as `captured`. Without it
+the backup still succeeds, the topic reads `captureDenied`, and a later
+restore's configuration parity names that topic as not assessed
+([the receipt field](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
+
 ### 21.7 Skipping a check is not answering it
 
 `spec.request.skipChecks` leaves a row out of the run. The row is still
@@ -8263,6 +8490,12 @@ answers the same request `Failed`/`ArchiveUrlUnreadable`, as it always did;
 after a rollback, re-run the check or restore without it. The one Restore
 controller row added, the advisory `destination.evidenceReadable`, never
 changes the aggregate.
+
+**A refused broker-configuration read (FX-4).** A runner image from FX-4 on
+answers `target.timestampBound` `unknown` (`BrokerConfigsNotReadable`) where an
+older one answered `ready` (§21.6b). No code, field or plan shape is new, so
+the controller and runner may be upgraded in either order. Rolling back the
+runner brings back the old `ready` answer.
 
 ## 22. The installation policy, the RBAC rows, and the console admission policy
 

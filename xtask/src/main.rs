@@ -45,6 +45,11 @@
 //! item against a `rename` on each field) are reported as drift, which errs on
 //! the safe side; and anything a macro generates.
 //!
+//! It also compares vendored LISTS (`LIST_CHECKS`, FX-4): a `&str` array that
+//! must name exactly the string literals of one upstream function, for data
+//! the engine never serialises -- the topic-configuration allowlist. A key only
+//! one side names is DRIFT; the same keys in another order are a note.
+//!
 //! The unit tests at the bottom run the gate against the pinned source tarball
 //! (`third_party/kafka-backup-v*.tar.gz`), so `cargo test --workspace` runs it
 //! on every CI build, and they fail on a file under `vendored/` that `CHECKS`
@@ -117,6 +122,144 @@ const CHECKS: &[Check] = &[
         ],
     },
 ];
+
+/// A vendored LIST, not a serde shape (FX-4): a `&str` array constant in a
+/// vendored file that must name exactly the string literals of one upstream
+/// function's body. The engine's topic-configuration allowlist is data the
+/// engine never serialises, so the shape comparison above cannot see it; a key
+/// upstream adds or drops changes what the engine captures, and so what FX-4's
+/// `captured` claims.
+struct ListCheck {
+    /// File name under `VENDORED_DIR`.
+    vendored: &'static str,
+    /// The array constant in it.
+    constant: &'static str,
+    /// Path relative to the root of an upstream checkout.
+    upstream: &'static str,
+    /// The upstream function whose body lists the same strings.
+    function: &'static str,
+}
+
+const LIST_CHECKS: &[ListCheck] = &[ListCheck {
+    vendored: "topic_config.rs",
+    constant: "RECOVERY_TOPIC_CONFIG_KEYS",
+    upstream: "crates/kafka-backup-core/src/backup/engine.rs",
+    function: "is_recovery_topic_config",
+}];
+
+/// The contents of every string literal in `src`, in order (escapes kept as
+/// written: the lists compared hold plain configuration keys).
+fn string_literals(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < src.len() {
+        if src.as_bytes()[i] == b'"' {
+            if let Some(end) = literal_end(src, i) {
+                out.push(src[i + 1..end.saturating_sub(1)].to_string());
+                i = end;
+                continue;
+            }
+        }
+        i += src[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    out
+}
+
+/// The text between the brackets of `const <name>: … = [ … ];` in
+/// comment-stripped `src`, or `None`.
+fn const_array_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let at = src.find(&format!("const {name}:"))?;
+    let open = at + src[at..].find("= [")? + 3;
+    let close = open + src[open..].find("];")?;
+    Some(&src[open..close])
+}
+
+/// The body of `fn <name>(` in comment-stripped `src`, braces balanced with
+/// string literals skipped, or `None`.
+fn fn_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let at = src.find(&format!("fn {name}("))?;
+    let open = at + src[at..].find('{')?;
+    let (b, mut depth, mut i) = (src.as_bytes(), 0usize, open);
+    while i < b.len() {
+        if let Some(end) = literal_end(src, i) {
+            i = end;
+            continue;
+        }
+        match b[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&src[open + 1..i]);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// One [`ListCheck`]: the SET of strings must be equal (a key only one side
+/// names is DRIFT, either way); the same set in another order is a note. A
+/// side that resolves to no list at all is DRIFT, never agreement.
+fn compare_list(check: &ListCheck, ours: &str, theirs: &str, tag: &str, report: &mut Report) {
+    let (ours, theirs) = (strip_comments(ours), strip_comments(theirs));
+    let label = format!("{}::{}", check.vendored, check.constant);
+    let Some(mine) = const_array_body(&ours, check.constant).map(string_literals) else {
+        report.drift(format!(
+            "DRIFT  {tag} {label}: no `const {}: … = [ … ];` in {}",
+            check.constant, check.vendored
+        ));
+        return;
+    };
+    let Some(upstream) = fn_body(&theirs, check.function).map(string_literals) else {
+        report.drift(format!(
+            "DRIFT  {tag} {label}: upstream {} has no `fn {}` -- renamed or moved, and \
+             nothing was compared",
+            check.upstream, check.function
+        ));
+        return;
+    };
+    if mine.is_empty() || upstream.is_empty() {
+        report.drift(format!(
+            "DRIFT  {tag} {label}: resolved to an EMPTY list (ours {}, upstream {}), which is \
+             not agreement",
+            mine.len(),
+            upstream.len()
+        ));
+        return;
+    }
+    let (a, b): (BTreeSet<&String>, BTreeSet<&String>) =
+        (mine.iter().collect(), upstream.iter().collect());
+    for gone in b.difference(&a) {
+        report.drift(format!(
+            "DRIFT  {tag} {label}: upstream `{}` keeps `{gone}`, we do not -- the engine \
+             captures a key our coverage filter would call a difference",
+            check.function
+        ));
+    }
+    for extra in a.difference(&b) {
+        report.drift(format!(
+            "DRIFT  {tag} {label}: we keep `{extra}`, upstream `{}` does not -- `captured` \
+             would claim a key the engine never writes",
+            check.function
+        ));
+    }
+    if a == b && mine != upstream {
+        report.lines.push(format!(
+            "note   {tag} {label}: the same {} keys as upstream `{}`, in another order",
+            mine.len(),
+            check.function
+        ));
+    }
+    report.compared.push((
+        check.vendored.to_string(),
+        check.constant.to_string(),
+        check.upstream.to_string(),
+        check.function.to_string(),
+    ));
+}
 
 /// What a declared divergence is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -988,6 +1131,17 @@ fn run(
             &mut report,
         );
     }
+    for check in LIST_CHECKS {
+        let ours = read(
+            &root.join(VENDORED_DIR).join(check.vendored),
+            "the vendored file should exist in-tree; run xtask from the repository root",
+        )?;
+        let theirs = read(
+            &upstream.join(check.upstream),
+            "extract kafka-backup at the pinned tag and pass its path via --upstream",
+        )?;
+        compare_list(check, &ours, &theirs, tag, &mut report);
+    }
     for (i, d) in divergences.iter().enumerate() {
         if !used.contains(&i) && checks.iter().any(|c| c.vendored == d.vendored) {
             let what = if d.field.is_empty() {
@@ -1037,8 +1191,10 @@ fn main() {
         std::process::exit(1);
     }
     println!(
-        "vendored structs agree with {tag} ({} item pairs: names, types and serde wire attributes)",
-        report.compared.len()
+        "vendored structs and lists agree with {tag} ({} item pairs: names, types and serde \
+         wire attributes; {} list(s): their keys)",
+        report.compared.len() - LIST_CHECKS.len(),
+        LIST_CHECKS.len()
     );
 }
 
@@ -1112,7 +1268,9 @@ mod tests {
             };
             let members: BTreeSet<String> = CHECKS
                 .iter()
-                .map(|c| format!("{top}/{}", c.upstream))
+                .map(|c| c.upstream)
+                .chain(LIST_CHECKS.iter().map(|c| c.upstream))
+                .map(|u| format!("{top}/{u}"))
                 .collect();
             let mut child = Command::new("tar")
                 .arg("-xzf")
@@ -1226,7 +1384,12 @@ mod tests {
             run(&repo_root(), &up.root, &up.tag, CHECKS, DIVERGENCES).expect("every file reads");
         assert!(!r.drift, "drift at the pin:\n{}", r.lines.join("\n"));
         let pairs: usize = CHECKS.iter().map(|c| c.items.len()).sum();
-        assert_eq!(r.compared.len(), pairs, "{:?}", r.compared);
+        assert_eq!(
+            r.compared.len(),
+            pairs + LIST_CHECKS.len(),
+            "{:?}",
+            r.compared
+        );
         for writer in [
             "crates/kafka-backup-core/src/backup/engine.rs",
             "crates/kafka-backup-cli/src/commands/snapshot_groups.rs",
@@ -1240,8 +1403,73 @@ mod tests {
         }
     }
 
+    /// **FX-4's allowlist, at the pin, and its three drift shapes.** The
+    /// vendored `RECOVERY_TOPIC_CONFIG_KEYS` names exactly the keys of the
+    /// pinned engine's `is_recovery_topic_config`. A key the engine adds, a key
+    /// we keep that it dropped, and a function that moved are each DRIFT --
+    /// never a silent agreement; the same keys in another order are a note.
+    #[test]
+    fn the_topic_config_allowlist_agrees_with_the_pinned_engine_and_drift_is_caught() {
+        let up = Checkout::extract();
+        let check = &LIST_CHECKS[0];
+        let theirs = up.src(check.upstream);
+        let ours = vendored_src(check.vendored);
+        let at_pin = |ours: &str, theirs: &str| {
+            let mut r = Report::default();
+            compare_list(check, ours, theirs, &up.tag, &mut r);
+            r
+        };
+        let r = at_pin(&ours, &theirs);
+        assert!(!r.drift, "drift at the pin:\n{}", r.lines.join("\n"));
+        assert_eq!(r.compared.len(), 1, "{:?}", r.compared);
+        assert!(r.lines.is_empty(), "{:?}", r.lines);
+
+        let added = mutate(
+            &theirs,
+            "| \"unclean.leader.election.enable\"",
+            "| \"unclean.leader.election.enable\"\n            | \"local.retention.ms\"",
+        );
+        let d = drift_lines(&at_pin(&ours, &added)).join("\n");
+        assert!(d.contains("keeps `local.retention.ms`, we do not"), "{d}");
+
+        let dropped = mutate(&ours, "    \"segment.ms\",\n", "");
+        let d = drift_lines(&at_pin(&dropped, &theirs)).join("\n");
+        assert!(d.contains("keeps `segment.ms`, we do not"), "{d}");
+
+        let extra = mutate(
+            &ours,
+            "    \"segment.ms\",\n",
+            "    \"segment.ms\",\n    \"x.y\",\n",
+        );
+        let d = drift_lines(&at_pin(&extra, &theirs)).join("\n");
+        assert!(d.contains("we keep `x.y`"), "{d}");
+
+        let moved = mutate(
+            &theirs,
+            "fn is_recovery_topic_config(",
+            "fn is_restorable_config(",
+        );
+        let d = drift_lines(&at_pin(&ours, &moved)).join("\n");
+        assert!(d.contains("has no `fn is_recovery_topic_config`"), "{d}");
+
+        let reordered = mutate(
+            &ours,
+            "    \"cleanup.policy\",\n    \"compression.type\",\n",
+            "    \"compression.type\",\n    \"cleanup.policy\",\n",
+        );
+        let r = at_pin(&reordered, &theirs);
+        assert!(!r.drift, "{:?}", r.lines);
+        assert!(
+            r.lines.iter().any(|l| l.contains("in another order")),
+            "{:?}",
+            r.lines
+        );
+    }
+
     /// **The gate cannot skip a file.** Every `.rs` under `vendored/` but
-    /// `mod.rs` is covered by `CHECKS`; FX-1's `consumer_groups.rs` was not.
+    /// `mod.rs` is covered by `CHECKS` or `LIST_CHECKS`; FX-1's
+    /// `consumer_groups.rs` was not, and FX-4's `topic_config.rs` was not
+    /// until its allowlist got a gate of its own.
     #[test]
     fn every_vendored_file_is_gated() {
         let dir = repo_root().join(VENDORED_DIR);
@@ -1251,7 +1479,11 @@ mod tests {
             .filter(|n| n.ends_with(".rs") && n != "mod.rs")
             .collect();
         assert!(files.contains("consumer_groups.rs"), "{files:?}");
-        let gated: BTreeSet<String> = CHECKS.iter().map(|c| c.vendored.to_string()).collect();
+        let gated: BTreeSet<String> = CHECKS
+            .iter()
+            .map(|c| c.vendored.to_string())
+            .chain(LIST_CHECKS.iter().map(|c| c.vendored.to_string()))
+            .collect();
         let ungated: Vec<&String> = files.difference(&gated).collect();
         assert!(
             ungated.is_empty(),

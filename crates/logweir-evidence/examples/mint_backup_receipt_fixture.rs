@@ -101,6 +101,10 @@ fn receipt() -> BackupReceipt {
             manifest_sha256:
                 "sha256:1111111111111111111111111111111111111111111111111111111111111111"
                     .to_string(),
+            // The committed fixture is the UNVERSIONED `1.0.0` document, and
+            // must stay byte-identical: FX-7's pin is absent here, so it writes
+            // nothing.
+            manifest_version_id: None,
             prefix: "logweir/backups/logweir-backup-01J8Z9QK7V/".to_string(),
         },
         records,
@@ -108,6 +112,10 @@ fn receipt() -> BackupReceipt {
             from_ms: 1_757_415_734_000,
             to_ms: 1_757_419_486_000,
         },
+        // The signed fixture is a 1.0.0 receipt and STAYS one after FX-4's
+        // 1.1.0: it is the "old evidence verifies unchanged" case, and ruling
+        // R-G reserves the re-mint. A 1.0.0 document has no config_coverage.
+        config_coverage: None,
     }
 }
 

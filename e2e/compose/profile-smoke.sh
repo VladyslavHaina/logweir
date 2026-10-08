@@ -233,6 +233,32 @@ smoke_registry() {
   out=$(innet "$T/kafka-console-consumer.sh --bootstrap-server kafka-broker-1:9094 --topic _schemas --from-beginning --timeout-ms 15000 --property print.key=true 2>/dev/null")
   if printf '%s' "$out" | grep -q "$n-value"; then pass registry.state-in-kafka "_schemas holds the $n-value registration"; else fail registry.state-in-kafka "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
 }
+smoke_acl() {
+  local p s out cfg rc
+  p=$(lw_e2e_port LOGWEIR_E2E_ACL_PORT)
+  s=$(lw_e2e_port LOGWEIR_E2E_ACL_SASL_PORT)
+  # The authorizer is ON: without one, every ACL call answers SecurityDisabled.
+  out=$(innet "$T/kafka-acls.sh --bootstrap-server kafka-acl:9094 --list; echo rc=\$?")
+  rc=$(printf '%s' "$out" | sed -n 's/^rc=//p' | tail -1)
+  if [ "$rc" = 0 ] && ! printf '%s' "$out" | grep -q -i 'SecurityDisabled\|No Authorizer'; then pass acl.authorizer "kafka-acls --list answers (StandardAuthorizer)"; else fail acl.authorizer "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  # One topic the restricted principal may Read and Describe, and nothing else.
+  innet "$T/kafka-topics.sh --bootstrap-server kafka-acl:9094 --create --topic $RUN-acl --partitions 1 --replication-factor 1 --config retention.ms=3600000 && $T/kafka-acls.sh --bootstrap-server kafka-acl:9094 --add --allow-principal User:logweir --operation Read --operation Describe --topic $RUN-acl" >/dev/null
+  cfg="security.protocol=SASL_PLAINTEXT\nsasl.mechanism=SCRAM-SHA-512\n$FAST"
+  # kafka-get-offsets needs only Describe. Not `kafka-topics --describe`: it
+  # also reads the topic's configuration, so it needs DescribeConfigs too
+  # (measured on 3.7.1: TopicAuthorizationException).
+  out=$(hostside "printf '$cfg\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"logweir\" password=\"$PASSWORD\";\n' > /tmp/c; $T/kafka-get-offsets.sh --bootstrap-server localhost:$s --command-config /tmp/c --topic $RUN-acl")
+  if printf '%s' "$out" | grep -q "^$RUN-acl:0:"; then pass acl.restricted-describe "logweir on localhost:$s reads $RUN-acl's offsets (its ACL allows Describe): $(printf '%s' "$out" | grep -m1 "^$RUN-acl:0:")"; else fail acl.restricted-describe "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  # Negative control: the same principal may NOT DescribeConfigs it.
+  out=$(hostside "printf '$cfg\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"logweir\" password=\"$PASSWORD\";\n' > /tmp/c; $T/kafka-configs.sh --bootstrap-server localhost:$s --command-config /tmp/c --describe --entity-type topics --entity-name $RUN-acl")
+  if printf '%s' "$out" | grep -q -i 'TopicAuthorizationException\|Authorization failed\|not authorized'; then pass acl.restricted-describe-configs-denied "$(printf '%s' "$out" | grep -i -m1 -o 'TopicAuthorizationException[^.]*\|Authorization failed[^.]*')"; else fail acl.restricted-describe-configs-denied "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  # ...while the super user on the PLAINTEXT port may.
+  out=$(hostside "$T/kafka-configs.sh --bootstrap-server localhost:$p --describe --entity-type topics --entity-name $RUN-acl")
+  if printf '%s' "$out" | grep -q 'retention.ms=3600000'; then pass acl.super-user-describe-configs "ANONYMOUS on localhost:$p reads retention.ms=3600000"; else fail acl.super-user-describe-configs "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  out=$(hostside "printf '$cfg\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"logweir\" password=\"wrong-password\";\n' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$s --command-config /tmp/c --list")
+  if printf '%s' "$out" | grep -q -i 'authentication failed\|SaslAuthenticationException'; then pass acl.scram.wrong-password-refused "refused"; else fail acl.scram.wrong-password-refused "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  innet "$T/kafka-acls.sh --bootstrap-server kafka-acl:9094 --remove --force --allow-principal User:logweir --operation Read --operation Describe --topic $RUN-acl; $T/kafka-topics.sh --bootstrap-server kafka-acl:9094 --delete --topic $RUN-acl" >/dev/null
+}
 
 profiles=${*:-$(printf '%s' "${COMPOSE_PROFILES:-}" | tr ',' ' ')}
 [ -n "$profiles" ] || { echo "profile-smoke: no profile named and COMPOSE_PROFILES is empty" >&2; exit 2; }
@@ -245,6 +271,7 @@ for p in $profiles; do
     streams) smoke_streams ;;
     objectstore) smoke_objectstore ;;
     registry) smoke_registry ;;
+    acl) smoke_acl ;;
     *) fail "$p" "no smoke defined for profile $p" ;;
   esac
 done

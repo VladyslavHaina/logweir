@@ -749,3 +749,91 @@ fn countersign_refuses_what_it_cannot_make_valid() {
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("no console confirmation"), "{out}");
 }
+
+/// **FX-9: `countersign` judges the CALLER's `now` and reads no clock.**
+///
+/// `run_countersign` hands it the wall clock, which the two binary rows above
+/// pin: a request five minutes from expiry is countersigned, and one that
+/// expired an hour ago is refused. These rows call the library with instants
+/// far from any date this suite runs on, in both directions, so a build that
+/// reads the wall clock fails on every date:
+///
+/// - a request open in 2001 is countersigned at a `now` in 2001, where a
+///   wall-clock check sees it long expired;
+/// - a request that expired in 2999 is refused at a `now` after that, where a
+///   wall-clock check sees it open;
+/// - at `now == expiresAt` it is refused, because `expiresAt` is the first
+///   instant the request authorises nothing; one minute earlier it is
+///   countersigned.
+#[test]
+fn countersign_judges_the_callers_now_and_reads_no_clock() {
+    let k = keys();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .expect("an instant")
+            .with_timezone(&Utc)
+    };
+    let request = |issued: &str, expires: &str| {
+        let mut doc = document(ApprovalMode::Governed);
+        doc.issued_at = at(issued);
+        doc.expires_at = at(expires);
+        doc.to_bytes()
+    };
+    let countersign_at = |name: &str, bytes: &[u8], now| {
+        let document = dir.path().join(format!("{name}.json"));
+        let confirmation = dir.path().join(format!("{name}.confirmation.sig"));
+        let key = dir.path().join(format!("{name}.approver.pem"));
+        let out = dir.path().join(format!("{name}.sig"));
+        std::fs::write(&document, bytes).expect("doc");
+        std::fs::write(&confirmation, sidecar(bytes, &k, false)).expect("conf");
+        std::fs::write(&key, k.approver.to_pkcs8_pem().expect("pkcs8")).expect("key");
+        let result = logweir::approve::countersign(
+            &logweir::approve::CountersignArgs {
+                document,
+                confirmation,
+                key,
+                out: out.clone(),
+            },
+            now,
+        );
+        (result, out)
+    };
+
+    // Open in 2001, judged in 2001.
+    let open_2001 = request("2001-01-01T00:00:00Z", "2001-01-01T00:05:00Z");
+    let (result, out) = countersign_at("open-2001", &open_2001, at("2001-01-01T00:01:00Z"));
+    result.expect(
+        "a request open at the caller's now is countersigned, whatever the wall clock says",
+    );
+    let merged: Sidecar =
+        serde_json::from_slice(&std::fs::read(&out).expect("written")).expect("a sidecar");
+    assert_eq!(
+        merged.signatures.len(),
+        2,
+        "the console's and the approver's"
+    );
+
+    // Expired in 2999: refused at its expiry and after it, naming that now.
+    let closed_2999 = request("2999-01-01T00:00:00Z", "2999-01-01T00:05:00Z");
+    for (label, now) in [
+        ("at-expiry", at("2999-01-01T00:05:00Z")),
+        ("an-hour-after", at("2999-01-01T01:05:00Z")),
+    ] {
+        let (result, out) = countersign_at(label, &closed_2999, now);
+        let error = result.expect_err("an expired request is refused at the caller's now");
+        assert!(error.contains("expired"), "{label}: {error}");
+        assert!(
+            error.contains(&format!("it is now {}", now.to_rfc3339())),
+            "{label}: the refusal judged the CALLER's now: {error}"
+        );
+        assert!(
+            !out.exists(),
+            "{label}: a refused countersign writes nothing"
+        );
+    }
+
+    // The positive control at the same boundary.
+    let (result, _) = countersign_at("inside-2999", &closed_2999, at("2999-01-01T00:04:00Z"));
+    result.expect("one minute before expiresAt the request is countersigned");
+}

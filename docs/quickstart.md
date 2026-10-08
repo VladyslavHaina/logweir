@@ -161,11 +161,32 @@ always a destination with no `evidenceRead` grant.
    ([ui/README.md](../ui/README.md), *Restore, from here*).
 2. In the wizard, choose the target connection (a `target` role), the topics and
    the new-topic mapping, and the point in time inside the covered window.
-   Restores only ever write **new** topics.
-3. The readiness check must pass before *Create the Restore* is enabled: every
-   blocking row `ready`, except the approval row, which is `skipped` until the
-   Restore exists ([kubernetes.md](kubernetes.md) §21.7; [ui/README.md](../ui/README.md),
-   *The readiness check holds the submit*). A point with no saved destination —
+   Restores only ever write **new** topics. Check the **replication factor** in
+   step 4: it defaults to the target's broker count, at most 3, when a
+   *Discover topics* of the target connection has read it (until the controller
+   collects that discovery, a day by default; past the discovery's freshness,
+   15 minutes by default, the count sets the default but refuses no factor),
+   and otherwise to 1, which the step says; run the discovery first, or set the
+   factor yourself
+   ([ui/README.md](../ui/README.md), *The replication factor: a default with its
+   basis, an input, and a refusal before Create*). This factor can differ from
+   the source's, and the target's storage follows it: a topic the source kept
+   at replication factor 1, restored at 3, takes three times the storage it
+   took there, with the replication traffic on top; a factor below the
+   source's keeps fewer copies than the source had.
+3. Run the readiness check in step 5 before *Create the Restore*. Once a check
+   has run for the plan, Create is held until it reads ready: every blocking
+   row `ready`, except the approval row, which is `skipped` until the Restore
+   exists ([kubernetes.md](kubernetes.md) §21.7; [ui/README.md](../ui/README.md),
+   *The readiness check holds the submit*). The check is advisory, so with no
+   check at all Create stays enabled, beside a warning, and nothing has
+   validated the replication factor against the target's brokers: the page
+   refuses a factor above the broker count only on a fresh discovery's count. A
+   factor the brokers cannot hold is then refused by the broker when the runner
+   creates the topics, after the approval and phases 0–5: the Restore ends
+   `Failed` with `exitCode 1` / `operational`, no signed result and nothing
+   restored, and the runner's log (`kubectl logs job/<Restore name>` in its
+   namespace) names `InvalidReplicationFactor`. A point with no saved destination —
    every point `v0.1.5` wrote — is checked the same way: the check reads its
    inline archive with the Secret its Backup named, as the restore will. Its
    evidence bucket starts as the archive's own; keep it there, because the
@@ -383,7 +404,11 @@ which shares no code with Logweir.
 - An **existing** `kafka-backup` archive in an S3-compatible bucket, created
   by `logweir backup run` or another compatible producer. This drill path reads
   that archive; integrated `--from-cluster` capture remains deferred
-  ([architecture](architecture.md#adr-0007-source-capture-scope)).
+  ([architecture](architecture.md#adr-0007-source-capture-scope)). An archive
+  written by a `kafka-backup` engine before 0.21, which includes anything
+  `kafka-backup-operator` 1.3.0 writes, carries no segment digests. Such an
+  archive drills as `outcome: fail-integrity` with `integrity.result: partial`
+  and exits 2 ([support-matrix.md](support-matrix.md)).
 - A **scratch** Kafka cluster you are willing to have topics created in. Not
   your production cluster, and not a cluster anything else depends on.
 - A **marker topic** on that scratch cluster. This is v0.1's segregation proof:

@@ -1,15 +1,120 @@
+/// The checked-in schema file of the CURRENT version of `name`, whose version
+/// is the writer's own constant (FX-4): a renumber moves the constant and
+/// `just schema`, and every test below follows it.
+fn current_schema(name: &str, version: &str) -> String {
+    let rel = format!("schemas/logweir-{name}-{version}.json");
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(&rel),
+    )
+    .unwrap_or_else(|e| panic!("{rel}: {e}"))
+}
+
+/// The justfile's `<name>_schema_version := "X"` value.
+fn justfile_schema_version(name: &str) -> String {
+    let justfile = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../justfile"),
+    )
+    .expect("read the justfile");
+    let prefix = format!("{name}_schema_version := \"");
+    justfile
+        .lines()
+        .find_map(|l| l.strip_prefix(prefix.as_str()))
+        .and_then(|r| r.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("the justfile declares no {name}_schema_version"))
+        .to_string()
+}
+
+/// **One version per document.** `just schema`/`schema-check` write and
+/// compare the file their justfile variable names; the writer's constant names
+/// the `$id` and the `format_version` it writes. They must be one number, or a
+/// renumber would regenerate one file and sign documents naming another. For
+/// the receipt the CURRENT file is the newest MINOR's, the one a pinned receipt
+/// carries (FX-7, 1.2.0); FX-4's 1.1.0 file is frozen beside it.
+#[test]
+fn the_justfile_schema_versions_are_the_writers_constants() {
+    assert_eq!(
+        justfile_schema_version("scorecard"),
+        logweir_core::FORMAT_VERSION
+    );
+    assert_eq!(
+        justfile_schema_version("receipt"),
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
+    );
+}
+
 /// The schema is checked in, not generated at build time, so a reviewer sees a
 /// format change as a diff. This test is the gate (spec §12).
 #[test]
 fn checked_in_schema_matches_the_types() {
     let generated = logweir_core::schema::scorecard_schema();
-    let checked_in = include_str!("../../../schemas/logweir-drill-scorecard-1.0.0.json");
+    let checked_in = current_schema("drill-scorecard", logweir_core::FORMAT_VERSION);
     assert_eq!(
         generated.trim_end(),
         checked_in.trim_end(),
-        "schemas/logweir-drill-scorecard-1.0.0.json is stale. \
+        "schemas/logweir-drill-scorecard-{}.json is stale. \
          Run `just schema` and review the diff — a field added is a MINOR bump, \
-         a field removed or retyped is a MAJOR bump (Global Constraint 12)."
+         a field removed or retyped is a MAJOR bump (Global Constraint 12).",
+        logweir_core::FORMAT_VERSION
+    );
+}
+
+/// FX-4: the 1.0.0 scorecard schema is FROZEN beside the 1.1.0 one, and still
+/// describes the documents written before the bump — `docs/stability.md`'s "a
+/// new schema file beside the old one". It is no longer regenerated, so this is
+/// the gate that it stays what it was: it names itself 1.0.0 and it has neither
+/// `topic_parity.not_assessed` nor `target_diff.not_assessed`.
+#[test]
+fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.0.0.json"
+    ))
+    .expect("the frozen 1.0.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.0.0.json"
+    );
+    let parity = &frozen["definitions"]["TopicParity"]["properties"];
+    assert!(parity["intentionally_deviated"].is_object());
+    assert!(
+        parity.get("not_assessed").is_none(),
+        "the frozen 1.0.0 schema must not describe the 1.1.0 field"
+    );
+    let diff = &frozen["definitions"]["TargetDiffSummary"]["properties"];
+    assert!(diff["collisions"].is_object());
+    assert!(
+        diff.get("not_assessed").is_none(),
+        "the frozen 1.0.0 schema must not describe the 1.1.0 target_diff field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_eq!(
+        current["$id"],
+        format!(
+            "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
+            logweir_core::FORMAT_VERSION
+        )
+    );
+    let parity = &current["definitions"]["TopicParity"];
+    assert!(parity["properties"]["not_assessed"].is_object());
+    assert!(
+        !parity["required"]
+            .as_array()
+            .expect("TopicParity has required fields")
+            .iter()
+            .any(|r| r == "not_assessed"),
+        "not_assessed is OPTIONAL: a 1.0.0 document without it must still validate"
+    );
+    let diff = &current["definitions"]["TargetDiffSummary"];
+    assert!(diff["properties"]["not_assessed"].is_object());
+    assert!(
+        !diff["required"]
+            .as_array()
+            .expect("TargetDiffSummary has required fields")
+            .iter()
+            .any(|r| r == "not_assessed"),
+        "target_diff.not_assessed is OPTIONAL: a 1.0.0 document without it must still validate"
     );
 }
 
@@ -50,14 +155,23 @@ fn schema_declares_the_format_version_const() {
 /// adds it, at assertion time, with the count in the message.
 #[test]
 fn the_scorecard_top_level_shape_is_unchanged() {
-    let checked_in: serde_json::Value = serde_json::from_str(include_str!(
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
         "../../../schemas/logweir-drill-scorecard-1.0.0.json"
+    ))
+    .expect("the frozen 1.0.0 scorecard schema parses");
+    let checked_in: serde_json::Value = serde_json::from_str(&current_schema(
+        "drill-scorecard",
+        logweir_core::FORMAT_VERSION,
     ))
     .expect("the checked-in scorecard schema parses");
     let generated: serde_json::Value =
         serde_json::from_str(&logweir_core::schema::scorecard_schema())
             .expect("the generated scorecard schema parses");
-    for (source, v) in [("the checked-in file", checked_in), ("the type", generated)] {
+    for (source, v) in [
+        ("the frozen 1.0.0 file", frozen),
+        ("the checked-in current file", checked_in),
+        ("the type", generated),
+    ] {
         let properties = v["properties"]
             .as_object()
             .expect("the scorecard schema has a top-level `properties` object");
@@ -84,20 +198,25 @@ fn the_scorecard_top_level_shape_is_unchanged() {
 ///
 /// The named test behind the CI drift arm and behind the by-hand acceptance
 /// (`cargo run -p logweir-core --example emit_backup_receipt_schema > /tmp/r.json`
-/// then `diff -u schemas/logweir-backup-receipt-1.0.0.json /tmp/r.json`). It
-/// fails in both directions: a type change nobody regenerated, and a
-/// hand-edit of the published file.
+/// then `diff -u` against the current schema file, which `just schema-check`
+/// names). It fails in both directions: a type change nobody regenerated, and a
+/// hand-edit of the published file. The CURRENT file is the newest MINOR's,
+/// named by the writer's constant (FX-7 fix round): the 1.0.0 file is frozen.
 #[test]
 fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
-    let checked_in = include_str!("../../../schemas/logweir-backup-receipt-1.0.0.json");
+    let checked_in = current_schema(
+        "backup-receipt",
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+    );
     assert_eq!(
         generated.trim_end(),
         checked_in.trim_end(),
-        "schemas/logweir-backup-receipt-1.0.0.json is stale. Run `just schema` and \
+        "schemas/logweir-backup-receipt-{}.json is stale. Run `just schema` and \
          review the diff — a field added is a MINOR bump, a field removed or \
          retyped is a MAJOR bump (Global Constraint 12), and the receipt's \
-         format_version is its own and not the scorecard's."
+         format_version is its own and not the scorecard's.",
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
     );
 }
 
@@ -117,7 +236,28 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
     assert_eq!(v["title"], "BackupReceipt");
     assert_eq!(
         v["$id"],
-        "https://logweir.dev/schemas/logweir-backup-receipt-1.0.0.json"
+        format!(
+            "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
+        )
+    );
+    let archive = &v["definitions"]["ReceiptArchive"];
+    assert!(archive["properties"]["manifest_version_id"].is_object());
+    assert!(
+        !archive["required"]
+            .as_array()
+            .expect("ReceiptArchive has required fields")
+            .iter()
+            .any(|r| r == "manifest_version_id"),
+        "manifest_version_id is OPTIONAL: every 1.0.0 and 1.1.0 receipt lacks it and must still validate"
+    );
+    assert!(
+        !v["required"]
+            .as_array()
+            .expect("the receipt schema has a required array")
+            .iter()
+            .any(|r| r == "config_coverage"),
+        "config_coverage is OPTIONAL: every 1.0.0 receipt lacks it and must still validate"
     );
     assert_eq!(
         v["properties"]["format_version"]["pattern"], r"^1\.[0-9]+\.[0-9]+$",
@@ -133,4 +273,79 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         );
         assert_eq!(covered[field]["format"], "int64");
     }
+}
+
+/// **The 1.0.0 receipt schema is FROZEN** (FX-4, and FX-7's fix round,
+/// review M-2) beside the newer ones and still describes every receipt written
+/// before FX-4: it names itself 1.0.0, it has no `config_coverage`, and its
+/// `ReceiptArchive` has no `manifest_version_id`. It is no longer regenerated
+/// (`just schema` writes the current file only), so this is the gate that it
+/// stays what adopters downloaded under that name — `docs/stability.md`'s "a
+/// new schema file beside the old one".
+#[test]
+fn the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.0.0.json"
+    ))
+    .expect("the frozen 1.0.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.0.0.json"
+    );
+    assert!(frozen["properties"]["records"].is_object());
+    assert!(
+        frozen["properties"].get("config_coverage").is_none(),
+        "the frozen 1.0.0 schema must not describe the 1.1.0 field"
+    );
+    let archive = &frozen["definitions"]["ReceiptArchive"]["properties"];
+    assert!(archive["manifest_sha256"].is_object());
+    assert!(
+        archive.get("manifest_version_id").is_none(),
+        "the frozen 1.0.0 schema must not describe the 1.2.0 field"
+    );
+    assert_ne!(
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        "1.0.0",
+        "the pin is a MINOR bump, so its schema is a NEW file"
+    );
+}
+
+/// **FX-4's 1.1.0 receipt schema is FROZEN** beside the 1.2.0 one (FX-7 merged
+/// after FX-4 and took the next MINOR). It still describes every receipt this
+/// build writes WITHOUT a pin — the [`RECEIPT_FORMAT_VERSION`] document: it
+/// names itself 1.1.0, it carries `config_coverage`, and its `ReceiptArchive`
+/// has no `manifest_version_id`. `just schema` no longer regenerates it, so
+/// this is the gate that it stays the file FX-4 published.
+///
+/// [`RECEIPT_FORMAT_VERSION`]: logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
+#[test]
+fn the_frozen_1_1_0_receipt_schema_is_still_fx4s() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.1.0.json"
+    ))
+    .expect("the frozen 1.1.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.1.0.json"
+    );
+    assert!(
+        frozen["properties"]["config_coverage"].is_object(),
+        "the 1.1.0 schema is FX-4's: it describes config_coverage"
+    );
+    let archive = &frozen["definitions"]["ReceiptArchive"]["properties"];
+    assert!(archive["manifest_sha256"].is_object());
+    assert!(
+        archive.get("manifest_version_id").is_none(),
+        "the frozen 1.1.0 schema must not describe the 1.2.0 field"
+    );
+    assert_eq!(
+        logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION,
+        "1.1.0",
+        "an unpinned receipt is FX-4's 1.1.0 document, which this file describes"
+    );
+    assert_ne!(
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION,
+        "the pin is a MINOR bump over FX-4's 1.1.0, so its schema is a NEW file"
+    );
 }

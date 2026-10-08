@@ -126,10 +126,13 @@ impl Row {
         format!("{ID_PREFIX}{}-{suffix}", self.nonce)
     }
 
+    /// A source topic. Its fixtures stamp records at `T` (2025-10-09), past
+    /// the broker's default retention, so it keeps them: `retention.ms=-1`
+    /// (`harness::create_topic_for_fixed_timestamps`; PROD-00.1 4.4).
     fn source_topic(&mut self, suffix: &str, configs: &[(&str, &str)]) -> String {
         let t = self.name_for(suffix);
         self.topics.push(t.clone());
-        create_topic_with_configs(&t, PARTS, configs);
+        create_topic_for_fixed_timestamps(&t, PARTS, configs);
         t
     }
 
@@ -1887,7 +1890,7 @@ fn recreated_topic_between_two_backups() {
         );
         std::thread::sleep(Duration::from_millis(500));
     }
-    create_topic_with_configs(&topic, PARTS, &[("message.timestamp.type", "CreateTime")]);
+    create_topic_for_fixed_timestamps(&topic, PARTS, &[("message.timestamp.type", "CreateTime")]);
     let g2 = gen(2, 2);
     kafka::produce_plain(&topic, &g2).expect("gen 2");
     let src2 = kafka::read_topic(&topic, PARTS, Isolation::Committed).expect("gen 2 source");

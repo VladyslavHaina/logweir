@@ -154,6 +154,174 @@ pub fn claim_execution(
     }
 }
 
+/// **FX-7 — one engine run per backup SET, whoever made the first one.**
+/// Refuse the engine when the archive already holds what the engine writes
+/// for this execution and a signed receipt attests: its manifest,
+/// `<prefix>/<backup_id>/manifest.json`, or any segment under
+/// `<prefix>/<backup_id>/topics/`.
+///
+/// # Why the claim alone is not enough
+///
+/// [`claim_execution`] stops a second run of an execution whose first run
+/// took a claim. A set written by a build WITHOUT the claim (a runner from
+/// before RECEIPT-DUP) carries none, so a later run of the same `backup_id`
+/// — a Backup Job lost and re-created across the upgrade, or a standalone
+/// `backup run` re-using a fixed `backup_id` — wins a fresh claim and starts
+/// the engine over the older run's archive. Measured on engine 0.21.0
+/// (FX-7, `docs/formats/backup-receipt.md`): the engine writes each segment
+/// at `<backup_id>/topics/<topic>/partition=<n>/segment-<start offset>…`, so
+/// the second run REWRITES the first run's segment objects in place, and its
+/// get-merge-put keeps the first run's manifest entry for every key it
+/// already had ("existing wins"). The manifest bytes can therefore come out
+/// IDENTICAL while the segment under them now holds different records: the
+/// first signed receipt's manifest digest still matches and its data does
+/// not. No manifest check can see that afterwards, so the only fix is that
+/// the second engine run never starts.
+///
+/// # Why the segments and not only the manifest — and why not "any object"
+///
+/// The engine writes segments before its final manifest, so an older run
+/// that is still running, or that died after its first segment, leaves a
+/// set with segments and no manifest; starting the engine there writes into
+/// the same keys again. So both are looked for.
+///
+/// Anything ELSE under the set's directory is not the engine's output in the
+/// configuration Logweir renders: `offsets.db` is written only by continuous
+/// or configured offset storage, and `consumer-groups-snapshot.json` only
+/// when the snapshot is enabled — neither of which `render_backup` does. A
+/// run beside such an object (an upstream archive's snapshot, say, which
+/// FX-1's rows plant on purpose) writes none of its keys and invalidates
+/// nothing, so it is not refused.
+///
+/// # Where it runs, and what it costs
+///
+/// AFTER the claim and as the last refusal before the engine, so between two
+/// runs of this build the claim still answers first (the same refusal, with
+/// its own message), and the window between these reads and the engine's
+/// first write is as short as it can be: only FX-4's topic-configuration
+/// read, which writes nothing and is never fatal, runs between them. Two reads through the read-only archive
+/// handle — a one-key LIST of `topics/` and a GET of the manifest — under
+/// the prefix `run` already lists and reads after the engine, so no
+/// permission is added. For a new execution both answer "nothing".
+///
+/// An existing set is exit 1 [`EXECUTION_ALREADY_CLAIMED`] — the same state
+/// as a claim that already exists, because it is the same fact (an earlier
+/// run of this `backup_id` reached the engine) with a different witness, and
+/// the same remedy (a new execution id; D1 §4.6's retry is one).
+///
+/// # A read that FAILS proves nothing about the set — and WHICH failure it was decides the code
+///
+/// Either way no engine run is started and nothing is signed. What differs is
+/// whether waiting can change the answer (FX-7 fix round, review L-3):
+///
+/// * **a transport failure, a timeout, or a 5xx/429 the object-store client
+///   already retried for its three minutes** — exit 1 `Operational`. It says
+///   nothing about the set or the configuration, the controller's retry policy
+///   (`weirkeeper::cadence::is_retryable`: exit 1 is "the run failed and wrote
+///   nothing; a broker or a network can be back") retries it when the schedule
+///   has `spec.retry`, and a retry is SAFE: it is a new execution id
+///   `<uid>-<slot>-r<k>`, a different set, with its own claim;
+/// * **anything else** — a 401/403 (the grant is missing), a wrong bucket,
+///   region or CA, or a failure this build cannot classify — exit 4
+///   [`EXECUTION_CLAIM_UNPROVEN`], exactly as a claim put the store refused: a
+///   decision no retry changes, which `is_retryable` does not retry.
+///
+/// Either message says the execution's claim is taken, so a MANUAL retry needs a
+/// new execution id too. `archive` is the [`ObjectAccess`] seam the check runner
+/// reads through — `Store` implements it — so a row can make either read fail
+/// with a chosen answer.
+///
+/// [`ObjectAccess`]: crate::check::store::ObjectAccess
+pub fn refuse_an_existing_set(
+    backup_id: &str,
+    storage: &logweir_core::engine::StorageUrl,
+    archive: &dyn crate::check::store::ObjectAccess,
+) -> Result<(), BackupError> {
+    use logweir_engine_oso::storage::StoreError;
+    // The directory is taken from the PLAN's storage prefix — the prefix the
+    // engine writes under and `run`'s read-back lists (`list_manifests` over
+    // `plan.storage`) — so the three agree by construction, whatever prefix
+    // the archive handle itself was built with.
+    let prefix = storage.prefix().trim_end_matches('/');
+    let directory = if prefix.is_empty() {
+        format!("{backup_id}/")
+    } else {
+        format!("{prefix}/{backup_id}/")
+    };
+    let unproven = |what: &str, e: &StoreError| {
+        if a_retry_can_change(e) {
+            BackupError::Operational(format!(
+                "execution `{backup_id}`: {what} could not be read to prove the backup set is \
+                 new: {e}. The failure is transient (a transport error, a timeout or a 5xx), so \
+                 NO engine run was started and nothing was signed, and the run ends exit 1: a \
+                 schedule with `spec.retry` retries it under a NEW execution id. This \
+                 execution's claim is taken, so a manual retry needs a new execution id too (a \
+                 new Backup, or a fresh `--backup-id-override`)."
+            ))
+        } else {
+            BackupError::Lock(format!(
+                "{EXECUTION_CLAIM_UNPROVEN}: execution `{backup_id}`: {what} could not be read \
+                 to prove the backup set is new: {e}. An existing set would be rewritten by the \
+                 engine, so NO engine run was started and nothing was signed. Grant \
+                 `s3:ListBucket` and `s3:GetObject` on the archive prefix (or fix the bucket, \
+                 region or CA the error names), then run again under a new execution id (a new \
+                 Backup): this execution's claim is taken."
+            ))
+        }
+    };
+    let segments = format!("{directory}topics/");
+    let found = match archive.list_page(&segments, None, 1) {
+        Ok(keys) => keys.into_iter().next(),
+        Err(e) => return Err(unproven(&segments, &e)),
+    };
+    let found = match found {
+        Some(segment) => Some(segment),
+        None => {
+            let manifest = format!("{directory}manifest.json");
+            match archive.get(&manifest) {
+                Ok(_) => Some(manifest),
+                Err(StoreError::NotFound(_)) => None,
+                Err(e) => return Err(unproven(&manifest, &e)),
+            }
+        }
+    };
+    match found {
+        None => Ok(()),
+        Some(key) => Err(BackupError::ExecutionClaimed(format!(
+            "{EXECUTION_ALREADY_CLAIMED}: execution `{backup_id}`'s backup set already exists in \
+             the archive ({key} is in it) although it carries no execution claim this run could \
+             see — an earlier run of this backup_id, by a build without the claim, wrote it. A \
+             second engine run would rewrite that run's segments in place, and its signed \
+             receipt would no longer describe the archive, so NO engine run was started and \
+             nothing was signed. Retry under a new execution id (a new Backup)."
+        ))),
+    }
+}
+
+/// **FX-7 fix round (review L-3).** Whether a failed read of the archive in
+/// [`refuse_an_existing_set`] is one a retry under a new execution id can
+/// change: a transport failure (`EndpointUnreachable`), a `Timeout`, or a 5xx
+/// or 429 the object-store client has already retried — which the classifier
+/// leaves unclassified, so the status line `object_store` prints decides. A
+/// closed match with no wildcard: a class added to the vocabulary must be
+/// placed here on purpose, and "could not classify" stays a decision.
+fn a_retry_can_change(e: &logweir_engine_oso::storage::StoreError) -> bool {
+    use logweir_engine_oso::storage::StoreErrorClass as Class;
+    match Class::classify(e) {
+        Class::EndpointUnreachable | Class::Timeout => true,
+        Class::StoreErrorUnclassified => {
+            let text = e.to_string().to_ascii_lowercase();
+            text.contains("non-2xx status code: 5") || text.contains("429 too many requests")
+        }
+        Class::AccessDenied
+        | Class::InvalidCredentials
+        | Class::BucketNotFound
+        | Class::ObjectNotFound
+        | Class::RegionMismatch
+        | Class::TlsTrustFailed => false,
+    }
+}
+
 pub fn load_signer(path: &Path) -> Result<ValidatedSigner, BackupError> {
     ValidatedSigner::load(
         path,
@@ -173,6 +341,10 @@ pub struct Ran {
     /// `logweir_core::ids::sha256_prefixed` (`ids.rs:11-13`) — never over a
     /// re-serialisation of anything.
     pub manifest_sha256: String,
+    /// **FX-7.** The version id the store answered the SAME read with — the
+    /// version those exact bytes are — or `None` on a bucket that keeps no
+    /// versions (`logweir_core::backup_receipt::pinnable_version_id`).
+    pub manifest_version_id: Option<String>,
     pub records_per_topic: BTreeMap<String, u64>,
     /// INCLUSIVE start of the covered window, epoch milliseconds: the oldest
     /// `start_timestamp` any segment of this backup set declares.
@@ -187,6 +359,13 @@ pub struct Ran {
     /// converted HERE, once, where the window is measured — see the argument
     /// in `run` below.
     pub covered_to_ms: i64,
+    /// **FX-4.** The manifest's `configurations` for each NAMED topic the
+    /// manifest mentions — read back through the same `describe` as the
+    /// counts, so the coverage comparison is against the bytes this run read.
+    /// A named topic the manifest does not mention is ABSENT here, which
+    /// `config_coverage::classify` reads as `manifestDiffers`, never as "no
+    /// overrides".
+    pub manifest_configurations: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 pub fn run(
@@ -238,10 +417,19 @@ pub fn run(
     // they are read here anyway: `describe` reaches the archive through the
     // engine's OWN store handle, so a receipt quoting only the engine's
     // number would be attesting bytes this process never saw.
-    let (manifest_bytes, _version_id) = store
+    //
+    // **And the version id that same read was answered with (FX-7).** It is
+    // the version of exactly these bytes — one response carries both — so a
+    // receipt that pins it names the object version its digest is over. The
+    // engine rewrites `<backup_id>/manifest.json` with its own unconditional
+    // put, several times in one run; what is pinned is the version this run
+    // read back AFTER the engine exited, i.e. the one the receipt attests.
+    let (manifest_bytes, answered_version) = store
         .get(&set.manifest_key)
         .map_err(|e| BackupError::Operational(e.to_string()))?;
     let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest_bytes);
+    let manifest_version_id =
+        logweir_core::backup_receipt::pinnable_version_id(answered_version.as_deref());
 
     // `describe_with_notices`, not `describe`: what the engine found that no
     // signed field carries — today an unreadable consumer-groups snapshot
@@ -270,12 +458,14 @@ pub fn run(
     // that is a different claim: nothing was captured for ANY named topic.)
     let mut records_per_topic: BTreeMap<String, u64> =
         plan.topics.iter().map(|t| (t.clone(), 0u64)).collect();
+    let mut manifest_configurations: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut oldest: Option<i64> = None;
     let mut newest: Option<i64> = None;
     for topic in &archive.topics {
         let Some(entry) = records_per_topic.get_mut(&topic.name) else {
             continue;
         };
+        manifest_configurations.insert(topic.name.clone(), topic.configurations.clone());
         for partition in &topic.partitions {
             for segment in &partition.segments {
                 // `record_count` is `i64` on the wire. A negative count is
@@ -331,9 +521,11 @@ pub fn run(
         facts,
         manifest_key: set.manifest_key,
         manifest_sha256,
+        manifest_version_id,
         records_per_topic,
         covered_from_ms,
         covered_to_ms,
+        manifest_configurations,
     })
 }
 
@@ -388,13 +580,27 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// `BackupOutcome` -> the document. A pure projection: every field is a value
 /// the outcome already carries, and nothing here measures anything.
 ///
-/// `format_version` is the pinned `1.0.0` of THIS document type (independent
-/// of the scorecard's), and `source.auth` is `BackupOutcome::source_auth`
-/// rendered as the two strings `ReceiptAuth` holds — **never a password, and
-/// no field that could hold one**.
+/// `format_version` is `RECEIPT_FORMAT_VERSION` (`1.1.0` since FX-4) of THIS
+/// document type (independent of the scorecard's), or
+/// `FORMAT_VERSION_WITH_MANIFEST_VERSION` (`1.2.0`) exactly when the receipt
+/// pins the manifest's version id (FX-7) —
+/// `logweir_core::backup_receipt::format_version_for`, the one place that
+/// decides it. `source.auth` is `BackupOutcome::source_auth` rendered as the
+/// two strings `ReceiptAuth` holds — **never a password, and no field that
+/// could hold one**.
+///
+/// `config_coverage` is ALWAYS written (FX-4): a receipt this build signs
+/// never leaves a topic's configuration coverage to be read as unknown by
+/// omission when it was measured.
 pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
+    let archive = ReceiptArchive {
+        manifest_key: outcome.manifest_key.clone(),
+        manifest_sha256: outcome.manifest_sha256.clone(),
+        manifest_version_id: outcome.manifest_version_id.clone(),
+        prefix: outcome.archive_prefix.clone(),
+    };
     BackupReceipt {
-        format_version: "1.0.0".to_string(),
+        format_version: logweir_core::backup_receipt::format_version_for(&archive).to_string(),
         run_id: outcome.run_id.clone(),
         backup_id: outcome.backup_id.clone(),
         requested_at: outcome.requested_at,
@@ -416,17 +622,14 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
             version: outcome.engine.version.clone(),
             digest: outcome.engine.digest.clone(),
         },
-        archive: ReceiptArchive {
-            manifest_key: outcome.manifest_key.clone(),
-            manifest_sha256: outcome.manifest_sha256.clone(),
-            prefix: outcome.archive_prefix.clone(),
-        },
+        archive,
         records: outcome.records_per_topic.clone(),
         covered: ReceiptCovered {
             from_ms: outcome.covered_from_ms,
             // EXCLUSIVE (I22). The conversion happened in `run` above, once.
             to_ms: outcome.covered_to_ms,
         },
+        config_coverage: Some(outcome.config_coverage.clone()),
     }
 }
 

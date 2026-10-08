@@ -34,8 +34,25 @@ const PREFIX: &str = "rehearsal-3f2a91c7-";
 /// bytes are reproducible; every clock-relative check takes `now` as an
 /// argument on both sides (Global Constraint 1), so a fixed instant here costs
 /// nothing and buys a byte-comparable artifact.
+///
+/// **FX-9.** Until 2026-10-05 the MINT side broke that rule: `mint_standing`
+/// read the wall clock for its already-expired refusal, so these rows passed
+/// only while the wall clock was inside this fixture's thirty days, and from
+/// 2026-10-01 three of them failed. The mint now takes [`now`] like the
+/// runner and the controller do.
 fn issued_at() -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+    at("2026-09-01T00:00:00Z")
+}
+
+/// The caller's clock these rows hand `mint_standing`: one day into the
+/// fixture's window, the same instant the runner row judges it at. Fixed, so
+/// no row here depends on the date it runs.
+fn now() -> chrono::DateTime<chrono::Utc> {
+    issued_at() + chrono::Duration::days(1)
+}
+
+fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
         .expect("a fixture instant")
         .with_timezone(&chrono::Utc)
 }
@@ -92,7 +109,7 @@ fn mint(valid_days: i64) -> Minted {
     std::fs::write(&key, signer.to_pkcs8_pem().expect("a private PEM")).expect("written");
 
     let args = args_for(dir.path(), &scope, &key, valid_days);
-    mint_standing(&args).expect("the authorization mints");
+    mint_standing(&args, now()).expect("the authorization mints");
 
     let out = dir.path().join("standing-authorization.json");
     let keys = serde_json::to_vec(&serde_json::json!({
@@ -153,8 +170,9 @@ fn a_minted_standing_authorization_is_accepted_by_the_runner() {
         &minted.sidecar,
         &minted.keys,
         Some(SCHEDULE_UID),
-        // Inside the window the fixture was minted for.
-        issued_at() + chrono::Duration::days(1),
+        // Inside the window the fixture was minted for: the instant it was
+        // minted at.
+        now(),
     )
     .expect("the runner admits a document this product minted");
 
@@ -275,7 +293,8 @@ fn a_document_the_cluster_would_refuse_is_refused_before_it_is_signed() {
 
     // D3 §4.3's ninety-day cap, and its floor.
     for (days, why) in [(91, "90"), (0, "minimum 1")] {
-        let error = mint_standing(&base(days)).expect_err("a window outside the cap is refused");
+        let error =
+            mint_standing(&base(days), now()).expect_err("a window outside the cap is refused");
         assert!(error.contains(why), "{days}: {error}");
     }
 
@@ -286,14 +305,11 @@ fn a_document_the_cluster_would_refuse_is_refused_before_it_is_signed() {
     // "valid now". Signing this would spend a key on bytes every reader
     // refuses, which is the one thing this command promises not to do.
     let mut long_past = base(30);
-    long_past.standing.as_mut().expect("standing").issued_at = Some(
-        chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
-            .expect("an instant")
-            .with_timezone(&chrono::Utc),
-    );
+    long_past.standing.as_mut().expect("standing").issued_at = Some(at("2020-01-01T00:00:00Z"));
     let out_past = dir.path().join("sa-past.json");
     long_past.out = out_past.clone();
-    let error = mint_standing(&long_past).expect_err("an already-expired document is refused");
+    let error =
+        mint_standing(&long_past, now()).expect_err("an already-expired document is refused");
     assert!(
         error.contains("already in the past"),
         "the refusal says what is wrong: {error}"
@@ -303,18 +319,18 @@ fn a_document_the_cluster_would_refuse_is_refused_before_it_is_signed() {
     // A blank UID is not a UID: it is what binds the document to ONE object.
     let mut blank = base(30);
     blank.standing.as_mut().expect("standing").schedule_uid = "  ".to_string();
-    let error = mint_standing(&blank).expect_err("a blank subject UID is refused");
+    let error = mint_standing(&blank, now()).expect_err("a blank subject UID is refused");
     assert!(error.contains("--schedule-uid is required"), "{error}");
 
     // A per-run approval's inputs, which this document does not bind.
     let mut with_spec = base(30);
     with_spec.spec = Some(PathBuf::from("drill.yaml"));
-    assert!(mint_standing(&with_spec)
+    assert!(mint_standing(&with_spec, now())
         .expect_err("--spec is refused")
         .contains("--spec is not used with --standing"));
     let mut with_ticket = base(30);
     with_ticket.ticket = "CHG-1".to_string();
-    assert!(mint_standing(&with_ticket)
+    assert!(mint_standing(&with_ticket, now())
         .expect_err("--ticket is refused")
         .contains("would NOT be signed"));
 
@@ -322,7 +338,7 @@ fn a_document_the_cluster_would_refuse_is_refused_before_it_is_signed() {
     // up pasted into the slot that makes it look substituted.
     let mut wrong_name = base(30);
     wrong_name.out = dir.path().join("approval.json");
-    assert!(mint_standing(&wrong_name)
+    assert!(mint_standing(&wrong_name, now())
         .expect_err("approval.json is refused")
         .contains("standing-authorization.json"));
 
@@ -356,7 +372,7 @@ fn a_document_the_cluster_would_refuse_is_refused_before_it_is_signed() {
         let mut args = args_for(dir.path(), &bad, &key, 30);
         let out = dir.path().join(format!("sa-{field}.json"));
         args.out = out.clone();
-        let error = mint_standing(&args).expect_err(
+        let error = mint_standing(&args, now()).expect_err(
             "a scope this build cannot act on must be refused BEFORE anything is signed",
         );
         assert!(
@@ -373,5 +389,138 @@ fn a_document_the_cluster_would_refuse_is_refused_before_it_is_signed() {
     assert!(
         !dir.path().join("standing-authorization.json").exists(),
         "a refused mint writes no document"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FX-9: the mint judges the CALLER's `now` and reads no clock of its own
+// ---------------------------------------------------------------------------
+
+/// One temp dir, scope and key, and `ApproveArgs` over them with the window
+/// each FX-9 row names.
+struct Bench {
+    dir: tempfile::TempDir,
+    scope: PathBuf,
+    key: PathBuf,
+}
+
+impl Bench {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let scope = dir.path().join("scope.json");
+        std::fs::write(&scope, scope_json()).expect("the scope is written");
+        let key = dir.path().join("approver.pem");
+        let signer = SigningKey::generate_ed25519();
+        std::fs::write(&key, signer.to_pkcs8_pem().expect("a private PEM")).expect("written");
+        Self { dir, scope, key }
+    }
+
+    /// `issued_at: None` is the operator's ordinary command line, with no
+    /// `--issued-at`.
+    fn args(
+        &self,
+        out: &str,
+        issued_at: Option<chrono::DateTime<chrono::Utc>>,
+        valid_days: i64,
+    ) -> ApproveArgs {
+        let mut args = args_for(self.dir.path(), &self.scope, &self.key, valid_days);
+        args.out = self.dir.path().join(out);
+        args.standing.as_mut().expect("standing").issued_at = issued_at;
+        args
+    }
+}
+
+fn read_doc(path: &Path) -> wire::StandingAuthorization {
+    serde_json::from_slice(&std::fs::read(path).expect("the envelope was written"))
+        .expect("the envelope parses")
+}
+
+/// **FX-9's negative control.** The committed fixture's own window (issued
+/// 2026-09-01, thirty days), judged at the caller's `now`. It is refused AT
+/// `expiresAt` and after it, and it mints one second before it. The refusal
+/// names the caller's `now`, not a clock of its own, and writes nothing.
+///
+/// The boundary row is what `<=` is for: `expiresAt` is the first instant the
+/// document authorises nothing (`admit_standing_authorization` refuses
+/// `expires_at <= now`), so a mint that admitted `now == expiresAt` would
+/// spend a key on bytes every reader refuses.
+#[test]
+fn the_fixture_window_is_refused_once_the_callers_now_reaches_its_expiry() {
+    let bench = Bench::new();
+    let expires = issued_at() + chrono::Duration::days(30);
+
+    for (label, judged_at) in [
+        ("at-expiry", expires),
+        ("a-day-after", expires + chrono::Duration::days(1)),
+    ] {
+        let args = bench.args(&format!("sa-{label}.json"), Some(issued_at()), 30);
+        let error = mint_standing(&args, judged_at)
+            .expect_err("a window that has closed at the caller's now is refused");
+        assert!(error.contains("already in the past"), "{label}: {error}");
+        assert!(
+            error.contains(&format!("it is now {}", judged_at.to_rfc3339())),
+            "{label}: the refusal judged the CALLER's now, not a clock of its own: {error}"
+        );
+        assert!(
+            !args.out.exists() && !args.out.with_extension("sig").exists(),
+            "{label}: a refused mint signs nothing and writes nothing"
+        );
+    }
+
+    // The positive control at the same boundary. One second earlier the same
+    // document mints, so the refusals above are the expiry check firing at
+    // `expiresAt`, and not something that refuses this window at any instant.
+    let args = bench.args("sa-inside.json", Some(issued_at()), 30);
+    mint_standing(&args, expires - chrono::Duration::seconds(1))
+        .expect("one second before expiresAt the document still mints");
+    assert_eq!(read_doc(&args.out).expires_at, expires);
+}
+
+/// **THE GUARD (FX-9): the mint reads no clock of its own.** Every instant
+/// here is centuries or decades from any date this suite runs on, in both
+/// directions. A build that reads the wall clock anywhere in `mint_standing`
+/// therefore fails a row today and on every later date:
+///
+/// 1. `now` in 2001, no `--issued-at`: the document mints, stamped with
+///    exactly that `now`. A wall-clock `issuedAt` is not 2001, and a
+///    wall-clock expiry check sees a window that closed in 2001 and refuses.
+///    This catches the expiry check on every date after 2001-01-31.
+/// 2. `now` in 2999, no `--issued-at`: stamped with exactly that `now`.
+/// 3. `now` in 2999, a window that closed a month earlier: refused, naming
+///    that `now`. A wall-clock expiry check sees a window open until 2999
+///    and signs it.
+#[test]
+fn the_mint_judges_and_stamps_the_callers_now_and_reads_no_clock() {
+    let bench = Bench::new();
+
+    for now in [at("2001-01-01T00:00:00Z"), at("2999-06-01T00:00:00Z")] {
+        let args = bench.args(&format!("sa-{}.json", now.timestamp()), None, 30);
+        mint_standing(&args, now).unwrap_or_else(|e| {
+            panic!(
+                "{now}: a window open at the caller's now mints, whatever the wall clock says: {e}"
+            )
+        });
+        let doc = read_doc(&args.out);
+        assert_eq!(
+            doc.issued_at, now,
+            "issuedAt defaults to the caller's now, never to the wall clock"
+        );
+        assert_eq!(doc.expires_at, now + chrono::Duration::days(30));
+    }
+
+    let now = at("2999-06-01T00:00:00Z");
+    let args = bench.args("sa-closed-2999.json", Some(at("2999-04-01T00:00:00Z")), 30);
+    let error = mint_standing(&args, now).expect_err(
+        "a window that closed before the caller's now is refused, however far ahead of the wall \
+         clock that now is",
+    );
+    assert!(error.contains("already in the past"), "{error}");
+    assert!(
+        error.contains(&format!("it is now {}", now.to_rfc3339())),
+        "{error}"
+    );
+    assert!(
+        !args.out.exists() && !args.out.with_extension("sig").exists(),
+        "nothing was signed"
     );
 }

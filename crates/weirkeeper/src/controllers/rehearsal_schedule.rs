@@ -255,6 +255,12 @@ pub struct Facts<'a> {
 ///    the same target ([`SkipReason::TargetBusy`]). Before the authorization
 ///    check, because "already running" is a cheaper and more accurate thing to
 ///    say than "your approval is fine but you cannot run".
+///
+///    4b. **The runner's resources** (FX-2) — `bounds.runnerResources` must
+///    pass [`crate::runner_resources::validate`]. A failure is
+///    [`SkipReason::AuthorizationInvalid`]: the sealed spec the standing
+///    authorization binds can never run, and nothing else about the slot is
+///    worth reporting first.
 /// 5. **The authorization** — present, `Verified=True`, bound to THIS
 ///    schedule's UID, signed by a key that may still authorise, inside its
 ///    life bound, not expired, and its scope agrees with the sealed spec.
@@ -351,6 +357,33 @@ pub fn decide(facts: &Facts<'_>) -> Verdict {
                  one rehearsal per target cluster runs at a time, because two would race over the \
                  same broker even though their topic names differ",
                 spec.target.cluster_ref.name
+            ),
+        ));
+    }
+
+    // ---- 4b. the runner's resources (FX-2) ------------------------------
+    //
+    // `bounds.runnerResources` is projected onto every child `Restore`, and a
+    // `Restore` carrying a value the controller will not apply is refused
+    // before its Job exists. Refusing the SLOT instead means no child is ever
+    // created for it — the CRD's own contract ("the rehearsal controller
+    // must refuse an oversized or wrong-unit request with
+    // `AuthorizationInvalid` rather than creating the Job"). The spec is
+    // sealed and the standing authorization binds its digest, so the only
+    // remedy is a new schedule under a new authorization, and the detail says
+    // so. Before the authorization check, because an approver who fixes the
+    // `Approval` first would be fixing a schedule that can never run.
+    if let Err(refused) = crate::runner_resources::validate(
+        spec.bounds.runner_resources.as_ref(),
+        crate::runner_resources::REHEARSAL_PATH,
+    ) {
+        return Verdict::Skipped(Skip::new(
+            SkipReason::AuthorizationInvalid,
+            format!(
+                "{refused}. The runner's requests and limits are applied exactly as written or \
+                 not at all, so no rehearsal Restore is created; the spec is sealed and the \
+                 standing authorization binds its digest — create a new RehearsalSchedule, \
+                 with a new authorization, whose bounds.runnerResources is inside the bounds"
             ),
         ));
     }

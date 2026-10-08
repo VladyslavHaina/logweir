@@ -3,10 +3,16 @@
 `application/vnd.logweir.catalog-point+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-catalog-point-1.0.0.json`](../../schemas/logweir-catalog-point-1.0.0.json),
+[`schemas/logweir-catalog-point-1.2.0.json`](../../schemas/logweir-catalog-point-1.2.0.json),
 regenerated from the Rust type by `just schema` and `diff -u`'d against the
 checked-in file by `just schema-check`, so this document and the schema cannot
-drift apart silently.
+drift apart silently. A MINOR bump is a new schema file beside the old one: the
+[`1.1.0` schema](../../schemas/logweir-catalog-point-1.1.0.json), which
+describes every record written without the manifest-version pin (FX-4,
+`topics[].config_coverage`), and the
+[`1.0.0` schema](../../schemas/logweir-catalog-point-1.0.0.json), which
+describes every record written before format 1.1.0, are frozen beside it and
+never regenerated.
 
 If you are verifying a document rather than producing one, read
 [../verify-a-scorecard.md](../verify-a-scorecard.md) for the mechanics of a
@@ -61,7 +67,10 @@ all of them wanted:
 1. **It is content-derived**, so the same archive copied to a second bucket is
    one point in two places rather than two points. Two records for one id that
    differ only in `archive.location_id` describe one point; two that differ in a
-   receipt-derived fact are a `Conflict` (below).
+   receipt-derived fact are a `Conflict` (below). A pinned manifest version
+   (FX-7) does not change that: a version id belongs to the bucket that issued
+   it, so a copy — which carries the pin and not the version — is checked by its
+   manifest digest, and says that the pin could not be checked there.
 2. **Anyone holding the receipt can compute it**, including a fresh
    installation that never saw the `Backup` object.
 3. **It cannot be forged into another point's identity** without breaking the
@@ -74,9 +83,10 @@ all of them wanted:
    two runs and silently drop the older receipt's window. The overwrite itself
    is now prevented at the source — a run must win a create-only
    [execution claim](backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)
-   before its engine starts, so a new execution signs one receipt — but sets
-   written by older builds can still hold two receipts, and this rule is what
-   keeps both of them visible.
+   before its engine starts, and (FX-7) must find the set's directory empty,
+   so a new execution signs one receipt and never writes into a set an older
+   build wrote — but sets written by older builds can still hold two receipts,
+   and this rule is what keeps both of them visible.
 
 `backup_id` remains the **archive set** identifier, and `pointId` is the
 **recovery point**. The 128-bit id is a display and lookup key; the full
@@ -123,7 +133,7 @@ all of them wanted:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`. |
+| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; this build writes `1.1.0`, or `1.2.0` for a record that carries `archive.manifest_version_id`. |
 | `point_id` | string | `lwp1-` + 32 lowercase hex. See [Point identity](#point-identity). |
 | `recorded_at` | RFC 3339 | When the RECORD was written. **Not** a fact about the backup. |
 | `receipt.key` / `.sidecar_key` | string | Where the signed backup receipt and its sidecar are, in this archive's evidence root. |
@@ -141,6 +151,7 @@ all of them wanted:
 | `archive.location_id` | string | `s3://<bucket>/<prefix>`, `gs://…`, `az://<account>/<container>/…` or `file://<path>` — **bucket and prefix only**. Never an endpoint, never a region, never a credential. It is deliberately NOT part of the identity, which is what makes one archive in two buckets one point in two places. |
 | `archive.manifest_key` | string | Receipt-derived. |
 | `archive.manifest_sha256` | `sha256:<hex>` | Receipt-derived. |
+| `archive.manifest_version_id` | string, **optional** (format `1.2.0`) | Receipt-derived: the receipt's pinned manifest version ([backup-receipt.md](backup-receipt.md#the-pinned-manifest-version-versioned-buckets)), present exactly when the receipt carries one — a point taken on a versioned bucket. Absent means unknown. A reader takes the pin from the verified RECEIPT, never from this copy; a record whose copy differs from the receipt's, or that carries one the receipt does not, is a mismatch (`Conflict`), while a record without one (an older writer) is not. The pin is checked only in a bucket that holds the pinned version: there, a pinned version that is no longer current is `Conflict`; elsewhere (a copy, an unversioned bucket, a version that was expired or deleted) the digest decides — which an identical manifest over rewritten segments passes — and the entry's remedy says the pin could not be checked ([backup-receipt.md](backup-receipt.md#the-pinned-manifest-version-versioned-buckets)). |
 | `archive.prefix` | string | The archive's own key prefix, as the receipt records it. |
 
 ### What was captured
@@ -153,6 +164,7 @@ all of them wanted:
 | `capture.finished_at` | RFC 3339 | The engine subprocess's end. |
 | `topics[].name` | string | One entry per topic the receipt names. |
 | `topics[].records` | int | Records this run captured for the topic. |
+| `topics[].config_coverage` | object, **optional** (1.1.0) | The backup receipt's [`config_coverage`](backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110) entry for the topic, COPIED: `coverage` (`captured`, `notCaptured`, `captureDenied`), `reason` for `notCaptured`, and the effective `timestamp_type` with its `source`. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means UNKNOWN — every 1.0.0 record, and every record derived from a receipt that predates 1.1.0 — and is never read as `captured`. |
 | `topics[].partitions` | int, **optional** | ABSENT on every record this build writes: a backup receipt records no partition count at all. See [absent means unknown](#absent-means-unknown-never-zero). |
 | `source.cluster_id` | string | Read from the broker at admission and carried by the receipt — never from a spec. |
 | `source.bootstrap_servers` | string[] | Addressing. |
@@ -212,13 +224,18 @@ and "which shard is it in" are one number.
    schema pins the major with a pattern (`^1\.[0-9]+\.[0-9]+$`) as well, so a
    schema-only validator refuses a `9.9.9` document too.
 2. **Unknown fields are ignored inside major 1.** A minor bump adds optional
-   fields and a 1.0.0 reader must still read a 1.1.0 record.
+   fields and a 1.0.0 reader must still read a 1.1.0 or 1.2.0 record.
 3. **Absent optional fields mean UNKNOWN — never zero.** See below.
 4. **Everything except the receipt-derived facts is informational.** The
    receipt's signature is the verification root. `backup_id`, `run_id`,
    `covered`, `capture` and `archive.manifest_key`/`manifest_sha256` are
    recomputed from the verified receipt, and a record whose copies disagree is
    reported as a mismatch (availability `Conflict`) rather than believed.
+   `topics[].config_coverage` (1.1.0) is receipt-derived too, one way: a record
+   may carry LESS than its receipt (an older writer copies nothing) but never a
+   coverage the receipt does not carry — `captured` beside a `captureDenied`
+   receipt, or any coverage beside a 1.0.0 receipt, is a `RecordMismatch`. Two
+   records of one point conflict on it only where both carry an entry.
 5. **Nothing under `logweir/` is ever rewritten.** Every put is create-only. A
    correction is a new record under a new point id; a removal is a tombstone.
    An existing object at a record key is "already there", which is a success,
@@ -234,6 +251,10 @@ This is the rule that is easiest to get wrong and most expensive to get wrong.
 * absent `execution` → provenance **unknown** (an imported archive from another
   installation).
 * absent `installation` → the writing installation is **unknown**.
+* absent `topics[].config_coverage` → whether that topic's configuration was
+  captured is **unknown**, and never `captured`. A restore does not read this
+  copy at all: its configuration parity takes coverage from the bound point's
+  VERIFIED receipt, and says `not assessed` when that receipt has none.
 
 Absent fields are absent from the bytes, not `null`, so a reader in any language
 sees nothing rather than a value.
@@ -248,8 +269,9 @@ Availability and verification are separate axes and both are separate from this
 signature:
 
 * *availability* — can the receipt, sidecar and manifest still be fetched, and
-  does the manifest's digest still equal the receipt's? Only a fetch answers
-  that, and this document is not one.
+  does the manifest's digest still equal the receipt's — and, for a point that
+  pins a manifest version, is that version still the current one? Only a fetch
+  answers that, and this document is not one.
 * *verification* — does the backup receipt's DSSE signature verify under a key
   you trust for evidence signing? That is the receipt's signature, not this one.
 
@@ -288,7 +310,17 @@ none of them.
 * **Refusal is per entry, not per catalog.** A `v1` reader meeting a major-2
   record marks that entry and keeps going.
 * **A minor bump adds optional fields only.** Unknown fields inside major 1 are
-  ignored, so a 1.0.0 reader reads a 1.1.0 record.
+  ignored, so a 1.0.0 reader reads a 1.1.0 record. **1.1.0 (FX-4)** is the first:
+  `topics[].config_coverage`. The day-sharded index entry did not change and
+  stays `format_version: 1.0.0`. An older `logweir` writing records from a
+  1.1.0 receipt writes them without the field (coverage unknown), which
+  `cross_check` accepts; a 1.0.0 record read by this build has no coverage and
+  is never upgraded to `captured`. **1.2.0 (FX-7)** is the second:
+  `archive.manifest_version_id`, written only for a point whose receipt pins
+  its manifest's version; every other record this build writes stays 1.1.0. A
+  record without it (an older writer, or an unversioned bucket) is unknown, and
+  `cross_check` accepts it; one whose copy differs from the receipt's is a
+  mismatch.
 * **A major bump** is for a change a `1.x` reader could misread — a field whose
   meaning changed, or a required field removed. It writes under a new key path.
 * **Absent optional fields are unknown**, in every version.

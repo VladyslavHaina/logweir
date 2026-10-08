@@ -241,13 +241,91 @@ pub fn cross_check(
             actual,
         };
     }
-    let disagreements =
+    let mut disagreements =
         ReceiptFacts::of_record(point).disagreements(&ReceiptFacts::of_receipt(receipt));
+    // **FX-7 — the pin, one way round.** A record that carries
+    // `archive.manifest_version_id` must carry the RECEIPT's: a different pin,
+    // or one the receipt does not have, would send a reader to the wrong
+    // object version. A record WITHOUT one says "unknown" (rule 2) — an older
+    // writer, or an unversioned bucket — and is not a contradiction: readers
+    // take the pin from the verified receipt, never from the record. That is
+    // why this is not a field of `ReceiptFacts`, whose comparison `reconcile`
+    // also uses between two RECORDS, where one written by an older build
+    // legitimately lacks the field.
+    if let Some(recorded) = point.archive.manifest_version_id.as_deref() {
+        let attested = receipt.archive.manifest_version_id.as_deref();
+        if attested != Some(recorded) {
+            disagreements.push(format!(
+                "archive.manifest_version_id: {recorded:?} vs {:?}",
+                attested.unwrap_or("")
+            ));
+        }
+    }
+    disagreements.extend(unbacked_coverage(point, receipt));
     if disagreements.is_empty() {
         CrossCheck::Agrees
     } else {
         CrossCheck::RecordMismatch(disagreements)
     }
+}
+
+/// **FX-4, rule 3 for `topics[].config_coverage`.** Every coverage entry the
+/// RECORD claims must be the receipt's own, byte for byte — a record may know
+/// LESS than its receipt (an older writer copies nothing: absent is UNKNOWN,
+/// rule 2), never more, and never something else. So a record that says
+/// `captured` beside a receipt that says `captureDenied`, or that carries a
+/// block its 1.0.0 receipt has no way to hold, is a `RecordMismatch`: the one
+/// way a catalog could present old evidence as a stronger claim.
+///
+/// Deliberately NOT part of [`ReceiptFacts`]: `reconcile` compares two
+/// RECORDS, where one legitimately knowing less than the other is not a
+/// conflict ([`coverage_conflicts`]).
+fn unbacked_coverage(point: &CatalogPoint, receipt: &BackupReceipt) -> Vec<String> {
+    point
+        .topics
+        .iter()
+        .filter_map(|t| {
+            let claimed = t.config_coverage.as_ref()?;
+            let backed = receipt
+                .config_coverage
+                .as_ref()
+                .and_then(|block| block.get(&t.name));
+            (backed != Some(claimed)).then(|| {
+                format!(
+                    "topics[{:?}].config_coverage: {:?} vs {}",
+                    t.name,
+                    claimed.coverage,
+                    backed.map_or_else(
+                        || "none in the receipt".to_string(),
+                        |b| format!("{:?}", b.coverage)
+                    )
+                )
+            })
+        })
+        .collect()
+}
+
+/// **FX-4, rule 4 for `topics[].config_coverage`.** Two records of one point
+/// must agree wherever BOTH carry an entry; one carrying none (an older
+/// writer) is not a conflict.
+fn coverage_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
+    a.topics
+        .iter()
+        .filter_map(|ta| {
+            let ca = ta.config_coverage.as_ref()?;
+            let cb = b
+                .topics
+                .iter()
+                .find(|tb| tb.name == ta.name)
+                .and_then(|tb| tb.config_coverage.as_ref())?;
+            (ca != cb).then(|| {
+                format!(
+                    "topics[{:?}].config_coverage: {:?} vs {:?}",
+                    ta.name, ca.coverage, cb.coverage
+                )
+            })
+        })
+        .collect()
 }
 
 /// What two records carrying ONE point id mean.
@@ -278,7 +356,8 @@ pub fn reconcile(a: &CatalogPoint, b: &CatalogPoint) -> Duplicate {
     if a.point_id != b.point_id {
         return Duplicate::DifferentPoints;
     }
-    let disagreements = ReceiptFacts::of_record(a).disagreements(&ReceiptFacts::of_record(b));
+    let mut disagreements = ReceiptFacts::of_record(a).disagreements(&ReceiptFacts::of_record(b));
+    disagreements.extend(coverage_conflicts(a, b));
     if !disagreements.is_empty() {
         return Duplicate::Conflict(disagreements);
     }

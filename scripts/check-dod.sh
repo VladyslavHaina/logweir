@@ -8,7 +8,10 @@ for file in README.md LICENSE NOTICE TRADEMARKS.md SECURITY.md \
   CONTRIBUTING.md THIRD_PARTY_NOTICES.md docs/quickstart.md \
   docs/support-matrix.md docs/architecture.md docs/kubernetes.md \
   schemas/logweir-drill-scorecard-1.0.0.json \
+  schemas/logweir-drill-scorecard-1.1.0.json \
   schemas/logweir-backup-receipt-1.0.0.json \
+  schemas/logweir-backup-receipt-1.1.0.json \
+  schemas/logweir-backup-receipt-1.2.0.json \
   third_party/kafka-backup-binary.digest third_party/LICENSE-MIT \
   third_party/org-root.pub.pem third_party/org-root.fingerprint \
   .github/workflows/release.yml; do

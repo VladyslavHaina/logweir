@@ -74,10 +74,28 @@ pub fn from_receipt(
             // no partition count at all. See `RecordTopic::partitions`.
             partitions: None,
             records: *records,
+            // FX-4: the receipt's own entry, copied — absent (UNKNOWN) for a
+            // receipt that predates format 1.1.0. Arm 7 has established the
+            // block names exactly the topics `records` does.
+            config_coverage: receipt
+                .config_coverage
+                .as_ref()
+                .and_then(|block| block.get(name))
+                .cloned(),
         })
         .collect();
+    // FX-7: the pin travels from the receipt, and the record's minor version
+    // says whether it carries one — `FORMAT_VERSION_WITH_MANIFEST_VERSION`
+    // (1.2.0) with it, FX-4's `FORMAT_VERSION` (1.1.0, which every record this
+    // build writes would otherwise carry) without it.
+    let manifest_version_id = receipt.archive.manifest_version_id.clone();
+    let format_version = if manifest_version_id.is_some() {
+        FORMAT_VERSION_WITH_MANIFEST_VERSION
+    } else {
+        FORMAT_VERSION
+    };
     Ok(CatalogPoint {
-        format_version: FORMAT_VERSION.to_string(),
+        format_version: format_version.to_string(),
         point_id: point_id(receipt_bytes),
         recorded_at: inputs.recorded_at,
         receipt: RecordReceipt {
@@ -92,6 +110,7 @@ pub fn from_receipt(
             location_id: inputs.location_id.clone(),
             manifest_key: receipt.archive.manifest_key.clone(),
             manifest_sha256: receipt.archive.manifest_sha256.clone(),
+            manifest_version_id,
             prefix: receipt.archive.prefix.clone(),
         },
         covered: RecordCovered {

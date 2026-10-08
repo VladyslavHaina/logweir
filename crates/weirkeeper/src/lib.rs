@@ -166,6 +166,10 @@ pub mod retention_plan;
 /// Jobs one namespace may have active at once, and the FIFO order the rest wait
 /// in. Pure; `controllers::{backup,restore}` are the thin halves.
 pub mod run_pool;
+/// FX-2: `runnerResources` — the validation a `Restore`'s and a
+/// `RehearsalSchedule`'s requests and limits pass before they reach the
+/// runner container, and the ceilings they are refused above.
+pub mod runner_resources;
 pub mod scope;
 pub mod slot;
 pub mod testing;

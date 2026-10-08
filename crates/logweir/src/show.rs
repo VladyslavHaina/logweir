@@ -136,9 +136,10 @@ pub fn render_table(sc: &Scorecard) -> String {
         &mut o,
         "topic parity",
         format!(
-            "intended [{}]  unexpected [{}]",
+            "intended [{}]  unexpected [{}]{}",
             sc.topic_parity.intentionally_deviated.join(", "),
-            sc.topic_parity.unexpected_divergence.join(", ")
+            sc.topic_parity.unexpected_divergence.join(", "),
+            parity_assessment(sc.topic_parity.not_assessed.as_deref())
         ),
     );
     row(
@@ -153,6 +154,21 @@ pub fn render_table(sc: &Scorecard) -> String {
     o.push_str(&format!("  {}\n", sc.sample.coverage_note));
     o.push_str(&qualifiers(sc));
     o
+}
+
+/// The configuration-parity qualifier on the `topic parity` row (FX-4).
+///
+/// ABSENT (a 1.0.0 document, or one whose phase 7 never ran) says the
+/// assessment was NOT RECORDED, because an empty `unexpected []` beside it is
+/// exactly the "no divergence" a denied capture used to produce. `Some([])`
+/// adds nothing: every topic's configuration was assessed. Otherwise the
+/// unassessed topics are listed.
+fn parity_assessment(not_assessed: Option<&[String]>) -> String {
+    match not_assessed {
+        None => "  configuration coverage not recorded".into(),
+        Some([]) => String::new(),
+        Some(topics) => format!("  not assessed [{}]", topics.join(", ")),
+    }
 }
 
 /// The `redactions` footer value: an em dash for the whole document every v0.1
