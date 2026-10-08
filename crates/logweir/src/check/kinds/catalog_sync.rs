@@ -1658,6 +1658,22 @@ struct RenderedBody {
     dropped_for_space: usize,
 }
 
+/// One entry's two renderings: in FULL, and SLIM — without its topics,
+/// `topicsOmitted` counting them, and without the `ownerDetection` that only
+/// qualifies a listed topic (PROD-05.1). An entry with no topics renders the
+/// same line twice.
+fn entry_renderings(entry: &CatalogEntry) -> (String, String) {
+    let full = serde_json::to_string(entry).unwrap_or_default();
+    if entry.topics.is_empty() {
+        return (full.clone(), full);
+    }
+    let mut slim = entry.clone();
+    slim.topics_omitted = u32::try_from(slim.topics.len()).ok();
+    slim.topics.clear();
+    slim.owner_detection = None;
+    (full, serde_json::to_string(&slim).unwrap_or_default())
+}
+
 /// Render one walk as the §7d body.
 ///
 /// The order is fixed and is the grammar's: the version line first, then the
@@ -1668,21 +1684,7 @@ fn render_body(req: &CatalogSyncRequest, walk: &Walk) -> RenderedBody {
     // Each entry in two renderings: with its topics, and SLIM — without them,
     // `topicsOmitted` counting what was left out (PROD-05.1). The topics are an
     // enhancement and never cost a point its place in the view.
-    let rendered: Vec<(String, String)> = walk
-        .entries
-        .iter()
-        .map(|entry| {
-            let full = serde_json::to_string(entry).unwrap_or_default();
-            if entry.topics.is_empty() {
-                return (full.clone(), full);
-            }
-            let mut slim = entry.clone();
-            slim.topics_omitted = u32::try_from(slim.topics.len()).ok();
-            slim.topics.clear();
-            slim.owner_detection = None;
-            (full, serde_json::to_string(&slim).unwrap_or_default())
-        })
-        .collect();
+    let rendered: Vec<(String, String)> = walk.entries.iter().map(entry_renderings).collect();
 
     // The summary lines are rendered FIRST so the byte budget is spent on the
     // pages that are left after the numbers that describe them. A body whose
@@ -1934,5 +1936,57 @@ mod tests {
         ];
         let (kept, dropped) = allocate_entry_lines(plain, cost(50));
         assert_eq!((kept, dropped), (vec![line('x', 50)], 1));
+    }
+
+    /// PROD-05.1 fix round (M2): the SLIM rendering drops `ownerDetection`
+    /// with the topics it qualifies and counts them; the full one keeps both.
+    #[test]
+    fn a_slim_entry_carries_no_topics_and_no_owner_detection() {
+        let entry = CatalogEntry {
+            point_id: "lwp1-00000000000000000000000000000000".into(),
+            backup_id: "set-a".into(),
+            run_id: "run-a".into(),
+            recovery_point_at_ms: 1,
+            covered_from_ms: 0,
+            covered_to_ms: 2,
+            locations: Vec::new(),
+            receipt_key: "k".into(),
+            receipt_sha256: "sha256:00".into(),
+            manifest_key: None,
+            manifest_sha256: None,
+            recorded_at: None,
+            format_version: Some("1.3.0".into()),
+            availability: Availability::Available,
+            signature: SignatureVerdict::Verified,
+            signer_key_id: None,
+            remedy: None,
+            topics: vec![EntryTopic {
+                name: "orders".into(),
+                partitions: Some(6),
+                replication_factor: None,
+                config_coverage: Some("captured".into()),
+                owner: None,
+            }],
+            topics_omitted: None,
+            owner_detection: Some(Vec::new()),
+        };
+        let (full, slim) = entry_renderings(&entry);
+        let full: serde_json::Value = serde_json::from_str(&full).unwrap();
+        let slim: serde_json::Value = serde_json::from_str(&slim).unwrap();
+        assert_eq!(full["ownerDetection"], serde_json::json!([]), "{full}");
+        assert_eq!(full["topics"][0]["name"], "orders", "{full}");
+        assert!(
+            full["topics"][0].get("replicationFactor").is_none(),
+            "{full}"
+        );
+        assert!(slim.get("topics").is_none(), "{slim}");
+        assert!(slim.get("ownerDetection").is_none(), "{slim}");
+        assert_eq!(slim["topicsOmitted"], 1, "{slim}");
+        // No topics: one line, rendered twice.
+        let mut bare = entry;
+        bare.topics.clear();
+        bare.owner_detection = None;
+        let (a, b) = entry_renderings(&bare);
+        assert_eq!(a, b);
     }
 }
