@@ -3367,7 +3367,7 @@ export function renderReplicationField(state) {
       : "") +
     renderBrokerFact(s) +
     (choice.source === null && choice.basis !== "chosen"
-      ? "<p class=\"note\" id=\"replication-source\">" + esc(sourceFactorNote(s)) + "</p>"
+      ? "<p class=\"note\" id=\"replication-source\">" + messageText(sourceFactorNote(s)) + "</p>"
       : "") +
     "<p class=\"help\">" + esc(REPLICATION_HELP) + "</p></div>"
   );
@@ -3419,7 +3419,7 @@ export function renderRecoveryLimits(state) {
     "<h4 id=\"recovery-limits\">What this recovery changes, and what it does not</h4>" +
     facts([
       ["target replication factor", messageText(replicationText(s))],
-      ["target partition counts", partitions === null ? cell(null) : esc(partitions)],
+      ["target partition counts", partitions === null ? cell(null) : messageText(partitions)],
       ["target mode", cell(mode)],
     ]) +
     (partitions === null
