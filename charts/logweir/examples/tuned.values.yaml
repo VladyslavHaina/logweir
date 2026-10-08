@@ -1,0 +1,69 @@
+# Every installation-policy value, and every controller setting a test can
+# follow, at a NON-default value — FX-10. A test fixture, NOT a recommendation.
+#
+# WHAT THIS EXAMPLE IS FOR. Two policy values (`checks.discovery.defaultMaxTopics`,
+# `checks.preflight.defaultTimeoutSeconds`) were documented, rendered and parsed
+# for weeks and changed nothing, and no gate could tell: every render carried
+# every number at its default, which is also what a template or a controller
+# that ignored the value produces. `rendered/tuned.yaml` is the chart with every
+# one of those numbers moved, so each can be followed from THIS file to the
+# code that acts on it:
+#
+#   * weirkeeper/tests/chart_policy.rs — each value lands, through the real
+#     `check::policy::parse`, in its own field, and a controller site reads it;
+#   * weirkeeper/tests/topic_discovery_controller.rs and
+#     weirkeeper/tests/configured_values.rs — the controller is served THIS
+#     document and behaves by its numbers (a queue at one, a plan cut at a
+#     hundred topics, a collector keeping two);
+#   * weirkeeper/tests/configured_values.rs also runs with the rendered
+#     controller Deployment's own environment, so `controller.*` and
+#     `archive.s3.*` are followed through the env to the code that reads it.
+#
+# Every number differs from its default AND from every other number here, so
+# two values the template swapped are visible (two with equal defaults are not,
+# in a default render). Several are deliberately tiny so a test reaches them
+# with one or two objects. `allowUnverifiedCustomCa: true` and `allowHttp: true` are the unsafe
+# directions of two switches, set here because a test of a switch must move it.
+checks:
+  maxActivePerNamespace: 1
+  maxActiveTotal: 19
+  maxActiveDiscoveriesPerConnection: 3
+  maxEvidenceFetchActivePerNamespace: 5
+  discovery:
+    freshSeconds: 60
+    retentionSeconds: 180
+    keepPerConnection: 2
+    hardMaxTopics: 100
+    visibilityAttestations:
+      - id: att-tuned
+        namespace: team-a
+        kafkaCluster: source
+        clusterId: M29I2S7FQPyHBEX12Vx7XA
+        principal: User:backup
+        attestedBy: platform-admin@example.invalid
+        attestedAt: "2026-09-15T00:00:00Z"
+        expiresAt: "2027-09-15T00:00:00Z"
+        statement: >-
+          FX-10 fixture: a document shape, not an attestation anybody made
+  preflight:
+    retentionSeconds: 90
+runs:
+  maxManualBackupsActivePerNamespace: 6    # RAISED: five running, the sixth starts
+  maxManualRestoresActivePerNamespace: 8
+controller:
+  failFastSeconds: 120
+  jobTtlSeconds: 7200
+engine:
+  allowUnverifiedCustomCa: true
+evidence:
+  controllerIdentityLocations:
+    - endpoint: http://minio.tuned.svc:9000
+      region: eu-west-1
+      bucket: lw-tuned-evidence
+archive:
+  url: s3://lw-tuned-archive/logweir
+  s3:
+    endpoint: http://minio.tuned.svc:9000
+    region: eu-west-1
+    allowHttp: true
+    virtualHostedStyle: true

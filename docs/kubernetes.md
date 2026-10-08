@@ -6866,11 +6866,17 @@ destination and **none** of the controller's own — §7b is the rule and
 **And the same four values are published**, read-only, in the installation
 policy `ConfigMap`'s `legacyArchiveAddressing` block (§22.2), from the same
 chart values and behind the same "only when an endpoint is set" guard. That
-block exists so `POST …/destinations:from-legacy` can derive a legacy object's
-location from configuration it has actually READ and label the result
-`installationConfig`. An install that forwards no addressing publishes an empty
-block — not `allowHttp: true` — because transport security is never derived
-(D-SEAMS S5).
+block is reserved for `POST …/destinations:from-legacy` (D2 §3.12 branch (b)),
+which is to derive a legacy object's location from configuration it has
+actually READ and label the result `installationConfig`. **That route does not
+read the block yet:** it cannot read a policy `ConfigMap` it does not own, so it
+takes branch (c) and refuses. Today the block's only reader is the restore
+readiness check over a `legacySourceArchive` point (§21.8), which takes
+`endpoint` and `region` from it when the plan leaves them out; `allowHttp` and
+`virtualHostedStyle` are published and read by nothing until the route lands
+(the runner gets both from the controller's own environment, above). An
+install that forwards no addressing publishes an empty block — not
+`allowHttp: true` — because transport security is never derived (D-SEAMS S5).
 
 ## 16. Serving the UI
 
@@ -8618,13 +8624,14 @@ renders none is a supported install, not a degraded one.
 | `checks` | How many check Jobs may run at once, per namespace and in total. Evidence fetches have their **own** pool, so verification cannot be starved by interactive checks. Over a ceiling a request is `Queued` with reason `ConcurrencyLimited` — not an error. |
 | `discovery.freshSeconds` | After this an inventory reads **stale**, never wrong. |
 | `discovery.retentionSeconds` / `keepPerConnection` | The collector's two rules (§22.3). |
-| `discovery.defaultMaxTopics` / `hardMaxTopics` | The default for a request that names none, and the ceiling a request is clamped to. The ceiling only ever LOWERS a request. |
+| `discovery.hardMaxTopics` | The ceiling a request's `maxTopics` is clamped to. It only ever LOWERS a request. |
 | `discovery.visibilityAttestations` | The **only** route to `visibility.state: attestedComplete` (§7c). |
-| `preflight.defaultTimeoutSeconds` / `retentionSeconds` | The default check budget, and the collector's window. |
+| `preflight.retentionSeconds` | The collector's window. |
+| `discovery.defaultMaxTopics`, `preflight.defaultTimeoutSeconds` | **Withdrawn (FX-10, 2026-10-05). Nothing reads them.** They were documented as the defaults for a request that names none, but no request ever names none: the CRDs default `spec.request.maxTopics` (20 000) and `spec.request.timeoutSeconds` (120) at admission, and the console writes both. The controller accepts a document with or without them and applies no range rule to them, only the type: any whole number from 0 to 4 294 967 295 is accepted, and `null`, a negative, a fraction, a quoted number or a larger number is refused like any malformed field, which fails the whole document closed (as it did before FX-10). The chart renders them at fixed values: `hardMaxTopics` if lower than 20 000, else 20 000, and 120. That keeps the document readable by a controller older than FX-10, which requires both keys and refuses a document without them. `charts/logweir/README.md`, *Withdrawn values*, has the upgrade notes. |
 | `engine.allowUnverifiedCustomCa` | Whether a `BackupDestination` may carry a private CA the archive engine cannot verify. |
 | `evidence.controllerIdentityLocations` | Where the controller's own identity may read evidence from. An unlisted location is refused with `ControllerIdentityNotAllowlisted`, so the empty default is the closed direction. |
 | `runs` | P10: how many MANUAL runs one namespace may have holding a runner slot at once — "Back up now" `Backup`s and admitted manual `Restore`s. Over a ceiling a run is `phase: Queued` with `Admitted=False` reason `ConcurrencyLimited` and `status.queue.limit`, with nothing created, and starts in creation order as slots free (§ *Manual runs may queue*). Scheduled, catch-up and retry `Backup`s and a `RehearsalSchedule`'s `Restore`s are never counted or queued. Absent is the defaults (4 and 2), so a document written before the block keeps bounding manual runs — and the chart renders the block **only** when a value differs from those defaults. |
-| `legacyArchiveAddressing` | The installation's inline-archive addressing, published read-only so `POST …/destinations:from-legacy` can derive a legacy object's location from configuration it has actually read (§15.5). |
+| `legacyArchiveAddressing` | The installation's inline-archive addressing, published read-only and reserved for `POST …/destinations:from-legacy` (D2 §3.12 branch (b)), which does not read it yet and refuses with branch (c) (§15.5). The restore readiness check over a `legacySourceArchive` point reads `endpoint` and `region` from it; `allowHttp` and `virtualHostedStyle` are read by nothing until that route lands. |
 
 **Who may write it is the access-control statement.** `create`/`update` on a
 ConfigMap in the release namespace is a chart or cluster administrator;
@@ -8653,7 +8660,8 @@ verifies the statement**: the UI renders "attested by *X* at *T*; not verified
 by Logweir".
 
 **A document the controller refuses fails closed.** It is parsed with unknown
-fields rejected and twelve range rules applied (P10 added the two `runs` floors). A refusal produces empty
+fields rejected and ten range rules applied (P10 added the two `runs` floors;
+FX-10 removed the two withdrawn fields' rules). A refusal produces empty
 attestations and an empty evidence allowlist, plus one advisory
 `configuration.policy notReady PolicyUnreadable` row on a `Preflight`. **It
 also writes one `WARN` line naming the failing rule** —
@@ -8667,8 +8675,8 @@ looks healthy.
 
 | layer | what it can check | when |
 |---|---|---|
-| `charts/logweir/values.schema.json` | every **per-field** bound, with `hardMaxTopics` pinned to `check_contract::MAX_TOPICS_CEILING` and the preflight timeout to the contract's `1..=600`. Required fields, the attestation's nine, `additionalProperties: false`. | `helm install` / `helm template`, before anything is applied |
-| `charts/logweir/templates/policy.yaml` | the **two cross-field** rules JSON Schema draft-07 cannot express — `maxActiveTotal >= maxActivePerNamespace` and `defaultMaxTopics <= hardMaxTopics`. A named `fail`, quoting both values. | the same moment |
+| `charts/logweir/values.schema.json` | every **per-field** bound, with `hardMaxTopics` pinned to `check_contract::MAX_TOPICS_CEILING`. Required fields, the attestation's nine, `additionalProperties: false` (the two withdrawn keys stay allowed, unbounded and ignored). | `helm install` / `helm template`, before anything is applied |
+| `charts/logweir/templates/policy.yaml` | the **one cross-field** rule JSON Schema draft-07 cannot express — `maxActiveTotal >= maxActivePerNamespace`. A named `fail`, quoting both values. | the same moment |
 | `weirkeeper::check::policy::parse` | all of the above, plus `deny_unknown_fields`, and it is the **authority**. | every 30 s in the controller |
 
 So a **chart** install cannot produce a document the controller then refuses;

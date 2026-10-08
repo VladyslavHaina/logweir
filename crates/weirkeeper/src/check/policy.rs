@@ -131,6 +131,25 @@ impl Default for RunsPolicy {
     }
 }
 
+/// The value `discovery.defaultMaxTopics` carries on the wire since FX-10
+/// withdrew it — see [`DiscoveryPolicy::withdrawn_default_max_topics`].
+///
+/// `charts/logweir/templates/policy.yaml` renders `min(this, hardMaxTopics)`,
+/// and `weirkeeper/tests/chart_policy.rs` reads both, so the two cannot drift.
+pub const WITHDRAWN_DEFAULT_MAX_TOPICS: u32 = 20_000;
+
+/// The value `preflight.defaultTimeoutSeconds` carries on the wire since FX-10
+/// withdrew it — see [`PreflightPolicy::withdrawn_default_timeout_seconds`].
+pub const WITHDRAWN_DEFAULT_TIMEOUT_SECONDS: u32 = 120;
+
+fn withdrawn_default_max_topics() -> u32 {
+    WITHDRAWN_DEFAULT_MAX_TOPICS
+}
+
+fn withdrawn_default_timeout_seconds() -> u32 {
+    WITHDRAWN_DEFAULT_TIMEOUT_SECONDS
+}
+
 /// Topic-discovery policy — D2 §4.4's `discovery` block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -141,8 +160,46 @@ pub struct DiscoveryPolicy {
     pub retention_seconds: u32,
     /// How many terminal discoveries per connection UID are kept.
     pub keep_per_connection: u32,
-    /// The `maxTopics` a request that names none gets.
-    pub default_max_topics: u32,
+    /// **WITHDRAWN (FX-10, 2026-10-05). Read by nothing, on purpose.**
+    ///
+    /// It was documented as "the `maxTopics` a request that names none gets",
+    /// and no request ever names none: the `TopicDiscovery` CRD defaults
+    /// `spec.request.maxTopics` to 20 000 at admission, the typed field is an
+    /// `i32` with the same serde default, and the console API writes the value
+    /// explicitly. So an administrator who set it changed nothing. The knob is
+    /// gone from `values.yaml`; a request's own `maxTopics` and
+    /// [`Self::hard_max_topics`] are the two bounds.
+    ///
+    /// **Why the field is still parsed, with a default and no rule.** Two
+    /// documents must keep working across an upgrade and a rollback:
+    ///
+    /// * a document an OLDER chart rendered, or an administrator wrote, still
+    ///   carries the key — and `deny_unknown_fields` would refuse it, which
+    ///   fails closed (every attestation and every evidence location
+    ///   discarded) over a value that does nothing;
+    /// * a controller OLDER than FX-10 requires the key, so the chart keeps
+    ///   rendering it with [`WITHDRAWN_DEFAULT_MAX_TOPICS`] (never from a
+    ///   value) for an image-only rollback and for the old pod during a rolling
+    ///   upgrade.
+    ///
+    /// Keeping it in the struct, at its old wire name and position, also keeps
+    /// [`Policy::digest`] of an UNCHANGED document byte-identical across the
+    /// upgrade, so a default install's retained `Preflight`s are not
+    /// downgraded to `unknown` with `PolicyChanged`. An install that had set
+    /// the old value to anything other than what the chart now renders gets
+    /// the fixed value instead: its document, and so its digest, changes once,
+    /// and its still-valid `ready` `Preflight`s read `unknown`
+    /// (`policyChanged`) until they are run again.
+    ///
+    /// No range rule applies: a value nothing reads must not be able to fail
+    /// the document closed. The TYPE still applies: any whole number from 0 to
+    /// 4 294 967 295 is accepted, and `null`, a negative, a fraction, a quoted
+    /// number or a larger number is refused like any malformed field (the
+    /// whole document fails closed, as it did before FX-10). The chart never
+    /// renders a configured value here, so only a hand-written document can
+    /// meet that refusal.
+    #[serde(rename = "defaultMaxTopics", default = "withdrawn_default_max_topics")]
+    pub withdrawn_default_max_topics: u32,
     /// The ceiling a request's `maxTopics` is clamped to.
     pub hard_max_topics: u32,
     /// The administrator's completeness attestations (D2 §5.4).
@@ -156,7 +213,7 @@ impl Default for DiscoveryPolicy {
             fresh_seconds: 900,
             retention_seconds: 86_400,
             keep_per_connection: 5,
-            default_max_topics: 20_000,
+            withdrawn_default_max_topics: WITHDRAWN_DEFAULT_MAX_TOPICS,
             hard_max_topics: 50_000,
             // EMPTY BY DEFAULT, and that is the safe direction: with no
             // attestation nothing is ever `attestedComplete`.
@@ -169,8 +226,20 @@ impl Default for DiscoveryPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PreflightPolicy {
-    /// The `timeoutSeconds` a request that names none gets.
-    pub default_timeout_seconds: u32,
+    /// **WITHDRAWN (FX-10, 2026-10-05). Read by nothing, on purpose.**
+    ///
+    /// It was documented as "the `timeoutSeconds` a request that names none
+    /// gets", and no request names none: the `Preflight` CRD defaults
+    /// `spec.request.timeoutSeconds` to 120 at admission, and the console API
+    /// writes the value explicitly. A request's own `timeoutSeconds` (30..600)
+    /// is the budget. Parsed with a default and no rule for the reasons
+    /// [`DiscoveryPolicy::withdrawn_default_max_topics`] gives; the chart
+    /// renders [`WITHDRAWN_DEFAULT_TIMEOUT_SECONDS`].
+    #[serde(
+        rename = "defaultTimeoutSeconds",
+        default = "withdrawn_default_timeout_seconds"
+    )]
+    pub withdrawn_default_timeout_seconds: u32,
     /// How long a terminal preflight is kept.
     pub retention_seconds: u32,
 }
@@ -178,7 +247,7 @@ pub struct PreflightPolicy {
 impl Default for PreflightPolicy {
     fn default() -> Self {
         Self {
-            default_timeout_seconds: 120,
+            withdrawn_default_timeout_seconds: WITHDRAWN_DEFAULT_TIMEOUT_SECONDS,
             retention_seconds: 3600,
         }
     }
@@ -366,12 +435,10 @@ impl Policy {
             "runs.maxManualRestoresActivePerNamespace",
             "must be at least 1; a limit of 0 would queue every manual Restore forever",
         )?;
-        rule(
-            self.discovery.default_max_topics >= 1
-                && self.discovery.default_max_topics <= self.discovery.hard_max_topics,
-            "discovery.defaultMaxTopics",
-            "must be at least 1 and at most discovery.hardMaxTopics",
-        )?;
+        // NO RULE FOR `discovery.defaultMaxTopics` OR
+        // `preflight.defaultTimeoutSeconds` (FX-10): both are withdrawn and read
+        // by nothing, and a document must not fail closed over a value that
+        // changes nothing.
         rule(
             self.discovery.hard_max_topics >= 1
                 && u64::from(self.discovery.hard_max_topics)
@@ -383,12 +450,6 @@ impl Policy {
             self.discovery.keep_per_connection >= 1,
             "discovery.keepPerConnection",
             "must be at least 1; keeping none would delete a discovery the moment it finished",
-        )?;
-        rule(
-            self.preflight.default_timeout_seconds >= 1
-                && self.preflight.default_timeout_seconds <= 600,
-            "preflight.defaultTimeoutSeconds",
-            "must be within the contract's 1..=600",
         )?;
         for (i, a) in self.discovery.visibility_attestations.iter().enumerate() {
             rule(

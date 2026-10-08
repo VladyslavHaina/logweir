@@ -1182,10 +1182,18 @@ async fn an_absent_policy_is_the_documented_defaults_and_is_ready() {
     let p = load.policy();
     assert_eq!(p.checks.max_active_per_namespace, 4);
     assert_eq!(p.checks.max_active_total, 20);
-    assert_eq!(p.discovery.default_max_topics, 20_000);
     assert_eq!(p.discovery.hard_max_topics, 50_000);
     assert_eq!(p.discovery.keep_per_connection, 5);
-    assert_eq!(p.preflight.default_timeout_seconds, 120);
+    // FX-10: the two withdrawn fields keep their wire values so the digest of
+    // an unchanged document does not move; nothing reads them.
+    assert_eq!(
+        p.discovery.withdrawn_default_max_topics,
+        policy::WITHDRAWN_DEFAULT_MAX_TOPICS
+    );
+    assert_eq!(
+        p.preflight.withdrawn_default_timeout_seconds,
+        policy::WITHDRAWN_DEFAULT_TIMEOUT_SECONDS
+    );
     assert!(
         p.discovery.visibility_attestations.is_empty(),
         "with no policy nothing is ever attestedComplete"
@@ -1260,11 +1268,6 @@ fn a_malformed_policy_is_refused_by_name_and_fails_closed() {
         ),
         (
             r#"{"version":1,"discovery":{"freshSeconds":900,"retentionSeconds":1,
-                "keepPerConnection":5,"defaultMaxTopics":60000,"hardMaxTopics":50000}}"#,
-            "defaultMaxTopics above hardMaxTopics",
-        ),
-        (
-            r#"{"version":1,"discovery":{"freshSeconds":900,"retentionSeconds":1,
                 "keepPerConnection":5,"defaultMaxTopics":10,"hardMaxTopics":999999}}"#,
             "hardMaxTopics above the contract ceiling",
         ),
@@ -1308,6 +1311,171 @@ fn a_malformed_policy_is_refused_by_name_and_fails_closed() {
     assert_eq!(
         policy::from_data(Some(&data)).code(),
         CheckCode::PolicyLoaded
+    );
+}
+
+/// **FX-10: the two withdrawn fields are accepted, read by nothing, and can
+/// never fail a document closed.**
+///
+/// `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` never
+/// reached a request (the CRDs default the request fields at admission), so the
+/// knobs were withdrawn. Three documents must keep parsing, each a real one:
+///
+/// * a document an OLDER chart rendered, carrying both keys at any value its
+///   schema admitted — including one the old rules would now be pointless
+///   about (`defaultMaxTopics` above `hardMaxTopics`, a 900-second budget);
+/// * a hand-written document that omits both;
+/// * the chart's own document, with the compatibility values.
+///
+/// And the digest of an unchanged document must not move, or every retained
+/// `Preflight` would read `policyChanged` after an upgrade that changed no
+/// behaviour.
+///
+/// **"ANY VALUE" IS ANY `u32`, AND NO MORE** (FX-10 review L3). The fields keep
+/// their type, so a whole number from 0 to 4 294 967 295 is accepted, and
+/// `null`, a negative, a fraction, a quoted number or 4 294 967 296 is refused
+/// like any malformed field: the WHOLE document fails closed, as it did for a
+/// controller before FX-10. The chart never renders a configured value there
+/// (it renders the fixed compatibility values), so only a hand-written
+/// document can meet the refusal; the docs say so, and the table below pins
+/// both edges.
+///
+/// MUTANTS: restoring either range rule refuses the first document (it fails
+/// CLOSED: attestations and the allowlist gone); dropping
+/// `#[serde(default = …)]` from either field refuses the second; dropping a
+/// field altogether refuses the first and third (`deny_unknown_fields`).
+#[test]
+fn the_withdrawn_fields_are_accepted_at_any_u32_or_absent_and_read_by_nothing() {
+    let parse = |doc: serde_json::Value| -> policy::Policy {
+        let mut data = BTreeMap::new();
+        data.insert(policy::POLICY_KEY.to_string(), doc.to_string());
+        match policy::from_data(Some(&data)) {
+            policy::PolicyLoad::Loaded(p) => p,
+            other => panic!("refused, so it would fail closed: {other:?}\n{doc}"),
+        }
+    };
+    let base: serde_json::Value = serde_json::from_str(GOOD_POLICY).expect("GOOD_POLICY is JSON");
+
+    // An older chart's document, out of the old rules' range on both fields.
+    let mut old = base.clone();
+    old["discovery"]["defaultMaxTopics"] = json!(60_000);
+    old["discovery"]["hardMaxTopics"] = json!(100);
+    old["preflight"]["defaultTimeoutSeconds"] = json!(900);
+    let p = parse(old);
+    assert_eq!(p.discovery.hard_max_topics, 100, "the live ceiling is read");
+    assert_eq!(
+        p.discovery.visibility_attestations.len(),
+        1,
+        "and the attestation survives: the document was NOT refused"
+    );
+
+    // A document that omits both: the wire defaults fill them.
+    let mut none = base.clone();
+    none["discovery"]
+        .as_object_mut()
+        .expect("a discovery block")
+        .remove("defaultMaxTopics");
+    none["preflight"]
+        .as_object_mut()
+        .expect("a preflight block")
+        .remove("defaultTimeoutSeconds");
+    let omitted = parse(none);
+    assert_eq!(
+        omitted.discovery.withdrawn_default_max_topics,
+        policy::WITHDRAWN_DEFAULT_MAX_TOPICS
+    );
+    assert_eq!(
+        omitted.preflight.withdrawn_default_timeout_seconds,
+        policy::WITHDRAWN_DEFAULT_TIMEOUT_SECONDS
+    );
+
+    // The chart's own values: the same parsed object, so the same digest, as a
+    // document that omits them.
+    let carried = parse(base);
+    assert_eq!(carried, omitted);
+    assert_eq!(carried.digest(), omitted.digest());
+
+    // AND THE WIRE NAMES ARE THE OLD ONES, so the digest of a document an older
+    // controller digested is the digest this one computes.
+    let wire = serde_json::to_value(policy::Policy::defaults()).expect("serialises");
+    assert_eq!(wire["discovery"]["defaultMaxTopics"], json!(20_000));
+    assert_eq!(wire["preflight"]["defaultTimeoutSeconds"], json!(120));
+    assert!(wire["discovery"].get("withdrawnDefaultMaxTopics").is_none());
+
+    // THE TYPE'S EDGES, for both fields: every u32 is accepted …
+    let with = |block: &str, key: &str, value: serde_json::Value| {
+        let mut doc: serde_json::Value =
+            serde_json::from_str(GOOD_POLICY).expect("GOOD_POLICY is JSON");
+        doc[block][key] = value;
+        let mut data = BTreeMap::new();
+        data.insert(policy::POLICY_KEY.to_string(), doc.to_string());
+        policy::from_data(Some(&data))
+    };
+    for (block, key) in [
+        ("discovery", "defaultMaxTopics"),
+        ("preflight", "defaultTimeoutSeconds"),
+    ] {
+        for accepted in [json!(0), json!(u32::MAX)] {
+            assert!(
+                matches!(
+                    with(block, key, accepted.clone()),
+                    policy::PolicyLoad::Loaded(_)
+                ),
+                "{block}.{key} = {accepted} is a u32 and must be accepted"
+            );
+        }
+        // … and nothing else: these fail the whole document closed.
+        for refused in [
+            json!(null),
+            json!(-1),
+            json!(120.5),
+            json!(u64::from(u32::MAX) + 1),
+            json!("120"),
+        ] {
+            let load = with(block, key, refused.clone());
+            assert!(
+                matches!(&load, policy::PolicyLoad::Unreadable { .. }),
+                "{block}.{key} = {refused} is not a u32; the docs say it is refused: {load:?}"
+            );
+            assert!(
+                load.policy().discovery.visibility_attestations.is_empty(),
+                "a refused document fails closed"
+            );
+        }
+    }
+}
+
+/// **FX-10: the digest of the default policy is the one every controller
+/// before FX-10 computed.**
+///
+/// `Policy::digest` is SHA-256 over the parsed object's JSON, and a retained
+/// `Preflight` whose recorded `policyDigest` differs from the current one is
+/// downgraded to `unknown` with `policyChanged` (`controllers/preflight.rs`).
+/// Renaming the two withdrawn fields in Rust must therefore leave the JSON —
+/// names AND order — exactly as it was. The literal below is the pre-FX-10
+/// serialisation of `Policy::defaults()`, field by field in declaration order.
+///
+/// MUTANT: move `withdrawn_default_max_topics` after `hard_max_topics`, or
+/// drop its `rename`, and the bytes (and the digest) change.
+#[test]
+fn the_default_policy_serialises_exactly_as_before_the_withdrawal() {
+    let expected = concat!(
+        r#"{"version":1,"#,
+        r#""checks":{"maxActivePerNamespace":4,"maxActiveTotal":20,"#,
+        r#""maxActiveDiscoveriesPerConnection":1,"maxEvidenceFetchActivePerNamespace":4},"#,
+        r#""discovery":{"freshSeconds":900,"retentionSeconds":86400,"keepPerConnection":5,"#,
+        r#""defaultMaxTopics":20000,"hardMaxTopics":50000,"visibilityAttestations":[]},"#,
+        r#""preflight":{"defaultTimeoutSeconds":120,"retentionSeconds":3600},"#,
+        r#""engine":{"allowUnverifiedCustomCa":false},"#,
+        r#""evidence":{"controllerIdentityLocations":[]},"#,
+        r#""legacyArchiveAddressing":{"endpoint":"","region":"","allowHttp":false,"virtualHostedStyle":false},"#,
+        r#""runs":{"maxManualBackupsActivePerNamespace":4,"maxManualRestoresActivePerNamespace":2}}"#,
+    );
+    let actual = serde_json::to_string(&policy::Policy::defaults()).expect("serialises");
+    assert_eq!(actual, expected);
+    assert_eq!(
+        policy::Policy::defaults().digest(),
+        logweir_core::ids::sha256_prefixed(expected.as_bytes())
     );
 }
 
@@ -2116,6 +2284,114 @@ fn limits_queues_over_namespace_cap() {
     assert_eq!(
         limits::admit(&counts, &tight, CheckPlanKind::OperationReadiness),
         limits::Admission::Queued(CheckCode::ConcurrencyLimited)
+    );
+}
+
+/// **FX-10: every check ceiling is the policy's own, at a value its default
+/// cannot imitate.**
+///
+/// The rows above drive `limits::admit` with `ChecksPolicy::default()` (4 / 20
+/// / 1 / 4) — so an `admit` that compared against a constant equal to the
+/// default passed them for three of the four ceilings (`maxActiveTotal` alone
+/// had a non-default row, at 7). Here each ceiling moves on its own, and the
+/// counts that sit exactly at the moved ceiling are queued while the default
+/// would admit them (or the reverse), so a constant cannot pass:
+///
+/// | ceiling | default | here | counts | default says | here |
+/// |---|---|---|---|---|---|
+/// | `maxActivePerNamespace` | 4 | 2 | 2 in the namespace | admit | queue |
+/// | `maxActiveDiscoveriesPerConnection` | 1 | 3 | 1 on the connection | queue | admit |
+/// | `maxEvidenceFetchActivePerNamespace` | 4 | 1 | 1 fetch | admit | queue |
+/// | `maxActiveTotal` | 20 | 25 | 20 in total | queue | admit |
+#[test]
+fn every_check_ceiling_is_the_policys_own_at_a_non_default_value() {
+    let defaults = policy::ChecksPolicy::default();
+    let counts =
+        |namespace: u32, total: u32, per_connection: u32, evidence: u32| limits::ActiveCounts {
+            namespace,
+            total,
+            per_connection,
+            evidence_namespace: evidence,
+        };
+    let queued = limits::Admission::Queued(CheckCode::ConcurrencyLimited);
+
+    // maxActivePerNamespace: 2.
+    let two_here = counts(2, 2, 0, 0);
+    let tight_ns = policy::ChecksPolicy {
+        max_active_per_namespace: 2,
+        ..defaults
+    };
+    assert!(limits::admit(&two_here, &defaults, CheckPlanKind::OperationReadiness).is_admitted());
+    assert_eq!(
+        limits::admit(&two_here, &tight_ns, CheckPlanKind::OperationReadiness),
+        queued
+    );
+
+    // maxActiveDiscoveriesPerConnection: 3.
+    let one_on_connection = counts(0, 0, 1, 0);
+    let wide_connection = policy::ChecksPolicy {
+        max_active_discoveries_per_connection: 3,
+        ..defaults
+    };
+    assert_eq!(
+        limits::admit(&one_on_connection, &defaults, CheckPlanKind::TopicInventory),
+        queued
+    );
+    assert!(limits::admit(
+        &one_on_connection,
+        &wide_connection,
+        CheckPlanKind::TopicInventory
+    )
+    .is_admitted());
+
+    // maxEvidenceFetchActivePerNamespace: 1.
+    let one_fetch = counts(0, 0, 0, 1);
+    let tight_evidence = policy::ChecksPolicy {
+        max_evidence_fetch_active_per_namespace: 1,
+        ..defaults
+    };
+    assert!(limits::admit(&one_fetch, &defaults, CheckPlanKind::EvidenceFetch).is_admitted());
+    assert_eq!(
+        limits::admit(&one_fetch, &tight_evidence, CheckPlanKind::EvidenceFetch),
+        queued
+    );
+
+    // maxActiveTotal: 25 — the other direction, a RAISED ceiling.
+    let twenty_elsewhere = counts(0, 20, 0, 0);
+    let wide_total = policy::ChecksPolicy {
+        max_active_total: 25,
+        ..defaults
+    };
+    assert_eq!(
+        limits::admit(
+            &twenty_elsewhere,
+            &defaults,
+            CheckPlanKind::OperationReadiness
+        ),
+        queued
+    );
+    assert!(limits::admit(
+        &twenty_elsewhere,
+        &wide_total,
+        CheckPlanKind::OperationReadiness
+    )
+    .is_admitted());
+}
+
+/// **FX-10: `freshUntil` is the observation plus the window it is GIVEN.** The
+/// row above uses the default 900 s only.
+#[test]
+fn fresh_until_is_the_observation_plus_a_non_default_window() {
+    use weirkeeper::controllers::topic_discovery as td;
+    let observed = Utc
+        .with_ymd_and_hms(2026, 9, 16, 11, 59, 0)
+        .single()
+        .unwrap();
+    assert_eq!(
+        td::fresh_until(observed, 60),
+        Utc.with_ymd_and_hms(2026, 9, 16, 12, 0, 0)
+            .single()
+            .unwrap()
     );
 }
 

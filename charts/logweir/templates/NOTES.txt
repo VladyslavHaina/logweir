@@ -63,3 +63,29 @@ because it can read and patch the private signer. An author-only install uses
 examples/author-only.values.yaml with local tags, pull policy Never and the
 explicit development exception; it is not evidence that anything was
 published.
+{{- /*
+FX-10: TWO WITHDRAWN VALUES, ACCEPTED BY THE SCHEMA AND SAID TO BE IGNORED.
+`hasKey` and not a truth test: `values.yaml` no longer carries either key, so
+its presence means a values file, a `--set` or a `--reuse-values` upgrade over a
+release of an older chart put it there — and a configured value that silently
+reaches nothing is the defect this row closed.
+*/}}
+{{- $withdrawnTopics := hasKey .Values.checks.discovery "defaultMaxTopics" }}
+{{- $withdrawnTimeout := hasKey .Values.checks.preflight "defaultTimeoutSeconds" }}
+{{- if or $withdrawnTopics $withdrawnTimeout }}
+
+WITHDRAWN VALUES ARE SET AND IGNORED (FX-10): they never changed anything, and
+this chart no longer reads them.
+{{- if $withdrawnTopics }}
+  * checks.discovery.defaultMaxTopics={{ .Values.checks.discovery.defaultMaxTopics }}: a TopicDiscovery's
+    maxTopics is its own (the CRD defaults it to 20000); checks.discovery.hardMaxTopics
+    ({{ .Values.checks.discovery.hardMaxTopics }}) still caps every discovery.
+{{- end }}
+{{- if $withdrawnTimeout }}
+  * checks.preflight.defaultTimeoutSeconds={{ .Values.checks.preflight.defaultTimeoutSeconds }}: a Preflight's
+    budget is its own spec.request.timeoutSeconds (30..600; the CRD defaults it to 120).
+{{- end }}
+  Remove them from your values file. If you never set them, an upgrade with
+  --reuse-values carried an older chart's defaults forward; upgrade once with
+  --reset-then-reuse-values. charts/logweir/README.md, "Withdrawn values".
+{{- end }}
