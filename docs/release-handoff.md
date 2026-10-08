@@ -27,6 +27,10 @@ per release rather than claiming the roadmap complete.
   `815249cb`, is `claude/poc-upgrade-5.result.md` in the orchestration store.
 - [product-expansion.md](to-do/product-expansion.md) is not started, by the
   user's decision (2026-09-23): this release carries platform improvements only.
+- How a release is cut — the dry run, the owner-approved tag, the GitHub
+  Release's assets and how each is verified — is
+  [the release checklist](tag1-checklist.md), *Cutting a release candidate*
+  (PROD-14.0, 2026-10-05); the pipeline is [gates.md](gates.md#versioned-releases).
 
 ## Shipped: the 41 tracker tasks
 

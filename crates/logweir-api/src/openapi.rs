@@ -17,7 +17,7 @@ use crate::contract as c;
 use crate::problem::{Problem, ProblemCode};
 
 /// The document version. `/api/v1` is not yet a stability promise.
-pub const DOCUMENT_VERSION: &str = "1.0.0-alpha.1";
+pub const DOCUMENT_VERSION: &str = "1.0.0-alpha.2";
 
 fn schema_ref(name: &str) -> Value {
     json!({ "$ref": format!("#/components/schemas/{name}") })
