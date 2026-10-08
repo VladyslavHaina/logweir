@@ -2340,7 +2340,7 @@ def test_the_owner_detection_sources_are_the_rust_readers():
     model = (root / "crates/logweir-core/src/topic_configuration.rs").read_text()
     values = {k: v for k, v in re.findall(r'pub const ([A-Z_0-9]+): &str = "([^"]+)";', model)}
     block = model.split("pub const OWNER_DETECTION_SOURCES", 1)[1].split("];", 1)[0]
-    names = re.findall(r"\b(DETECTION_[A-Z_]+)\b", block.split("= [", 1)[1])
+    names = re.findall(r"\b(DETECTION_[A-Z_]+)\b", re.split(r"=\s*\[", block, maxsplit=1)[1])
     assert tuple(values[n] for n in names) == mod.RECEIPT_OWNER_DETECTION_SOURCES
     basis = model.split("pub fn detection_for_basis", 1)[1].split("\n}\n", 1)[0]
     pairs = re.findall(r'"([^"]+)" => Some\(([A-Z_]+)\)', basis)
