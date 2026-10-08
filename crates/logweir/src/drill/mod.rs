@@ -2936,7 +2936,13 @@ fn execute_with_validated_approval(
     // 4
     let src_topics: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
     let mut sel = record(&mut sc, 4, "sample-select", || {
-        phase4_sample::run(&facts, &c.spec.sample, &src_topics)
+        // PROD-11.1: only selected partitions, from the stated start.
+        phase4_sample::run_selected(
+            &facts,
+            &c.spec.sample,
+            &src_topics,
+            replay_selection.as_ref().map(|r| &r.selection),
+        )
     })?;
     // Binding note appended to the brief during Task 16 fix round 1:
     // `phase4_sample::run` emits `per_partition[..].set.manifest_key` EMPTY,

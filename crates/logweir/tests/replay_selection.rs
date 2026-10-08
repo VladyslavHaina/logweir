@@ -370,3 +370,52 @@ fn a_start_at_a_segments_last_record_still_selects_it() {
         ExitCode::GuardRefused
     );
 }
+
+/// **Phase 4 samples only the selection.** With a selection, no sample comes
+/// from a partition the plan did not select, and the sample window starts at
+/// the stated start when the spec's sample window starts earlier — the window
+/// the scorecard signs as `sample.window_start`. The control is the same
+/// archive with no selection: every partition, the spec's own window.
+/// KILLS: a candidate from an unselected partition; the archive's or the
+/// spec's start signed for a narrowed restore.
+#[test]
+fn phase4_samples_only_selected_partitions_from_the_stated_start() {
+    use logweir::drill::phase4_sample;
+    let s = selecting();
+    let r = resolve_selection(&s, &mapping(), &facts())
+        .unwrap()
+        .expect("a selection");
+    let topics: Vec<String> = mapping().keys().cloned().collect();
+    let sel =
+        phase4_sample::run_selected(&facts(), &s.sample, &topics, Some(&r.selection)).unwrap();
+    let picked: Vec<(String, i32)> = sel
+        .per_partition
+        .iter()
+        .map(|p| (p.topic.clone(), p.partition))
+        .collect();
+    assert_eq!(
+        picked,
+        vec![
+            ("audit".to_string(), 0),
+            ("audit".to_string(), 1),
+            ("audit".to_string(), 2),
+            ("orders".to_string(), 0),
+            ("orders".to_string(), 2),
+            ("payments".to_string(), 1),
+        ]
+    );
+    assert_eq!(
+        sel.window.0.timestamp_millis(),
+        START_MS,
+        "the stated start"
+    );
+    assert!(sel.per_partition.iter().all(|p| p.window.0 == START_MS));
+
+    let full = phase4_sample::run(&facts(), &s.sample, &topics).unwrap();
+    assert_eq!(full.per_partition.len(), 9, "the control: every partition");
+    assert_eq!(
+        full.window.0.timestamp_millis(),
+        FLOOR_MS,
+        "the spec's window"
+    );
+}

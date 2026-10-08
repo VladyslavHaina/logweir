@@ -107,6 +107,10 @@ pub enum SelectionRefusal {
     /// No segment of any selected partition overlaps the window: the restore
     /// would produce nothing, and an empty restore is never a pass.
     EmptySelection { start_ms: i64, end_ms: i64 },
+    /// The stated start is after `sample.window_end`: the drill's sample
+    /// window would hold no restored record, so its sample could verify
+    /// nothing the restore wrote.
+    StartAfterSampleWindow { start_ms: i64, sample_end_ms: i64 },
 }
 
 impl std::fmt::Display for SelectionRefusal {
@@ -163,6 +167,15 @@ impl std::fmt::Display for SelectionRefusal {
                 "restore.partitions.{topic} names partition {partition}, which the archive set's \
                  manifest does not list for `{topic}`"
             ),
+            Self::StartAfterSampleWindow {
+                start_ms,
+                sample_end_ms,
+            } => write!(
+                f,
+                "this plan's restore.window_start is epoch-ms {start_ms}, after its \
+                 sample.window_end of epoch-ms {sample_end_ms}: the drill's sample window would \
+                 hold no restored record. Move the sample window into the restore window"
+            ),
             Self::EmptySelection { start_ms, end_ms } => write!(
                 f,
                 "no archived segment of a selected partition overlaps the restore window \
@@ -216,6 +229,8 @@ pub struct ResolvedSelection {
     pub partitions: Vec<SelectedPartition>,
     /// The engine runs, in render order.
     pub runs: Vec<EngineRunSelection>,
+    /// The selection this resolves, for the predicates phases 4 and 7 apply.
+    pub selection: ReplaySelection,
 }
 
 impl ResolvedSelection {
@@ -288,6 +303,13 @@ impl ReplaySelection {
                     start_ms,
                     end_ms: window_end_ms,
                     end_field: window_end_field,
+                });
+            }
+            let sample_end_ms = spec.sample.window_end.timestamp_millis();
+            if start_ms > sample_end_ms {
+                return Err(SelectionRefusal::StartAfterSampleWindow {
+                    start_ms,
+                    sample_end_ms,
                 });
             }
         }
@@ -466,6 +488,7 @@ impl ReplaySelection {
             end_ms,
             partitions,
             runs,
+            selection: self.clone(),
         })
     }
 }
@@ -710,6 +733,13 @@ mod tests {
                 SelectionRefusal::NegativePartition {
                     topic: "b".into(),
                     partition: -1,
+                },
+            ),
+            (
+                "  window_start: \"2026-01-02T00:00:00.001Z\"\n  point_in_time: \"2026-01-03T00:00:00Z\"\n",
+                SelectionRefusal::StartAfterSampleWindow {
+                    start_ms: 1_767_312_000_000 + 1,
+                    sample_end_ms: 1_767_312_000_000,
                 },
             ),
             (
