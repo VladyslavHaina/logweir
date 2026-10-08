@@ -278,6 +278,10 @@ fn check_storage(spec: &std::path::Path) -> CheckResult {
         Err(e) => return CheckResult::Failed(format!("storage: cannot read the drill spec: {e}")),
     };
     let loc = storage_location(&sp.source.storage);
+    // FX-20: the object-store binding `drill run` will check, before a store.
+    if let Err(e) = crate::credential_binding::check_store_bindings() {
+        return CheckResult::Failed(e.to_string());
+    }
     let st = match logweir_engine_oso::storage::Store::read_only_from_url(&sp.source.storage) {
         Ok(st) => st,
         Err(e) => return CheckResult::Failed(format!("storage: {e}")),

@@ -57,6 +57,10 @@ fn run(flags: &[&str]) -> i32 {
         Ok(a) => a,
         Err(e) => {
             eprintln!("logweir-retention: {e}");
+            // FX-20: the closed code the controller publishes, on stdout.
+            if let Some(code) = e.code() {
+                println!("{}{code}", logweir_retention::REFUSAL_LINE);
+            }
             return e.exit_code();
         }
     };

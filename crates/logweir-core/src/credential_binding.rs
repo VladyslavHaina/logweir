@@ -90,6 +90,14 @@ pub const EVIDENCE_CREDENTIAL_BINDING_ENV: &str = "LOGWEIR_EVIDENCE_CREDENTIAL_B
 pub const EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
     "LOGWEIR_EVIDENCE_CREDENTIAL_BINDING_EXPECTED";
 
+/// The projected binding of a CHECK pod's separately projected
+/// `evidenceRead` grant (`LOGWEIR_EVIDENCE_READ_AWS_*`,
+/// [`crate::check_contract::EVIDENCE_READ_ENV`]).
+pub const EVIDENCE_READ_CREDENTIAL_BINDING_ENV: &str = "LOGWEIR_EVIDENCE_READ_CREDENTIAL_BINDING";
+/// What the controller expects [`EVIDENCE_READ_CREDENTIAL_BINDING_ENV`] to be.
+pub const EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
+    "LOGWEIR_EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED";
+
 /// The projected binding of a delivery Job's PagerDuty routing-key Secret.
 pub const NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV: &str = "NOTIFY_PAGERDUTY_CREDENTIAL_BINDING";
 /// What the controller expects [`NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV`] to be.
@@ -110,7 +118,7 @@ pub const NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
 /// `(projected, expected)`, in a fixed order. With
 /// [`crate::connection::SOURCE_CREDENTIAL_BINDING_ENV`] and its target twin
 /// they are every binding pair a store- or Kafka-reading runner can carry.
-pub const STORE_BINDING_PAIRS: [(&str, &str); 2] = [
+pub const STORE_BINDING_PAIRS: [(&str, &str); 3] = [
     (
         ARCHIVE_CREDENTIAL_BINDING_ENV,
         ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV,
@@ -118,6 +126,10 @@ pub const STORE_BINDING_PAIRS: [(&str, &str); 2] = [
     (
         EVIDENCE_CREDENTIAL_BINDING_ENV,
         EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV,
+    ),
+    (
+        EVIDENCE_READ_CREDENTIAL_BINDING_ENV,
+        EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV,
     ),
 ];
 

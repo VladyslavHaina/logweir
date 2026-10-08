@@ -97,6 +97,19 @@ pub fn status_for(
         location_digest: Some(verdict.location_digest.clone()),
         ca_bundle_sha256: verdict.ca_bundle_sha256.clone(),
         observed_at: Some(observed_at_for(previous, verdict, now)),
+        // FX-20: a pure function of the UID and the immutable location, so it
+        // never moves on an unchanged object and costs no write of its own.
+        credential_binding: dest
+            .metadata
+            .uid
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+            .map(|uid| {
+                logweir_core::credential_binding::destination_binding(
+                    uid,
+                    &crate::destination::location_of(dest).archive_storage_url(),
+                )
+            }),
         conditions: Some(vec![merge_condition(
             current_condition(
                 previous.and_then(|s| s.conditions.as_ref()),

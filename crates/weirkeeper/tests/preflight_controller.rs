@@ -8291,3 +8291,58 @@ async fn a_preflights_own_skip_list_reaches_its_plan() {
         "the Job was created from that plan"
     );
 }
+
+/// **FX-20: every object-store credential a check pod carries travels with
+/// its binding pair** — the destination grant's (`AWS_*`), and a separated
+/// `evidenceRead` grant's (`LOGWEIR_EVIDENCE_READ_AWS_*`) — each expecting the
+/// destination's binding, each projected OPTIONALLY from the same Secret as
+/// the credential it guards. The check runner refuses every store build while
+/// one pair disagrees (`crates/logweir/tests/store_binding.rs`).
+///
+/// KILLS: the evidence-read pair dropped (a separated reader Secret written for
+/// another destination would read this one's evidence root); the expectation
+/// left off.
+#[test]
+fn fx20_every_credential_in_a_check_pod_carries_its_binding_pair() {
+    use logweir_core::credential_binding as cb;
+    let inputs = inputs_for(
+        PreflightOperation::DestinationAccess,
+        &reading_destination(evidence_read_secret_grant()),
+        vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceRead],
+    );
+    let shape = shape_of(&inputs).expect("renders");
+    for (credential, projected_binding, expected_binding) in [
+        (
+            "AWS_ACCESS_KEY_ID",
+            cb::ARCHIVE_CREDENTIAL_BINDING_ENV,
+            cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV,
+        ),
+        (
+            "LOGWEIR_EVIDENCE_READ_AWS_ACCESS_KEY_ID",
+            cb::EVIDENCE_READ_CREDENTIAL_BINDING_ENV,
+            cb::EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV,
+        ),
+    ] {
+        let secret = projected(&shape, credential).expect(credential);
+        let pair = shape
+            .spec
+            .env_from_secret
+            .iter()
+            .find(|e| e.name == projected_binding)
+            .unwrap_or_else(|| panic!("{credential}: no projected binding"));
+        assert_eq!(
+            pair.secret_name, secret,
+            "{credential}: from the same Secret"
+        );
+        assert_eq!(pair.key, cb::CREDENTIAL_BINDING_KEY);
+        assert!(pair.optional, "{credential}");
+        let expected = literal(&shape, expected_binding)
+            .unwrap_or_else(|| panic!("{credential}: no expectation"));
+        assert!(expected.starts_with("v1:"), "{credential}: {expected}");
+    }
+    assert_eq!(
+        literal(&shape, cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        literal(&shape, cb::EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV),
+        "one destination, one binding for both of its Secrets"
+    );
+}

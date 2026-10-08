@@ -12856,6 +12856,8 @@ mod evidence_fetch_job {
                         || [
                             "LOGWEIR_STORE_CONTRACT_VERSION",
                             "LOGWEIR_ARCHIVE_CREDENTIALS",
+                            // FX-20: the evidenceRead grant's expected binding.
+                            "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED",
                             "TMPDIR"
                         ]
                         .contains(&name),
@@ -12880,6 +12882,12 @@ mod evidence_fetch_job {
                     "AWS_SECRET_ACCESS_KEY".to_string(),
                     "lw-b-archive-reader".to_string(),
                     "rkey".to_string()
+                ),
+                // FX-20: the same Secret's binding, beside it.
+                (
+                    "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING".to_string(),
+                    "lw-b-archive-reader".to_string(),
+                    "logweir-binding".to_string()
                 ),
             ],
             "EXACTLY the evidenceRead grant — ArchiveReadGrant is archiveRead's Secret, never \

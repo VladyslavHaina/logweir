@@ -752,6 +752,12 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
             return ExitCode::SigningOrLock;
         }
     };
+    // FX-20: a projected store credential whose Secret is not bound to the
+    // location this Job was built for is refused before the store exists.
+    if let Err(refusal) = crate::credential_binding::check_store_bindings() {
+        eprintln!("{refusal}");
+        return ExitCode::GuardRefused;
+    }
     let evidence = match Store::from_url(&url) {
         Ok(s) => s,
         Err(e) => {
@@ -819,6 +825,10 @@ pub fn run_list(args: &ListArgs) -> ExitCode {
             return ExitCode::Operational;
         }
     };
+    if let Err(refusal) = crate::credential_binding::check_store_bindings() {
+        eprintln!("{refusal}");
+        return ExitCode::GuardRefused;
+    }
     let store = match Store::from_url(&url) {
         Ok(s) => s,
         Err(e) => {

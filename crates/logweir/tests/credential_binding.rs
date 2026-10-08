@@ -301,3 +301,161 @@ fn cluster_probe_refuses_an_unbound_credential_without_dialling() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// FX-20: the object-store credentials, on the same entry points
+// ---------------------------------------------------------------------------
+
+/// A secret access key the refusal paths must never print.
+const SEEDED_S3: &str = "seeded-store-row-secret-access-key-9c1e";
+
+/// `backup run` against an S3 location whose ENDPOINT is the sentinel: the
+/// destination's Secret (`AWS_*`) carries `binding` under the archive pair.
+/// The source is plaintext, so the archive pair is the only one in play.
+fn store_backup(root: &Path, endpoint: &str, binding: Option<&str>) -> Output {
+    let spec = format!(
+        "backup_id: store-binding-row\nsource:\n  bootstrap_servers: [\"127.0.0.1:1\"]\n  \
+         auth:\n    mode: plaintext\n  topics: [orders]\nstorage:\n  backend: s3\n  bucket: \
+         lw-a\n  prefix: team-a\n  endpoint: \"http://{endpoint}\"\n  path_style: true\n  \
+         allow_http: true\n"
+    );
+    let spec_path = root.join("backup.yaml");
+    std::fs::write(&spec_path, spec).unwrap();
+    let allowed = root.join("allowed.json");
+    std::fs::write(&allowed, r#"{"allowed_cluster_ids":[]}"#).unwrap();
+    let mut command = base(root);
+    command
+        .args(["backup", "run", "--spec"])
+        .arg(&spec_path)
+        .arg("--allowed-clusters")
+        .arg(&allowed)
+        .arg("--signing-key")
+        .arg(root.join("absent-signing-key.pem"))
+        .env("AWS_ACCESS_KEY_ID", "AKIASTOREROW")
+        .env("AWS_SECRET_ACCESS_KEY", SEEDED_S3)
+        .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED", EXPECTED);
+    if let Some(b) = binding {
+        command.env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", b);
+    }
+    run(command, "store backup")
+}
+
+/// **`backup run` refuses a destination Secret that is unbound or bound to
+/// another destination, before any store exists, and never dials the
+/// endpoint; the bound Secret passes the check.**
+///
+/// KILLS: `check_projected_bindings` checking only the Kafka sides; the store
+/// pairs read under the wrong names.
+#[test]
+fn fx20_backup_run_refuses_an_unbound_or_foreign_destination_secret_before_any_store() {
+    for (label, binding) in [("absent", None), ("foreign", Some(FOREIGN))] {
+        let root = tempfile::tempdir().unwrap();
+        let (listener, address) = sentinel();
+        let out = store_backup(root.path(), &address, binding);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(3), "{label}: {stdout}\n{stderr}");
+        assert_eq!(
+            last_line(&stdout),
+            "refusal-reason=CredentialBindingMismatch",
+            "{label}: {stdout}"
+        );
+        assert!(
+            stderr.contains("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING"),
+            "{label}: the refusal names the archive pair: {stderr}"
+        );
+        assert!(
+            !stdout.contains(SEEDED_S3) && !stderr.contains(SEEDED_S3),
+            "{label}: the secret access key must never be printed"
+        );
+        assert!(!stderr.contains(FOREIGN) && !stderr.contains(EXPECTED));
+        assert_no_connection(&listener, label);
+    }
+    // NEGATIVE CONTROL: bound to this destination, the run passes the check
+    // and stops later (the signing key does not exist), never on the binding.
+    let root = tempfile::tempdir().unwrap();
+    let (_listener, address) = sentinel();
+    let out = store_backup(root.path(), &address, Some(EXPECTED));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !stdout.contains("CredentialBindingMismatch")
+            && !stderr.contains("CredentialBindingMismatch"),
+        "the bound credential must pass the check: {stdout}\n{stderr}"
+    );
+}
+
+/// **The restore runner refuses an evidence or archive Secret bound
+/// elsewhere, first thing**, before the approval, the signer or the spec is
+/// read — a Restore whose evidence destination reuses the source's Secret
+/// carries exactly this foreign evidence pair.
+#[test]
+fn fx20_drill_run_refuses_a_foreign_store_credential_first_thing() {
+    for (label, pair, binding, refused) in [
+        (
+            "archive foreign",
+            "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING",
+            Some(FOREIGN),
+            true,
+        ),
+        (
+            "evidence foreign",
+            "LOGWEIR_EVIDENCE_CREDENTIAL_BINDING",
+            Some(FOREIGN),
+            true,
+        ),
+        (
+            "evidence absent",
+            "LOGWEIR_EVIDENCE_CREDENTIAL_BINDING",
+            None,
+            true,
+        ),
+        (
+            "evidence bound",
+            "LOGWEIR_EVIDENCE_CREDENTIAL_BINDING",
+            Some(EXPECTED),
+            false,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = base(root.path());
+        command
+            .args(["drill", "run", "--spec"])
+            .arg(root.path().join("absent-spec.yaml"))
+            .arg("--approval")
+            .arg(root.path().join("absent-approval.json"))
+            .arg("--approver-key")
+            .arg(root.path().join("absent-approver.pem"))
+            .arg("--allowed-clusters")
+            .arg(root.path().join("absent-allowed.json"))
+            .arg("--signing-key")
+            .arg(root.path().join("absent-signing.pem"))
+            .env("LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY", SEEDED_S3)
+            .env(format!("{pair}_EXPECTED"), EXPECTED);
+        if let Some(b) = binding {
+            command.env(pair, b);
+        }
+        let out = run(command, label);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        if refused {
+            assert_eq!(out.status.code(), Some(3), "{label}: {stdout}\n{stderr}");
+            assert_eq!(
+                last_line(&stdout),
+                "refusal-reason=CredentialBindingMismatch",
+                "{label}: {stdout}"
+            );
+            assert!(stderr.contains(pair), "{label}: names its pair: {stderr}");
+        } else {
+            assert!(
+                !stdout.contains("CredentialBindingMismatch")
+                    && !stderr.contains("CredentialBindingMismatch"),
+                "{label}: {stdout}\n{stderr}"
+            );
+        }
+        assert!(
+            !stdout.contains(SEEDED_S3) && !stderr.contains(SEEDED_S3),
+            "{label}"
+        );
+    }
+}
