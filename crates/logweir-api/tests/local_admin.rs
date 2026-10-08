@@ -1599,3 +1599,744 @@ fn http2_prior_knowledge_is_closed_at_once() {
     let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
 }
+
+// ---------------------------------------------------------------------------
+// FX-24b: the stall deadline on a connection's output and a request body, and
+// the total on a JSON body.
+// ---------------------------------------------------------------------------
+
+/// `main::IO_STALL_TIMEOUT`, which a test cannot import from a binary.
+/// [`the_stall_and_body_deadlines_these_rows_measure_are_mains`] reads it back
+/// out of `src/main.rs`.
+const STALL_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long past [`STALL_DEADLINE`] the non-reading-clients row waits for the
+/// server to act, counted from the LAST client's connect.
+///
+/// LONGER THAN [`DEADLINE_SLACK`], AND WHY. The stall clock starts at the last
+/// byte the KERNEL took, not at the last byte the client read, and a client
+/// that stops reading does not stop the kernel at once: macOS grows a
+/// connection's receive buffer on its own while data arrives (a socket set to
+/// 4 KiB read back 326,640 bytes once connected, 2026-10-08), so the server's
+/// writes keep progressing for a few seconds after the client's last read.
+/// Measured on the built binary: a single non-reading client ended 35.1 s
+/// after its request, 5 s of ramp plus the 30 s deadline. Fifteen seconds
+/// covers that ramp three times over and still fails a deadline doubled to
+/// sixty seconds.
+const STALL_SLACK: Duration = Duration::from_secs(15);
+
+/// `logweir_api::http::JSON_BODY_DEADLINE`, WRITTEN OUT rather than imported:
+/// a row that took the bound from the code it measures would follow a mutant
+/// that raised it, and pass at the new value. The pin row compares the two.
+const BODY_DEADLINE: Duration = Duration::from_secs(60);
+
+/// The deadline the FX-24b rows measure is the one `src/main.rs` configures
+/// and hands to both guards, and the JSON body's total is the documented one.
+///
+/// THE CALL SITES TOO (the FX-24 review's L1 lesson): a constant that still
+/// reads thirty seconds proves nothing if a guard is built with something
+/// else, so each guard must be handed `IO_STALL_TIMEOUT` itself, once.
+#[test]
+fn the_stall_and_body_deadlines_these_rows_measure_are_mains() {
+    let main =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs")).unwrap();
+    assert!(
+        main.contains(&format!(
+            "const IO_STALL_TIMEOUT: Duration = Duration::from_secs({});",
+            STALL_DEADLINE.as_secs()
+        )),
+        "src/main.rs no longer sets IO_STALL_TIMEOUT to {STALL_DEADLINE:?}; update \
+         STALL_DEADLINE in this file with it"
+    );
+    let code: String = main
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (call, what) in [
+        (
+            "StallGuard::new(TokioIo::new(stream), IO_STALL_TIMEOUT)",
+            "the connection's IO",
+        ),
+        (
+            "StallBody::new(body, IO_STALL_TIMEOUT)",
+            "each request body",
+        ),
+    ] {
+        assert_eq!(
+            code.matches(call).count(),
+            1,
+            "{what} must be guarded with IO_STALL_TIMEOUT itself, exactly once: `{call}`"
+        );
+    }
+    assert_eq!(
+        code.matches("StallGuard::new(").count() + code.matches("StallBody::new(").count(),
+        2,
+        "src/main.rs builds a guard somewhere else too"
+    );
+    assert_eq!(
+        logweir_api::http::JSON_BODY_DEADLINE,
+        BODY_DEADLINE,
+        "the JSON body's total deadline moved; update BODY_DEADLINE, the docs and the release \
+         notes with it"
+    );
+    assert!(
+        BODY_DEADLINE > STALL_DEADLINE + DEADLINE_SLACK,
+        "the body rows tell the stall from the total only while the total is the later one"
+    );
+}
+
+/// A current-thread runtime for the few socket options `std` does not offer.
+fn socket_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a current-thread runtime")
+}
+
+/// A blocking connection to `address` whose kernel receive buffer was set to
+/// `receive_buffer` bytes before the handshake.
+///
+/// WHY. A client that stops reading stops the server's writes only once the
+/// server's send buffer and the client's receive buffer are both full. With
+/// the defaults that is about half a MiB per connection on macOS (measured
+/// 2026-10-08: 556,016 bytes), 140 MB of kernel memory for 256 of them; with a
+/// 4 KiB receive buffer it is the server's send buffer alone.
+fn connect_with_receive_buffer(
+    runtime: &tokio::runtime::Runtime,
+    address: SocketAddr,
+    receive_buffer: u32,
+) -> Result<TcpStream, String> {
+    runtime.block_on(async move {
+        let socket = tokio::net::TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
+        socket
+            .set_recv_buffer_size(receive_buffer)
+            .map_err(|e| format!("SO_RCVBUF: {e}"))?;
+        let stream = tokio::time::timeout(Duration::from_secs(5), socket.connect(address))
+            .await
+            .map_err(|_| "connect: timed out".to_owned())?
+            .map_err(|e| format!("connect: {e}"))?;
+        let stream = stream.into_std().map_err(|e| format!("into_std: {e}"))?;
+        stream
+            .set_nonblocking(false)
+            .map_err(|e| format!("blocking: {e}"))?;
+        Ok(stream)
+    })
+}
+
+/// Read until the server ends `stream`, for at most `limit`, keeping what it
+/// sent. `Ok((elapsed, bytes))` on EOF or reset; `Err` naming what happened
+/// otherwise.
+fn answered_then_closed(
+    stream: &mut TcpStream,
+    limit: Duration,
+) -> Result<(Duration, Vec<u8>), String> {
+    let started = Instant::now();
+    let mut received = Vec::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let left = limit.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return Err(format!(
+                "still open after {:?}, {} bytes received: {:?}",
+                started.elapsed(),
+                received.len(),
+                String::from_utf8_lossy(&received[..received.len().min(200)])
+            ));
+        }
+        stream
+            .set_read_timeout(Some(left.min(Duration::from_millis(500))))
+            .unwrap();
+        match stream.read(&mut buffer) {
+            Ok(0) => return Ok((started.elapsed(), received)),
+            Ok(n) => received.extend_from_slice(&buffer[..n]),
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(e) if e.kind() == ErrorKind::ConnectionReset => {
+                return Ok((started.elapsed(), received))
+            }
+            Err(e) => return Err(format!("read failed after {:?}: {e}", started.elapsed())),
+        }
+    }
+}
+
+/// The size of the largest answer the binary can give without a cluster:
+/// `ui/render.js`, served whole.
+fn render_js_size() -> usize {
+    usize::try_from(
+        std::fs::metadata(repo_root().join("ui/render.js"))
+            .expect("ui/render.js exists")
+            .len(),
+    )
+    .unwrap()
+}
+
+/// **Clients that stop reading cannot hold the ceiling past the stall
+/// deadline, and the request queued behind them is answered (FX-24b).**
+///
+/// The FX-24 review's reproduction, as a row: every one of the 256 connection
+/// permits held by a client that pipelined requests for a 156 KiB asset and
+/// reads nothing, and a real request waiting in the kernel's queue behind
+/// them. Before FX-24b that request was unanswered at 30 s and every
+/// non-reading connection was still open at 32.9 s (the review's probe on the
+/// built binary).
+///
+/// - **Held first.** The queued request is not answered while the
+///   non-reading clients hold every permit, for a measured window (as in the
+///   ceiling rows), so the row cannot pass on a server with no ceiling.
+/// - **Released by the stall deadline, not by something else.** It is
+///   answered no sooner than the deadline (less a second) after the first
+///   non-reading client connected, and within the deadline plus
+///   [`STALL_SLACK`] of the last. A release at ten seconds would be the
+///   header deadline, meaning the answers had fitted in the kernel's buffers
+///   and the row had stalled nothing, and it fails here by name.
+/// - **By the server, cut short.** By the same bound every non-reading
+///   connection has been ended from the server's side, each before its
+///   sixteen answers were all sent, and the server still answers afterwards.
+///   Nothing reads a non-reading connection before then: a read is progress,
+///   and would keep it alive.
+#[test]
+fn clients_that_stop_reading_cannot_hold_the_ceiling_past_the_stall_deadline() {
+    const CEILING: usize = 256;
+    // Answers far past the server's send buffer, so every connection's write
+    // is pending: sixteen of the asset is about 2.5 MB requested per
+    // connection, against a send buffer of a few hundred KiB at most. The
+    // server never writes more than its buffer holds, so this costs nothing.
+    const PIPELINED: usize = 16;
+    let fixture = Fixture::new("slowreaders");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let runtime = socket_runtime();
+    let request = format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let requests = request.repeat(PIPELINED);
+    let open = |i: usize| {
+        let mut stream = connect_with_receive_buffer(&runtime, address, 4096)
+            .unwrap_or_else(|e| panic!("non-reading connection {i}: {e}"));
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(requests.as_bytes())
+            .unwrap_or_else(|e| panic!("non-reading connection {i}: write: {e}"));
+        stream
+    };
+
+    // The ceiling rows' fill: a batch at a time, each proven accepted by a
+    // FIFO probe, the last connection opened unproven.
+    let mut held = Vec::with_capacity(CEILING);
+    let mut slowest = Duration::ZERO;
+    let first = Instant::now();
+    while held.len() < CEILING - 1 {
+        for _ in 0..(CEILING - 1 - held.len()).min(UNACCEPTED_AT_ONCE) {
+            held.push(open(held.len()));
+        }
+        slowest = slowest.max(answered_after(port, held.len()));
+    }
+    held.push(open(CEILING - 1));
+    let last = Instant::now();
+
+    let mut queued = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    queued
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        queued,
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+
+    // Held first.
+    let window = (slowest * 4).max(Duration::from_secs(2));
+    let budget = STALL_DEADLINE
+        .saturating_sub(first.elapsed())
+        .saturating_sub(Duration::from_secs(1));
+    assert!(
+        window <= budget,
+        "inconclusive, not a product failure: filling the ceiling took {:?} and the slowest \
+         probe {slowest:?}, which leaves {budget:?} before the first connection's stall \
+         deadline for a {window:?} window",
+        first.elapsed()
+    );
+    queued.set_read_timeout(Some(window)).unwrap();
+    let mut buffer = [0u8; 64];
+    match queued.read(&mut buffer) {
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+        other => panic!(
+            "the queued request was not held behind {CEILING} non-reading connections for \
+             {window:?}: {other:?} {:?}",
+            String::from_utf8_lossy(&buffer)
+        ),
+    }
+
+    // Then released, by the stall deadline: nothing here reads or closes a
+    // non-reading connection before the queued request is answered.
+    let limit = (STALL_DEADLINE + STALL_SLACK).saturating_sub(last.elapsed());
+    queued.set_read_timeout(Some(limit)).unwrap();
+    let mut response = Vec::new();
+    let read = queued.read_to_end(&mut response);
+    let answered_at = first.elapsed();
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        read.is_ok() && text.starts_with("HTTP/1.1 200"),
+        "the request queued behind {CEILING} non-reading connections was not answered within \
+         {:?} of the last one: {read:?} {text:?}",
+        STALL_DEADLINE + STALL_SLACK
+    );
+    assert!(
+        answered_at >= STALL_DEADLINE.saturating_sub(Duration::from_secs(1)),
+        "the queued request was answered {answered_at:?} after the first non-reading client \
+         connected, before the {STALL_DEADLINE:?} stall deadline: a permit came back some \
+         other way (at about ten seconds, the header deadline: the answers fitted in the \
+         kernel's buffers and no write was ever pending)"
+    );
+
+    // By the server, cut short. Wait out the same bound first, reading
+    // nothing; then each connection must already be over: a reset, or EOF
+    // after what the kernel had buffered, in under two seconds and short of
+    // the sixteen answers. A connection the server never ended would instead
+    // be read to the end of all sixteen, or still be open.
+    std::thread::sleep((STALL_DEADLINE + STALL_SLACK).saturating_sub(last.elapsed()));
+    let whole = PIPELINED * render_js_size();
+    for (i, stream) in held.iter_mut().enumerate() {
+        match answered_then_closed(stream, Duration::from_secs(2)) {
+            Ok((_, received)) if received.len() < whole => {}
+            Ok((_, received)) => panic!(
+                "non-reading connection {i} of {CEILING} was sent all {} bytes of its answers \
+                 once read: the server never ended it",
+                received.len()
+            ),
+            Err(why) => panic!(
+                "non-reading connection {i} of {CEILING} was not ended by the server within {:?} \
+                 of the last connect: {why}",
+                STALL_DEADLINE + STALL_SLACK
+            ),
+        }
+    }
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+}
+
+/// **A slow but steady reader outlasts the stall deadline (FX-24b).**
+///
+/// NEGATIVE CONTROL for the row above: the bound is on a STALL. One client
+/// pipelines fourteen requests for the 156 KiB asset (the last asks to
+/// close) and reads 8 KiB every 150 ms through a 16 KiB receive buffer, so
+/// the server's writes are pending nearly the whole time and the transfer
+/// takes well past the deadline in all; every byte arrives, and the server
+/// ends the connection only after the last answer, at the client's request.
+/// A deadline that counted the whole answer, or the connection's age, fails
+/// here.
+#[test]
+fn a_slow_but_steady_reader_outlasts_the_stall_deadline() {
+    const ANSWERS: usize = 14;
+    let fixture = Fixture::new("steadyreader");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let runtime = socket_runtime();
+    let mut stream = connect_with_receive_buffer(&runtime, address, 16 * 1024).unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let keep = format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let close = format!(
+        "GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(format!("{}{close}", keep.repeat(ANSWERS - 1)).as_bytes())
+        .unwrap();
+
+    let started = Instant::now();
+    let mut received = 0usize;
+    let mut buffer = [0u8; 8 * 1024];
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let ended = loop {
+        std::thread::sleep(Duration::from_millis(150));
+        match stream.read(&mut buffer) {
+            Ok(0) => break Ok(()),
+            Ok(n) => received += n,
+            Err(e) => break Err(e),
+        }
+        assert!(
+            started.elapsed() < STALL_DEADLINE * 4,
+            "the transfer is still running after {:?}",
+            started.elapsed()
+        );
+    };
+    let elapsed = started.elapsed();
+    assert!(
+        ended.is_ok(),
+        "a steady reader's connection was cut after {elapsed:?} and {received} bytes: {ended:?}"
+    );
+    assert!(
+        received >= ANSWERS * render_js_size(),
+        "the connection ended after {received} bytes, before {ANSWERS} answers of {} bytes",
+        render_js_size()
+    );
+    assert!(
+        elapsed > STALL_DEADLINE + DEADLINE_SLACK,
+        "the transfer took only {elapsed:?}, so a deadline on the whole answer would not have \
+         cut it either: the row proves nothing about a stall"
+    );
+}
+
+/// A Kubernetes API server, plain HTTP on loopback, that serves one running
+/// `Backup`, `team-a/sse`, for as long as it is alive, and 404 for anything
+/// else. kube-client dials `http://` servers (`https_or_http`).
+struct FakeKube {
+    port: u16,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FakeKube {
+    fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let path =
+            repo_root().join("crates/logweir-api/tests/fixtures/backup-succeeded-verified.json");
+        let mut object: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        object["metadata"]["name"] = "sse".into();
+        object["metadata"]["namespace"] = "team-a".into();
+        // Unsettled, as `operation_stream.rs` makes one: the stream stays open.
+        object["status"]["phase"] = "Running".into();
+        object["status"]["progress"]["stage"] = "Running".into();
+        for key in ["exitCode", "exitReason", "evidence"] {
+            object["status"].as_object_mut().unwrap().remove(key);
+        }
+        let backup = object.to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (thread_reads, thread_stop) = (Arc::clone(&reads), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            // Bounded twice: by the owner's stop flag, and by a ceiling well
+            // past any row that uses it.
+            let until = Instant::now() + Duration::from_secs(300);
+            while !thread_stop.load(Ordering::Relaxed) && Instant::now() < until {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                };
+                let backup = backup.clone();
+                let reads = Arc::clone(&thread_reads);
+                std::thread::spawn(move || {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") && head.len() < 16 * 1024 {
+                        match stream.read(&mut byte) {
+                            Ok(1) => head.push(byte[0]),
+                            _ => return,
+                        }
+                    }
+                    let line = String::from_utf8_lossy(&head);
+                    let path = line.split_whitespace().nth(1).unwrap_or("");
+                    let (status, body) = if path
+                        .split('?')
+                        .next()
+                        .is_some_and(|p| p.ends_with("/namespaces/team-a/backups/sse"))
+                    {
+                        reads.fetch_add(1, Ordering::Relaxed);
+                        ("200 OK", backup)
+                    } else {
+                        (
+                            "404 Not Found",
+                            r#"{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","reason":"NotFound","code":404}"#
+                                .to_owned(),
+                        )
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: \
+                         {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        Self { port, reads, stop }
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for FakeKube {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// **An event stream that heartbeats outlives the stall deadline (FX-24b).**
+///
+/// The console's one long-lived answer is the operation event stream: up to
+/// 300 s, a heartbeat every 15 s of silence. Between heartbeats the server
+/// has nothing to write, and for the whole stream hyper keeps a read pending
+/// on the socket to notice the client leaving. So the stream is cut at the
+/// deadline by either of the two easy mistakes: timing the connection's
+/// reads, or timing the answer as a whole. The client here reads normally,
+/// through the shipped binary against a fake API server that serves a
+/// running backup, for the deadline plus 25 s: the stream must still be open,
+/// with no `end` frame, and must have delivered a heartbeat after the
+/// deadline had passed.
+#[test]
+fn an_event_stream_that_heartbeats_outlives_the_stall_deadline() {
+    let kube = FakeKube::start();
+    let fixture = Fixture::new("eventstream");
+    std::fs::write(
+        fixture.0.join("kubeconfig.yaml"),
+        format!(
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: fixture\n  cluster:\n    server: \
+             http://127.0.0.1:{}\ncontexts:\n- name: fixture\n  context:\n    cluster: fixture\n    \
+             user: fixture\nusers:\n- name: fixture\n  user: {{}}\n",
+            kube.port
+        ),
+    )
+    .unwrap();
+    let (server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /api/v1/namespaces/team-a/operations/backup/sse/events HTTP/1.1\r\nHost: \
+         127.0.0.1:{port}\r\nAccept: text/event-stream\r\n\r\n"
+    )
+    .unwrap();
+    let opened = Instant::now();
+    let watch = STALL_DEADLINE + Duration::from_secs(25);
+    let mut received = Vec::new();
+    let mut heartbeats = Vec::new();
+    let mut buffer = [0u8; 16 * 1024];
+    let mut ended = None;
+    while opened.elapsed() < watch {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                ended = Some("EOF".to_owned());
+                break;
+            }
+            Ok(n) => {
+                received.extend_from_slice(&buffer[..n]);
+                let beats = String::from_utf8_lossy(&received)
+                    .matches("event: heartbeat")
+                    .count();
+                while heartbeats.len() < beats {
+                    heartbeats.push(opened.elapsed());
+                }
+            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(e) => {
+                ended = Some(e.to_string());
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&received).into_owned();
+    assert!(
+        text.starts_with("HTTP/1.1 200") && text.contains("text/event-stream"),
+        "the stream did not open: {:?}\n{}",
+        &text[..text.len().min(300)],
+        server.log()
+    );
+    assert!(
+        text.contains("event: operation"),
+        "no snapshot frame (the fake API server answered {} reads): {:?}",
+        kube.reads(),
+        &text[..text.len().min(600)]
+    );
+    assert!(
+        ended.is_none(),
+        "the event stream was ended after {:?} ({}), with heartbeats at {heartbeats:?}",
+        opened.elapsed(),
+        ended.unwrap_or_default()
+    );
+    assert!(
+        !text.contains("event: end"),
+        "the stream sent `end` within {watch:?}: {text:?}"
+    );
+    assert!(
+        heartbeats
+            .iter()
+            .any(|at| *at > STALL_DEADLINE + Duration::from_secs(1)),
+        "no heartbeat arrived after the {STALL_DEADLINE:?} deadline had passed (heartbeats at \
+         {heartbeats:?})"
+    );
+}
+
+/// The head of a localAdmin `POST .../backups` that passes every check before
+/// the handler reads its body — the configured origin, JSON, an idempotency
+/// key — and announces `length` body bytes.
+fn backup_post_head(port: u16, length: usize, key: &str) -> String {
+    format!(
+        "POST /api/v1/namespaces/team-a/backups HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: \
+         http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nIdempotency-Key: \
+         {key}\r\nContent-Length: {length}\r\n\r\n"
+    )
+}
+
+/// **A signed-in client that stops sending its body is answered and closed at
+/// the stall deadline (FX-24b).**
+///
+/// The local administrator is the signed-in actor in localAdmin mode, and
+/// `POST .../backups` reads its body only after authorizing it. The client
+/// announces 4096 bytes, sends ten and stops: the body read is pending with
+/// nothing arriving, so the stall deadline ends it with `400
+/// malformed_request`, "stopped arriving", and the server closes the
+/// connection after the answer. It must be the STALL, at thirty seconds and
+/// not at the sixty-second total: a server whose body has no stall clock of
+/// its own fails here, as does one with no deadline at all.
+///
+/// NEGATIVE CONTROL: a second client, opened at the same moment, waits three
+/// seconds before sending a complete body; it is read and judged on its
+/// content, not refused for being slow to start.
+#[test]
+fn a_signed_in_body_that_stops_is_closed_at_the_stall_deadline() {
+    let fixture = Fixture::new("bodystop");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let mut stopped = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    stopped
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stopped
+        .write_all(
+            format!(
+                "{}{{\"topics\":",
+                backup_post_head(port, 4096, "fx24b-stop-0001")
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let sent = Instant::now();
+
+    let mut prompt = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    prompt
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let body = "{}";
+    prompt
+        .write_all(backup_post_head(port, body.len(), "fx24b-prompt-0001").as_bytes())
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    prompt.write_all(body.as_bytes()).unwrap();
+    let (_, answer) = answered_then_closed(&mut prompt, Duration::from_secs(20))
+        .unwrap_or_else(|why| panic!("a complete body sent after three seconds: {why}"));
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(
+        answer.starts_with("HTTP/1.1 ")
+            && !answer.contains("stopped arriving")
+            && !answer.contains("not received within"),
+        "a body sent three seconds after its head was refused as late: {answer}"
+    );
+
+    let limit = (STALL_DEADLINE + DEADLINE_SLACK).saturating_sub(sent.elapsed());
+    let (_, response) = answered_then_closed(&mut stopped, limit).unwrap_or_else(|why| {
+        panic!(
+            "a body that stopped was not answered and closed within {:?}: {why}",
+            STALL_DEADLINE + DEADLINE_SLACK
+        )
+    });
+    let closed_at = sent.elapsed();
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 400")
+            && response.contains("\"code\":\"malformed_request\"")
+            && response.contains("stopped arriving"),
+        "a body that stopped was answered with: {response}"
+    );
+    assert!(
+        closed_at >= STALL_DEADLINE.saturating_sub(Duration::from_secs(1)),
+        "a body that stopped was ended after {closed_at:?}, before the {STALL_DEADLINE:?} stall \
+         deadline"
+    );
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+}
+
+/// **A signed-in client that trickles its body is answered and closed at the
+/// total deadline (FX-24b).**
+///
+/// One byte (a space, which JSON allows) every five seconds: the body never
+/// stalls for the thirty-second stall deadline, so only `read_json`'s total
+/// can end it — at sixty seconds, with `400 malformed_request`, "not received
+/// within 60 seconds", and the connection closed after the answer. A server
+/// with no total fails here; so does one whose total is the stall's.
+#[test]
+fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
+    let fixture = Fixture::new("bodytrickle");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let mut trickle = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    trickle
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    trickle
+        .write_all(backup_post_head(port, 4096, "fx24b-trickle-0001").as_bytes())
+        .unwrap();
+    let sent = Instant::now();
+    let limit = BODY_DEADLINE + DEADLINE_SLACK;
+    let mut received = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut dripped = 0;
+    let closed_at = loop {
+        assert!(
+            sent.elapsed() < limit,
+            "a trickling body was not answered and closed within {limit:?} ({dripped} bytes \
+             sent, {} received: {:?})",
+            received.len(),
+            String::from_utf8_lossy(&received)
+        );
+        // The read timeout is the trickle's pace.
+        trickle
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        match trickle.read(&mut buffer) {
+            Ok(0) => break sent.elapsed(),
+            Ok(n) => received.extend_from_slice(&buffer[..n]),
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                // Nothing yet: one more byte. After the answer the server may
+                // have closed already, and a failed write is that, not ours.
+                if received.is_empty() && trickle.write_all(b" ").is_ok() {
+                    dripped += 1;
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::ConnectionReset => break sent.elapsed(),
+            Err(e) => panic!(
+                "the trickling connection failed after {:?}: {e}",
+                sent.elapsed()
+            ),
+        }
+    };
+    let response = String::from_utf8_lossy(&received);
+    assert!(
+        response.starts_with("HTTP/1.1 400")
+            && response.contains("\"code\":\"malformed_request\"")
+            && response.contains(&format!(
+                "not received within {} seconds",
+                BODY_DEADLINE.as_secs()
+            )),
+        "a trickling body was answered with: {response}"
+    );
+    assert!(
+        closed_at >= BODY_DEADLINE.saturating_sub(Duration::from_secs(1)),
+        "a trickling body was ended after {closed_at:?}, before the {BODY_DEADLINE:?} total \
+         deadline ({dripped} bytes sent)"
+    );
+    assert!(
+        dripped >= 10,
+        "only {dripped} bytes were trickled: the body was not kept moving"
+    );
+}
