@@ -1655,6 +1655,12 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// with twenty-six items, fail the twenty-seven pin (FX-8 fix round,
 /// 2026-10-07; item 23 when first written, renumbered after FX-10, FX-3,
 /// FX-13 and FX-11).
+///
+/// Then to twenty-eight: item 28 is PROD-08.1's — a plan may ask phase 7 to
+/// verify every record, and every 1.4.0 scorecard says what its verdict
+/// covered. Its token is the plan value an operator adds. The notes at main's
+/// `2c277dc1`, with twenty-seven items, fail the twenty-eight pin (PROD-08.1,
+/// 2026-10-07).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1680,9 +1686,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=27).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-seven operator-facing changes, `#### 1.` \
-         to `#### 27.` in order; found {numbers:?}"
+        (1..=28).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-eight operator-facing changes, `#### 1.` \
+         to `#### 28.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1754,6 +1760,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
             "a LogAppendTime point in time refused or labelled",
             "PointInTimeByProducerTime",
         ),
+        // PROD-08.1 (2026-10-07): complete coverage, and what every 1.4.0
+        // scorecard says its verdict covered.
+        ("complete coverage", "coverage: complete"),
     ]) {
         assert!(
             body.contains(token),

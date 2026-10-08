@@ -22,7 +22,7 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10), 24 (FX-3), 25
 (FX-13), 26 (FX-11) and 27 (FX-8), from the product-expansion tracker's fix-now
-rows, land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
+rows, and item 28 (PROD-08.1), its first wave-1 row, land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
 execution-claim set check, receipt and catalog format 1.2.0, the pin's read
 by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
@@ -179,7 +179,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-seven operator-facing changes
+### The twenty-eight operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -199,6 +199,9 @@ FX-11 and is not proven live yet: the PoC upgrade that carries it runs its
 rows.
 Item 27 is fix-now row FX-8, proven on the compose stack; the PoC upgrade that
 carries it runs its refusal and opt-in rows.
+Item 28 is row PROD-08.1, proven on the compose stack; it changes the runner's
+signed scorecard and adds a plan value no controller renders yet, so the PoC
+upgrade that carries it runs the sampled rows unchanged.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -1235,6 +1238,66 @@ Not yet proven on the PoC: the upgrade that carries FX-8 runs those rows.
 selections this build refuses, unlabelled, signing format 1.1.0 again. The 1.3.0
 scorecards already written stay valid under both readers.
 
+#### 28. A plan can ask phase 7 to verify every record, and the scorecard says what its verdict covered (PROD-08.1)
+
+**Added.** `sample.coverage: complete` in a drill or restore plan makes phase 7
+read every archived segment of every partition of every restored topic, check
+its sha256 against the manifest and decode it, compute the expected output from
+each archived record's OWN timestamp, read every restored record back and
+compare it with that output by `x-original-offset`, headers in order: exact
+per-partition counts of missing, unexpected, duplicate, out-of-order and
+different records, every faulty segment named. The manifest's first/last
+count bound is not consulted, so PROD-01.1's out-of-order cases read right
+there: a skipped segment and a record below the window floor FAIL, and a
+correct point-in-time restore PASSES. `sample.complete_max_records` bounds it;
+a bound that stops it signs `covered: false` and never a pass. Every 1.4.0
+scorecard — sampled or complete — carries the new optional
+`integrity.verification` block: the coverage, what it compared with (the
+archive), whether header order was verified, the verified partitions' capture
+gaps and pruned ranges as structured ranges, and a complete run's archive
+integrity and replay comparison. The scorecard is format **1.4.0**; both
+readers check seven new arms, IV-1 to IV-7, and print `integrity coverage:`
+lines; `verify_scorecard.py` is 1.19.0
+([drill-spec.md](formats/drill-spec.md#samplecoverage-and-samplecomplete_max_records-prod-081),
+[the scorecard format](formats/drill-scorecard.md#integrityverification-format-140),
+[stability.md](stability.md#scorecard-format-140-integrityverification-prod-081),
+[the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
+What changes on the upgrade:
+
+- **A sampled drill fails a restored head that repeats or reorders source
+  offsets** (`x-original-offset`); it used to key that head in a map, where a
+  duplicate collapsed and order was invisible. Only a target the engine wrote
+  wrongly is affected.
+- **Phase 0 refuses**, exit 3, a plan with `coverage: complete` and
+  `max_partitions`, or `complete_max_records` without complete coverage, or a
+  bound of `0`.
+- **A scorecard written by the new runner is format 1.4.0.** Readers built
+  before PROD-08.1 accept it and ignore the block.
+
+**Do:** nothing for existing plans, which stay sampled and byte-identical. To
+verify every record, add `coverage: complete` to the plan's `sample` block and
+re-approve it; budget for a read of the whole archive of the restored
+partitions and of the whole output (measured in the decision record: about a
+minute per GiB of one-KiB records with an optimised build on a laptop, against
+about five seconds for the sampled check), and set `complete_max_records` if a
+run must stop. A `Restore`, a `RehearsalSchedule` and the console cannot ask for
+it yet. **Scope:**
+`crates/logweir/tests/complete_verify.rs` (the fault matrix over real KBAK
+segments: a corrupt unsampled segment, an omitted segment in the store and in
+the target, a duplicate, a reorder, reordered headers, compaction holes,
+non-monotonic timestamps, the bound), `crates/logweir/tests/orchestrator.rs`
+(a complete plan through every phase, and a changed record past the canary),
+the seven arms in both readers with the invariant corpus and the parity gate,
+and planted mutants, each killed. Live, on the compose stack: the complete
+restores added to
+`e2e/tests/record_semantics.rs`'s timestamp, shapes and compaction rows, and
+`complete_coverage_hashes_every_segment_outside_the_window` and
+`complete_coverage_over_faulted_targets_on_the_real_broker_and_archive`.
+**Rollback:** an older runner ignores `sample.coverage`, runs a sampled check
+and signs format 1.3.0 again with no block; the 1.4.0 scorecards already written
+stay valid under both readers.
+
 ### Verification scope: what "verified" means in this release
 
 - **A green badge** means the signed document's signature verified under a key
@@ -1244,10 +1307,12 @@ scorecards already written stay valid under both readers.
   completion panel — upgrade the controller before the runner). `Historical`
   (signed before the key was retired) is a pass; `RecordedBeforeRevocation` never
   is ([kubernetes.md](kubernetes.md) §15.2–15.2a).
-- **Record checks are samples.** `verificationScope` is `sampled`, `degraded` or
-  `none`, never `complete`; no level in this version compares every record
+- **Record checks in a `Restore` or a rehearsal are samples.** `verificationScope`
+  is `sampled`, `degraded` or `none`, never `complete`
   (`recordsSampled`, `recordsSampledMatching` and the window beside them are the
-  exact claim).
+  exact claim). Only `logweir drill run` and `logweir restore run` can ask for
+  complete coverage (item 28); the signed scorecard says which in
+  `integrity.verification.coverage`.
 - **The independent verifier** (`docs/verify_scorecard.py`) checks the same
   signed documents with no Logweir code ([verify-a-scorecard.md](verify-a-scorecard.md)).
 - **Tested environments** are named in [release-handoff.md](release-handoff.md):
@@ -1343,7 +1408,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26 and 27, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26, 27 and 28, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.
