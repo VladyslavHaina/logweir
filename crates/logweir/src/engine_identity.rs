@@ -179,9 +179,11 @@ const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// # Errors
 /// The binary cannot be run, does not finish within a minute, exits non-zero,
 /// or does not print `version` as a whole token.
-pub fn verify_engine_reports(binary: &std::path::Path, version: &str) -> Result<(), String> {
+pub fn verify_engine_reports(engine: &std::path::Path, version: &str) -> Result<(), String> {
     use std::io::Read;
-    let mut child = std::process::Command::new(binary)
+    // `--version` is a flag, not an engine subcommand: it prints a string and
+    // acts on no cluster or bucket (ruling GR8), as `doctor`'s own probe does.
+    let mut child = std::process::Command::new(engine)
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -190,7 +192,7 @@ pub fn verify_engine_reports(binary: &std::path::Path, version: &str) -> Result<
         .map_err(|e| {
             format!(
                 "the engine at {} could not be run for --version: {e}",
-                binary.display()
+                engine.display()
             )
         })?;
     let deadline = std::time::Instant::now() + VERSION_PROBE_TIMEOUT;
@@ -205,12 +207,12 @@ pub fn verify_engine_reports(binary: &std::path::Path, version: &str) -> Result<
                 let _ = child.wait();
                 return Err(format!(
                     "the engine at {} did not print its version within {}s",
-                    binary.display(),
+                    engine.display(),
                     VERSION_PROBE_TIMEOUT.as_secs()
                 ));
             }
             Err(e) => {
-                return Err(format!("waiting for {} --version: {e}", binary.display()));
+                return Err(format!("waiting for {} --version: {e}", engine.display()));
             }
         }
     };
@@ -221,7 +223,7 @@ pub fn verify_engine_reports(binary: &std::path::Path, version: &str) -> Result<
     if let Some(mut s) = child.stderr.take() {
         let _ = s.read_to_string(&mut out);
     }
-    check_reported(binary, status.success(), &out, version)
+    check_reported(engine, status.success(), &out, version)
 }
 
 /// The decision of [`verify_engine_reports`], pure.
