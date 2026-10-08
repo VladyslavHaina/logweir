@@ -1739,6 +1739,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             // FX-4: an unbound plan's coverage — UNKNOWN for every topic.
             // `tests/config_coverage_drill.rs` drives the captured value.
             source_config_coverage: logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+            // FX-16: an unbound plan has no set to compare the restored one
+            // with. `tests/orchestrator.rs`'s FX-16 rows set it.
+            bound_set: None,
         },
         segment_bytes,
         out,

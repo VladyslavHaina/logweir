@@ -1663,16 +1663,25 @@ pub struct Ctx {
     /// phases 3 and 7 report every topic's configuration parity `notAssessed`
     /// rather than comparing against a manifest record nobody vouched for.
     pub source_config_coverage: SourceConfigCoverage,
+    /// **FX-16.** The backup set the verified point's receipt describes —
+    /// from the SAME `binding::VerifiedPoint` as `source_config_coverage` —
+    /// which `binding::check_restored_set` compares with the set `describe`
+    /// read, before the time basis is decided and before phase 2. `None` for a
+    /// plan bound to no point.
+    pub bound_set: Option<binding::BoundSet>,
 }
 
 /// `source_config_coverage` is what the VERIFIED point binding established
 /// (FX-4): the context is BORN with it, so no later assignment can be dropped
 /// between the binding check and the phases that read it (review L1, X4).
+/// `bound_set` is the set that same binding's receipt describes (FX-16), born
+/// with the context for the same reason.
 fn context(
     spec_text: String,
     allowed_text: String,
     contract: bool,
     source_config_coverage: SourceConfigCoverage,
+    bound_set: Option<binding::BoundSet>,
 ) -> Result<Ctx, DrillError> {
     let spec: DrillSpec = serde_yaml::from_str(&spec_text)
         .map_err(|e| DrillError::Operational(format!("drill spec does not parse: {e}")))?;
@@ -1807,6 +1816,8 @@ fn context(
         // What `check_v2_bindings` verified; UNKNOWN for a plan bound to no
         // point, because there is then no signed capture record to read.
         source_config_coverage,
+        // FX-16: the set that record describes; `None` when nothing is bound.
+        bound_set,
     })
 }
 
@@ -2372,6 +2383,7 @@ fn execute_for_reporting(
         startup.allowed_text,
         store_contract,
         bindings.source_config_coverage,
+        bindings.bound_set,
     ) {
         Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, approved),
         Err(error) => Err(error),
@@ -2387,6 +2399,9 @@ struct V2Bindings {
     /// **FX-4.** The verified recovery point's configuration capture coverage;
     /// [`SourceConfigCoverage::unknown`] when the plan binds no point.
     source_config_coverage: SourceConfigCoverage,
+    /// **FX-16.** The set the verified point's receipt describes; `None` when
+    /// the plan binds no point.
+    bound_set: Option<binding::BoundSet>,
 }
 
 /// The standing-authorization scope check and the recovery-point binding
@@ -2465,6 +2480,7 @@ fn check_v2_bindings(
     }
 
     let mut source_config_coverage = SourceConfigCoverage::unknown();
+    let mut bound_set = None;
     if plan.source.point.is_some() {
         // A READ-ONLY handle, built here and dropped here. `Store` is not
         // `Clone` and `context` builds its own; a read-only handle cannot put
@@ -2489,11 +2505,13 @@ fn check_v2_bindings(
                 tracing::warn!(point_id = %verified.point_id, "{note}");
             }
             source_config_coverage = verified.config_coverage;
+            bound_set = Some(verified.set);
         }
     }
     Ok(V2Bindings {
         standing_approved,
         source_config_coverage,
+        bound_set,
     })
 }
 
@@ -2731,6 +2749,23 @@ fn execute_with_validated_approval(
     // told to the operator here, before any target is touched, rather than
     // dropped. It changes nothing this run does or signs.
     let (facts, notices) = c.engine.describe_with_notices(&set)?;
+    // **FX-16: THE SET IS THE BOUND POINT'S, checked here and before anything
+    // is decided from the point's receipt.** `pick_backup_set` chose `set` by
+    // `source.backup`, and the binding verified a receipt that describes ONE
+    // set; every decision below that reads the receipt — the time basis (its
+    // recorded timestamp types, FX-8), phases 3 and 7 (its capture coverage,
+    // FX-4) — and FX-7's pin verdict are about that set alone. So the set id,
+    // the manifest key, the digest `describe` just computed and the version it
+    // read must all be the ones the binding verified, or the run is refused
+    // exit 3 (`PointBindingSetMismatch`) before phase 2: no target topic of
+    // this restore is created and the engine never starts. A plan bound to no
+    // point compares nothing.
+    //
+    // `orchestrator.rs::a_restored_set_that_is_not_the_bound_points_creates_no_target_topic`
+    // fails if this moves after the creation step, and
+    // `a_restored_set_mismatch_is_refused_before_the_time_basis_reads_the_receipt`
+    // if it moves after `time_basis::decide`.
+    binding::check_restored_set(c.bound_set.as_ref(), &set, &facts)?;
     surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
     // **FX-8: THE TIME BASIS, decided here and nowhere later.** The first point
     // at which both of its records are in hand — the archive manifest just
@@ -3944,10 +3979,90 @@ mod tests {
         );
         assert!(
             body.contains(
-                "Ok(V2Bindings {\n        standing_approved,\n        source_config_coverage,\n    })"
+                "Ok(V2Bindings {\n        standing_approved,\n        source_config_coverage,\n        \
+                 bound_set,\n    })"
             ),
             "check_v2_bindings must return the coverage it kept"
         );
+    }
+
+    /// **FX-16: the set the verified receipt describes travels WITH its
+    /// coverage**, from the same `VerifiedPoint`, through `V2Bindings` and
+    /// `context` into `Ctx::bound_set` — so a run whose coverage came from a
+    /// receipt always has that receipt's set to compare. A behaviour test over
+    /// the real binary cannot reach `describe` without a broker; this reads
+    /// the one path.
+    ///
+    /// KILLS: `check_v2_bindings` dropping the set (`bound_set` stays `None`
+    /// and `check_restored_set` compares nothing); `execute_for_reporting`
+    /// passing `None`; `context` storing anything but what it is given.
+    #[test]
+    fn the_verified_binding_hands_its_set_to_the_run() {
+        let src = include_str!("mod.rs");
+        let body = fn_body(src, "check_v2_bindings");
+        let after_verify = body
+            .split("binding::verify_point_binding(")
+            .nth(1)
+            .expect("check_v2_bindings verifies the point binding");
+        assert!(
+            after_verify.contains("bound_set = Some(verified.set);"),
+            "check_v2_bindings must keep the verified binding's set: {after_verify}"
+        );
+        assert_eq!(
+            body.matches("bound_set = ").count(),
+            2,
+            "exactly the `None` default and the verified assignment"
+        );
+        assert!(body.contains("let mut bound_set = None;"));
+        let run = fn_body(src, "execute_for_reporting");
+        let call = run
+            .split("match context(")
+            .nth(1)
+            .and_then(|r| r.split(") {").next())
+            .expect("execute_for_reporting builds its context with `match context(…) {`");
+        assert!(
+            call.contains("bindings.bound_set"),
+            "the run context must be built WITH the verified binding's set: {call}"
+        );
+        let ctx = fn_body(src, "context");
+        assert!(
+            ctx.contains("bound_set: Option<binding::BoundSet>,")
+                && ctx.contains("        bound_set,\n    })"),
+            "context() must take the set and store exactly what it is given"
+        );
+    }
+
+    /// **FX-16: WHERE the restored set is checked.** Exactly once, after
+    /// `describe` produced the facts it compares, and before every reader of
+    /// the receipt's word in the phase sequence: the time basis (FX-8), phase
+    /// 2, phase 3's diff and phase 7's parity (FX-4). The behaviour rows in
+    /// `tests/orchestrator.rs` prove the refusal creates no target topic and
+    /// pre-empts the time basis; this pins the order against the rest.
+    #[test]
+    fn the_restored_set_is_checked_after_describe_and_before_the_receipt_is_read() {
+        let src = include_str!("mod.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("mod.rs production half");
+        const CHECK: &str = "binding::check_restored_set(c.bound_set.as_ref(), &set, &facts)?;";
+        assert_eq!(prod.matches("check_restored_set(").count(), 1, "one check");
+        let body = fn_body(src, "execute_with_validated_approval");
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("execute_with_validated_approval has `{needle}`"))
+        };
+        let check = at(CHECK);
+        assert!(at("describe_with_notices(&set)") < check, "after describe");
+        for later in [
+            "logweir_core::time_basis::decide(",
+            "phase2_target::run(",
+            "phase3_diff::run(",
+            "&c.source_config_coverage",
+            "create_target_topics(",
+        ] {
+            assert!(check < at(later), "the set check must precede `{later}`");
+        }
     }
 
     #[test]
@@ -3971,7 +4086,7 @@ mod tests {
         let ctx = fn_body(src, "context");
         assert!(
             ctx.contains("source_config_coverage: SourceConfigCoverage,")
-                && ctx.contains("        source_config_coverage,\n    })"),
+                && ctx.contains("        source_config_coverage,\n        // FX-16"),
             "context() must take the coverage and store exactly what it is given"
         );
         assert!(

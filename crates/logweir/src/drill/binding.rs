@@ -60,6 +60,16 @@ pub const POINT_UNTRUSTED: &str = "PointUntrusted";
 /// rewritten under an identical manifest ([`crate::catalog::pin`], "The cost,
 /// stated").
 pub const POINT_PIN_UNCHECKED: &str = "PointPinUnchecked";
+/// **FX-16.** The token a refusal opens with when the bound point HOLDS — its
+/// receipt, signature and manifest all verify — but the backup set this run
+/// would restore is not the set that receipt describes: a plan whose
+/// `source.backup` names another set (or `latestCompleted`), or a restored set
+/// whose id, manifest key, manifest digest or manifest version is not the one
+/// the binding verified. Exit 3, in the same arrangement as
+/// [`POINT_BINDING_MISMATCH`] (the message opens with it; the line reads
+/// `refusal-reason=GuardRefused`): it is a refusal of the PLAN, and no retry
+/// makes it restore the point it was approved for.
+pub const POINT_BINDING_SET_MISMATCH: &str = "PointBindingSetMismatch";
 
 fn refuse(message: String) -> DrillError {
     DrillError::Guard(GuardRefusal(message))
@@ -84,6 +94,39 @@ pub struct VerifiedPoint {
     /// bucket ([`POINT_PIN_UNCHECKED`], then [`crate::catalog::pin::UNCHECKED_NOTE`]).
     /// The runner logs it as a warning and goes on.
     pub pin_note: Option<String>,
+    /// **FX-16.** The backup set the verified receipt describes, which
+    /// [`check_restored_set`] compares with the set the engine is about to
+    /// restore before anything is decided from this receipt.
+    pub set: BoundSet,
+}
+
+/// **FX-16.** The backup set a VERIFIED recovery point describes: the only set
+/// whose records the receipt's word is about.
+///
+/// Everything the runner takes from the bound receipt — FX-4's configuration
+/// capture coverage (phases 3 and 7), FX-8's recorded timestamp type (the time
+/// basis) and FX-7's pin verdict (a judgement of ONE manifest object at ONE
+/// version) — is a statement about this set. [`check_restored_set`] refuses a
+/// run whose restored set is any other, so none of it is ever applied to
+/// another set's records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundSet {
+    /// The point, for the refusal message.
+    pub point_id: String,
+    /// The receipt's `backup_id`: the set id the engine must be told to
+    /// restore (`build_plan` renders `BackupSetRef::backup_id`).
+    pub backup_id: String,
+    /// The receipt's `archive.manifest_key`: the key the binding read the
+    /// manifest back through and judged FX-7's pin at — bucket-absolute, the
+    /// space `list_manifests` returns keys in.
+    pub manifest_key: String,
+    /// The bound `manifest_sha256`, which the binding proved that key's bytes
+    /// hash to.
+    pub manifest_sha256: String,
+    /// The version id the binding's read of that manifest answered: `None` for
+    /// a store that answers none (a filesystem archive, an unversioned
+    /// bucket). FX-7's verdict is about the object AT this version.
+    pub manifest_version_id: Option<String>,
 }
 
 /// Re-verify the recovery point the plan is bound to, against the archive.
@@ -195,6 +238,28 @@ pub fn verify_point_binding(
             "{POINT_BINDING_MISMATCH}. Recovery point {}'s receipt attests manifest digest {}, \
              but the plan is bound to {}; no data operation was started.",
             point.point_id, receipt.archive.manifest_sha256, point.manifest_sha256
+        )));
+    }
+    // **FX-16 — THE PLAN NAMES THE POINT'S OWN SET.** `source.backup` is what
+    // `pick_backup_set` restores, and the receipt describes exactly one set.
+    // A plan binding point A while naming set B would restore B's records and
+    // then take every decision the receipt informs — the configuration parity
+    // of phases 3 and 7 (FX-4), the time basis (FX-8) — from A's record. The
+    // controller's readiness check refuses that plan (`preflight.rs`,
+    // `CatalogPointBindingMismatch`); this is the runner's own half, over the
+    // approved bytes, before any broker is contacted.
+    //
+    // `latestCompleted` is refused here too, and on purpose: it names whichever
+    // set is newest when the run starts, so it can agree with the point today
+    // and silently stop agreeing after the next backup. A bound plan names its
+    // point's set (`source.backup: <the receipt's backup_id>`), which is what
+    // the console, the catalog route and a rehearsal (`rehearsal.rs`, `backup:
+    // point.backup_id`) all render.
+    if plan.source.backup != receipt.backup_id {
+        return Err(refuse(plan_set_refusal(
+            &point.point_id,
+            &receipt.backup_id,
+            &plan.source.backup,
         )));
     }
 
@@ -309,7 +374,109 @@ pub fn verify_point_binding(
         point_id: point.point_id.clone(),
         config_coverage: verified_coverage(&point.point_id, &receipt),
         pin_note,
+        set: BoundSet {
+            point_id: point.point_id.clone(),
+            backup_id: receipt.backup_id.clone(),
+            manifest_key,
+            manifest_sha256: manifest_digest,
+            manifest_version_id: current_version,
+        },
     }))
+}
+
+/// **FX-16.** The binding's refusal of a plan whose `source.backup` is not the
+/// bound point's set.
+fn plan_set_refusal(point_id: &str, receipt_backup_id: &str, plan_backup: &str) -> String {
+    let named = if plan_backup == "latestCompleted" {
+        "`latestCompleted`, which restores whichever set is newest when the run starts".to_string()
+    } else {
+        format!("set `{plan_backup}`")
+    };
+    format!(
+        "{POINT_BINDING_SET_MISMATCH}. The plan is bound to recovery point {point_id} of backup \
+         set `{receipt_backup_id}`, but its source.backup names {named}. The point's receipt \
+         describes `{receipt_backup_id}` alone, so nothing it records may be applied to another \
+         set's records; a bound plan names its point's own set (source.backup: \
+         {receipt_backup_id}). No data operation was started."
+    )
+}
+
+/// **FX-16 — THE SET THE ENGINE IS ABOUT TO RESTORE IS THE SET THE BOUND
+/// RECEIPT DESCRIBES.** Called by the drill immediately after `describe`, before
+/// the time basis is decided and before phase 2, so a refused run has created
+/// no target topic of this restore and has taken no decision from the receipt.
+///
+/// `bound` is `None` for a plan bound to no point (nothing to compare: the set
+/// is the one `source.backup` names, as it always was). Otherwise every one of
+/// the four must agree, and each closes a different way the restored set can
+/// differ from the verified one:
+///
+/// * **the set id** (`set.backup_id`, what `build_plan` renders for the
+///   engine) against the receipt's `backup_id` — `latestCompleted` resolving
+///   to a newer set, if a plan ever reached here with it;
+/// * **the manifest key** against the receipt's `archive.manifest_key` — the
+///   plan's storage prefix pointing at another copy of a set with the same id
+///   (FX-7's pin verdict was taken at the receipt's key, not at this one);
+/// * **the manifest digest** `describe` computed against the bound
+///   `manifest_sha256` — different bytes under the same id and key;
+/// * **the manifest version** `describe` read against the version the binding
+///   read — the manifest written again between the binding and `describe`,
+///   with bytes that may be identical (FX-7's case, inside this run).
+///
+/// Exit 3 ([`POINT_BINDING_SET_MISMATCH`]) naming every disagreement.
+pub fn check_restored_set(
+    bound: Option<&BoundSet>,
+    set: &logweir_core::engine::BackupSetRef,
+    facts: &logweir_core::engine::BackupSetFacts,
+) -> Result<(), DrillError> {
+    let Some(bound) = bound else {
+        return Ok(());
+    };
+    let mut faults = Vec::new();
+    if set.backup_id != bound.backup_id {
+        faults.push(format!(
+            "it is backup set `{}`, not the receipt's `{}`",
+            set.backup_id, bound.backup_id
+        ));
+    }
+    if set.manifest_key != bound.manifest_key {
+        faults.push(format!(
+            "its manifest is {}, not the receipt's {} (the manifest the binding verified)",
+            set.manifest_key, bound.manifest_key
+        ));
+    }
+    if facts.manifest_sha256 != bound.manifest_sha256 {
+        faults.push(format!(
+            "its manifest hashes to {}, not the bound {}",
+            facts.manifest_sha256, bound.manifest_sha256
+        ));
+    }
+    if facts.manifest_version_id != bound.manifest_version_id {
+        let said = |v: &Option<String>| match v {
+            Some(version) => format!("version {version}"),
+            None => "no version id".to_string(),
+        };
+        faults.push(format!(
+            "its manifest read answered {}, and the binding's read answered {}: the manifest was \
+             written again after the point was verified",
+            said(&facts.manifest_version_id),
+            said(&bound.manifest_version_id)
+        ));
+    }
+    if faults.is_empty() {
+        return Ok(());
+    }
+    Err(refuse(format!(
+        "{POINT_BINDING_SET_MISMATCH}. The plan is bound to recovery point {} of backup set `{}`, \
+         but the set this run would restore is not that set: {}. Everything this run would take \
+         from the point's receipt (its configuration capture coverage and recorded timestamp \
+         types, its manifest pin) describes `{}` alone. No target topic of this restore was \
+         created and no data operation was started.",
+        bound.point_id,
+        bound.backup_id,
+        faults.join("; "),
+        bound.backup_id
+    )))
 }
 
 /// **FX-4.** The coverage a verified point lends phases 3 and 7 — read only
@@ -916,12 +1083,21 @@ mod tests {
     }
 
     /// A point proven with nothing to note, from a receipt that carries no
-    /// `config_coverage` block (FX-4: UNKNOWN for every topic).
-    fn proven(point_id: String) -> Option<VerifiedPoint> {
+    /// `config_coverage` block (FX-4: UNKNOWN for every topic), describing the
+    /// fixture's set (FX-16) as the binding read its manifest: at
+    /// `manifest_version_id`, `None` for a store that answers no version.
+    fn proven(point_id: String, manifest_version_id: Option<String>) -> Option<VerifiedPoint> {
         Some(VerifiedPoint {
-            point_id,
+            point_id: point_id.clone(),
             config_coverage: logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
             pin_note: None,
+            set: BoundSet {
+                point_id,
+                backup_id: "nightly-7".into(),
+                manifest_key: MANIFEST_KEY.into(),
+                manifest_sha256: logweir_core::ids::sha256_prefixed(br#"{"topics":[]}"#),
+                manifest_version_id,
+            },
         })
     }
 
@@ -1059,10 +1235,13 @@ mod tests {
         );
     }
 
+    /// `backup: nightly-7`, the receipt fixture's set: a bound plan names its
+    /// point's own set (FX-16). This fixture said `latestCompleted` until
+    /// FX-16, which is the plan shape the fix refuses.
     const PLAN_YAML: &str = r#"
 source:
   storage: {backend: filesystem, path: /tmp/logweir-binding-fixture}
-  backup: latestCompleted
+  backup: nightly-7
   topics: [orders]
 target:
   bootstrap_servers: ["target:9092"]
@@ -1100,7 +1279,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         assert_eq!(
             check(&plan_with(Some(a.binding.clone())), &a.store, &a.keys)
                 .expect("the point verifies"),
-            proven(id)
+            proven(id, None)
         );
     }
 
@@ -1291,7 +1470,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         assert_eq!(
             check(&plan_with(Some(a.binding.clone())), &a.store, &a.keys)
                 .expect("the pinned version is the current one"),
-            proven(id)
+            proven(id, current_version(&a.store))
         );
     }
 
@@ -1363,6 +1542,225 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         }
     }
 
+    /// The version a read of the fixture manifest answers in `store` now.
+    fn current_version(store: &Store) -> Option<String> {
+        store.get(MANIFEST_KEY).expect("the manifest reads").1
+    }
+
+    // ------------------------------------------------------------- FX-16
+
+    /// The refusal's message, asserting it is an exit-3 guard refusal that
+    /// opens with [`POINT_BINDING_SET_MISMATCH`].
+    fn set_mismatch(result: Result<Option<VerifiedPoint>, DrillError>) -> String {
+        match result {
+            Err(DrillError::Guard(GuardRefusal(message))) => {
+                assert!(
+                    message.starts_with(&format!("{POINT_BINDING_SET_MISMATCH}. ")),
+                    "{message}"
+                );
+                message
+            }
+            other => panic!("expected a {POINT_BINDING_SET_MISMATCH} refusal, got {other:?}"),
+        }
+    }
+
+    /// **FX-16, the plan half.** A plan bound to point A of set `nightly-7`
+    /// whose `source.backup` names `nightly-8` is refused exit 3 by the
+    /// binding, over the approved bytes, before any broker is contacted —
+    /// although the receipt, its signature and its manifest all verify. The
+    /// control is the same binding with `backup: nightly-7`
+    /// (`a_point_the_archive_holds_is_proven_and_names_itself`).
+    ///
+    /// KILLS: deleting the comparison (the point is proven); comparing the
+    /// receipt's `backup_id` with anything but `source.backup`.
+    #[test]
+    fn a_plan_naming_another_set_than_its_points_is_refused() {
+        let a = archive();
+        let mut plan = plan_with(Some(a.binding.clone()));
+        plan.source.backup = "nightly-8".into();
+        let message = set_mismatch(check(&plan, &a.store, &a.keys));
+        assert!(
+            message.contains(&a.binding.point_id)
+                && message.contains("backup set `nightly-7`")
+                && message.contains("names set `nightly-8`")
+                && message.contains("source.backup: nightly-7"),
+            "the refusal names the point, both sets and the repair: {message}"
+        );
+        assert!(
+            !message.contains(POINT_BINDING_MISMATCH),
+            "a distinct token: the binding itself holds"
+        );
+    }
+
+    /// **FX-16: `latestCompleted` with a bound point is refused**, even when
+    /// the point's set is the newest one: the selector can stop agreeing with
+    /// the point at the next backup, and the plan the approver signed would
+    /// then restore another set under this receipt.
+    #[test]
+    fn latest_completed_with_a_bound_point_is_refused() {
+        let a = archive();
+        let mut plan = plan_with(Some(a.binding.clone()));
+        plan.source.backup = "latestCompleted".into();
+        let message = set_mismatch(check(&plan, &a.store, &a.keys));
+        assert!(
+            message.contains("`latestCompleted`, which restores whichever set is newest")
+                && message.contains("source.backup: nightly-7"),
+            "{message}"
+        );
+    }
+
+    /// **FX-16: the verified point carries the set it describes** — the
+    /// receipt's set id and manifest key, the bound digest, and the version
+    /// the binding read — on an unversioned store (no version) and on a
+    /// versioned one (the current version, which is the pinned one).
+    ///
+    /// KILLS: a `BoundSet` built from the plan instead of the receipt, or with
+    /// the version dropped (`check_restored_set` would then refuse every
+    /// versioned bucket's run, or none).
+    #[test]
+    fn a_verified_point_carries_the_set_its_receipt_describes() {
+        let a = archive();
+        let verified = check(&plan_with(Some(a.binding.clone())), &a.store, &a.keys)
+            .expect("verifies")
+            .expect("bound");
+        assert_eq!(verified.set.backup_id, "nightly-7");
+        assert_eq!(verified.set.manifest_key, MANIFEST_KEY);
+        assert_eq!(verified.set.manifest_sha256, a.binding.manifest_sha256);
+        assert_eq!(verified.set.manifest_version_id, None);
+
+        let (v, _bucket) = versioned_point(true);
+        let verified = check(&plan_with(Some(v.binding.clone())), &v.store, &v.keys)
+            .expect("verifies")
+            .expect("bound");
+        assert!(verified.set.manifest_version_id.is_some());
+        assert_eq!(
+            verified.set.manifest_version_id,
+            current_version(&v.store),
+            "the version the binding READ"
+        );
+    }
+
+    fn bound_set() -> BoundSet {
+        BoundSet {
+            point_id: "lwp1-0123456789abcdef0123456789abcdef".into(),
+            backup_id: "nightly-7".into(),
+            manifest_key: "archive/nightly-7/manifest.json".into(),
+            manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+            manifest_version_id: Some("v-1".into()),
+        }
+    }
+
+    /// The set and facts `describe` would hand the drill for exactly the
+    /// bound set.
+    fn restored_as_bound() -> (
+        logweir_core::engine::BackupSetRef,
+        logweir_core::engine::BackupSetFacts,
+    ) {
+        let b = bound_set();
+        (
+            logweir_core::engine::BackupSetRef {
+                backup_id: b.backup_id.clone(),
+                manifest_key: b.manifest_key.clone(),
+            },
+            logweir_core::engine::BackupSetFacts {
+                backup_id: b.backup_id.clone(),
+                created_at: chrono::Utc::now(),
+                source_cluster_id: None,
+                manifest_sha256: b.manifest_sha256.clone(),
+                manifest_version_id: b.manifest_version_id.clone(),
+                consumer_group_snapshot_sha256: None,
+                topics: vec![],
+            },
+        )
+    }
+
+    /// **FX-16, the restored-set half, row by row.** The set `describe` read
+    /// is the bound one: proven. A plan bound to no point: nothing to compare.
+    /// Then each of the four disagreements ALONE is refused, naming itself —
+    /// so a check that ignores any one of them fails its row.
+    ///
+    /// KILLS (one per row): the set id ignored; the manifest key ignored; the
+    /// digest ignored; the version ignored; and the whole check returning `Ok`.
+    #[test]
+    fn a_restored_set_is_the_bound_one_or_is_refused_naming_what_differs() {
+        let (set, facts) = restored_as_bound();
+        let bound = bound_set();
+        check_restored_set(Some(&bound), &set, &facts).expect("the bound set itself");
+        check_restored_set(None, &set, &facts).expect("an unbound plan compares nothing");
+
+        let refused = |set: &logweir_core::engine::BackupSetRef,
+                       facts: &logweir_core::engine::BackupSetFacts,
+                       needle: &str| {
+            let message = set_mismatch(check_restored_set(Some(&bound), set, facts).map(|()| None));
+            assert!(message.contains(needle), "{needle:?} not in: {message}");
+            assert!(
+                message.contains(&bound.point_id)
+                    && message.contains("No target topic of this restore was created"),
+                "{message}"
+            );
+            assert_eq!(
+                message.matches("; ").count(),
+                0,
+                "exactly ONE disagreement is planted per row: {message}"
+            );
+        };
+
+        let (mut other_id, f) = restored_as_bound();
+        other_id.backup_id = "nightly-8".into();
+        refused(
+            &other_id,
+            &f,
+            "it is backup set `nightly-8`, not the receipt's `nightly-7`",
+        );
+
+        let (mut other_key, f) = restored_as_bound();
+        other_key.manifest_key = "copy/nightly-7/manifest.json".into();
+        refused(
+            &other_key,
+            &f,
+            "its manifest is copy/nightly-7/manifest.json, not the receipt's \
+             archive/nightly-7/manifest.json",
+        );
+
+        let (s, mut other_digest) = restored_as_bound();
+        other_digest.manifest_sha256 = format!("sha256:{}", "b".repeat(64));
+        refused(
+            &s,
+            &other_digest,
+            &format!("its manifest hashes to sha256:{}", "b".repeat(64)),
+        );
+
+        let (s, mut rewritten) = restored_as_bound();
+        rewritten.manifest_version_id = Some("v-2".into());
+        refused(
+            &s,
+            &rewritten,
+            "its manifest read answered version v-2, and the binding's read answered version v-1",
+        );
+
+        let (s, mut unversioned) = restored_as_bound();
+        unversioned.manifest_version_id = None;
+        refused(
+            &s,
+            &unversioned,
+            "its manifest read answered no version id, and the binding's read answered version v-1",
+        );
+    }
+
+    /// Several disagreements are all named, in one refusal.
+    #[test]
+    fn every_disagreement_is_named_in_one_refusal() {
+        let (mut set, mut facts) = restored_as_bound();
+        set.backup_id = "nightly-8".into();
+        facts.manifest_sha256 = format!("sha256:{}", "c".repeat(64));
+        let message =
+            set_mismatch(check_restored_set(Some(&bound_set()), &set, &facts).map(|()| None));
+        assert!(
+            message.contains("backup set `nightly-8`") && message.contains("hashes to"),
+            "{message}"
+        );
+    }
+
     fn noted(result: Result<Option<VerifiedPoint>, DrillError>, id: &str) -> String {
         let proven = result
             .expect("a copy of a signed point is that point")
@@ -1398,7 +1796,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         assert_eq!(
             check(&plan_with(Some(a.binding.clone())), &a.store, &a.keys)
                 .expect("the original proves"),
-            proven(id)
+            proven(id, current_version(&a.store))
         );
     }
 
@@ -1504,7 +1902,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         assert_eq!(
             check(&plan_with(Some(u.binding.clone())), &copy, &u.keys)
                 .expect("an unpinned point proves by its digest"),
-            proven(u.binding.point_id.clone())
+            proven(u.binding.point_id.clone(), None)
         );
     }
 

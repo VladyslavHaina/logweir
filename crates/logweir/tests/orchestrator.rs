@@ -1894,6 +1894,165 @@ fn an_unrecorded_type_is_labelled_and_a_create_time_topic_is_not_refused() {
     );
 }
 
+// ------------------------------------------------------------------ FX-16
+//
+// The restored set is the bound point's, or nothing is created: a plan that
+// binds point A must not restore set B and then take A's recorded word —
+// configuration coverage, timestamp types, the manifest pin — for B's records.
+
+/// The set the fixture engine lists and describes, exactly as a VERIFIED point
+/// binding records it (`binding::VerifiedPoint::set`) when its receipt
+/// describes that set.
+fn bound_as_restored(f: &fixtures::OrchestratorFixture) -> logweir::drill::binding::BoundSet {
+    let sets = f
+        .ctx
+        .engine
+        .list_backup_sets(&f.ctx.spec.source.storage)
+        .expect("the fixture lists its set");
+    let set = sets.last().expect("one set").clone();
+    let facts = f
+        .ctx
+        .engine
+        .describe(&set)
+        .expect("the fixture describes it");
+    logweir::drill::binding::BoundSet {
+        point_id: "lwp1-0123456789abcdef0123456789abcdef".into(),
+        backup_id: set.backup_id,
+        manifest_key: set.manifest_key,
+        manifest_sha256: facts.manifest_sha256,
+        manifest_version_id: facts.manifest_version_id,
+    }
+}
+
+/// Asserts the run was refused `PointBindingSetMismatch` (exit 3, the general
+/// `GuardRefused` line, as every binding refusal) naming `needle`, and that it
+/// was refused BEFORE phase 2: no target topic created, the engine never asked
+/// for a fingerprint, no scorecard signed.
+fn refused_set_mismatch(f: &fixtures::OrchestratorFixture, err: DrillError, needle: &str) {
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=GuardRefused");
+    assert!(
+        message.starts_with("PointBindingSetMismatch. "),
+        "{message}"
+    );
+    assert!(message.contains(needle), "{needle:?} not in: {message}");
+    assert!(
+        fixtures::created_topics(f).is_empty(),
+        "a refused set created a target topic: {:?}",
+        fixtures::created_topics(f)
+    );
+    assert!(fixtures::fingerprint_calls(f).is_empty(), "before phase 4");
+    assert!(
+        f.ctx
+            .store
+            .get(&format!("logweir/drills/{}.json", f.run_id))
+            .is_err(),
+        "a refused run signs nothing"
+    );
+}
+
+/// **FX-16 — a plan binding point A while restoring set B is refused before
+/// any target exists.** The fixture engine restores its one set; the verified
+/// binding (as `Ctx::bound_set`) describes a set that differs from it in ONE
+/// respect per run: another set id (what `latestCompleted` resolving to a newer
+/// set looks like), another manifest key (a second copy of the set under
+/// another prefix, where FX-7's pin was never judged), another manifest digest
+/// (other bytes), another version (the manifest written again between the
+/// binding and `describe`). Each is exit 3 with nothing created.
+///
+/// KILLS: removing the check (all four runs pass and create the topic);
+/// moving it after the target-creation step (`created_topics` is not empty);
+/// ignoring the set id, the key, the digest or the version (that run passes).
+#[test]
+fn a_restored_set_that_is_not_the_bound_points_creates_no_target_topic() {
+    type Edit = fn(&mut logweir::drill::binding::BoundSet);
+    let rows: [(&str, Edit, &str); 4] = [
+        (
+            "another set id",
+            |b| b.backup_id = "backup-2026-08-31T02:00:00Z".into(),
+            "it is backup set `backup-2026-08-30T02:00:00Z`, not the receipt's \
+             `backup-2026-08-31T02:00:00Z`",
+        ),
+        (
+            "another manifest key",
+            |b| b.manifest_key = "copy/fixture/manifest.json".into(),
+            "its manifest is drills/fixture/manifest.json, not the receipt's \
+             copy/fixture/manifest.json",
+        ),
+        (
+            "another manifest digest",
+            |b| b.manifest_sha256 = format!("sha256:{}", "b".repeat(64)),
+            "not the bound sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        (
+            "another manifest version",
+            |b| b.manifest_version_id = Some("3HL4kqtJlcpXroDTDmJ".into()),
+            "its manifest read answered no version id, and the binding's read answered version \
+             3HL4kqtJlcpXroDTDmJ",
+        ),
+    ];
+    for (row, edit, needle) in rows {
+        let mut f = fixtures::orchestrator_fixture(Drill::Passes);
+        let mut bound = bound_as_restored(&f);
+        edit(&mut bound);
+        f.ctx.bound_set = Some(bound);
+        let err = execute_with(&f.args, &f.run_id, &f.ctx)
+            .expect_err(&format!("{row}: a set that is not the point's is refused"));
+        refused_set_mismatch(&f, err, needle);
+    }
+}
+
+/// **FX-16, the control.** The same run with the binding describing exactly
+/// the set the engine restores passes as `Passes` does, and creates its one
+/// target topic — so the row above is not a build that refuses every bound
+/// run.
+#[test]
+fn a_restored_set_that_is_the_bound_points_runs() {
+    let mut f = fixtures::orchestrator_fixture(Drill::Passes);
+    f.ctx.bound_set = Some(bound_as_restored(&f));
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the bound set restores");
+    assert_eq!(fixtures::created_topics(&f).len(), 1);
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
+}
+
+/// **FX-16 and FX-8: the receipt's word never reaches another set.** The
+/// bound receipt records `orders` as `LogAppendTime` from the broker default
+/// (FX-8's broker-default arm, decided from the RECEIPT alone). Bound to a
+/// receipt of ANOTHER set, the run is refused `PointBindingSetMismatch`, not
+/// `PointInTimeByProducerTime`: the set check comes first, so the time basis
+/// is never decided from a record about other records. The control — the
+/// same receipt describing the restored set — reaches the time basis and is
+/// refused there, as FX-8's row is.
+///
+/// KILLS: moving the set check after `time_basis::decide` (the first run is
+/// refused `PointInTimeByProducerTime`).
+#[test]
+fn a_restored_set_mismatch_is_refused_before_the_time_basis_reads_the_receipt() {
+    let mut f = fixtures::orchestrator_fixture(Drill::SelectsAtAPoint);
+    f.ctx.source_config_coverage =
+        coverage_recording("LogAppendTime", "dynamicDefaultBrokerConfig");
+    let mut other = bound_as_restored(&f);
+    other.backup_id = "backup-2026-08-31T02:00:00Z".into();
+    f.ctx.bound_set = Some(other);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    refused_set_mismatch(&f, err, "not the receipt's `backup-2026-08-31T02:00:00Z`");
+
+    let mut f = fixtures::orchestrator_fixture(Drill::SelectsAtAPoint);
+    f.ctx.source_config_coverage =
+        coverage_recording("LogAppendTime", "dynamicDefaultBrokerConfig");
+    f.ctx.bound_set = Some(bound_as_restored(&f));
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    assert_eq!(
+        refusal(err).2,
+        "refusal-reason=PointInTimeByProducerTime",
+        "the receipt's own set: FX-8 decides from its record"
+    );
+    assert!(fixtures::created_topics(&f).is_empty());
+}
+
 // ------------------------------------------------------------------ PROD-08.1
 
 /// **PROD-08.1, the wiring.** A plan stating `sample.coverage: complete`

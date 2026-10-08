@@ -759,4 +759,55 @@ evidence: {{backend: filesystem, path: {evidence}}}
         let run = run_bound_restore(&plan(archive_dir.path(), evidence.path(), &truthful), None);
         refused_before_phase_zero(&run, "no evidence-signing keyring");
     }
+
+    /// **FX-16, through the real binary: a plan binding point A (of set
+    /// `nightly-7`) while naming set B is refused before phase 0.** The
+    /// receipt, its signature under the mounted keyring and its manifest all
+    /// verify — the truthful binding of the control row above — and the plan's
+    /// `source.backup` alone differs. Exit 3, `PointBindingSetMismatch`, no
+    /// phase announced, the bootstrap never dialled, so no target topic can
+    /// exist. Its control is `a_truthful_binding_gets_past_the_check_and_fails_later`
+    /// (the same archive and binding with `backup: nightly-7`).
+    #[test]
+    fn a_plan_naming_another_set_than_its_point_is_refused_before_phase_zero() {
+        for (backup, needle) in [
+            ("nightly-8", "names set `nightly-8`"),
+            (
+                "latestCompleted",
+                "names `latestCompleted`, which restores whichever set is newest",
+            ),
+        ] {
+            let (archive_dir, truthful, point_id, signer) = archive();
+            let keys = evidence_keys(&signer, logweir_core::trust::KeyState::Active);
+            let evidence = tempfile::tempdir().expect("tempdir");
+            let plan_text = plan(archive_dir.path(), evidence.path(), &truthful)
+                .replace("  backup: nightly-7\n", &format!("  backup: {backup}\n"));
+            assert!(plan_text.contains(&format!("  backup: {backup}\n")));
+            let run = run_bound_restore(&plan_text, Some(&keys));
+            assert_eq!(run.code, 3, "{backup}: {}", run.transcript);
+            for expected in [
+                "PointBindingSetMismatch",
+                needle,
+                point_id.as_str(),
+                "source.backup: nightly-7",
+                "refusal-reason=GuardRefused",
+            ] {
+                assert!(
+                    run.transcript.contains(expected),
+                    "{backup}: {expected:?} missing:\n{}",
+                    run.transcript
+                );
+            }
+            assert!(
+                !run.transcript.contains("progress-phase=0:admit"),
+                "{backup}: no restore phase may begin:\n{}",
+                run.transcript
+            );
+            assert!(
+                !run.transcript.contains("19098"),
+                "{backup}: the plan's bootstrap must never be dialled:\n{}",
+                run.transcript
+            );
+        }
+    }
 }
