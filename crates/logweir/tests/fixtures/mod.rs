@@ -869,6 +869,14 @@ pub enum Drill {
     /// 300th, far past the 25-record canary a sampled drill reads) changed on
     /// the target: the complete lane counts it and the drill fails.
     VerifiesCompletelyAndFindsAChangedRecord,
+    /// **FX-23.** `Passes` in every respect, except that the engine's offset
+    /// report names NO entry: the report an engine leaves when a SIGTERM
+    /// stopped it before it finished `orders` (it exits 0, and writes the
+    /// report from its `Ok` arm). Phase 7 refuses it, `fail-integrity`, on the
+    /// report alone: the sample reconciles, the count is inside its bound and
+    /// every objective is met, so a non-pass here can only come from the
+    /// orchestrator handing phase 7 the report phase 6 read.
+    EngineReportLacksTheTopic,
 }
 
 /// **PROD-08.1.** CRC-32 (IEEE, reflected), bitwise: the KBAK footer's
@@ -1585,6 +1593,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             engine.digest = String::new();
         }
         Drill::IgnoresTheHeaderLever => engine.header_honoured = false,
+        Drill::EngineReportLacksTheTopic => {
+            engine.engine_report = logweir_core::engine::EngineReport::Read(Default::default());
+        }
         Drill::DropsARenderedKeyDuringRestore => {
             engine.preflight_unknown_keys = vec!["restore.header_preflight".into()];
             engine.restore_unknown_keys = vec!["restore.checkpoint_interval_secs".into()];

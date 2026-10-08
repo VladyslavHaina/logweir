@@ -5358,4 +5358,59 @@ mod standing_approved_tests {
             );
         }
     }
+
+    /// **FX-23: the writer's version follows the sample.** `sample_info`
+    /// signs the topics phase 4 left unsampled (absent when none), and
+    /// `execute_with_validated_approval` raises the document to 1.6.0 from that
+    /// block right after setting it, so a document naming an unsampled topic
+    /// is never written under a version arm US-1 refuses. KILLS: dropping the
+    /// field in `sample_info`; writing `Some(vec![])`; deleting or moving the
+    /// version step.
+    #[test]
+    fn a_sample_that_names_an_unsampled_topic_is_written_as_1_6_0() {
+        let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().to_utc();
+        let spec = logweir_core::spec::SampleSpec {
+            window_start: t("2026-08-29T00:00:00Z"),
+            window_end: t("2026-08-30T02:00:00Z"),
+            records_per_partition: 25,
+            anchor: logweir_core::spec::Anchor::Head,
+            max_partitions: Some(1),
+            coverage: logweir_core::spec::Coverage::Sampled,
+            complete_max_records: None,
+        };
+        let sel = |unsampled: Vec<String>| phase4_sample::Selection {
+            window: (spec.window_start, spec.window_end),
+            per_partition: Vec::new(),
+            records_expected: 0,
+            topics: 1,
+            partitions: 1,
+            notes: Vec::new(),
+            unsampled_topics: unsampled,
+        };
+        let named = sample_info(&spec, &sel(vec!["orders".into()]));
+        assert_eq!(named.unsampled_topics, Some(vec!["orders".to_string()]));
+        assert_eq!(
+            logweir_core::scorecard::format_version_with_sample("1.4.0", &named),
+            "1.6.0"
+        );
+        let none = sample_info(&spec, &sel(Vec::new()));
+        assert_eq!(none.unsampled_topics, None, "none is ABSENT, never []");
+
+        let src = include_str!("mod.rs");
+        let start = src
+            .find("\nfn execute_with_validated_approval(")
+            .expect("drill/mod.rs has `fn execute_with_validated_approval(`");
+        let body = &src[start..];
+        let body = &body[..body.find("\n}\n").expect("the function closes at column 0")];
+        let set = body
+            .find("sc.sample = sample_info(&c.spec.sample, &sel);")
+            .expect("phase 4's sample block is set in this function");
+        let step = body[set..]
+            .find("format_version_with_sample(&sc.format_version, &sc.sample)")
+            .expect("the version step follows the sample block");
+        assert!(
+            step < 400,
+            "the version step must follow the sample block at once, before anything signs"
+        );
+    }
 }
