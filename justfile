@@ -228,6 +228,7 @@ fixtures-sign-bogus:
 # one-shot).
 e2e-up:
     ./e2e/compose/stack-env.sh --check
+    mkdir -p ".e2e/auth/${COMPOSE_PROJECT_NAME:-logweir-e2e}"
     docker compose -f e2e/compose/docker-compose.yml up -d --wait
     docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm minio-setup
     docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm topic-setup
