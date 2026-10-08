@@ -382,8 +382,12 @@ const CONDITION = shapeOf(
 
 const ARCHIVE = shapeOf("ArchiveView", { url: str }, { credentialRef: objectOf(NAME_REF) });
 
-/** The two authentication modes a connection may declare. */
-export const CONNECTION_AUTH_MODES = Object.freeze(["plaintext", "scramSha512"]);
+/** The authentication modes a connection may declare: tag 1's two, and
+ *  PROD-01.3's three (`plain` only over TLS, `mtls` with a client
+ *  certificate). Byte for byte `ConnectionAuthMode`. */
+export const CONNECTION_AUTH_MODES = Object.freeze([
+  "plaintext", "scramSha512", "scramSha256", "plain", "mtls",
+]);
 
 /** The two roles a connection may carry. */
 export const CONNECTION_ROLES = Object.freeze(["source", "target"]);
@@ -395,10 +399,18 @@ export const CONCURRENCY_POLICIES = Object.freeze(["Forbid", "Allow"]);
  *  `TargetMode` and the CRD's own enum -- see `ui/plan.js`. */
 export const RESTORE_MODES = Object.freeze(["scratch", "newTopic"]);
 
+/** Where a stored connection's CA certificate is -- a REFERENCE (PROD-01.3). */
+const TLS_CA_VIEW = shapeOf("TlsCaView", { kind: str, name: str, key: str }, {});
+
 const CONNECTION_AUTH = shapeOf(
   "ConnectionAuthView",
   { mode: str, tls: bool },
-  { username: str, credentialRef: objectOf(NAME_REF) },
+  {
+    username: str,
+    credentialRef: objectOf(NAME_REF),
+    clientCertificateRef: objectOf(NAME_REF),
+    tlsCa: objectOf(TLS_CA_VIEW),
+  },
 );
 
 /** The reachability verdicts `crates/logweir-api/src/projection.rs` emits. */
@@ -927,10 +939,36 @@ const POLICY_CHANGED_DETAIL = shapeOf(
 
 const ARCHIVE_REQUEST = shapeOf("ArchiveRequest", { url: str }, { credentialRef: objectOf(NAME_REF) });
 
+/** PROD-01.3 security follow-up: the credential, TYPED ONCE and never named.
+ *  WRITE-ONLY -- the product API turns it into a Secret bound to the
+ *  connection and never returns it. */
+const NEW_CONNECTION_CREDENTIAL_REQUEST = shapeOf(
+  "NewConnectionCredentialRequest",
+  {},
+  { password: str, certificatePem: str, privateKeyPem: str },
+);
+
+const OBJECT_KEY_REF_REQUEST = shapeOf("ObjectKeyRefRequest", { name: str, key: str }, {});
+
+/** A private CA, from a ConfigMap only (a CA certificate is public). */
+const TLS_CA_REQUEST = shapeOf(
+  "TlsCaRequest",
+  { configMapKeyRef: objectOf(OBJECT_KEY_REF_REQUEST) },
+  {},
+);
+
 const CONNECTION_AUTH_REQUEST = shapeOf(
   "ConnectionAuthRequest",
   { mode: oneOf(CONNECTION_AUTH_MODES), tls: bool },
-  { username: str, credentialRef: objectOf(NAME_REF) },
+  {
+    username: str,
+    // REFUSED by the product API since the PROD-01.3 security follow-up; kept
+    // in the shape only because the server's grammar still names it, so the
+    // refusal can say why. This client never sends it.
+    credentialRef: objectOf(NAME_REF),
+    credential: objectOf(NEW_CONNECTION_CREDENTIAL_REQUEST),
+    tlsCa: objectOf(TLS_CA_REQUEST),
+  },
 );
 
 const CREATE_CONNECTION_REQUEST = shapeOf(
@@ -1587,6 +1625,7 @@ export const CONSOLE_SHAPES = Object.freeze({
   NameRef: NAME_REF,
   ArchiveView: ARCHIVE,
   ConnectionAuthView: CONNECTION_AUTH,
+  TlsCaView: TLS_CA_VIEW,
   ReachabilityView: REACHABILITY,
   Connection: CONNECTION,
   RetentionView: RETENTION,
@@ -1632,6 +1671,9 @@ export const CONSOLE_SHAPES = Object.freeze({
   OperationResponse: OPERATION_RESPONSE,
   ArchiveRequest: ARCHIVE_REQUEST,
   ConnectionAuthRequest: CONNECTION_AUTH_REQUEST,
+  NewConnectionCredentialRequest: NEW_CONNECTION_CREDENTIAL_REQUEST,
+  ObjectKeyRefRequest: OBJECT_KEY_REF_REQUEST,
+  TlsCaRequest: TLS_CA_REQUEST,
   CreateConnectionRequest: CREATE_CONNECTION_REQUEST,
   RetentionRequest: RETENTION_REQUEST,
   CreateScheduleRequest: CREATE_SCHEDULE_REQUEST,
