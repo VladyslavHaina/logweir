@@ -211,7 +211,25 @@ struct Ctx {
     window: (i64, i64),
 }
 
-fn fixture(tag: &str) -> Vec<Out> {
+/// Record `i`'s CreateTime offset from `T`: one record per millisecond, in
+/// order.
+fn monotonic(i: i64) -> i64 {
+    i
+}
+
+/// Record `i`'s CreateTime offset for T2: even records in order, odd records
+/// 5 s later. Every 300-record segment then starts with an even record and
+/// ends with an odd one, so its first/last bounds straddle any point between
+/// them: no segment is "wholly inside" a window that ends there.
+fn straddling(i: i64) -> i64 {
+    if i % 2 == 0 {
+        i
+    } else {
+        5_000 + i
+    }
+}
+
+fn fixture(tag: &str, ts: fn(i64) -> i64) -> Vec<Out> {
     let pad = "v".repeat(100);
     (0..PARTS)
         .flat_map(|p| {
@@ -220,7 +238,7 @@ fn fixture(tag: &str) -> Vec<Out> {
             (0..PER_PARTITION).map(move |i| {
                 Out::kv(
                     p,
-                    Some(T + i),
+                    Some(T + ts(i)),
                     &format!("{tag}-p{p}-{i}"),
                     &format!("{i} {pad}"),
                 )
@@ -230,11 +248,18 @@ fn fixture(tag: &str) -> Vec<Out> {
 }
 
 fn setup(lab: &mut Lab) -> Ctx {
-    let a = lab.topic("src-a");
-    let b = lab.topic("src-b");
-    kafka::produce_plain(&a, &fixture("a")).expect("produce the first topic");
-    kafka::produce_plain(&b, &fixture("b")).expect("produce the second topic");
-    let backup_id = lab.name("arch");
+    setup_with(lab, "", monotonic, T + PER_PARTITION + 10_000)
+}
+
+/// Two source topics named `<label>src-a` / `<label>src-b`, stamped by `ts`,
+/// one archive `<label>arch`, and a restore window from the archive's floor
+/// to `end`.
+fn setup_with(lab: &mut Lab, label: &str, ts: fn(i64) -> i64, end: i64) -> Ctx {
+    let a = lab.topic(&format!("{label}src-a"));
+    let b = lab.topic(&format!("{label}src-b"));
+    kafka::produce_plain(&a, &fixture("a", ts)).expect("produce the first topic");
+    kafka::produce_plain(&b, &fixture("b", ts)).expect("produce the second topic");
+    let backup_id = lab.name(&format!("{label}arch"));
     lab.archives.push(backup_id.clone());
     let o = kafka::backup_run(&backup_id, &[&a, &b], SEGMENT_RECORDS);
     assert_eq!(
@@ -288,7 +313,7 @@ fn setup(lab: &mut Lab) -> Ctx {
         segments,
         archives,
         facts,
-        window: (floor, T + PER_PARTITION + 10_000),
+        window: (floor, end),
     }
 }
 
@@ -409,9 +434,12 @@ fn start_engine(lab: &mut Lab, label: &str, doc: &Path) -> String {
         "--user",
         "0:0",
         "-e",
-        format!("AWS_ACCESS_KEY_ID={user}").as_str(),
+        // NAMES only, as `engine-docker.sh` does: `docker run -e NAME` takes
+        // the value from this child's environment (set below), so the
+        // credential is in neither `ps` nor `docker inspect`'s argv.
+        "AWS_ACCESS_KEY_ID",
         "-e",
-        format!("AWS_SECRET_ACCESS_KEY={secret}").as_str(),
+        "AWS_SECRET_ACCESS_KEY",
         "-e",
         "AWS_REGION=us-east-1",
         "-e",
@@ -436,7 +464,9 @@ fn start_engine(lab: &mut Lab, label: &str, doc: &Path) -> String {
     .map(|s| s.to_string())
     .collect();
     let mut c = Command::new("docker");
-    c.args(&args);
+    c.args(&args)
+        .env("AWS_ACCESS_KEY_ID", user)
+        .env("AWS_SECRET_ACCESS_KEY", secret);
     lab.containers.push(name.clone());
     let o = kafka::output_within(c, 120).expect("docker run");
     assert_eq!(
@@ -1269,79 +1299,104 @@ fn t1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     o
 }
 
-/// K3 — kill while produce requests are in flight: freeze the broker, let
-/// every partition send its next request, SIGKILL the engine, thaw. Then
-/// resume from the target's tail (the prototype).
+/// K3 — kill while produce requests are in flight: two twin restores of the
+/// same archive into two target pairs, interrupted together (freeze the
+/// broker, let every partition send its next request, SIGKILL both engines,
+/// thaw). Twin A resumes from the target's tail (the prototype); twin B gets
+/// the engine's own re-run of the same document, so the counterfactual is
+/// measured on the same interruption, not inferred from K1.
 fn k3(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     let mut o = Outcome::new("k3-kill-before-acknowledgement");
     let m = targets(lab, ctx, "k3");
+    let m2 = targets(lab, ctx, "k3t");
     let (ta, tb) = (a_of(&m, ctx), b_of(&m, ctx));
-    let f = files(lab, "k3", "stable");
+    let (ta2, tb2) = (a_of(&m2, ctx), b_of(&m2, ctx));
+    let f = files(lab, "k3", "twin-a");
+    let f2 = files(lab, "k3", "twin-b");
     write_doc(ctx, &m, &f.checkpoint, &f.offsets, &f.doc);
+    write_doc(ctx, &m2, &f2.checkpoint, &f2.offsets, &f2.doc);
     let e1 = start_engine(lab, "k3-e1", &f.doc);
-    let reached = wait_until(180, 50, || landed(&ta) >= 1_500 || !running(&e1));
-    let before_pause = hw(&ta);
+    let e1b = start_engine(lab, "k3-e1b", &f2.doc);
+    let reached = wait_until(180, 50, || {
+        (landed(&ta) >= 1_500 && landed(&ta2) >= 1_500) || !running(&e1) || !running(&e1b)
+    });
     let mut thaw = kafka::Thaw { armed: true };
     let paused = kafka::compose_broker("pause");
     std::thread::sleep(Duration::from_millis(1_500));
     signal(&e1, "KILL");
+    signal(&e1b, "KILL");
     let exit1 = wait_engine(&e1, 60);
+    let exit1b = wait_engine(&e1b, 60);
     std::thread::sleep(Duration::from_millis(500));
     let unpaused = kafka::compose_broker("unpause");
     thaw.armed = false;
-    let after = settled(&[&ta, &tb]);
-    let log1 = logs(&e1);
-    let acked = acknowledged(&log1);
-    let unacked: BTreeMap<String, i64> = after[&ta]
-        .iter()
-        .map(|(p, h)| {
-            (
-                p.to_string(),
-                h - acked.get(&(ta.clone(), *p)).copied().unwrap_or(0),
-            )
-        })
-        .collect();
+    let after = settled(&[&ta, &tb, &ta2, &tb2]);
+    let unacked_of = |log: &str, t: &String| -> BTreeMap<String, i64> {
+        let acked = acknowledged(log);
+        after[t]
+            .iter()
+            .map(|(p, h)| {
+                (
+                    p.to_string(),
+                    h - acked.get(&(t.clone(), *p)).copied().unwrap_or(0),
+                )
+            })
+            .collect()
+    };
+    let (log1, log1b) = (logs(&e1), logs(&e1b));
+    let unacked = unacked_of(&log1, &ta);
+    let unacked_b = unacked_of(&log1b, &ta2);
     let unacked_total: i64 = unacked.values().sum();
+    let unacked_total_b: i64 = unacked_b.values().sum();
+    let landed_b_first: i64 = after[&ta2].values().sum();
     o.put("kill_reached_mid_topic", json!(reached));
     o.put("pause_exit", json!(paused.status.code()));
     o.put("unpause_exit", json!(unpaused.status.code()));
-    o.put("attempt1_exit", json!(exit1));
-    o.put("hw_a_before_pause", json!(before_pause));
+    o.put("attempt1_exits", json!([exit1, exit1b]));
     o.put("landed_after_thaw", json!(after));
-    o.put(
-        "acknowledged_end_per_partition",
-        json!(acked
-            .iter()
-            .map(|((t, p), e)| json!([t, p, e]))
-            .collect::<Vec<_>>()),
-    );
-    o.put("appended_without_acknowledgement_a", json!(unacked));
+    o.put("appended_without_acknowledgement_twin_a", json!(unacked));
+    o.put("appended_without_acknowledgement_twin_b", json!(unacked_b));
     let resumed = resume_prototype(ctx, &m);
     o.put(
-        "resume_prototype",
+        "twin_a_resume_prototype",
         match &resumed {
             Ok(v) => v.clone(),
             Err(e) => json!({"refused": e}),
         },
     );
     let v = verify(ctx, &m);
-    o.put("verification_after_resume", v.clone());
+    o.put("twin_a_verification_after_resume", v.clone());
+    let e2b = start_engine(lab, "k3-e2b", &f2.doc);
+    let exit2b = wait_engine(&e2b, ENGINE_DEADLINE_SECS);
+    let vb = verify(ctx, &m2);
+    o.put("twin_b_rerun_exit", json!(exit2b));
+    o.put("twin_b_verification_after_rerun", vb.clone());
     o.expect(
         "the freeze and thaw both ran",
         paused.status.code() == Some(0) && unpaused.status.code() == Some(0),
     );
     o.expect(
-        "records were appended that the engine never saw acknowledged",
-        unacked_total > 0,
+        "records were appended that neither engine saw acknowledged",
+        unacked_total > 0 && unacked_total_b > 0,
     );
     o.expect(
         "at most one produce request per partition was appended unacknowledged",
-        unacked.values().all(|n| (0..=PRODUCE_BATCH).contains(n)),
+        unacked
+            .values()
+            .chain(unacked_b.values())
+            .all(|n| (0..=PRODUCE_BATCH).contains(n)),
     );
-    o.expect("the tail resume ran", resumed.is_ok());
+    o.expect("twin a: the tail resume ran", resumed.is_ok());
     o.expect(
-        "after the tail resume both topics are exact: no duplicate of the unacknowledged batch",
+        "twin a: after the tail resume both topics are exact (no duplicate of the unacknowledged batch)",
         exact(&v, "first") && exact(&v, "second"),
+    );
+    o.expect("twin b: the engine's re-run exits 0", exit2b == Some(0));
+    o.expect(
+        "twin b: the re-run duplicates every landed record, the unacknowledged batch included",
+        count(&vb, "first", "duplicates") == landed_b_first
+            && count(&vb, "first", "missing") == 0
+            && exact(&vb, "second"),
     );
     o
 }
@@ -1523,6 +1578,184 @@ fn m1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     o
 }
 
+/// Phase 4 then phase 7's SAMPLED lane (the default coverage) over
+/// `mapping`'s targets, through the shipped `phase4_sample::run`,
+/// `OsoCliEngine::fingerprints` and `phase7_verify::run_with_coverage`: the
+/// verdict a `logweir restore run` with `max_partitions` would sign.
+fn sampled(ctx: &Ctx, mapping: &BTreeMap<String, String>, max_partitions: Option<u32>) -> Value {
+    use logweir::drill::phase7_verify::run_with_coverage;
+    use logweir_core::engine::BackupSetRef;
+    use logweir_core::spec::{Anchor, Coverage, SampleSpec};
+    let spec = SampleSpec {
+        window_start: chrono::DateTime::from_timestamp_millis(ctx.window.0).expect("floor"),
+        window_end: chrono::DateTime::from_timestamp_millis(ctx.window.1).expect("end"),
+        records_per_partition: 25,
+        anchor: Anchor::Head,
+        max_partitions,
+        coverage: Coverage::Sampled,
+        complete_max_records: None,
+    };
+    let topics: Vec<String> = mapping.keys().cloned().collect();
+    let mut sel = match logweir::drill::phase4_sample::run(&ctx.facts, &spec, &topics) {
+        Ok(s) => s,
+        Err(e) => return json!({"phase4_refused": format!("{e:?}")}),
+    };
+    sel.bind_backup_set(&BackupSetRef {
+        backup_id: ctx.backup_id.clone(),
+        manifest_key: kafka::manifest_key(&ctx.backup_id),
+    });
+    let store = || {
+        logweir_engine_oso::storage::Store::read_only_from_url(&kafka::archive_location(
+            &ctx.backup_id,
+        ))
+        .expect("the archive store")
+    };
+    let engine = logweir_engine_oso::engine::OsoCliEngine::new(
+        engine_bin(),
+        engine_version(),
+        engine_digest(),
+        engine_mount().join("resume71-verify"),
+        store(),
+    );
+    let scratch = engine_mount().join("resume71-verify");
+    let selections: Vec<Value> = sel
+        .per_partition
+        .iter()
+        .map(|s| json!([topic_role(ctx, &s.topic), s.partition]))
+        .collect();
+    let v = run_with_coverage(
+        &engine,
+        &reader(),
+        &store(),
+        &ctx.facts,
+        &sel.per_partition,
+        mapping,
+        &plan(
+            ctx,
+            mapping,
+            &scratch.join("cp.json"),
+            &scratch.join("off.json"),
+        ),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::NewTopic,
+        Coverage::Sampled,
+        None,
+    );
+    match v {
+        Ok(v) => {
+            let block = serde_json::to_value(&v.integrity).expect("integrity serialises");
+            json!({
+                "selections": selections,
+                "result": block["result"],
+                "records_sampled": block["records_sampled"],
+                "records_sampled_matching": block["records_sampled_matching"],
+                "records_restored": v.records_restored,
+                "integrity": block,
+            })
+        }
+        Err(e) => json!({"selections": selections, "refused": format!("{e:?}")}),
+    }
+}
+
+/// T2 — T1's interruption judged by the default SAMPLED lane (FX-23).
+///
+/// Its own archive (`straddling` stamps), restored to a point inside every
+/// segment, so the aggregate count bound's lower end is 0. SIGTERM inside the
+/// first topic: the engine finishes it, exits 0, and never starts the second.
+/// Then phase 6's post-condition, the sampled lane with `max_partitions` equal
+/// to one topic's partitions (phase 4 keeps the first ones in manifest order:
+/// exactly the topic that finished), the same lane over every partition, and
+/// the complete lane.
+///
+/// **Today (before FX-23) the truncated sampled lane signs `pass`**; that is
+/// the prediction recorded here, and FX-23's fix must turn it red.
+fn t2(lab: &mut Lab, _: &Ctx) -> Outcome {
+    let mut o = Outcome::new("t2-sigterm-sampled-lane");
+    let end = T + 1_050;
+    let ctx = setup_with(lab, "t2-", straddling, end);
+    let m = targets(lab, &ctx, "t2");
+    let (ta, tb) = (a_of(&m, &ctx), b_of(&m, &ctx));
+    let in_window = |src: &String| -> i64 {
+        ctx.archives[src]
+            .records
+            .iter()
+            .filter(|r| r.timestamp <= end)
+            .count() as i64
+    };
+    let (want_a, want_b) = (in_window(&ctx.sources[0]), in_window(&ctx.sources[1]));
+    let straddle = ctx
+        .archives
+        .values()
+        .flat_map(|a| a.segments.iter())
+        .filter(|s| s.start_timestamp <= end)
+        .all(|s| s.end_timestamp > end);
+    let f = files(lab, "t2", "stable");
+    write_doc(&ctx, &m, &f.checkpoint, &f.offsets, &f.doc);
+    let e1 = start_engine(lab, "t2-e1", &f.doc);
+    let reached = wait_until(180, 50, || landed(&ta) >= 300 || !running(&e1));
+    let at_signal = landed(&ta);
+    signal(&e1, "TERM");
+    let exit1 = wait_engine(&e1, ENGINE_DEADLINE_SECS);
+    let log1 = logs(&e1);
+    let after = settled(&[&ta, &tb]);
+    let ends: BTreeMap<String, Vec<(i32, i64)>> = [&ta, &tb]
+        .iter()
+        .map(|t| ((*t).clone(), hw(t).into_iter().collect()))
+        .collect();
+    let phase6 = logweir::drill::phase6_restore::assert_post_condition(&ends);
+    let truncated = sampled(&ctx, &m, Some(PARTS as u32));
+    let every = sampled(&ctx, &m, None);
+    let complete = verify(&ctx, &m);
+    o.put("in_window_per_topic", json!([want_a, want_b]));
+    o.put(
+        "every_in_window_segment_straddles_the_point",
+        json!(straddle),
+    );
+    o.put("signal_reached_mid_topic", json!(reached));
+    o.put("landed_first_at_signal", json!(at_signal));
+    o.put("attempt1_exit", json!(exit1));
+    o.put("attempt1_log", json!(interesting(&log1)));
+    o.put("landed_after_attempt1", json!(after));
+    o.put(
+        "phase6_post_condition",
+        json!(phase6.as_ref().map(|_| "ok").map_err(|e| format!("{e:?}"))),
+    );
+    o.put("sampled_max_partitions_3", truncated.clone());
+    o.put("sampled_every_partition", every.clone());
+    o.put("complete", complete.clone());
+    let only_first = truncated["selections"]
+        .as_array()
+        .is_some_and(|v| !v.is_empty() && v.iter().all(|x| x[0] == "first"));
+    o.expect("every in-window segment straddles the point", straddle);
+    o.expect(
+        "the signal landed while the first topic was partly restored",
+        reached && at_signal < want_a,
+    );
+    o.expect("the engine exits 0 after SIGTERM", exit1 == Some(0));
+    o.expect(
+        "the first topic is restored to the point, the second never started",
+        landed(&ta) == want_a && landed(&tb) == 0,
+    );
+    o.expect("phase 6's post-condition passes", phase6.is_ok());
+    o.expect(
+        "phase 4 with max_partitions 3 samples only the first topic",
+        only_first,
+    );
+    o.expect(
+        "TODAY (FX-23 open): the truncated sampled lane signs pass",
+        truncated["result"] == "pass",
+    );
+    o.expect(
+        "the control: the sampled lane over every partition fails",
+        every["result"] == "fail",
+    );
+    o.expect(
+        "the complete lane fails: every in-window record of the second topic missing",
+        count(&complete, "second", "missing") == want_b && complete["result"] == "fail",
+    );
+    o
+}
+
 /// The `config_hash` each of `n` attempts of ONE document leaves in the
 /// checkpoint file. The window selects nothing, so nothing is produced; every
 /// attempt still saves after each topic (2.4), and a file whose hash differs
@@ -1623,6 +1856,7 @@ fn the_pinned_engines_restore_checkpoint_under_interruption() {
         ("w1", w1 as Row),
         ("m1", m1 as Row),
         ("d1", d1 as Row),
+        ("t2", t2 as Row),
     ] {
         if want(key) {
             let t0 = Instant::now();
