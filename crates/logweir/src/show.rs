@@ -176,8 +176,7 @@ fn parity_assessment(not_assessed: Option<&[String]>) -> String {
 /// clock"; an empty block is an em dash; otherwise each non-empty list.
 fn time_basis_qualifier(label: Option<&logweir_core::scorecard::TimeBasisLabel>) -> String {
     let Some(label) = label else {
-        return "not recorded: whether a time selection read producer timestamps is unknown"
-            .into();
+        return "not recorded: whether a time selection read producer timestamps is unknown".into();
     };
     let mut parts = Vec::new();
     if !label.producer_time.is_empty() {

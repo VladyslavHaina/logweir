@@ -2449,7 +2449,9 @@ mod tests {
             let mut sc = valid_scorecard();
             sc.format_version = version.into();
             sc.source.time_basis = Some(time_basis(None, &[], &[]));
-            let err = sc.validate_invariants().expect_err("the block predates its version");
+            let err = sc
+                .validate_invariants()
+                .expect_err("the block predates its version");
             assert_eq!(
                 err.0,
                 format!(
@@ -2517,7 +2519,11 @@ mod tests {
             present: false,
         }];
         let err = sc.validate_invariants().expect_err("two arms");
-        assert!(err.0.starts_with("source.time_basis.producer_time"), "{}", err.0);
+        assert!(
+            err.0.starts_with("source.time_basis.producer_time"),
+            "{}",
+            err.0
+        );
     }
 
     /// The writer's version defines the field it writes: a renumber that moved

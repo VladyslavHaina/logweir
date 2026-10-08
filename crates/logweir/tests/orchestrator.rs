@@ -1586,3 +1586,209 @@ fn a_captured_source_configuration_reaches_the_signed_document_as_assessed() {
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.topic_parity.not_assessed, Some(vec![]));
 }
+
+// ------------------------------------------------------------------ FX-8
+//
+// The time basis, end to end through the phase sequence: the refusal of a
+// selection by producer time over a `LogAppendTime` source, before any target
+// topic exists, and the label the opt-in signs.
+
+/// A receipt coverage recording `orders`' EFFECTIVE `message.timestamp.type`
+/// as `value` from `source` — what FX-4's backup records and a verified point
+/// binding hands the drill. The broker-default arm's only record.
+fn coverage_recording(
+    value: &str,
+    source: &str,
+) -> logweir_core::backup_receipt::SourceConfigCoverage {
+    let mut receipt: logweir_core::backup_receipt::BackupReceipt = serde_json::from_slice(
+        &std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../e2e/fixtures/signed/backup-receipt.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    receipt.format_version = "1.1.0".into();
+    receipt.config_coverage = Some(std::collections::BTreeMap::from([(
+        "orders".to_string(),
+        logweir_core::backup_receipt::TopicConfigCoverage {
+            coverage: "captured".into(),
+            reason: None,
+            timestamp_type: Some(logweir_core::backup_receipt::EffectiveConfigValue {
+                value: value.into(),
+                source: source.into(),
+            }),
+        },
+    )]));
+    logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(&receipt)
+}
+
+/// The refusal a run returned, as the message the runner prints, with its exit
+/// code and the `refusal-reason=` line a controller reads.
+fn refusal(err: DrillError) -> (String, ExitCode, String) {
+    let message = match &err {
+        DrillError::Guard(g) => g.0.clone(),
+        other => panic!("expected a guard refusal, got {other:?}"),
+    };
+    let line = logweir_core::guard::refusal_reason_line(&message);
+    (message, ExitCode::from(err), line)
+}
+
+/// **FX-8, the topic-override arm — and WHERE it refuses.** The archive
+/// manifest records `orders` as `LogAppendTime` and the plan states a point in
+/// time with no `restore.time_basis`: exit 3, `refusal-reason=
+/// PointInTimeByProducerTime`, naming the topic and the record — and NO target
+/// topic was created, NO scorecard was written, the engine never fingerprinted.
+///
+/// KILLS: deleting the manifest arm (the run passes); moving the decision after
+/// the target-creation step (`created_topics` is not empty); a refusal that
+/// does not name its terminal state (`GuardRefused` on the line).
+#[test]
+fn the_time_basis_refusal_creates_no_target_topic() {
+    let f = fixtures::orchestrator_fixture(Drill::SelectsALogAppendTimeTopicAtAPoint);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=PointInTimeByProducerTime");
+    assert!(
+        message.contains(
+            "`orders` (the archive manifest's topic override message.timestamp.type=LogAppendTime)"
+        ),
+        "{message}"
+    );
+    assert!(
+        message.contains("restore.time_basis: producerTime"),
+        "{message}"
+    );
+    assert!(
+        fixtures::created_topics(&f).is_empty(),
+        "a refused time basis created a target topic: {:?}",
+        fixtures::created_topics(&f)
+    );
+    assert!(
+        fixtures::fingerprint_calls(&f).is_empty(),
+        "the refusal comes before phase 4"
+    );
+    assert!(
+        f.ctx
+            .store
+            .get(&format!("logweir/drills/{}.json", f.run_id))
+            .is_err(),
+        "a refused run signs nothing"
+    );
+}
+
+/// **FX-8, the opt-in.** The same archive and point with `restore.time_basis:
+/// producerTime` in the approved plan: the run passes as `Passes` does, the
+/// target topic IS created, and the signed scorecard — format 1.3.0 — lists
+/// `orders` under `source.time_basis.producer_time` with the plan's value.
+///
+/// KILLS: a writer that drops the label (`source.time_basis` absent or its
+/// list empty); an opt-in that is not read (the run is refused).
+#[test]
+fn the_producer_time_opt_in_runs_and_the_signed_scorecard_says_so() {
+    let f = fixtures::orchestrator_fixture(Drill::SelectsALogAppendTimeTopicByProducerTime);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the opt-in runs");
+    assert_eq!(fixtures::created_topics(&f).len(), 1);
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
+    assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
+    assert_eq!(
+        sc.source.time_basis,
+        Some(logweir_core::scorecard::TimeBasisLabel {
+            plan: Some("producerTime".into()),
+            producer_time: vec!["orders".into()],
+            not_recorded: vec![],
+        })
+    );
+    assert!(sc.validate_invariants().is_ok());
+}
+
+/// **FX-8: the opt-in is inside the approved bytes.** An approval minted over
+/// the plan WITHOUT `restore.time_basis` does not authorise the same plan WITH
+/// it: phase 1 refuses before the archive is opened, and nothing is created.
+///
+/// KILLS: an opt-in read from anywhere but the hashed plan bytes, or a plan
+/// hash computed over bytes with the field taken out.
+#[test]
+fn an_approval_without_the_opt_in_does_not_authorise_it() {
+    let without = fixtures::orchestrator_fixture(Drill::SelectsALogAppendTimeTopicAtAPoint);
+    let mut with = fixtures::orchestrator_fixture(Drill::SelectsALogAppendTimeTopicByProducerTime);
+    // Same signer and approver key (both fixtures copy the one checked-in
+    // key); only the plan the approval names differs.
+    with.args.approval = without.args.approval.clone();
+    let err = execute_with(&with.args, &with.run_id, &with.ctx)
+        .expect_err("an approval over other bytes");
+    let (message, code, _) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert!(
+        !message.starts_with("PointInTimeByProducerTime"),
+        "refused at phase 1, not at the time basis: {message}"
+    );
+    assert!(fixtures::created_topics(&with).is_empty());
+    // The control: the same approval over its own plan reaches the time basis.
+    let err = execute_with(&without.args, &without.run_id, &without.ctx).expect_err("refused");
+    assert_eq!(refusal(err).2, "refusal-reason=PointInTimeByProducerTime");
+}
+
+/// **FX-8, the broker-default arm.** No manifest override; the VERIFIED
+/// receipt's coverage recorded `orders`' effective type `LogAppendTime` from
+/// the broker's dynamic default. Refused the same way, naming that record,
+/// with nothing created.
+///
+/// KILLS: reading only the manifest override (the run passes, labelled
+/// `not_recorded`); ignoring `c.source_config_coverage`.
+#[test]
+fn a_broker_default_log_append_time_is_refused_from_the_receipts_record() {
+    let mut f = fixtures::orchestrator_fixture(Drill::SelectsAtAPoint);
+    f.ctx.source_config_coverage =
+        coverage_recording("LogAppendTime", "dynamicDefaultBrokerConfig");
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=PointInTimeByProducerTime");
+    assert!(
+        message.contains(
+            "`orders` (the bound backup receipt's effective message.timestamp.type LogAppendTime \
+             from dynamicDefaultBrokerConfig)"
+        ),
+        "{message}"
+    );
+    assert!(fixtures::created_topics(&f).is_empty());
+}
+
+/// **FX-8, the unknown case and the `CreateTime` control**, over the same
+/// point-in-time plan. Nothing records the type (an unbound plan, or a receipt
+/// before FX-4): the run PASSES and signs `not_recorded: [orders]` — never
+/// `CreateTime` by silence. The receipt recorded `CreateTime`: the run passes
+/// and lists `orders` nowhere.
+///
+/// KILLS: refusing the unknown case; reading silence as `CreateTime` (the
+/// unknown run signs empty lists); refusing a `CreateTime` topic.
+#[test]
+fn an_unrecorded_type_is_labelled_and_a_create_time_topic_is_not_refused() {
+    let f = fixtures::orchestrator_fixture(Drill::SelectsAtAPoint);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the unknown case runs");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
+    assert_eq!(
+        sc.source.time_basis,
+        Some(logweir_core::scorecard::TimeBasisLabel {
+            plan: None,
+            producer_time: vec![],
+            not_recorded: vec!["orders".into()],
+        })
+    );
+
+    let mut f = fixtures::orchestrator_fixture(Drill::SelectsAtAPoint);
+    f.ctx.source_config_coverage = coverage_recording("CreateTime", "defaultConfig");
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("a CreateTime topic runs");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(
+        sc.source.time_basis,
+        Some(logweir_core::scorecard::TimeBasisLabel::default())
+    );
+}

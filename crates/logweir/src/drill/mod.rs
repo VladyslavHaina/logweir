@@ -2743,13 +2743,9 @@ fn execute_with_validated_approval(
     // `orchestrator.rs::the_time_basis_refusal_creates_no_target_topic`
     // fails if this moves after the creation step.
     let selected: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
-    let time_basis = logweir_core::time_basis::decide(
-        &c.spec,
-        &facts,
-        &c.source_config_coverage,
-        &selected,
-    )
-    .map_err(|refusal| DrillError::Guard(GuardRefusal(refusal)))?;
+    let time_basis =
+        logweir_core::time_basis::decide(&c.spec, &facts, &c.source_config_coverage, &selected)
+            .map_err(|refusal| DrillError::Guard(GuardRefusal(refusal)))?;
     sc.source = source_info(&facts, time_basis);
 
     // 2

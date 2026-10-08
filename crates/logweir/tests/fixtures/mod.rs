@@ -835,6 +835,24 @@ pub enum Drill {
     /// the manifest's `[0, 3]` bound, and every objective is met, so a
     /// non-pass here can have come from nothing else.
     SamplesAcrossAStraddlingSegment,
+    /// **FX-8.** `Passes`, with the plan stating `restore.point_in_time` at
+    /// the sample window's end — the same window — and the manifest recording
+    /// no `message.timestamp.type` override: a selection by time whose
+    /// timestamp type only a bound receipt's coverage can record (the
+    /// broker-default arm, the unknown case and the `CreateTime` control).
+    SelectsAtAPoint,
+    /// **FX-8.** The archive manifest records `orders` with the topic
+    /// override `message.timestamp.type=LogAppendTime` — PROD-01.1's `lat`
+    /// row (§2.3) — and the plan states `restore.point_in_time` at the sample
+    /// window's end and no `restore.time_basis`. The archive holds producer
+    /// time only, so the run is refused `PointInTimeByProducerTime` after the
+    /// archive is described and before any target topic is created.
+    SelectsALogAppendTimeTopicAtAPoint,
+    /// **FX-8.** The same archive and point, with `restore.time_basis:
+    /// producerTime` in the approved plan: every phase runs exactly as
+    /// `Passes`, and the signed scorecard lists `orders` under
+    /// `source.time_basis.producer_time`.
+    SelectsALogAppendTimeTopicByProducerTime,
 }
 
 pub const FIXTURE_CLUSTER_ID: &str = "MkU3OEVBNTcwNTJENDM2Qk";
@@ -1264,6 +1282,18 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     let window_end_ms = ts(FIXTURE_WINDOW_END).timestamp_millis();
 
     // ---- the spec, and the approval signed over its exact bytes ----
+    // FX-8: the three time-basis shapes state a point in time at the sample
+    // window's end — the window the other shapes restore — and one of them
+    // the opt-in. Every other shape's spec bytes are what they were.
+    let restore_block = match shape {
+        Drill::SelectsAtAPoint | Drill::SelectsALogAppendTimeTopicAtAPoint => {
+            format!("restore:\n  point_in_time: \"{FIXTURE_WINDOW_END}\"\n")
+        }
+        Drill::SelectsALogAppendTimeTopicByProducerTime => format!(
+            "restore:\n  point_in_time: \"{FIXTURE_WINDOW_END}\"\n  time_basis: producerTime\n"
+        ),
+        _ => String::new(),
+    };
     let spec_text = format!(
         "source:\n  \
            storage:\n    backend: filesystem\n    path: /logweir-fixture-archive\n  \
@@ -1275,6 +1305,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
            topic_mapping_prefix: \"drill-\"\n  \
            default_replication_factor: 1\n  \
            teardown: delete\n\
+         {restore_block}\
          sample:\n  \
            window_start: \"{FIXTURE_WINDOW_START}\"\n  \
            window_end: \"{FIXTURE_WINDOW_END}\"\n  \
@@ -1333,11 +1364,21 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         .unwrap();
 
     let straddles = shape == Drill::SamplesAcrossAStraddlingSegment;
-    let facts = if straddles {
+    let mut facts = if straddles {
         orchestrator_facts_straddling(&segment_bytes)
     } else {
         orchestrator_facts(&segment_bytes)
     };
+    // FX-8: the manifest's topic override, exactly as the engine records it
+    // for a source topic that set one (PROD-01.1 §2.3).
+    if matches!(
+        shape,
+        Drill::SelectsALogAppendTimeTopicAtAPoint | Drill::SelectsALogAppendTimeTopicByProducerTime
+    ) {
+        facts.topics[0]
+            .configurations
+            .insert("message.timestamp.type".into(), "LogAppendTime".into());
+    }
     // An hour short of the requested recovery point: `measured.rpo_seconds` is
     // `sample.window_end - newest_restored_record`, so this is 3600 against a
     // 300s objective. The archive fingerprints are built from the SAME
@@ -1453,6 +1494,11 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // `orchestrator_facts_straddling`) and the fingerprint set it can
         // therefore offer.
         | Drill::SamplesAcrossAStraddlingSegment
+        // FX-8. The engine is the passing one: the variables are the plan's
+        // `restore` block and the MANIFEST's topic override above.
+        | Drill::SelectsAtAPoint
+        | Drill::SelectsALogAppendTimeTopicAtAPoint
+        | Drill::SelectsALogAppendTimeTopicByProducerTime
         | Drill::LeavesATopicBehind => {}
     }
 

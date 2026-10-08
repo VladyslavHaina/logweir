@@ -99,9 +99,8 @@ pub fn recorded_timestamp_type(
         .get(TIMESTAMP_TYPE_KEY)
         .map(String::as_str);
     let receipt = receipt_entry.and_then(|e| e.timestamp_type.as_ref());
-    let from_manifest = |value: &str| {
-        format!("the archive manifest's topic override {TIMESTAMP_TYPE_KEY}={value}")
-    };
+    let from_manifest =
+        |value: &str| format!("the archive manifest's topic override {TIMESTAMP_TYPE_KEY}={value}");
     let from_receipt = |value: &str, source: &str| {
         format!("the bound backup receipt's effective {TIMESTAMP_TYPE_KEY} {value} from {source}")
     };
@@ -332,7 +331,12 @@ mod tests {
 
     /// A plan over `topics`, with an optional point in time, an optional
     /// `restore.time_basis`, and a sample window ending at `window_end`.
-    fn plan(topics: &[&str], point: Option<i64>, basis: Option<&str>, window_end: i64) -> DrillSpec {
+    fn plan(
+        topics: &[&str],
+        point: Option<i64>,
+        basis: Option<&str>,
+        window_end: i64,
+    ) -> DrillSpec {
         let mut restore = String::new();
         if point.is_some() || basis.is_some() {
             restore.push_str("restore:\n");
@@ -397,23 +401,24 @@ mod tests {
     /// broker's DYNAMIC DEFAULT — the broker-default arm, which no manifest
     /// carries.
     fn broker_default(topic: &str, value: &str) -> SourceConfigCoverage {
-        let receipt: crate::backup_receipt::BackupReceipt = serde_json::from_value(serde_json::json!({
-            "format_version": "1.1.0",
-            "run_id": "r", "backup_id": "set",
-            "requested_at": "2026-08-29T00:00:00Z",
-            "started_at": "2026-08-29T00:00:00Z",
-            "finished_at": "2026-08-29T00:00:01Z",
-            "exit_code": 0, "triggered_by": "t",
-            "source": {"cluster_id": "c", "bootstrap_servers": ["b"],
-                       "auth": {"mode": "plaintext", "username": null}, "topics": [topic]},
-            "engine": {"id": "oso-cli", "version": "v0.21.0", "digest": "sha256:0"},
-            "archive": {"manifest_key": "m", "manifest_sha256": "sha256:0", "prefix": "p"},
-            "records": {topic: 10},
-            "covered": {"from_ms": T0, "to_ms": T1 + 1},
-            "config_coverage": {topic: {"coverage": "captured",
-                "timestamp_type": {"value": value, "source": "dynamicDefaultBrokerConfig"}}}
-        }))
-        .expect("a receipt");
+        let receipt: crate::backup_receipt::BackupReceipt =
+            serde_json::from_value(serde_json::json!({
+                "format_version": "1.1.0",
+                "run_id": "r", "backup_id": "set",
+                "requested_at": "2026-08-29T00:00:00Z",
+                "started_at": "2026-08-29T00:00:00Z",
+                "finished_at": "2026-08-29T00:00:01Z",
+                "exit_code": 0, "triggered_by": "t",
+                "source": {"cluster_id": "c", "bootstrap_servers": ["b"],
+                           "auth": {"mode": "plaintext", "username": null}, "topics": [topic]},
+                "engine": {"id": "oso-cli", "version": "v0.21.0", "digest": "sha256:0"},
+                "archive": {"manifest_key": "m", "manifest_sha256": "sha256:0", "prefix": "p"},
+                "records": {topic: 10},
+                "covered": {"from_ms": T0, "to_ms": T1 + 1},
+                "config_coverage": {topic: {"coverage": "captured",
+                    "timestamp_type": {"value": value, "source": "dynamicDefaultBrokerConfig"}}}
+            }))
+            .expect("a receipt");
         SourceConfigCoverage::from_receipt(&receipt)
     }
 
@@ -432,8 +437,13 @@ mod tests {
             topic("lat", &[(TIMESTAMP_TYPE_KEY, LOG_APPEND_TIME)]),
             topic("orders", &[(TIMESTAMP_TYPE_KEY, CREATE_TIME)]),
         ]);
-        let err = decide(&spec, &f, &SourceConfigCoverage::unknown(), &names(&["lat", "orders"]))
-            .expect_err("a LogAppendTime override selected at a point is refused");
+        let err = decide(
+            &spec,
+            &f,
+            &SourceConfigCoverage::unknown(),
+            &names(&["lat", "orders"]),
+        )
+        .expect_err("a LogAppendTime override selected at a point is refused");
         assert!(err.starts_with("PointInTimeByProducerTime: "), "{err}");
         assert_eq!(
             crate::guard::terminal_state(&err),
@@ -444,7 +454,10 @@ mod tests {
             err.contains("`lat` (the archive manifest's topic override message.timestamp.type=LogAppendTime)"),
             "{err}"
         );
-        assert!(!err.contains("`orders`"), "a CreateTime topic is not refused: {err}");
+        assert!(
+            !err.contains("`orders`"),
+            "a CreateTime topic is not refused: {err}"
+        );
         assert!(err.contains("restore.time_basis: producerTime"), "{err}");
         let point = chrono::DateTime::from_timestamp_millis(T0 + 1_500).unwrap();
         assert!(
@@ -460,8 +473,13 @@ mod tests {
     fn a_point_in_time_over_a_broker_default_log_append_time_is_refused() {
         let spec = plan(&["bd"], Some(T0 + 1_500), None, T1);
         let f = facts(vec![topic("bd", &[])]);
-        let err = decide(&spec, &f, &broker_default("bd", LOG_APPEND_TIME), &names(&["bd"]))
-            .expect_err("a broker-default LogAppendTime is refused once it is recorded");
+        let err = decide(
+            &spec,
+            &f,
+            &broker_default("bd", LOG_APPEND_TIME),
+            &names(&["bd"]),
+        )
+        .expect_err("a broker-default LogAppendTime is refused once it is recorded");
         assert!(
             err.contains("`bd` (the bound backup receipt's effective message.timestamp.type LogAppendTime from dynamicDefaultBrokerConfig)"),
             "{err}"
@@ -485,8 +503,13 @@ mod tests {
             topic("lat", &[(TIMESTAMP_TYPE_KEY, LOG_APPEND_TIME)]),
             topic("bd", &[]),
         ]);
-        let label = decide(&spec, &f, &broker_default("bd", LOG_APPEND_TIME), &names(&["lat", "bd"]))
-            .expect("the opt-in accepts the selection");
+        let label = decide(
+            &spec,
+            &f,
+            &broker_default("bd", LOG_APPEND_TIME),
+            &names(&["lat", "bd"]),
+        )
+        .expect("the opt-in accepts the selection");
         assert_eq!(
             label,
             TimeBasisLabel {
@@ -509,8 +532,13 @@ mod tests {
             topic("ctr", &[]),
             topic("old", &[]),
         ]);
-        let label = decide(&spec, &f, &broker_default("ctr", CREATE_TIME), &names(&["old", "ct", "ctr"]))
-            .expect("nothing here is refused");
+        let label = decide(
+            &spec,
+            &f,
+            &broker_default("ctr", CREATE_TIME),
+            &names(&["old", "ct", "ctr"]),
+        )
+        .expect("nothing here is refused");
         assert_eq!(
             label,
             TimeBasisLabel {
@@ -531,7 +559,12 @@ mod tests {
         let f = facts(vec![topic("lat", &[(TIMESTAMP_TYPE_KEY, LOG_APPEND_TIME)])]);
         let full = plan(&["lat"], None, None, T1);
         assert_eq!(
-            decide(&full, &f, &SourceConfigCoverage::unknown(), &names(&["lat"])),
+            decide(
+                &full,
+                &f,
+                &SourceConfigCoverage::unknown(),
+                &names(&["lat"])
+            ),
             Ok(TimeBasisLabel::default())
         );
         let cut = plan(&["lat"], None, None, T1 - 1);
@@ -542,7 +575,10 @@ mod tests {
         assert!(!selects_by_time(&full, f.topics.first()));
         // A stated point ALWAYS selects by time, even at the archive's end:
         // the manifest cannot prove no record lies beyond it (S6).
-        assert!(selects_by_time(&plan(&["lat"], Some(T1), None, T1), f.topics.first()));
+        assert!(selects_by_time(
+            &plan(&["lat"], Some(T1), None, T1),
+            f.topics.first()
+        ));
     }
 
     /// The plan grammar: `producerTime` and nothing else parses, and an
@@ -550,10 +586,15 @@ mod tests {
     #[test]
     fn restore_time_basis_parses_one_value_and_absent_is_no_opt_in() {
         assert_eq!(
-            plan(&["a"], None, Some("producerTime"), T1).restore.time_basis,
+            plan(&["a"], None, Some("producerTime"), T1)
+                .restore
+                .time_basis,
             Some(TimeBasis::ProducerTime)
         );
-        assert_eq!(plan(&["a"], Some(T0 + 1), None, T1).restore.time_basis, None);
+        assert_eq!(
+            plan(&["a"], Some(T0 + 1), None, T1).restore.time_basis,
+            None
+        );
         for bad in ["appendTime", "ProducerTime", "producer_time", "\"\""] {
             let yaml = format!(
                 "source:\n  storage: {{backend: filesystem, path: /a}}\n  topics: [a]\n\
@@ -571,7 +612,8 @@ mod tests {
         // type (a rehearsal slot's) is byte-identical to before FX-8.
         let text = serde_yaml::to_string(&plan(&["a"], Some(T0 + 1), None, T1).restore).unwrap();
         assert!(!text.contains("time_basis"), "{text}");
-        let text = serde_yaml::to_string(&plan(&["a"], None, Some("producerTime"), T1).restore).unwrap();
+        let text =
+            serde_yaml::to_string(&plan(&["a"], None, Some("producerTime"), T1).restore).unwrap();
         assert!(text.contains("time_basis: producerTime"), "{text}");
     }
 }
