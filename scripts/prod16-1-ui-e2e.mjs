@@ -46,6 +46,14 @@
 //      later for a reason that is not the authorization; control: the same
 //      bundle beside another policy's snapshot is refused exit 3.
 //   5  key loss: the console Secret emptied, the hook refuses to regenerate.
+//   6  NO STANDING GRANT ON A FAILED HOOK (fix round, review H1): a real
+//      ClusterRoleBinding `<ns>-identity-trust`, bound to the hook's account
+//      through a ClusterRole whose ONLY rule is `delete` on that one binding
+//      (no TrustPolicy power is ever granted here), is deleted by the hook
+//      when a step fails, when its store cannot be opened, and after a usage
+//      error; without `--revoke-trust-binding` it stays (control). Both
+//      cluster-scoped objects carry the test-owner label and are deleted in
+//      cleanup.
 //
 //   NODE_PATH="$(npm root -g)" node scripts/prod16-1-ui-e2e.mjs
 //
@@ -184,6 +192,7 @@ function chartIdentityRender() {
   const helm = spawnSync("helm", ["template", "lw", join(REPO, "charts", "logweir"), "-n", NS,
     "--set", "api.enabled=true", "--set", "api.console.enabled=true",
     "--set", "api.console.mode=localAdmin", "--set", "api.console.keySecret=unused",
+    "--set", "identity.bootstrapFeatures.consoleKey=true",
     "--show-only", "templates/identity.yaml"], { encoding: "utf8", timeout: 60000 });
   check(helm.status === 0, "helm template failed: " + helm.stderr);
   const asJson = kube(["create", "--dry-run=client", "-o", "json", "-f", "-"], { input: helm.stdout });
@@ -264,6 +273,7 @@ async function startApi(port, policyFile) {
     "  context: " + KUBE_CONTEXT,
     "cursorKeyFile: " + join(WORK, "cursor.key"),
     "confirmationKeyFile: " + join(WORK, "confirmation", "confirmation.key"),
+    "confirmationKeyManaged: true",
     "installationIdentity:",
     "  namespace: " + NS,
     "  publicConfigMap: logweir-signing-trust",
@@ -673,6 +683,67 @@ async function main() {
   control("a published console key whose private half is gone stops the hook (key loss), nothing regenerated", {
     exit: lost.status });
 
+  // ---------------------------------------------------------------- 6
+  const grant = NS + "-identity-trust";
+  const grantLabels = Object.assign({}, LABELS);
+  const bindGrant = () => {
+    kube(["create", "-f", "-"], { input: JSON.stringify({
+      apiVersion: "rbac.authorization.k8s.io/v1", kind: "ClusterRoleBinding",
+      metadata: { name: grant, labels: grantLabels },
+      roleRef: { apiGroup: "rbac.authorization.k8s.io", kind: "ClusterRole", name: grant },
+      subjects: [{ kind: "ServiceAccount", name: "lw-identity-bootstrap", namespace: NS }],
+    }) });
+  };
+  const grantExists = () => kube(["get", "clusterrolebinding", grant, "--ignore-not-found", "-o", "name"])
+    .stdout.trim() !== "";
+  kube(["create", "-f", "-"], { input: JSON.stringify({
+    apiVersion: "rbac.authorization.k8s.io/v1", kind: "ClusterRole",
+    metadata: { name: grant, labels: grantLabels },
+    rules: [{ apiGroups: ["rbac.authorization.k8s.io"], resources: ["clusterrolebindings"],
+      resourceNames: [grant], verbs: ["delete"] }],
+  }) });
+  result.created.push({ kind: "ClusterRole", name: grant });
+  const hook = (args) => {
+    const done = spawnSync(LOGWEIR_BIN, args, {
+      encoding: "utf8", timeout: 120000, env: Object.assign({}, process.env, env),
+    });
+    return { status: done.status, text: String(done.stdout || "") + String(done.stderr || "") };
+  };
+  const consoleArgs = ["--console-secret-name", "logweir-console-confirmation",
+    "--console-public-configmap-name", "logweir-console-trust"];
+  const paths = [
+    ["a failed step (the console key loss above)",
+      ["identity", "bootstrap", "--namespace", NS].concat(consoleArgs, ["--revoke-trust-binding", grant]),
+      grant + ":revoked"],
+    ["a store that cannot be opened (an argument the hook refuses)",
+      ["identity", "bootstrap", "--namespace", NS, "--secret-name", "Not_A_Name", "--revoke-trust-binding", grant],
+      grant + ":revoked"],
+    ["a usage error (a flag from a newer chart)",
+      ["identity", "bootstrap", "--namespace", NS, "--a-flag-from-a-newer-chart", "--revoke-trust-binding", grant],
+      grant + ":revoked (after a usage error)"],
+  ];
+  const revocations = [];
+  paths.forEach(([what, args, expected], i) => {
+    bindGrant();
+    check(grantExists(), "the grant is bound before " + what);
+    const run = hook(args);
+    save("06-revocation-" + (i + 1) + ".txt", "$ logweir " + args.join(" ") + "\nexit " + run.status + "\n" + run.text);
+    check(run.status !== 0, what + ": the hook fails: " + run.text);
+    check(run.text.includes("installation-trust-grant " + expected), what + ": revoked: " + run.text);
+    check(!grantExists(), what + ": the ClusterRoleBinding is gone");
+    revocations.push({ path: what, exit: run.status });
+  });
+  record("NO STANDING GRANT: a real ClusterRoleBinding granting the hook is deleted by the hook itself when a step " +
+    "fails, when its store cannot be opened, and after a usage error", { binding: grant, paths: revocations });
+  // CONTROL: the same failing hook WITHOUT the flag leaves the binding.
+  bindGrant();
+  const kept = hook(["identity", "bootstrap", "--namespace", NS].concat(consoleArgs));
+  save("06-revocation-control.txt", "exit " + kept.status + "\n" + kept.text);
+  check(kept.status !== 0 && grantExists(), "without --revoke-trust-binding the binding stays: " + kept.text);
+  kube(["delete", "clusterrolebinding", grant]);
+  control("without --revoke-trust-binding a failed hook leaves the binding (so the deletions above are the hook's)", {
+    exit: kept.status });
+
   // ------------------------------------------------- no key file handled
   const tree = [];
   const walk = (dir) => {
@@ -697,6 +768,22 @@ async function main() {
 
 async function cleanup() {
   await stopApi();
+  // Journey 6's cluster-scoped pair, by name and only when labelled ours.
+  const grant = NS + "-identity-trust";
+  for (const kind of ["clusterrolebinding", "clusterrole"]) {
+    try {
+      const found = spawnSync("kubectl", ["--context", KUBE_CONTEXT, "get", kind, grant, "-o", "json",
+        "--ignore-not-found"], { encoding: "utf8", timeout: 60000 });
+      const object = found.stdout.trim() ? JSON.parse(found.stdout) : null;
+      if (object && (object.metadata.labels || {})["logweir.dev/test-owner"] === OWNER) {
+        kube(["delete", kind, grant]);
+      }
+      result.cleanup_cluster = (result.cleanup_cluster || []).concat([{ kind: kind, name: grant,
+        present: kube(["get", kind, grant, "--ignore-not-found", "-o", "name"]).stdout.trim() !== "" }]);
+    } catch (error) {
+      result.cleanup_cluster = (result.cleanup_cluster || []).concat([{ kind: kind, error: String(error.message) }]);
+    }
+  }
   try {
     const ns = kubeJson(["get", "namespace", NS]);
     if ((ns.metadata.labels || {})["logweir.dev/test-owner"] === OWNER &&
