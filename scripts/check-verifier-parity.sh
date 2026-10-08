@@ -1265,7 +1265,7 @@ for name in iv1-under-1.3.0 iv2-coverage iv3-header-order iv4-no-block iv5-no-re
         iv3-header-order) want_msg='integrity.verification.header_order is not "verified" or "notVerified", or claims "verified" for a coverage that is not complete; a sampled verification compares a fingerprint that sorts headers' ;;
         iv4-no-block) want_msg='integrity.verification.complete is present exactly when integrity.verification.coverage is "complete"' ;;
         iv5-no-reason) want_msg="integrity.verification.complete.incomplete_reason is required exactly when complete.covered is false" ;;
-        iv6-pass-over-a-missing-record) want_msg="integrity.result is pass but integrity.verification.complete is not covered, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record" ;;
+        iv6-pass-over-a-missing-record) want_msg="integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition" ;;
         iv7-sums) want_msg="integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified" ;;
     esac
     if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then

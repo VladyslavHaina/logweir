@@ -11,7 +11,8 @@
 //! Each fault is asserted CAUGHT by the complete lane and, as its negative
 //! control, either MISSED by the sampled lane (where that is the gap PROD-08.1
 //! closes) or absent from an unfaulted twin that passes. The live twins of
-//! these rows are in `e2e/tests/complete_integrity.rs`.
+//! these rows are the complete restores and the `complete_coverage_*` rows of
+//! `e2e/tests/record_semantics.rs`.
 mod fixtures;
 
 use logweir::drill::phase7_verify::complete::{lineage_offset, LINEAGE_HEADER};
@@ -248,6 +249,11 @@ struct Built {
 struct Target {
     parts: BTreeMap<i32, Vec<Rec>>,
     reads: Mutex<Vec<(i32, i64, usize)>>,
+    /// `(partition, offset)`: from this offset on, `consume_range` returns
+    /// nothing below the high watermark, as the real reader does when
+    /// librdkafka reports end-of-partition early (`rdkafka_reader.rs` breaks
+    /// on `PartitionEOF`, e.g. over a tail of control records).
+    stops_at: Option<(i32, i64)>,
 }
 
 impl Target {
@@ -255,6 +261,7 @@ impl Target {
         Target {
             parts,
             reads: Mutex::new(Vec::new()),
+            stops_at: None,
         }
     }
     fn consumed(&self, p: i32) -> Vec<ConsumedRecord> {
@@ -317,10 +324,14 @@ impl ClusterReader for Target {
             return Err(KafkaError::TopicNotFound(topic.into()));
         }
         self.reads.lock().unwrap().push((partition, from, max));
+        let stop = match self.stops_at {
+            Some((p, at)) if p == partition => at,
+            _ => i64::MAX,
+        };
         Ok(self
             .consumed(partition)
             .into_iter()
-            .filter(|r| r.offset >= from)
+            .filter(|r| r.offset >= from && r.offset < stop)
             .take(max)
             .collect())
     }
@@ -933,6 +944,19 @@ fn a_bound_that_stops_complete_verification_is_incomplete_never_a_pass() {
     assert_eq!(b.max_records, Some(6));
     assert!(!b.partitions[1].compared && b.partitions[0].compared);
     assert_eq!(b.archive.segments_unverified.len(), 2);
+    // Review L-4: each lane says its own thing about the stopped partition,
+    // so `partial_reason` names it twice in two different sentences, never the
+    // same sentence twice.
+    let reason = v.integrity.partial_reason.as_deref().unwrap_or_default();
+    let notes: Vec<&str> = reason.split("; ").collect();
+    let mut unique = notes.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), notes.len(), "a note repeated: {reason}");
+    assert!(
+        reason.contains("orders/1: 2 archived segments were not read, past the bound"),
+        "{reason}"
+    );
     let ok = case.verify(Coverage::Complete, Some(10)).unwrap();
     assert_eq!(ok.integrity.result, IntegrityResult::Pass);
 }
@@ -1099,4 +1123,59 @@ fn the_complete_block_the_writer_builds_satisfies_the_invariants() {
             "pass={pass}"
         );
     }
+}
+
+/// **Review M-2: a short read is refused, never a smaller comparison.** The
+/// target's partition 0 holds every expected record and then ONE stray record
+/// past them; the reader answers nothing from the stray's offset on, below the
+/// high watermark. Ending the comparison there would have matched every
+/// expected record, undercounted `restored` and signed a covered `pass` over a
+/// target that holds an unexpected record. The lane refuses instead —
+/// `Operational`, exit 1, nothing signed — naming the offset it stopped at.
+/// The negative control is the same target read whole: the stray is counted
+/// `unexpected` and the run fails.
+#[test]
+fn a_short_target_read_is_refused_and_never_a_smaller_comparison() {
+    let mut case = healthy();
+    let mut stray = case.target[&0][0].clone();
+    stray.headers = vec![(LINEAGE_HEADER.into(), Some(999i64.to_le_bytes().to_vec()))];
+    let expected_on_p0 = case.target[&0].len() as i64;
+    case.target.get_mut(&0).unwrap().push(stray);
+
+    let b = case.archive.build();
+    let floor = case.archive.floor();
+    let mut reader = Target::of(case.target.clone());
+    reader.stops_at = Some((0, expected_on_p0));
+    let out = run_with_coverage(
+        &SampledEngine {
+            archive: case.archive.parts.clone(),
+        },
+        &reader,
+        &b.store,
+        &b.facts,
+        &selections(&b.facts, floor, case.end, 25),
+        &fixtures::mapping(SOURCE, TARGET),
+        &plan(floor, case.end),
+        &SourceConfigCoverage::unknown(),
+        TargetMode::NewTopic,
+        Coverage::Complete,
+        None,
+    );
+    match out {
+        Err(DrillError::Operational(msg)) => {
+            assert!(
+                msg.contains(&format!(
+                    "stopped at offset {expected_on_p0} below the high watermark {}",
+                    expected_on_p0 + 1
+                )),
+                "{msg}"
+            );
+        }
+        other => panic!("a short read must be refused, got {other:?}"),
+    }
+
+    // The control: read whole, the stray is unexpected and the run fails.
+    let v = case.complete();
+    assert_eq!(v.integrity.result, IntegrityResult::Fail);
+    assert_eq!(block(&v).partitions[0].replay.unexpected, 1);
 }

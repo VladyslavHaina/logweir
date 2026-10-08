@@ -571,6 +571,20 @@ by the worker's script (recorded in its report); every literal is in the files.
 | `verification_pass_over_a_missing_record` | IV-6: a `pass` beside a complete block that counts a missing record |
 | `verification_totals_not_the_partitions_sums` | IV-7: a total that is not its partitions' sum |
 
+Since PROD-08.1's review (M-1), IV-6 and IV-7 also carry one case per
+CONJUNCT, each violating exactly that conjunct, so a reader that drops one
+answers with a later arm's words or `VALID` and the walker fails it:
+`verification_iv6_*` (not covered, no partition, a failed segment, an
+unverified segment, segments not all verified, each total fault —
+`missing`, `unexpected`, `duplicates`, `out_of_order`, `mismatched`, matching
+short, restored over — a partition not compared, and partitions inexact with
+exact totals) and `verification_iv7_*` (each of the eight replay sums, the
+segment, verified-segment, decoded-record and offset-hole sums, and the
+accounted segments). Two more pin review L-1: a reason made of a unit
+separator (U+001F) is not blank to either reader —
+`verification_incomplete_reason_a_unit_separator` (ACCEPT) and
+`verification_covered_with_a_unit_separator_reason` (IV-5).
+
 IV-1's message interpolates the document's `format_version`, so its `arm` is the
 literal text before the placeholder. IV-2, IV-3 and IV-4 quote values the Rust
 source spells with `\"`, so their `arm`s are the quote-free text before the

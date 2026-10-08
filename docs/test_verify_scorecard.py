@@ -3013,6 +3013,15 @@ def _not_a_pass(doc, result="fail"):
     return doc
 
 
+IV6_MESSAGE = (
+    "integrity.result is pass but integrity.verification.complete is not covered, lists no "
+    "partition, names a failed or unverified segment, or records a missing, unexpected, "
+    "duplicate, out-of-order or mismatched record, in total or in a partition")
+IV7_MESSAGE = (
+    "integrity.verification.complete's totals are not the sums of its partitions, or its "
+    "segments are not each verified, failed or unverified")
+
+
 def test_the_verification_minor_is_the_rust_readers():
     mod = _verifier_module()
     rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
@@ -3059,13 +3068,9 @@ def test_iv1_to_iv7_refuse_with_the_rust_readers_words():
     b["complete"]["replay"]["duplicates"] = 1
     b["complete"]["partitions"][0]["replay"]["duplicates"] = 1
     cases.append((_scorecard_1_4(b),
-                  "integrity.result is pass but integrity.verification.complete is not covered, "
-                  "names a failed or unverified segment, or records a missing, unexpected, "
-                  "duplicate, out-of-order or mismatched record"))
+                  IV6_MESSAGE))
     b = _complete_block(); b["complete"]["partitions"][1]["offset_holes"] = 3
-    cases.append((_not_a_pass(_scorecard_1_4(b)),
-                  "integrity.verification.complete's totals are not the sums of its partitions, "
-                  "or its segments are not each verified, failed or unverified"))
+    cases.append((_not_a_pass(_scorecard_1_4(b)), IV7_MESSAGE))
     for doc, want in cases:
         assert mod.check_invariants(doc) == want, (want, mod.check_invariants(doc))
 
@@ -3116,3 +3121,114 @@ def test_the_coverage_lines_say_what_the_verdict_covered():
     lines = mod._verification_lines(b)
     assert lines[1].startswith("integrity coverage: INCOMPLETE: 12 expected"), lines
     assert lines[2] == "integrity coverage: incomplete because the bound"
+
+
+# Review M-1: IV-6 and IV-7 CONJUNCT BY CONJUNCT, as the Rust reader's
+# `iv6_refuses_a_pass_over_a_complete_block_that_is_not_clean` and
+# `iv7_refuses_totals_that_are_not_the_partitions_sums` test them. Each case
+# violates exactly ONE conjunct of its arm, so a reader that drops that
+# conjunct answers with a later arm's words or VALID, never this message. The
+# same cases are in `e2e/fixtures/invariants/` (`verification_iv6_*`,
+# `verification_iv7_*`), where both readers are held to the same text.
+
+def _iv6_not_covered(c):
+    c["covered"] = False
+    c["incomplete_reason"] = "a reason"
+
+
+def _iv6_no_partition(c):
+    c["partitions"] = []
+    c["archive"].update(segments=0, segments_verified=0, records_decoded=0)
+    c["replay"] = _replay(0)
+
+
+def _iv6_verified_short(c):
+    c["archive"]["segments_verified"] = 3
+    c["partitions"][0]["segments_verified"] = 1
+
+
+def _iv6_partitions_inexact(c):
+    c["partitions"][0]["replay"].update(restored=6, matching=6)
+    c["partitions"][1]["replay"].update(restored=6, matching=6)
+
+
+IV6_CASES = {
+    "not covered": _iv6_not_covered,
+    "no partition": _iv6_no_partition,
+    "failed segment": lambda c: c["archive"]["segments_failed"].append("k"),
+    "unverified segment": lambda c: c["archive"]["segments_unverified"].append("k"),
+    "segments not all verified": _iv6_verified_short,
+    "total missing": lambda c: c["replay"].__setitem__("missing", 1),
+    "total unexpected": lambda c: c["replay"].__setitem__("unexpected", 1),
+    "total duplicates": lambda c: c["replay"].__setitem__("duplicates", 1),
+    "total out of order": lambda c: c["replay"].__setitem__("out_of_order", 1),
+    "total mismatched": lambda c: c["replay"].__setitem__("mismatched", 1),
+    "total matching short": lambda c: c["replay"].__setitem__("matching", 11),
+    "total restored over": lambda c: c["replay"].__setitem__("restored", 13),
+    "a partition not compared": lambda c: c["partitions"][1].__setitem__("compared", False),
+    "partitions inexact, totals exact": _iv6_partitions_inexact,
+}
+
+
+def test_iv6_refuses_each_unclean_conjunct_beside_a_pass():
+    mod = _verifier_module()
+    for name, mutate in sorted(IV6_CASES.items()):
+        b = _complete_block()
+        mutate(b["complete"])
+        assert mod.check_invariants(_scorecard_1_4(b)) == IV6_MESSAGE, name
+        # The same block beside a verdict that is not a pass is IV-6's to
+        # ignore (the cases that also break a sum are IV-7's there).
+        if name not in ("failed segment", "unverified segment", "segments not all verified") \
+                and not name.startswith("total "):
+            assert mod.check_invariants(_not_a_pass(_scorecard_1_4(b))) == "", name
+
+
+def _iv7_segments(c):
+    c["archive"]["segments"] = 5
+    c["archive"]["segments_unverified"] = ["k"]
+
+
+def _iv7_verified(c):
+    c["archive"]["segments_verified"] = 3
+    c["archive"]["segments_unverified"] = ["k"]
+
+
+IV7_CASES = {
+    **{f"sum {f}": (lambda c, f=f: c["replay"].__setitem__(f, c["replay"][f] + 1))
+       for f in ("expected", "restored", "matching", "missing", "unexpected", "duplicates",
+                 "out_of_order", "mismatched")},
+    "sum segments": _iv7_segments,
+    "sum segments verified": _iv7_verified,
+    "sum records decoded": lambda c: c["archive"].__setitem__("records_decoded", 15),
+    "sum offset holes": lambda c: c["archive"].__setitem__("offset_holes", 1),
+    "accounted segments": lambda c: c["archive"]["segments_failed"].append("k"),
+}
+
+
+def test_iv7_refuses_each_sum_and_the_accounted_segments():
+    mod = _verifier_module()
+    for name, mutate in sorted(IV7_CASES.items()):
+        b = _complete_block()
+        mutate(b["complete"])
+        assert mod.check_invariants(_not_a_pass(_scorecard_1_4(b))) == IV7_MESSAGE, name
+
+
+def test_the_blank_set_is_the_rust_readers():
+    # Review L-1: Rust's `trim` strips `char::is_whitespace`, and nothing else;
+    # `crates/logweir-core/src/scorecard.rs::
+    # the_blank_set_is_the_unicode_white_space_property_the_script_strips` pins
+    # the same 25 code points there.
+    mod = _verifier_module()
+    want = [*range(0x9, 0xE), 0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200B),
+            0x2028, 0x2029, 0x202F, 0x205F, 0x3000]
+    assert sorted(ord(c) for c in mod.RUST_WHITESPACE) == want
+    # A unit separator is not blank: covered false beside it is a reason, and
+    # covered true beside it is IV-5.
+    b = _complete_block()
+    b["complete"]["covered"] = False
+    b["complete"]["incomplete_reason"] = "\x1f"
+    assert mod.check_invariants(_not_a_pass(_scorecard_1_4(b), "partial")) == ""
+    b = _complete_block()
+    b["complete"]["incomplete_reason"] = "\x1f"
+    assert mod.check_invariants(_scorecard_1_4(b)).startswith(
+        "integrity.verification.complete.incomplete_reason is required")

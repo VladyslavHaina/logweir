@@ -701,7 +701,7 @@ carrying the block:
 | IV-3 | a `header_order` other than `verified` or `notVerified`, or `verified` beside sampled coverage |
 | IV-4 | a `complete` block without `coverage: complete`, or `coverage: complete` without one |
 | IV-5 | `covered: false` without a non-blank `incomplete_reason`, or a reason beside `covered: true` |
-| IV-6 | `integrity.result: pass` beside a complete block that is not covered, names a failed or unverified segment, records a missing, unexpected, duplicate, out-of-order or different record, or lists a partition it did not compare |
+| IV-6 | `integrity.result: pass` beside a complete block that is not covered, lists no partition, names a failed or unverified segment, records a missing, unexpected, duplicate, out-of-order or different record — in total or in any one partition — or lists a partition it did not compare |
 | IV-7 | totals that are not the sums of `partitions[]`, or segments not each verified, failed or unverified |
 
 Both readers print `integrity coverage:` lines — the coverage, its basis and

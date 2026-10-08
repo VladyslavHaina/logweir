@@ -421,8 +421,8 @@
   "file": "verification_pass_over_a_missing_record.json",
   "rust_exit": 4,
   "python_exit": 1,
-  "reason": "integrity.result is pass but integrity.verification.complete is not covered, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record",
-  "arm": "integrity.result is pass but integrity.verification.complete is not covered, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record"
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
  },
  {
   "id": "verification_totals_not_the_partitions_sums",
@@ -431,5 +431,236 @@
   "python_exit": 1,
   "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
   "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv6_not_covered",
+  "file": "verification_iv6_not_covered.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_no_partition",
+  "file": "verification_iv6_no_partition.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_failed_segment",
+  "file": "verification_iv6_failed_segment.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_unverified_segment",
+  "file": "verification_iv6_unverified_segment.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_segments_not_all_verified",
+  "file": "verification_iv6_segments_not_all_verified.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_total_missing",
+  "file": "verification_iv6_total_missing.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_total_unexpected",
+  "file": "verification_iv6_total_unexpected.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_total_duplicates",
+  "file": "verification_iv6_total_duplicates.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_total_out_of_order",
+  "file": "verification_iv6_total_out_of_order.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_total_mismatched",
+  "file": "verification_iv6_total_mismatched.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_total_matching_short",
+  "file": "verification_iv6_total_matching_short.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_total_restored_over",
+  "file": "verification_iv6_total_restored_over.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_partition_not_compared",
+  "file": "verification_iv6_partition_not_compared.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv6_partitions_inexact_totals_exact",
+  "file": "verification_iv6_partitions_inexact_totals_exact.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+ },
+ {
+  "id": "verification_iv7_sum_expected",
+  "file": "verification_iv7_sum_expected.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_restored",
+  "file": "verification_iv7_sum_restored.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_matching",
+  "file": "verification_iv7_sum_matching.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_missing",
+  "file": "verification_iv7_sum_missing.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_unexpected",
+  "file": "verification_iv7_sum_unexpected.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_duplicates",
+  "file": "verification_iv7_sum_duplicates.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_out_of_order",
+  "file": "verification_iv7_sum_out_of_order.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_mismatched",
+  "file": "verification_iv7_sum_mismatched.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_segments",
+  "file": "verification_iv7_sum_segments.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_segments_verified",
+  "file": "verification_iv7_sum_segments_verified.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_records_decoded",
+  "file": "verification_iv7_sum_records_decoded.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_sum_offset_holes",
+  "file": "verification_iv7_sum_offset_holes.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_iv7_accounted_segments",
+  "file": "verification_iv7_accounted_segments.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+ },
+ {
+  "id": "verification_incomplete_reason_a_unit_separator",
+  "file": "verification_incomplete_reason_a_unit_separator.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "verification_covered_with_a_unit_separator_reason",
+  "file": "verification_covered_with_a_unit_separator_reason.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete.incomplete_reason is required exactly when complete.covered is false",
+  "arm": "integrity.verification.complete.incomplete_reason is required exactly when complete.covered is false"
  }
 ]

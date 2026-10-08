@@ -142,7 +142,7 @@ built before this row, reads a sample; nothing re-reads old evidence as complete
 | IV-3 | `header_order` not `verified`/`notVerified`, or `verified` beside sampled | the block | (a) |
 | IV-4 | `complete` without `coverage: complete`, or the reverse | the block | (a) |
 | IV-5 | `covered: false` without a non-blank reason, or a reason beside `covered: true` | the block | (a) |
-| IV-6 | `integrity.result: pass` beside a complete block that is not covered, names a failed or unverified segment, counts any fault, or lists an uncompared partition | the block and `integrity.result` | (a): fires only on a document carrying the block, judges an existing field against it and can only refuse — the reading FX-3's NR-2 to NR-5 were given |
+| IV-6 | `integrity.result: pass` beside a complete block that is not covered, lists no partition, names a failed or unverified segment, counts any fault in total or in any one partition, or lists an uncompared partition | the block and `integrity.result` | (a): fires only on a document carrying the block, judges an existing field against it and can only refuse — the reading FX-3's NR-2 to NR-5 were given |
 | IV-7 | totals that are not the partitions' sums; a segment neither verified, failed nor unverified | the block | (a) |
 
 Both readers state each arm in the same position (after `source.time_basis`, before

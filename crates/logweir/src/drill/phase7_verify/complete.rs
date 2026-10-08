@@ -576,7 +576,14 @@ pub(super) fn run(
             verdicts.push(SelectionVerdict {
                 id,
                 claimed: 0,
-                segments: Evidence::Unverified { why: why.clone() },
+                // Its own sentence (review L-4): `partial_reason` carries both
+                // lanes' notes, and the same `why` twice said nothing twice.
+                segments: Evidence::Unverified {
+                    why: format!(
+                        "{} archived segments were not read, past the bound",
+                        keys.len()
+                    ),
+                },
                 records: Evidence::Unverified { why },
                 records_restored: replay.restored,
                 reconciled: None,

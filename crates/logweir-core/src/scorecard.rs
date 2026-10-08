@@ -1707,17 +1707,24 @@ impl Scorecard {
                 // IV-6. THE RULE ITSELF, in the signed document: a pass over a
                 // complete verification is a verification that covered every
                 // partition, verified every segment and found the restored
-                // output exactly the expected one.
+                // output exactly the expected one — in total AND in every
+                // partition, over at least one partition (review L-2: a pass
+                // whose partitions are inexact but whose sums happen to be
+                // exact, and a covered pass over no partition at all, were
+                // accepted by both readers; the writer produces neither).
                 if self.integrity.result == IntegrityResult::Pass {
                     let clean = c.covered
+                        && !c.partitions.is_empty()
                         && c.archive.segments_failed.is_empty()
                         && c.archive.segments_unverified.is_empty()
                         && c.archive.segments_verified == c.archive.segments
                         && c.replay.is_exact()
-                        && c.partitions.iter().all(|p| p.compared);
+                        && c.partitions
+                            .iter()
+                            .all(|p| p.compared && p.replay.is_exact());
                     if !clean {
                         return Err(InvariantError(
-                            "integrity.result is pass but integrity.verification.complete is not covered, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record"
+                            "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
                                 .into(),
                         ));
                     }
@@ -3577,9 +3584,9 @@ mod tests {
     /// one of its conjuncts (each mutation below is one conjunct's case).
     #[test]
     fn iv6_refuses_a_pass_over_a_complete_block_that_is_not_clean() {
-        let msg = "integrity.result is pass but integrity.verification.complete is not covered, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record";
+        let msg = "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition";
         type Mutation = fn(&mut CompleteVerification);
-        let cases: [(&str, Mutation); 9] = [
+        let cases: [(&str, Mutation); 11] = [
             ("not covered", |c| {
                 c.covered = false;
                 c.incomplete_reason = Some("bound".into());
@@ -3626,6 +3633,21 @@ mod tests {
             }),
             ("a partition not compared", |c| {
                 c.partitions[1].compared = false
+            }),
+            // Review L-2 (a): every partition inexact, the sums exact.
+            ("partitions inexact, totals exact", |c| {
+                c.partitions[0].replay.restored += 1;
+                c.partitions[0].replay.matching += 1;
+                c.partitions[1].replay.restored -= 1;
+                c.partitions[1].replay.matching -= 1;
+            }),
+            // Review L-2 (b): a covered pass over no partition at all.
+            ("no partition", |c| {
+                c.partitions.clear();
+                c.archive.segments = 0;
+                c.archive.segments_verified = 0;
+                c.archive.records_decoded = 0;
+                c.replay = ReplayComparison::default();
             }),
         ];
         for (what, mutate) in cases {
@@ -3720,5 +3742,28 @@ mod tests {
         assert_eq!(json["integrity"]["verification"]["coverage"], "complete");
         let back: Scorecard = serde_json::from_value(json).unwrap();
         assert_eq!(back.integrity.verification, Some(complete_verification()));
+    }
+
+    /// Review L-1: ruling R-A's "blank" is `str::trim().is_empty()`, and
+    /// `trim` strips `char::is_whitespace`. `docs/verify_scorecard.py`'s
+    /// `RUST_WHITESPACE` is that set, code point for code point (pinned there
+    /// by `test_the_blank_set_is_the_rust_readers`); this pins it here, so a
+    /// toolchain whose Unicode data moves the set fails beside its twin.
+    #[test]
+    fn the_blank_set_is_the_unicode_white_space_property_the_script_strips() {
+        let set: Vec<u32> = (0u32..=0x10FFFF)
+            .filter_map(char::from_u32)
+            .filter(|c| c.is_whitespace())
+            .map(u32::from)
+            .collect();
+        let mut want: Vec<u32> = (0x9..=0xd).collect();
+        want.extend([0x20, 0x85, 0xa0, 0x1680]);
+        want.extend(0x2000..=0x200a);
+        want.extend([0x2028, 0x2029, 0x202f, 0x205f, 0x3000]);
+        assert_eq!(set, want);
+        assert!(
+            !'\u{1f}'.is_whitespace(),
+            "U+001F is not blank to this reader"
+        );
     }
 }

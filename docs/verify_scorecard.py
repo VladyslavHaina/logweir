@@ -431,13 +431,16 @@ FORMAT_VERSION = "1.4.0"
 # version of at least 1.4.0, a coverage of `sampled` or `complete`, header order
 # `verified` only for complete coverage, the complete block exactly with
 # complete coverage, an incomplete reason exactly when not covered, a pass only
-# over a covered, clean complete block, and totals that are the partitions'
-# sums. They fire only on a document carrying the block, so every document
-# without it is decided exactly as before. The shape layer refuses a block whose
-# fields are not of the types the writer gives them. The `integrity coverage:`
-# lines say what the verdict covered, and that a document before 1.4.0 covered
-# a sample. A renumber moves this line, the literal pins in
-# docs/test_verify_scorecard.py and the guide's table together.
+# over a covered, clean complete block (clean in total and in every partition,
+# over at least one partition), and totals that are the partitions' sums. They
+# fire only on a document carrying the block, so every document without it is
+# decided exactly as before. The shape layer refuses a block whose fields are not
+# of the types the writer gives them. The `integrity coverage:` lines say what
+# the verdict covered, and that a document before 1.4.0 covered a sample. Every
+# blank test (ruling R-A) now strips `RUST_WHITESPACE`, Rust's own `trim` set,
+# where it stripped Python's wider one (U+001C..U+001F too). A renumber moves
+# this line, the literal pins in docs/test_verify_scorecard.py and the guide's
+# table together.
 SCRIPT_VERSION = "1.19.0"
 
 # The first minor of SCORECARD format 1 that defines `integrity.verification`
@@ -459,6 +462,21 @@ REPLAY_FIELDS = (
     "out_of_order",
     "mismatched",
 )
+
+
+def _replay_exact(replay) -> bool:
+    """`ReplayComparison::is_exact`: no fault of any kind, every expected
+    record restored once and matching, nothing else restored. Each conjunct is
+    held to the Rust reader by its own corpus case (review M-1)."""
+    return (
+        replay["missing"] == 0
+        and replay["unexpected"] == 0
+        and replay["duplicates"] == 0
+        and replay["out_of_order"] == 0
+        and replay["mismatched"] == 0
+        and replay["matching"] == replay["expected"]
+        and replay["restored"] == replay["expected"]
+    )
 
 
 def _sat_add(a: int, b: int) -> int:
@@ -682,6 +700,23 @@ def _minor(version: str):
         return None
     n = int(parts[1])
     return n if n < 2 ** 64 else None
+
+
+# RULING R-A'S "BLANK", EXACTLY AS THE RUST READER SPELLS IT (PROD-08.1 review
+# L-1). Every blank test there is `str::trim().is_empty()`, and `trim` strips
+# `char::is_whitespace` — the Unicode White_Space property, these 25 code
+# points. Python's argument-less `str.strip()` also strips U+001C..U+001F (the
+# file, group, record and unit separators, which `str.isspace` counts), so on a
+# reason, key or mode made of those the two readers disagreed in both
+# directions: `incomplete_reason: "\x1f"` beside `covered: false` was VALID from
+# `drill verify` and refused here, and beside `covered: true` the reverse. The
+# writer never produces either; the script mirrors the reference reader, so
+# every blank test here strips this set and nothing else.
+RUST_WHITESPACE = (
+    "\t\n\x0b\x0c\r \x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
 
 
 def _time_basis_shape_ok(block) -> bool:
@@ -1358,8 +1393,8 @@ def check_invariants(doc) -> str:
         # on `""` — Rust's `is_some()` is true for `Some("")` while Python's
         # truthiness is false — which is the class of split the parity gate
         # exists to catch, and the one T0-6 actually found.
-        offset_key_named = bool(str(evidence.get("offset_report_key") or "").strip())
-        offset_digest_named = bool(str(evidence.get("offset_report_sha256") or "").strip())
+        offset_key_named = bool(str(evidence.get("offset_report_key") or "").strip(RUST_WHITESPACE))
+        offset_digest_named = bool(str(evidence.get("offset_report_sha256") or "").strip(RUST_WHITESPACE))
         if offset_key_named != offset_digest_named:
             return (
                 "evidence.offset_report_key and evidence.offset_report_sha256 are present or "
@@ -1422,7 +1457,7 @@ def check_invariants(doc) -> str:
         # `#[serde(default)]` plus `TargetMode::is_scratch` for every document
         # the Rust reader can read. By the time this runs, a PRESENT `mode` is
         # one of the two spellings and `mode is None` means the key was absent.
-        marker_named = bool(str(target.get("marker_topic") or "").strip())
+        marker_named = bool(str(target.get("marker_topic") or "").strip(RUST_WHITESPACE))
         mode = target.get("mode")
         if not marker_named and (mode is None or mode == "scratch"):
             return (
@@ -1440,7 +1475,7 @@ def check_invariants(doc) -> str:
     # predicate, the same message, the same position.
     if integrity.get("result") == "partial" and not str(
         integrity.get("partial_reason") or ""
-    ).strip():
+    ).strip(RUST_WHITESPACE):
         return "integrity.result is 'partial' but partial_reason is null"
 
     # The format's only two float fields.
@@ -1521,7 +1556,7 @@ def check_invariants(doc) -> str:
     # The converse of the `partial => partial_reason` arm above, on the same
     # trimmed-empty predicate (ruling R-A), so `""` and `"   "` count as absent
     # in both readers.
-    if outcome == "pass" and str(integrity.get("partial_reason") or "").strip():
+    if outcome == "pass" and str(integrity.get("partial_reason") or "").strip(RUST_WHITESPACE):
         return "outcome is 'pass' but integrity.partial_reason is present"
 
     # `met: null` is legitimate on a pass; only an explicit `false` contradicts
@@ -1587,8 +1622,8 @@ def check_invariants(doc) -> str:
     # neither reaches an invariant. `"auth": null` is absent in both.
     target_auth = target.get("auth")
     if isinstance(target_auth, dict):
-        mode_blank = not str(target_auth.get("mode") or "").strip()
-        username_named = bool(str(target_auth.get("username") or "").strip())
+        mode_blank = not str(target_auth.get("mode") or "").strip(RUST_WHITESPACE)
+        username_named = bool(str(target_auth.get("username") or "").strip(RUST_WHITESPACE))
         if mode_blank and username_named:
             return (
                 "target.auth names a username with no auth mode; a username without its "
@@ -1754,7 +1789,7 @@ def check_invariants(doc) -> str:
             )
         if c is not None:
             # IV-5. A reason exactly when not covered; blank is no reason.
-            reason_given = bool(str(c.get("incomplete_reason") or "").strip())
+            reason_given = bool(str(c.get("incomplete_reason") or "").strip(RUST_WHITESPACE))
             if c["covered"] == reason_given:
                 return (
                     "integrity.verification.complete.incomplete_reason is required exactly "
@@ -1764,28 +1799,21 @@ def check_invariants(doc) -> str:
             archive = c["archive"]
             # IV-6. A pass over a complete block is a covered, clean one.
             if integrity.get("result") == "pass":
-                exact = (
-                    replay["missing"] == 0
-                    and replay["unexpected"] == 0
-                    and replay["duplicates"] == 0
-                    and replay["out_of_order"] == 0
-                    and replay["mismatched"] == 0
-                    and replay["matching"] == replay["expected"]
-                    and replay["restored"] == replay["expected"]
-                )
                 clean = (
                     c["covered"]
+                    and bool(c["partitions"])
                     and not archive["segments_failed"]
                     and not archive["segments_unverified"]
                     and archive["segments_verified"] == archive["segments"]
-                    and exact
-                    and all(p["compared"] for p in c["partitions"])
+                    and _replay_exact(replay)
+                    and all(p["compared"] and _replay_exact(p["replay"]) for p in c["partitions"])
                 )
                 if not clean:
                     return (
                         "integrity.result is pass but integrity.verification.complete is not "
-                        "covered, names a failed or unverified segment, or records a missing, "
-                        "unexpected, duplicate, out-of-order or mismatched record"
+                        "covered, lists no partition, names a failed or unverified segment, or "
+                        "records a missing, unexpected, duplicate, out-of-order or mismatched "
+                        "record, in total or in a partition"
                     )
             # IV-7. The totals are the partitions' sums (saturating, as the
             # Rust reader adds), and every segment is accounted for.
@@ -2012,7 +2040,7 @@ def check_backup_receipt_invariants(doc) -> str:
     # COUNTS AS ABSENT (ruling R-A): naming no manifest and naming a manifest
     # made of spaces are the same claim.
     manifest_key = doc["archive"].get("manifest_key")
-    named = bool(str(manifest_key or "").strip())
+    named = bool(str(manifest_key or "").strip(RUST_WHITESPACE))
     exit_code = doc["exit_code"]
     if (exit_code == 0) != named:
         rendered = _rust_debug_str(manifest_key) if named else "absent"
@@ -2487,7 +2515,7 @@ def main(
         # older run's output is byte-identical to what it was — and the DIGEST
         # is printed beside the key, because a key alone tells an auditor where
         # to look and not whether what they find is what was signed.
-        offsets_key = str(doc["evidence"].get("offset_report_key") or "").strip()
+        offsets_key = str(doc["evidence"].get("offset_report_key") or "").strip(RUST_WHITESPACE)
         if offsets_key:
             print(f"       offsets:  {offsets_key}")
             print(
@@ -2594,7 +2622,7 @@ def main(
         # The manifest and its digest are what an auditor goes and looks with.
         # An empty key is LEGAL and means the backup did not exit 0 (arm 2), so
         # it is spelled out rather than printed blank.
-        if str(archive.get("manifest_key") or "").strip():
+        if str(archive.get("manifest_key") or "").strip(RUST_WHITESPACE):
             print(f"       manifest {archive.get('manifest_key')}")
             print(f"       manifest_sha256={archive.get('manifest_sha256')}")
             # FX-7: on a versioned bucket, WHICH version of that key the digest
