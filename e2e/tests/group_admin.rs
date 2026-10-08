@@ -785,7 +785,7 @@ fn acls_round_trip_and_what_librdkafka_cannot_name_is_counted() {
             .into_iter()
             .filter(|a| mine(&a.1, &a.3))
             .collect();
-        if cli.len() >= adds.len() + 1 {
+        if cli.len() > adds.len() {
             break;
         }
         std::thread::sleep(Duration::from_millis(250));
