@@ -58,7 +58,7 @@
       "entries": {
         "cleanup.policy": {
           "value": "compact",
-          "source": "dynamicTopicConfig",
+          "source": "DYNAMIC_TOPIC_CONFIG",
           "portability": "portable"
         },
         "message.format.version": {

@@ -1,14 +1,15 @@
-//! `BackupReceipt::validate_invariants` has exactly NINETEEN arms — the four
+//! `BackupReceipt::validate_invariants` has exactly TWENTY-ONE arms — the four
 //! SELF-CONTRADICTION invariants and, since Task 5b fix round 1, the one
 //! CLOSED VALUE SET (`source.auth.mode`), plus since FX-4 the six arms (6-11)
 //! that read ONLY the 1.1.0 `config_coverage` block, plus since PROD-05.1 the
-//! eight (12-19) that run only on the 1.3.0 `topic_configuration` block — and
-//! each one refuses with an exact message.
+//! eight (12-19) that run only on the 1.3.0 `topic_configuration` block and
+//! the two (20-21) over its `owner_detection` — and each one refuses with an
+//! exact message.
 //!
 //! The four and the five are asserted SEPARATELY and on purpose:
 //! `arm_cases()` carries the four self-contradiction arms and
 //! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` closes over them, while
-//! `validate_invariants_has_exactly_nineteen_return_err_statements` closes over
+//! `validate_invariants_has_exactly_twenty_one_return_err_statements` closes over
 //! the function's TOTAL by reading its source text. So an arm added to the
 //! function without a case here fails the second test, and a case deleted
 //! from `arm_cases()` fails the first — neither number can go stale under
@@ -87,6 +88,7 @@ fn pristine() -> BackupReceipt {
         },
         config_coverage: None,
         topic_configuration: None,
+        owner_detection: None,
     }
 }
 
@@ -99,7 +101,7 @@ fn pristine() -> BackupReceipt {
 /// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
 /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` keeps saying exactly
 /// what its name says while
-/// `validate_invariants_has_exactly_nineteen_return_err_statements` pins the
+/// `validate_invariants_has_exactly_twenty_one_return_err_statements` pins the
 /// total.
 fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     // Arm 1: a major this reader has never seen.
@@ -256,7 +258,7 @@ fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
     }
 }
 
-/// **THE TOTAL.** `validate_invariants` has exactly nineteen refusing statements.
+/// **THE TOTAL.** `validate_invariants` has exactly twenty-one refusing statements.
 ///
 /// Read out of the SOURCE TEXT, which is the only way to make the count a
 /// claim about the function rather than about this file's case list: an arm
@@ -269,7 +271,7 @@ fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
 /// `crates/logweir/tests/two_reader_parity.rs::
 /// every_invariant_arm_has_a_corpus_case` applies to the scorecard's arms).
 #[test]
-fn validate_invariants_has_exactly_nineteen_return_err_statements() {
+fn validate_invariants_has_exactly_twenty_one_return_err_statements() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/backup_receipt.rs"
@@ -290,9 +292,9 @@ fn validate_invariants_has_exactly_nineteen_return_err_statements() {
 
     let total = body.matches("return Err(format!(").count();
     assert_eq!(
-        total, 19,
+        total, 21,
         "BackupReceipt::validate_invariants has {total} `return Err(format!(` \
-         statement(s), not 19. Every one of them needs a per-arm test in this file with \
+         statement(s), not 21. Every one of them needs a per-arm test in this file with \
          its exact message AND a case in \
          e2e/fixtures/invariants/backup-receipt-index.json — \
          scripts/check-invariant-corpus.sh derives the list from this same slice and \
@@ -318,7 +320,7 @@ fn validate_invariants_has_exactly_nineteen_return_err_statements() {
 /// exact message, and a pristine receipt accepted. Arm 5 — the closed value
 /// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
 /// function's total is
-/// `validate_invariants_has_exactly_nineteen_return_err_statements`.
+/// `validate_invariants_has_exactly_twenty_one_return_err_statements`.
 ///
 /// **RENAMED, Task 12 closeout carry (c).** It was
 /// `backup_receipt_invariants_have_exactly_four_arms`, which Task 5b's fix
@@ -954,7 +956,7 @@ fn a_1_0_0_receipt_round_trips_byte_for_byte_through_the_1_1_0_type() {
 }
 
 // ---------------------------------------------------------------------------
-// PROD-05.1: format 1.3.0's `topic_configuration` block and arms 12-19
+// PROD-05.1: format 1.3.0's `topic_configuration` block and arms 12-21
 // ---------------------------------------------------------------------------
 
 fn entry(value: Option<&str>, source: &str, portability: &str) -> ConfigEntry {
@@ -965,10 +967,11 @@ fn entry(value: Option<&str>, source: &str, portability: &str) -> ConfigEntry {
     }
 }
 
-/// A 1.3.0 receipt that satisfies all nineteen arms: `orders` a compacted,
+/// A 1.3.0 receipt that satisfies all twenty-one arms: `orders` a compacted,
 /// min-in-sync-2 topic with an inherited retention and a removed-in-4.0
 /// override, owned by a Strimzi `KafkaTopic`; `payments` with a secret and a
-/// provider-only override, declared externally owned.
+/// provider-only override, declared externally owned; and the run looked in
+/// both places (`owner_detection`).
 fn pristine_1_3() -> BackupReceipt {
     let mut doc = pristine_1_1();
     doc.format_version = "1.3.0".to_string();
@@ -1026,6 +1029,7 @@ fn pristine_1_3() -> BackupReceipt {
         },
     );
     doc.topic_configuration = Some(model);
+    doc.owner_detection = Some(vec!["declared".into(), "kafkaTopicResources".into()]);
     doc
 }
 
@@ -1326,6 +1330,88 @@ fn arm_19_refuses_a_zero_count() {
         "topic_configuration[\"payments\"] records partitions absent and replication_factor \
          0: a recorded count is at least 1",
         "arm 19, the factor",
+    );
+}
+
+const ARM_20_TAIL: &str = " is not a detection this format defines: it is present only \
+                           beside topic_configuration, and lists \"declared\" and \
+                           \"kafkaTopicResources\" each at most once";
+
+/// **Arm 20 (fix round, M2).** `owner_detection` is the closed set, each word
+/// at most once, and only beside the model it qualifies. An EMPTY list is a
+/// run that looked nowhere — legal — and so is an absent one.
+#[test]
+fn arm_20_refuses_a_detection_outside_the_closed_set_or_beside_no_model() {
+    for bad in [
+        vec!["labels".to_string()],
+        vec!["declared".to_string(), "declared".to_string()],
+        vec!["Declared".to_string()],
+        vec!["kafkaTopicResource".to_string()],
+    ] {
+        let mut doc = pristine_1_3();
+        doc.owner_detection = Some(bad.clone());
+        refused_with(
+            &doc,
+            &format!("owner_detection {bad:?}{ARM_20_TAIL}"),
+            "arm 20",
+        );
+    }
+    // Beside no model: a 1.1.0 document claiming where it looked for owners
+    // it records none of.
+    let mut doc = pristine_1_1();
+    doc.owner_detection = Some(Vec::new());
+    refused_with(
+        &doc,
+        &format!("owner_detection []{ARM_20_TAIL}"),
+        "arm 20, no model",
+    );
+    // Legal: empty, absent, one, both — with the owners arm 21 then allows.
+    let mut doc = pristine_1_3();
+    for t in ["orders", "payments"] {
+        topic(&mut doc, t).owner = None;
+    }
+    for ok in [None, Some(vec![]), Some(vec!["declared".to_string()])] {
+        doc.owner_detection = ok.clone();
+        assert_eq!(doc.validate_invariants(), Ok(()), "{ok:?}");
+    }
+}
+
+/// **Arm 21 (fix round, M2).** An owner is recorded only from a source the
+/// run looked in: a `declared` owner needs `declared`, a `kafkaTopicResource`
+/// owner `kafkaTopicResources`. An absent detection reads as empty.
+#[test]
+fn arm_21_refuses_an_owner_from_a_source_the_run_did_not_look_in() {
+    let tail = ": a \"declared\" owner needs \"declared\", a \"kafkaTopicResource\" owner \
+                \"kafkaTopicResources\"";
+    let mut doc = pristine_1_3();
+    doc.owner_detection = Some(vec!["declared".into()]);
+    refused_with(
+        &doc,
+        &format!(
+            "topic_configuration[\"orders\"].owner by \"kafkaTopicResource\" names no source \
+             owner_detection [\"declared\"] lists{tail}"
+        ),
+        "arm 21, resources not read",
+    );
+    let mut doc = pristine_1_3();
+    doc.owner_detection = Some(vec!["kafkaTopicResources".into()]);
+    refused_with(
+        &doc,
+        &format!(
+            "topic_configuration[\"payments\"].owner by \"declared\" names no source \
+             owner_detection [\"kafkaTopicResources\"] lists{tail}"
+        ),
+        "arm 21, nothing declared",
+    );
+    let mut doc = pristine_1_3();
+    doc.owner_detection = None;
+    refused_with(
+        &doc,
+        &format!(
+            "topic_configuration[\"orders\"].owner by \"kafkaTopicResource\" names no source \
+             owner_detection [] lists{tail}"
+        ),
+        "arm 21, absent reads as empty",
     );
 }
 

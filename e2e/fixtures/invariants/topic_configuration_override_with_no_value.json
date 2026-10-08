@@ -57,7 +57,6 @@
       "replication_factor": 3,
       "entries": {
         "cleanup.policy": {
-          "value": "compact",
           "source": "dynamicTopicConfig",
           "portability": "portable"
         },

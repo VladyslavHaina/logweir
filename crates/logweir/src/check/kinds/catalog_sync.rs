@@ -377,6 +377,13 @@ pub struct CatalogEntry {
     /// them. A reader then knows the list is not the point's topic set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topics_omitted: Option<u32>,
+    /// **PROD-05.1 (fix round, M2).** The record's `owner_detection` — where
+    /// the run looked for declarative owners — present beside `topics` and
+    /// only there: it is what lets a reader of a topic without an `owner`
+    /// tell "no owner found" from "owner never looked for". Absent with the
+    /// topics, and absent for a record that predates 1.3.0 (NOT RECORDED).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_detection: Option<Vec<String>>,
 }
 
 /// The signature half of [`CatalogCounts`].
@@ -1560,6 +1567,7 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
             .filter(|r| !r.is_empty()),
         topics: Vec::new(),
         topics_omitted: None,
+        owner_detection: None,
     };
     // One sync contributes one location, so this can only ever be a no-op —
     // and it is written down so the cap is enforced on the side that renders
@@ -1567,6 +1575,14 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
     entry.locations.truncate(MAX_ENTRY_LOCATIONS);
     // PROD-05.1: the topics, from a record the cross-check let stand.
     (entry.topics, entry.topics_omitted) = entry_topics(point, availability);
+    // M2 (fix round): where the run looked for owners travels WITH the
+    // topics, so a topic the view lists is never read without it.
+    if !entry.topics.is_empty() {
+        entry.owner_detection = point
+            .owner_detection
+            .as_ref()
+            .map(|d| d.iter().map(|s| redact(s)).collect());
+    }
     Some(entry)
 }
 
@@ -1663,6 +1679,7 @@ fn render_body(req: &CatalogSyncRequest, walk: &Walk) -> RenderedBody {
             let mut slim = entry.clone();
             slim.topics_omitted = u32::try_from(slim.topics.len()).ok();
             slim.topics.clear();
+            slim.owner_detection = None;
             (full, serde_json::to_string(&slim).unwrap_or_default())
         })
         .collect();

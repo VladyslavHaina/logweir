@@ -50,11 +50,14 @@
 //! # 1.3.0: the topic configuration model (PROD-05.1)
 //!
 //! `topic_configuration` records, per named topic, the source's partition
-//! count and replication factor as the archive records them, the topic's
+//! count as the archive's manifest records it, its replication factor as
+//! Logweir's own metadata read found it (the manifest's only where that read
+//! named none), the topic's
 //! configuration entries as Logweir's own read returned them — each with its
 //! source and a portability class from
 //! `crate::topic_configuration::TABLE` — and the topic's declarative owner
-//! ([`TopicConfiguration`]). Arms 12-19 read it, and only when it is present.
+//! ([`TopicConfiguration`]), with `owner_detection` saying where the run
+//! looked for owners. Arms 12-21 read them, and only when they are present.
 //! Every receipt this build signs carries it, so every one is written as
 //! [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] ([`format_version_for`]).
 //!
@@ -165,6 +168,17 @@ pub struct BackupReceipt {
     /// an older document round-trips byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_configuration: Option<BTreeMap<String, TopicConfiguration>>,
+    /// **Format 1.3.0 (PROD-05.1).** WHERE the run looked for declarative
+    /// owners: `declared` (the plan carried `source.topic_owners`) and/or
+    /// `kafkaTopicResources` (it was given Strimzi `KafkaTopic` resources),
+    /// from the closed set `crate::topic_configuration::OWNER_DETECTION_SOURCES`
+    /// (arm 20), each at most once. EMPTY means the run looked nowhere: a
+    /// topic without an `owner` then has an owner NOT CHECKED, and a reader
+    /// never says it is applied through the admin API. Every owner's basis
+    /// names a source listed here (arm 21). Present only beside
+    /// `topic_configuration`; ABSENT reads as empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_detection: Option<Vec<String>>,
 }
 
 /// The `format_version` this build WRITES for a receipt that pins no manifest
@@ -285,12 +299,21 @@ pub struct EffectiveConfigValue {
 ///
 /// # Where each part comes from
 ///
-/// - `partitions` and `replication_factor`: the ARCHIVE's record, the
-///   manifest's `original_partition_count` and `source_replication_factor`
-///   (the engine reads them from the source's metadata; the factor is the
-///   replica count of partition 0). The manifest is the one this run read back
-///   and digested, so they are the counts the restore will see. ABSENT when
-///   the manifest does not record them, never `0`.
+/// - `partitions`: the ARCHIVE's record, the manifest's
+///   `original_partition_count` — the manifest this run read back and
+///   digested, so the count a restore creates the topic with. ABSENT when the
+///   manifest does not record one, never `0`.
+/// - `replication_factor`: Logweir's OWN metadata read of the source, through
+///   the engine's principal, immediately before the engine — the SMALLEST
+///   replica count of the topic's partitions (a partition mid-reassignment
+///   also lists the replicas being added). Only where that read named no
+///   factor for the topic does the manifest's `source_replication_factor`
+///   stand, and the pinned engine records that for the first topic it saves
+///   only (`merge_manifests` drops it from every later save; FX-21). When the
+///   metadata read is unavailable — it failed, or the reader cannot answer —
+///   the run logs a warning and records the factor only where the manifest
+///   has one: for every other topic it is ABSENT, NOT RECORDED, never `0` and
+///   never the target's.
 /// - `entries`: Logweir's OWN DescribeConfigs read before the engine — the
 ///   same read as `config_coverage` — filtered by
 ///   `crate::topic_configuration::records`: every explicit override, and the
@@ -300,13 +323,19 @@ pub struct EffectiveConfigValue {
 /// - `owner`: the plan's declaration (`source.topic_owners`), or a Strimzi
 ///   `KafkaTopic` resource the run was given. A topic with an owner is
 ///   restored by exporting desired state for that owner, never through the
-///   admin API around it.
+///   admin API around it. A topic WITHOUT one has "no owner found" only where
+///   the receipt's `owner_detection` says the run looked; where it is empty,
+///   the owner was NOT CHECKED.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TopicConfiguration {
-    /// The source's partition count, as the archive records it.
+    /// The source's partition count, as the archive's manifest records it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partitions: Option<u32>,
-    /// The source's replication factor, as the archive records it.
+    /// The source's replication factor: Logweir's own metadata read before
+    /// the engine (the smallest replica count of the topic's partitions), else
+    /// the manifest's where that read named none. When the read is unavailable
+    /// the run warns and the manifest's factor stands where it has one. ABSENT
+    /// when neither names one — NOT RECORDED, never `0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replication_factor: Option<u32>,
     /// The recorded configuration entries, by key. ABSENT when the read did
@@ -690,6 +719,10 @@ impl BackupReceipt {
     ///     `kafkaTopicResource` owner is `strimzi`) and its reference is 1 to
     ///     256 characters with no control character.
     /// 19. a recorded partition count or replication factor is at least 1.
+    /// 20. `owner_detection` is present only beside `topic_configuration`, and
+    ///     lists `declared` and `kafkaTopicResources` each at most once.
+    /// 21. every recorded owner's basis names a source `owner_detection` lists
+    ///     (absent reads as empty).
     pub fn validate_invariants(&self) -> Result<(), String> {
         // ARM 1. GC12 for this document: a reader refuses a major it has
         // never seen rather than guessing at a shape.
@@ -1035,6 +1068,44 @@ impl BackupReceipt {
                          replication_factor {}: a recorded count is at least 1",
                         shown(entry.partitions),
                         shown(entry.replication_factor)
+                    ));
+                }
+            }
+        }
+        // ARM 20 (format 1.3.0, PROD-05.1). Where the run looked for owners:
+        // only beside the model it qualifies, from the closed set, each source
+        // at most once.
+        if let Some(detection) = &self.owner_detection {
+            let mut seen = std::collections::BTreeSet::new();
+            let fits = self.topic_configuration.is_some()
+                && detection.iter().all(|d| {
+                    crate::topic_configuration::OWNER_DETECTION_SOURCES.contains(&d.as_str())
+                        && seen.insert(d.as_str())
+                });
+            if !fits {
+                return Err(format!(
+                    "owner_detection {detection:?} is not a detection this format defines: it is \
+                     present only beside topic_configuration, and lists \"declared\" and \
+                     \"kafkaTopicResources\" each at most once"
+                ));
+            }
+        }
+        // ARM 21. An owner is recorded only from a source the run looked in: a
+        // `declared` owner needs `declared`, a `kafkaTopicResource` owner needs
+        // `kafkaTopicResources`. An absent detection is an empty one.
+        if let Some(model) = &self.topic_configuration {
+            let detection: &[String] = self.owner_detection.as_deref().unwrap_or(&[]);
+            for (topic, entry) in model {
+                let Some(owner) = &entry.owner else {
+                    continue;
+                };
+                let source = crate::topic_configuration::detection_for_basis(&owner.basis);
+                if !source.is_some_and(|s| detection.iter().any(|d| d == s)) {
+                    return Err(format!(
+                        "topic_configuration[{topic:?}].owner by {:?} names no source \
+                         owner_detection {detection:?} lists: a \"declared\" owner needs \
+                         \"declared\", a \"kafkaTopicResource\" owner \"kafkaTopicResources\"",
+                        owner.basis
                     ));
                 }
             }

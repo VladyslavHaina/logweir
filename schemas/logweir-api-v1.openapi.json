@@ -9996,7 +9996,7 @@
         ],
         "properties": {
           "applyRoute": {
-            "description": "`adminApi`, or `desiredStateExport` for a topic a declarative owner manages: a restore exports its desired state for the owner to apply instead of changing it through Kafka's admin API, which the owner would revert.",
+            "description": "How the topic's configuration reaches a target (`logweir_core::topic_configuration::apply_route`): `desiredStateExport` for a topic a declarative owner manages — a restore exports its desired state for the owner to apply instead of changing it through Kafka's admin API, which the owner would revert; `adminApi` for a topic with no owner where the backup run looked for one (the point's `ownerDetection` is not empty); and `unknown` where it did not look, or the view does not say where it looked. An owner nobody checked for is never published as the admin-API route.",
             "type": "string"
           },
           "configCoverage": {
@@ -10014,14 +10014,14 @@
             "nullable": true
           },
           "partitions": {
-            "description": "The source's partition count, as the archive records it.",
+            "description": "The source's partition count, as the archive's manifest records it (the receipt's `topic_configuration[<name>].partitions`). Absent when the manifest records none, or the point predates the configuration model: unknown, never zero.",
             "type": "integer",
             "format": "uint32",
             "minimum": 0.0,
             "nullable": true
           },
           "replicationFactor": {
-            "description": "The source's replication factor, as the archive records it. The console's restore wizard defaults a plan's factor from it, capped by the target's broker count.",
+            "description": "The source's replication factor, as the backup run read it from the source cluster's metadata: the smallest replica count among the topic's partitions. When that read was unavailable the run warned and recorded the archive manifest's value where the manifest carries one; otherwise the factor is absent — unknown, never a default. The console's restore wizard defaults a plan's factor from it, capped by the target's broker count.",
             "type": "integer",
             "format": "uint32",
             "minimum": 0.0,
@@ -10088,6 +10088,14 @@
           "manifestSha256": {
             "description": "The manifest's recorded SHA-256.",
             "type": "string",
+            "nullable": true
+          },
+          "ownerDetection": {
+            "description": "**PROD-05.1.** Where the backup run looked for declarative owners, beside `topics`: `declared` (the plan's `source.topic_owners`) and `kafkaTopicResources` (Strimzi `KafkaTopic` resources). EMPTY says it looked nowhere, so every un-owned topic's `applyRoute` is `unknown`. ABSENT is NOT PUBLISHED.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "nullable": true
           },
           "pointId": {

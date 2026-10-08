@@ -80,25 +80,12 @@
           "source": "dynamicTopicConfig",
           "portability": "secret"
         }
-      },
-      "owner": {
-        "kind": "strimzi",
-        "basis": "kafkaTopicResource",
-        "reference": "kafka/orders"
       }
     },
     "payments": {
       "partitions": 1,
-      "replication_factor": 1,
-      "owner": {
-        "kind": "external",
-        "basis": "declared",
-        "reference": "terraform: kafka_topic.payments"
-      }
+      "replication_factor": 1
     }
   },
-  "owner_detection": [
-    "declared",
-    "kafkaTopicResources"
-  ]
+  "owner_detection": []
 }

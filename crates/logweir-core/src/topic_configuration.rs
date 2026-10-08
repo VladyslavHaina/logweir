@@ -3,8 +3,9 @@
 //! A backup receipt from format 1.3.0 records, per named topic, what a later
 //! restore needs to rebuild the topic rather than guess at it
 //! ([`crate::backup_receipt::TopicConfiguration`]): the source's partition
-//! count and replication factor as the archive records them, the topic's
-//! configuration entries as Logweir's own DescribeConfigs read returned them,
+//! count as the archive's manifest records it, its replication factor as
+//! Logweir's own metadata read found it (the manifest's only where that read
+//! named none), the topic's configuration entries as Logweir's own DescribeConfigs read returned them,
 //! each with its source and a PORTABILITY CLASS from the table below, and the
 //! topic's declarative owner when one manages it. This module holds the parts
 //! of that model that are pure functions of a key, a source and a flag: the
@@ -97,6 +98,44 @@ pub const OWNER_KINDS: [&str; 2] = ["strimzi", "external"];
 /// `TopicOwner::basis`'s closed set (receipt arm 18): found from a Strimzi
 /// `KafkaTopic` resource, or declared by the plan.
 pub const OWNER_BASES: [&str; 2] = ["kafkaTopicResource", "declared"];
+
+/// `owner_detection` value: the plan carried `source.topic_owners` (an empty
+/// list included — the operator's statement that no topic is declared).
+pub const DETECTION_DECLARED: &str = "declared";
+/// `owner_detection` value: the run was given Strimzi `KafkaTopic` resources.
+pub const DETECTION_KAFKA_TOPIC_RESOURCES: &str = "kafkaTopicResources";
+
+/// `BackupReceipt::owner_detection`'s closed set (receipt arm 20), in the order
+/// a writer lists them: WHERE the run looked for declarative owners. An EMPTY
+/// list is a run that looked nowhere — owner NOT CHECKED — and is never read as
+/// "no owner".
+pub const OWNER_DETECTION_SOURCES: [&str; 2] =
+    [DETECTION_DECLARED, DETECTION_KAFKA_TOPIC_RESOURCES];
+
+/// The `owner_detection` source an owner's `basis` needs (receipt arm 21):
+/// `declared` for `declared`, `kafkaTopicResources` for `kafkaTopicResource`.
+#[must_use]
+pub fn detection_for_basis(basis: &str) -> Option<&'static str> {
+    match basis {
+        "declared" => Some(DETECTION_DECLARED),
+        "kafkaTopicResource" => Some(DETECTION_KAFKA_TOPIC_RESOURCES),
+        _ => None,
+    }
+}
+
+/// The run's `owner_detection`, in [`OWNER_DETECTION_SOURCES`] order: what it
+/// was given to look for owners in.
+#[must_use]
+pub fn owner_detection(declared: bool, kafka_topic_resources: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    if declared {
+        out.push(DETECTION_DECLARED.to_string());
+    }
+    if kafka_topic_resources {
+        out.push(DETECTION_KAFKA_TOPIC_RESOURCES.to_string());
+    }
+    out
+}
 
 /// The longest `TopicOwner::reference`, in characters (receipt arm 18).
 pub const MAX_OWNER_REFERENCE_CHARS: usize = 256;
@@ -397,6 +436,26 @@ pub struct DeclaredOwner {
     pub reference: String,
 }
 
+/// Why the plan's declarations are refused, or `None`: each by
+/// [`refuse_declared`], and no topic declared twice — an approved plan that
+/// names two owners for one topic would be signed as one of them.
+#[must_use]
+pub fn refuse_declarations(owners: &[DeclaredOwner], named: &[String]) -> Option<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for owner in owners {
+        if let Some(why) = refuse_declared(owner, named) {
+            return Some(why);
+        }
+        if !seen.insert(owner.topic.as_str()) {
+            return Some(format!(
+                "source.topic_owners declares topic {:?} more than once",
+                owner.topic
+            ));
+        }
+    }
+    None
+}
+
 /// Why a declared owner is refused, or `None` — the same rule receipt arm 18
 /// enforces on the recorded owner, plus "the topic is one the plan names".
 #[must_use]
@@ -579,15 +638,20 @@ pub fn merge_owners(
     owners
 }
 
-/// How a topic's configuration reaches a target: through Kafka's admin API,
-/// or — for a topic a declarative owner manages, which would revert a change
-/// made around it — as desired state exported for that owner to apply.
+/// How a topic's configuration reaches a target, in ONE place (the product
+/// API's `applyRoute`, both readers' line): `desiredStateExport` for a topic a
+/// declarative owner manages, which would revert a change made around it;
+/// `adminApi` for a topic with no owner where the run LOOKED for one
+/// (`owner_detection` non-empty); and `unknown` where it did not — an owner
+/// nobody checked for is never read as "no owner".
 #[must_use]
-pub const fn apply_route(owned: bool) -> &'static str {
+pub const fn apply_route(owned: bool, detection_ran: bool) -> &'static str {
     if owned {
         "desiredStateExport"
-    } else {
+    } else if detection_ran {
         "adminApi"
+    } else {
+        "unknown"
     }
 }
 
@@ -827,7 +891,31 @@ mod tests {
         let mut bad = ok.clone();
         bad.reference = "x".repeat(MAX_OWNER_REFERENCE_CHARS + 1);
         assert!(refuse_declared(&bad, &named).is_some());
-        assert_eq!(apply_route(true), "desiredStateExport");
+        assert_eq!(apply_route(true, false), "desiredStateExport");
+        assert_eq!(apply_route(true, true), "desiredStateExport");
+        assert_eq!(apply_route(false, true), "adminApi");
+        assert_eq!(
+            apply_route(false, false),
+            "unknown",
+            "NEGATIVE CONTROL: adminApi for an owner nobody looked for fails this"
+        );
+        assert_eq!(owner_detection(false, false), Vec::<String>::new());
+        assert_eq!(
+            owner_detection(true, true),
+            vec!["declared".to_string(), "kafkaTopicResources".to_string()]
+        );
+        assert_eq!(
+            detection_for_basis("kafkaTopicResource"),
+            Some("kafkaTopicResources")
+        );
+        assert_eq!(detection_for_basis("declared"), Some("declared"));
+        assert_eq!(detection_for_basis("label"), None);
+        // L3: a topic declared twice is refused.
+        let twice = [ok.clone(), ok.clone()];
+        assert!(refuse_declarations(&twice, &named)
+            .unwrap()
+            .contains("more than once"));
+        assert_eq!(refuse_declarations(std::slice::from_ref(&ok), &named), None);
         // A declaration is laid over a detected resource for the same topic.
         let detected = BTreeMap::from([(
             "orders".to_string(),
@@ -840,6 +928,5 @@ mod tests {
         let merged = merge_owners(detected, std::slice::from_ref(&ok));
         assert_eq!(merged["orders"].basis, "declared");
         assert_eq!(merged["orders"].reference, ok.reference);
-        assert_eq!(apply_route(false), "adminApi");
     }
 }

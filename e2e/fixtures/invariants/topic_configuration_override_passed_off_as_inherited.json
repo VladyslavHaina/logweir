@@ -69,7 +69,7 @@
         "min.insync.replicas": {
           "value": "2",
           "source": "dynamicTopicConfig",
-          "portability": "portable"
+          "portability": "inherited"
         },
         "retention.ms": {
           "value": "604800000",

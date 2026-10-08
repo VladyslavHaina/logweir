@@ -175,6 +175,12 @@ pub struct BackupOutcome {
     /// `phase_run::build_receipt` writes it as the receipt's 1.3.0
     /// `topic_configuration` block.
     pub topic_configuration: BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>,
+    /// **PROD-05.1.** Where this run looked for declarative owners
+    /// (`topic_configuration::owner_detection`): the receipt's
+    /// `owner_detection`. Empty when it looked nowhere, and then a topic
+    /// without an owner reads "not checked", never "applied through the admin
+    /// API".
+    pub owner_detection: Vec<String>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -393,6 +399,11 @@ struct Inputs {
     /// it). Phase −1 refuses an invalid declaration before anything is
     /// recorded.
     owners: BTreeMap<String, logweir_core::backup_receipt::TopicOwner>,
+    /// **PROD-05.1.** Where the run looked for owners: `declared` when the
+    /// plan carries `source.topic_owners` (an empty list too: the operator
+    /// says no topic has one), `kafkaTopicResources` when it was given the
+    /// resources file.
+    owner_detection: Vec<String>,
 }
 
 fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
@@ -443,13 +454,20 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
             )
         }
     };
-    let owners =
-        logweir_core::topic_configuration::merge_owners(detected, &spec.source.topic_owners);
+    let owners = logweir_core::topic_configuration::merge_owners(
+        detected,
+        spec.source.topic_owners.as_deref().unwrap_or(&[]),
+    );
+    let owner_detection = logweir_core::topic_configuration::owner_detection(
+        spec.source.topic_owners.is_some(),
+        args.kafka_topic_resources.is_some(),
+    );
     Ok(Inputs {
         spec,
         spec_text,
         allowed,
         owners,
+        owner_detection,
     })
 }
 
@@ -703,6 +721,7 @@ fn execute_with_signer(
         covered_to_ms: ran.covered_to_ms,
         config_coverage: coverage,
         topic_configuration,
+        owner_detection: inputs.owner_detection.clone(),
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

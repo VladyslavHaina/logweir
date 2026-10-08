@@ -41,11 +41,8 @@
   },
   "config_coverage": {
     "orders": {
-      "coverage": "captured",
-      "timestamp_type": {
-        "value": "LogAppendTime",
-        "source": "dynamicDefaultBrokerConfig"
-      }
+      "coverage": "notCaptured",
+      "reason": "describeFailed"
     },
     "payments": {
       "coverage": "captureDenied"

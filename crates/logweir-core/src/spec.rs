@@ -831,10 +831,13 @@ pub struct BackupSourceSpec {
     /// restore exports desired state for such a topic instead of applying its
     /// settings through the admin API, which the owner would revert.
     ///
-    /// Optional and empty by default: an older runner ignores the key, and a
-    /// plan without it is the plan it was.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub topic_owners: Vec<crate::topic_configuration::DeclaredOwner>,
+    /// Optional: an older runner ignores the key, and a plan without it is the
+    /// plan it was. ABSENT and EMPTY differ: an absent list declares nothing
+    /// and the receipt's `owner_detection` does not name `declared`; an empty
+    /// list is the operator's statement that no topic of the plan has a
+    /// declared owner, and it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_owners: Option<Vec<crate::topic_configuration::DeclaredOwner>>,
 }
 
 /// The `backup:` block's tunables. The two keys the rendered document pins

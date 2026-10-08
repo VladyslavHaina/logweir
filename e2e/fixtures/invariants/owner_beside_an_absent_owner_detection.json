@@ -96,9 +96,5 @@
         "reference": "terraform: kafka_topic.payments"
       }
     }
-  },
-  "owner_detection": [
-    "declared",
-    "kafkaTopicResources"
-  ]
+  }
 }

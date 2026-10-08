@@ -99,6 +99,6 @@
   },
   "owner_detection": [
     "declared",
-    "kafkaTopicResources"
+    "labels"
   ]
 }

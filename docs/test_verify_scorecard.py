@@ -2225,8 +2225,8 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # coverage:` lines. Map still five.
     #
     # 1.20.0 (PROD-05.1) adds the backup receipt's eight `topic_configuration`
-    # arms (12-19), their shape check and the `topic_configuration` lines.
-    # Map still five.
+    # arms (12-19), the two `owner_detection` arms (20-21), their shape checks
+    # and the `topic_configuration` lines. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
     assert mod.SCRIPT_VERSION == "1.20.0", mod.SCRIPT_VERSION
@@ -2330,6 +2330,166 @@ def test_the_topic_configuration_lines_never_carry_a_value():
         "topic_configuration: not recorded, so no topic's partition count, replication "
         "factor or settings are known to a restore from this receipt"
     ]
+
+
+def test_the_owner_detection_sources_are_the_rust_readers():
+    # Arm 20's closed set and arm 21's basis-to-source map are the Rust
+    # constants' (PROD-05.1 fix round, M2), read from the source.
+    mod = _verifier_module()
+    root = pathlib.Path(__file__).resolve().parent.parent
+    model = (root / "crates/logweir-core/src/topic_configuration.rs").read_text()
+    values = {k: v for k, v in re.findall(r'pub const ([A-Z_0-9]+): &str = "([^"]+)";', model)}
+    block = model.split("pub const OWNER_DETECTION_SOURCES", 1)[1].split("];", 1)[0]
+    names = re.findall(r"\b(DETECTION_[A-Z_]+)\b", block.split("= [", 1)[1])
+    assert tuple(values[n] for n in names) == mod.RECEIPT_OWNER_DETECTION_SOURCES
+    basis = model.split("pub fn detection_for_basis", 1)[1].split("\n}\n", 1)[0]
+    pairs = re.findall(r'"([^"]+)" => Some\(([A-Z_]+)\)', basis)
+    assert {k: values[v] for k, v in pairs} == mod.RECEIPT_OWNER_DETECTION_FOR_BASIS
+
+
+def test_the_owner_detection_shape_is_the_rust_deserialisers():
+    mod = _verifier_module()
+    base = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_3_with_topic_configuration.json").read_text())
+    for bad in ("declared", {"declared": True}, ["declared", 1], [None]):
+        doc = json.loads(json.dumps(base))
+        doc["owner_detection"] = bad
+        assert mod._receipt_shape(doc) == "owner_detection is not a list of strings", bad
+    doc = json.loads(json.dumps(base))
+    doc["owner_detection"] = None
+    assert mod._receipt_shape(doc) == "", "null is absent"
+
+
+def test_an_owner_nobody_looked_for_is_never_the_admin_api_route():
+    # PROD-05.1 fix round, M2: a topic without an owner is applied through the
+    # admin API only where `owner_detection` says the run looked; an empty or
+    # absent detection says the owner was NOT CHECKED.
+    mod = _verifier_module()
+    fixtures = ROOT / "e2e/fixtures/invariants"
+    pinned = json.loads((fixtures / "receipt_1_3_pinned_with_topic_configuration.json").read_text())
+    assert pinned["owner_detection"] == ["kafkaTopicResources"]
+    lines = mod._topic_configuration_lines(pinned["topic_configuration"], pinned["owner_detection"])
+    assert lines[1] == (
+        'topic_configuration["payments"]: partitions 1, replication factor 1, entries not '
+        "recorded, no declarative owner found (kafkaTopicResources), so applied through the "
+        "admin API"
+    ), lines
+    unchecked = json.loads((fixtures / "receipt_1_3_owner_not_checked.json").read_text())
+    assert unchecked["owner_detection"] == []
+    for detection in ([], None):
+        lines = mod._topic_configuration_lines(unchecked["topic_configuration"], detection)
+        assert all(
+            line.endswith(", owner not checked, so how it is applied is not known")
+            for line in lines
+        ), (detection, lines)
+        assert not any("admin API" in line for line in lines), lines
+    both = mod._topic_configuration_lines(unchecked["topic_configuration"],
+                                          ["declared", "kafkaTopicResources"])
+    assert all(line.endswith(
+        ", no declarative owner found (declared, kafkaTopicResources), so applied through "
+        "the admin API") for line in both), both
+
+
+def test_each_half_of_the_topic_configuration_arms_refuses_with_its_exact_message():
+    # PROD-05.1 fix round, M4: arms 15-21 are biconditionals or several rules
+    # in one, and EACH half refuses here — not only the one the first corpus
+    # case happened to exercise — with the Rust reader's exact words
+    # (`crates/logweir-core/tests/backup_receipt.rs`).
+    mod = _verifier_module()
+    base = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_3_with_topic_configuration.json").read_text())
+    assert mod.check_backup_receipt_invariants(base) == ""
+    arm15 = ('entries are recorded exactly when the configuration read succeeded ("captured", '
+             'or "notCaptured" with reason "manifestDiffers")')
+    arm17 = ('an entry is "secret" exactly when it carries no value, and otherwise "inherited" '
+             'exactly when its source is not "dynamicTopicConfig"')
+    arm18 = ('is not an owner this format defines: the kind is "strimzi" or "external", the '
+             'basis is "kafkaTopicResource" (for "strimzi" only) or "declared", and the '
+             'reference is 1 to 256 characters with no control character')
+    arm20 = ('is not a detection this format defines: it is present only beside '
+             'topic_configuration, and lists "declared" and "kafkaTopicResources" each at '
+             'most once')
+    arm21 = ('lists: a "declared" owner needs "declared", a "kafkaTopicResource" owner '
+             '"kafkaTopicResources"')
+
+    def drop_entries(d):
+        del d["topic_configuration"]["orders"]["entries"]
+
+    def differs(d):
+        d["config_coverage"]["orders"] = {"coverage": "notCaptured", "reason": "manifestDiffers"}
+        drop_entries(d)
+
+    def entry(key, **changes):
+        def apply(d):
+            e = d["topic_configuration"]["orders"]["entries"][key]
+            for k, v in changes.items():
+                if v is None:
+                    e.pop(k, None)
+                else:
+                    e[k] = v
+        return apply
+
+    def reference(value):
+        def apply(d):
+            d["topic_configuration"]["payments"]["owner"]["reference"] = value
+        return apply
+
+    def detection(value):
+        def apply(d):
+            if value is None:
+                d.pop("owner_detection", None)
+            else:
+                d["owner_detection"] = value
+        return apply
+
+    def zero_partitions(d):
+        d["topic_configuration"]["payments"]["partitions"] = 0
+
+    cases = [
+        (drop_entries, f'topic_configuration["orders"].entries absent does not fit its '
+                       f'config_coverage "captured": {arm15}'),
+        (differs, f'topic_configuration["orders"].entries absent does not fit its '
+                  f'config_coverage "notCaptured/manifestDiffers": {arm15}'),
+        (entry("cleanup.policy", source="DYNAMIC_TOPIC_CONFIG"),
+         'topic_configuration["orders"].entries["cleanup.policy"] source '
+         '"DYNAMIC_TOPIC_CONFIG" and portability "portable" are not a source and class '
+         'this format defines: the source is "dynamicTopicConfig", "dynamicBrokerConfig", '
+         '"dynamicDefaultBrokerConfig", "staticBrokerConfig", "defaultConfig" or "unknown", '
+         'and the class is "portable", "inherited", "removedInKafka4", "clusterBound", '
+         '"requiresTieredStorage", "providerOnly" or "secret"'),
+        (entry("cleanup.policy", value=None),
+         'topic_configuration["orders"].entries["cleanup.policy"] is "portable" from '
+         f'"dynamicTopicConfig" with no value: {arm17}'),
+        (entry("min.insync.replicas", portability="inherited"),
+         'topic_configuration["orders"].entries["min.insync.replicas"] is "inherited" from '
+         f'"dynamicTopicConfig" with a value: {arm17}'),
+        (reference("x" * 257), f'topic_configuration["payments"].owner "external" by "declared" {arm18}'),
+        (reference("a\u0007b"), f'topic_configuration["payments"].owner "external" by "declared" {arm18}'),
+        (reference(" \t "), f'topic_configuration["payments"].owner "external" by "declared" {arm18}'),
+        (zero_partitions, 'topic_configuration["payments"] records partitions 0 and '
+                          'replication_factor 1: a recorded count is at least 1'),
+        (detection(["declared", "labels"]), f'owner_detection ["declared", "labels"] {arm20}'),
+        (detection(["declared", "declared"]), f'owner_detection ["declared", "declared"] {arm20}'),
+        (detection(["declared"]),
+         'topic_configuration["orders"].owner by "kafkaTopicResource" names no source '
+         f'owner_detection ["declared"] {arm21}'),
+        (detection(["kafkaTopicResources"]),
+         'topic_configuration["payments"].owner by "declared" names no source '
+         f'owner_detection ["kafkaTopicResources"] {arm21}'),
+        (detection(None),
+         'topic_configuration["orders"].owner by "kafkaTopicResource" names no source '
+         f'owner_detection [] {arm21}'),
+    ]
+    for mutate, want in cases:
+        doc = json.loads(json.dumps(base))
+        mutate(doc)
+        assert mod.check_backup_receipt_invariants(doc) == want, want
+    # The boundary: 256 characters is a reference.
+    doc = json.loads(json.dumps(base))
+    reference("x" * 256)(doc)
+    assert mod.check_backup_receipt_invariants(doc) == ""
+    # Arm 20 beside no model: a 1.1.0 receipt claiming where it looked.
+    older = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_1_with_config_coverage.json").read_text())
+    older["owner_detection"] = []
+    assert mod.check_backup_receipt_invariants(older) == f"owner_detection [] {arm20}"
 
 
 def test_the_payload_type_resolver_accepts_every_short_name_and_media_type():

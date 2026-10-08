@@ -1365,7 +1365,7 @@ impl FrozenInputs {
                 bootstrap_servers: inputs.source.bootstrap_servers.clone(),
                 auth: inputs.source.auth.clone(),
                 topics: inputs.topics.clone(),
-                topic_owners: Vec::new(),
+                topic_owners: None,
             },
             storage: inputs.archive.storage.clone(),
             backup_id: inputs.execution.id.clone(),

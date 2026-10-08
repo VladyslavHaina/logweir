@@ -137,6 +137,9 @@ pub fn from_receipt(
             finished_at: receipt.finished_at,
         },
         topics,
+        // PROD-05.1: where the run looked for owners, copied — absent (NOT
+        // RECORDED) for a receipt that predates format 1.3.0.
+        owner_detection: receipt.owner_detection.clone(),
         source: RecordSource {
             cluster_id: receipt.source.cluster_id.clone(),
             bootstrap_servers: receipt.source.bootstrap_servers.clone(),

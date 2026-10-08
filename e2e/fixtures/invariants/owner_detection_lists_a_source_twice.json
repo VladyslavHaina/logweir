@@ -98,7 +98,7 @@
     }
   },
   "owner_detection": [
-    "declared",
+    "kafkaTopicResources",
     "kafkaTopicResources"
   ]
 }

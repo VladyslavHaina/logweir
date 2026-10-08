@@ -260,6 +260,8 @@ PYEOF
 receipt_count=0
 receipt_tb_cases=0
 receipt_model_cases=0
+receipt_unchecked_cases=0
+receipt_admin_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
     receipt_count=$((receipt_count + 1))
@@ -382,6 +384,36 @@ $want_tc
 $rust_tc"
         fi
         [ "$want_tc" = "topic_configuration: not recorded" ] || receipt_model_cases=$((receipt_model_cases + 1))
+        # PROD-05.1 fix round (M2): HOW each topic is applied, derived from the
+        # DOCUMENT — an owned topic by desired-state export, an un-owned one
+        # through the admin API ONLY where `owner_detection` says the run
+        # looked, and otherwise "owner not checked". A reader that printed the
+        # admin-API route for an owner nobody looked for fails here, not only
+        # when the two readers happen to disagree.
+        want_route="$("$PY" -c 'import json, sys
+doc = json.load(open(sys.argv[1]))
+model = doc.get("topic_configuration")
+looked = doc.get("owner_detection") or []
+for t in sorted(model or {}):
+    if (model[t] or {}).get("owner") is not None:
+        print(json.dumps(t) + " desired-state export")
+    elif looked:
+        print(json.dumps(t) + " no declarative owner found (" + ", ".join(looked) + "), so applied through the admin API")
+    else:
+        print(json.dumps(t) + " owner not checked, so how it is applied is not known")' "$doc")"
+        got_route="$(printf '%s\n' "$rust_tc" | sed -n \
+            -e 's/^topic_configuration\[\(".*"\)\]:.*, so restored by \(desired-state export\)$/\1 \2/p' \
+            -e 's/^topic_configuration\[\(".*"\)\]:.*, \(no declarative owner found (.*), so applied through the admin API\)$/\1 \2/p' \
+            -e 's/^topic_configuration\[\(".*"\)\]:.*, \(owner not checked, so how it is applied is not known\)$/\1 \2/p')"
+        if [ "$got_route" != "$want_route" ]; then
+            fail "$name: the topic configuration lines do not say how each topic is applied as its owner and owner_detection decide.
+  want:
+$want_route
+  got:
+$rust_tc"
+        fi
+        case "$want_route" in *"owner not checked"*) receipt_unchecked_cases=$((receipt_unchecked_cases + 1)) ;; esac
+        case "$want_route" in *"applied through the admin API"*) receipt_admin_cases=$((receipt_admin_cases + 1)) ;; esac
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -395,6 +427,9 @@ if [ "$receipt_tb_cases" -eq 0 ]; then
 fi
 if [ "$receipt_model_cases" -eq 0 ]; then
     fail "no accepted backup-receipt case carries topic_configuration, so the model lines (PROD-05.1) were never compared"
+fi
+if [ "$receipt_unchecked_cases" -eq 0 ] || [ "$receipt_admin_cases" -eq 0 ]; then
+    fail "the accepted backup-receipt cases do not include both an owner NOT CHECKED ($receipt_unchecked_cases) and one looked for and not found ($receipt_admin_cases), so the route words (PROD-05.1 M2) were never told apart"
 fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
 
@@ -635,6 +670,7 @@ modelled["topics"][0]["configuration"] = {
     "owner": {"kind": "strimzi", "basis": "kafkaTopicResource", "reference": "kafka/orders"},
 }
 modelled["topics"][0]["config_coverage"] = {"coverage": "captured"}
+modelled["owner_detection"] = ["kafkaTopicResources"]
 modelled_payload = json.dumps(modelled, indent=2).encode() + b"\n"
 (out / "modelled.json").write_bytes(modelled_payload)
 (out / "modelled.sig").write_text(sign(modelled_payload))

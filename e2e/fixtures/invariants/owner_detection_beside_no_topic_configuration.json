@@ -1,5 +1,5 @@
 {
-  "format_version": "1.3.0",
+  "format_version": "1.1.0",
   "run_id": "01J8Z9QK7V6M3F2R5T8W1XB0CD",
   "backup_id": "logweir-backup-01J8Z9QK7V",
   "requested_at": "2026-09-09T11:02:14Z",
@@ -51,54 +51,5 @@
       "coverage": "captureDenied"
     }
   },
-  "topic_configuration": {
-    "orders": {
-      "partitions": 6,
-      "replication_factor": 3,
-      "entries": {
-        "cleanup.policy": {
-          "value": "compact",
-          "source": "dynamicTopicConfig",
-          "portability": "portable"
-        },
-        "message.format.version": {
-          "value": "3.0-IV1",
-          "source": "dynamicTopicConfig",
-          "portability": "removedInKafka4"
-        },
-        "min.insync.replicas": {
-          "value": "2",
-          "source": "dynamicTopicConfig",
-          "portability": "portable"
-        },
-        "retention.ms": {
-          "value": "604800000",
-          "source": "defaultConfig",
-          "portability": "inherited"
-        },
-        "vendor.token": {
-          "source": "dynamicTopicConfig",
-          "portability": "secret"
-        }
-      },
-      "owner": {
-        "kind": "strimzi",
-        "basis": "kafkaTopicResource",
-        "reference": "kafka/orders"
-      }
-    },
-    "payments": {
-      "partitions": 1,
-      "replication_factor": 1,
-      "owner": {
-        "kind": "external",
-        "basis": "declared",
-        "reference": "terraform: kafka_topic.payments"
-      }
-    }
-  },
-  "owner_detection": [
-    "declared",
-    "kafkaTopicResources"
-  ]
+  "owner_detection": []
 }

@@ -93,7 +93,7 @@
       "owner": {
         "kind": "external",
         "basis": "declared",
-        "reference": "terraform: kafka_topic.payments"
+        "reference": "terraform:\u0007payments"
       }
     }
   },

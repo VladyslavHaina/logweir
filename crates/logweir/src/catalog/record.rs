@@ -177,6 +177,18 @@ pub struct CatalogPoint {
     pub capture: RecordCapture,
     /// One entry per topic the receipt names, in the receipt's own order.
     pub topics: Vec<RecordTopic>,
+    /// **Format 1.3.0 (PROD-05.1).** The receipt's `owner_detection`, copied
+    /// and never recomputed: where the run looked for declarative owners
+    /// (`declared`, `kafkaTopicResources`). It is what lets a reader tell a
+    /// topic with no owner found from one whose owner was never looked for:
+    /// a topic without an owner beside an EMPTY list reads "owner not
+    /// checked", never "applied through the admin API".
+    ///
+    /// Receipt-derived under rule 3 — `reader::cross_check` refuses a record
+    /// whose copy the receipt does not back. ABSENT means NOT RECORDED (rule
+    /// 2): every record before 1.3.0. Never read as "looked everywhere".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_detection: Option<Vec<String>>,
     pub source: RecordSource,
     /// ABSENT means the provenance is UNKNOWN — an archive imported from
     /// another installation, or a run this build could not identify. Never

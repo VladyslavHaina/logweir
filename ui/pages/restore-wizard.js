@@ -2970,15 +2970,19 @@ export function replicationMayDiffer(choice) {
  *  all when the page knows no topic layout for the point ([`sourceFactsWhy`]
  *  says why). `replicationDefault` takes the largest.
  *
- *  WHERE IT COMES FROM. The backup engine records the factor per topic in the
- *  archive manifest (`topics[].source_replication_factor`, the replica count of
- *  partition 0). Since PROD-05.1 the backup receipt projects it into
- *  `topic_configuration`, the catalog point record copies it, the catalog's
- *  sync lists it for an `Available` point whose record agreed with its verified
- *  receipt, and the product API publishes it as `PointView.topics[]`. A
- *  catalog point carries its row; a Backup's point is looked up by its
- *  receipt's digest ([`refreshSourceFacts`]). A topic discovery of the source
- *  is NOT a substitute: it lists the cluster as it is now, not the point. */
+ *  WHERE IT COMES FROM. Since PROD-05.1 the backup run reads the factor from
+ *  the source cluster's metadata before the engine starts (the smallest
+ *  replica count of the topic's partitions) and records it in the receipt's
+ *  `topic_configuration`. Only where that read named none does it fall back
+ *  to the archive manifest's `source_replication_factor`. When the read was
+ *  unavailable, a topic the manifest records no factor for has none, and this
+ *  function returns `null` for it. The catalog point record copies it, the
+ *  catalog's sync lists it for an `Available` point whose record agreed with
+ *  its verified receipt, and the product API publishes it as
+ *  `PointView.topics[]`. A catalog point carries its row; a Backup's point
+ *  is looked up by its receipt's digest ([`refreshSourceFacts`]). A topic
+ *  discovery of the source is NOT a substitute: it lists the cluster as it is
+ *  now, not the point. */
 export function sourceReplicationFactorsOf(state) {
   const facts = sourceFactsOf(state);
   if (!Array.isArray(facts.topics)) {

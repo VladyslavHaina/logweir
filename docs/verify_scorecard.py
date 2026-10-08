@@ -548,6 +548,16 @@ PORTABILITY_CLASSES = (
     "secret",
 )
 
+# PROD-05.1: `BackupReceipt::owner_detection`'s closed set (arm 20), in
+# `logweir_core::topic_configuration::OWNER_DETECTION_SOURCES`'s order — WHERE
+# the run looked for declarative owners — and the source each owner basis
+# needs (arm 21, `detection_for_basis`).
+RECEIPT_OWNER_DETECTION_SOURCES = ("declared", "kafkaTopicResources")
+RECEIPT_OWNER_DETECTION_FOR_BASIS = {
+    "declared": "declared",
+    "kafkaTopicResource": "kafkaTopicResources",
+}
+
 # `TopicConfigCoverage`/`ConfigEntry` source's closed set (arms 11 and 16).
 RECEIPT_CONFIG_SOURCES = (
     "dynamicTopicConfig",
@@ -2040,6 +2050,13 @@ def _receipt_shape(doc) -> str:
                 for name in ("kind", "basis", "reference"):
                     if not isinstance(owner.get(name), str):
                         return f"{where}.owner.{name} is not a string"
+    # PROD-05.1: `owner_detection` is `Option<Vec<String>>`, refused at
+    # deserialisation when it is anything else.
+    detection = doc.get("owner_detection")
+    if detection is not None and (
+        not isinstance(detection, list) or not all(isinstance(d, str) for d in detection)
+    ):
+        return "owner_detection is not a list of strings"
     return ""
 
 
@@ -2360,7 +2377,47 @@ def check_backup_receipt_invariants(doc) -> str:
                     f"and replication_factor {shown_f}: a recorded count is at least 1"
                 )
 
+    # ARM 20 (format 1.3.0, PROD-05.1). Where the run looked for owners: only
+    # beside the model it qualifies, from the closed set, each source at most
+    # once.
+    detection = doc.get("owner_detection")
+    if detection is not None:
+        seen = set()
+        fits = model is not None
+        for d in detection:
+            if not fits:
+                break
+            fits = d in RECEIPT_OWNER_DETECTION_SOURCES and d not in seen
+            seen.add(d)
+        if not fits:
+            return (
+                f"owner_detection {_rust_debug_str_list(detection)} is not a detection this "
+                "format defines: it is present only beside topic_configuration, and lists "
+                "\"declared\" and \"kafkaTopicResources\" each at most once"
+            )
+    # ARM 21. An owner is recorded only from a source the run looked in. An
+    # absent detection is an empty one.
+    if model is not None:
+        looked = detection if detection is not None else []
+        for topic in sorted(model):
+            owner = model[topic].get("owner")
+            if owner is None:
+                continue
+            source = RECEIPT_OWNER_DETECTION_FOR_BASIS.get(owner["basis"])
+            if source is None or source not in looked:
+                return (
+                    f"topic_configuration[{_rust_debug_str(topic)}].owner by "
+                    f"{_rust_debug_str(owner['basis'])} names no source owner_detection "
+                    f"{_rust_debug_str_list(looked)} lists: a \"declared\" owner needs "
+                    "\"declared\", a \"kafkaTopicResource\" owner \"kafkaTopicResources\""
+                )
+
     return ""
+
+
+def _rust_debug_str_list(items):
+    """A `Vec<String>` as Rust's `{:?}` renders it: `["a", "b"]`, `[]`."""
+    return "[" + ", ".join(_rust_debug_str(i) for i in items) + "]"
 
 
 def _coverage_lines(block):
@@ -2387,11 +2444,16 @@ def _coverage_lines(block):
     return lines
 
 
-def _topic_configuration_lines(block):
+def _topic_configuration_lines(block, detection=None):
     """The receipt's `topic_configuration`, one line per topic in NAME order,
     or the line that says it is absent — the twin of `crates/logweir/src/
     verify.rs::topic_configuration_lines`, in the same words (PROD-05.1).
-    Counts and classes, never a configuration value."""
+    Counts and classes, never a configuration value.
+
+    `detection` is the receipt's `owner_detection` (absent reads as empty): a
+    topic without an owner is applied through the admin API only where the
+    run looked for one, and otherwise its owner was not checked."""
+    looked = detection if detection is not None else []
     if block is None:
         return [
             "topic_configuration: not recorded, so no topic's partition count, replication "
@@ -2417,8 +2479,13 @@ def _topic_configuration_lines(block):
             if by_class:
                 said += f" ({', '.join(by_class)})"
         owner = model.get("owner")
-        if owner is None:
-            route = "applied through the admin API"
+        if owner is None and not looked:
+            route = "owner not checked, so how it is applied is not known"
+        elif owner is None:
+            route = (
+                f"no declarative owner found ({', '.join(looked)}), so applied through the "
+                "admin API"
+            )
         else:
             route = (
                 f"owned by {owner['kind']} ({owner['basis']} "
@@ -2898,7 +2965,9 @@ def main(
         # PROD-05.1: the configuration model, one line per topic, in the same
         # words `logweir drill verify` prints (`verify.rs::
         # topic_configuration_lines`); the parity script compares them.
-        for line in _topic_configuration_lines(doc.get("topic_configuration")):
+        for line in _topic_configuration_lines(
+            doc.get("topic_configuration"), doc.get("owner_detection")
+        ):
             print(f"       {line}")
         print(
             "       This signature covers the receipt only. It says what THIS run "
@@ -2916,7 +2985,9 @@ def main(
             "and topic_configuration's eight: present only from 1.3.0 and beside "
             "config_coverage, covering exactly the named topic set, entries exactly where the "
             "read succeeded, closed source and class sets, secret and inherited where they "
-            "fit, a closed owner with a usable reference, and counts of at least one)"
+            "fit, a closed owner with a usable reference, and counts of at least one, "
+            "and owner_detection's two: a closed set present only beside "
+            "topic_configuration, and an owner only from a source it lists)"
         )
         return 0
 

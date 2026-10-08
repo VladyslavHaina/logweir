@@ -263,6 +263,7 @@ pub fn cross_check(
     }
     disagreements.extend(unbacked_coverage(point, receipt));
     disagreements.extend(unbacked_configuration(point, receipt));
+    disagreements.extend(unbacked_owner_detection(point, receipt));
     if disagreements.is_empty() {
         CrossCheck::Agrees
     } else {
@@ -348,6 +349,23 @@ fn unbacked_configuration(point: &CatalogPoint, receipt: &BackupReceipt) -> Vec<
     out
 }
 
+/// **PROD-05.1, rule 3 for `owner_detection`.** The same one-way rule: a
+/// record may carry none (an older writer), never a list its receipt does
+/// not. A record that claims the run looked for owners it never looked for
+/// would turn "owner not checked" into "applied through the admin API".
+fn unbacked_owner_detection(point: &CatalogPoint, receipt: &BackupReceipt) -> Option<String> {
+    let claimed = point.owner_detection.as_ref()?;
+    (receipt.owner_detection.as_ref() != Some(claimed)).then(|| {
+        format!(
+            "owner_detection: {claimed:?} vs {}",
+            receipt
+                .owner_detection
+                .as_ref()
+                .map_or_else(|| "none in the receipt".to_string(), |d| format!("{d:?}"))
+        )
+    })
+}
+
 /// A model entry in one short phrase, for a disagreement line: counts, the
 /// number of entries, the owner. Never a configuration VALUE: a mismatch line
 /// is logged, and a value is the adopter's data.
@@ -388,6 +406,11 @@ fn configuration_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
             if pa != pb {
                 out.push(format!("topics[{:?}].partitions: {pa} vs {pb}", ta.name));
             }
+        }
+    }
+    if let (Some(da), Some(db)) = (a.owner_detection.as_ref(), b.owner_detection.as_ref()) {
+        if da != db {
+            out.push(format!("owner_detection: {da:?} vs {db:?}"));
         }
     }
     out

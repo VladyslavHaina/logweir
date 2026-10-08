@@ -55,32 +55,6 @@
     "orders": {
       "partitions": 6,
       "replication_factor": 3,
-      "entries": {
-        "cleanup.policy": {
-          "value": "compact",
-          "source": "dynamicTopicConfig",
-          "portability": "portable"
-        },
-        "message.format.version": {
-          "value": "3.0-IV1",
-          "source": "dynamicTopicConfig",
-          "portability": "removedInKafka4"
-        },
-        "min.insync.replicas": {
-          "value": "2",
-          "source": "dynamicTopicConfig",
-          "portability": "portable"
-        },
-        "retention.ms": {
-          "value": "604800000",
-          "source": "defaultConfig",
-          "portability": "inherited"
-        },
-        "vendor.token": {
-          "source": "dynamicTopicConfig",
-          "portability": "secret"
-        }
-      },
       "owner": {
         "kind": "strimzi",
         "basis": "kafkaTopicResource",

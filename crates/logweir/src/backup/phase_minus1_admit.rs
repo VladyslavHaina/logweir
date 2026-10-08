@@ -115,17 +115,17 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
     //     refused here, exit 3, rather than recording an owner the receipt's
     //     arm 18 would refuse after the archive exists, or silently dropping
     //     a declaration that would have routed a restore to desired-state
-    //     export.
-    for owner in &spec.source.topic_owners {
-        if let Some(why) =
-            logweir_core::topic_configuration::refuse_declared(owner, &spec.source.topics)
-        {
-            return Err(GuardRefusal(format!(
-                "{why}; a declared owner routes the topic's restore to a desired-state export, \
-                 so a declaration this build cannot record is refused rather than dropped"
-            ))
-            .into());
-        }
+    //     export. A topic declared twice is refused too: which of the two
+    //     the receipt would carry is not the operator's to guess.
+    if let Some(why) = logweir_core::topic_configuration::refuse_declarations(
+        spec.source.topic_owners.as_deref().unwrap_or(&[]),
+        &spec.source.topics,
+    ) {
+        return Err(GuardRefusal(format!(
+            "{why}; a declared owner routes the topic's restore to a desired-state export, \
+             so a declaration this build cannot record is refused rather than dropped"
+        ))
+        .into());
     }
 
     // 4. Interface **I6**'s refusal, LAST among the local checks.

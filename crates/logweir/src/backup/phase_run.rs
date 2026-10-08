@@ -649,6 +649,10 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         // model — a receipt never leaves it to be read as NOT RECORDED by
         // omission when it was observed.
         topic_configuration: Some(outcome.topic_configuration.clone()),
+        // PROD-05.1: where the run looked for owners — written beside the
+        // model, so a topic without an owner reads "not checked" when it is
+        // empty and never "applied through the admin API".
+        owner_detection: Some(outcome.owner_detection.clone()),
     }
 }
 

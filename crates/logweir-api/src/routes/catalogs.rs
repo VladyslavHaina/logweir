@@ -393,10 +393,17 @@ pub struct PointLocationView {
 pub struct PointTopicView {
     /// The source topic's name.
     pub name: String,
-    /// The source's partition count, as the archive records it.
+    /// The source's partition count, as the archive's manifest records it
+    /// (the receipt's `topic_configuration[<name>].partitions`). Absent when
+    /// the manifest records none, or the point predates the configuration
+    /// model: unknown, never zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partitions: Option<u32>,
-    /// The source's replication factor, as the archive records it. The
+    /// The source's replication factor, as the backup run read it from the
+    /// source cluster's metadata: the smallest replica count among the
+    /// topic's partitions. When that read was unavailable the run warned and
+    /// recorded the archive manifest's value where the manifest carries one;
+    /// otherwise the factor is absent — unknown, never a default. The
     /// console's restore wizard defaults a plan's factor from it, capped by
     /// the target's broker count.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -410,10 +417,15 @@ pub struct PointTopicView {
     /// the topic's configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// `adminApi`, or `desiredStateExport` for a topic a declarative owner
-    /// manages: a restore exports its desired state for the owner to apply
-    /// instead of changing it through Kafka's admin API, which the owner would
-    /// revert.
+    /// How the topic's configuration reaches a target
+    /// (`logweir_core::topic_configuration::apply_route`):
+    /// `desiredStateExport` for a topic a declarative owner manages — a
+    /// restore exports its desired state for the owner to apply instead of
+    /// changing it through Kafka's admin API, which the owner would revert;
+    /// `adminApi` for a topic with no owner where the backup run looked for
+    /// one (the point's `ownerDetection` is not empty); and `unknown` where
+    /// it did not look, or the view does not say where it looked. An owner
+    /// nobody checked for is never published as the admin-API route.
     pub apply_route: String,
 }
 
@@ -506,6 +518,13 @@ pub struct PointView {
     /// never takes a partial list for the point's topic set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topics_omitted: Option<u32>,
+    /// **PROD-05.1.** Where the backup run looked for declarative owners,
+    /// beside `topics`: `declared` (the plan's `source.topic_owners`) and
+    /// `kafkaTopicResources` (Strimzi `KafkaTopic` resources). EMPTY says it
+    /// looked nowhere, so every un-owned topic's `applyRoute` is `unknown`.
+    /// ABSENT is NOT PUBLISHED.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_detection: Option<Vec<String>>,
 }
 
 /// The longest topic name Kafka accepts.
@@ -557,15 +576,23 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
                 replication_factor: t.replication_factor,
                 config_coverage: t.config_coverage.as_deref().map(|c| bounded(c, 32)),
                 owner: t.owner.as_deref().map(|o| bounded(o, 32)),
-                apply_route: if t.owner.is_some() {
-                    "desiredStateExport"
-                } else {
-                    "adminApi"
-                }
+                // ONE rule, the core's: an owner the run never looked for is
+                // `unknown`, never `adminApi` (fix round, M2).
+                apply_route: logweir_core::topic_configuration::apply_route(
+                    t.owner.is_some(),
+                    entry
+                        .owner_detection
+                        .as_ref()
+                        .is_some_and(|d| !d.is_empty()),
+                )
                 .to_string(),
             })
             .collect(),
         topics_omitted: entry.topics_omitted,
+        owner_detection: entry
+            .owner_detection
+            .as_ref()
+            .map(|d| d.iter().take(2).map(|w| bounded(w, 32)).collect()),
     }
 }
 

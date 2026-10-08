@@ -88,6 +88,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
         },
         config_coverage: None,
         topic_configuration: None,
+        owner_detection: None,
     }
 }
 
@@ -2206,6 +2207,9 @@ fn receipt_1_3() -> BackupReceipt {
             }),
         },
     )]));
+    // The run read the `KafkaTopic` resources (arm 21: the owner's basis
+    // names a source this list carries).
+    r.owner_detection = Some(vec!["kafkaTopicResources".into()]);
     assert_eq!(r.validate_invariants(), Ok(()));
     r
 }
@@ -2234,13 +2238,20 @@ fn a_1_3_0_record_copies_the_receipts_configuration_and_partitions() {
         point_for(&pinned, "s3://kafka-backups/prod", &key).format_version,
         "1.3.0"
     );
+    assert_eq!(
+        p.owner_detection,
+        Some(vec!["kafkaTopicResources".to_string()])
+    );
     let older = point_for(&receipt_1_1("captured"), "s3://kafka-backups/prod", &key);
     assert_eq!(older.format_version, "1.1.0");
     assert_eq!(older.topics[0].partitions, None);
     assert_eq!(older.topics[0].configuration, None);
+    assert_eq!(older.owner_detection, None);
     let text = String::from_utf8(older.canonical_bytes().unwrap()).unwrap();
     assert!(
-        !text.contains("\"configuration\"") && !text.contains("\"partitions\""),
+        !text.contains("\"configuration\"")
+            && !text.contains("\"partitions\"")
+            && !text.contains("\"owner_detection\""),
         "{text}"
     );
     assert_eq!(CatalogLogEntry::of(&p).format_version, "1.0.0");
@@ -2302,10 +2313,31 @@ fn a_record_claiming_a_configuration_its_receipt_does_not_back_is_a_record_misma
         }
         other => panic!("a model the receipt cannot hold must not agree: {other:?}"),
     }
+    // M2 (fix round): a record that claims the run looked for owners it did
+    // not look for would turn "owner not checked" into "applied through the
+    // admin API" — refused, against a 1.3.0 receipt and against an older one.
+    let mut widened = honest.clone();
+    widened.owner_detection = Some(vec!["declared".into(), "kafkaTopicResources".into()]);
+    mismatch(&widened, &r, "owner_detection");
+    let mut emptied = honest.clone();
+    emptied.owner_detection = Some(Vec::new());
+    mismatch(&emptied, &r, "owner_detection");
+    let mut claimed = point_for(&old, "s3://kafka-backups/prod", &key);
+    claimed.owner_detection = Some(vec!["declared".into()]);
+    match reader::cross_check(&claimed, &old, &receipt_bytes(&old)) {
+        CrossCheck::RecordMismatch(d) => {
+            assert_eq!(
+                d,
+                vec!["owner_detection: [\"declared\"] vs none in the receipt".to_string()]
+            );
+        }
+        other => panic!("a detection the receipt cannot hold must not agree: {other:?}"),
+    }
     // Knowing less is not a contradiction.
     let mut quieter = honest.clone();
     quieter.topics[0].configuration = None;
     quieter.topics[0].partitions = None;
+    quieter.owner_detection = None;
     assert_eq!(
         reader::cross_check(&quieter, &r, &bytes),
         CrossCheck::Agrees
@@ -2326,6 +2358,7 @@ fn two_records_conflict_on_configuration_only_where_both_carry_it() {
     let mut b = point_for(&r, "s3://dr-copy/prod", &key);
     b.topics[0].configuration = None;
     b.topics[0].partitions = None;
+    b.owner_detection = None;
     assert!(matches!(
         reader::reconcile(&a, &b),
         Duplicate::SameIdentity { .. }
@@ -2352,5 +2385,16 @@ fn two_records_conflict_on_configuration_only_where_both_carry_it() {
             );
         }
         other => panic!("two copies disagreeing on the model are a conflict: {other:?}"),
+    }
+    // M2 (fix round): and on where the run looked for owners.
+    let mut d = a.clone();
+    d.archive.location_id = "s3://dr-copy/prod".into();
+    d.owner_detection = Some(Vec::new());
+    match reader::reconcile(&a, &d) {
+        Duplicate::Conflict(found) => assert_eq!(
+            found,
+            vec!["owner_detection: [\"kafkaTopicResources\"] vs []".to_string()]
+        ),
+        other => panic!("two copies disagreeing on owner detection are a conflict: {other:?}"),
     }
 }
