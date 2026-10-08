@@ -1142,6 +1142,55 @@ fn a_new_topic_run_signs_its_lost_source_settings_as_not_reconstructed() {
     }
 }
 
+/// **FX-3 review F2 (and FX-4's twin): a scorecard signed BEFORE phase 7
+/// records neither parity claim.** `topic_parity.not_reconstructed` and
+/// `topic_parity.not_assessed` are written by phase 7 alone; `[]` in either is
+/// the claim "compared, and nothing left unreconstructed / unassessed". A run
+/// that stops at phase 5 (a blocked preflight) or phase 6 (a restore that
+/// wrote nothing) signs both ABSENT, in both modes, so no reader reads a
+/// comparison that never ran.
+///
+/// Negative control: `new_scorecard` drafting `not_reconstructed:
+/// Some(Vec::new())` (the review's surviving mutant R6), or `not_assessed:
+/// Some(Vec::new())`, signs the key and this test fails.
+#[test]
+fn a_scorecard_signed_before_phase_7_records_neither_parity_claim() {
+    for drill in [Drill::BlocksAtPreflight, Drill::RestoresNothing] {
+        for mode in [
+            logweir_core::spec::TargetMode::Scratch,
+            logweir_core::spec::TargetMode::NewTopic,
+        ] {
+            let mut f = fixtures::orchestrator_fixture(drill);
+            f.ctx.spec.target.mode = mode;
+            if mode == logweir_core::spec::TargetMode::NewTopic {
+                f.ctx.spec.target.topic_naming = Some(logweir_core::spec::TopicNaming {
+                    prefix: "drill-".into(),
+                });
+            }
+            let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
+                logweir::drill::DrillError::NotPass(sc, _) => sc,
+                other => panic!("{drill:?} / {mode:?}: expected a signed NotPass, got {other:?}"),
+            };
+            assert!(
+                !sc.phases.iter().any(|p| p.phase == 7),
+                "{drill:?} / {mode:?}: phase 7 must not have run"
+            );
+            let signed: serde_json::Value =
+                serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+            let parity = signed["topic_parity"]
+                .as_object()
+                .expect("the signed document carries topic_parity");
+            for claim in ["not_reconstructed", "not_assessed"] {
+                assert!(
+                    !parity.contains_key(claim),
+                    "{drill:?} / {mode:?}: a scorecard signed before phase 7 must not record \
+                     topic_parity.{claim}: {parity:?}"
+                );
+            }
+        }
+    }
+}
+
 /// Phase 9's call site, its policy and its binding. The attestation is bound
 /// to the SIGNED BYTES, not to the run id a second time.
 #[test]
