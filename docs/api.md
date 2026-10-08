@@ -1397,6 +1397,18 @@ Mutation bodies are strict: an unknown field is `422 validation_failed` naming
 the field, not a silently ignored key. So is an unknown or repeated query
 parameter (`400 malformed_request`). Bodies are capped at 1 MiB.
 
+**The listener speaks HTTP/1.1 only, and every connection is on a clock.**
+A connection has ten seconds from the moment it is accepted to send a complete
+request head, and ten seconds again after each answer on a keep-alive
+connection; past that the server closes it, whether it sent part of a head or
+nothing at all (R4; FX-24 extended it to a connection that sends no byte). A
+head larger than 32 KiB is refused. At most 256 connections are served at
+once, and further ones wait in the kernel's listen queue until one closes, so
+idle sockets cannot hold that ceiling for longer than the ten-second deadline.
+HTTP/2 is not served: a client that opens with the HTTP/2 preface (prior
+knowledge, `h2c`) is closed at its first line. A shutdown signal gives open
+connections ten seconds to finish, then drops them and exits 0.
+
 **`errors[].field` is a path and nothing else** — `topics[2]`,
 `scheduleRef.name`, `access.archiveWrite.mode`, or a header or query-parameter
 name. It never carries a parenthetical or any other note a client would have to
@@ -2007,7 +2019,7 @@ naming the field.
 |---|---|
 | immutable, content-addressed `ConfigMap` holding `config.yaml` | `api.console.enabled` |
 | `Deployment` `<release>-api` | `api.console.enabled` |
-| ClusterIP `Service` `<release>-api` | `api.console.mode: shared` — **only**. The in-cluster administrator mode binds loopback, so a Service there would advertise a ready endpoint and refuse every connection |
+| ClusterIP `Service` `<release>-api` | `api.console.mode: shared` — **only**. The in-cluster administrator mode binds loopback, so a Service there would advertise a ready endpoint and refuse every connection. It speaks plain HTTP/1.1, every ingress controller's default for an HTTP backend; a controller configured to dial it with HTTP/2 (an `h2c` or gRPC backend) is refused (FX-24) |
 | `PodDisruptionBudget` | `api.console.replicas` > 1 |
 | `Ingress` | `api.console.ingress.enabled` — shared mode only, TLS required, host must be `publicBaseUrl`'s authority |
 | `NetworkPolicy` | `api.console.networkPolicy.enabled` — an allow rule for the configured ingress controller in shared mode, `ingress: []` (deny) in the administrator mode |

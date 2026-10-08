@@ -27,7 +27,8 @@ binding), 34 (FX-16, a point-bound restore restores its point's set), 35
 (PROD-00.2, the engine built from the vendored source), 36 (FX-23, an
 early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
 one crate that may hold `unsafe` code, and the consumer-group and ACL reads
-behind it) and 38 (FX-20, the binding for every other credential reference)
+behind it), 38 (FX-20, the binding for every other credential reference)
+and 39 (FX-24, a silent connection meets the console's header deadline)
 so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
@@ -73,6 +74,10 @@ object to MinIO; a bound one backs up); it changes the controller, every
 runner, the retention worker, the product API, the console and three CRDs'
 status, and the PoC upgrade that carries it binds the `primary` destination's
 Secrets and runs the refusal rows against a sentinel.
+Item 39 is fix-now row FX-24, proven by rows on the built console binary and
+live on the host in localAdmin mode; it changes the console only, and the PoC
+upgrade that carries it repeats the silent-socket probe against the shared-mode
+console.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -834,6 +839,44 @@ the new status fields; bound Secrets keep working with them. An older console
 offers `existing` again, which this API refuses — roll the console with the
 controller.
 
+#### 39. A connection that sends nothing is closed at the console's header deadline; the console speaks HTTP/1.1 only (FX-24)
+
+**Changed.** `logweir-api` (the console) closed a connection that sent part of
+a request head at its ten-second header deadline (R4), but never timed out a
+connection that sent no byte at all: the listener first read the leading bytes
+to choose HTTP/1 or HTTP/2, with no timer, and the deadline began only after
+them. 256 silent sockets, the console's connection ceiling, therefore held every
+connection slot for as long as their client liked, and the console answered
+nobody; in shared mode anything that can reach the pod could do it. The console
+now serves HTTP/1.1 only, and the deadline starts when a connection is
+accepted: a silent socket is closed at ten seconds like a partial one, and its
+slot is free again. A client that opens with the HTTP/2 preface (prior
+knowledge, `h2c`) is closed at its first line instead of being served HTTP/2,
+which had no header deadline either. Browsers, an ingress controller dialling
+an HTTP backend and kubelet probes all speak HTTP/1.1 to the console, and
+nothing Logweir ships spoke HTTP/2 to it.
+**Do:** nothing, unless an ingress controller was configured to dial the
+console's Service with HTTP/2 (an `h2c` or gRPC backend, never the chart's
+setting): return it to HTTP/1.1, or the console is unreachable through it
+([api.md](api.md#conventions)).
+**Scope:** rows on the built binary (`crates/logweir-api/tests/local_admin.rs`):
+a silent connection is closed no sooner than ten seconds and within 25 s, while
+one opened beside it that sends a complete request after three seconds is
+answered; 256 silent connections hold a queued request and then the deadline
+releases it, every silent socket closed by the server; an HTTP/2 preface is
+closed at once; the R4 partial-head row is unchanged. Seven mutants are each
+killed: the deadline removed two ways, raised to 300 s, started only once the
+first byte is readable, the old version sniff restored, cut to one second (the
+three-second client fails), and the controller's health listener without its
+deadline. Live, the built binary on the host in localAdmin mode: a silent
+socket closed at 10.0 s (still open at 16 s before), and a request behind 256
+silent sockets answered at 10.0 s (unanswered at 25 s before). The
+controller's in-pod health listener already dropped a silent connection at its
+two-second deadline; a row now pins that. The shared-mode console's probe runs
+at the PoC upgrade that carries this item.
+**Rollback:** an older console serves HTTP/2 prior knowledge again and leaves a
+silent connection open; nothing is stored, so nothing needs converting.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -895,7 +938,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37 and 38, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38 and 39, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -910,7 +953,9 @@ needs nothing; item 37 changes no behaviour any binary shows (it adds
 library calls no command uses yet) and needs nothing; item 38 changes the
 controller, every runner, the retention worker, the product API, the
 console and the status of three CRDs, and needs each destination,
-retention, notification and inline-archive credential Secret bound. To roll back to
+retention, notification and inline-archive credential Secret bound; item 39
+changes the console only and needs nothing unless an ingress dials the
+console with HTTP/2. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
