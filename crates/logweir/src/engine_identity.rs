@@ -38,7 +38,7 @@ pub const DIGEST_ENV: &str = "LOGWEIR_ENGINE_DIGEST";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineIdentity {
     /// `engine.version`: the token `kafka-backup --version` prints, e.g.
-    /// `0.23.3+logweir.1` for Logweir's build or `0.23.3` for OSO's release.
+    /// `0.23.3+logweir.2` for Logweir's build or `0.23.3` for OSO's release.
     pub version: String,
     /// `engine.digest`: `sha256:<hex>`, Logweir's build-input digest or the
     /// digest of OSO's image the binary came from.

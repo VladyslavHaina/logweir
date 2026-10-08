@@ -217,7 +217,9 @@ pub fn verification_lines(v: Option<&logweir_core::scorecard::Verification>) -> 
 }
 
 /// The configuration-parity line both readers print for a scorecard (FX-4),
-/// or `None` when every topic was assessed. `docs/verify_scorecard.py` prints
+/// or `None` when every topic was assessed. It names every `not_assessed`
+/// entry as written, FX-21's `replication_factor (notRecorded)` and
+/// `partition_count (notRecorded)` included. `docs/verify_scorecard.py` prints
 /// the same sentence from the same three cases, and
 /// `scripts/check-verifier-parity.sh` compares the two.
 #[must_use]

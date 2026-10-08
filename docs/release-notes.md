@@ -23,8 +23,10 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
 key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
 32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the credential
-binding), 34 (FX-16, a point-bound restore restores its point's set) and 35
-(PROD-00.2, the engine built from the vendored source) so far. Items continue the next entry's
+binding), 34 (FX-16, a point-bound restore restores its point's set), 35
+(PROD-00.2, the engine built from the vendored source) and 36 (FX-21, a
+replication factor the archive does not record is never read as matching; the
+engine's first patch) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -59,6 +61,11 @@ Item 35 is PROD-00.2 (owner decision OD-3), proven on a compose stack and by
 image checks on both platforms; the PoC refresh that carries it runs the
 runner's signed engine identity, and the first `main` publication after it
 runs the keyless signing.
+Item 36 is fix-now row FX-21, proven by unit, phase and reader rows and on
+the compose stack (`cluster3`) with three engines; it changes the runner's
+phase 7 and the engine (patch 0002, build `0.23.3+logweir.2`), so the PoC
+refresh that carries it runs a multi-topic backup and restore and reads the
+new runner's engine identity.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -634,6 +641,59 @@ Logweir's build, an archive OSO's binary wrote. The reverse (an archive
 Logweir's build wrote, restored by OSO's binary) is reasoned from that
 identity of source, not run.
 
+#### 36. A replication factor the archive does not record is never read as matching; the engine records every topic's (FX-21)
+
+**Changed.** Engine 0.23.3 records a topic's source replication factor in the
+archive's manifest for the FIRST topic a backup saves only, and phase 7 used
+the restored topic's own factor in place of a missing one, so every other
+topic's replication-factor difference was signed as no divergence. Phase 7 now
+compares the factor only where the source's is recorded: the manifest's, else
+the bound recovery point's receipt (`topic_configuration`, format 1.3.0,
+Logweir's own read of the source). Where neither records it, the scorecard
+names it in `topic_parity.not_assessed` as `"<target topic>:
+replication_factor (notRecorded)"`, with the twin `"<target topic>:
+replication_factor not assessed (notRecorded)"` in `unexpected_divergence`, and
+both readers print it in their `configuration parity: NOT ASSESSED for …`
+line. A partition count the manifest does not record (an archive before engine
+0.17) is the same case. The engine itself is fixed too: Logweir's first real
+engine patch, `0002-manifest-replication-factor.patch`, makes the manifest
+record every topic's factor, so the engine is now `kafka-backup
+0.23.3+logweir.2` (build-input digest
+`sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8`,
+appended to `third_party/kafka-backup-builds.txt`); `logweir doctor` accepts
+exactly that version. No document format moves: the new entries are content
+in two existing lists that can only move a verdict to the safer side (MINOR
+under OD-7's third case, [stability](stability.md#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
+**Do:** roll the controller and the runner image together, as for item 35. A
+standalone CLI install replaces its engine with build 2 and exports
+`LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest
+([quickstart.md](quickstart.md), step 4). Read a scorecard written before this
+change against its archive's manifest: a topic whose
+`source_replication_factor` the manifest lacks has no replication-factor
+finding, whatever the scorecard lists.
+**Scope:** unit rows over the rule (not recorded, recorded as 0 or less, only
+the factor missing) in both modes, phase-7 rows through `run` (no record, the
+receipt's factor where the manifest has none, the manifest's first where both
+do, the partition count, a `newTopic` document phase 8 signs), the arm NR-5
+row in both readers and the parity script's new case, and nine mutants
+(`claude/artifacts/fx-21/mutants/`). Live, on compose slot 1 with `cluster3`
+(Kafka 3.7.1): three topics at factors 3, 2 and 3 backed up in one run and
+restored by `newTopic` restores, unbound and bound to the point, on three
+engines. OSO's 0.23.3 (the container route) and Logweir's `0.23.3+logweir.1`
+recorded one factor of three; this build named the other two `notRecorded`
+unbound and compared all three from the receipt bound, and a `logweir` built
+before FX-21 signed the same two topics with no replication-factor entry at
+all. `0.23.3+logweir.2` recorded all three, each the broker's. The engine's
+own unit rows for the patch fail without it. Parity, `+logweir.1` against
+`+logweir.2` (both native, one stack): PARITY_RESULT.
+**Rollback:** an older `logweir` writes the old silence again; the documents
+this build wrote stay valid for every reader. An engine rollback (to
+`+logweir.1`, or OSO's 0.23.3 with `ENGINE_SOURCE=oso`) records one factor per
+backup again, which this build then names `notRecorded` unless a 1.3.0 receipt
+is bound. Archives are unaffected in either direction: the patch changes what
+the manifest records, never the segment format, and a manifest with every
+factor is read by every engine that reads one with the first.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -675,7 +735,8 @@ In addition to the next entry's six, in its order:
 - **Verify an image digest before you deploy it** with the pinned commands in
   [install.md](install.md#verify-the-images) (item 35); a standalone CLI
   install replaces its engine with Logweir's build and exports
-  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1` and its digest.
+  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest (build 2 since
+  item 36).
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -688,7 +749,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34 and 35, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35 and 36, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -698,7 +759,8 @@ controller), the product API and the console; item 33 changes the controller,
 the runner, the console and the `KafkaCluster` CRD, and needs each credentialed
 connection's Secret bound; item 34 changes the runner only; item 35 changes the
 runner image (its engine and its platforms) and the controller's Job
-environment together. To roll back to
+environment together; item 36 changes the runner (phase 7 and the engine's
+build) only. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

@@ -238,11 +238,13 @@ pub type Layout = (Option<i32>, Option<i16>);
 /// - `replication_factor`: Logweir's OWN metadata read before the engine
 ///   (`factors`, `ClusterReader::replication_factors`), and the manifest's
 ///   `source_replication_factor` only where that read named none. Not the
-///   manifest first, because the pinned engine records the factor reliably
-///   only for the FIRST topic it saves: its `merge_manifests` carries
+///   manifest first, because engine 0.23.3 records the factor reliably only
+///   for the FIRST topic it saves: its `merge_manifests` carries
 ///   `original_partition_count` from each later save and drops
 ///   `source_replication_factor` (engine 0.23.3 `backup/engine.rs:1683-1705`;
-///   measured on compose, PROD-05.1 report).
+///   measured on compose, PROD-05.1 report). Logweir's build from
+///   `0.23.3+logweir.2` records every topic's (patch 0002, FX-21), but OSO's
+///   release, the one-release rollback, still does not.
 /// - A count that is absent, or `0` or less, is NOT RECORDED rather than
 ///   written as a value arm 19 refuses — a run must not refuse its own receipt
 ///   after the archive exists.

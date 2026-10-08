@@ -49,7 +49,11 @@ adopter's evidence bucket is a document some reader may already parse, so:
     FX-16's refusal `PointBindingSetMismatch`, a new cause for exit 3: a
     point-bound plan that restored another set under the point's receipt is
     now refused before any target is created
-    ([below](#a-point-bound-plan-restores-its-points-own-set-fx-16)).
+    ([below](#a-point-bound-plan-restores-its-points-own-set-fx-16)). So are
+    FX-21's `topic_parity` entries for a replication factor or partition
+    count the archive does not record: not assessed where a writer before
+    FX-21 signed a match
+    ([below](#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
 
   Nothing else is ruled: any other change to an existing field's content is
   still a MAJOR bump.
@@ -390,6 +394,60 @@ documents — the backup receipt's `source.auth.mode` and the scorecard's
   reader from PROD-01.3 on, and older readers refuse them (the safe direction).
   An older controller and runner ignore the binding pair; a bound Secret keeps
   working with them.
+
+### A source replication factor the archive does not record is not assessed (FX-21)
+
+Engine 0.23.3 records `source_replication_factor` in the archive's manifest
+for the FIRST topic a backup saves only: its `merge_manifests` carries the
+partition count of a topic the stored manifest already holds and drops the
+factor, and the configuration capture puts every topic into the manifest
+before the first save. Phase 7 then used the TARGET's own factor (the plan's)
+in place of the missing one, so every other topic's replication-factor
+difference was signed as no divergence. Found by PROD-05.1; measured live by
+FX-21 on a three-topic `cluster3` backup (factors 3, 2 and 3): OSO's 0.23.3
+and Logweir's `0.23.3+logweir.1` recorded one factor of three, and the writer
+before FX-21 signed the other two topics with no `replication_factor` entry at
+all.
+
+- **The writer.** Phase 7 compares a topic's replication factor only where the
+  source's is recorded: the manifest's `source_replication_factor`, else the
+  verified receipt's `topic_configuration[<topic>].replication_factor`
+  (format 1.3.0, Logweir's own metadata read). The manifest's comes first, so
+  every document whose manifest records the factor is decided exactly as
+  before. Where neither records one, the topic's factor is named in
+  `topic_parity.not_assessed` as `"<target topic>: replication_factor
+  (notRecorded)"`, and the fail-safe twin `"<target topic>: replication_factor
+  not assessed (notRecorded)"` goes into `unexpected_divergence`, FX-4's marker
+  shape. A partition count the manifest does not record (an archive written
+  before engine 0.17) is the same case: `partition_count (notRecorded)`.
+- **The engine.** Patch 0002 (`third_party/kafka-backup-patches/`) makes
+  `merge_manifests` carry the factor as it carries the partition count, so
+  Logweir's build `0.23.3+logweir.2` records every topic's factor; measured on
+  the same three topics, 3 of 3, each the broker's.
+- **No new field and no version: MINOR, OD-7's third case.** The entries are
+  new content in two existing fields, and they can only move a reader's
+  verdict to the safer side: what a writer before FX-21 signed as matching is
+  now not assessed, and no entry makes any verdict stronger. `outcome` does
+  not depend on either list. Every reader since format 1.1.0 prints the new
+  `not_assessed` entries in its `configuration parity: NOT ASSESSED for …`
+  line, and a reader older than that sees the twin in `unexpected_divergence`.
+  The twin's `<key>`, the text after the last `": "`, is `replication_factor
+  not assessed (notRecorded)`, never one of the four settings the restore
+  decides, so arm NR-5 does not read it as a deviation `not_reconstructed`
+  must name (a unit row in each reader). The scorecard
+  stays 1.4.0 (1.5.0 for the auth modes of PROD-01.3).
+- **Old evidence is not re-read.** A scorecard written before FX-21 carries
+  no marker that tells it apart: where its archive's manifest lacks a topic's
+  `source_replication_factor`, its silence about that topic's factor is the
+  defect, not parity. The manifest says which topics: read
+  `topics[].source_replication_factor` in the archive the scorecard's
+  `source.backup` names.
+- **Rollback.** An older `logweir` writes the old documents again (the
+  silence above); the documents this build wrote stay valid for every reader.
+  Rolling the engine back to `+logweir.1` or to OSO's 0.23.3
+  (`ENGINE_SOURCE=oso`) records one factor per backup again; this build then
+  names the rest `notRecorded` where no 1.3.0 receipt is bound, and compares
+  the receipt's factor where one is.
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -742,7 +800,10 @@ coverage and portability and PROD-05.2 applies a reviewed target configuration:
   from its broker's defaults is not in that record and is never named, and a
   topic whose configuration was not captured is in `not_assessed`
   ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
-  The replication factor is compared from the manifest either way.
+  The replication factor is compared from the manifest, else from the bound
+  receipt's `topic_configuration`, either way; where neither records one it is
+  named in `not_assessed` (FX-21,
+  [below](#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
 - **The partition count is reconstructed** — phase 6 creates the manifest's
   count — so `partition_count` reaches `not_reconstructed` only if a topic
   changes between creation and verification.
@@ -2316,7 +2377,8 @@ spend).
   CLI behaviour against (`docs/UPSTREAM-VERSIONS.md` in the planning repo;
   `ae5a102f93b5270927d95d4ccec184b577febb10`). The floor is not the pin:
   since PROD-00.2 the engine the images ship is Logweir's build of OSO's
-  **0.23.3** source, `0.23.3+logweir.1` (*Supported engine pin*, below).
+  **0.23.3** source, `0.23.3+logweir.2` since FX-21's patch 0002
+  (*Supported engine pin*, below).
 
 - **Runtime image floor.** The `kafka-backup` binary is dynamically
   linked against **glibc >= 2.36** (`ldd`, 2026-10-08: libc, libm and
@@ -2354,7 +2416,9 @@ spend).
   added in a minor.
 
 - **Supported engine pin.** The engine the images ship is **Logweir's build
-  of OSO 0.23.3**, `kafka-backup 0.23.3+logweir.1` (PROD-00.2, OD-3): the
+  of OSO 0.23.3**, `kafka-backup 0.23.3+logweir.2` (PROD-00.2, OD-3; build 2
+  adds FX-21's patch 0002, the manifest records every topic's replication
+  factor): the
   vendored source of OSO's newest release on 2026-10-07 (tag commit
   `afb160e7`) plus Logweir's patch folder, built for linux/amd64 and
   linux/arm64 (`third_party/kafka-backup-build.env`; its `engine.digest` is the

@@ -463,8 +463,8 @@ fields.
 | `integrity.restoredPrincipalCouldConsume` | bool \| null | **SP3.** Null, never `false`, until then. The wire name is camelCase deliberately and permanently: renaming it later would be a major bump. |
 | `integrity.verification` | object, **optional** (1.4.0) | What the verdict COVERED: `sampled` or `complete` coverage, what it compared against, whether header order was verified, the verified partitions' capture gaps and pruned ranges, and a complete verification's archive integrity and replay comparison. See [below](#integrityverification-format-140). ABSENT means not recorded, read as sampled and never as complete. |
 | `topic_parity.intentionally_deviated` | string[] | A SCRATCH drill's deviations on the four settings the restore's own topic creation decides (`cleanup.policy`, `retention.ms`, `partition_count`, `replication_factor`), as `"<target topic>: <key>"`. Since 1.2.0 always `[]` in a `newTopic` restore; in a `newTopic` document before 1.2.0 its entries were NOT reconstructed, whatever the label ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
-| `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have, as `"<target topic>: <key>"`. Since 1.1.0 also one fail-safe entry `"<target topic>: configuration not assessed (<why>)"` per topic `not_assessed` names ([below](#topic_parity-and-what-its-silence-means)). Since 1.2.0, in a `newTopic` restore, also every entry of `not_reconstructed` ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
-| `topic_parity.not_assessed` | string[], **optional** (1.1.0) | The mapped target topics whose CONFIGURATION parity was not assessed, as `"<target topic>: configuration (<why>)"`. See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
+| `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have, as `"<target topic>: <key>"`. Since 1.1.0 also one fail-safe entry `"<target topic>: <what> not assessed (<why>)"` per entry `not_assessed` names ([below](#topic_parity-and-what-its-silence-means)). Since 1.2.0, in a `newTopic` restore, also every entry of `not_reconstructed` ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
+| `topic_parity.not_assessed` | string[], **optional** (1.1.0) | What was not assessed per mapped target topic, as `"<target topic>: <what> (<why>)"`: its CONFIGURATION (`configuration`, FX-4), or a replication factor or partition count the source's record lacks (`replication_factor` or `partition_count`, `notRecorded`, FX-21). See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
 | `topic_parity.not_reconstructed` | string[], **optional** (1.2.0) | The source settings a `newTopic` restore did NOT reconstruct, as `"<target topic>: <key>"`; each is also in `unexpected_divergence` and never in `intentionally_deviated`. `[]` in a scratch drill. In a `newTopic` document carrying it, `intentionally_deviated` is `[]` and every divergence on the four settings is listed here (arms NR-4, NR-5). See [below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120). ABSENT means not recorded. |
 
 ### `topic_parity`, and what its silence means
@@ -488,11 +488,27 @@ Every other mapped topic is named in `not_assessed` with `<why>`:
 For a listed topic the two arrays above still name every difference the archive's
 own record shows — those are facts — but their SILENCE proves nothing. Partition
 count and replication factor come from metadata, not DescribeConfigs, and are
-classified either way.
+classified whatever the coverage — where the source's value is recorded (next).
+
+**A replication factor or partition count the source's record lacks (FX-21).**
+Phase 7 compares the source's replication factor from the archive's manifest
+(`source_replication_factor`), else from the bound receipt's
+`topic_configuration` (format 1.3.0), and its partition count from the
+manifest (`original_partition_count`). Where none records the value — engine
+0.23.3 records the factor for the first topic a backup saves only, and an
+archive before engine 0.17 records neither — the value is not compared: it is
+named in `not_assessed` as `"<target topic>: replication_factor
+(notRecorded)"` (or `partition_count`), with the fail-safe twin below. A
+writer before FX-21 compared the target's own value with itself there, so its
+silence about such a topic's factor is not parity
+([stability](../stability.md#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
+Logweir's engine build `0.23.3+logweir.2` records every topic's factor.
 
 **The fail-safe entry.** For every topic it names in `not_assessed`, phase 7
 also writes `"<target topic>: configuration not assessed (<why>)"` into
-`unexpected_divergence`. `not_assessed` is new in 1.1.0, so a reader that
+`unexpected_divergence` (and, for an FX-21 entry, `"<target topic>:
+replication_factor not assessed (notRecorded)"` or its `partition_count`
+twin). `not_assessed` is new in 1.1.0, so a reader that
 predates it — `verify_scorecard.py` before 1.15.0, a `logweir drill show` built
 before FX-4, a person with a 1.0.0 guide — reads only the two arrays it always
 had, and must not see a clean list for a topic nobody assessed. For

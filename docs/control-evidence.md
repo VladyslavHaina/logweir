@@ -647,7 +647,11 @@ or `targetReadDenied`, and writes a `configuration not assessed` entry for each
 into `topic_parity.unexpected_divergence`, so that a reader which predates the
 list does not see a clean one. `target_diff.not_assessed` qualifies collisions
 the same way. Partition count and replication factor come from metadata and are
-compared either way
+compared whatever the coverage, where the source's value is recorded: the
+replication factor from the archive's manifest, else from the bound receipt's
+`topic_configuration`. A value neither records is named in `not_assessed` as
+`replication_factor (notRecorded)` (or `partition_count`), never compared with
+the target's own (FX-21)
 ([what the silence means](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means);
 [an empty `unexpected_divergence` is not configuration parity](verify-a-scorecard.md#an-empty-unexpected_divergence-is-not-configuration-parity)).
 What remains:
@@ -656,6 +660,11 @@ What remains:
   such as one whose check never ran, an empty
   `topic_parity.unexpected_divergence` does not show that configuration was
   compared.
+- In a scorecard written before FX-21, the silence about a topic's replication
+  factor is not parity where the archive's manifest lacks the source's factor:
+  engine 0.23.3 records it for the first topic a backup saves only, and the
+  writer compared the target's factor with itself. The manifest's
+  `topics[].source_replication_factor` says which topics.
 - Where configuration was compared, only the captured overrides were. A value
   the source inherited from a broker default is never compared: FX-4 measured a
   source on `LogAppendTime` by broker default, restored as `CreateTime`, with

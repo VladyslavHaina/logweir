@@ -196,6 +196,10 @@ The first is a format 1.1.0 document naming the topics whose configuration
 parity was not assessed; the second is every 1.0.0 document, and a 1.1.0 one
 whose drill stopped before phase 7. Neither is a refusal and neither changes the
 exit code. No line is printed when every topic was assessed (`not_assessed: []`).
+Since FX-21 the first line also names a replication factor or partition count
+the source's record lacks, which the writer did not compare
+(`drill-orders: replication_factor (notRecorded)`): a writer before FX-21
+compared the target's own value with itself there and printed nothing.
 See [what an empty divergence list does not prove](#an-empty-unexpected_divergence-is-not-configuration-parity).
 
 Both also print one line about the source settings a `newTopic` restore did
@@ -571,6 +575,18 @@ Since format 1.1.0 each topic `not_assessed` names ALSO has one entry
 script before 1.15.0, a `logweir drill show` built before FX-4, or a guide
 written for 1.0.0) sees a divergence for it, never a clean list. A
 configuration key never contains a space, which tells such an entry from a key.
+An FX-21 entry has the same twin, `"<target topic>: replication_factor not
+assessed (notRecorded)"` (or `partition_count`).
+
+**A replication factor is parity only where the source's is recorded.** Phase
+7 compares it from the archive's manifest, else from the bound receipt's
+`topic_configuration`; a scorecard written before FX-21 compared the target's
+own factor with itself where the manifest lacked the source's, which engine
+0.23.3 does for every topic after the first one a backup saves. For such a
+document, read `topics[].source_replication_factor` in the archive's manifest:
+a topic without one has no replication-factor finding, whatever the scorecard
+lists
+([stability](stability.md#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
 
 **What "assessed" covers.** An assessed topic's parity compares the
 configuration OVERRIDES the engine captured — explicit topic-level settings on

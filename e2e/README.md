@@ -152,8 +152,21 @@ LOGWEIR_E2E_ENGINE_IMAGE=logweir:check LOGWEIR_E2E_ENGINE_PLATFORM=linux/arm64 \
 ```
 
 `engine_version()` reads the engine's own `--version`, and `engine_digest()`
-names Logweir's build-input digest for a `+logweir.` version and OSO's image
-digest otherwise, so a signed document always names the engine that ran.
+names Logweir's build-input digest for a `+logweir.` version, as the build
+ledger `third_party/kafka-backup-builds.txt` records it for that version (so
+an earlier build run at this checkout is named by its own digest, FX-21), and
+OSO's image digest otherwise, so a signed document always names the engine
+that ran. `scripts/demo.sh` and `scripts/mvp-demo.sh` read the ledger the
+same way.
+
+**A native engine can outrun the target's metadata.** Built natively on the
+host (`scripts/engine-source.sh build` on macOS), the engine starts a restore
+within a second of phase 0 creating the target topics, and once in four runs
+on a loaded host (FX-21, 2026-10-08) it failed every topic with `Partition N
+not available for topic …` before the broker's metadata named the new
+partitions' leaders: the drill exits 1 and signs nothing. The container route
+starts slowly enough not to meet it. Phase 0 does not wait for the leaders it
+just asked for; until it does, a native run that meets this is rerun.
 
 ## Optional profiles
 
@@ -169,7 +182,7 @@ container with `timeout` or `gtimeout` when present (this host's
 | Profile | Services | What it provides | Ports (default) | Owner (first consumers) |
 |---|---|---|---|---|
 | `auth` | `kafka-auth` (+ certs, setup) | A separate single-node cluster: SASL_SSL/PLAIN on 9102, SASL_PLAINTEXT/SCRAM-SHA-256 on 9103, SSL with a required client certificate on 9104, all advertised as `localhost:<port>`. User `logweir`, password `logweir-e2e-not-a-secret`. A throwaway test CA, broker and client certificates and a wrong CA in `.e2e/auth/<project>/`. | 9102-9104 | PROD-01.3 |
-| `cluster3` | `kafka-c3-1..3` | A three-node KRaft cluster, replication factor 3 and `min.insync.replicas` 2 by default | 9112-9114 | the orchestrator until PROD-10.1 starts (FX-5 and PROD-05.1 use it first) |
+| `cluster3` | `kafka-c3-1..3` | A three-node KRaft cluster, replication factor 3 and `min.insync.replicas` 2 by default | 9112-9114 | the orchestrator until PROD-10.1 starts (FX-5 and PROD-05.1 use it first; FX-3's `new_topic_parity.rs` and FX-21's `replication_factor_parity.rs`) |
 | `cluster2` | `kafka-cluster2` (+ setup) | A second single-node cluster with its own cluster id and the marker topic | 9122 | PROD-11.1 (PROD-04.2, PROD-12.1) |
 | `objectstore` | `objectstore` (+ setup) | SeaweedFS 4.48 beside MinIO: `kafka-backups`, `logweir-evidence`, `kafka-backups-locked` (Object Lock) and `kafka-backups-2`, credentials `minioadmin`/`minioadmin` | 9130 | PROD-09.1 (PROD-09.2, REPLACE-MINIO) |
 | `registry` | `registry` | Karapace 6.2.3, Schema-Registry-compatible, schemas in `_schemas` on `kafka-broker-1`, BACKWARD compatibility | 9141 | PROD-03.0 (PROD-03.1, 03.2) |

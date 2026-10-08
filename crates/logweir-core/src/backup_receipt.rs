@@ -308,8 +308,10 @@ pub struct EffectiveConfigValue {
 ///   replica count of the topic's partitions (a partition mid-reassignment
 ///   also lists the replicas being added). Only where that read named no
 ///   factor for the topic does the manifest's `source_replication_factor`
-///   stand, and the pinned engine records that for the first topic it saves
-///   only (`merge_manifests` drops it from every later save; FX-21). When the
+///   stand, and engine 0.23.3 records that for the first topic it saves only
+///   (`merge_manifests` drops it from every later save) unless it is
+///   Logweir's build `0.23.3+logweir.2` or later, whose patch 0002 records
+///   every topic's (FX-21). When the
 ///   metadata read is unavailable — it failed, or the reader cannot answer —
 ///   the run logs a warning and records the factor only where the manifest
 ///   has one: for every other topic it is ABSENT, NOT RECORDED, never `0` and

@@ -56,7 +56,7 @@ them can approve their own restore, or enforce a deletion plan they wrote.
 ### 1. Install
 
 1. Check the floors: Kubernetes 1.29+, amd64 or arm64 nodes, and engine
-   0.21.0, with Logweir's build of 0.23.3 (`0.23.3+logweir.1`) the engine the
+   0.21.0, with Logweir's build of 0.23.3 (`0.23.3+logweir.2`) the engine the
    images ship
    ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
 2. Choose images: the published digests of the exact CI run you deploy, not
@@ -449,7 +449,7 @@ which shares no code with Logweir.
   architecture (`docker create` the image, then `docker cp
   <container>:/usr/local/bin/kafka-backup .`), or build it from a checkout
   with `scripts/engine-source.sh build`. `kafka-backup --version` prints
-  `kafka-backup 0.23.3+logweir.1`.
+  `kafka-backup 0.23.3+logweir.2`.
 
 ### 1. Write the drill spec
 
@@ -503,7 +503,7 @@ logweir doctor \
 `doctor` checks credentials, the engine **version** and glibc floor, target
 reachability, the marker topic and the approver key — before a drill is
 attempted. It compares the engine's own `--version` output against the pinned
-`0.23.3+logweir.1`, Logweir's build, as a whole token (`0.23.3+logweir.2` or
+`0.23.3+logweir.2`, Logweir's build, as a whole token (`0.23.3+logweir.1` or
 `0.23.3` is a mismatch; OSO's own `0.23.3` passes only as the declared
 rollback, named as OSO's release). It also refuses an engine whose version is
 not the one the run would sign (`LOGWEIR_ENGINE_VERSION`, or the image's
