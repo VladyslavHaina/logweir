@@ -313,7 +313,8 @@ pub fn mint_standing(
             format!(
                 "{} is not a RehearsalScope: {e}. It is D3 §4.3's scope in camelCase: \
                  templateDigest, targetClusterId, topicPrefix, topics, maxPartitions, \
-                 recordsPerPartition, deadlineSeconds, modes.",
+                 recordsPerPartition, deadlineSeconds, modes, and optionally coverage \
+                 (sampled or complete) and completeMaxRecords.",
                 standing.scope.display()
             )
         })?;
@@ -376,8 +377,11 @@ pub fn mint_standing(
         .map_err(|e| format!("{}: {e}", args.key.display()))?;
 
     let issued_at = standing.issued_at.unwrap_or(now);
+    // PROD-08.1a: 1.1.0 exactly when the scope carries `coverage` or
+    // `completeMaxRecords`, so every other document is minted byte for byte as
+    // before; `admit_standing_authorization` below refuses an incoherent pair.
     let doc = wire::StandingAuthorization {
-        format_version: wire::STANDING_AUTHORIZATION_FORMAT_VERSION.to_string(),
+        format_version: wire::standing_format_version_for(&scope).to_string(),
         kind: wire::STANDING_AUTHORIZATION_KIND.to_string(),
         subject_ref: wire::AuthorizationSubject {
             api_version: wire::SUBJECT_API_VERSION.to_string(),

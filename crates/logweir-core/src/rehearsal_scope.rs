@@ -98,9 +98,46 @@ pub struct RehearsalScope {
     /// build that has learned a second mode, and a scope that carried no mode
     /// at all would silently widen when one arrived.
     pub modes: Vec<String>,
+    /// **PROD-08.1a, document format 1.1.0.** The verification coverage the
+    /// signer authorises: every slot's plan must state exactly this
+    /// `sample.coverage`.
+    ///
+    /// ABSENT MEANS `sampled`, and that is every scope signed before the
+    /// field existed: such a scope admits exactly the sampled plans it always
+    /// admitted, and a `complete` plan under it is REFUSED by name. A scope
+    /// that says `complete` admits a complete plan — which reads every
+    /// archived record of the restored topics and the whole restored output,
+    /// so its work is bounded by `deadlineSeconds` and, when stated,
+    /// [`Self::complete_max_records`] — and refuses a sampled one, because a
+    /// weaker check than the signer chose is not the check they authorised.
+    /// Not serialised when absent, so a 1.0.0 scope's bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::spec::Coverage>,
+    /// **PROD-08.1a, document format 1.1.0.** The most archived records one
+    /// complete verification may decode (the plan's
+    /// `sample.complete_max_records` may not exceed it, and may not be absent
+    /// beside it). Meaningful only with `coverage: complete`, and refused on
+    /// any other scope. Absent: the work is bounded by `deadlineSeconds`
+    /// alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complete_max_records: Option<u64>,
 }
 
 impl RehearsalScope {
+    /// The coverage this scope authorises: [`Self::coverage`], absent read as
+    /// `sampled`.
+    #[must_use]
+    pub fn signed_coverage(&self) -> crate::spec::Coverage {
+        self.coverage.unwrap_or_default()
+    }
+
+    /// Whether the scope carries a field defined only from document format
+    /// 1.1.0 (PROD-08.1a), so its document must declare at least that minor.
+    #[must_use]
+    pub fn needs_coverage_format(&self) -> bool {
+        self.coverage.is_some() || self.complete_max_records.is_some()
+    }
+
     /// Whether this scope permits the scratch mode and nothing else.
     ///
     /// The check a reader performs BEFORE trusting any other field: a scope

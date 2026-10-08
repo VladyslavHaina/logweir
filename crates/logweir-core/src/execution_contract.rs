@@ -420,7 +420,33 @@ pub const PAYLOAD_TYPE_STANDING_AUTHORIZATION: &str =
 
 /// The document format this build reads. A MAJOR bump is a refusal; a minor
 /// adds optional fields only (GC12's rule, applied to this document).
+///
+/// It is also the version a document whose scope carries no field newer than
+/// 1.0.0 is minted at, so every such document is byte-for-byte what it was;
+/// [`standing_format_version_for`] picks
+/// [`STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE`] for one that does.
 pub const STANDING_AUTHORIZATION_FORMAT_VERSION: &str = "1.0.0";
+
+/// **PROD-08.1a.** The minor that defines `scope.coverage` and
+/// `scope.completeMaxRecords`. A document declaring an older minor that
+/// carries either is refused: the fields are a signer's choice of a STRONGER
+/// check, and a document that predates them cannot have made it.
+pub const STANDING_AUTHORIZATION_COVERAGE_SINCE_MINOR: u64 = 1;
+
+/// **PROD-08.1a.** The version a document whose scope carries
+/// `coverage` or `completeMaxRecords` is minted at.
+pub const STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE: &str = "1.1.0";
+
+/// The `formatVersion` a standing authorization over `scope` is minted at:
+/// 1.1.0 when the scope carries a PROD-08.1a field, 1.0.0 otherwise.
+#[must_use]
+pub fn standing_format_version_for(scope: &RehearsalScope) -> &'static str {
+    if scope.needs_coverage_format() {
+        STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE
+    } else {
+        STANDING_AUTHORIZATION_FORMAT_VERSION
+    }
+}
 /// `kind` — inside the signed bytes, so it cannot be relabelled.
 pub const STANDING_AUTHORIZATION_KIND: &str = "StandingRehearsalAuthorization";
 /// The only subject kind a standing rehearsal authorization may name.
@@ -643,6 +669,42 @@ pub fn admit_standing_authorization(
             doc.format_version
         )));
     }
+    // PROD-08.1a: the scope's coverage fields, in a document new enough to
+    // carry them, and coherent. Each can only REFUSE: a scope without them
+    // admits what every 1.0.0 scope admitted (`plan_within_scope`).
+    if doc.scope.needs_coverage_format() {
+        let minor = doc
+            .format_version
+            .split('.')
+            .nth(1)
+            .and_then(|m| m.parse::<u64>().ok());
+        if minor.is_none_or(|m| m < STANDING_AUTHORIZATION_COVERAGE_SINCE_MINOR) {
+            return Err(AuthorizationRefusal::invalid(format!(
+                "the signed scope carries `coverage` or `completeMaxRecords`, which are defined \
+                 from formatVersion {STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE}, and the \
+                 document declares {:?}",
+                doc.format_version
+            )));
+        }
+    }
+    match (doc.scope.signed_coverage(), doc.scope.complete_max_records) {
+        (crate::spec::Coverage::Sampled, Some(_)) => {
+            return Err(AuthorizationRefusal::invalid(
+                "the signed scope states `completeMaxRecords` and does not authorise \
+                 `coverage: complete`; a bound on a verification it does not permit authorises \
+                 nothing"
+                    .to_string(),
+            ))
+        }
+        (crate::spec::Coverage::Complete, Some(0)) => {
+            return Err(AuthorizationRefusal::invalid(
+                "the signed scope's `completeMaxRecords` is 0; a complete verification that may \
+                 decode no record compares nothing"
+                    .to_string(),
+            ))
+        }
+        _ => {}
+    }
     if doc.kind != STANDING_AUTHORIZATION_KIND {
         return Err(AuthorizationRefusal::invalid(format!(
             "the signed document declares kind {:?}, not {STANDING_AUTHORIZATION_KIND:?}",
@@ -862,6 +924,14 @@ pub struct PlanScopeFacts {
     /// compared against a signed ceiling. See [`plan_within_scope`] for why
     /// absent is a MISMATCH here rather than a pass.
     pub max_partitions: Option<u32>,
+    /// **PROD-08.1a.** `sample.coverage`, which must be exactly the signed
+    /// scope's ([`RehearsalScope::signed_coverage`]). A `complete` plan
+    /// verifies every partition of every restored topic, so it states NO
+    /// `sample.max_partitions` — phase 0 refuses the pair.
+    pub coverage: crate::spec::Coverage,
+    /// **PROD-08.1a.** `sample.complete_max_records`, held to the signed
+    /// scope's `completeMaxRecords` when it states one.
+    pub complete_max_records: Option<u64>,
 }
 
 /// The facts a mounted restore plan and its allowlist state.
@@ -889,6 +959,8 @@ pub fn plan_scope_facts(
         mode: plan.target.mode.to_string(),
         records_per_partition: plan.sample.records_per_partition as u64,
         max_partitions: plan.sample.max_partitions,
+        coverage: plan.sample.coverage,
+        complete_max_records: plan.sample.complete_max_records,
     }
 }
 
@@ -940,6 +1012,25 @@ impl std::fmt::Display for ScopeRefusal {
 ///   that satisfies the second has not thereby satisfied the first — the
 ///   controller still owes the point-selection check — so this comparison is
 ///   necessary and not sufficient, and W7 keeps §4.2's filter.
+/// * **`coverage` is SIGNED, and the plan's must be exactly it** (PROD-08.1a).
+///   A scope that states no `coverage` — every scope signed before document
+///   format 1.1.0 — authorises `sampled` and nothing else: a `complete` plan
+///   under it is refused by name, so an approver who signed sampled
+///   rehearsals never finds a complete one run in their name, and a
+///   controller cannot choose one for them. A scope that says `complete`
+///   refuses a sampled plan just as plainly: a weaker check than the one
+///   signed is not the one authorised.
+/// * **A complete plan states no `max_partitions`, and under a scope that
+///   authorises complete coverage that is admitted.** It verifies every
+///   partition of every restored topic, and phase 0 refuses it beside a
+///   `max_partitions` (which would keep only the first N), so its absence is
+///   not "sample every candidate partition, unbounded": nothing is sampled. A
+///   complete plan that ALSO states one is refused here, naming both. What
+///   the signer bounded is what bounds its work: the Job's `deadlineSeconds`
+///   (the controller's half, below) and, when the scope states
+///   `completeMaxRecords`, the plan's `sample.complete_max_records`, which
+///   must then be present and no larger. A complete verification reads every
+///   archived record of the restored topics and the whole restored output.
 /// * `deadline_seconds` genuinely is NOT a plan field — it is the Job's
 ///   `activeDeadlineSeconds`. It stays the controller's half of §4.3(d) and
 ///   this predicate does not pretend to check it.
@@ -1017,17 +1108,64 @@ pub fn plan_within_scope(
     // plan asking for every candidate partition, and "unbounded" is not inside
     // any finite ceiling a human signed. Reading absent as "fine" would make
     // the one way to evade this check the easiest thing to write.
-    match facts.max_partitions {
-        None => mismatches.push(format!(
+    //
+    // PROD-08.1a: THE COVERAGE IS SIGNED. A scope that names none (every
+    // 1.0.0 scope) authorises `sampled` only; the plan's must be exactly the
+    // signed one, in both directions.
+    let signed = scope.signed_coverage();
+    if facts.coverage != signed {
+        mismatches.push(format!(
+            "the plan asks for `sample.coverage: {}` and the signed scope authorises `{}` \
+             coverage{}",
+            facts.coverage.as_str(),
+            signed.as_str(),
+            if scope.coverage.is_none() {
+                " (it states no `coverage`, which authorises sampled rehearsals only)"
+            } else {
+                ""
+            }
+        ));
+    }
+    // A COMPLETE PLAN SAMPLES NOTHING, so its absent partition bound is not
+    // an unbounded sample — under a scope that authorised complete coverage
+    // (the arm above refuses it under any other). The sampled arms are
+    // exactly what they were.
+    match (facts.coverage, facts.max_partitions) {
+        (crate::spec::Coverage::Complete, None) => {}
+        (crate::spec::Coverage::Complete, Some(max)) => mismatches.push(format!(
+            "the plan asks for `sample.coverage: complete` and states `sample.max_partitions: \
+             {max}`; a complete verification checks every partition, and phase 0 refuses the \
+             pair"
+        )),
+        (crate::spec::Coverage::Sampled, None) => mismatches.push(format!(
             "the plan states no `sample.max_partitions`, so it is unbounded; the signed scope \
              permits at most {}",
             scope.max_partitions
         )),
-        Some(max) if max > scope.max_partitions => mismatches.push(format!(
-            "the plan samples up to {max} partitions; the signed scope permits {}",
-            scope.max_partitions
-        )),
-        Some(_) => {}
+        (crate::spec::Coverage::Sampled, Some(max)) if max > scope.max_partitions => mismatches
+            .push(format!(
+                "the plan samples up to {max} partitions; the signed scope permits {}",
+                scope.max_partitions
+            )),
+        (crate::spec::Coverage::Sampled, Some(_)) => {}
+    }
+    // The signer's record bound on a complete verification, when they stated
+    // one: ABSENT IN THE PLAN IS UNBOUNDED, and so a mismatch, exactly as an
+    // absent partition bound is for a sampled plan.
+    if let (crate::spec::Coverage::Complete, Some(cap)) =
+        (facts.coverage, scope.complete_max_records)
+    {
+        match facts.complete_max_records {
+            None => mismatches.push(format!(
+                "the plan states no `sample.complete_max_records`, so its complete \
+                 verification is unbounded; the signed scope permits at most {cap} records"
+            )),
+            Some(n) if n > cap => mismatches.push(format!(
+                "the plan's complete verification may decode {n} records; the signed scope \
+                 permits {cap}"
+            )),
+            Some(_) => {}
+        }
     }
     // The target cluster id, through the allowlist — see this function's doc
     // comment for why that is the strongest form available before a broker
@@ -1181,6 +1319,25 @@ mod tests {
             records_per_partition: 25,
             deadline_seconds: 3600,
             modes: vec![MODE_SCRATCH.to_string()],
+            coverage: None,
+            complete_max_records: None,
+        }
+    }
+
+    /// A 1.1.0 scope that authorises complete coverage, with no record bound.
+    fn complete_scope() -> RehearsalScope {
+        RehearsalScope {
+            coverage: Some(crate::spec::Coverage::Complete),
+            ..scope()
+        }
+    }
+
+    /// The facts of a complete plan: no partition bound, no record bound.
+    fn complete_facts() -> PlanScopeFacts {
+        PlanScopeFacts {
+            coverage: crate::spec::Coverage::Complete,
+            max_partitions: None,
+            ..facts()
         }
     }
 
@@ -1193,7 +1350,233 @@ mod tests {
             mode: MODE_SCRATCH.to_string(),
             records_per_partition: 25,
             max_partitions: Some(200),
+            coverage: crate::spec::Coverage::Sampled,
+            complete_max_records: None,
         }
+    }
+
+    /// **PROD-08.1a, the orchestrator's four rows.** The coverage is SIGNED:
+    ///
+    /// 1. a complete plan under a scope that states no `coverage` (every 1.0.0
+    ///    scope) or says `sampled` is REFUSED, by name;
+    /// 2. the same plan under a scope that authorises `complete` is admitted —
+    ///    its absent `max_partitions` is not an unbounded sample;
+    /// 3. a sampled plan with no partition bound is still refused, under
+    ///    either scope;
+    /// 4. a complete plan that states `max_partitions` is still refused.
+    ///
+    /// KILLS: the coverage-equality arm removed (row 1 admits); the
+    /// `(Complete, None)` arm folded into the unbounded refusal (row 2
+    /// refuses); the `(Sampled, None)` arm admitted (row 3); the
+    /// `(Complete, Some)` arm admitted (row 4).
+    #[test]
+    fn a_complete_plan_is_admitted_only_under_a_scope_that_signed_complete() {
+        // 1. an old scope, and an explicitly sampled one.
+        for (what, signed) in [
+            ("no coverage", scope()),
+            (
+                "coverage: sampled",
+                RehearsalScope {
+                    coverage: Some(crate::spec::Coverage::Sampled),
+                    ..scope()
+                },
+            ),
+        ] {
+            let refusal = plan_within_scope(&complete_facts(), &signed)
+                .expect_err("a complete plan under a sampled-only scope");
+            let rendered = refusal.to_string();
+            assert!(
+                rendered.contains("`sample.coverage: complete`")
+                    && rendered.contains("authorises `sampled` coverage"),
+                "{what}: {rendered}"
+            );
+            assert_eq!(
+                refusal.mismatches.len(),
+                1,
+                "{what}: only the coverage: {rendered}"
+            );
+        }
+        // 2. the same plan under a scope that signed complete.
+        plan_within_scope(&complete_facts(), &complete_scope())
+            .expect("a complete plan under a complete scope samples nothing to bound");
+        // 3. a sampled plan with no bound, under either scope.
+        for signed in [scope(), complete_scope()] {
+            let unbounded = PlanScopeFacts {
+                max_partitions: None,
+                ..facts()
+            };
+            let refusal = plan_within_scope(&unbounded, &signed).expect_err("unbounded");
+            assert!(
+                refusal
+                    .to_string()
+                    .contains("states no `sample.max_partitions`"),
+                "{refusal}"
+            );
+        }
+        // 4. complete plus a partition bound.
+        let both = PlanScopeFacts {
+            max_partitions: Some(10),
+            ..complete_facts()
+        };
+        let refusal = plan_within_scope(&both, &complete_scope()).expect_err("the pair");
+        let rendered = refusal.to_string();
+        assert!(
+            rendered.contains("`sample.coverage: complete`")
+                && rendered.contains("`sample.max_partitions: 10`"),
+            "{rendered}"
+        );
+    }
+
+    /// A scope that signed complete coverage refuses a SAMPLED plan: a weaker
+    /// check than the signer chose is not the one they authorised.
+    ///
+    /// KILLS: the equality reduced to "complete needs a complete scope" (this
+    /// sampled plan, inside every other bound, would be admitted).
+    #[test]
+    fn a_sampled_plan_under_a_complete_scope_is_refused() {
+        let refusal = plan_within_scope(&facts(), &complete_scope()).expect_err("downgraded");
+        assert!(
+            refusal
+                .to_string()
+                .contains("`sample.coverage: sampled` and the signed scope authorises `complete`"),
+            "{refusal}"
+        );
+        assert_eq!(refusal.mismatches.len(), 1, "{refusal}");
+    }
+
+    /// The signer's record bound: a complete plan under a scope stating
+    /// `completeMaxRecords` must state its own bound, no larger. Absent in the
+    /// plan is unbounded and refused; a larger bound is refused; an equal or
+    /// smaller one is admitted; with no bound in the scope, any plan bound (or
+    /// none) is inside it.
+    ///
+    /// KILLS: the `None` arm admitted; the comparison reversed or `>=`.
+    #[test]
+    fn a_signed_record_bound_holds_the_complete_plan() {
+        let bounded = RehearsalScope {
+            complete_max_records: Some(1_000),
+            ..complete_scope()
+        };
+        let refusal = plan_within_scope(&complete_facts(), &bounded).expect_err("unbounded");
+        assert!(
+            refusal
+                .to_string()
+                .contains("states no `sample.complete_max_records`"),
+            "{refusal}"
+        );
+        let over = PlanScopeFacts {
+            complete_max_records: Some(1_001),
+            ..complete_facts()
+        };
+        let refusal = plan_within_scope(&over, &bounded).expect_err("over the bound");
+        assert!(
+            refusal.to_string().contains("may decode 1001 records"),
+            "{refusal}"
+        );
+        for n in [1_000, 1] {
+            let inside = PlanScopeFacts {
+                complete_max_records: Some(n),
+                ..complete_facts()
+            };
+            plan_within_scope(&inside, &bounded).expect("inside the signed bound");
+            plan_within_scope(&inside, &complete_scope()).expect("no signed bound");
+        }
+    }
+
+    /// The document carrying the new fields must say so, and they must be
+    /// coherent: `coverage`/`completeMaxRecords` under formatVersion 1.0.0 is
+    /// refused; a record bound beside a sampled-only scope is refused; a bound
+    /// of 0 is refused; the same scope at 1.1.0 is admitted, and a 1.0.0
+    /// document without them is admitted as before. The minting version is
+    /// 1.1.0 exactly when the scope carries one.
+    ///
+    /// KILLS: the minor check removed (the first refusal); `<` turned `<=`
+    /// (the 1.1.0 admission); each arm of the coherence match.
+    #[test]
+    fn the_coverage_fields_need_format_1_1_and_cohere() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let doc = |version: &str, scope: RehearsalScope| StandingAuthorization {
+            format_version: version.to_string(),
+            kind: STANDING_AUTHORIZATION_KIND.to_string(),
+            subject_ref: AuthorizationSubject {
+                api_version: SUBJECT_API_VERSION.to_string(),
+                kind: REHEARSAL_SCHEDULE_KIND.to_string(),
+                namespace: "team-a".into(),
+                name: "weekly".into(),
+                uid: "u-1".into(),
+            },
+            scope,
+            issued_at: now - chrono::Duration::days(1),
+            expires_at: now + chrono::Duration::days(1),
+        };
+        let refused =
+            admit_standing_authorization(&doc("1.0.0", complete_scope()), Some("u-1"), now)
+                .expect_err("a 1.0.0 document cannot carry coverage");
+        assert!(
+            refused.detail.contains("defined from formatVersion 1.1.0"),
+            "{refused}"
+        );
+        admit_standing_authorization(&doc("1.1.0", complete_scope()), Some("u-1"), now)
+            .expect("1.1.0 carries it");
+        admit_standing_authorization(&doc("1.0.0", scope()), Some("u-1"), now)
+            .expect("a 1.0.0 scope without it, as before");
+        let sampled_bound = RehearsalScope {
+            complete_max_records: Some(5),
+            ..scope()
+        };
+        let refused = admit_standing_authorization(&doc("1.1.0", sampled_bound), Some("u-1"), now)
+            .expect_err("a bound beside sampled");
+        assert!(refused.detail.contains("does not authorise"), "{refused}");
+        let zero = RehearsalScope {
+            complete_max_records: Some(0),
+            ..complete_scope()
+        };
+        let refused = admit_standing_authorization(&doc("1.1.0", zero), Some("u-1"), now)
+            .expect_err("a bound of 0");
+        assert!(refused.detail.contains("is 0"), "{refused}");
+
+        assert_eq!(standing_format_version_for(&scope()), "1.0.0");
+        assert_eq!(standing_format_version_for(&complete_scope()), "1.1.0");
+        let json = serde_json::to_string(&scope()).expect("serialises");
+        assert!(
+            !json.contains("coverage") && !json.contains("completeMaxRecords"),
+            "a scope without the fields serialises as a 1.0.0 scope did: {json}"
+        );
+        let json = serde_json::to_string(&complete_scope()).expect("serialises");
+        assert!(json.contains("\"coverage\":\"complete\""), "{json}");
+    }
+
+    /// The facts carry the plan's own coverage, so the runner's half of
+    /// "checked twice" reads what the mounted bytes say.
+    #[test]
+    fn the_scope_facts_carry_the_plans_coverage() {
+        let yaml = |coverage: &str| {
+            format!(
+                "source:\n  storage: {{backend: filesystem, path: /a}}\n  backup: b\n  \
+                 topics: [orders]\ntarget:\n  bootstrap_servers: [\"k:9092\"]\n  mode: scratch\n  \
+                 topic_mapping_prefix: rehearsal-3f2a91c7-\n  marker_topic: m\n\
+                 sample:\n  window_start: \"2026-01-01T00:00:00Z\"\n  \
+                 window_end: \"2026-01-01T01:00:00Z\"\n{coverage}\
+                 objectives: {{}}\nevidence: {{backend: filesystem, path: /e}}\n"
+            )
+        };
+        let allowed = crate::spec::AllowedClusters {
+            allowed_cluster_ids: vec!["TARGET00000000000000000".into()],
+            source_cluster_id: None,
+        };
+        let sampled: crate::spec::DrillSpec = serde_yaml::from_str(&yaml("")).expect("a plan");
+        assert_eq!(
+            plan_scope_facts(&sampled, &allowed).coverage,
+            crate::spec::Coverage::Sampled
+        );
+        let complete: crate::spec::DrillSpec =
+            serde_yaml::from_str(&yaml("  coverage: complete\n")).expect("a plan");
+        assert_eq!(
+            plan_scope_facts(&complete, &allowed).coverage,
+            crate::spec::Coverage::Complete
+        );
     }
 
     #[test]

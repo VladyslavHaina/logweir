@@ -101,9 +101,14 @@ fn args_for(dir: &Path, scope: &Path, key: &Path, valid_days: i64) -> ApproveArg
 /// Mint with the shipped code path, and build the keyring the bundle would
 /// carry for the key that signed it.
 fn mint(valid_days: i64) -> Minted {
+    mint_scope(valid_days, &scope_json())
+}
+
+/// [`mint`] over any scope file text.
+fn mint_scope(valid_days: i64, scope_text: &str) -> Minted {
     let dir = tempfile::tempdir().expect("a temp dir");
     let scope = dir.path().join("scope.json");
-    std::fs::write(&scope, scope_json()).expect("the scope is written");
+    std::fs::write(&scope, scope_text).expect("the scope is written");
     let signer = SigningKey::generate_ed25519();
     let key = dir.path().join("approver.pem");
     std::fs::write(&key, signer.to_pkcs8_pem().expect("a private PEM")).expect("written");
@@ -216,6 +221,94 @@ fn a_minted_standing_authorization_is_accepted_by_the_runner() {
         scope["deadlineSeconds"]
     );
     assert_eq!(doc.scope.modes, vec!["scratch".to_string()]);
+}
+
+/// **PROD-08.1a: a scope that signs complete coverage mints format 1.1.0, and
+/// the runner admits a complete plan under it.** The scope file states
+/// `coverage: complete` and `completeMaxRecords`; the document is minted at
+/// 1.1.0 carrying both, read back from the verified bytes; a complete plan
+/// inside the bound is admitted by the runner's own entry point and one past
+/// it is refused. A scope stating `completeMaxRecords` without complete
+/// coverage is refused BEFORE anything is signed.
+///
+/// KILLS: the minter writing 1.0.0 over a scope that carries the fields (the
+/// runner then refuses the document); either field dropped on the way
+/// through the signer; the record bound not enforced.
+#[test]
+fn a_scope_that_signs_complete_coverage_mints_1_1_and_the_runner_admits_its_plan() {
+    let mut scope: serde_json::Value = serde_json::from_str(&scope_json()).expect("parses");
+    scope["coverage"] = serde_json::json!("complete");
+    scope["completeMaxRecords"] = serde_json::json!(5000);
+    let minted = mint_scope(30, &scope.to_string());
+    let mut complete = plan();
+    complete.sample.max_partitions = None;
+    complete.sample.coverage = logweir_core::spec::Coverage::Complete;
+    complete.sample.complete_max_records = Some(5000);
+    let verified = logweir::drill::binding::verify_standing_authorization(
+        &complete,
+        &allowed(),
+        &minted.envelope,
+        &minted.sidecar,
+        &minted.keys,
+        Some(SCHEDULE_UID),
+        now(),
+    )
+    .expect("a complete plan inside the signed complete scope");
+    assert_eq!(verified.document.format_version, "1.1.0");
+    assert_eq!(
+        verified.document.scope.coverage,
+        Some(logweir_core::spec::Coverage::Complete)
+    );
+    assert_eq!(verified.document.scope.complete_max_records, Some(5000));
+
+    complete.sample.complete_max_records = Some(5001);
+    let refused = logweir::drill::binding::verify_standing_authorization(
+        &complete,
+        &allowed(),
+        &minted.envelope,
+        &minted.sidecar,
+        &minted.keys,
+        Some(SCHEDULE_UID),
+        now(),
+    )
+    .expect_err("past the signed record bound");
+    assert!(
+        format!("{refused:?}").contains("may decode 5001 records"),
+        "{refused:?}"
+    );
+
+    // A sampled plan (the 1.0.0 fixture's) is not the coverage this scope signed.
+    let refused = logweir::drill::binding::verify_standing_authorization(
+        &plan(),
+        &allowed(),
+        &minted.envelope,
+        &minted.sidecar,
+        &minted.keys,
+        Some(SCHEDULE_UID),
+        now(),
+    )
+    .expect_err("a weaker check than signed");
+    assert!(
+        format!("{refused:?}").contains("authorises `complete`"),
+        "{refused:?}"
+    );
+
+    // A bound on a coverage the scope does not authorise is refused before signing.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("scope.json");
+    let mut incoherent: serde_json::Value = serde_json::from_str(&scope_json()).expect("parses");
+    incoherent["completeMaxRecords"] = serde_json::json!(5000);
+    std::fs::write(&path, incoherent.to_string()).expect("written");
+    let signer = SigningKey::generate_ed25519();
+    let key = dir.path().join("approver.pem");
+    std::fs::write(&key, signer.to_pkcs8_pem().expect("a private PEM")).expect("written");
+    let refused = mint_standing(&args_for(dir.path(), &path, &key, 30), now())
+        .expect_err("an incoherent scope is not signed");
+    assert!(refused.contains("does not authorise"), "{refused}");
+    assert!(
+        !dir.path().join("standing-authorization.json").exists(),
+        "nothing was written"
+    );
 }
 
 /// The payload type is the whole point of the second signer path: a standing

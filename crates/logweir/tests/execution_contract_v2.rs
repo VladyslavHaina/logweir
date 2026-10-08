@@ -133,9 +133,18 @@ fn scope_value(prefix: &str, cluster: &str) -> serde_json::Value {
 /// A standing authorization for `uid`, over `prefix`/`cluster`, signed by a
 /// freshly generated `GovernedApproval` key that the keyring pins.
 fn signed_authorization(uid: &str, prefix: &str, cluster: &str) -> SignedAuthorization {
+    signed_authorization_with(uid, scope_value(prefix, cluster), "1.0.0")
+}
+
+/// [`signed_authorization`] over any scope, at any `formatVersion`.
+fn signed_authorization_with(
+    uid: &str,
+    scope: serde_json::Value,
+    format_version: &str,
+) -> SignedAuthorization {
     let issued = Utc::now() - chrono::Duration::days(1);
     let document = serde_json::to_vec(&serde_json::json!({
-        "formatVersion": "1.0.0",
+        "formatVersion": format_version,
         "kind": "StandingRehearsalAuthorization",
         "subjectRef": {
             "apiVersion": "logweir.dev/v1alpha1",
@@ -144,7 +153,7 @@ fn signed_authorization(uid: &str, prefix: &str, cluster: &str) -> SignedAuthori
             "name": "weekly-orders",
             "uid": uid,
         },
-        "scope": scope_value(prefix, cluster),
+        "scope": scope,
         "issuedAt": issued.to_rfc3339(),
         "expiresAt": (issued + chrono::Duration::days(30)).to_rfc3339(),
     }))
@@ -1064,6 +1073,75 @@ fn a_minted_authorization_is_refused_by_the_real_binary() {
         "{transcript}"
     );
     assert!(!transcript.contains("19099"), "{transcript}");
+}
+
+/// **PROD-08.1a: the runner's half of "the coverage is signed", through the
+/// real binary.** The rehearsal plan asks for `sample.coverage: complete`
+/// (and so states no `max_partitions`). Under a 1.0.0 scope — every scope
+/// signed before the field existed, which authorises sampled rehearsals only —
+/// it is refused before any client, naming the coverage. Under a 1.1.0 scope
+/// that signed `coverage: complete` the SAME plan gets past every
+/// authorization check and fails later for a reason that is not the
+/// authorization (no broker listens).
+///
+/// KILLS: the runner reading the plan's coverage as admissible under any
+/// scope (the first half admits); the coverage arm refusing a complete plan
+/// whatever the scope says (the second half refuses).
+#[test]
+fn a_complete_plan_runs_only_under_a_scope_that_signed_complete_coverage() {
+    let complete_plan = REHEARSAL_PLAN.replace("  max_partitions: 200\n", "  coverage: complete\n");
+    assert!(
+        complete_plan.contains("coverage: complete"),
+        "{complete_plan}"
+    );
+    let fixture = fixture_with_plan(complete_plan.as_bytes().to_vec());
+
+    let old = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    let m = mount(&fixture, &old);
+    let contract = standing_contract(&fixture, &old, "uid-1");
+    let argv = standing_argv(&m);
+    let (code, transcript) = invoke(
+        &m,
+        &fixture,
+        &env_map(&contract),
+        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    assert_eq!(code, 3, "{transcript}");
+    assert!(
+        transcript.contains("RehearsalScopeViolation"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("`sample.coverage: complete`")
+            && transcript.contains("authorises `sampled` coverage"),
+        "{transcript}"
+    );
+    assert!(!transcript.contains("19099"), "{transcript}");
+
+    let mut scope = scope_value("rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    scope["coverage"] = serde_json::json!("complete");
+    let signed = signed_authorization_with("uid-1", scope, "1.1.0");
+    let m = mount(&fixture, &signed);
+    let contract = standing_contract(&fixture, &signed, "uid-1");
+    let argv = standing_argv(&m);
+    let (code, transcript) = invoke(
+        &m,
+        &fixture,
+        &env_map(&contract),
+        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    for not_expected in [
+        "RehearsalScopeViolation",
+        "AuthorizationInvalid",
+        "AuthorizationExpired",
+    ] {
+        assert!(
+            !transcript.contains(not_expected),
+            "a scope that signed complete coverage covers this plan; not {not_expected} (exit \
+             {code}):\n{transcript}"
+        );
+    }
+    assert_ne!(code, 0, "no broker is running, so it cannot succeed");
 }
 
 /// The control: the SAME plan under an authorization that covers it gets past

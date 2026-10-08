@@ -53,8 +53,25 @@ pub const EXACTLY_ONE_AUTHORIZATION_RULE: &str = "has(self.approvalRef) != has(s
 pub const EXACTLY_ONE_AUTHORIZATION_MESSAGE: &str =
     "set exactly one of spec.approvalRef (a per-run Approval) or spec.authorization (a standing authorization); a Restore is never unauthorized";
 
+/// **PROD-08.1a.** The CEL rule that keeps a record bound beside the coverage
+/// it bounds: `completeMaxRecords` only with `coverage: complete`.
+///
+/// The runner's phase 0 refuses the same pair in the plan
+/// (`sample.complete_max_records` beside a sampled coverage) and the
+/// controller refuses a spec that disagrees with its plan, so this rule is the
+/// earliest of three refusals, at admission, before any approval is asked
+/// for. One rule serves both kinds: on `Restore` it sits on `.spec`, on
+/// `RehearsalSchedule` on `.spec.bounds`, and the two field names are the
+/// same.
+pub const COMPLETE_MAX_RECORDS_RULE: &str =
+    "!has(self.completeMaxRecords) || (has(self.coverage) && self.coverage == 'complete')";
+
+/// The message [`COMPLETE_MAX_RECORDS_RULE`] travels with.
+pub const COMPLETE_MAX_RECORDS_MESSAGE: &str =
+    "completeMaxRecords bounds a complete verification and is set only with coverage: complete";
+
 /// The rules on `Restore`'s `.spec`.
-pub const SPEC_RULES: [SpecRule; 4] = [
+pub const SPEC_RULES: [SpecRule; 5] = [
     SpecRule::new(super::SPEC_IMMUTABLE_RULE, super::SPEC_IMMUTABLE_MESSAGE),
     SpecRule::new(DESTINATIONS_TOGETHER_RULE, DESTINATIONS_TOGETHER_MESSAGE),
     SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
@@ -62,7 +79,53 @@ pub const SPEC_RULES: [SpecRule; 4] = [
         EXACTLY_ONE_AUTHORIZATION_RULE,
         EXACTLY_ONE_AUTHORIZATION_MESSAGE,
     ),
+    SpecRule::new(COMPLETE_MAX_RECORDS_RULE, COMPLETE_MAX_RECORDS_MESSAGE),
 ];
+
+/// **PROD-08.1a.** How much of a restore phase 7 verifies, as a `Restore` or
+/// a `RehearsalSchedule` asks for it: the plan grammar's `sample.coverage`
+/// (`logweir_core::spec::Coverage`) in the CRDs' camelCase.
+///
+/// - **`sampled`** — today's check: a canary of `recordsPerPartition` records
+///   of each sampled partition, compared byte for byte, and the manifest's
+///   count bound for the window.
+/// - **`complete`** — every archived segment of every partition of every
+///   restored topic read, hashed and decoded, and every restored record
+///   compared with the archive by `x-original-offset`: exact per-partition
+///   counts. It reads the whole archive of the restored partitions and the
+///   whole output, so it COSTS MORE — about a minute per GiB of one-KiB
+///   records with an optimised build on a laptop, against about five seconds
+///   for the sampled check (`docs/to-do/decisions/PROD-08.1-integrity-contract.md`
+///   §7). A bound (`completeMaxRecords`) or an archive it cannot compare
+///   signs `covered: false`, which is never a pass.
+///
+/// ABSENT MEANS SAMPLED, and is not serialised, so every object written
+/// before this field is byte-identical and so is every plan rendered from it.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum VerificationCoverage {
+    /// A sampled check — the default.
+    Sampled,
+    /// Every record of every restored partition.
+    Complete,
+}
+
+impl VerificationCoverage {
+    /// The plan grammar's value for this coverage.
+    #[must_use]
+    pub fn plan(self) -> logweir_core::spec::Coverage {
+        match self {
+            Self::Sampled => logweir_core::spec::Coverage::Sampled,
+            Self::Complete => logweir_core::spec::Coverage::Complete,
+        }
+    }
+
+    /// The coverage a spec field asks for: absent is sampled.
+    #[must_use]
+    pub fn of(field: Option<Self>) -> logweir_core::spec::Coverage {
+        field.map_or(logweir_core::spec::Coverage::Sampled, Self::plan)
+    }
+}
 
 /// `target.mode`'s enum, fixed byte for byte at this task.
 ///
@@ -174,6 +237,135 @@ pub struct Integrity {
     /// `partial` with no reason is a badge an auditor cannot act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_reason: Option<String>,
+    /// **PROD-08.1a.** The signed `integrity.verification.coverage` (scorecard
+    /// format 1.4.0): `sampled` or `complete`, what the run ACTUALLY verified.
+    /// A CLAIM until `evidence.verification` says `Valid`, like `result`.
+    ///
+    /// ABSENT MEANS NOT RECORDED — a scorecard before 1.4.0, a run that signed
+    /// none, or one not read yet — and is read as a sampled check, NEVER as a
+    /// complete one: nothing re-reads old evidence as a stronger guarantee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 16))]
+    pub coverage: Option<String>,
+    /// **PROD-08.1a.** A complete verification's result, copied from the
+    /// signed `integrity.verification.complete` — present exactly when
+    /// `coverage` is `complete` and the document's block was well formed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complete: Option<CompleteCoverage>,
+    /// **FX-23.** The signed `sample.unsampled_topics` (format 1.6.0): the
+    /// restored topics a SAMPLED check's partition cap left without a sampled
+    /// partition — counted against their bound, not compared record by
+    /// record. Absent means none is recorded as unsampled (and says nothing
+    /// for a document before 1.6.0). All of it or nothing: a list past
+    /// [`UNSAMPLED_TOPICS_MAX`] is not copied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256), inner(length(max = 249)))]
+    pub unsampled_topics: Option<Vec<String>>,
+}
+
+/// `status.integrity.unsampledTopics`' `maxItems`.
+pub const UNSAMPLED_TOPICS_MAX: usize = 256;
+
+/// `status.integrity.complete.partitions`' `maxItems`. A signed block listing
+/// more partitions is copied WITHOUT its partition rows (`partitionCount`
+/// still says how many it lists): a truncated list would be a claim the
+/// signed document does not make, and the rows stay in the scorecard.
+pub const COMPLETE_PARTITIONS_MAX: usize = 256;
+
+/// **PROD-08.1a.** A complete verification's result on a `Restore` — the
+/// signed `integrity.verification.complete` (format 1.4.0) in this
+/// resource's camelCase, COPIED and never recomputed.
+///
+/// `covered: false` IS NEVER A PASS. The scorecard's own arm IV-6 refuses a
+/// `pass` beside it; the controller's badge rule refuses green beside it too
+/// (`CompleteNotCovered`), so a document that somehow said both is still not
+/// green here.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteCoverage {
+    /// `true` when every partition of every restored topic was compared.
+    pub covered: bool,
+    /// Why `covered` is `false`: the bound, an archive without lineage
+    /// headers, a segment that could not be decoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1024))]
+    pub incomplete_reason: Option<String>,
+    /// The plan's `sample.complete_max_records`, the bound in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_records: Option<i64>,
+    /// Archive integrity over every segment of the restored partitions.
+    pub archive: CompleteArchive,
+    /// The replay comparison, summed over every compared partition.
+    pub replay: ReplayCounts,
+    /// How many partitions the signed block lists.
+    pub partition_count: i64,
+    /// One row per partition, sorted by topic and partition — ABSENT when the
+    /// signed block lists more than [`COMPLETE_PARTITIONS_MAX`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub partitions: Option<Vec<PartitionCoverage>>,
+}
+
+/// Archive integrity under complete coverage, as counts.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteArchive {
+    /// Segments the manifest lists for the restored partitions.
+    pub segments: i64,
+    /// Segments whose sha256, decode and manifest count all agreed.
+    pub segments_verified: i64,
+    /// How many segments were examined and found wrong (the keys are in the
+    /// signed scorecard's `segments_failed`).
+    pub segments_failed_count: i64,
+    /// How many segments could not be examined (`segments_unverified`).
+    pub segments_unverified_count: i64,
+    /// Archived records decoded.
+    pub records_decoded: i64,
+    /// Source offsets inside the decoded span no archived record holds —
+    /// a compacted source's holes. Disclosed, never a fault.
+    pub offset_holes: i64,
+}
+
+/// The exact counts of a replay comparison: one partition's, or the sums.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayCounts {
+    /// Archived records the window selects: the expected output.
+    pub expected: i64,
+    /// Records the target holds.
+    pub restored: i64,
+    /// Expected records restored byte for byte, headers in order.
+    pub matching: i64,
+    /// Expected records with no restored copy.
+    pub missing: i64,
+    /// Restored records that are no expected record.
+    pub unexpected: i64,
+    /// Restored records repeating a source offset already seen.
+    pub duplicates: i64,
+    /// Restored records below a source offset seen before them.
+    pub out_of_order: i64,
+    /// Expected records whose restored copy differs.
+    pub mismatched: i64,
+}
+
+/// One partition of a complete verification.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionCoverage {
+    /// The archive-side (source) topic.
+    #[schemars(length(max = 249))]
+    pub topic: String,
+    /// The partition.
+    pub partition: i32,
+    /// The restored topic it was compared with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 249))]
+    pub target_topic: Option<String>,
+    /// `false` when this partition was not compared — past the bound, or its
+    /// expected output could not be established.
+    pub compared: bool,
+    /// Its exact counts.
+    pub replay: ReplayCounts,
 }
 
 /// **FX-8.** The signed scorecard's `source.time_basis` (format 1.3.0), as
@@ -280,6 +472,7 @@ pub struct RestoreEvidence {
     printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.reason","description":"the terminal or current condition reason - ApprovalNotVerified, PlanHashMismatch, GuardRefused, Ok, ...; NOT exitReason, which is `operational` for every admission refusal"}"#,
     printcolumn = r#"{"name":"OUTCOME","type":"string","jsonPath":".status.outcome"}"#,
     printcolumn = r#"{"name":"INTEGRITY","type":"string","jsonPath":".status.integrity.result"}"#,
+    printcolumn = r#"{"name":"COVERAGE","type":"string","jsonPath":".status.integrity.coverage","description":"what the signed scorecard verified: sampled or complete; empty is not recorded, never complete"}"#,
     printcolumn = r#"{"name":"RTO","type":"integer","jsonPath":".status.measured.rtoSeconds"}"#,
     printcolumn = r#"{"name":"SIGNED","type":"string","jsonPath":".status.evidence.verification.result","description":"green needs this Valid AND outcome pass"}"#,
     printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
@@ -357,6 +550,35 @@ pub struct RestoreSpec {
     /// resources come from here and never from the target mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_resources: Option<super::rehearsal_schedule::RunnerResources>,
+    /// **PROD-08.1a.** How much of the restore phase 7 verifies: `sampled`
+    /// (absent means this) or `complete` — every record of every restored
+    /// partition, compared with the archive, with exact per-partition counts.
+    /// Complete COSTS MORE: it reads every archived record of the restored
+    /// topics and the whole restored output (about a minute per GiB of one-KiB
+    /// records with an optimised build on a laptop, against about five seconds
+    /// for the sampled check). A run its bound stops, or whose archive it
+    /// cannot compare, signs `covered: false`, which is never a pass.
+    ///
+    /// A DECLARATION OF WHAT `planBytes` SAYS, CHECKED AGAINST IT. The plan
+    /// is what the approver signs and what the runner executes; this field
+    /// states its `sample.coverage` where a list, a printer column and the
+    /// console can read it without parsing the plan. The controller refuses a
+    /// `Restore` whose plan says otherwise (absent here means the plan must
+    /// be sampled) before an approval is waited for or anything is created:
+    /// `Failed`, reason `ExecutionSpecInvalid`. `spec` is immutable and the
+    /// approval binds the plan bytes, so coverage cannot change after the
+    /// approval — a different coverage is a different plan, a different
+    /// hash and a new approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<VerificationCoverage>,
+    /// **PROD-08.1a.** The bound on a complete verification — the plan's
+    /// `sample.complete_max_records`: the most archived records it decodes,
+    /// summed over every restored partition. Only with `coverage: complete`
+    /// (CEL), checked against the plan like `coverage`. A run the bound stops
+    /// signs `covered: false`, never a pass. Absent: no bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub complete_max_records: Option<i64>,
 }
 
 impl RestoreSpec {

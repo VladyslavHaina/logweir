@@ -135,9 +135,9 @@ use logweir_verify::{verify_detached, Sidecar, VerifyingKey};
 use serde_json::{json, Value};
 
 use crate::conditions::{
-    current_condition, merge_condition, CONDITION_VERIFIED, REASON_EXIT_CODE_NOT_ZERO,
-    REASON_OUTCOME_NOT_PASS, REASON_VERIFICATION_INVALID, REASON_VERIFICATION_NOT_ATTEMPTED,
-    REASON_VERIFICATION_UNTRUSTED, REASON_VERIFIED,
+    current_condition, merge_condition, CONDITION_VERIFIED, REASON_COMPLETE_NOT_COVERED,
+    REASON_EXIT_CODE_NOT_ZERO, REASON_OUTCOME_NOT_PASS, REASON_VERIFICATION_INVALID,
+    REASON_VERIFICATION_NOT_ATTEMPTED, REASON_VERIFICATION_UNTRUSTED, REASON_VERIFIED,
 };
 use crate::crds::Condition;
 use crate::trust::{Resolution, ResolvedTrust, TrustSource};
@@ -1429,7 +1429,8 @@ pub fn backup_badge(status: &Value) -> Badge {
 
 /// **Interface I21, the `Restore` half.** Green ⟺ `verification.result ==
 /// Valid` AND `status.outcome == pass` AND no recorded `exitCode` other than
-/// `0`.
+/// `0` AND no signed complete verification that says `covered: false`
+/// (PROD-08.1a, [`REASON_COMPLETE_NOT_COVERED`]).
 ///
 /// `outcome` is the scorecard's own string, copied onto the status by Task
 /// 20's reconciler and never re-derived — `pass`, `fail-objective`,
@@ -1464,6 +1465,12 @@ pub fn restore_badge(status: &Value) -> Badge {
         .is_some_and(|code| code.as_i64() != Some(0))
     {
         return Badge::not_green(REASON_EXIT_CODE_NOT_ZERO);
+    }
+    // PROD-08.1a: A COMPLETE VERIFICATION THAT DID NOT COVER THE RESTORE IS
+    // NEVER A PASS, whatever `outcome` says. Arm IV-6 keeps the two apart in
+    // every document either reader accepts; this keeps them apart here too.
+    if status.pointer("/integrity/complete/covered") == Some(&Value::Bool(false)) {
+        return Badge::not_green(REASON_COMPLETE_NOT_COVERED);
     }
     Badge::green(at, key, historical)
 }
