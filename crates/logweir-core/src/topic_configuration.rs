@@ -837,7 +837,7 @@ mod tests {
                 reference: "kafka/orders".into(),
             },
         )]);
-        let merged = merge_owners(detected, &[ok.clone()]);
+        let merged = merge_owners(detected, std::slice::from_ref(&ok));
         assert_eq!(merged["orders"].basis, "declared");
         assert_eq!(merged["orders"].reference, ok.reference);
         assert_eq!(apply_route(false), "adminApi");
