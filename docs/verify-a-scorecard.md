@@ -454,6 +454,7 @@ topic parity and evidence. The footer adds qualifications:
 | `objectives.met` | `yes`, `NO` or `unmeasurable`; the last means a requested pass rate could not be measured. |
 | `integrity.partial_reason` | Verbatim reason. |
 | `engine_subreport.caveat` | Verbatim caveat, or an explicit notice that the block is null. |
+| `sample.unsampled_topics` (format 1.6.0) | The topics a sampled verification's `max_partitions` left without a sampled partition — counted, not reconciled. Printed only when the document names one. |
 
 The footer states that the table is a summary; `--format json` prints the signed
 bytes. Read the JSON for details the summary omits:

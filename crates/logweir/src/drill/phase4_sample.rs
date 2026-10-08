@@ -93,7 +93,7 @@ pub fn run(
     let mut candidates: Vec<Candidate> = Vec::new();
 
     // PROD-08.1: a COMPLETE verification selects every partition the
-    // manifest lists for a restored topic — never the first `max_partitions`
+    // manifest lists for a restored topic — never a `max_partitions` subset
     // (phase 0 refuses that pairing), and never only the partitions whose
     // segments' first/last timestamps overlap the window: those bounds are
     // the engine's selection, and the complete lane's expected output is
