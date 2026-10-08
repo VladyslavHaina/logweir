@@ -841,6 +841,26 @@ Branch `claude/prod-04-0b`. OD-6 (a2): this row is the first to land FFI, so it 
 
 **Not run here:** clusters of several brokers (T6's duplicates, T19); a consumer group caught in `Assigning` or `Reconciling` (T4 rests on unit rows); a broker that reports no authorized operations (unit rows only).
 
+
+### 14.1 Fix round (2026-10-08, review `claude/prod-04-0b.review.md`)
+
+- **H1: the fixture row on the legacy default line.** CI's `e2e` job and engine-matrix's 3.7.1 rows run the non-ignored `group_admin` rows on the 3.7.1 default stack, where the broker prints TYPE `-` and the typed listing carries type 0. The row now reads the line from the broker's answer and, there, asserts the legacy outcome: every typed fixture entry has type 0, every fixture group is `GroupTypeNotCaptured { UnknownType { raw: 0 } }`, and no description is taken. It never skips.
+- **M1, M2: rustc is the first layer of the fence.** The root `Cargo.toml` carries `[workspace.lints.rust] unsafe_code = "forbid"`, and every member except the perimeter takes it, so rustc refuses `unsafe`, `no_mangle`, `export_name`, `link_section` and `global_asm!` in every target: tests, benches and build scripts included. Measured: a test target holding the review's macro, `cfg_attr(.., no_mangle)` and `global_asm!` is refused, and so is a build script's `unsafe` block. The gate requires the table and each opt-in, and its scan now flags any `unsafe` token, those attributes anywhere, `global_asm!`/`naked_asm!`, `allow`/`warn`/`expect` of `unsafe_code`, any `include!`, and a `#[path]` into the perimeter or out of the tree. It prunes only at the root. Every pattern has a negative control.
+- **L1: absence and "other type" need a listing that lost no broker.**
+  - The classic stand-in proves an unlisted id absent only when the listings are incomplete through the principal's visibility (no Describe on the cluster, operations not reported or unread). With a typed-listing error, `_PARTIAL` or T19's mismatch, the verdict is `failed: AbsenceUnproven`.
+  - Its twin: a group only the name listing shows is `GroupTypeNotCaptured` only when the typed listing lost no broker. Otherwise it is `failed: TypeUnproven`, since a classic or consumer group the lost broker coordinates is missing from the typed listing too.
+- **L2:** the e2e soak's bound is 1 MiB. Measured growth was 0 KiB; one leaked name listing per round grows it by about 3 MiB.
+- **L3:** the glue's choice of targeted ids and its answer mapping are the pure `groups::classify_with`, unit-tested with a fake describe.
+- **ASan, from the review:** the FFI unit rows pass under AddressSanitizer on Linux (nightly, aarch64, in Docker, 4 MB quarantine), with a planted double free and a planted use-after-free each reported. LeakSanitizer gave no signal there; leak coverage rests on the RSS soaks and macOS `leaks`.
+- **L4:** `e2e/tests/group_admin.rs::on_three_brokers_an_existing_group_is_never_excluded_while_one_is_down`, on the `cluster3` profile (results in the worker's report).
+
+**The rule recommended for PROD-04.1 on brokers below ListGroups v5 (3.7.x; PROD-04.1 decides).** Keep T4: an Unknown type is never captured on the listing's word alone. Add one narrow legacy rule, applied only to entries of the typed listing whose type is Unknown:
+- capture as **classic** an entry whose protocol type is empty (`is_simple`): KIP-848 groups always list protocol type `consumer`, and the typed listing keeps only `""` and `consumer` (C7);
+- for an entry whose protocol type is `consumer`, send a targeted DescribeConsumerGroups, and capture it as the type described only when that answer cannot be the stand-in: **Consumer** (a KIP-848 early-access group, answered by ConsumerGroupDescribe), or **Classic** with at least one member or with the listing's own non-Dead state (the classic describe tells the truth for a real classic group, §3.1);
+- everything else stays `GroupTypeNotCaptured { UnknownType }`.
+
+Commit it with unit rows, the 3.7.1 e2e row turned to expect captures, and a negative control: a Dead, memberless stand-in is never captured. The alternative is to declare 3.7 unsupported for group capture and land PROD-01.5a (the default line off 3.7.1) first. Either way the 3.7.1 row states the outcome.
+
 ---
 
 Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).

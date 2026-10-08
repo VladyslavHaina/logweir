@@ -147,10 +147,13 @@ requires checking the new client's full admin API and release targets.
 PROD-04.0b).** Logweir calls librdkafka functions the safe rdkafka API lacks,
 through `rdkafka::bindings`, in exactly one FFI perimeter: the crate
 `logweir-rdkafka-ffi`, which alone does not carry `#![forbid(unsafe_code)]`,
-and which `logweir-kafka` depends on. Every other crate root carries
-`#![forbid(unsafe_code)]`; `scripts/check-unsafe-scope.sh` (in `just lint`)
-enforces the perimeter and the attribute, and bars code-shaped `unsafe`
-outside it.
+and which `logweir-kafka` depends on. Every other package takes the root
+`Cargo.toml`'s `[workspace.lints.rust] unsafe_code = "forbid"` (`[lints]
+workspace = true`), so rustc refuses `unsafe` in every one of its targets,
+tests, benches and build scripts included, and every other crate root also
+carries `#![forbid(unsafe_code)]`. `scripts/check-unsafe-scope.sh` (in `just
+lint`) enforces the perimeter, the lint table and the attribute, and scans
+the tree for `unsafe` outside the perimeter as a second layer.
 
 The perimeter wraps ListConsumerGroups, DescribeConsumerGroups,
 DescribeCluster and DescribeAcls, and the legacy group listing
