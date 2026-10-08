@@ -3966,3 +3966,110 @@ async fn fx11_a_running_pod_costs_no_events_list() {
         calls(&recorder)
     );
 }
+
+/// **FX-11 review L4: once the pod exists, its OWN Events are read — by the
+/// POD's UID.** A check pod whose `runner` container has sat in
+/// `ContainerCreating` past the 60 s mount grace, with a `FailedMount` Event
+/// on the pod, is `VolumeMountFailed`, naming the volume — the `FailedMount`
+/// row the module header and `docs/kubernetes.md` §12 say these check paths
+/// read. The one events list carries `involvedObject.uid=<pod uid>`, never the
+/// Job's: a `FailedMount` is recorded against the pod, so a list by the Job's
+/// UID would come back without it on a real API server.
+///
+/// KILLS: `check::job_events` listing by the Job's UID while a pod exists
+/// (review mutant RM4).
+#[tokio::test]
+async fn fx11_a_pending_mount_is_read_from_the_pods_own_events() {
+    const POD_UID: &str = "5e5e5e5e-0000-4000-8000-0000000000e5";
+    let creating: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {
+            "name": POD, "namespace": NS, "uid": POD_UID,
+            "creationTimestamp": "2026-09-16T11:58:40Z",
+            "ownerReferences": [{
+                "apiVersion": "batch/v1", "kind": "Job", "name": JOB,
+                "uid": JOB_UID, "controller": true, "blockOwnerDeletion": true
+            }],
+            "labels": {"batch.kubernetes.io/job-name": JOB}
+        },
+        "spec": {"containers": []},
+        "status": {"phase": "Pending", "containerStatuses": [{
+            "name": "runner", "image": "x", "imageID": "", "ready": false,
+            "restartCount": 0, "state": {"waiting": {"reason": "ContainerCreating"}}
+        }]}
+    }))
+    .expect("a Pod");
+    let mount = json!({
+        "apiVersion": "v1", "kind": "EventList", "metadata": {},
+        "items": [{
+            "apiVersion": "v1", "kind": "Event",
+            "metadata": {"name": format!("{POD}.1"), "namespace": NS},
+            "involvedObject": {"apiVersion": "v1", "kind": "Pod", "name": POD,
+                               "namespace": NS, "uid": POD_UID},
+            "reason": "FailedMount", "type": "Warning",
+            "message": "MountVolume.SetUp failed for volume \"archive-ca\" : configmap \
+                        \"archive-ca\" not found"
+        }]
+    })
+    .to_string();
+    let mut routes = refused_routes(mount);
+    routes[1].body = pod_list(vec![creating]);
+    let (client, recorder, bodies) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+
+    assert_eq!(
+        outcome.reason,
+        CheckCode::VolumeMountFailed.as_str(),
+        "{:?}",
+        calls(&recorder)
+    );
+    let said = status_of(&bodies)["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(said.contains("archive-ca"), "the volume is named: {said}");
+    let lists = event_lists(&recorder);
+    assert_eq!(lists.len(), 1, "{lists:?}");
+    assert!(
+        lists[0].contains(&format!("involvedObject.uid={POD_UID}")),
+        "the pod's own Events, by the POD's UID: {lists:?}"
+    );
+    assert!(
+        !lists[0].contains(JOB_UID),
+        "never the Job's UID once there is a pod: {lists:?}"
+    );
+
+    // NEGATIVE CONTROL: the same pending pod with no `FailedMount` Event is
+    // not `VolumeMountFailed` — the code comes from the pod's Event.
+    let mut routes = refused_routes(failed_create(&[]));
+    routes[1].body = pod_list(vec![serde_json::from_value::<Pod>(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {
+            "name": POD, "namespace": NS, "uid": POD_UID,
+            "creationTimestamp": "2026-09-16T11:58:40Z",
+            "ownerReferences": [{
+                "apiVersion": "batch/v1", "kind": "Job", "name": JOB,
+                "uid": JOB_UID, "controller": true, "blockOwnerDeletion": true
+            }],
+            "labels": {"batch.kubernetes.io/job-name": JOB}
+        },
+        "spec": {"containers": []},
+        "status": {"phase": "Pending", "containerStatuses": [{
+            "name": "runner", "image": "x", "imageID": "", "ready": false,
+            "restartCount": 0, "state": {"waiting": {"reason": "ContainerCreating"}}
+        }]}
+    }))
+    .expect("a Pod")]);
+    let (client, recorder, _bodies) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(
+        outcome.reason,
+        CheckCode::PodNotStarted.as_str(),
+        "{:?}",
+        calls(&recorder)
+    );
+}

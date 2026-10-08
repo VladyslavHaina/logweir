@@ -1631,10 +1631,15 @@ fn discovery_refused(job_name: &str, name: &str, code: CheckCode, message: &str)
 /// retryable — a runner that printed something unverifiable will print it
 /// again. Everything else is operational (an unreachable broker, a pod that
 /// never started, a deadline) and a retry — which is a NEW `Backup`, and
-/// therefore a fresh discovery — can succeed. A pod the namespace refused at
-/// creation is that class too, named `PodCreationForbidden` — the state a
-/// `Backup`'s runner reaches for the same refusal — rather than
-/// `DiscoveryFailed`, which reads as a broker problem (FX-11).
+/// therefore a fresh discovery — can succeed.
+///
+/// A pod the namespace refused at creation is NEITHER: it is
+/// `PodCreationForbidden` (FX-11), the state a `Backup`'s runner reaches for
+/// the same refusal, rather than `DiscoveryFailed`, which reads as a broker
+/// problem. A new `Backup` can succeed once the namespace admits the pod, but
+/// a schedule's `spec.retry` does NOT retry it: `PodCreationForbidden` is not
+/// in [`crate::cadence::RETRYABLE_TERMINAL_STATES`], exactly as for a refused
+/// runner pod (decision confirmed by the orchestrator, 2026-10-07).
 ///
 /// Both are terminal for THIS run: `Backup.spec` is CEL-immutable, so a requeue
 /// could never resolve differently, and D1 §7.7 says a refused dynamic run is
