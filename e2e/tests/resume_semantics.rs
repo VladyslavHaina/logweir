@@ -12,8 +12,12 @@
 //! scenario controls, and interrupts it: `SIGKILL` mid-topic and after a
 //! checkpoint commit, `SIGTERM`, a kill while produce requests are in flight
 //! (broker frozen), a stale checkpoint over a recreated target, a corrupt
-//! checkpoint, two workers, and a foreign write into the target; and D1 asks
-//! whether the checkpoint's hash is even a function of the document. Logweir
+//! checkpoint, two workers, and a foreign write into the target; D1 asks
+//! whether the checkpoint's hash is even a function of the document; and T2
+//! (its own archive) asks what the default SAMPLED verification signs over a
+//! restore the engine stopped early. Today it can sign `pass` (FX-23); T2
+//! records that, and FX-23's fix must turn T2's sampled-lane prediction red.
+//! Logweir
 //! cannot be used to interrupt its own engine: a killed `logweir` leaves the
 //! engine running to completion (PROD-01.1 §5.2, `docs/stability.md` Later
 //! #13), so the engine is driven here the way `e2e/fixtures/engine-docker.sh`
@@ -46,7 +50,7 @@
 //! # Running it
 //!
 //! `#[ignore]`d: it freezes the slot's broker for about two seconds and runs
-//! some thirty engine containers (about ten minutes). On a PROD-01.5 slot:
+//! some forty engine containers (about fifteen minutes). On a PROD-01.5 slot:
 //!
 //! ```text
 //! eval "$(e2e/compose/stack-env.sh --slot 1)"
