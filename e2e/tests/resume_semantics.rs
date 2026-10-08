@@ -12,7 +12,8 @@
 //! scenario controls, and interrupts it: `SIGKILL` mid-topic and after a
 //! checkpoint commit, `SIGTERM`, a kill while produce requests are in flight
 //! (broker frozen), a stale checkpoint over a recreated target, a corrupt
-//! checkpoint, two workers, and a foreign write into the target. Logweir
+//! checkpoint, two workers, and a foreign write into the target; and D1 asks
+//! whether the checkpoint's hash is even a function of the document. Logweir
 //! cannot be used to interrupt its own engine: a killed `logweir` leaves the
 //! engine running to completion (PROD-01.1 §5.2, `docs/stability.md` Later
 //! #13), so the engine is driven here the way `e2e/fixtures/engine-docker.sh`
@@ -45,7 +46,7 @@
 //! # Running it
 //!
 //! `#[ignore]`d: it freezes the slot's broker for about two seconds and runs
-//! some twenty engine containers. On a PROD-01.5 slot:
+//! some thirty engine containers (about ten minutes). On a PROD-01.5 slot:
 //!
 //! ```text
 //! eval "$(e2e/compose/stack-env.sh --slot 1)"
@@ -308,6 +309,16 @@ fn plan(
     checkpoint: &Path,
     offsets: &Path,
 ) -> logweir_core::engine::RestorePlan {
+    plan_in(ctx, mapping, checkpoint, offsets, ctx.window)
+}
+
+fn plan_in(
+    ctx: &Ctx,
+    mapping: &BTreeMap<String, String>,
+    checkpoint: &Path,
+    offsets: &Path,
+    window: (i64, i64),
+) -> logweir_core::engine::RestorePlan {
     use logweir_core::engine::{AuthRender, BackupSetRef, RestorePlan, WindowFloorSource};
     RestorePlan {
         set: BackupSetRef {
@@ -319,8 +330,8 @@ fn plan(
         target_auth: AuthRender::Plaintext,
         topic_mapping: mapping.clone(),
         time_window: (
-            chrono::DateTime::from_timestamp_millis(ctx.window.0).expect("floor"),
-            chrono::DateTime::from_timestamp_millis(ctx.window.1).expect("end"),
+            chrono::DateTime::from_timestamp_millis(window.0).expect("floor"),
+            chrono::DateTime::from_timestamp_millis(window.1).expect("end"),
         ),
         window_floor_source: WindowFloorSource::ArchiveManifest,
         default_replication_factor: 1,
@@ -339,9 +350,21 @@ fn write_doc(
     offsets: &Path,
     doc: &Path,
 ) {
-    let rendered =
-        logweir_engine_oso::render_restore::render(&plan(ctx, mapping, checkpoint, offsets))
-            .expect("the restore document renders");
+    write_doc_in(ctx, mapping, checkpoint, offsets, doc, ctx.window)
+}
+
+fn write_doc_in(
+    ctx: &Ctx,
+    mapping: &BTreeMap<String, String>,
+    checkpoint: &Path,
+    offsets: &Path,
+    doc: &Path,
+    window: (i64, i64),
+) {
+    let rendered = logweir_engine_oso::render_restore::render(&plan_in(
+        ctx, mapping, checkpoint, offsets, window,
+    ))
+    .expect("the restore document renders");
     // The pacing keys go into the `restore:` block, which must be the
     // document's last top-level block for an append to land in it.
     let last_top = rendered
@@ -600,9 +623,8 @@ fn verify(ctx: &Ctx, mapping: &BTreeMap<String, String>) -> Value {
         backup_id: ctx.backup_id.clone(),
         manifest_key: kafka::manifest_key(&ctx.backup_id),
     };
-    let sel: Vec<SampleSelection> = ctx
-        .sources
-        .iter()
+    let sel: Vec<SampleSelection> = mapping
+        .keys()
         .flat_map(|t| {
             let set = set.clone();
             (0..PARTS).map(move |p| SampleSelection {
@@ -633,8 +655,13 @@ fn verify(ctx: &Ctx, mapping: &BTreeMap<String, String>) -> Value {
         logweir_core::spec::TargetMode::NewTopic,
         logweir_core::spec::Coverage::Complete,
         None,
-    )
-    .unwrap_or_else(|e| panic!("phase 7's complete lane did not run: {e:?}"));
+    );
+    // A refusal is an outcome too (an empty target is refused operationally:
+    // "no restored records found on any mapped target topic").
+    let v = match v {
+        Ok(v) => v,
+        Err(e) => return json!({"refused": format!("{e:?}")}),
+    };
     let block = serde_json::to_value(&v.integrity).expect("integrity serialises");
     let complete = &block["verification"]["complete"];
     let fields = [
@@ -648,7 +675,7 @@ fn verify(ctx: &Ctx, mapping: &BTreeMap<String, String>) -> Value {
         "mismatched",
     ];
     let mut per_topic = serde_json::Map::new();
-    for src in &ctx.sources {
+    for src in mapping.keys() {
         let mut sums = serde_json::Map::new();
         for f in fields {
             let n: u64 = complete["partitions"]
@@ -1071,6 +1098,11 @@ fn k2(lab: &mut Lab, ctx: &Ctx) -> Outcome {
                 .all(|k| k.contains(&format!("/topics/{a_name}/"))),
     );
     o.expect("attempt 2 exits 0", exit2 == Some(0));
+    // The engine's hash of a TWO-topic document is not deterministic across
+    // processes (D1), so attempt 2 either accepts the file or discards it.
+    // Both branches are recorded; each has its own exact prediction.
+    let accepted = !log2.contains("config hash mismatch");
+    o.put("attempt2_accepted_the_checkpoint", json!(accepted));
     o.expect(
         "attempt 2 loads the checkpoint",
         log2.contains(&format!(
@@ -1078,10 +1110,17 @@ fn k2(lab: &mut Lab, ctx: &Ctx) -> Outcome {
             ctx.segments[0]
         )),
     );
-    o.expect(
-        "the first topic: exact (its segments were skipped)",
-        exact(&v, "first"),
-    );
+    if accepted {
+        o.expect(
+            "accepted: the first topic is exact (its segments were skipped)",
+            exact(&v, "first"),
+        );
+    } else {
+        o.expect(
+            "discarded: the first topic is re-produced whole",
+            count(&v, "first", "duplicates") == PER_TOPIC,
+        );
+    }
     o.expect(
         "the second topic: duplicates = every record attempt 1 left in it",
         count(&v, "second", "duplicates") == landed_b && landed_b > 0,
@@ -1091,13 +1130,14 @@ fn k2(lab: &mut Lab, ctx: &Ctx) -> Outcome {
         count(&v, "second", "missing") == 0,
     );
     o.expect(
-        "attempt 2's offset report has no entry for the first topic (skipped segments add nothing)",
-        !report_keys.iter().any(|k| k.starts_with(&format!("{ta}/")))
-            && report_keys
-                .iter()
-                .filter(|k| k.starts_with(&format!("{tb}/")))
-                .count()
-                == PARTS as usize,
+        "attempt 2's offset report has no entry for the first topic when it skipped it",
+        !accepted
+            || !report_keys.iter().any(|k| k.starts_with(&format!("{ta}/")))
+                && report_keys
+                    .iter()
+                    .filter(|k| k.starts_with(&format!("{tb}/")))
+                    .count()
+                    == PARTS as usize,
     );
     o
 }
@@ -1212,10 +1252,20 @@ fn t1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
             ctx.segments[0]
         )),
     );
-    o.expect(
-        "after attempt 2 both topics are exact",
-        exact(&v2, "first") && exact(&v2, "second"),
-    );
+    // As in K2, a two-topic document's hash may differ in attempt 2 (D1).
+    let accepted = !log2.contains("config hash mismatch");
+    o.put("attempt2_accepted_the_checkpoint", json!(accepted));
+    if accepted {
+        o.expect(
+            "accepted: after attempt 2 both topics are exact",
+            exact(&v2, "first") && exact(&v2, "second"),
+        );
+    } else {
+        o.expect(
+            "discarded: the first topic is re-produced whole, the second is exact",
+            count(&v2, "first", "duplicates") == PER_TOPIC && exact(&v2, "second"),
+        );
+    }
     o
 }
 
@@ -1296,63 +1346,62 @@ fn k3(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     o
 }
 
-/// S1 — a completed restore's checkpoint, then the target topics deleted and
-/// recreated under the same names, then the same document and path again.
+/// S1 — a completed restore's checkpoint, then the target topic deleted and
+/// recreated under the same name, then the same document and path again.
+///
+/// ONE topic: with one mapping entry the engine's hash is deterministic (D1),
+/// so the second attempt is certain to accept the file; with two, it accepts
+/// it about half the time.
 fn s1(lab: &mut Lab, ctx: &Ctx) -> (Outcome, PathBuf) {
     let mut o = Outcome::new("s1-stale-checkpoint-new-target");
-    let m = targets(lab, ctx, "s1");
-    let (ta, tb) = (a_of(&m, ctx), b_of(&m, ctx));
+    let ta = lab.topic("s1-a");
+    let m: BTreeMap<String, String> = [(ctx.sources[0].clone(), ta.clone())].into_iter().collect();
     let f = files(lab, "s1", "stable");
     write_doc(ctx, &m, &f.checkpoint, &f.offsets, &f.doc);
     let e1 = start_engine(lab, "s1-e1", &f.doc);
     let exit1 = wait_engine(&e1, ENGINE_DEADLINE_SECS);
     let v1 = verify(ctx, &m);
     let segs = completed_segments(&checkpoint_json(&f.checkpoint));
-    for t in [&ta, &tb] {
-        let _ = kafka_topics(&[
-            "--bootstrap-server",
-            "kafka-broker-1:9094",
-            "--delete",
-            "--topic",
-            t,
-        ]);
-    }
-    let gone = wait_until(60, 500, || !topic_exists(&ta) && !topic_exists(&tb));
-    for t in [&ta, &tb] {
-        create_topic_for_fixed_timestamps(t, PARTS, &[("message.timestamp.type", "CreateTime")]);
-    }
+    let _ = kafka_topics(&[
+        "--bootstrap-server",
+        "kafka-broker-1:9094",
+        "--delete",
+        "--topic",
+        &ta,
+    ]);
+    let gone = wait_until(60, 500, || !topic_exists(&ta));
+    create_topic_for_fixed_timestamps(&ta, PARTS, &[("message.timestamp.type", "CreateTime")]);
     let e2 = start_engine(lab, "s1-e2", &f.doc);
     let exit2 = wait_engine(&e2, ENGINE_DEADLINE_SECS);
     let log2 = logs(&e2);
-    let after = settled(&[&ta, &tb]);
+    let after = settled(&[&ta]);
+    let landed2: i64 = after[&ta].values().sum();
     let v2 = verify(ctx, &m);
     o.put("attempt1_exit", json!(exit1));
     o.put("verification_after_attempt1", v1.clone());
     o.put("checkpoint_segments", json!(segs.len()));
-    o.put("targets_deleted", json!(gone));
+    o.put("target_deleted_and_recreated", json!(gone));
     o.put("attempt2_exit", json!(exit2));
     o.put("attempt2_log", json!(interesting(&log2)));
     o.put("landed_after_attempt2", json!(after));
     o.put("verification_after_attempt2", v2.clone());
-    o.expect(
-        "the control: attempt 1 is exact",
-        exact(&v1, "first") && exact(&v1, "second"),
-    );
+    o.expect("the control: attempt 1 is exact", exact(&v1, "first"));
     o.expect(
         "the checkpoint lists every segment",
-        segs.len() == ctx.segments[0] + ctx.segments[1],
+        segs.len() == ctx.segments[0],
     );
     o.expect("attempt 2 exits 0", exit2 == Some(0));
     o.expect(
         "attempt 2 trusts the stale checkpoint",
         log2.contains(&format!(
             "Loaded checkpoint: {} segments completed",
-            ctx.segments[0] + ctx.segments[1]
-        )),
+            ctx.segments[0]
+        )) && !log2.contains("config hash mismatch"),
     );
+    o.expect("the recreated target is left empty", landed2 == 0);
     o.expect(
-        "the recreated target is left empty: every record missing",
-        count(&v2, "first", "missing") == PER_TOPIC && count(&v2, "second", "missing") == PER_TOPIC,
+        "phase 7 never passes it: every record missing, or refused",
+        count(&v2, "first", "missing") == PER_TOPIC || v2.get("refused").is_some(),
     );
     (o, f.checkpoint)
 }
@@ -1474,6 +1523,78 @@ fn m1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     o
 }
 
+/// The `config_hash` each of `n` attempts of ONE document leaves in the
+/// checkpoint file. The window selects nothing, so nothing is produced; every
+/// attempt still saves after each topic (2.4), and a file whose hash differs
+/// from the process's own is replaced by one carrying the process's hash, so
+/// the file after attempt i holds attempt i's hash either way.
+fn hashes_of(
+    lab: &mut Lab,
+    ctx: &Ctx,
+    label: &str,
+    mapping: &BTreeMap<String, String>,
+    n: usize,
+) -> (Vec<String>, Vec<Option<i64>>) {
+    let f = files(lab, "d1", label);
+    write_doc_in(
+        ctx,
+        mapping,
+        &f.checkpoint,
+        &f.offsets,
+        &f.doc,
+        (T - 20_000, T - 10_000),
+    );
+    let mut hashes = Vec::new();
+    let mut exits = Vec::new();
+    for i in 0..n {
+        let e = start_engine(lab, &format!("d1-{label}-{i}"), &f.doc);
+        exits.push(wait_engine(&e, ENGINE_DEADLINE_SECS));
+        hashes.push(
+            checkpoint_json(&f.checkpoint)
+                .and_then(|v| v["config_hash"].as_str().map(str::to_string))
+                .unwrap_or_default(),
+        );
+    }
+    (hashes, exits)
+}
+
+/// D1 — is the engine's checkpoint hash a function of the document? The same
+/// two-topic document, run eight times; the same one-topic document, run four
+/// times. `RestoreOptions::topic_mapping` is a `HashMap` (`config.rs:869`),
+/// serialised in iteration order, which std randomises per process.
+fn d1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
+    let mut o = Outcome::new("d1-hash-determinism");
+    let two = targets(lab, ctx, "d1");
+    let one: BTreeMap<String, String> = [(ctx.sources[0].clone(), lab.topic("d1-one"))]
+        .into_iter()
+        .collect();
+    let (h2, x2) = hashes_of(lab, ctx, "two-topics", &two, 8);
+    let (h1, x1) = hashes_of(lab, ctx, "one-topic", &one, 4);
+    let d2: BTreeSet<&String> = h2.iter().collect();
+    let d1: BTreeSet<&String> = h1.iter().collect();
+    let landed_two: i64 = two.values().map(|t| landed(t)).sum();
+    o.put("two_topics_hashes", json!(h2));
+    o.put("two_topics_exits", json!(x2));
+    o.put("one_topic_hashes", json!(h1));
+    o.put("one_topic_exits", json!(x1));
+    o.put("landed", json!(landed_two));
+    o.expect(
+        "every attempt exits 0 and leaves a checkpoint",
+        x2.iter().chain(x1.iter()).all(|x| *x == Some(0))
+            && h2.iter().chain(h1.iter()).all(|h| !h.is_empty()),
+    );
+    o.expect("the empty window produced nothing", landed_two == 0);
+    o.expect(
+        "one document, two topics: more than one hash across processes",
+        d2.len() >= 2,
+    );
+    o.expect(
+        "the control, one topic: one hash across processes",
+        d1.len() == 1,
+    );
+    o
+}
+
 #[test]
 #[ignore = "PROD-07.1 research rows: freezes the slot's broker and runs ~20 engine containers"]
 fn the_pinned_engines_restore_checkpoint_under_interruption() {
@@ -1501,6 +1622,7 @@ fn the_pinned_engines_restore_checkpoint_under_interruption() {
         ("k3", k3 as Row),
         ("w1", w1 as Row),
         ("m1", m1 as Row),
+        ("d1", d1 as Row),
     ] {
         if want(key) {
             let t0 = Instant::now();
