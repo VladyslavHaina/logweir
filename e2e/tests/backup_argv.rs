@@ -1046,3 +1046,52 @@ fn sweep_real_engine_archives() {
          the drill's: {left:?}"
     );
 }
+
+/// **PROD-00.2 review L3/L4: a backup never signs an engine other than the one
+/// that runs.** The command declares the real engine's version, but the binary
+/// it would execute prints another: refused (exit 1) before the execution claim
+/// and before any engine command, so no receipt exists.
+#[test]
+fn a_backup_whose_engine_prints_another_version_is_refused_before_it_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    let backup_id = fresh_backup_id();
+    let spec = backup_spec_with_id(
+        "backup-other-version.yaml",
+        &backup_id,
+        "[orders]",
+        "",
+        &bootstrap(),
+    );
+    let exe = demo_dir().join("backup-other-version-engine.sh");
+    let log = demo_dir().join("backup-other-version-engine.log");
+    let _ = std::fs::remove_file(&log);
+    std::fs::write(
+        &exe,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'kafka-backup 9.9.9-not-the-signed-engine'; exit 0; fi\n\
+             echo \"$@\" >> '{}'\nexit 0\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut cmd = backup_run(&spec, None);
+    cmd.env("LOGWEIR_ENGINE_BIN", &exe);
+    let out = cmd.output().expect("logweir");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("refusing to sign") && stderr.contains("9.9.9-not-the-signed-engine"),
+        "{stderr}"
+    );
+    assert!(
+        !log.exists(),
+        "the engine ran a command: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    assert!(
+        !stdout.contains("receipt-key="),
+        "no receipt may be written:\n{stdout}"
+    );
+}

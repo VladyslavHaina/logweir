@@ -864,3 +864,26 @@ fn both_graphs_admit_crates_io_only_and_the_gate_checks_it() {
         "a gate that skips sources"
     );
 }
+
+/// The one M1 edit neither the script nor `check_ledger` can see: the last
+/// ledger line rewritten in place to describe new inputs under the old
+/// version. Both accept it — a file has no history — which is exactly why
+/// `engine_pin.rs`'s `SHIPPED_BUILDS` pins every build that landed and
+/// `a_rewritten_or_dropped_shipped_build_is_refused` refuses this tree's
+/// ledger. Stated here so the limit is a test, not a footnote.
+#[test]
+fn a_line_rewritten_in_place_is_left_to_the_shipped_build_pins() {
+    let inputs = Inputs::real()
+        .with_patch("0901-fix.patch", &good_patch())
+        .with_digest_rerecorded_unbumped(LedgerEdit::RewrittenInPlace);
+    inputs.check().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    inputs.plant(dir.path());
+    let out = script(dir.path(), &["check"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_ne!(
+        inputs.ledger,
+        read("third_party/kafka-backup-builds.txt"),
+        "the planted ledger rewrote the shipped line"
+    );
+}

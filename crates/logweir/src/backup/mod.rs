@@ -558,6 +558,7 @@ pub fn execute_with(
 /// The common execution path. Production supplies the signer it validated
 /// before constructing any runner clients; the in-process seam validates at
 /// the same logical boundary, immediately before its first engine operation.
+#[allow(clippy::too_many_arguments)]
 fn execute_with_signer(
     args: &BackupRunArgs,
     run_id: &str,
