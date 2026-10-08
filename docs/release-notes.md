@@ -30,20 +30,34 @@ tested environments and the results are in
 
 ### Candidate record
 
-Fill every row for the exact candidate before the tag; a row left as `—` is an
-unrecorded fact, not a pass. A previous run does not validate new bytes.
+Fill every row for the exact candidate; a row left as `—` is an unrecorded
+fact, not a pass. A previous run does not validate new bytes. A tag does not
+rebuild the images — it gives the `sha-<commit>` publication `main` CI already
+made the version tag, unchanged — so the release dry run's `release.json`
+(workflow artifact `release-assets`) gives the publication commit and the four
+image digests **before** the tag. Nothing else carries over: the tag run
+packages the chart and builds the three CLI archives again. The chart package
+is not byte-reproducible (`helm package` records each file's modification
+time, which is its checkout time), and nothing shows the archives to be. The
+chart and archive rows therefore come from the **tag run's** `release.json`,
+the GitHub Release asset, after the tag, together with the run rows
+([the release checklist](tag1-checklist.md), *Cutting a release candidate*).
 
 | What | Value |
 |---|---|
-| Candidate commit | — |
+| Candidate commit (the tagged commit) | — |
 | Version tag | — |
-| CI run (`ci.yml`) for that commit | — |
-| Release run (`release.yml`) and release drill | — |
+| Publication commit (`release.json` `.images.publication`: the `sha-<commit>` images and chart the tag promotes) | — |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | — |
+| Release dry run (`release.yml` dispatched on the candidate) | — |
+| Release run (`release.yml` on the tag) and release drill | — |
 | Runner image digest (`linux/amd64`) | — |
 | Controller image digest (manifest list; amd64 and arm64) | — |
 | Console image digest (`logweir-console`) | — |
 | UI image digest (`logweir-ui`) | — |
-| `ui/` bundle, file by file | the output of the command below |
+| Chart (`logweir-chart` version and package sha256 from the tag run's `release.json` `.chart`; OCI digest from the release's notes, as an anonymous `helm pull` reports it) | — |
+| CLI archives (three; the tag run's `release.json` `.archives`, each with its sha256 and run-time needs) | — |
+| `ui/` bundle, file by file | the output of the command below, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate (context, auth mode, storage, limits) | — |
 | Checks deliberately deferred, each with its reason | — |
 
@@ -1049,9 +1063,42 @@ policy or roster ([keys.md](keys.md)).
   source's** (item 22). The source's factor is recorded only in the archive
   manifest; the default is the target's broker count, at most 3, until
   PROD-05.1 projects the source's factor to the console.
-- **The product API's OpenAPI document is still `1.0.0-alpha.1`**, although the
-  console image and the chart now consume it; ship and upgrade the console and
-  the API together until the owner freezes it ([stability.md](stability.md)).
+- **The `v0.1.1`–`v0.1.5` image tags on Docker Hub are leftovers of failed
+  runs, not releases.** Those tag runs pushed version-tagged images before
+  they failed — `logweir:v0.1.1`–`v0.1.5`, `weirkeeper:v0.1.2`–`v0.1.5` and
+  `logweir-ui:v0.1.3`–`v0.1.5`; no console image and no chart — and none of
+  them published a chart, a GitHub Release or a release drill. Every run
+  failed in the CLI build matrix; `v0.1.1`'s image job also failed its own
+  repository-digest check after pushing, and the pull-back jobs of `v0.1.2`
+  and `v0.1.3` failed with "cannot overwrite digest". Do not install or pin
+  them. The owner decided on 2026-10-07 to delete them all once v0.2.0 ships. The repaired pipeline
+  never builds an image under a version tag: it tags main CI's `sha-<commit>`
+  images.
+- **The CLI archives' run-time needs.** The Linux archives are built in the
+  runner image's builder base (`rust:1.89-bookworm`), so they need what the
+  runner image installs: a glibc at least as new as the version measured on
+  each binary — 2.34 on the Linux arm64 archive built locally on 2026-10-05;
+  each release's notes give its own — which is never above the Debian 12
+  glibc (2.36) they are built against, so Debian 12's glibc or newer always
+  suffices; and `libssl.so.3`, `libcrypto.so.3`, `libsasl2.so.2` and
+  `libz.so.1` (Debian and Ubuntu: `libssl3`, `libsasl2-2`, `zlib1g`). A
+  distribution whose SASL library has another soname
+  (`libsasl2.so.3` on RHEL and Fedora) builds from the checkout. The macOS
+  archive needs Homebrew's `openssl@3`. `logweir --version` prints the
+  workspace version (`0.1.0`), not the tag; `release.json` ties each archive
+  to its tag and commit.
+- **The product API's OpenAPI document is `1.0.0-alpha.2`, still a
+  pre-release**, although the console image and the chart consume it; ship and
+  upgrade the console and the API together until PROD-14.2 freezes it at
+  `1.0.0` ([stability.md](stability.md)). Since `1.0.0-alpha.1` (2026-09-16,
+  never published) it gained 38 operations and removed none: destinations
+  (list, create, read, usage, test, update access, adopt from legacy), catalogs
+  with their points and signers, topic discoveries, preflights, the operation
+  event stream, schedule updates, manual backups, the restore approval
+  submission, read-only protection, rehearsal, retention and trust policies,
+  the namespace's approval policy, cadence previews, and the shared console's
+  sign-in routes (`/auth/login`, `/auth/callback`, session logout). Its
+  component schemas grew from 66 to 257; none was removed.
 - **No in-place runner signing-key cutover** ([keys.md](keys.md), step 2 of
   *The supported procedure*).
 - **Restore admission does not hold on a retention lease** (above).

@@ -32,6 +32,7 @@ done
 
 cargo test --locked --workspace
 python3 scripts/test-ci-images.py
+python3 scripts/test-release.py
 just verify-py
 
 just schema-check
