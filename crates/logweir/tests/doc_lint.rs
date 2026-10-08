@@ -1763,10 +1763,7 @@ fn the_release_notes_carry_every_owed_operator_action() {
         ),
         // PROD-16.1 (2026-10-07): no approver key by default, and the marker
         // an upgrade never reaches.
-        (
-            "no approver key by default",
-            "logweir.dev/approval-default",
-        ),
+        ("no approver key by default", "logweir.dev/approval-default"),
     ]) {
         assert!(
             body.contains(token),
