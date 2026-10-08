@@ -775,12 +775,12 @@ async fn a_provider_error_is_reported_without_echoing_it() {
     assert_eq!(idp.token_calls(), 0);
 }
 
-/// **The login surface is rate limited per peer.**
+/// **The login surface is rate limited per key.**
 ///
-/// The in-process router carries no peer address, so this drives the limiter
-/// the route uses rather than the route — the route's use of it is covered by
-/// `check_login_rate` having exactly one caller shape, and by the live
-/// exercise.
+/// This drives the limiter the route uses rather than the route. The route's
+/// use of it — which key a request is counted against, through the trusted
+/// ingress or not — is held through the real router, with a peer address
+/// injected, by the FX-13 rows at the end of `tests/entry_point.rs`.
 #[tokio::test]
 async fn the_login_surface_is_rate_limited() {
     use logweir_api::auth::ratelimit::{Decision, RateLimiter};
@@ -792,6 +792,7 @@ async fn the_login_surface_is_rate_limited() {
         match limiter.check(peer) {
             Decision::Allowed => allowed += 1,
             Decision::Limited { .. } => limited += 1,
+            Decision::AllowedUntracked { .. } => panic!("one key never fills the table"),
         }
     }
     assert_eq!(allowed, logweir_api::auth::ratelimit::LOGIN_PER_WINDOW);

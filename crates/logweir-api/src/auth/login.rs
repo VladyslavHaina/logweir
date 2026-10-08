@@ -234,9 +234,15 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
         Ok(identity) => identity,
         Err(error) => {
             // The variant's code, never the token, the code or the provider's
-            // body.
+            // body. The detail is the variant's own text, which carries none of
+            // them either: for a refused exchange it is the provider's HTTP
+            // status ("the provider answered HTTP 429"), which is what an
+            // operator alerting on the provider throttling this client needs
+            // to see (FX-13 review M1) — `code_exchange_failed` alone reads
+            // the same for a junk code and for a provider that has stopped
+            // serving this client.
             audit.set_failure(error.code());
-            tracing::warn!(reason = %error.code(), "a sign-in was refused");
+            tracing::warn!(reason = %error.code(), detail = %error, "a sign-in was refused");
             let mut response = ApiError::new(
                 ProblemCode::Unauthenticated,
                 "The sign-in could not be completed.",

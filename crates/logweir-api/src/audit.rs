@@ -119,8 +119,11 @@ pub struct AuditRecord {
     /// The immediate peer's address, when it is known.
     pub peer: String,
     /// The forwarded client address, present ONLY when the immediate peer is
-    /// inside a configured trusted-proxy CIDR. Transport logging only: no
-    /// decision anywhere reads it.
+    /// inside a configured trusted-proxy CIDR. Transport logging: no decision
+    /// reads this field. The sign-in limiter charges its bucket to the same
+    /// hop, under the same trust check (`crate::http::login_rate_key`, FX-13),
+    /// and a bucket only ever refuses; no identity, grant or actor comes from
+    /// it.
     pub forwarded_for: String,
     /// Identity-shaped headers the request carried, BY NAME. Their values are
     /// never read and never recorded; the names are here so an operator can

@@ -164,7 +164,8 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | FX-15 | FX-10's owed items: non-default rows for five configured values (evidence-fetch pool, restore manual-run gate, `api.console.*`, `identity.*`, a Backup's `visibilityAttestations`), the unread `legacyArchiveAddressing` fields, and a retention refusal's reason on its status | P3 | M3 | fix | — | — | none | A | Proposed |
 | 0 | FX-11 | Report a rejected Job pod promptly, with its reason, in every Job-owning controller | P2 | M1 | fix | — | — | none | A | In progress |
 | 0 | FX-12 | Pass `now` into weirkeeper's evidence verification (trust-window clock reads) | P2 | M1 | fix | FX-9 | — | none | A | Proposed |
-| 0 | FX-13 | Key the sign-in limiter on the trusted-proxy client address | P1 | M1 | fix | — | — | none | A | Proposed |
+| 0 | FX-13 | Key the sign-in limiter on the trusted-proxy client address | P1 | M1 | fix | — | — | none | A | In progress |
+| 0 | FX-13a | Make the sign-in state single-use (one login cookie replays several callbacks within its 600 s, each a token request) | P3 | M1 | fix | FX-13 | — | none | A | Proposed |
 | 0 | FX-14 | FX-7's and PROD-08.4's owed items: the restore preflight reads the pinned manifest version; minimal grants name `s3:GetObjectVersion`; the surviving fail-safe mutant MR-L2; two wrong field descriptions | P2 | M1 | fix | FX-7 | — | compose | A | Proposed |
 | 0 | PROD-00.1 | Evaluate the engine; decide a route per capability | P1 | M1 | research | — | — | compose | B | Done |
 | 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | Done |
