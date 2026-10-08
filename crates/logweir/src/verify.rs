@@ -2,6 +2,7 @@ use crate::exit::ExitCode;
 use logweir_core::backup_receipt::BackupReceipt;
 use logweir_core::outcome::Outcome;
 use logweir_core::scorecard::Scorecard;
+use logweir_core::spec::TargetMode;
 use logweir_evidence::{
     keys::VerifyingKey, verify::verify_detached, Error as EvidenceError, Sidecar,
     PAYLOAD_TYPE_BACKUP_RECEIPT, PAYLOAD_TYPE_CATALOG_POINT, PAYLOAD_TYPE_PUT_RECEIPT,
@@ -135,6 +136,13 @@ pub struct VerifyReport {
     /// `topic_parity.not_assessed` (scorecard 1.1.0, FX-4), carried as read:
     /// `None` is NOT RECORDED (a 1.0.0 document), never "every topic assessed".
     pub not_assessed: Option<Vec<String>>,
+    /// `target.mode`, `topic_parity.intentionally_deviated` and
+    /// `topic_parity.not_reconstructed` (scorecard 1.2.0, FX-3), carried as
+    /// read for [`reconstruction_line`]: `None` is NOT RECORDED, never
+    /// "everything reconstructed".
+    pub target_mode: TargetMode,
+    pub intentionally_deviated: Vec<String>,
+    pub not_reconstructed: Option<Vec<String>>,
 }
 
 /// The configuration-parity line both readers print for a scorecard (FX-4),
@@ -154,6 +162,46 @@ pub fn parity_line(not_assessed: Option<&[String]>) -> Option<String> {
             "configuration parity: NOT ASSESSED for {}",
             topics.join("; ")
         )),
+    }
+}
+
+/// The reconstruction line both readers print for a scorecard (FX-3), or
+/// `None` when there is nothing it could change in an auditor's reading.
+///
+/// - **`not_reconstructed` present and non-empty** (format 1.2.0): the source
+///   settings the restore did not reconstruct, whatever the mode — a reader
+///   reports what the document says.
+/// - **absent in a `newTopic` document whose `intentionally_deviated` names
+///   anything**: a writer before 1.2.0 applied the scratch rationale in every
+///   mode, so those "intended" settings are ones the restore did NOT
+///   reconstruct. This re-reads OLD evidence as a WEAKER claim than its label,
+///   never a stronger one (product-expansion rule 3), and changes no verdict.
+/// - otherwise nothing: `[]` is the claim that nothing was left
+///   unreconstructed, and a scratch drill's deviations are intended in every
+///   version.
+///
+/// `docs/verify_scorecard.py::_reconstruction_line` prints the same sentence
+/// from the same cases, and `scripts/check-verifier-parity.sh` compares them.
+#[must_use]
+pub fn reconstruction_line(
+    mode: TargetMode,
+    not_reconstructed: Option<&[String]>,
+    intentionally_deviated: &[String],
+) -> Option<String> {
+    match not_reconstructed {
+        Some([]) => None,
+        Some(settings) => Some(format!(
+            "reconstruction: source settings NOT RECONSTRUCTED for {}",
+            settings.join("; ")
+        )),
+        None if mode == TargetMode::NewTopic && !intentionally_deviated.is_empty() => {
+            Some(format!(
+                "reconstruction: not recorded, so the settings this newTopic document labels \
+                 intentionally_deviated were NOT reconstructed: {}",
+                intentionally_deviated.join("; ")
+            ))
+        }
+        None => None,
     }
 }
 
@@ -460,6 +508,9 @@ pub fn verify_scorecard(
         key_id: matched_key_id,
         offset_report,
         not_assessed: sc.topic_parity.not_assessed.clone(),
+        target_mode: sc.target.mode,
+        intentionally_deviated: sc.topic_parity.intentionally_deviated.clone(),
+        not_reconstructed: sc.topic_parity.not_reconstructed.clone(),
     }))
 }
 
@@ -492,6 +543,14 @@ fn print_report(r: &VerifyReport) {
     }
     // FX-4: an exit 0 is not configuration parity the document does not claim.
     if let Some(line) = parity_line(r.not_assessed.as_deref()) {
+        println!("parity:    {line}");
+    }
+    // FX-3: nor is it a restore that reconstructed the source's settings.
+    if let Some(line) = reconstruction_line(
+        r.target_mode,
+        r.not_reconstructed.as_deref(),
+        &r.intentionally_deviated,
+    ) {
         println!("parity:    {line}");
     }
 }

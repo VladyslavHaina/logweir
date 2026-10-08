@@ -82,12 +82,16 @@ golden:
 # first fields added after the v0.1 tags: a MINOR bump "with a new schema file
 # beside the old one", docs/stability.md). FX-7, which merged after it, adds the
 # receipt's and the catalog record's optional `archive.manifest_version_id` at
-# 1.2.0. The older files are FROZEN beside the current ones and are NOT
-# regenerated here: the three `-1.0.0.json` files describe every document
-# written before FX-4, and FX-4's receipt and catalog-point `-1.1.0.json` files
-# every one written without a pin. Their own tests
+# 1.2.0, and FX-3, which merged after FX-7, the scorecard's optional
+# `topic_parity.not_reconstructed` at 1.2.0. The older files are FROZEN beside
+# the current ones and are NOT regenerated here: the three `-1.0.0.json` files
+# describe every document written before FX-4, FX-4's receipt and
+# catalog-point `-1.1.0.json` files every one written without a pin, and FX-4's
+# scorecard `-1.1.0.json` every scorecard written before FX-3. Their own tests
 # (`the_frozen_1_0_0_*_schema_is_still_the_1_0_0_schema`,
-# `the_frozen_1_1_0_*_schema_is_still_fx4s`) keep them what they were.
+# `the_frozen_1_1_0_*_schema_is_still_fx4s`,
+# `the_frozen_1_1_0_scorecard_schema_is_still_the_1_1_0_schema`) keep them what
+# they were.
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's constant (`logweir_core::FORMAT_VERSION`,
@@ -95,7 +99,7 @@ golden:
 # `catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION`), which also builds
 # the schema's `$id`. A renumber moves the constant and this line, and keeps
 # the old file frozen beside the new.
-scorecard_schema_version := "1.1.0"
+scorecard_schema_version := "1.2.0"
 receipt_schema_version := "1.2.0"
 catalog_schema_version := "1.2.0"
 

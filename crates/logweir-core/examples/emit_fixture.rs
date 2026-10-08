@@ -151,6 +151,9 @@ fn main() {
             intentionally_deviated: vec!["cleanup.policy".into(), "retention.ms".into()],
             unexpected_divergence: vec![],
             not_assessed: None,
+            // FX-3's 1.2.0 field stays absent too: the frozen 1.0.0 document,
+            // a scratch drill, whose deviations are intended.
+            not_reconstructed: None,
         },
         engine_subreport: Some(EngineSubreport {
             retained_verbatim: true,

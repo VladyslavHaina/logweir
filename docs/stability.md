@@ -97,6 +97,70 @@ frozen `1.0.0` one:
   documents again, and their coverage then reads unknown. The 1.1.0 documents
   already written stay valid under both readers.
 
+### Format 1.2.0 (FX-3): what a `newTopic` restore did not reconstruct
+
+FX-3 is the scorecard's second post-tag addition, and only the scorecard
+moves: to `1.2.0`, with a new schema file beside its frozen `1.0.0` and `1.1.0`
+ones. FX-3 does not touch the receipt or the catalog point; FX-7 moved those to
+their own `1.2.0`
+([its section](#a-backup-set-that-already-exists-is-never-written-again-versioned-buckets-pin-the-manifest-fx-7)).
+
+| Document | New optional field | Schema |
+|---|---|---|
+| Drill scorecard | `topic_parity.not_reconstructed` | `schemas/logweir-drill-scorecard-1.2.0.json` |
+
+- **What it fixes.** Phase 7 labelled four deviations the restore's own topic
+  creation makes — `cleanup.policy`, `retention.ms`, `partition_count`,
+  `replication_factor` — `intentionally_deviated` in every mode, with a
+  scratch-only rationale, so a `newTopic` restore signed lost compaction and
+  replication factor 1 as intended. A `newTopic` restore now writes each one
+  into `not_reconstructed` AND into the existing `unexpected_divergence`, and
+  never into `intentionally_deviated`; a scratch drill is unchanged and writes
+  `not_reconstructed: []`
+  ([the scorecard format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120)).
+- **Absent means not recorded.** Every 1.0.0 and 1.1.0 document, and a 1.2.0
+  one whose phase 7 never ran, is decided exactly as before. Both readers also
+  print that a `newTopic` document from before 1.2.0 labelled the settings it
+  did not reconstruct `intended`: old evidence read as a weaker claim than its
+  label, never a stronger one, and no verdict changes.
+- **The field and its five arms are MINOR** under the owner's OD-7 (a), the
+  rule above. Each arm fires only on a document carrying the field, and judges
+  it against `format_version` (NR-1) or against the two lists every reader
+  already has (NR-2 to NR-5), as FX-4's receipt arms 6 and 7 judge
+  `config_coverage` against `format_version` and `source.topics`.
+- **NR-4 and NR-5 are MINOR under OD-7 too** (added after FX-3's review, F1).
+  They fire only on a 1.2.0 or later document that carries the field and whose
+  `target.mode` is `newTopic`, and they can only refuse. NR-4 refuses such a
+  document whose `intentionally_deviated` is not empty. NR-5 refuses one whose
+  `unexpected_divergence` names a setting the restore decides that
+  `not_reconstructed` omits. That is the document a writer would sign if the
+  mode were lost on its way to phase 7: the scratch labels beside
+  `not_reconstructed: []`, which claims that nothing was left unreconstructed.
+  Phase 8 refuses to sign it, and both readers refuse it. No document an
+  earlier writer produced carries the field, so none changes verdict.
+- **The content of the two existing lists is MINOR: the owner ruled it on
+  2026-10-07, OD-7's third case** (the rule above). In a `newTopic` document,
+  entries of the existing shape `"<target topic>: <key>"` leave
+  `intentionally_deviated` and are written into `unexpected_divergence`
+  instead. That is new content in two existing fields, and it can only move a
+  reader's verdict to the safer side, from intended to not intended: what an
+  older reader showed as intended it now shows as unexpected. It makes no
+  verdict stronger, and no verdict moves at all: no reader built before FX-3
+  has a `topic_parity` arm (NR-1 to NR-5 judge only documents that carry the
+  new field), and `outcome` does not depend on it (measured, the next bullet).
+  A scratch drill's lists are unchanged.
+- **Readers built before FX-3 accept every 1.2.0 document** (measured on FX-3's
+  live and synthetic 1.2.0 scorecards with `logweir` and `verify_scorecard.py`
+  1.15.0 at main `b8b9263f`, and with the released `v0.1.5` runner image and
+  script 1.13.0; FX-7's script 1.16.0, over the live ones, the same way): every
+  one exits 0, prints no reconstruction line, and its `logweir drill show` lists
+  each not-reconstructed setting under `unexpected [...]`, never under
+  `intended [...]`. They do not run NR-1 to NR-5, so they also accept a 1.2.0
+  document only this build refuses.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.1.0
+  documents again, with the old labels; the 1.2.0 documents already written
+  stay valid under both readers.
+
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
@@ -410,6 +474,47 @@ This is the safe direction — a drill over a compacted topic FAILS rather than
 passing — but it means you cannot run a meaningful drill against a compacted
 scratch topic in v0.1. Restore into a scratch topic with
 `cleanup.policy=delete`, which is what phase 6 creates by default.
+
+### A `newTopic` restore does not reconstruct the source's topic settings
+
+A restore creates every target topic itself, the same way in both modes: the
+manifest's partition count, the plan's `default_replication_factor` (1 when
+the plan names none), `retention.ms=-1`, `message.timestamp.type=CreateTime`,
+and the target broker's default for everything else, `cleanup.policy`
+included. That is what a scratch drill needs. For a `newTopic` restore — the
+recovery itself — it means the source's compaction, retention and replication
+factor are **not reconstructed**: a compacted source comes back as a
+delete-policy topic with infinite retention (nothing is deleted and nothing is
+compacted), and a replication-factor-3 source comes back at the plan's factor.
+The records are restored; these are the topic's settings.
+
+Since scorecard format 1.2.0 (FX-3) the signed scorecard says so: each such
+setting the archive's record shows is named in `topic_parity.not_reconstructed`
+and in `unexpected_divergence`, never in `intentionally_deviated`, and both
+readers print `reconstruction: source settings NOT RECONSTRUCTED for …`. A
+scorecard signed before 1.2.0 labels the same settings `intentionally_deviated`;
+in a `newTopic` document that label means not reconstructed, and both readers
+of this build say it.
+
+"Not reconstructed" means, until PROD-05.1 captures topic configuration with
+coverage and portability and PROD-05.2 applies a reviewed target configuration:
+
+- **Apply the source settings after the restore is verified**, never before:
+  `cleanup.policy` and `retention.ms` with `kafka-configs.sh --alter` (a
+  retention shorter than the restored records' age deletes them at the next
+  retention check), and the replication factor with a partition reassignment.
+  Logweir does neither.
+- **It covers only what the archive recorded.** The comparison reads the
+  configuration OVERRIDES the engine captured; a setting the source inherited
+  from its broker's defaults is not in that record and is never named, and a
+  topic whose configuration was not captured is in `not_assessed`
+  ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
+  The replication factor is compared from the manifest either way.
+- **The partition count is reconstructed** — phase 6 creates the manifest's
+  count — so `partition_count` reaches `not_reconstructed` only if a topic
+  changes between creation and verification.
+- **A scratch drill is unaffected.** Its deviations are intended, as before,
+  and its scorecard says `not_reconstructed: []`.
 
 ### `engine_subreport` is always null in v0.1
 

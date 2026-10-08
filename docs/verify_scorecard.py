@@ -161,7 +161,11 @@ PAYLOAD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 # docs/stability.md). Only the MAJOR
 # is ever compared, so a 1.0.0 document still verifies and a reader built
 # before the bump still reads a 1.1.0 one.
-FORMAT_VERSION = "1.1.0"
+#
+# `1.2.0` since FX-3 (`topic_parity.not_reconstructed`: the source settings a
+# `newTopic` restore did not reconstruct, which phase 7 had labelled
+# `intentionally_deviated` with a scratch-only rationale in every mode).
+FORMAT_VERSION = "1.2.0"
 
 # This SCRIPT's own version — NOT the format version (GC12: FORMAT_VERSION stays
 # "1.0.0"). Bumped whenever this script's VERDICT RULE changes: when there is a
@@ -372,7 +376,53 @@ FORMAT_VERSION = "1.1.0"
 # record's copy of it (catalog point format 1.2.0). No invariant arm and no
 # payload type is added; a 1.15.0 reader reads a 1.2.0 receipt as the 1.1.0
 # document under it and prints no version line.
-SCRIPT_VERSION = "1.16.0"
+#
+# 1.17.0 (FX-3, which merged after FX-7) knows scorecard format 1.2.0 and its
+# `topic_parity.not_reconstructed`. Five arms, NR-1 to NR-5, mirrored byte for
+# byte and in position from `Scorecard::validate_invariants`: the block only
+# under a version of at least 1.2.0, every entry also in
+# `unexpected_divergence` (the fail-safe twin an older reader sees), none
+# in `intentionally_deviated`, and, in a newTopic document, nothing intended
+# and every unexpected deviation on a setting the restore decides named in the
+# block (NR-4, NR-5: FX-3 review F1). They fire only on a document carrying the
+# block, so every document without it is decided exactly as before. The shape
+# layer now also refuses `topic_parity.intentionally_deviated` and
+# `unexpected_divergence` that are not arrays of strings -- the Rust reader
+# refuses them at deserialisation and this script printed VALID (measured at
+# main b8b9263f) -- and the new field the same way. The `reconstruction:` line
+# names what a newTopic restore did not reconstruct, and says that a newTopic
+# document before 1.2.0 labelled those settings intended. A renumber moves this
+# line, the two literal pins in docs/test_verify_scorecard.py and the guide's
+# table.
+SCRIPT_VERSION = "1.17.0"
+
+# The first minor of SCORECARD format 1 that defines
+# `topic_parity.not_reconstructed` (arm NR-1) -- `NOT_RECONSTRUCTED_SINCE_MINOR`
+# in `crates/logweir-core/src/scorecard.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_not_reconstructed_minor_is_the_rust_readers`).
+# A renumber moves both, and FORMAT_VERSION.
+TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR = 2
+
+# The four settings a restore's own topic creation decides instead of copying
+# from the source -- `RESTORE_DECIDED_SETTINGS` in
+# `crates/logweir-core/src/scorecard.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_restore_decided_settings_are_the_rust_readers`).
+# Arm NR-5 reads it.
+RESTORE_DECIDED_SETTINGS = (
+    "cleanup.policy",
+    "partition_count",
+    "replication_factor",
+    "retention.ms",
+)
+
+
+def _parity_key(entry: str) -> str:
+    """The `<key>` of a `topic_parity` entry `"<target topic>: <key>"`.
+
+    Mirrors `logweir_core::scorecard::parity_key`: the text after the LAST
+    `": "`, or the whole entry when it has none. Read by arm NR-5 only.
+    """
+    return entry.rsplit(": ", 1)[-1]
 
 # The first minor of the BACKUP RECEIPT's format 1 that defines
 # `config_coverage` (arm 6) — `CONFIG_COVERAGE_SINCE_MINOR` in
@@ -521,14 +571,39 @@ def _major(version: str):
     """Leading integer of a dotted version string, or None if there is none.
 
     Mirrors `logweir_core::scorecard::major_version` exactly: split on ".",
-    take the first field, parse it as an integer. Anything else is "not a
-    parseable semver", which is a refusal rather than an assumption.
+    take the first field, parse it as Rust's `str::parse::<u64>` does. Anything
+    else is "not a parseable semver", which is a refusal rather than an
+    assumption.
+
+    Rust's parse accepts an optional leading `+` and ASCII digits below 2**64,
+    and nothing else. Until SCRIPT_VERSION 1.17.0 this was `int(head)`, which
+    is wider on three points -- whitespace, `_` and unicode digits -- and the
+    gap was a live two-reader split: `" 1.0.0"`, `"0_1.0.0"` and `"١.0.0"` were
+    `drill verify` exit 4 ("not a parseable semver") and VALID here (measured at
+    main b8b9263f, FX-3's class sweep: `_minor` below needs the same parse).
     """
     head = version.split(".")[0] if isinstance(version, str) else ""
-    try:
-        return int(head)
-    except ValueError:
+    if not re.fullmatch(r"\+?[0-9]+", head):
         return None
+    n = int(head)
+    return n if n < 2 ** 64 else None
+
+
+def _minor(version: str):
+    """Second integer of a dotted version string, or None if there is none.
+
+    Mirrors `logweir_core::scorecard::minor_version`: split on ".", take the
+    second field, parse it as Rust's `str::parse::<u64>` does -- an optional
+    leading `+` and ASCII digits, below 2**64, and nothing else. Python's
+    `int()` is wider (whitespace, `_`, unicode digits), and a wider parse here
+    would let `"1. 2.0"` define a field the Rust reader says it predates
+    (`_receipt_parse_semver` makes the same choice). Read by arm NR-1 only.
+    """
+    parts = version.split(".") if isinstance(version, str) else []
+    if len(parts) < 2 or not re.fullmatch(r"\+?[0-9]+", parts[1]):
+        return None
+    n = int(parts[1])
+    return n if n < 2 ** 64 else None
 
 
 def _finite(x) -> bool:
@@ -921,12 +996,34 @@ def check_invariants(doc) -> str:
     # document carrying `"not_assessed": "x"` or `[1]` printed VALID here while
     # `drill verify` exited 1 — measured on this branch before this check
     # existed, not argued. Both are cases in `shape-index.json`.
+    # Also shape (FX-3): `topic_parity.intentionally_deviated` and
+    # `unexpected_divergence` are REQUIRED `Vec<String>`s over there, so a
+    # missing one, `"x"` or `[1]` is refused at DESERIALISATION, and until
+    # 1.17.0 this script printed VALID for all four (measured at main b8b9263f).
+    # Arms NR-2 to NR-5 below read both lists, and `in` over a string would be
+    # a SUBSTRING test here, so the shape is asserted first. In the struct's
+    # declaration order, before `not_assessed`.
+    for name in ("intentionally_deviated", "unexpected_divergence"):
+        listed = doc["topic_parity"].get(name)
+        if not isinstance(listed, list) or not all(isinstance(t, str) for t in listed):
+            return f"topic_parity.{name} is not an array of strings"
+
     not_assessed = doc["topic_parity"].get("not_assessed")
     if not_assessed is not None and (
         not isinstance(not_assessed, list)
         or not all(isinstance(t, str) for t in not_assessed)
     ):
         return "topic_parity.not_assessed is not an array of strings"
+
+    # Also shape (FX-3, scorecard 1.2.0): `topic_parity.not_reconstructed` is an
+    # `Option<Vec<String>>` over there, like `not_assessed` above. `null` is
+    # ABSENT. Both bad shapes are cases in `shape-index.json`.
+    not_reconstructed = doc["topic_parity"].get("not_reconstructed")
+    if not_reconstructed is not None and (
+        not isinstance(not_reconstructed, list)
+        or not all(isinstance(t, str) for t in not_reconstructed)
+    ):
+        return "topic_parity.not_reconstructed is not an array of strings"
 
     # THE u64 DOMAIN, not merely the JSON type (Task 5d, from Task 5c's review
     # finding F1). `isinstance(v, int)` mirrors serde's TYPE and not `u64`'s
@@ -1258,6 +1355,68 @@ def check_invariants(doc) -> str:
                 "target.auth.mode is not one of the two values this format defines; it "
                 "is \"plaintext\" or \"scramSha512\" and nothing else"
             )
+
+    # `topic_parity.not_reconstructed` (format 1.2.0, FX-3): arms NR-1 to
+    # NR-5, mirrored ARM FOR ARM, IN THIS POSITION (after `target.auth`,
+    # before `redactions`) and with the same words from
+    # `Scorecard::validate_invariants`. They fire ONLY on a document carrying
+    # the block, so every 1.0.0 and 1.1.0 document -- and a 1.2.0 one whose
+    # phase 7 never ran -- is decided exactly as before. Not interpolated except
+    # NR-1's version: an entry names a topic. The shape layer above has proved
+    # both lists and the block are arrays of strings.
+    if not_reconstructed is not None:
+        # NR-1. A version before 1.2.0 cannot carry the 1.2.0 field.
+        minor = _minor(version)
+        if not (
+            doc_major == 1
+            and minor is not None
+            and minor >= TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR
+        ):
+            return (
+                f"topic_parity.not_reconstructed is present but format_version "
+                f"{_rust_debug_str(version)} predates it: the field is defined from "
+                f"1.{TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR}.0"
+            )
+        parity_block = doc["topic_parity"]
+        # NR-2. THE FAIL-SAFE TWIN an older reader sees.
+        if any(e not in parity_block["unexpected_divergence"] for e in not_reconstructed):
+            return (
+                "topic_parity.not_reconstructed names a deviation that unexpected_divergence "
+                "does not; a source setting the restore did not reconstruct is also an "
+                "unexpected divergence, so a reader that predates not_reconstructed never "
+                "reads it as parity"
+            )
+        # NR-3. Never an intended deviation.
+        if any(e in parity_block["intentionally_deviated"] for e in not_reconstructed):
+            return (
+                "topic_parity.not_reconstructed names a deviation that intentionally_deviated "
+                "also names; a source setting the restore did not reconstruct is never an "
+                "intended deviation"
+            )
+        # NR-4 and NR-5 (FX-3 review F1): in a `newTopic` document the block
+        # is the claim, and the two existing lists must agree with it, or a
+        # writer that lost the mode signs `not_reconstructed: []` beside the
+        # scratch labels. Only on a document carrying the block whose
+        # `target.mode` is `newTopic`; each can only refuse.
+        if doc["target"].get("mode") == "newTopic":
+            # NR-4. A `newTopic` restore labels nothing intended.
+            if parity_block["intentionally_deviated"]:
+                return (
+                    "topic_parity.intentionally_deviated is not empty in a newTopic document "
+                    "that carries not_reconstructed; a newTopic restore's deviations are "
+                    "source settings it did not reconstruct, never intended ones"
+                )
+            # NR-5. The converse of NR-2 over the settings the restore decides.
+            if any(
+                _parity_key(e) in RESTORE_DECIDED_SETTINGS and e not in not_reconstructed
+                for e in parity_block["unexpected_divergence"]
+            ):
+                return (
+                    "topic_parity.unexpected_divergence names a setting the restore decides "
+                    "(cleanup.policy, retention.ms, partition_count or replication_factor) "
+                    "that not_reconstructed does not, in a newTopic document; such a "
+                    "deviation is a source setting the restore did not reconstruct"
+                )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -1623,6 +1782,29 @@ def _parity_line(not_assessed):
     return "configuration parity: NOT ASSESSED for " + "; ".join(str(t) for t in not_assessed)
 
 
+def _reconstruction_line(mode, not_reconstructed, intentionally_deviated):
+    """The scorecard's reconstruction sentence, or "" -- the twin of
+    `crates/logweir/src/verify.rs::reconstruction_line` (FX-3), in the same
+    words from the same three cases. `mode` is `target.mode` as read: absent
+    is scratch. A newTopic document WITHOUT `not_reconstructed` predates format
+    1.2.0, and its writer labelled the settings it did not reconstruct
+    `intentionally_deviated`; that is re-read here as the weaker claim, never
+    a stronger one, and changes no verdict."""
+    if not_reconstructed is not None:
+        if not not_reconstructed:
+            return ""
+        return "reconstruction: source settings NOT RECONSTRUCTED for " + "; ".join(
+            str(e) for e in not_reconstructed
+        )
+    if mode == "newTopic" and intentionally_deviated:
+        return (
+            "reconstruction: not recorded, so the settings this newTopic document labels "
+            "intentionally_deviated were NOT reconstructed: "
+            + "; ".join(str(e) for e in intentionally_deviated)
+        )
+    return ""
+
+
 def main(
     scorecard_path: str,
     sig_path: str,
@@ -1838,6 +2020,16 @@ def main(
         parity = _parity_line(doc["topic_parity"].get("not_assessed"))
         if parity:
             print(f"       parity:   {parity}")
+        # FX-3: nor is it a restore that reconstructed the source's settings.
+        # The same sentence `logweir drill verify` prints
+        # (`crates/logweir/src/verify.rs::reconstruction_line`).
+        reconstruction = _reconstruction_line(
+            doc["target"].get("mode"),
+            doc["topic_parity"].get("not_reconstructed"),
+            doc["topic_parity"]["intentionally_deviated"],
+        )
+        if reconstruction:
+            print(f"       parity:   {reconstruction}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -1870,6 +2062,9 @@ def main(
             "evidence.offset_report_key and its sha256 present or absent together; "
             "target.marker_topic present unless target.mode is newTopic; "
             "target.mode absent or one of the two values the format defines; "
+            "topic_parity.not_reconstructed only from 1.2.0, each entry also an unexpected "
+            "divergence and never an intended one, and in a newTopic document nothing intended "
+            "and every decided setting's divergence named in it; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

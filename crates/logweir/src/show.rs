@@ -1,6 +1,7 @@
 //! `logweir drill show` — the fixed-width scorecard table (spec §13) and the
 //! raw `--format json` passthrough.
 use logweir_core::scorecard::Scorecard;
+use logweir_core::spec::TargetMode;
 
 fn row(out: &mut String, label: &str, value: impl std::fmt::Display) {
     out.push_str(&format!("  {label:<26}  {value}\n"));
@@ -136,10 +137,15 @@ pub fn render_table(sc: &Scorecard) -> String {
         &mut o,
         "topic parity",
         format!(
-            "intended [{}]  unexpected [{}]{}",
+            "intended [{}]  unexpected [{}]{}{}",
             sc.topic_parity.intentionally_deviated.join(", "),
             sc.topic_parity.unexpected_divergence.join(", "),
-            parity_assessment(sc.topic_parity.not_assessed.as_deref())
+            parity_assessment(sc.topic_parity.not_assessed.as_deref()),
+            reconstruction_assessment(
+                sc.target.mode,
+                sc.topic_parity.not_reconstructed.as_deref(),
+                &sc.topic_parity.intentionally_deviated
+            )
         ),
     );
     row(
@@ -168,6 +174,29 @@ fn parity_assessment(not_assessed: Option<&[String]>) -> String {
         None => "  configuration coverage not recorded".into(),
         Some([]) => String::new(),
         Some(topics) => format!("  not assessed [{}]", topics.join(", ")),
+    }
+}
+
+/// The reconstruction qualifier on the `topic parity` row (FX-3), from the
+/// same three cases as `crate::verify::reconstruction_line`.
+///
+/// A format 1.2.0 document lists what it did NOT reconstruct; `[]` adds
+/// nothing. A `newTopic` document WITHOUT the field predates 1.2.0, and its
+/// writer labelled the settings it did not reconstruct `intended` (the
+/// scratch rationale, in every mode), so the row says what that label means
+/// there. A scratch drill's `intended` is what it says, in every version.
+fn reconstruction_assessment(
+    mode: TargetMode,
+    not_reconstructed: Option<&[String]>,
+    intentionally_deviated: &[String],
+) -> String {
+    match not_reconstructed {
+        Some([]) => String::new(),
+        Some(settings) => format!("  not reconstructed [{}]", settings.join(", ")),
+        None if mode == TargetMode::NewTopic && !intentionally_deviated.is_empty() => {
+            "  intended = NOT reconstructed (a newTopic document before format 1.2.0)".into()
+        }
+        None => String::new(),
     }
 }
 

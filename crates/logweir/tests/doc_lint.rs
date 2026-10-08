@@ -1621,18 +1621,24 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// will see fails here. The notes at main's `80336916`, with twenty-two items,
 /// fail the twenty-three pin (FX-10 fix round, 2026-10-05).
 ///
-/// Then to twenty-four: item 24 is FX-11's — every Job-owning controller now
-/// reports a pod the namespace refused at creation, with new reason values
-/// where alert rules match and a refused discovery no schedule retries. Its
-/// token is the read that shows an operator which namespaces refuse Logweir
-/// pods today. The notes at main's `19b5ecd9`, with twenty-three items, fail
-/// the twenty-four pin (FX-11 fix round, 2026-10-07).
-///
 /// AND EVERY LINE THAT LISTS THE ITEMS AFTER `fdb48cd8` NAMES EACH OF THEM
 /// (FX-10 review L4). The entry's opening paragraph, the paragraph under the
 /// count heading and the upgrade path in *Migration and rollback* each list
 /// the product-expansion items by number; an item added without them made
 /// all three false while every pin here stayed green.
+///
+/// Then to twenty-four: item 24 is FX-3's scorecard change, a `newTopic`
+/// restore's not-reconstructed source settings. Its token is the new field's
+/// name, so an item 24 that stops naming what an operator reads after a
+/// restore fails here, and the notes at main `19b5ecd9`, with twenty-three
+/// items, fail the twenty-four pin (FX-3 fix round, 2026-10-07).
+///
+/// Then to twenty-five: item 25 is FX-11's — every Job-owning controller now
+/// reports a pod the namespace refused at creation, with new reason values
+/// where alert rules match and a refused discovery no schedule retries. Its
+/// token is the read that shows an operator which namespaces refuse Logweir
+/// pods today. The notes at main's `3638b006`, with twenty-four items, fail
+/// the twenty-five pin (FX-11 fix round, 2026-10-07).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1658,9 +1664,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=24).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-four operator-facing changes, `#### 1.` \
-         to `#### 24.` in order; found {numbers:?}"
+        (1..=25).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-five operator-facing changes, `#### 1.` \
+         to `#### 25.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1710,6 +1716,12 @@ fn the_release_notes_carry_every_owed_operator_action() {
         (
             "two inert policy values withdrawn",
             "WITHDRAWN VALUES ARE SET AND IGNORED",
+        ),
+        // FX-3 (2026-10-05): a newTopic restore's scorecard names the source
+        // settings it did not reconstruct, never "intended".
+        (
+            "not-reconstructed source settings",
+            "topic_parity.not_reconstructed",
         ),
         // FX-11 (2026-10-07): every Job-owning controller reports a refused
         // pod; the operator's read of which namespaces refuse one today.
