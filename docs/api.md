@@ -136,8 +136,8 @@ anything not listed is `404`.
 |---|---|
 | `GET /api/v1/session` | The actor, the explicit namespace grants and the capability flags. |
 | `GET /api/v1/namespaces` | The configured grants. It never lists core `Namespace` objects. |
-| `GET /api/v1/namespaces/{ns}/connections[/{name}]` | `KafkaCluster` projections: role, bootstrap addresses, auth mode, username, TLS, the credential Secret's **name**, and the controller's reachability observation. |
-| `POST /api/v1/namespaces/{ns}/connections` | Create a `KafkaCluster` that references an existing credential Secret by name. The body has no name member: the object is named `conn-<26 base32>` from the idempotency scope, and the response carries that name. |
+| `GET /api/v1/namespaces/{ns}/connections[/{name}]` | `KafkaCluster` projections: role, bootstrap addresses, auth mode (`plaintext`, `scramSha512`, `scramSha256`, `plain`, `mtls`), username, TLS, the credential and mTLS client-certificate Secrets' **names**, the CA reference, and the controller's reachability observation. Never a password or a key. |
+| `POST /api/v1/namespaces/{ns}/connections` | Create a `KafkaCluster`. A SASL password, or an mTLS client certificate and key, is entered ONCE in `auth.credential` and becomes a Secret this service creates — owned by and bound to the connection — and never reads back; an existing Secret is never named (`auth.credentialRef` is refused, `existing_credential_refused`). The body has no name member: the object is named `conn-<26 base32>` from the idempotency scope, and the response carries that name. |
 | `GET /api/v1/cadence-previews` | What a cron expression — or a preset — will actually do in a time zone, before anything is saved. No namespace, no Kubernetes call. |
 | `GET /api/v1/namespaces/{ns}/schedules[/{name}]` | `BackupSchedule` projections, with the cadence policy, the revision and the controller's own next runs. |
 | `POST /api/v1/namespaces/{ns}/schedules` | Create a `BackupSchedule` from the whole policy: cadence and zone, a named or dynamic selection, an inline archive **or** a saved destination, deadlines, catch-up, retries and retention. |
@@ -988,6 +988,24 @@ and prefix it *did* recover so you can paste them into an explicit `POST
 installation config arrives with W11**, and `addressingSource` — the field that
 will say which source a derived location came from — is deliberately absent from
 the response until a route can fill it honestly.
+
+**Connection credentials are entered, never named (PROD-01.3).** A connection
+create carries its credential in `auth.credential` — `password` for
+`scramSha512`, `scramSha256` and `plain` (which needs `tls: true`; otherwise
+`422 plain_requires_tls`, `PlainWithoutTls`), or `certificatePem` and
+`privateKeyPem` (unencrypted) for `mtls` (`tls: true`). It needs
+`credential.write` as well as `connection.create`. The service checks the
+deterministic Secret name `<connection>-credential` free with a dry-run create,
+creates the `KafkaCluster` naming it, then creates the Secret — type
+`logweir.dev/kafka-sasl-password` or `logweir.dev/kafka-client-certificate`,
+owned by the connection, carrying its `logweir-binding` — and never reads it
+back. Naming an existing Secret (`auth.credentialRef`) is refused,
+`422 existing_credential_refused`: a connection that could name any Secret
+could make Logweir present another team's credential to brokers of its
+author's choosing, and the runner enforces the same rule on every
+`KafkaCluster` however it was written ([kubernetes.md](kubernetes.md) §20.9).
+A private CA is a reference to a **ConfigMap** key (`auth.tlsCa.configMapKeyRef`):
+a CA certificate is public and is only ever a local trust anchor.
 
 **Write-only credential entry.** A grant may carry a value once, in
 `access.<role>.secret.new`. It becomes a Secret named

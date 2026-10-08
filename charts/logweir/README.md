@@ -271,9 +271,10 @@ is REQUIRED and non-empty: an absent, empty or null one renders a subject that
 matches nobody, so the schema and the template both refuse it. (Earlier
 revisions called the policy inert until D0 stage 7 landed the console; it has.)
 
-It requires that a Secret the console creates carries one of the two Logweir
+It requires that a Secret the console creates carries one of the three Logweir
 credential types (`logweir.dev/object-store-credential`,
-`logweir.dev/kafka-sasl-password`) and the
+`logweir.dev/kafka-sasl-password`, and since PROD-01.3
+`logweir.dev/kafka-client-certificate` for an mTLS connection) and the
 `app.kubernetes.io/managed-by: logweir` label — which closes the one thing an
 unfenced `create secrets` could otherwise do, minting a
 `kubernetes.io/service-account-token` for another ServiceAccount. Every other

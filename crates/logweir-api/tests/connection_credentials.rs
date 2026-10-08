@@ -452,3 +452,33 @@ async fn a_taken_credential_name_writes_nothing() {
     assert!(writes.is_empty(), "nothing may be written: {writes:?}");
     assert_eq!(fake.count("kafkaclusters", NS_A), 0);
 }
+
+/// The create-only Secret shape's `Debug` prints key NAMES, never the base64
+/// data — a stray `{:?}` in a log line, a tracing field or a panic message
+/// cannot carry a credential (the derived `Debug` it replaced did).
+#[test]
+fn a_write_only_credential_debug_names_keys_and_no_value() {
+    let parts = weirkeeper::connection::credential::build_kafka_credential_secret(
+        weirkeeper::connection::credential::NewKafkaCredential {
+            namespace: NS_A,
+            secret_name: "c-credential",
+            connection_name: "c",
+            password: weirkeeper::connection::credential::WriteOnlyPassword::new(
+                SEEDED_PASSWORD.to_string(),
+            ),
+            request_id: None,
+            binding: Some("v1:uid:sha256:00"),
+            owner_uid: Some("uid"),
+        },
+    )
+    .unwrap()
+    .into_parts();
+    let credential = logweir_api::kube::WriteOnlyCredential::from_parts(parts);
+    let shown = format!("{credential:?}");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(SEEDED_PASSWORD);
+    assert!(shown.contains("password"), "the key name is shown: {shown}");
+    assert!(
+        !shown.contains(SEEDED_PASSWORD) && !shown.contains(&b64),
+        "{shown}"
+    );
+}

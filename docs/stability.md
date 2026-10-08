@@ -213,6 +213,50 @@ which it selected by time with **no recorded timestamp type**
   them without a label — the pre-FX-8 behaviour. The 1.3.0 documents already
   written stay valid under both readers.
 
+### Three new auth modes: receipt and catalog point 1.3.0, scorecard 1.4.0 (PROD-01.3)
+
+PROD-01.3 adds `scramSha256`, `plain` (SASL/PLAIN, over TLS only) and `mtls`
+to the closed set of auth modes. Two existing fields carry the mode in signed
+documents — the backup receipt's `source.auth.mode` and the scorecard's
+`target.auth.mode` — and the catalog point record copies the receipt's.
+
+- **The value set is versioned, and only a document that names a new value
+  moves.** A receipt or catalog point naming one of the three is **1.3.0**, a
+  scorecard **1.4.0**; every document of a `plaintext` or `scramSha512` run is
+  written at the version it always was, byte for byte. Each new schema file
+  differs from the frozen one beside it in that field's description only.
+- **MINOR, under OD-7's third case** (2026-10-07): this is new content in an
+  existing field that can only move an older reader's verdict to the safer
+  side. A reader built before PROD-01.3 refuses such a document (the mode is
+  outside the two it knows) — never accepts it as something stronger — and
+  decides every other document exactly as before. Each reader's one auth arm
+  becomes three statements, mirrored in both: the closed two below the new
+  version (unchanged), a new value under a version that predates it (refused),
+  and the closed five from the new version. The corpus
+  (`e2e/fixtures/invariants/`, three cases per document) and the parity gate
+  re-prove it on every `just lint`; `verify_scorecard.py` is 1.19.0.
+- **Two runner terminal states are added**, each a refusal that names its
+  cause: `PlainWithoutTls` (SASL/PLAIN without TLS) and
+  `CredentialBindingMismatch` (a projected credential whose Secret's
+  `logweir-binding` does not name the connection — the PROD-01.3 security
+  follow-up, [kubernetes.md](kubernetes.md) §20.9). Both are new causes for
+  exit 3 and can only refuse.
+- **The `KafkaCluster` CRD is additive**: three enum values appended,
+  `auth.clientCertificate`, `status.credentialBinding`, and three CEL rules
+  that are vacuously true for every object an earlier release could write.
+  **One existing behaviour changes, deliberately:** every credentialed
+  connection now needs its Secret bound (`logweir-binding`), or its runs are
+  refused — the upgrade step is in [kubernetes.md](kubernetes.md) §20.9.
+- **The product API no longer accepts `auth.credentialRef`** on a connection
+  create (`422 existing_credential_refused`); the credential is entered once in
+  `auth.credential`. A pre-release API change (below), listed in the release
+  notes.
+- **Rollback.** An older `logweir` cannot parse a spec naming a new mode, so it
+  writes no 1.3.0/1.4.0 document; those already written stay valid for every
+  reader from PROD-01.3 on, and older readers refuse them (the safe direction).
+  An older controller and runner ignore the binding pair; a bound Secret keeps
+  working with them.
+
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the

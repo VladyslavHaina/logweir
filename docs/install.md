@@ -1127,8 +1127,10 @@ credential cannot be read back by any route. `create` alone is still the widest
 grant the service asks for: in a namespace it could in principle mint a
 `kubernetes.io/service-account-token` Secret for any ServiceAccount there.
 
-Both credential builders stamp a distinct `type` —
-`logweir.dev/object-store-credential` and `logweir.dev/kafka-sasl-password` —
+The credential builders stamp a distinct `type` —
+`logweir.dev/object-store-credential`, `logweir.dev/kafka-sasl-password` and
+(PROD-01.3, an mTLS connection's certificate and key)
+`logweir.dev/kafka-client-certificate` —
 and the `app.kubernetes.io/managed-by: logweir` label, so a
 `ValidatingAdmissionPolicy` can require both:
 

@@ -29,7 +29,7 @@ out to by pinned digest and never links. Report those upstream.
 
 ## What this design does not protect against
 
-These four are **accepted residuals**, not undiscovered bugs. They are stated
+These five are **accepted residuals**, not undiscovered bugs. They are stated
 here, in `README.md` and in `docs/kubernetes.md` so that nobody has to discover
 them; a report that one of them is true is not a vulnerability report.
 
@@ -53,6 +53,21 @@ them; a report that one of them is true is not a vulnerability report.
 - **`self_attested: false` means only "two different keys".** One person
   holding both keypairs satisfies it. It is not evidence of an independent
   auditor, and a scorecard that carries it should not be read as one.
+- **A connection's credential binding is enforced by the runner, after the
+  kubelet has projected the credential.** A `KafkaCluster` that names another
+  connection's credential Secret cannot make Logweir present it anywhere: every
+  runner compares the Secret's `logweir-binding` with the binding of the
+  connection it was built for and refuses a mismatch before any client exists
+  (`CredentialBindingMismatch`, [kubernetes.md](docs/kubernetes.md) §20.9).
+  But the controller reads no Secret, so it is the kubelet that resolves the
+  reference, and the foreign value sits in the refused pod's environment (or,
+  for a client key, its projected volume) for the moment before the runner
+  exits — inside a pod that mounts no ServiceAccount token and sends nothing.
+  Anyone who can already read pods' environment or exec into a runner pod in
+  that namespace can read any credential a run projects, bound or not. And
+  anyone who can WRITE a Secret can bind a credential they put there to their
+  own connection — that is their own credential, which the binding exists to
+  allow.
 
 ## Cryptography
 

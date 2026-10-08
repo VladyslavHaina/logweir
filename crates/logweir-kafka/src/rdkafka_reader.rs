@@ -1034,6 +1034,126 @@ mod tests {
     //! here — see the Task 10 fix report's "unproven without a live broker"
     //! list.
 
+    /// **PROD-01.3: librdkafka's settings for the three new modes**, with no
+    /// socket. Each row is the property its mutant breaks: SCRAM-SHA-256's
+    /// two-hyphen spelling (the ENGINE writes one), PLAIN only as `SASL_SSL`
+    /// with hostname verification pinned, and mTLS as `SSL` with the two FILE
+    /// paths and no SASL key — and a client config without the certificate,
+    /// which has no identity to present, refused.
+    #[test]
+    fn the_prod_01_3_modes_configure_librdkafka_as_the_engine_is_configured() {
+        use super::RdKafkaReader;
+        use crate::reader::AuthConfig;
+        use logweir_core::connection::ClientCertificateFiles;
+        let bootstrap = vec!["b0:9093".to_string()];
+
+        for (tls, protocol) in [(false, "SASL_PLAINTEXT"), (true, "SASL_SSL")] {
+            let cfg = RdKafkaReader::client_config(
+                &bootstrap,
+                &AuthConfig::ScramSha256 {
+                    username: "u".into(),
+                    password: "pw".into(),
+                    tls,
+                    tls_ca_file: None,
+                },
+            )
+            .expect("scram-256 configures");
+            assert_eq!(cfg.get("security.protocol"), Some(protocol));
+            assert_eq!(cfg.get("sasl.mechanism"), Some("SCRAM-SHA-256"));
+            assert_eq!(cfg.get("sasl.username"), Some("u"));
+            assert_eq!(
+                cfg.get("ssl.endpoint.identification.algorithm"),
+                tls.then_some("https")
+            );
+        }
+
+        let plain = RdKafkaReader::client_config(
+            &bootstrap,
+            &AuthConfig::Plain {
+                username: "u".into(),
+                password: "pw".into(),
+                tls_ca_file: Some("/ca.crt".into()),
+            },
+        )
+        .expect("plain configures");
+        assert_eq!(
+            plain.get("security.protocol"),
+            Some("SASL_SSL"),
+            "never SASL_PLAINTEXT"
+        );
+        assert_eq!(plain.get("sasl.mechanism"), Some("PLAIN"));
+        assert_eq!(
+            plain.get("ssl.endpoint.identification.algorithm"),
+            Some("https")
+        );
+        assert_eq!(plain.get("ssl.ca.location"), Some("/ca.crt"));
+
+        let mtls = RdKafkaReader::client_config(
+            &bootstrap,
+            &AuthConfig::Mtls {
+                tls_ca_file: None,
+                client_certificate: Some(ClientCertificateFiles {
+                    cert_file: "/c/tls.crt".into(),
+                    key_file: "/c/tls.key".into(),
+                }),
+            },
+        )
+        .expect("mtls configures");
+        assert_eq!(mtls.get("security.protocol"), Some("SSL"));
+        assert_eq!(mtls.get("ssl.certificate.location"), Some("/c/tls.crt"));
+        assert_eq!(mtls.get("ssl.key.location"), Some("/c/tls.key"));
+        assert_eq!(
+            mtls.get("ssl.endpoint.identification.algorithm"),
+            Some("https")
+        );
+        assert_eq!(mtls.get("sasl.mechanism"), None);
+        assert!(RdKafkaReader::client_config(
+            &bootstrap,
+            &AuthConfig::Mtls {
+                tls_ca_file: None,
+                client_certificate: None,
+            },
+        )
+        .is_err());
+    }
+
+    /// **PROD-01.3: the transport refusals at the ONE construction site, and
+    /// no password in `Debug` for either new SASL arm.**
+    #[test]
+    fn from_spec_refuses_plain_and_mtls_without_tls_and_debug_redacts() {
+        use crate::reader::AuthConfig;
+        use logweir_core::spec::AuthSpec;
+        let err = AuthConfig::from_spec(
+            &AuthSpec::Plain {
+                username: "u".into(),
+                tls: false,
+            },
+            Some("pw-SEEDED-7".into()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("PlainWithoutTls"), "{err}");
+        assert!(!err.contains("pw-SEEDED-7"), "{err}");
+        assert!(AuthConfig::from_spec(&AuthSpec::Mtls { tls: false }, None).is_err());
+        assert!(AuthConfig::from_spec(&AuthSpec::Mtls { tls: true }, None).is_ok());
+        for spec in [
+            AuthSpec::Plain {
+                username: "u".into(),
+                tls: true,
+            },
+            AuthSpec::ScramSha256 {
+                username: "u".into(),
+                tls: false,
+            },
+        ] {
+            let auth = AuthConfig::from_spec(&spec, Some("pw-SEEDED-7".into())).expect("builds");
+            assert!(!format!("{auth:?}").contains("pw-SEEDED-7"), "{auth:?}");
+            // A missing password is operational and names the mode.
+            let missing = AuthConfig::from_spec(&spec, None).unwrap_err().to_string();
+            assert!(missing.contains(spec.mode_str()), "{missing}");
+        }
+    }
+
     /// **THE TLS CLIENT PINS HOSTNAME VERIFICATION AND TRUSTS THE PROJECTED
     /// CA** — PLAT-07.1 review findings H1 and H2.
     ///

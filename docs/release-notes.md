@@ -22,7 +22,8 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10), 24 (FX-3), 25
 (FX-13), 26 (FX-11) and 27 (FX-8), from the product-expansion tracker's fix-now
-rows, and item 28 (PROD-00.3f, the engine pin), land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
+rows, item 28 (PROD-00.3f, the engine pin) and item 29 (PROD-01.3, client
+authentication modes and the credential binding), land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
 execution-claim set check, receipt and catalog format 1.2.0, the pin's read
 by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
@@ -141,6 +142,10 @@ under its item below.
    then any approval-policy binding (item 7). On the Helm path these are one
    release and successive `helm upgrade`s: first the image values (controller,
    runner and console move together), then the `approvalPolicy.*` values.
+7. **Bind every credentialed connection's Secret** (item 29): after the
+   controller rolls, copy each `KafkaCluster`'s `status.credentialBinding` into
+   its credential Secret's `logweir-binding` key. Until then its runs are
+   refused (`CredentialBindingMismatch`), closed.
 
 **Pre-upgrade check: which compromise revocations become installation-wide**
 (item 16). This build applies every `KeyCompromise` revocation a `TrustPolicy`
@@ -179,7 +184,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-eight operator-facing changes
+### The twenty-nine operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -201,6 +206,9 @@ Item 27 is fix-now row FX-8, proven on the compose stack; the PoC upgrade that
 carries it runs its refusal and opt-in rows.
 Item 28 is PROD-00.3f, the engine pin, proven on a compose stack; the PoC
 upgrade that carries it runs its controller and runner rows.
+Item 29 is PROD-01.3 and its security follow-up, proven on a compose stack
+(both clients, every mode); the PoC upgrade that carries it runs the live
+`KafkaCluster` rows and the binding migration.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -1292,6 +1300,53 @@ from source only: an OLDER Logweir build reading a 0.23.3 archive or receipt.
 The manifest has the keys a 0.21.0 manifest has (`missing_topics` is omitted
 when empty), the segment container is unchanged since 0.18.0, and the vendored
 structs ignore unknown keys.
+
+#### 29. SASL/PLAIN over TLS, SCRAM-SHA-256 and mTLS; a connection presents only its own credential (PROD-01.3) — required action
+
+**Changed.** A connection (`KafkaCluster`, a spec's `auth:` block, the console
+form, `logweir cluster-probe --auth-mode`) may use **`scramSha256`**,
+**`plain`** (SASL/PLAIN — Confluent Cloud API keys, Azure Event Hubs
+connection strings) or **`mtls`** (a TLS client certificate, from
+`auth.clientCertificate`, a `kubernetes.io/tls`-shaped Secret) beside
+`plaintext` and `scramSha512`, on both clients. **`plain` without `tls: true` is
+refused, never dialled** (`PlainWithoutTls`: the CRD's rule, the controller,
+`refusal-reason=PlainWithoutTls` at exit 3, and both client builders). Signed
+documents name the mode: a receipt or catalog point naming a new mode is
+format **1.3.0**, a scorecard **1.4.0** (MINOR; [stability.md](stability.md));
+`verify_scorecard.py` is 1.19.0. **Security follow-up:** a connection presents
+only a credential bound to it. Every runner refuses a projected password or
+client key whose Secret lacks the connection's `logweir-binding` (UID and
+endpoint digest) — `CredentialBindingMismatch`, before any client exists — so
+a `KafkaCluster` that names another connection's Secret cannot make Logweir
+present that credential to a broker of its author's choosing. The console API
+takes the credential ONCE (`auth.credential`), creates the bound Secret itself
+(owned by the connection) and refuses `auth.credentialRef`
+(`422 existing_credential_refused`); a console CA comes from a ConfigMap.
+**Do:** apply the CRDs, roll controller, runner and console together, then
+bind every existing credentialed connection's Secret ([kubernetes.md](kubernetes.md)
+§20.9 has the two commands). A Secret shared by two connections needs splitting
+(one binding each). A client of the product API that named `credentialRef`
+sends the password in `auth.credential` instead. Admission-policy users: the
+chart's policy now also admits `logweir.dev/kafka-client-certificate`.
+**Scope:** on compose slot 4 (Kafka 3.7.1, engine 0.23.3 under emulation), the
+`auth` profile's four listener shapes each passed a real backup (Logweir's
+client at phase −1, the engine's client for the archive) and a real drill
+restoring it into the same cluster, with the receipt and scorecard VALID in both
+readers and a seeded-secret scan clean; a wrong password, a wrong CA, an
+untrusted client certificate and PLAIN without TLS were each refused
+(`e2e/tests/auth_modes.rs`, 8/8). The binding's refusal is proven on the shipped
+binary for `backup run`, `drill run`, `cluster-probe` and the check runner
+against a loopback sentinel that is never dialled; the API's write-only entry,
+its refusals and a seeded-value scan by `crates/logweir-api/tests/connection_credentials.rs`.
+No managed provider was dialled (OD-4): Confluent Cloud and Event Hubs move
+from unsupported to **untested**, MSK through SCRAM-SHA-512/TLS stays untested
+([support-matrix.md](support-matrix.md)). The live `KafkaCluster` journey on
+docker-desktop is the next PoC upgrade's.
+**Rollback:** an older controller and runner ignore the binding pair and the
+new fields; a bound Secret keeps working with them. An older build cannot parse
+a spec naming a new mode, and an older reader refuses a 1.3.0/1.4.0 document
+that names one (the safe direction). An older console would send
+`credentialRef` again; roll the console with the controller.
 
 ### Verification scope: what "verified" means in this release
 
