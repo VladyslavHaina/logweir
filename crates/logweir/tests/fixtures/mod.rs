@@ -504,6 +504,8 @@ fn base_verify_outcome() -> logweir::drill::phase7_verify::VerifyOutcome {
             unexpected_divergence: vec![],
             // Phase 7 ran: every topic's configuration parity was assessed.
             not_assessed: Some(vec![]),
+            // ...and, a scratch drill, nothing was left unreconstructed (FX-3).
+            not_reconstructed: Some(vec![]),
         },
         records_restored: 75,
         newest_restored_ts_ms: 1_756_519_200_000,

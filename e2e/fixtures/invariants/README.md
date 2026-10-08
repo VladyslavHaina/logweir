@@ -163,11 +163,14 @@ arm *and* its `uncovered-arms.json` entry in the same edit.
 
 ## `shape-index.json` — parity BEFORE the invariants
 
-Thirty-five documents that neither reader reaches an invariant on. Eleven are
+Forty-four documents that neither reader reaches an invariant on. Eleven are
 `unmodified_example.json` with one whole required block removed and nothing else
 touched; one has two removed at once; six have one required NON-block field
 removed and six carry one at the WRONG JSON TYPE; three override
-`sample.records_expected` alone; six set a non-`Option` `u64` field to `null`.
+`sample.records_expected` alone; six set a non-`Option` `u64` field to `null`;
+two give `target.mode` a value outside its set (Task 10); four give FX-4's two
+`not_assessed` fields a type serde refuses; and five do the same to
+`topic_parity`'s lists, or remove one (FX-3, below).
 
 Every required field of `logweir_core::scorecard::Scorecard` — block or not —
 carries no `#[serde(default)]`, so `serde_json` refuses a document missing one at
@@ -475,6 +478,45 @@ refuses the document a regression would produce rather than an invented one.
 Neither message interpolates, so both `arm` fields are verbatim fragments of
 `Scorecard::validate_invariants` and `every_invariant_arm_has_a_corpus_case`
 joins on them exactly as it does for every other case here.
+
+## FX-3: `topic_parity.not_reconstructed` (scorecard format 1.2.0)
+
+Ten `index.json` cases for the field and its five arms, NR-1 to NR-5, which
+both readers state in the same position (after `target.auth`, before
+`redactions`) and words. Each is `unmodified_example.json` with exactly the
+overrides that make its case; a `newTopic` one also drops `marker_topic`, sets
+`target.mode` and names its targets `restore-20260903T090000Z-orders`.
+
+| case | what it pins |
+|---|---|
+| `new_topic_1_2_with_not_reconstructed` | ACCEPT: the 1.2.0 `newTopic` shape phase 7 writes, the three settings in `not_reconstructed` and in `unexpected_divergence`, nothing intended |
+| `scratch_1_2_with_empty_not_reconstructed` | ACCEPT: a 1.2.0 drill, intended deviations beside `not_reconstructed: []` |
+| `new_topic_1_1_with_intended_labels` | ACCEPT: a `newTopic` document from before FX-3, all three intended and no field, decided exactly as before |
+| `not_reconstructed_under_format_1_1_0` | NR-1: the field under `1.1.0` |
+| `not_reconstructed_without_its_unexpected_twin` | NR-2: two settings dropped from `unexpected_divergence` instead of moved, which a reader older than 1.2.0 would read as silence |
+| `not_reconstructed_also_intended` | NR-3: one setting also intended |
+| `not_reconstructed_copied_into_intended` | ORDER: copied into `intentionally_deviated` and missing its twins, so NR-2 and NR-3 both fire; both readers report NR-2 |
+| `new_topic_1_2_with_scratch_labels_beside_empty_not_reconstructed` | NR-4: the three settings intended beside `not_reconstructed: []`, what a writer that lost the mode would sign (FX-3 review F1) |
+| `new_topic_1_2_decided_divergence_missing_from_not_reconstructed` | NR-5: the three settings unexpected beside `not_reconstructed: []` |
+| `new_topic_1_2_other_divergence_beside_empty_not_reconstructed` | ACCEPT: a key the restore does not decide (`min.insync.replicas`) beside `not_reconstructed: []`; NR-5 reads only the four settings |
+
+NR-1's message interpolates the document's `format_version`, so its `arm` is the
+literal text before the placeholder, as the redactions arm's is. None of NR-2 to
+NR-5 interpolates an entry: an entry names a topic. NR-4 and NR-5 fire only on a
+`newTopic` document; `scratch_1_2_with_empty_not_reconstructed` (intended
+deviations beside `[]`) is NR-4's scratch control.
+
+Five `shape-index.json` cases (`check: message:`), because `drill verify`
+refuses them at deserialisation and script 1.15.0 printed `VALID` for all five
+(the two existing lists' cases measured at `b8b9263f`; the new field's it did
+not know):
+`topic_parity_not_reconstructed_not_an_array`,
+`topic_parity_not_reconstructed_item_not_a_string`,
+`topic_parity_intentionally_deviated_not_an_array`,
+`topic_parity_intentionally_deviated_absent` and
+`topic_parity_unexpected_divergence_item_not_a_string`. The script's shape check
+for the two existing lists is what makes NR-2 and NR-3 list membership there:
+over a string, Python's `in` is a substring test.
 
 ---
 
