@@ -331,6 +331,13 @@ fn verdict(r: &Run) -> Value {
         "time_basis": sc["source"]["time_basis"],
         "refusal_reason": pick("refusal-reason=").into_iter().last(),
         "integrity": sc["integrity"],
+        // PROD-08.1: each phase's signed duration, for the cost row.
+        "phase_ms": sc["phases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| json!([p["phase"], p["name"], p["duration_ms"]]))
+            .collect::<Vec<_>>(),
         "records_restored": sc["sample"]["records_restored"],
         "summary": pick("run ").into_iter().find(|l| l.starts_with("run ")),
         "count_bound": pick("manifest bounds the window"),
@@ -3159,4 +3166,192 @@ fn complete_coverage_over_faulted_targets_on_the_real_broker_and_archive() {
         assert_eq!(result(name), "fail", "{name}: {}", results[name]);
         assert_eq!(replay(name)[field], n, "{name}: {}", replay(name));
     }
+}
+
+/// The signed duration of phase `n` of a restore, in milliseconds.
+fn phase_ms(r: &Restored, n: i64) -> i64 {
+    r.verdict["phase_ms"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p[0] == n)
+        .and_then(|p| p[2].as_i64())
+        .unwrap_or_else(|| panic!("no phase {n} in {}", r.verdict["phase_ms"]))
+}
+
+/// **PROD-08.1 — what complete verification costs, measured** (for PROD-10.1
+/// to bound). `#[ignore]`d: it writes and restores hundreds of megabytes.
+///
+/// Three partitions of `LOGWEIR_PROD081_COST_RECORDS` records (default
+/// 50,000) with `LOGWEIR_PROD081_COST_VALUE_BYTES`-byte values (default 1,024),
+/// backed up in 10,000-record segments, restored twice in full — sampled and
+/// complete — and each run's SIGNED phase-7 duration recorded beside the
+/// archive's size from its manifest. The outcome file
+/// (`record-semantics/cv-cost-<records>.json`) carries the derived rates: ms
+/// per GiB of uncompressed archive and per partition, for the complete lane
+/// and its increment over the sampled one. Both restores must pass, and the
+/// complete one must have compared every record.
+///
+/// ```text
+/// LOGWEIR_PROD081_COST_RECORDS=150000 cargo test -p e2e --features e2e \
+///     --test record_semantics -- --ignored --nocapture complete_coverage_cost
+/// ```
+#[test]
+#[ignore = "writes and restores hundreds of MB; run alone with --ignored"]
+fn complete_coverage_cost_per_gigabyte_and_partition() {
+    let per_partition: usize = std::env::var("LOGWEIR_PROD081_COST_RECORDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50_000);
+    let value_bytes: usize = std::env::var("LOGWEIR_PROD081_COST_VALUE_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024);
+    let mut row = Row::new("cv-cost");
+    let topic = row.source_topic("cv-cost", &[("message.timestamp.type", "CreateTime")]);
+    let filler = "x".repeat(value_bytes.saturating_sub(16));
+    let fixture: Vec<Out> = (0..PARTS)
+        .flat_map(|p| {
+            let filler = filler.clone();
+            (0..per_partition).map(move |i| {
+                Out::kv(
+                    p,
+                    Some(T + i as i64),
+                    &format!("cost-p{p}-{i}"),
+                    &format!("{i:016}{filler}"),
+                )
+            })
+        })
+        .collect();
+    let t0 = Instant::now();
+    kafka::produce_plain(&topic, &fixture).expect("produce");
+    let produced = t0.elapsed();
+    drop(fixture);
+    let backup_id = row.backup_id("cv-cost");
+    let t0 = Instant::now();
+    backup_ok(&backup_id, &[&topic], 10_000);
+    let backed_up = t0.elapsed();
+    let manifest: Value =
+        serde_json::from_slice(&kafka::manifest_bytes(&backup_id).expect("the manifest"))
+            .expect("manifest JSON");
+    let segments: Vec<&Value> = manifest["topics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|t| t["partitions"].as_array().into_iter().flatten())
+        .flat_map(|p| p["segments"].as_array().into_iter().flatten())
+        .collect();
+    let sum = |f: &str| -> u64 { segments.iter().filter_map(|s| s[f].as_u64()).sum() };
+    let (uncompressed, compressed) = (sum("uncompressed_size"), sum("compressed_size"));
+    let span = (T - 1000, T + per_partition as i64 + 1000);
+    let rs = restore(&mut row, "sampled", &backup_id, &topic, None, span);
+    let rc = restore_complete(&mut row, "complete", &backup_id, &topic, None, span);
+    let (s7, c7) = (phase_ms(&rs, 7), phase_ms(&rc, 7));
+    let (s6, c6) = (phase_ms(&rs, 6), phase_ms(&rc, 6));
+    // The complete lane alone, IN THIS PROCESS, over the target the complete
+    // restore wrote: what `target/debug/logweir` measures above is a debug
+    // build; run this row under `cargo test --release` and this figure is the
+    // optimised library's.
+    let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
+    let in_process_ms = {
+        use logweir_core::engine::{BackupSetRef, RestorePlan, SampleSelection, WindowFloorSource};
+        let facts = facts_of(&backup_id, &archive);
+        let store = logweir_engine_oso::storage::Store::read_only_from_url(
+            &kafka::archive_location(&backup_id),
+        )
+        .expect("the archive store");
+        let mapping: std::collections::BTreeMap<String, String> =
+            [(topic.clone(), rc.target.clone())].into_iter().collect();
+        let set = BackupSetRef {
+            backup_id: backup_id.clone(),
+            manifest_key: kafka::manifest_key(&backup_id),
+        };
+        let sel: Vec<SampleSelection> = (0..PARTS)
+            .map(|p| SampleSelection {
+                set: set.clone(),
+                topic: topic.clone(),
+                partition: p,
+                anchor: logweir_core::spec::Anchor::Head,
+                count: 25,
+                window: span,
+            })
+            .collect();
+        let plan = RestorePlan {
+            set,
+            storage: kafka::archive_location(&backup_id),
+            target_bootstrap: vec![kafka::bootstrap()],
+            target_auth: logweir_core::engine::AuthRender::Plaintext,
+            topic_mapping: mapping.clone(),
+            time_window: (
+                chrono::DateTime::from_timestamp_millis(T).unwrap(),
+                chrono::DateTime::from_timestamp_millis(span.1).unwrap(),
+            ),
+            window_floor_source: WindowFloorSource::ArchiveManifest,
+            default_replication_factor: 1,
+            checkpoint_state: demo_dir().join("cv-cost-checkpoint.json"),
+            checkpoint_interval_secs: 30,
+            offset_report: demo_dir().join("cv-cost-offsets.json"),
+        };
+        let started = Instant::now();
+        let v = logweir::drill::phase7_verify::run_with_coverage(
+            &NoEngine,
+            &reader(),
+            &store,
+            &facts,
+            &sel,
+            &mapping,
+            &plan,
+            &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+            logweir_core::spec::TargetMode::NewTopic,
+            logweir_core::spec::Coverage::Complete,
+            None,
+        )
+        .expect("phase 7 runs in process");
+        assert_eq!(
+            v.integrity.result,
+            logweir_core::outcome::IntegrityResult::Pass,
+            "{:?}",
+            v.integrity
+        );
+        started.elapsed().as_millis() as i64
+    };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let gib = uncompressed as f64 / (1u64 << 30) as f64;
+    let total = (per_partition as u64) * PARTS as u64;
+    let outcome = json!({
+        "records": total,
+        "partitions": PARTS,
+        "value_bytes": value_bytes,
+        "segments": segments.len(),
+        "archive_uncompressed_bytes": uncompressed,
+        "archive_compressed_bytes": compressed,
+        "produce_ms": produced.as_millis() as u64,
+        "backup_ms": backed_up.as_millis() as u64,
+        "sampled": {"exit": rs.verdict["exit"], "phase6_restore_ms": s6, "phase7_verify_ms": s7},
+        "complete": {"exit": rc.verdict["exit"], "phase6_restore_ms": c6, "phase7_verify_ms": c7,
+                     "replay": complete_block(&rc)["replay"], "archive": complete_block(&rc)["archive"]},
+        "in_process_complete_phase7": {"profile": profile, "ms": in_process_ms,
+                                       "ms_per_gib": in_process_ms as f64 / gib,
+                                       "us_per_record": in_process_ms as f64 * 1000.0 / total as f64},
+        "binary_profile": "debug (target/debug/logweir, harness::bin)",
+        "complete_phase7_ms_per_gib": c7 as f64 / gib,
+        "complete_phase7_increment_ms_per_gib": (c7 - s7) as f64 / gib,
+        "complete_phase7_ms_per_partition": c7 as f64 / f64::from(PARTS),
+        "complete_phase7_us_per_record": c7 as f64 * 1000.0 / total as f64,
+    });
+    eprintln!("[recsem] cv-cost: {outcome:#}");
+    kafka::write_json(
+        &demo_dir().join(format!("record-semantics/cv-cost-{per_partition}.json")),
+        &outcome,
+    );
+    if !contract_applies("cv-cost") {
+        return;
+    }
+    assert_verdict("cost sampled", &rs, 0, "pass");
+    assert_verdict("cost complete", &rc, 0, "pass");
+    assert_eq!(complete_block(&rc)["replay"]["matching"], json!(total));
 }
