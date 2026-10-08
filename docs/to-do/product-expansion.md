@@ -193,7 +193,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 2 | PROD-05.1a | Detect Strimzi `KafkaTopic` owners from the controller and mark them for desired-state export | P2 | M2 | impl | 05.1 | — | k8s | A | Proposed |
 | 1 | PROD-04.1 | Archive consumer position evidence | P1 | M2 | impl | 04.0, 04.0a, 04.0b, 04.0d, 01.4, FX-1 | — | compose | A | Proposed |
 | 1 | PROD-02.1 | Honest coverage for scheduled backups | P1 | M2 | impl | 01.4 | — | k8s | A | Proposed |
-| 1 | PROD-07.1 | Resolve checkpoint and delivery semantics | P2 | M3 | research | 01.1 | — | none | B | In progress |
+| 1 | PROD-07.1 | Resolve checkpoint and delivery semantics | P2 | M3 | research | 01.1 | — | none | B | Done |
 | 1 | PROD-09.3 | Decide archive data protection | P2 | M3 | research | 00.1 | — | none | B | Proposed |
 | 1 | PROD-01.1a | Detect transactional archives; refuse by default, label an approved override | P1 | M2 | impl | 01.1, FX-6 | — | compose | A | Proposed |
 | 1 | PROD-01.1b | Make recovery-point selection safe for out-of-order timestamps | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
@@ -201,6 +201,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-04.0a | Committed positions through the safe consumer API | P1 | M2 | impl | 04.0 | — | compose | A | Done |
 | 1 | PROD-01.5a | Move the default broker line off 3.7.1 | P1 | M1 | infra | 01.5, 00.1 | — | compose | B | Proposed |
 | 1 | PROD-01.5c | Run PROD-01.1's and 01.4's suites on the 3.9, 4.1 and 4.3 lines | P1 | M2 | infra | 01.5 | — | compose | C | Proposed |
+| 3 | PROD-01.5d | A produce-response fault proxy profile: drop or hold one produce response deterministically (oracle for 07.1-R9 and 00.3d's A-C5-1) | P2 | M2 | infra | 01.5 | — | compose | B | Proposed |
 | 3 | PROD-01.5b | Put the `crates/` e2e rows on the per-stack variables | P2 | M3 | infra | 01.5 | — | compose | B | Proposed |
 | 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Proposed |
 | 1 | PROD-04.0c | Amendment D names the engine's group subcommands | P2 | M3 | docs | 04.0 | owner's yes on Amendment D (rule 8) | none | B | Proposed |
@@ -219,7 +220,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 3 | PROD-00.3d | Idempotent (or sequence-checked) restore produce | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
 | 3 | PROD-00.3e | Keep repeated header keys through capture and replay | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
 | 1 | PROD-00.3f | Move the pin to the newest OSO release (0.23.x), with the C15/C16 guards and `doctor`'s pin | P1 | M1 | infra | 00.1 | — | compose | A | Done |
-| 3 | PROD-00.3g | Engine restore checkpoint: honour `checkpoint_interval_secs`, hash without file paths (C4) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
+| 3 | PROD-00.3g | Engine restore checkpoint: honour `checkpoint_interval_secs`, hash without file paths (C4); off PROD-07.3's path since PROD-07.1, kept as a bug-class patch (07.1-G1 to G3) | P3 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
 | 3 | PROD-00.3h | Enforce the byte-rate limit (C12) | P2 | M3 | impl | 00.1, 00.2 | — | compose | B | Proposed |
 | 3 | PROD-00.3i | YAML record-filter rules: erasure, offset ranges, resume point (C10, C11) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
 | 1 | PROD-00.3o | Weekly archive-compatibility rows for operator-written archives | P2 | M1 | infra | FX-1 | — | compose | B | Proposed |
@@ -228,8 +229,8 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 3 | PROD-03.1 | Capture a usable registry dependency set | P2 | M3 | impl | 03.0, 01.2 | OD-2 | compose | A | Proposed |
 | 3 | PROD-03.2 | Preview and execute schema-aware recovery | P2 | M3 | impl | 03.1, 08.1 | OD-2 | k8s | A | Proposed |
 | 3 | PROD-05.3 | Export access policy for review | P2 | M3 | impl | 04.0, 04.0b, 04.0d, 05.1 | — | compose | A | Proposed |
-| 3 | PROD-07.2 | Make interruption honest | P2 | M3 | impl | 07.1 | — | k8s | A | Proposed |
-| 3 | PROD-07.3 | Resume within proven semantics | P2 | M3 | impl | 07.2, 00.3 | — | k8s | A | Proposed |
+| 3 | PROD-07.2 | Make interruption honest | P2 | M3 | impl | 07.1, FX-23 | — | k8s | A | Proposed |
+| 3 | PROD-07.3 | Resume within proven semantics | P2 | M3 | impl | 07.2, 00.3i | — | k8s | A | Proposed |
 | 2 | PROD-16.3 | Standing rehearsal authorizations without a personal key | P2 | M2 | impl | 16.2 | — | k8s | A | Proposed |
 | 3 | PROD-08.2 | Measure recovery objectives | P2 | M3 | impl | 08.1 | — | k8s | A | Proposed |
 | 3 | PROD-08.3 | Full streamed replay comparison | P2 | M3 | impl | 08.1 | — | compose | A | Proposed |
@@ -784,26 +785,34 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Tests/evidence:** Termination before and after acknowledgements and checkpoint commits; stale checkpoints; two workers; target mutation; measured duplicate and loss behaviour.
 - **Dependencies:** PROD-01.1. **Handoff:** resume decision, checkpoint contract and failure-state table.
 
+**Completion record — Done (2026-10-08), PROD-07.1.**
+- **Ownership:** worker `prod-07-1` (one run and one fix round), independent Tier-B review `claude/prod-07-1.review.md` (ACCEPT-WITH-FIXES, H1 filed as FX-23, M1, M2 and L1 to L3 fixed); the orchestrator read the fix round. Merged as `01a042f2` (branch tip `56092042`, main merged in at `367f775c`). Gates at the merged tip: `clippy -p e2e --features e2e --all-targets`, `doc_lint`, `check-links` on the record, and `just lint`, each rc 0 (`claude/artifacts/prod-07-1/integrate/gates-2026-10-08.log`). It ships no product code: the one non-record file is the `#[ignore]`d harness `e2e/tests/resume_semantics.rs`, which CI's e2e run does not start.
+- **Decision record:** [`decisions/PROD-07.1-resume-semantics.md`](decisions/PROD-07.1-resume-semantics.md). The engine's restore checkpoint is pod-local, saved once per topic, not atomic, and its hash covers Logweir's per-run paths and no target identity; for two or more topics it is not even deterministic (`topic_mapping` is a `HashMap`). Measured on compose slot 1 (10 rows, 52 predictions held): a naive resume duplicates every landed record; SIGTERM exits 0 with a whole topic unrestored; two writers duplicate the archive; a kill with requests in flight leaves one unacknowledged request per partition in the target. Logweir never resumes today, which is what keeps it safe.
+- **Default contract (PROD-07.2):** resume means reconcile, or a fresh target. **Resume (PROD-07.3):** the target is the checkpoint, through PROD-00.3i's offset floor, under six preconditions; a tail-resume prototype after the in-flight kill gave an exact target (0 duplicates, 0 missing). The engine's own checkpoint is not recommended as the mechanism (about 6 days of work and still up to a segment of duplicates).
+- **Ledger changes recorded:** PROD-07.2 takes the contract, rows I1 to I7 and A-C4-3, and depends on FX-23; PROD-07.3 depends on 00.3i and PROD-01.4's target identity instead of "00.3", with its two approach sentences replaced; PROD-00.3g leaves PROD-07.3's path and is kept at P3 as a bug-class patch (07.1-G1 to G3); A-C4-1 is superseded by 07.1-I4 and A-C4-2 by 07.1-R2.
+- **Rows added:** PROD-01.5d, a produce-response fault proxy profile (compose, Tier B): a listener whose advertised address is a proxy that forwards produce requests and can drop or hold a response deterministically. PROD-01.1's 07-1 (07.1-R9) and PROD-00.3d's oracle A-C5-1 wait on it; K3's freeze-and-kill covers "kill with requests in flight" but does not drop a single response.
+
 ### PROD-07.2 — Make interruption honest
 
 - **Issue:** An interrupted restore reads as a generic failure and its partial targets are not listed. Retention protects only non-terminal Restores, so the point a retry needs can be released.
 - **Approach:** A distinct interrupted state with a signed list of partial targets. Retry through PLAT-12.2's fresh target and new approval. Hold the point until the interruption is resolved. Clean up only targets the same execution created. Propagate cancellation to the engine subprocess (`docs/stability.md` Later #13).
 - **Acceptance:** Restarting the controller or browser cannot duplicate an operation. The operator sees the last durable progress. Cleanup never deletes an unrelated target or the only recovery path.
 - **Tests/evidence:** Kill the runner, restart the controller, disconnect the browser, repeat commands, expire credentials, race cancel with completion.
-- **Dependencies:** PROD-07.1. **Handoff:** user state model and retention/cleanup policy.
+- **Dependencies:** PROD-07.1; FX-23 for the sampled lane (5.2 item 5, row I3). **Handoff:** user state model and retention/cleanup policy.
+- **From PROD-07.1** ([decision record](decisions/PROD-07.1-resume-semantics.md) §5.2, §7): this row takes the default contract, resume means reconcile or a fresh target, and rows 07.1-I1 to I7. Logweir stops rendering `checkpoint_state` and `checkpoint_interval_secs`; an engine exit 0 after a cancel is never completion; a cancel is SIGTERM then SIGKILL, and the attempt ends only when the writer is proved gone. It also takes A-C4-3 (as I4) and the `docs/kubernetes.md` `TMPDIR` row, which must change with I4.
 
 ### PROD-07.3 — Resume within proven semantics
 
 - **Issue:** Long restores need to continue after a crash without duplicating or losing records.
 - **Approach:**
   - Resume each partition from the target tail's `x-original-offset`.
-  - Keep rendered options byte-identical across attempts.
+  - Keep rendered options identical across attempts except the attempt's own `offset_report` path and the offset-floor block (07.1-R10).
   - Rebuild the offset mapping from headers and prove it covers every restored record.
-  - Label up to one segment of duplicates per partition as bounded.
+  - A resume adds no duplicate at the interruption (07.1-R1). Duplicates inside an attempt (C5's re-sends) are disclosed and fail the verdict until PROD-00.3d (07.1-R9).
   - Scope an exception to phase 0's existing-target refusal to targets the same execution created.
 - **Acceptance:** Resume continues within proven semantics or explains why it is blocked; output integrity and target identity are verified after every restart.
 - **Tests/evidence:** Kill before and after acknowledgements and checkpoint commits, stale checkpoints, two workers, target mutation.
-- **Dependencies:** PROD-07.2, 00.3 per OD-3. **Handoff:** resume evidence and limits.
+- **Dependencies:** PROD-07.2; PROD-00.3i (C11's per-partition offset floor, 07.1-F1); PROD-01.4's target identity (`topic_id` needs OD-6's FFI crate, PROD-01.4a; the creation-marks and fingerprint fallback is available now). PROD-00.3d is recommended, not required; 00.3g is not on this path. Rows 07.1-R1 to R10 ([decision record](decisions/PROD-07.1-resume-semantics.md) §5.3, §7). **Handoff:** resume evidence and limits.
 
 ## PROD-08 — Verification that answers recovery questions
 
