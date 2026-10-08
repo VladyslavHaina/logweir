@@ -389,6 +389,56 @@ fn max_partitions_truncates_consistently_with_the_reported_counts() {
     assert_eq!(s.topics, 1);
 }
 
+/// PROD-08.1: a COMPLETE selection is every partition the manifest lists for
+/// a restored topic — even one whose segments' first/last timestamps all lie
+/// outside the sample window (the engine's selection, which complete coverage
+/// does not read), and even with `max_partitions` set (phase 0 refuses the
+/// pairing; phase 4 never truncates a complete selection on its own). Every
+/// gap and pruned range of those partitions is noted. KILLS: keeping the
+/// window filter in complete mode (the far-away partition disappears), or
+/// applying `max_partitions` (two partitions disappear).
+#[test]
+fn a_complete_selection_is_every_listed_partition_whatever_the_window() {
+    let mut facts = fixtures::backup_facts_orders(3);
+    // Partition 2's segments move to 2020: no first/last bound overlaps the
+    // window below.
+    for seg in &mut facts.topics[0].partitions[2].segments {
+        seg.start_timestamp = 1_577_836_800_000;
+        seg.end_timestamp = 1_577_836_800_000;
+    }
+    facts.topics[0].partitions[2].gaps.push((100_000, 200_000));
+    let mut spec = fixtures::sample_spec(
+        "2026-08-29T00:00:00Z",
+        "2026-08-30T02:00:00Z",
+        25,
+        Anchor::Head,
+    );
+    let sampled = phase4_sample::run(&facts, &spec, &["orders".into()]).unwrap();
+    assert_eq!(
+        sampled.partitions, 2,
+        "the control: sampling follows the window"
+    );
+    spec.coverage = logweir_core::spec::Coverage::Complete;
+    spec.max_partitions = Some(1);
+    let s = phase4_sample::run(&facts, &spec, &["orders".into()]).unwrap();
+    assert_eq!(s.partitions, 3);
+    assert_eq!(
+        s.per_partition
+            .iter()
+            .map(|p| p.partition)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(s.records_expected, 1500);
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.contains("capture gap 100000..200000 in a completely verified partition")),
+        "{:?}",
+        s.notes
+    );
+}
+
 /// `phase4_sample::run` cannot populate `SampleSelection.set.manifest_key` —
 /// `BackupSetFacts` does not carry one. `Selection::bind_backup_set` is the
 /// structural fix (Task 16 review round 1, MAJOR-2): a caller who forgets to

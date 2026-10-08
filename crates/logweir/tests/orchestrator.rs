@@ -1893,3 +1893,101 @@ fn an_unrecorded_type_is_labelled_and_a_create_time_topic_is_not_refused() {
         Some(logweir_core::scorecard::TimeBasisLabel::default())
     );
 }
+
+// ------------------------------------------------------------------ PROD-08.1
+
+/// **PROD-08.1, the wiring.** A plan stating `sample.coverage: complete`
+/// reaches phase 7's complete lane and the SIGNED document says so: coverage
+/// complete, header order verified, the block covered and exact over all 500
+/// records — the whole window, not the 25-record canary — `sample` holding
+/// the complete canary (500 expected, one partition), and the archive's
+/// fingerprints never asked for (the complete lane decodes the archive
+/// itself). The signed bytes satisfy every invariant, IV-1..IV-7 included.
+///
+/// KILLS: the orchestrator not passing the plan's coverage to phase 7 (the
+/// block says sampled); `complete_sample_info` not run (records_sampled 500
+/// exceeds records_expected 25, refused at signing).
+#[test]
+fn a_complete_coverage_plan_signs_a_covered_exact_complete_block() {
+    let f = fixtures::orchestrator_fixture(Drill::VerifiesCompletely);
+    execute_with(&f.args, &f.run_id, &f.ctx)
+        .expect("a complete verification of a correct restore passes");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
+    assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
+    let v = sc
+        .integrity
+        .verification
+        .as_ref()
+        .expect("the block is signed");
+    assert_eq!(
+        (v.coverage.as_str(), v.header_order.as_str()),
+        ("complete", "verified")
+    );
+    let c = v.complete.as_ref().expect("the complete block");
+    assert!(c.covered && c.replay.is_exact(), "{c:?}");
+    assert_eq!(c.replay.expected, fixtures::FIXTURE_WINDOW_RECORDS as u64);
+    assert_eq!(
+        (
+            c.archive.segments,
+            c.archive.segments_verified,
+            c.archive.records_decoded
+        ),
+        (1, 1, 500)
+    );
+    assert_eq!(
+        (
+            sc.sample.records_expected,
+            sc.sample.partitions,
+            sc.sample.topics
+        ),
+        (500, 1, 1)
+    );
+    assert_eq!(
+        (
+            sc.integrity.records_sampled,
+            sc.integrity.records_sampled_matching
+        ),
+        (500, 500)
+    );
+    assert!(
+        fixtures::fingerprint_calls(&f).is_empty(),
+        "the complete lane reads the archive itself, never the engine's sampled fingerprints"
+    );
+    assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+}
+
+/// **PROD-08.1.** The same plan, with one restored record past the canary
+/// changed on the target: the complete lane finds it, the drill scores
+/// `fail-integrity` (exit 2 with a signed document), and the signed block
+/// counts exactly one different record. A sampled drill over the same target
+/// reads the first 25 records only and cannot see offset 300.
+///
+/// KILLS: a complete lane that compares only the canary; an ordered-digest
+/// comparison replaced by a count.
+#[test]
+fn a_complete_coverage_plan_finds_a_changed_record_past_the_canary() {
+    let f = fixtures::orchestrator_fixture(Drill::VerifiesCompletelyAndFindsAChangedRecord);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("a changed record fails");
+    assert!(matches!(err, DrillError::NotPass(..)), "{err:?}");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::FailIntegrity);
+    let c = sc
+        .integrity
+        .verification
+        .as_ref()
+        .and_then(|v| v.complete.as_ref())
+        .expect("the complete block");
+    assert_eq!((c.replay.mismatched, c.replay.matching), (1, 499));
+    assert!(
+        c.partitions[0]
+            .findings
+            .iter()
+            .any(|l| l.contains("source offset 300 at target offset 300 differs from the archive")),
+        "{:?}",
+        c.partitions[0].findings
+    );
+    assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+}

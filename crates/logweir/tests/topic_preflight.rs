@@ -78,6 +78,8 @@ fn spec_with_window_end(window_end: chrono::DateTime<chrono::Utc>) -> DrillSpec 
             records_per_partition: 25,
             anchor: Anchor::Head,
             max_partitions: None,
+            coverage: logweir_core::spec::Coverage::Sampled,
+            complete_max_records: None,
         },
         restore: logweir_core::spec::RestoreSpecBlock::default(),
         objectives: ObjectivesSpec {

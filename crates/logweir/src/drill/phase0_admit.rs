@@ -3,7 +3,9 @@ use logweir_core::guard::{
     check_topic_mapping_coverage, scan_forbidden_keys, GuardRefusal,
     TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
 };
-use logweir_core::spec::{target_topic_prefix, AllowedClusters, Anchor, DrillSpec, TargetMode};
+use logweir_core::spec::{
+    target_topic_prefix, AllowedClusters, Anchor, Coverage, DrillSpec, TargetMode,
+};
 use logweir_kafka::reader::{
     ClusterReader, NewTopicSpec, TopicCreator, TopicDeleter, TARGET_TOPIC_CONFIGS,
 };
@@ -396,6 +398,50 @@ pub fn run(
             spec.sample.anchor, spec.sample.anchor, spec.sample.anchor
         ))
         .into());
+    }
+
+    // PROD-08.1: `sample.coverage`. Three plans ask for two things at once,
+    // and each is refused HERE, before anything runs, rather than run as one
+    // of them: a verification the approved plan did not describe would be
+    // signed as if it had.
+    // - `complete` with `max_partitions`: the latter keeps the FIRST N
+    //   partitions, the sampling complete coverage exists to remove.
+    // - `complete_max_records` with `sampled`: a bound on a verification the
+    //   plan did not ask for.
+    // - `complete_max_records: 0`: a complete verification that may decode
+    //   nothing compares nothing.
+    match (
+        spec.sample.coverage,
+        spec.sample.max_partitions,
+        spec.sample.complete_max_records,
+    ) {
+        (Coverage::Complete, Some(n), _) => {
+            return Err(GuardRefusal(format!(
+                "sample.coverage is `complete` and sample.max_partitions is {n}. \
+                 max_partitions keeps the first {n} partitions, and a complete verification \
+                 checks every partition of every restored topic; remove one of the two. \
+                 Refusing rather than verifying a subset under a plan that asked for all of it."
+            ))
+            .into());
+        }
+        (Coverage::Sampled, _, Some(_)) => {
+            return Err(GuardRefusal(
+                "sample.complete_max_records is set and sample.coverage is `sampled` (its \
+                 default). The bound applies only to a complete verification; set \
+                 `sample.coverage: complete` or remove the bound."
+                    .to_string(),
+            )
+            .into());
+        }
+        (Coverage::Complete, None, Some(0)) => {
+            return Err(GuardRefusal(
+                "sample.complete_max_records is 0: a complete verification that may decode no \
+                 archived record compares nothing. Remove the bound or raise it."
+                    .to_string(),
+            )
+            .into());
+        }
+        _ => {}
     }
 
     // FROM HERE ON every failure reaches the network. A `KafkaError` here
@@ -925,6 +971,8 @@ mod tests {
                 records_per_partition: 25,
                 anchor: Anchor::Head,
                 max_partitions: None,
+                coverage: logweir_core::spec::Coverage::Sampled,
+                complete_max_records: None,
             },
             restore: logweir_core::spec::RestoreSpecBlock::default(),
             objectives: ObjectivesSpec {
@@ -1178,6 +1226,90 @@ mod tests {
                 }
                 other => panic!("expected a guard refusal (exit 3) for {anchor}, got {other:?}"),
             }
+        }
+    }
+
+    /// PROD-08.1: the three plans that ask for two verifications at once are
+    /// refused at phase 0 (exit 3), each naming the fields, and the two
+    /// coherent ones are not. KILLS: deleting any arm (that row then admits),
+    /// or refusing `complete` without `max_partitions` (the control rows).
+    #[test]
+    fn a_plan_asking_for_two_verifications_at_once_is_refused_before_anything_runs() {
+        type Row<'a> = (&'a str, Coverage, Option<u32>, Option<u64>, &'a [&'a str]);
+        let refused: [Row; 3] = [
+            (
+                "complete with max_partitions",
+                Coverage::Complete,
+                Some(2),
+                None,
+                &[
+                    "sample.coverage",
+                    "sample.max_partitions",
+                    "first 2 partitions",
+                ],
+            ),
+            (
+                "a bound on a sampled plan",
+                Coverage::Sampled,
+                None,
+                Some(1000),
+                &["sample.complete_max_records", "`sampled`"],
+            ),
+            (
+                "a zero bound",
+                Coverage::Complete,
+                None,
+                Some(0),
+                &["sample.complete_max_records is 0"],
+            ),
+        ];
+        for (what, coverage, max_partitions, bound, words) in refused {
+            let mut spec = spec_with(&["orders"], "drill-");
+            spec.sample.coverage = coverage;
+            spec.sample.max_partitions = max_partitions;
+            spec.sample.complete_max_records = bound;
+            let reader = healthy_reader("ALLOWED0000000000000000", &spec.target.marker_topic);
+            let err = run(
+                &spec,
+                "restore: {}\n",
+                &allowed(&["ALLOWED0000000000000000"], None),
+                &reader,
+                &NoopCreator,
+                &NoopDeleter,
+            )
+            .unwrap_err();
+            match err {
+                DrillError::Guard(GuardRefusal(msg)) => {
+                    for w in words {
+                        assert!(msg.contains(w), "{what}: {msg}");
+                    }
+                    assert!(!msg.contains("  "), "{what}: single-spaced prose: {msg}");
+                }
+                other => panic!("{what}: expected a guard refusal (exit 3), got {other:?}"),
+            }
+        }
+        for (coverage, max_partitions, bound) in [
+            (Coverage::Complete, None, None),
+            (Coverage::Complete, None, Some(1)),
+            (Coverage::Sampled, Some(2), None),
+        ] {
+            let mut spec = spec_with(&["orders"], "drill-");
+            spec.sample.coverage = coverage;
+            spec.sample.max_partitions = max_partitions;
+            spec.sample.complete_max_records = bound;
+            let reader = healthy_reader("ALLOWED0000000000000000", &spec.target.marker_topic);
+            let out = run(
+                &spec,
+                "restore: {}\n",
+                &allowed(&["ALLOWED0000000000000000"], None),
+                &reader,
+                &NoopCreator,
+                &NoopDeleter,
+            );
+            assert!(
+                !matches!(&out, Err(DrillError::Guard(GuardRefusal(m))) if m.contains("sample.")),
+                "{coverage:?}/{max_partitions:?}/{bound:?} is a coherent plan: {out:?}"
+            );
         }
     }
 

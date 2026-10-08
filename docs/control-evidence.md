@@ -65,7 +65,7 @@ is the companion to this page.
 
 | Document | Signed by | What it records | Fields are defined in |
 |---|---|---|---|
-| Scorecard | The runner's evidence-signing key (under Kubernetes, the installation identity), in a DSSE sidecar | One restore drill or scheduled rehearsal that reached a result: the archive, the target, the approval, the measured RTO and RPO, and a sampled integrity check | [Scorecard format](formats/drill-scorecard.md) |
+| Scorecard | The runner's evidence-signing key (under Kubernetes, the installation identity), in a DSSE sidecar | One restore drill or scheduled rehearsal that reached a result: the archive, the target, the approval, the measured RTO and RPO, and an integrity check, sampled unless the plan asked for complete coverage | [Scorecard format](formats/drill-scorecard.md) |
 | Put receipt | The same key | What the store reported when the scorecard was uploaded | [The storage receipt](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document) |
 | Backup receipt | The same key | One completed backup run: the source cluster, the topics, per-topic record counts, the covered window, the manifest digest and, from format 1.1.0, per-topic configuration capture coverage | [Backup receipt format](formats/backup-receipt.md) |
 | Catalog point | The key named in its `signing.key_id`; the backup receipt it points at is the verification root | One recovery point: when its capture started, its window, where its archive is and, from format 1.1.0, a copy of each topic's configuration capture coverage | [Catalog point format](formats/catalog-point.md) |
@@ -235,13 +235,15 @@ results of tests".
 |---|---|
 | Where `integrity.level` reads `byte-fingerprint`, the sampled records were reconciled byte for byte with the archive; the size of the sample and the result are recorded at every level. | [Scorecard](formats/drill-scorecard.md): `integrity.level`, `integrity.result`, `integrity.records_sampled`, `integrity.records_sampled_matching`, `integrity.mismatches`, `sample.records_expected` |
 | The archive manifest the restore read is identified by digest, which an auditor can re-derive from the store by hand. | [Scorecard](formats/drill-scorecard.md): `source.manifest_sha256`, `source.manifest_version_id` |
+| In a scorecard of format 1.4.0 whose `integrity.verification.coverage` reads `complete` and whose `integrity.verification.complete.covered` is `true`, every archived segment of every restored partition was checked against the manifest's sha256, and every archived record the restore window selects was compared with the restored records by its source offset, with the missing, unexpected, duplicate, out-of-order and different records counted per partition. | [Scorecard](formats/drill-scorecard.md): `format_version`, `integrity.verification.coverage`, `integrity.verification.complete.covered`, `integrity.verification.complete.archive.segments_failed`, `integrity.verification.complete.replay.missing`, `integrity.verification.complete.replay.duplicates`, `integrity.verification.complete.partitions` |
 | A check that could not finish says why, and both verifiers refuse a `pass` beside such a reason. | [Scorecard](formats/drill-scorecard.md): `integrity.partial_reason`, `outcome` |
 | In a scorecard of format 1.1.0 whose `topic_parity.not_assessed` is present, the configuration overrides the archive recorded were compared with the restored topics' for every topic that list does not name, which the backup receipt the restore was bound to marks `captured`; the differences found are listed. | [Scorecard](formats/drill-scorecard.md): `format_version`, `topic_parity.not_assessed`, `topic_parity.unexpected_divergence`, `topic_parity.intentionally_deviated`; [Backup receipt](formats/backup-receipt.md): `config_coverage.<topic>.coverage` |
 
 **What it does not show**
 
-- That every record was checked, or, below `byte-fingerprint`, that the
-  contents of the sampled records were compared:
+- That every record was checked, unless the coverage is complete and covered;
+  or, below `byte-fingerprint`, that the contents of the sampled records were
+  compared:
   [sampling versus complete verification](#sampling-versus-complete-verification).
 - Consistency with the source cluster or with other systems, because the
   comparison is with the archive:
@@ -519,45 +521,71 @@ so that it can be followed. Until that work merges, the gap stands as written.
 
 ### Sampling versus complete verification
 
-A restore test checks a sample. Per sampled partition it compares the first
-records of the requested window (`sample.anchor` is always `head`), as many as
-the plan's records-per-partition setting allows, up to the plan's partition
-cap; `sample.records_expected` is that canary size, and `sample.partitions` and
+A restore test checks a sample unless its plan asks for complete coverage, and
+since format 1.4.0 the scorecard says which: `integrity.verification.coverage`
+reads `sampled` or `complete`
+([the block](formats/drill-scorecard.md#integrityverification-format-140)). A
+scorecard without the block — every one before format 1.4.0 — checked a sample.
+
+**Sampled.** Per sampled partition the test compares the first records of the
+requested window (`sample.anchor` is always `head`), as many as the plan's
+records-per-partition setting allows, up to the plan's partition cap;
+`sample.records_expected` is that canary size, and `sample.partitions` and
 `sample.topics` count what was selected. A `pass` establishes agreement inside
 the sample. It does not establish that unsampled records would match
 ([the sample window is not a claim about the whole archive](verify-a-scorecard.md#the-sample-window-is-not-a-claim-about-the-whole-archive)),
 and `sample.coverage_note` is the test's own statement of how representative
-the sample is.
+the sample is. Only the in-window segments of the sampled partitions are
+hashed. The record count check is a bound computed from the archive manifest's
+segment first and last timestamps, not an exact count per partition. Since
+format 1.4.0 a restored head that repeats or reorders source offsets fails the
+check, but duplicates and order beyond the head are not checked.
 
-`integrity.level` records how strong the check of the sample was
+**Complete.** Every archived segment of every restored partition is read back
+and checked against the manifest's sha256 and record count, and its records are
+decoded; the expected output is every archived record whose own timestamp the
+restore window selects; and every restored record is read back and compared
+with it by its source offset (`x-original-offset`), headers in order. The
+counts per partition and in total — expected, restored, matching, missing,
+unexpected, duplicates, out of order, different — are in
+`integrity.verification.complete`, with each failed or unverifiable segment
+named. `integrity.verification.complete.covered: false` means a bound (`integrity.verification.complete.max_records`) stopped
+the check, or a partition's expected output could not be established, and
+`integrity.verification.complete.incomplete_reason` says which; such a scorecard is never a `pass`.
+Complete coverage costs a read of the whole archive of the restored partitions
+and of the whole restored output, and only the command-line runner can ask for
+it yet
+([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
+`integrity.level` records how strong the check was
 ([the `integrity` block](formats/drill-scorecard.md#target_diff-integrity-topic_parity)):
 
-- **`byte-fingerprint`:** every sampled record was fingerprinted in the archive
-  and in the target and the two compared. The fingerprint covers the record's
-  key, value, headers and timestamp; headers are sorted before hashing, so
-  their order is not compared.
-- **`consume-only`:** at least one sampled partition could not be
-  fingerprinted, because the engine cannot decode its archive segments. For
-  that partition the check shows only that the target gave back at least the
-  records the manifest claims, and nothing about their contents.
-  `integrity.partial_reason` names each such partition,
-  `integrity.records_sampled` counts only the records that were fingerprinted,
-  and `integrity.pass_rate_measured` is `null`.
+- **`byte-fingerprint`:** every compared record was fingerprinted in the
+  archive and in the target and the two compared. A sampled check's
+  fingerprint covers the record's key, value, headers and timestamp, with the
+  headers sorted, so their order is not compared
+  (`integrity.verification.header_order` reads `notVerified`); a complete
+  check compares them in order (`verified`).
+- **`consume-only`:** at least one partition could not be fingerprinted,
+  because its archive segments cannot be decoded. For that partition the check
+  shows only that the target gave back at least the records the manifest
+  claims, and nothing about their contents. `integrity.partial_reason` names
+  each such partition, `integrity.records_sampled` counts only the records
+  that were fingerprinted, and `integrity.pass_rate_measured` is `null`.
 - **`not-attempted`:** no check ran, and the result is never `pass`.
 
-So a byte-level comparison of the sample is shown only beside
-`byte-fingerprint`, and a reader checks the level before reading a `pass`.
+So a byte-level comparison is shown only beside `byte-fingerprint`, and a
+reader checks the level and the coverage before reading a `pass`.
 
 `sample.records_restored` counts the records the check read back from the
-target, not every record the restore wrote: the scorecard records no total of
-restored records. The record count check is a bound computed from the archive
-manifest, not an exact count per partition. Duplicates and record order are not
-checked, and only the in-window segments of the sampled partitions are hashed.
-[PROD-08.1](to-do/product-expansion.md#prod-081--complete-archive-integrity-and-exact-counts)
-lists these limits and plans complete per-partition counts, duplicate and order
-checks, and a signed field that says whether a check was sampled or complete.
-The engine's own validation report is not retained (`engine_subreport` is
-`null`) and would corroborate nothing if it were
+target: under a sampled check, not every record the restore wrote. Capture
+gaps and retention-pruned ranges the manifest records for the verified
+partitions are listed, as source offset ranges, in
+`integrity.verification.gaps` and `integrity.verification.pruned`. No check
+validates the restored data in an application
+(`integrity.verification.application` reads `notAttempted`). The engine's own
+validation report is not retained (`engine_subreport` is `null`) and would
+corroborate nothing if it were
 ([why](verify-a-scorecard.md#engine_subreport-corroborates-nothing-about-logweirs-integrity-claim)).
 
 ### Archive-relative, not source-relative
@@ -772,13 +800,17 @@ does not detect. In each measured case below, the test was signed `pass`
 - Out-of-order timestamps within a segment can make a point-in-time restore
   omit a record at or before the requested point
   ([recovery-point selection](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+  A sampled check passes such a restore; a complete check reports the record
+  missing and fails it.
 - A repeated header key keeps one copy
   ([repeated header keys](stability.md#a-repeated-header-key-keeps-one-copy)).
 
 A broker outage or a lost acknowledgement during a restore can leave duplicates
 and a partial target. In every measured case Logweir exited 1 and signed
-nothing, so what a completed test makes of duplicates was not measured
+nothing
 ([broker outages](stability.md#a-broker-outage-during-a-restore-can-leave-a-partial-target-with-duplicates)).
+A duplicated target that reaches a complete check is counted
+(`integrity.verification.complete.replay.duplicates`) and fails it.
 
 So a `pass` shows that the restored sample matches the archive; it does not
 show transactional, exactly-once or source-faithful recovery.

@@ -41,7 +41,11 @@ adopter's evidence bucket is a document some reader may already parse, so:
     `archive.manifest_version_id`. So is FX-3's move of the new-topic
     deviations from `intentionally_deviated` to `unexpected_divergence`. So is
     FX-8's refusal `PointInTimeByProducerTime`, a new cause for exit 3
-    ([below](#scorecard-format-130-sourcetime_basis-fx-8)).
+    ([below](#scorecard-format-130-sourcetime_basis-fx-8)). So is PROD-08.1's
+    sampled-lane order check, a new cause for `fail-integrity`, and its
+    phase-0 refusals of a plan that asks for two verifications at once, new
+    causes for exit 3
+    ([below](#scorecard-format-140-integrityverification-prod-081)).
 
   Nothing else is ruled: any other change to an existing field's content is
   still a MAJOR bump.
@@ -212,6 +216,62 @@ which it selected by time with **no recorded timestamp type**
   documents again with no block, runs the selections FX-8 refuses, and signs
   them without a label — the pre-FX-8 behaviour. The 1.3.0 documents already
   written stay valid under both readers.
+
+### Scorecard format 1.4.0: `integrity.verification` (PROD-08.1)
+
+PROD-08.1 adds one nested optional block to the drill scorecard,
+`integrity.verification`, and moves the scorecard to **1.4.0**
+(`schemas/logweir-drill-scorecard-1.4.0.json`, with FX-8's 1.3.0 frozen beside
+it). The block says what a verdict COVERED — a sample, or every selected record
+— and, for a complete verification, what it found
+([the scorecard format](formats/drill-scorecard.md#integrityverification-format-140);
+[the plan field](formats/drill-spec.md#samplecoverage-and-samplecomplete_max_records-prod-081);
+[the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
+- **Absent means not recorded, read as sampled.** A document without the block
+  — every scorecard before 1.4.0 — is never read as a complete verification,
+  and both readers print an `integrity coverage: not recorded` line for it.
+  Every 1.4.0 run that reaches phase 7 writes the block.
+- **The block is additive and optional: MINOR.**
+- **Seven arms, IV-1 to IV-7, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block and judges the block, or `integrity.result`
+  against it (IV-6, as NR-2 to NR-5 judge the existing parity lists against
+  `not_reconstructed`), and each can only refuse. No document without the block
+  changes verdict; the corpus (`e2e/fixtures/invariants/`) and the parity gate
+  re-prove that on every `just lint`.
+- **A complete verification fills the existing counters with the complete
+  comparison**: `integrity.records_sampled` is the expected records of the
+  compared partitions, `sample.records_expected` the same (the whole expected
+  output only when `complete.covered` is `true`),
+  `sample.partitions` and `sample.topics` every partition and topic it
+  verified. Each field keeps its meaning — how many records the drill set out
+  to reconcile, and how many it did — and a reader that predates the block
+  reads a large sample, never a complete one.
+- **Two new causes for existing values, each only to the safer side (OD-7's
+  third case).** The sampled lane now FAILS a selection whose restored head
+  repeats or goes backwards in `x-original-offset` (it used to key the head by
+  that header in a map, where a duplicate collapsed and order was invisible):
+  a new cause for `fail-integrity`. And phase 0 now refuses, exit 3, a plan
+  asking for two verifications at once (`coverage: complete` with
+  `max_partitions`; `complete_max_records` with sampled coverage, or `0`).
+  Neither makes any verdict stronger.
+- **A complete verification can pass a restore the sampled check fails, and
+  fail one it passes** — the point. The exact per-partition model replaces the
+  manifest's first/last count bound, so PROD-01.1's correct point-in-time
+  restore over an out-of-order segment passes complete coverage, and its
+  skipped segment and below-the-floor record fail it
+  ([the limitation](#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+  Both are new runs under a new plan value, signed with the block; no earlier
+  document is re-read.
+- **Readers built before PROD-08.1** accept every 1.4.0 document — the major
+  is unchanged and the block is a nested optional field they ignore — and print
+  no coverage line. They do not run IV-1 to IV-7.
+- **The plan grammar gains `sample.coverage` and `sample.complete_max_records`**,
+  both omitted from the serialised plan at their defaults. A runner built
+  before PROD-08.1 ignores them, runs a sampled check, and signs no block.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.3.0
+  documents again, sampled, with no block; the 1.4.0 documents already written
+  stay valid under both readers.
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -626,6 +686,17 @@ and last records are inside the window holds a later record. Measured by three r
 `non_monotonic_create_time_inside_a_wholly_inside_segment` (the correct restore signed
 `fail-integrity`).
 
+Since PROD-08.1 a plan can ask for **complete coverage** (`sample.coverage:
+complete`), which selects the expected output by each archived record's own
+timestamp and compares every restored record with it, so the same three rows
+read differently there: the skipped record and the record below the floor are
+reported missing and the restore is signed `fail-integrity` (at the point too),
+and the correct point-in-time restore is signed `pass`. The restores themselves
+are unchanged — the engine still selects by first and last timestamps, and the
+floor still drops the record — until PROD-01.1b. Measured by the same rows'
+complete restores
+([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
 ### `LogAppendTime` sources are restored with the producers' timestamps
 
 For a topic on `message.timestamp.type=LogAppendTime`, the archive holds the timestamp each
@@ -695,6 +766,11 @@ a duplicated target was not measured. Measured by
 `e2e/tests/record_semantics.rs::a_lost_produce_acknowledgement_during_restore`, an `#[ignore]`d
 row that freezes the broker and runs alone with `--ignored`
 ([decision record §5.1](to-do/decisions/PROD-01.1-record-semantics.md#51-a-lost-produce-acknowledgement--run)).
+Since PROD-08.1, a duplicated target that DOES reach phase 7 is counted:
+complete coverage reports each repeated `x-original-offset` as a duplicate and
+fails the restore, and the sampled check fails a duplicate inside the head it
+reads (measured over a duplicated target on the real broker by
+`e2e/tests/record_semantics.rs::complete_coverage_over_faulted_targets_on_the_real_broker_and_archive`).
 
 ### SASL/SCRAM-SHA-512: two clients, two trust stores, and one password variable
 

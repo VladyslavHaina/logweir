@@ -478,6 +478,247 @@ pub struct Integrity {
     #[serde(default, rename = "restoredPrincipalCouldConsume")]
     #[schemars(rename = "restoredPrincipalCouldConsume")]
     pub restored_principal_could_consume: Option<bool>,
+    /// **Format 1.4.0 (PROD-08.1).** What this verdict covered, structured:
+    /// see [`Verification`].
+    ///
+    /// ABSENT means NOT RECORDED — every document before 1.4.0, and one whose
+    /// phase 7 never ran — and is read as SAMPLED, never as complete: before
+    /// PROD-08.1 every drill sampled. Every 1.4.0 run that reaches phase 7
+    /// writes it. A nested optional field, which Global Constraint 12 as
+    /// amended permits; `skip_serializing_if`, so every earlier document
+    /// round-trips byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Verification>,
+}
+
+/// **PROD-08.1, scorecard format 1.4.0.** What phase 7's verdict covered,
+/// with the four kinds of evidence a restore can carry kept apart:
+///
+/// | evidence | where it is |
+/// |---|---|
+/// | the authenticated report | the DSSE envelope over these bytes (and, for a point-bound plan, the verified receipt) — not in this block |
+/// | archive integrity | `complete.archive` (complete coverage); `evidence`/`integrity` counters for a sampled run |
+/// | replay comparison | `complete.replay` and `complete.partitions` (complete coverage); `integrity.records_sampled*` for a sampled run |
+/// | application validation | `application`: `notAttempted` in this build |
+///
+/// The full contract — the expected-output model, what each count means, and
+/// what filters, partition subsets, compaction and transformations do to it —
+/// is `docs/to-do/decisions/PROD-08.1-integrity-contract.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Verification {
+    /// `sampled` or `complete` ([`COVERAGE_SAMPLED`], [`COVERAGE_COMPLETE`];
+    /// arm IV-2): the plan's `sample.coverage`, as run.
+    pub coverage: String,
+    /// What the restored records were compared WITH: `archive` in this build
+    /// ([`COMPARISON_BASIS_ARCHIVE`]). Never the source: a loss that happened
+    /// when the archive was written is in the archive and in the target, and
+    /// this comparison cannot see it (PROD-01.1 V3).
+    pub comparison_basis: String,
+    /// Whether the comparison held each record's headers to their recorded
+    /// ORDER: `verified` (complete coverage, which compares
+    /// `logweir_kafka::fingerprint::record_digest_ordered`) or `notVerified`
+    /// (sampled coverage, whose fingerprint sorts headers). Arm IV-3:
+    /// `verified` only with `coverage: complete`.
+    pub header_order: String,
+    /// Application-level validation of the restored data:
+    /// `notAttempted` in this build ([`APPLICATION_NOT_ATTEMPTED`]; PROD-06.2
+    /// is where it is attempted).
+    pub application: String,
+    /// The capture gaps the manifest records for the partitions this run
+    /// verified: source offset ranges the backup could NOT capture. Sorted by
+    /// topic, partition and offset. Structured and signed; the free-text
+    /// `sample.coverage_note` still carries the sampled-window subset.
+    pub gaps: Vec<OffsetRange>,
+    /// The ranges retention deliberately removed from the archive, for the
+    /// same partitions, the same shape.
+    pub pruned: Vec<OffsetRange>,
+    /// Present exactly when `coverage` is `complete` (arm IV-4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complete: Option<CompleteVerification>,
+}
+
+/// One inclusive source offset range of one partition, as the manifest
+/// records it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+pub struct OffsetRange {
+    pub topic: String,
+    pub partition: i32,
+    pub from_offset: i64,
+    pub to_offset: i64,
+}
+
+/// **PROD-08.1.** A complete verification's result: every archived segment
+/// of every restored partition read, hashed and decoded; the expected output
+/// computed from each record's own timestamp; every restored record compared
+/// with it by `x-original-offset`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CompleteVerification {
+    /// `true` when every partition was compared; `false` when the bound
+    /// stopped the verification or a partition could not be compared (an
+    /// archive whose records carry no `x-original-offset`, a segment that
+    /// could not be decoded). Arms IV-5 and IV-6: `false` names its reason
+    /// and is never a pass.
+    pub covered: bool,
+    /// Why `covered` is `false`; absent when it is `true` (arm IV-5).
+    #[serde(default)]
+    pub incomplete_reason: Option<String>,
+    /// The plan's `sample.complete_max_records`, the bound in force; absent
+    /// when the plan set none.
+    #[serde(default)]
+    pub max_records: Option<u64>,
+    /// The window the expected output was selected by, on each archived
+    /// record's OWN timestamp: see [`CompleteWindow`].
+    pub window: CompleteWindow,
+    /// Archive integrity, over every segment of every restored partition.
+    pub archive: ArchiveIntegrity,
+    /// The replay comparison, summed over every compared partition (arm
+    /// IV-7: the sums of `partitions[].replay`).
+    pub replay: ReplayComparison,
+    /// One entry per partition of every restored topic, sorted by topic and
+    /// partition.
+    pub partitions: Vec<PartitionVerification>,
+}
+
+/// The selection the expected output is computed with. A record is expected
+/// when its own timestamp is at or before `end_ms` (inclusive, as the
+/// engine's restore filter is) and, when `start_ms` is present, at or after
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CompleteWindow {
+    /// ABSENT means NO LOWER BOUND: the plan's window starts at the archive
+    /// (guard G-WIN, `ArchiveManifest`), so every archived record at or
+    /// before `end_ms` is expected — including one older than every
+    /// segment's FIRST record, which the engine's window floor drops
+    /// (PROD-01.1 ts-floor, acceptance row 08-3).
+    #[serde(default)]
+    pub start_ms: Option<i64>,
+    /// The restore window's end: the plan's point in time, or its sample
+    /// window end when it states none. Inclusive.
+    pub end_ms: i64,
+}
+
+/// Archive integrity over every segment of every restored partition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ArchiveIntegrity {
+    /// Segments the manifest lists for the restored partitions.
+    pub segments: u64,
+    /// Segments read back whose sha256 matched the manifest, whose records
+    /// decoded, and whose decoded count and offsets agreed with the manifest.
+    pub segments_verified: u64,
+    /// Segment keys examined and found wrong: a sha256 mismatch, an object
+    /// the store does not hold, or a decoded count or offset range that
+    /// disagrees with the manifest.
+    pub segments_failed: Vec<String>,
+    /// Segment keys that could not be examined: no sha256 (written before
+    /// 0.21), a format the decoder does not read, or past the bound.
+    pub segments_unverified: Vec<String>,
+    /// Archived records decoded, inside the window or not.
+    pub records_decoded: u64,
+    /// Source offsets inside the decoded span that no archived record holds
+    /// and no recorded gap or pruned range explains — a compacted source's
+    /// holes. Disclosed, never a fault: the archive holds what the source
+    /// held when it was read (PROD-01.1 C7).
+    pub offset_holes: u64,
+}
+
+/// The replay comparison of one partition, or the sums over all of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReplayComparison {
+    /// Archived records the window selects: the expected output.
+    pub expected: u64,
+    /// Records the target partition holds.
+    pub restored: u64,
+    /// Expected records whose restored copy (the first one, by
+    /// `x-original-offset`) is byte-identical: key, value, timestamp and the
+    /// headers in order.
+    pub matching: u64,
+    /// Expected records with no restored copy.
+    pub missing: u64,
+    /// Restored records that are no expected record: an `x-original-offset`
+    /// the expected output does not hold, or none at all.
+    pub unexpected: u64,
+    /// Restored records that repeat an `x-original-offset` already seen.
+    pub duplicates: u64,
+    /// Restored records whose `x-original-offset` is below one seen before
+    /// them (archive order is source-offset order).
+    pub out_of_order: u64,
+    /// Expected records whose first restored copy differs from the archive.
+    pub mismatched: u64,
+}
+
+/// One partition of a complete verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PartitionVerification {
+    /// The archive-side (source) topic.
+    pub topic: String,
+    pub partition: i32,
+    /// The restored topic it was compared with.
+    pub target_topic: String,
+    /// `false` when this partition was not compared — past the bound, or its
+    /// expected output could not be established; `findings` says why.
+    pub compared: bool,
+    /// Segments the manifest lists for this partition, and how many verified.
+    pub segments: u64,
+    pub segments_verified: u64,
+    pub records_decoded: u64,
+    pub offset_holes: u64,
+    pub replay: ReplayComparison,
+    /// The first findings, in words: which offsets are missing, duplicated,
+    /// out of order or different, and why a partition was not compared. At
+    /// most [`PARTITION_FINDINGS_CAP`] entries plus one that says how many
+    /// were left out; the counts above are complete.
+    pub findings: Vec<String>,
+}
+
+/// The first minor of scorecard format 1 that defines
+/// `integrity.verification` (PROD-08.1), which arm IV-1 enforces. **A
+/// renumber changes this and [`crate::FORMAT_VERSION`] together**; IV-1's
+/// message is built from it, `docs/verify_scorecard.py`'s
+/// `SCORECARD_VERIFICATION_SINCE_MINOR` must equal it.
+pub const VERIFICATION_SINCE_MINOR: u64 = 4;
+
+/// `integrity.verification.coverage` for a sampled verification.
+pub const COVERAGE_SAMPLED: &str = "sampled";
+/// `integrity.verification.coverage` for a complete verification.
+pub const COVERAGE_COMPLETE: &str = "complete";
+/// `integrity.verification.comparison_basis`: the archive.
+pub const COMPARISON_BASIS_ARCHIVE: &str = "archive";
+/// `integrity.verification.header_order` when the comparison held headers to
+/// their order.
+pub const HEADER_ORDER_VERIFIED: &str = "verified";
+/// `integrity.verification.header_order` when it did not.
+pub const HEADER_ORDER_NOT_VERIFIED: &str = "notVerified";
+/// `integrity.verification.application` in this build.
+pub const APPLICATION_NOT_ATTEMPTED: &str = "notAttempted";
+/// How many findings one partition carries in words before one more entry
+/// says how many were left out.
+pub const PARTITION_FINDINGS_CAP: usize = 20;
+
+impl ReplayComparison {
+    /// No fault of any kind: every expected record restored once, in order,
+    /// unchanged, and nothing else restored.
+    #[must_use]
+    pub fn is_exact(&self) -> bool {
+        self.missing == 0
+            && self.unexpected == 0
+            && self.duplicates == 0
+            && self.out_of_order == 0
+            && self.mismatched == 0
+            && self.matching == self.expected
+            && self.restored == self.expected
+    }
+
+    /// Adds `other` into `self`, saturating.
+    pub fn add(&mut self, other: &ReplayComparison) {
+        self.expected = self.expected.saturating_add(other.expected);
+        self.restored = self.restored.saturating_add(other.restored);
+        self.matching = self.matching.saturating_add(other.matching);
+        self.missing = self.missing.saturating_add(other.missing);
+        self.unexpected = self.unexpected.saturating_add(other.unexpected);
+        self.duplicates = self.duplicates.saturating_add(other.duplicates);
+        self.out_of_order = self.out_of_order.saturating_add(other.out_of_order);
+        self.mismatched = self.mismatched.saturating_add(other.mismatched);
+    }
 }
 
 /// The published sink for phase 3 — the phase no shipped artifact performs.
@@ -1393,6 +1634,131 @@ impl Scorecard {
                 ));
             }
         }
+        // `integrity.verification` (format 1.4.0, PROD-08.1): arms IV-1 to
+        // IV-7. They fire ONLY on a document that CARRIES the block and judge
+        // the block, or an existing field against it (IV-6, as NR-2 to NR-5
+        // judge the existing parity lists against `not_reconstructed`), so
+        // every document without it — every scorecard before 1.4.0 — is
+        // decided exactly as before: MINOR under the owner's OD-7 (a)
+        // (`docs/stability.md`, "The v0.1.0 tag is the compatibility
+        // boundary"). Each can only refuse.
+        //
+        // NOT INTERPOLATED, except IV-1's version: the block names topics and
+        // segment keys, adopter-influenced strings, and the messages are
+        // joined to `index.json`'s `arm` fields by literal substring.
+        //
+        // Mirrored arm for arm, in this order and this position (after
+        // `source.time_basis`, before `redactions`, which stays last), in
+        // `docs/verify_scorecard.py::check_invariants`.
+        if let Some(v) = &self.integrity.verification {
+            // IV-1. A document declaring a version before 1.4.0 cannot carry
+            // a 1.4.0 field.
+            let defined = major_version(&self.format_version) == Some(1)
+                && minor_version(&self.format_version)
+                    .is_some_and(|minor| minor >= VERIFICATION_SINCE_MINOR);
+            if !defined {
+                return Err(InvariantError(format!(
+                    "integrity.verification is present but format_version {:?} predates it: the \
+                     field is defined from 1.{VERIFICATION_SINCE_MINOR}.0",
+                    self.format_version
+                )));
+            }
+            // IV-2. A coverage this reader does not know is never read as
+            // complete, and never as sampled either: it is refused.
+            if v.coverage != COVERAGE_SAMPLED && v.coverage != COVERAGE_COMPLETE {
+                return Err(InvariantError(
+                    "integrity.verification.coverage is neither \"sampled\" nor \"complete\""
+                        .into(),
+                ));
+            }
+            // IV-3. Only a complete verification compares headers in order: a
+            // sampled one reconciles a fingerprint that sorts them, so it can
+            // never claim header order was verified.
+            let complete = v.coverage == COVERAGE_COMPLETE;
+            let order_known = v.header_order == HEADER_ORDER_VERIFIED
+                || v.header_order == HEADER_ORDER_NOT_VERIFIED;
+            if !order_known || (v.header_order == HEADER_ORDER_VERIFIED && !complete) {
+                return Err(InvariantError(
+                    "integrity.verification.header_order is not \"verified\" or \"notVerified\", or claims \"verified\" for a coverage that is not complete; a sampled verification compares a fingerprint that sorts headers"
+                        .into(),
+                ));
+            }
+            // IV-4. The complete block is the claim `coverage: complete` makes,
+            // and nothing else carries it.
+            if complete != v.complete.is_some() {
+                return Err(InvariantError(
+                    "integrity.verification.complete is present exactly when integrity.verification.coverage is \"complete\""
+                        .into(),
+                ));
+            }
+            if let Some(c) = &v.complete {
+                // IV-5. An incomplete complete verification says why, and a
+                // covered one has no reason to give.
+                let reason_given = c
+                    .incomplete_reason
+                    .as_deref()
+                    .is_some_and(|r| !r.trim().is_empty());
+                if c.covered == reason_given {
+                    return Err(InvariantError(
+                        "integrity.verification.complete.incomplete_reason is required exactly when complete.covered is false"
+                            .into(),
+                    ));
+                }
+                // IV-6. THE RULE ITSELF, in the signed document: a pass over a
+                // complete verification is a verification that covered every
+                // partition, verified every segment and found the restored
+                // output exactly the expected one — in total AND in every
+                // partition, over at least one partition (review L-2: a pass
+                // whose partitions are inexact but whose sums happen to be
+                // exact, and a covered pass over no partition at all, were
+                // accepted by both readers; the writer produces neither).
+                if self.integrity.result == IntegrityResult::Pass {
+                    let clean = c.covered
+                        && !c.partitions.is_empty()
+                        && c.archive.segments_failed.is_empty()
+                        && c.archive.segments_unverified.is_empty()
+                        && c.archive.segments_verified == c.archive.segments
+                        && c.replay.is_exact()
+                        && c.partitions
+                            .iter()
+                            .all(|p| p.compared && p.replay.is_exact());
+                    if !clean {
+                        return Err(InvariantError(
+                            "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition"
+                                .into(),
+                        ));
+                    }
+                }
+                // IV-7. The totals are the partitions' sums, and every listed
+                // segment is verified, failed or unverified.
+                let mut replay = ReplayComparison::default();
+                let (mut segments, mut verified, mut decoded, mut holes) = (0u64, 0u64, 0u64, 0u64);
+                for p in &c.partitions {
+                    replay.add(&p.replay);
+                    segments = segments.saturating_add(p.segments);
+                    verified = verified.saturating_add(p.segments_verified);
+                    decoded = decoded.saturating_add(p.records_decoded);
+                    holes = holes.saturating_add(p.offset_holes);
+                }
+                let accounted = c
+                    .archive
+                    .segments_verified
+                    .saturating_add(c.archive.segments_failed.len() as u64)
+                    .saturating_add(c.archive.segments_unverified.len() as u64);
+                if replay != c.replay
+                    || segments != c.archive.segments
+                    || verified != c.archive.segments_verified
+                    || decoded != c.archive.records_decoded
+                    || holes != c.archive.offset_holes
+                    || accounted != c.archive.segments
+                {
+                    return Err(InvariantError(
+                        "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
+                            .into(),
+                    ));
+                }
+            }
+        }
         // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
         // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
         // now nothing enforced it and no surface displayed it — a third party
@@ -1541,6 +1907,7 @@ mod tests {
                 mismatches: 0,
                 pass_rate_measured: None,
                 restored_principal_could_consume: None,
+                verification: None,
             },
             topic_parity: TopicParity {
                 intentionally_deviated: vec![],
@@ -3000,6 +3367,403 @@ mod tests {
         assert_eq!(
             crate::spec::TimeBasis::ProducerTime.as_str(),
             TIME_BASIS_PRODUCER_TIME
+        );
+    }
+
+    // --- PROD-08.1: `integrity.verification`, arms IV-1 to IV-7 -----------
+
+    fn sampled_verification() -> Verification {
+        Verification {
+            coverage: COVERAGE_SAMPLED.into(),
+            comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
+            header_order: HEADER_ORDER_NOT_VERIFIED.into(),
+            application: APPLICATION_NOT_ATTEMPTED.into(),
+            gaps: vec![OffsetRange {
+                topic: "orders".into(),
+                partition: 0,
+                from_offset: 10,
+                to_offset: 19,
+            }],
+            pruned: Vec::new(),
+            complete: None,
+        }
+    }
+
+    fn exact(n: u64) -> ReplayComparison {
+        ReplayComparison {
+            expected: n,
+            restored: n,
+            matching: n,
+            ..ReplayComparison::default()
+        }
+    }
+
+    fn partition(p: i32, replay: ReplayComparison) -> PartitionVerification {
+        PartitionVerification {
+            topic: "orders".into(),
+            partition: p,
+            target_topic: "drill-orders".into(),
+            compared: true,
+            segments: 2,
+            segments_verified: 2,
+            records_decoded: replay.expected + 1,
+            offset_holes: 0,
+            replay,
+            findings: Vec::new(),
+        }
+    }
+
+    /// A covered, exact complete verification over two partitions — the shape
+    /// a passing complete run signs.
+    fn complete_verification() -> Verification {
+        let partitions = vec![partition(0, exact(5)), partition(1, exact(7))];
+        Verification {
+            coverage: COVERAGE_COMPLETE.into(),
+            header_order: HEADER_ORDER_VERIFIED.into(),
+            complete: Some(CompleteVerification {
+                covered: true,
+                incomplete_reason: None,
+                max_records: None,
+                window: CompleteWindow {
+                    start_ms: None,
+                    end_ms: 1_760_000_005_000,
+                },
+                archive: ArchiveIntegrity {
+                    segments: 4,
+                    segments_verified: 4,
+                    segments_failed: Vec::new(),
+                    segments_unverified: Vec::new(),
+                    records_decoded: 14,
+                    offset_holes: 0,
+                },
+                replay: exact(12),
+                partitions,
+            }),
+            ..sampled_verification()
+        }
+    }
+
+    fn with_verification(v: Verification) -> Scorecard {
+        let mut sc = valid_scorecard();
+        sc.integrity.verification = Some(v);
+        sc
+    }
+
+    /// `sc` as a drill that did not pass: `result` with a reason, and an
+    /// engine matrix verdict that does not claim a byte-level pass.
+    fn not_a_pass(mut sc: Scorecard, result: IntegrityResult) -> Scorecard {
+        sc.outcome = Outcome::FailIntegrity;
+        sc.integrity.result = result;
+        sc.integrity.partial_reason = Some("not a pass".into());
+        sc.engine.matrix_verdict = MatrixVerdict::PassDegraded;
+        sc
+    }
+
+    /// The writer's two shapes are accepted at the writer's version: the
+    /// control for IV-1..IV-7, so an arm written backwards cannot pass the
+    /// refusing tests below for the wrong reason. Also: an incomplete or
+    /// failing complete block beside a non-pass result is a coherent
+    /// document.
+    #[test]
+    fn the_verification_block_is_accepted_in_every_shape_the_writer_produces() {
+        for v in [sampled_verification(), complete_verification()] {
+            let sc = with_verification(v.clone());
+            assert!(sc.validate_invariants().is_ok(), "{v:?}");
+        }
+        let mut v = complete_verification();
+        let c = v.complete.as_mut().unwrap();
+        c.covered = false;
+        c.incomplete_reason = Some("stopped at sample.complete_max_records".into());
+        c.partitions[1].compared = false;
+        let sc = not_a_pass(with_verification(v), IntegrityResult::Partial);
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+    }
+
+    /// IV-1. KILLS: deleting the arm; comparing against the wrong minor.
+    #[test]
+    fn iv1_refuses_the_block_under_a_version_that_predates_it() {
+        for version in ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.x.0"] {
+            let mut sc = with_verification(sampled_verification());
+            sc.format_version = version.into();
+            let err = sc
+                .validate_invariants()
+                .expect_err("the block predates its version");
+            assert_eq!(
+                err.0,
+                format!(
+                    "integrity.verification is present but format_version {version:?} predates \
+                     it: the field is defined from 1.{VERIFICATION_SINCE_MINOR}.0"
+                )
+            );
+        }
+        // Absent, every earlier version is decided exactly as before.
+        let mut sc = valid_scorecard();
+        sc.format_version = "1.3.0".into();
+        assert!(sc.validate_invariants().is_ok());
+    }
+
+    /// IV-2. KILLS: deleting the arm; accepting a third spelling.
+    #[test]
+    fn iv2_refuses_a_coverage_outside_its_set() {
+        for coverage in ["Complete", "full", ""] {
+            let mut v = sampled_verification();
+            v.coverage = coverage.into();
+            let err = with_verification(v)
+                .validate_invariants()
+                .expect_err("closed set");
+            assert_eq!(
+                err.0,
+                "integrity.verification.coverage is neither \"sampled\" nor \"complete\""
+            );
+        }
+    }
+
+    /// IV-3. KILLS: deleting either half (an unknown value; `verified` beside
+    /// sampled coverage).
+    #[test]
+    fn iv3_refuses_header_order_a_sampled_run_cannot_claim() {
+        let msg = "integrity.verification.header_order is not \"verified\" or \"notVerified\", or claims \"verified\" for a coverage that is not complete; a sampled verification compares a fingerprint that sorts headers";
+        let mut v = sampled_verification();
+        v.header_order = HEADER_ORDER_VERIFIED.into();
+        assert_eq!(
+            with_verification(v).validate_invariants().unwrap_err().0,
+            msg
+        );
+        let mut v = complete_verification();
+        v.header_order = "ordered".into();
+        assert_eq!(
+            with_verification(v).validate_invariants().unwrap_err().0,
+            msg
+        );
+        // A complete run MAY say header order was not verified (weaker).
+        let mut v = complete_verification();
+        v.header_order = HEADER_ORDER_NOT_VERIFIED.into();
+        assert!(with_verification(v).validate_invariants().is_ok());
+    }
+
+    /// IV-4. KILLS: deleting the arm, in either direction.
+    #[test]
+    fn iv4_ties_the_complete_block_to_complete_coverage() {
+        let msg = "integrity.verification.complete is present exactly when integrity.verification.coverage is \"complete\"";
+        let mut v = complete_verification();
+        v.complete = None;
+        assert_eq!(
+            with_verification(v).validate_invariants().unwrap_err().0,
+            msg
+        );
+        let mut v = complete_verification();
+        v.coverage = COVERAGE_SAMPLED.into();
+        v.header_order = HEADER_ORDER_NOT_VERIFIED.into();
+        assert_eq!(
+            with_verification(v).validate_invariants().unwrap_err().0,
+            msg
+        );
+    }
+
+    /// IV-5. KILLS: deleting the arm; a blank reason accepted.
+    #[test]
+    fn iv5_requires_a_reason_exactly_when_not_covered() {
+        let msg = "integrity.verification.complete.incomplete_reason is required exactly when complete.covered is false";
+        for reason in [None, Some("  ".to_string())] {
+            let mut v = complete_verification();
+            let c = v.complete.as_mut().unwrap();
+            c.covered = false;
+            c.incomplete_reason = reason;
+            let sc = not_a_pass(with_verification(v), IntegrityResult::Partial);
+            assert_eq!(sc.validate_invariants().unwrap_err().0, msg);
+        }
+        let mut v = complete_verification();
+        v.complete.as_mut().unwrap().incomplete_reason = Some("why".into());
+        assert_eq!(
+            with_verification(v).validate_invariants().unwrap_err().0,
+            msg
+        );
+    }
+
+    /// IV-6, the rule in the signed document. KILLS: deleting the arm, or any
+    /// one of its conjuncts (each mutation below is one conjunct's case).
+    #[test]
+    fn iv6_refuses_a_pass_over_a_complete_block_that_is_not_clean() {
+        let msg = "integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition";
+        type Mutation = fn(&mut CompleteVerification);
+        let cases: [(&str, Mutation); 11] = [
+            ("not covered", |c| {
+                c.covered = false;
+                c.incomplete_reason = Some("bound".into());
+            }),
+            ("failed segment", |c| {
+                c.archive.segments_verified -= 1;
+                c.archive.segments_failed.push("k".into());
+                c.partitions[0].segments_verified -= 1;
+            }),
+            ("unverified segment", |c| {
+                c.archive.segments_verified -= 1;
+                c.archive.segments_unverified.push("k".into());
+                c.partitions[0].segments_verified -= 1;
+            }),
+            ("missing", |c| {
+                c.replay.missing += 1;
+                c.replay.matching -= 1;
+                c.replay.restored -= 1;
+                c.partitions[0].replay.missing += 1;
+                c.partitions[0].replay.matching -= 1;
+                c.partitions[0].replay.restored -= 1;
+            }),
+            ("unexpected", |c| {
+                c.replay.unexpected += 1;
+                c.replay.restored += 1;
+                c.partitions[0].replay.unexpected += 1;
+                c.partitions[0].replay.restored += 1;
+            }),
+            ("duplicate", |c| {
+                c.replay.duplicates += 1;
+                c.replay.restored += 1;
+                c.partitions[0].replay.duplicates += 1;
+                c.partitions[0].replay.restored += 1;
+            }),
+            ("out of order", |c| {
+                c.replay.out_of_order += 1;
+                c.partitions[0].replay.out_of_order += 1;
+            }),
+            ("mismatched", |c| {
+                c.replay.mismatched += 1;
+                c.replay.matching -= 1;
+                c.partitions[0].replay.mismatched += 1;
+                c.partitions[0].replay.matching -= 1;
+            }),
+            ("a partition not compared", |c| {
+                c.partitions[1].compared = false
+            }),
+            // Review L-2 (a): every partition inexact, the sums exact.
+            ("partitions inexact, totals exact", |c| {
+                c.partitions[0].replay.restored += 1;
+                c.partitions[0].replay.matching += 1;
+                c.partitions[1].replay.restored -= 1;
+                c.partitions[1].replay.matching -= 1;
+            }),
+            // Review L-2 (b): a covered pass over no partition at all.
+            ("no partition", |c| {
+                c.partitions.clear();
+                c.archive.segments = 0;
+                c.archive.segments_verified = 0;
+                c.archive.records_decoded = 0;
+                c.replay = ReplayComparison::default();
+            }),
+        ];
+        for (what, mutate) in cases {
+            let mut v = complete_verification();
+            mutate(v.complete.as_mut().unwrap());
+            let sc = with_verification(v.clone());
+            assert_eq!(
+                sc.validate_invariants().map_err(|e| e.0),
+                Err(msg.to_string()),
+                "{what}"
+            );
+            // The same block beside a verdict that is not a pass is coherent:
+            // IV-6 judges a PASS, nothing else.
+            let sc = not_a_pass(with_verification(v), IntegrityResult::Fail);
+            assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()), "{what}");
+        }
+    }
+
+    /// IV-7. KILLS: deleting the arm, or any one sum.
+    #[test]
+    fn iv7_refuses_totals_that_are_not_the_partitions_sums() {
+        let msg = "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified";
+        type Mutation = fn(&mut CompleteVerification);
+        let cases: [(&str, Mutation); 7] = [
+            ("replay", |c| c.replay.expected += 1),
+            ("segments", |c| c.archive.segments += 1),
+            ("segments verified", |c| {
+                c.partitions[0].segments_verified -= 1
+            }),
+            ("records decoded", |c| c.archive.records_decoded += 1),
+            ("offset holes", |c| c.partitions[1].offset_holes += 3),
+            ("unaccounted segment", |c| {
+                c.archive.segments_failed.push("k".into());
+            }),
+            ("partition replay", |c| c.partitions[1].replay.restored += 1),
+        ];
+        for (what, mutate) in cases {
+            let mut v = complete_verification();
+            mutate(v.complete.as_mut().unwrap());
+            let sc = not_a_pass(with_verification(v), IntegrityResult::Fail);
+            assert_eq!(
+                sc.validate_invariants().map_err(|e| e.0),
+                Err(msg.to_string()),
+                "{what}"
+            );
+        }
+    }
+
+    /// The IV arms sit before `redactions`, which stays LAST.
+    #[test]
+    fn the_verification_arms_report_before_the_redactions_arm() {
+        let mut v = sampled_verification();
+        v.coverage = "full".into();
+        let mut sc = with_verification(v);
+        sc.redactions = vec![Redaction {
+            path: "/target/cluster_id".into(),
+            reason: "ordering".into(),
+            present: false,
+        }];
+        let err = sc.validate_invariants().expect_err("two arms");
+        assert!(
+            err.0.starts_with("integrity.verification.coverage"),
+            "{}",
+            err.0
+        );
+    }
+
+    /// The writer's version defines the field it writes, and the spec's
+    /// spelling is the scorecard's.
+    #[test]
+    fn the_written_version_defines_verification() {
+        assert_eq!(major_version(crate::FORMAT_VERSION), Some(1));
+        assert!(
+            minor_version(crate::FORMAT_VERSION)
+                .is_some_and(|minor| minor >= VERIFICATION_SINCE_MINOR),
+            "the writer's version must define integrity.verification, which IV-1 admits from 1.{}.0",
+            VERIFICATION_SINCE_MINOR
+        );
+        assert_eq!(crate::spec::Coverage::Sampled.as_str(), COVERAGE_SAMPLED);
+        assert_eq!(crate::spec::Coverage::Complete.as_str(), COVERAGE_COMPLETE);
+    }
+
+    /// Absent is the spelling of "not recorded": a scorecard without the block
+    /// serialises without the key, so every earlier document round-trips.
+    #[test]
+    fn an_absent_verification_block_is_not_serialised() {
+        let sc = valid_scorecard();
+        let json = serde_json::to_value(&sc).unwrap();
+        assert!(json["integrity"].get("verification").is_none(), "{json}");
+        let sc = with_verification(complete_verification());
+        let json = serde_json::to_value(&sc).unwrap();
+        assert_eq!(json["integrity"]["verification"]["coverage"], "complete");
+        let back: Scorecard = serde_json::from_value(json).unwrap();
+        assert_eq!(back.integrity.verification, Some(complete_verification()));
+    }
+
+    /// Review L-1: ruling R-A's "blank" is `str::trim().is_empty()`, and
+    /// `trim` strips `char::is_whitespace`. `docs/verify_scorecard.py`'s
+    /// `RUST_WHITESPACE` is that set, code point for code point (pinned there
+    /// by `test_the_blank_set_is_the_rust_readers`); this pins it here, so a
+    /// toolchain whose Unicode data moves the set fails beside its twin.
+    #[test]
+    fn the_blank_set_is_the_unicode_white_space_property_the_script_strips() {
+        let set: Vec<u32> = (0u32..=0x10FFFF)
+            .filter_map(char::from_u32)
+            .filter(|c| c.is_whitespace())
+            .map(u32::from)
+            .collect();
+        let mut want: Vec<u32> = (0x9..=0xd).collect();
+        want.extend([0x20, 0x85, 0xa0, 0x1680]);
+        want.extend(0x2000..=0x200a);
+        want.extend([0x2028, 0x2029, 0x202f, 0x205f, 0x3000]);
+        assert_eq!(set, want);
+        assert!(
+            !'\u{1f}'.is_whitespace(),
+            "U+001F is not blank to this reader"
         );
     }
 }

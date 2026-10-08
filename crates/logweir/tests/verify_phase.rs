@@ -3130,6 +3130,9 @@ fn the_signed_document_carries_no_pass_rate_beside_a_partial_verdict() {
     sc.integrity = integ;
     sc.outcome = outcome;
     sc.objectives = objectives;
+    // Phase 7's integrity carries `integrity.verification` since PROD-08.1,
+    // a 1.4.0 field (arm IV-1), so the document is the writer's version.
+    sc.format_version = logweir_core::FORMAT_VERSION.into();
 
     let store = fixtures::recording_store();
     let signed = logweir::drill::phase8_score::run(

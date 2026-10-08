@@ -1070,7 +1070,9 @@ a contract constant or a plan field and never from prose this page invented:
   manifest's. PLAT-15.1's catalog is where that would come from;
 * the **sampled verification scope**, from the plan's `sample` block, closing
   with the clause D3 section 3.5 makes non-optional -- *a sampled check, not an
-  exhaustive comparison*. No level in this version compares every record;
+  exhaustive comparison*. No restore the console starts compares every record
+  (complete coverage, PROD-08.1, is a plan field the wizard does not offer
+  yet);
 * the **consumer cutover limitation**, byte for byte from `render.js`'s
   `COMPLETION_GUIDANCE` and `TARGET_MODE_MEANING` -- the same fixed sentences
   the completion panel shows afterwards;

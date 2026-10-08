@@ -11,8 +11,9 @@ use crate::scorecard::Scorecard;
 /// "with a new schema file beside the old one").
 ///
 /// **1.2.0 since FX-3** (`topic_parity.not_reconstructed`), and **1.3.0 since
-/// FX-8** (`source.time_basis`); the 1.1.0 and 1.2.0 files are frozen beside
-/// the current one the same way. The `$id` is built from
+/// FX-8** (`source.time_basis`), and **1.4.0 since PROD-08.1**
+/// (`integrity.verification`); the 1.1.0, 1.2.0 and 1.3.0 files are frozen
+/// beside the current one the same way. The `$id` is built from
 /// [`crate::FORMAT_VERSION`], so the file this writes is always the one the
 /// writer's documents name.
 pub fn scorecard_schema() -> String {
