@@ -84,6 +84,18 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # SHARE GROUPS' STATE TOPIC (KIP-932, the 4.x lines), sized for ONE broker
+      # like the two internal topics above (PROD-04.0d). Its defaults —
+      # replication factor 3, min ISR 2 — cannot be met here, so
+      # `__share_group_state` is never created (INVALID_REPLICATION_FACTOR on
+      # every attempt) and share groups get members but no share-partition
+      # state: no start offsets to read (PROD-04.0 §3.8, measured on 4.3.1).
+      # A 3.x broker does not know either key and only logs it as unused, so
+      # the 3.7 default stack and the 3.9 line behave exactly as before. Every
+      # single-node broker below carries the same two lines
+      # (e2e/tests/stack_params.rs checks it).
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
       KAFKA_LISTENERS: PLAINTEXT://kafka-broker-1:9094,EXTERNAL://kafka-broker-1:9092,CONTROLLER://kafka-broker-1:9093,SASL://kafka-broker-1:9096,SASLEXT://kafka-broker-1:9097,K8S://kafka-broker-1:9095
       # `K8S` is the one advertised name a CI runner has to change, and it is
       # therefore a PARAMETER and not a literal: `kind` on a Linux GitHub
@@ -380,6 +392,9 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # One broker: the share-group state topic sized like kafka-broker-1's.
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
       KAFKA_LOG_DIRS: /tmp/kafka-logs
@@ -522,6 +537,9 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # One broker: the share-group state topic sized like kafka-broker-1's.
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
       KAFKA_LOG_DIRS: /tmp/kafka-logs
@@ -591,6 +609,9 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # One broker: the share-group state topic sized like kafka-broker-1's.
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
       KAFKA_LOG_DIRS: /tmp/kafka-logs
@@ -664,6 +685,65 @@ services:
       # left the JVM alive and the group Empty) never gets there. The smoke run
       # proves the counts.
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group logweir-e2e-wordcount --state | grep -q -w Stable"]
+      interval: 10s
+      timeout: 20s
+      retries: 18
+      start_period: 30s
+
+  # --- profile `streams-protocol`: a Streams application on KIP-1071 ---------
+  # PROD-04.0d, BESIDE PROD-06.1's `streams` profile, which runs the CLASSIC
+  # rebalance protocol and is not changed. Apache Kafka's
+  # WordCountProcessorDemo from the broker line's own image with
+  # `group.protocol=streams`, so its group is a STREAMS group: `kafka-groups.sh
+  # --list` types it Streams, and ListConsumerGroups and DescribeGroups do not
+  # report it (PROD-04.0 §3.1). It is also the streams member of the groups
+  # fixture (`e2e/compose/groups.sh`), which starts and stops this service.
+  #
+  # The PROCESSOR demo, not WordCountDemo, on purpose: WordCountDemo's output
+  # topic is a constant, `streams-wordcount-output`, which the `streams`
+  # profile's application writes; two WordCountDemos on one broker would each
+  # count the shared input into that topic, and the `streams` smoke's
+  # stopped-application control would fail. This one writes
+  # `streams-wordcount-processor-output`. Both read `streams-plaintext-input`,
+  # each with its own group, so the two profiles run together. Its store is
+  # in memory (`Stores.inMemoryKeyValueStore`, no RocksDB, see `streams`) and
+  # changelog-backed; the topology has no repartition topic.
+  #
+  # The 4.x lines only (measured on 4.3.1, where the protocol is on by
+  # default): a 3.x client refuses `group.protocol=streams`, the application
+  # exits, and `up --wait` fails.
+  streams-protocol-topics:
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    profiles: [streams-protocol]
+    networks: [kafka-net]
+    depends_on:
+      kafka-broker-1: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    # `--if-not-exists` and then a describe: the `streams` profile's
+    # streams-topics creates the same input topic and may run at the same
+    # moment, so "already exists" is success here.
+    command:
+      - >-
+        for t in streams-plaintext-input streams-wordcount-processor-output; do
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-broker-1:9094 --create
+        --if-not-exists --topic $$t --partitions 1 --replication-factor 1
+        || /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-broker-1:9094 --describe
+        --topic $$t || exit 1; done
+
+  streams-protocol-wordcount:
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    profiles: [streams-protocol]
+    networks: [kafka-net]
+    depends_on:
+      streams-protocol-topics: { condition: service_completed_successfully }
+    volumes:
+      - ./profiles/streams-protocol/wordcount-processor.properties:/streams/wordcount-processor.properties:ro
+    entrypoint: ["/opt/kafka/bin/kafka-run-class.sh"]
+    command: ["org.apache.kafka.streams.examples.wordcount.WordCountProcessorDemo", "/streams/wordcount-processor.properties"]
+    healthcheck:
+      # A Streams group is not a consumer group: kafka-consumer-groups.sh does
+      # not describe it, kafka-streams-groups.sh does.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-streams-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group logweir-e2e-wordcount-streams --state | grep -q -w Stable"]
       interval: 10s
       timeout: 20s
       retries: 18

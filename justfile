@@ -228,7 +228,7 @@ e2e-up:
 # stack — or another slot — from under its user.
 e2e-down:
     ./e2e/compose/stack-env.sh --check
-    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile streams --profile objectstore --profile registry --profile acl down -v --remove-orphans
+    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile streams --profile streams-protocol --profile objectstore --profile registry --profile acl down -v --remove-orphans
 
 # AWS_EC2_METADATA_DISABLED (fix round 1, review F7): with no AWS credentials
 # in the environment, `AmazonS3Builder::from_env()` falls through to the EC2
