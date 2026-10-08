@@ -526,11 +526,26 @@ fn every_interpolated_backup_value_is_escaped() {
     p.compression = PAYLOAD.into();
     cases.push(("compression", p));
 
+    // The REGION is refused before rendering when it is not a region name
+    // (FX-20 fix round, review F1), which is stronger than escaping it.
     let mut p = plan();
     p.storage = StorageUrl::S3 {
         bucket: PAYLOAD.into(),
         prefix: PAYLOAD.into(),
         region: Some(PAYLOAD.into()),
+        endpoint: Some(PAYLOAD.into()),
+        path_style: false,
+        allow_http: false,
+    };
+    assert_eq!(
+        render_backup::render(&p).unwrap_err(),
+        render_backup::RenderError::StorageRegionInvalid
+    );
+    let mut p = plan();
+    p.storage = StorageUrl::S3 {
+        bucket: PAYLOAD.into(),
+        prefix: PAYLOAD.into(),
+        region: Some("us-east-1".into()),
         endpoint: Some(PAYLOAD.into()),
         path_style: false,
         allow_http: false,

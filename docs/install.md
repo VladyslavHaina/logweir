@@ -1440,13 +1440,24 @@ object, by name, with a dry run**:
 
    `--kind RetentionPolicy`, `--kind ProtectionPolicy` (with `--route` when one
    Secret serves routes with different bindings), `--kind KafkaCluster`, and,
-   for an inline archive, `--location s3://<bucket> --endpoint <url|aws>` work
-   the same way. The tool refuses — exit 3, nothing written — a Secret that any
-   other object also names (**an incident**: ask the owner which object is
-   theirs, delete the other, treat the credential as exposed if it ever ran), a
-   Secret owned by or minted for another object, a Secret already bound to
-   something else, and an object that has not yet published its binding. A
-   destination with several Secrets needs one run per Secret.
+   for an inline archive, `--location s3://<bucket> --endpoint <url|aws>
+   --region <region|none> --path-style true|false --allow-http true|false`
+   work the same way. An inline location is bound over every field that shapes
+   the URL the runner dials, so all five are stated: for a `Restore`, its
+   plan's `source.storage` (and its `evidence` block, if that is elsewhere);
+   for a `Backup` or a schedule, the controller's `AWS_ENDPOINT_URL`,
+   `AWS_REGION`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` (path style is its
+   negation) and `AWS_ALLOW_HTTP` (the chart's `archive.s3.*`). The tool
+   binds the value it **computes** from the object's UID and the spec it
+   prints — the endpoint the owner confirms — and refuses — exit 3, nothing
+   written — a Secret that any other object also names (**an incident**: ask
+   the owner which object is theirs, delete the other, treat the credential as
+   exposed if it ever ran), a Secret owned by or minted for another object, a
+   Secret already bound to something else, an object that has not yet
+   published its binding, an object whose published binding is not the one its
+   spec gives (a status that lags an edit: let the controller reconcile and run
+   it again), and a region that is not a region name. A destination with
+   several Secrets needs one run per Secret.
 4. A destination the console created before this release also carries an
    `api.logweir.dev/request-sha256` annotation hashed over its secret key
    (PROD-01.3, F1): remove it with `kubectl annotate backupdestination <name>

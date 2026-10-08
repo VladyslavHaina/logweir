@@ -8333,7 +8333,7 @@ point the endpoint at a host they control, and have Logweir present it there:
 | `ProtectionPolicy` route | PagerDuty routing key (sent in the body); webhook or Slack URL (a bearer token) | the route's `endpoint`; the URL in the Secret | the policy's UID, the sink kind, and the PagerDuty endpoint |
 | `BackupDestination` `SecretKeys` grant | S3 key pair and session token | `spec.storage` | the destination's UID and its whole archive route (bucket, prefix, region, endpoint, addressing, transport) |
 | `RetentionPolicy` `enforcement.credentialSecretRef` | a DELETE-capable S3 key pair | the destination it resolves to | the policy's UID, that destination's route, and `spec.scope.prefix` |
-| inline archive `secretRef` (`Backup`, `BackupSchedule`, `Restore.sourceArchive`, a restore `Preflight`'s legacy source) | S3 key pair | the location the runner dials | the LOCATION: scheme, bucket and endpoint — never the prefix |
+| inline archive `secretRef` (`Backup`, `BackupSchedule`, `Restore.sourceArchive`, a restore `Preflight`'s legacy source) | S3 key pair | the location the runner dials | the LOCATION: every field that shapes the URL — scheme, bucket, endpoint, region, addressing, `allowHttp` — never the prefix |
 
 For S3, SigV4 never sends the secret key, but every request carries the access
 key id, a signature an endpoint can replay within its window, and any session
@@ -8378,8 +8378,21 @@ route of the destination its `destinationRef` resolves to NOW, so a destination
 deleted and re-created under the same name elsewhere changes it. A
 `ProtectionPolicy`'s spec is mutable, so its PagerDuty `endpoint` is in the
 binding: edit it, and the routing key is refused until the Secret is bound
-again. An inline archive is bound to its location, so a plan or URL naming
-another bucket or endpoint is refused.
+again. An inline archive is bound to its location — every field that shapes
+the URL the runner dials, the region included — so a plan or URL naming
+another bucket, endpoint, region, addressing style or transport is refused.
+
+**A region that is not a region name is refused outright.** Without an
+endpoint, the S3 client builds the host from the region
+(`s3.<region>.amazonaws.com`), so a region is part of where a request goes. A
+storage block whose `region` does not match `^[a-z0-9-]{1,32}$` is refused by
+name, `StorageRegionInvalid` (`refusal-reason=GuardRefused`), by `restore
+run`/`drill run` before the archive is read, by `backup run` at phase −1, by
+every engine renderer and by every object-store client Logweir builds — a
+second rule beside the binding, which a region spelled `x@attacker/` would
+otherwise have kept the victim's (FX-20's review F1). The `BackupDestination`
+CRD, the product API (`region_invalid`) and the chart's `archive.s3.region`
+refuse the same spellings at admission.
 
 **Where the binding comes from.**
 
@@ -8393,9 +8406,11 @@ another bucket or endpoint is refused.
   and write it into the Secret under `logweir-binding`, as §20.9 shows.
 * **An inline archive** has no object of its own (a `Backup` is one-shot and a
   schedule mints them), so its Secret is bound to the location:
-  `v1:location:sha256:<hex>` over `scheme`, `bucket` and the endpoint
+  `v1:location:sha256:<hex>` over `scheme`, `bucket`, the endpoint
   (lower-cased, trailing `/` removed, `aws` for none — the installation's
-  `AWS_ENDPOINT_URL` when the plan or URL names none). Any object in the
+  `AWS_ENDPOINT_URL` when the plan or URL names none), the region (the
+  installation's `AWS_REGION` when the plan names none), the addressing style
+  and `allowHttp`: every field that shapes the URL. Any object in the
   namespace may then use that Secret, but only at that location — what a
   `BackupDestination` in the namespace already allows. An inline `Restore`
   whose plan writes `evidence:` to another bucket or endpoint presents the
@@ -8436,13 +8451,23 @@ object at a time:
    `--kind` is `BackupDestination`, `RetentionPolicy`, `ProtectionPolicy`
    (`--route` when one Secret serves routes with different bindings) or
    `KafkaCluster`; an inline archive is `--location s3://<bucket> --endpoint
-   <url|aws>`. The tool refuses — exit 3, nothing written — a Secret that any
-   other object names (an **incident**: find out which object is the owner's,
-   delete the other, and treat the credential as exposed if it ever ran), a
-   Secret owned by or minted for another object, a Secret already bound to
-   something else, and an object that does not name the Secret or has not
-   published its binding. It patches one key, preconditioned on the Secret's
-   `resourceVersion`.
+   <url|aws> --region <region|none> --path-style true|false --allow-http
+   true|false` — for a `Restore` its plan's `source.storage` (and `evidence`),
+   for a `Backup` or a schedule the controller's `AWS_ENDPOINT_URL`,
+   `AWS_REGION`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` (path style is its
+   negation) and `AWS_ALLOW_HTTP`. The binding it writes is the one it
+   **computes** from the object's UID and the spec it prints (the same forms
+   as the product's, checked against one fixture), so what the owner confirms
+   is what is bound. The tool refuses — exit 3, nothing written — a Secret that
+   any other object names (an **incident**: find out which object is the
+   owner's, delete the other, and treat the credential as exposed if it ever
+   ran), a Secret owned by or minted for another object, a Secret already bound
+   to something else, an object that does not name the Secret or has not
+   published its binding, an object whose published binding is not the one its
+   spec gives (a status that lags an edit, or a `RetentionPolicy` whose
+   destination was re-created: let the controller reconcile and run it again),
+   and a region that is not a region name. It patches one key, preconditioned
+   on the Secret's `resourceVersion`.
 4. **Resume the schedules.**
 
 **A destination created through the console before this release** also carries
@@ -8472,6 +8497,10 @@ new status fields; bound Secrets keep working, and the extra key is inert.
   Secret's writer put there, and only that writer can change it.
 * **The product API cannot inspect an inline archive's `credentialRef`**: it
   names a Secret, as before, and the runner enforces the location binding.
+* **A standing rehearsal authorization's scope does not name the source or
+  evidence storage** (PLAT-14.3b): a `Restore` under one may name any inline
+  archive and Secret without a per-run approver. The location binding and the
+  region rule are what keep that Secret at its own location.
 
 ## 21. `Preflight`: what a readiness check proves, and what it cannot
 

@@ -127,9 +127,17 @@ them; a report that one of them is true is not a vulnerability report.
   role's temporary credentials (the session token and access key id travel);
   a destination's **CA reference** is mutable, so a principal who can both edit
   it and intercept traffic to the (immutable) endpoint can read signed
-  requests; and an inline archive is bound to its **location**, so any object
-  in the namespace may use that Secret at that location — what a
-  `BackupDestination` in the namespace already allows.
+  requests; and an inline archive is bound to its **location** — every field
+  that shapes the URL the runner dials (scheme, bucket, endpoint, region,
+  addressing, `allowHttp`; never the prefix) — so any object in the namespace
+  may use that Secret at that location, what a `BackupDestination` in the
+  namespace already allows. A region that is not a region name is refused
+  outright (`StorageRegionInvalid`): without an endpoint the region is part of
+  the host, and before FX-20's fix round a plan keeping the victim's bucket
+  could spell one that sent the requests elsewhere. A standing rehearsal
+  authorization's scope does not name the storage a `Restore` reads
+  (PLAT-14.3b), so under one the location binding and the region rule are
+  what keep a Secret at its location.
 
 ## Cryptography
 

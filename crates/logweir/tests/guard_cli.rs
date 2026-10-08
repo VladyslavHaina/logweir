@@ -323,15 +323,16 @@ fn fx20_an_injected_region_exits_3_before_the_archive_is_read() {
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let injected = format!("\"x@{address}/\"");
-    // Both blocks state `region: us-east-1` and `endpoint: http://localhost:9000`;
-    // the source's are indented four spaces, the evidence store's two.
+    // Both blocks state `region: us-east-1` and an `endpoint:` line; the
+    // source's are indented four spaces, the evidence store's two. The
+    // endpoint line is dropped whatever it says (the region becomes the host
+    // only without one), so this row never names an address.
     let edit = |text: &str, indent: &str, region: &str| {
         // Anchored on the newline, so two spaces never match inside four.
-        let text = text.replacen(
-            &format!("\n{indent}endpoint: http://localhost:9000\n"),
-            "\n",
-            1,
-        );
+        let key = format!("\n{indent}endpoint: ");
+        let at = text.find(&key).expect("the block states an endpoint");
+        let end = at + 1 + text[at + 1..].find('\n').expect("a line end");
+        let text = format!("{}{}", &text[..at], &text[end..]);
         text.replacen(
             &format!("\n{indent}region: us-east-1\n"),
             &format!("\n{indent}region: {region}\n"),
@@ -362,6 +363,14 @@ fn fx20_an_injected_region_exits_3_before_the_archive_is_read() {
             "refusal-reason=GuardRefused",
             "{stdout}"
         );
+        // BEFORE PHASE 0: no phase began. Phase 0 holds the same rule (its own
+        // row is `topic_preflight.rs`), so the absence of any phase line is
+        // what proves the early guard — the one before the archive is read
+        // and before any client exists — is the one that refused.
+        assert!(
+            !stdout.contains("progress-phase="),
+            "{field}: refused before any phase:\n{stdout}"
+        );
         assert!(
             !stderr.contains(&address) && !stdout.contains(&address),
             "{field}: the region is never echoed"
@@ -386,5 +395,9 @@ fn fx20_an_injected_region_exits_3_before_the_archive_is_read() {
     assert!(
         stderr.contains("topic_mapping entry") || stderr.contains("onto itself"),
         "the control reached phase 0's mapping check:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("progress-phase="),
+        "the control printed a phase line, so the discriminator above is live:\n{stdout}"
     );
 }

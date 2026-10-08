@@ -569,7 +569,12 @@ and its archive route), a `RetentionPolicy`'s delete-capable key to the policy,
 its destination's route and its scope, each `ProtectionPolicy` route's Secret
 to the policy, the sink kind and the PagerDuty endpoint, and an inline
 `archive.secretRef` (a `Backup`, a schedule, a `Restore`'s `sourceArchive`) to
-the location the runner dials — scheme, bucket and endpoint. Every runner
+the location the runner dials — every field that shapes its URL: scheme,
+bucket, endpoint, region, addressing style and `allowHttp`. An S3 region that
+is not a region name (`^[a-z0-9-]{1,32}$`) is refused by name,
+`StorageRegionInvalid` (`refusal-reason=GuardRefused`), by every runner before
+any client exists, by the engine renderers and by every object-store client:
+without an endpoint the region is part of the host. Every runner
 (`backup run`, `restore run`, the check runner, the catalog sync and evidence
 fetch, `logweir-retention`, `logweir notify deliver`) refuses an unbound or
 foreign Secret with `CredentialBindingMismatch` **before it builds a store or
@@ -589,15 +594,20 @@ Secret: a create (and `:from-legacy`) refuses `secret.existing`
 (`existing_credential_refused`), `:update-access` accepts only a Secret the
 destination already names, and a rotation's `secret.new` is written to a new
 bound Secret `lwd-<destination>-<role>-<suffix>`. The console's create form
-offers no existing Secret and starts on a new credential.
+offers no existing Secret and starts on a new credential. The chart's
+`archive.s3.region` and `evidence.controllerIdentityLocations[].region` refuse a non-region
+spelling, and the API's `region_invalid` message no longer repeats the value.
 **Do:** suspend the schedules that use a credential Secret, apply the CRDs,
 roll the controller, the runner and the console together, then bind every
 existing credential Secret **one at a time with `scripts/bind-credential.py`**
 — dry first, then `--apply --confirm-endpoint` once the credential's owner has
 confirmed the endpoint it prints ([install.md](install.md), *Bind every
-existing credential Secret after the upgrade*). The tool refuses a Secret any
-other object also names (an incident), a Secret owned by or minted for another
-object, and a Secret already bound elsewhere, and writes one key under a
+existing credential Secret after the upgrade*). The tool computes the binding
+from the object's UID and the spec it prints, and refuses when the published
+status says otherwise (a status that lags an edit); an `s3://` location states
+its region, path style and `allowHttp`. It refuses a Secret any other object
+also names (an incident), a Secret owned by or minted for another object, and
+a Secret already bound elsewhere, and writes one key under a
 `resourceVersion` precondition. Remove the pre-PROD-01.3
 `api.logweir.dev/request-sha256` from a console-made destination, and rotate a
 guessable key (its create's audit record keeps the hash). Resume the
@@ -606,7 +616,12 @@ schedules. Until a Secret is bound its runs are refused, closed.
 (`crates/weirkeeper/tests/{protection_controller,destination_controller,retention_policy_controller,backup_controller,restore_controller,preflight_controller,credential_backstop}.rs`,
 `crates/logweir-api/tests/destinations.rs`), the shipped binaries against a
 loopback sentinel that is never dialled (`notify deliver`, `backup run`,
-`drill run`; `crates/logweir/tests/{notify_deliver,credential_binding}.rs`),
+`drill run`, `catalog list`; `crates/logweir/tests/{notify_deliver,credential_binding,guard_cli}.rs`),
+the review's region-injection probe refused twice beside a store that does
+dial its control (`crates/weirkeeper/tests/fx20_region_binding.rs`,
+`crates/logweir-store/tests/region_backstop.rs`), one binding fixture the
+product and the upgrade tool both check
+(`e2e/fixtures/credential-binding/bindings.json`),
 the real runner driven by the controller's rendered Job
 (`schedule_controller.rs`), the retention worker binary
 (`crates/logweir-retention/tests/worker.rs`), and the upgrade tool's offline
