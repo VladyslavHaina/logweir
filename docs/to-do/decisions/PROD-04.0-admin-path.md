@@ -619,6 +619,11 @@ Both texts are proposals. Neither lands in this row (rule 8).
   - **A `groups` helper:** one group of each type on the 4.3 line and the classic groups on 3.9, with members that stop cleanly. Bracketed `pkill` patterns are needed: this row's first control step killed its own `sh -c`.
   - **A `group.protocol=streams` variant of the `streams` profile.** PROD-01.5's runs the classic protocol. The profile's owner is PROD-06.1, so this is a new service beside it or a request to its owner (README, "The owner changes a profile's services without asking").
   - **Share-state settings on single-broker 4.x stacks:** `share.coordinator.state.topic.replication.factor=1` and `…min.isr=1`. With the defaults (3 and 2), `__share_group_state` is never created (INVALID_REPLICATION_FACTOR on every attempt), so share groups there have members but no share-partition state (§3.8).
+  - **As built (PROD-04.0d, 2026-10-08; `e2e/README.md`, "The groups fixture").**
+    - The `acl` profile is FX-4's, extended rather than new. §3.9's visibility setup is opt-in, `e2e/compose/groups.sh visibility apply` and `remove`: its cluster ACL takes from `logweir` every cluster operation that FX-4's rows on the same profile expect it to have.
+    - The `groups` helper is `e2e/compose/groups.sh`.
+    - The streams-protocol variant is the profile `streams-protocol`. Its application is also the helper's streams group, `logweir-e2e-streams-protocol` (§10's annotation says why it is not `pa-streams`).
+    - The share-state settings are on every single-node broker, whatever the line. **For PROD-05.3:** a 3.x broker does not use them, but its DescribeConfigs reports both keys as sensitive with a null value (measured on 3.7.1 and 3.9.2), the same "set, value withheld" form as AP-05.3-6's `super.users` and `allow.everyone.if.no.acl.found`, so a 3.x `acl` stack withholds four keys, not two.
 - **Upstream reports** (no ledger row; any worker may file them):
   - librdkafka: DescribeAcls drops the response's top-level error (T9);
   - librdkafka: ListConsumerGroups drops non-consumer protocol types without telling the caller (T3);
@@ -628,6 +633,13 @@ Both texts are proposals. Neither lands in this row (rule 8).
 ## 10. Acceptance rows
 
 Fixture names refer to §3's groups and to PROD-04.0d's profiles.
+
+**Annotation (PROD-04.0d, 2026-10-08): §3's `pa-streams` is `logweir-e2e-streams-protocol` in the fixture.**
+- It is the `streams-protocol` profile's application, WordCountProcessorDemo with `group.protocol=streams`.
+- Why not WordCountDemo: it hard-codes its output topic, `streams-wordcount-output`, which PROD-06.1's `streams` profile writes on the same broker, so a second WordCountDemo would mix the two applications' counts. The processor demo writes its own topic.
+- Why not the name `logweir-e2e-wordcount-streams`: its internal topics would match the `streams` smoke's `logweir-e2e-wordcount-` check.
+- Its topology has no repartition topic, so §3.2's repartition position is not reproduced. AP-04.1-1 and -7 and AP-04.2-1 and -2 need only a Streams group with commits on its input topic.
+- Every other group keeps §3's name.
 
 - **"compose 4.3"** is a PROD-01.5 slot started with `eval "$(e2e/compose/stack-env.sh --slot <N> --kafka 4.3)"` (the 4.3.1 image pinned by digest). **"compose 3.9"** is the same with `--kafka 3.9`.
 - Every negative control is a way the implementation could be wrong, and it must make the row fail.
