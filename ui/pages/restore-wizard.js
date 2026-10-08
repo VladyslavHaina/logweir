@@ -2738,10 +2738,12 @@ export function sourceFactsWhy(state) {
  *
  *  A CATALOG POINT carries its row already: nothing is read. A BACKUP's point
  *  is named in the catalog by its receipt's digest ([`pointIdOfReceiptDigest`])
- *  and looked for in this namespace's recovery catalogs, at most
- *  [`MAX_SOURCE_CATALOGS`] of them; a read that fails is a reason, never an
- *  error, because the factor then falls back to the target's broker count and
- *  the page says why. */
+ *  -- the Backup's own `status.evidence.receiptSha256`, or, where the list
+ *  this page holds does not carry it (the product API's list projection does
+ *  not), the run's own operation, read once -- and looked for in this
+ *  namespace's recovery catalogs, at most [`MAX_SOURCE_CATALOGS`] of them. A
+ *  read that fails is a reason, never an error, because the factor then falls
+ *  back to the target's broker count and the page says why. */
 export async function refreshSourceFacts(state, api, lifecycle) {
   const s = state || {};
   const point = s.point || {};
@@ -2749,14 +2751,30 @@ export async function refreshSourceFacts(state, api, lifecycle) {
   if (isCatalogPoint(point)) {
     facts = sourceFactsOfEntry(point.catalogPoint, point.catalogPoint.catalog);
   } else {
-    const digest = (((point.status || {}).evidence) || {}).receiptSha256;
+    const readers = catalogReadersOf(api, s.ns, lifecycle);
+    let digest = (((point.status || {}).evidence) || {}).receiptSha256;
+    let unread = "";
+    if (pointIdOfReceiptDigest(digest).length === 0) {
+      const name = String(((point.metadata || {}).name) || "");
+      try {
+        digest = name.length > 0 ? ((await readers.ownVerdict(name)) || {}).receiptSha256 : null;
+      } catch (failed) {
+        if (cancelled(failed, lifecycle)) {
+          throw failed;
+        }
+        unread = String(((failed || {}).message) || failed);
+      }
+    }
     const pointId = pointIdOfReceiptDigest(digest);
     facts = pointId.length === 0
       ? Object.assign({}, SOURCE_FACTS_NOT_READ, {
-        why: "this Backup records no receipt digest, so no recovery catalog point can be named " +
-          "for it",
+        why: unread.length > 0
+          ? "this Backup's receipt digest could not be read (" + unread + "), so no recovery " +
+            "catalog point can be named for it"
+          : "this Backup records no receipt digest, so no recovery catalog point can be named " +
+            "for it",
       })
-      : await findSourceFacts(catalogReadersOf(api, s.ns, lifecycle), pointId, lifecycle);
+      : await findSourceFacts(readers, pointId, lifecycle);
   }
   if (!active(lifecycle)) {
     return false;

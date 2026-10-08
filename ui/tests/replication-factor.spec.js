@@ -1058,10 +1058,31 @@ test("prod051_a_backups_point_is_found_in_the_namespaces_catalogs_by_its_receipt
     } });
     assert.match(failing.sourceFacts.why,
       /recovery catalogs could not be read: served by the Logweir product API only/);
-    // NO DIGEST: nothing to look up.
+    // NO DIGEST ON THE LIST (the product API's list projection carries none):
+    // the run's own operation is read for it, once, and the point is found.
+    const listed = wizardState("team-p051-backup-listed");
+    const owned = [];
+    const viaOperation = readers([row]);
+    viaOperation.catalogReaders.ownVerdict = async (name) => {
+      owned.push(name);
+      return { verdict: null, receiptSha256: digest };
+    };
+    await refreshSourceFacts(listed, viaOperation);
+    assert.deepEqual(owned, [listed.point.metadata.name]);
+    assert.deepEqual(sourceReplicationFactorsOf(listed), [3, 1],
+      "NEGATIVE CONTROL: null -- the operation never read for the digest -- fails this");
+    // NO DIGEST ANYWHERE: nothing to look up, and said.
     const bare = wizardState("team-p051-backup-bare");
-    await refreshSourceFacts(bare, readers([row]));
+    const none = readers([row]);
+    none.catalogReaders.ownVerdict = async () => ({ verdict: null, receiptSha256: null });
+    await refreshSourceFacts(bare, none);
     assert.match(bare.sourceFacts.why, /records no receipt digest/);
+    const unreadState = wizardState("team-p051-backup-unread");
+    const refused = readers([row]);
+    refused.catalogReaders.ownVerdict = async () => { throw new Error("403 operationsRead"); };
+    await refreshSourceFacts(unreadState, refused);
+    assert.match(unreadState.sourceFacts.why,
+      /receipt digest could not be read \(403 operationsRead\)/);
     assert.ok(MAX_SOURCE_CATALOGS >= 1);
     assert.equal(SOURCE_FACTS_NOT_READ.topics, null);
   });

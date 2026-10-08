@@ -673,7 +673,7 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.19.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.20.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
 since FX-3, `1.3.0` since FX-8, or `1.4.0` since PROD-08.1). It
@@ -701,6 +701,7 @@ history is:
 | `1.17.0` | Knows scorecard format `1.2.0` (FX-3). Adds the five `topic_parity.not_reconstructed` arms (NR-1 to NR-5; NR-4 and NR-5 refuse a `newTopic` document carrying the field whose `intentionally_deviated` is not empty, or whose block omits a divergence on a setting the restore decides) and prints the reconstruction line. Refuses `topic_parity.intentionally_deviated` and `unexpected_divergence` that are not arrays of strings, and a `format_version` whose major Rust's integer parse refuses (`" 1.0.0"`, `"0_1.0.0"`): `drill verify` refused all of these while earlier versions printed `VALID`. Every other document without the new field is decided exactly as before. |
 | `1.18.0` | Knows scorecard format `1.3.0` (FX-8). Adds `source.time_basis`'s four arms (TB-1 to TB-4) and its shape check, and prints the `time basis:` lines for a scorecard and, for a backup receipt, one per topic it records as `LogAppendTime`. Every document without the block is decided exactly as before. |
 | `1.19.0` | Knows scorecard format `1.4.0` (PROD-08.1). Adds `integrity.verification`'s seven arms (IV-1 to IV-7), its shape check and the domain of its 25 nested counts (24 refuse null), and prints the `integrity coverage:` lines. Every blank test (ruling R-A) now strips exactly the set Rust's `trim` strips: before, a reason, key, mode or marker made only of U+001C–U+001F was blank here and not in `logweir drill verify`, so the two readers split on it (the writer never produces one). Apart from such a value, every document without the block is decided exactly as before. |
+| `1.20.0` | Knows backup-receipt and catalog-point format `1.3.0` (PROD-05.1). Adds the backup receipt's eight `topic_configuration` arms (12–19), their shape check (the counts are `u32`, an entry's value a string or absent) and the `topic_configuration` lines: per topic the recorded partition count, replication factor, entry counts by portability class and the apply route — never a configuration value. Every document without the block is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
@@ -709,6 +710,11 @@ reports `run_id`. Both refuse; this is not an acceptance disagreement.
 A verifier older than `1.18.0`, and a `logweir` built before FX-8, accept a
 1.3.0 scorecard — the major is unchanged — ignore `source.time_basis`, check
 none of its four arms and print no time-basis line.
+
+A verifier older than `1.20.0`, and a `logweir` built before PROD-05.1, accept a
+1.3.0 backup receipt or catalog point: they ignore `topic_configuration` (and the
+record's `topics[].configuration`), check none of arms 12 to 19 and print no
+model line.
 
 A verifier older than `1.19.0`, and a `logweir` built before PROD-08.1, accept a
 1.4.0 scorecard the same way: they ignore `integrity.verification`, check none

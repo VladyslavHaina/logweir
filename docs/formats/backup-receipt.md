@@ -3,13 +3,15 @@
 `application/vnd.logweir.backup-receipt+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-backup-receipt-1.2.0.json`](../../schemas/logweir-backup-receipt-1.2.0.json)
+[`schemas/logweir-backup-receipt-1.3.0.json`](../../schemas/logweir-backup-receipt-1.3.0.json)
 and CI regenerates it from the Rust type and `diff -u`s it against the checked-in
 file on every build, so this document and the schema cannot drift apart
 silently. A MINOR bump is a new schema file beside the old one: the
+[`1.2.0` schema](../../schemas/logweir-backup-receipt-1.2.0.json), which
+describes every pinned receipt written before PROD-05.1 (FX-7's format), the
 [`1.1.0` schema](../../schemas/logweir-backup-receipt-1.1.0.json), which
-describes every receipt written without the manifest-version pin (FX-4's
-format), and the [`1.0.0` schema](../../schemas/logweir-backup-receipt-1.0.0.json),
+describes every unpinned receipt written before PROD-05.1 (FX-4's format), and
+the [`1.0.0` schema](../../schemas/logweir-backup-receipt-1.0.0.json),
 which describes every receipt written before format 1.1.0, are FROZEN beside it
 and never regenerated. The payload type keeps `version=1.0.0`: it names the
 major-1 envelope, and a new value would make every existing reader refuse every
@@ -240,11 +242,68 @@ topic, because the covered window above is that topic's PRODUCER time.
 **What `captured` does not claim.** That every setting of the topic was
 archived: overrides outside the engine's allowlist (`local.retention.ms`, a
 provider-specific key) are never part of the claim. Which settings are portable
-and how they are applied is PROD-05.1 and 05.2.
+is [`topic_configuration`](#topic_configuration--the-topic-configuration-model-format-130)
+below; how they are applied is PROD-05.2.
 
 ---
 
-## The eleven arms
+## `topic_configuration` — the topic configuration model (format 1.3.0)
+
+**Why it exists (PROD-05.1).** A restore used to rebuild a topic from the
+manifest's partition count and nothing else: the source's replication factor,
+its settings and whether something outside Kafka manages it were not part of
+any signed document. This block records them per named topic, so a recovery
+point says what the topic WAS and what of it can be carried to a target.
+
+An object keyed by topic name, **one entry per `source.topics` entry and no
+others** (arm 14), always beside `config_coverage` (arm 13):
+
+```json
+"topic_configuration": {
+  "orders": {
+    "partitions": 6,
+    "replication_factor": 3,
+    "entries": {
+      "cleanup.policy":      { "value": "compact",   "source": "dynamicTopicConfig", "portability": "portable" },
+      "min.insync.replicas": { "value": "2",         "source": "dynamicTopicConfig", "portability": "portable" },
+      "retention.ms":        { "value": "604800000", "source": "defaultConfig",      "portability": "inherited" }
+    },
+    "owner": { "kind": "strimzi", "basis": "kafkaTopicResource", "reference": "kafka/orders" }
+  },
+  "payments": { "partitions": 1, "replication_factor": 1 }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `partitions` | integer ≥ 1, optional | The source's partition count as the archive manifest records it — the count a restore creates the topic with. Absent: not recorded. |
+| `replication_factor` | integer ≥ 1, optional | The source's replication factor: `logweir backup run`'s own metadata read before the engine (the smallest replica count of the topic's partitions), and the manifest's only where that read named none — the pinned engine keeps it in the manifest for the first topic it saves only ([why](../to-do/decisions/PROD-05.1-configuration-model.md#5-the-replication-factor-an-engine-defect-measured)). Absent: not recorded. |
+| `entries` | object, optional | The configuration entries Logweir's own read returned (FX-4's read, before the engine): every explicit override, and the effective value of each semantic key. **Present exactly when that read succeeded** (arm 15): absent for `captureDenied` and `describeFailed`, which is NOT RECORDED — never "no configuration". |
+| `entries.<key>.value` | string, optional | The value in force. **Absent exactly when `portability` is `secret`** (arm 17): a sensitive entry is recorded by key, never by value. |
+| `entries.<key>.source` | string | `config_coverage`'s six sources (arm 16). |
+| `entries.<key>.portability` | string | `portable`, `inherited`, `removedInKafka4`, `clusterBound`, `requiresTieredStorage`, `providerOnly` or `secret` (arm 16); `inherited` exactly when the source is not `dynamicTopicConfig` (arm 17). |
+| `owner.kind` | string | `strimzi` or `external`. |
+| `owner.basis` | string | `kafkaTopicResource` (a Strimzi `KafkaTopic` named the topic; `strimzi` only) or `declared` (the plan's `source.topic_owners`). |
+| `owner.reference` | string, 1–256 characters | Where the desired state lives: the `KafkaTopic`'s `namespace/name`, or the plan's words. Never a credential. |
+
+**The classes, the measured table and what a restore does with each** are in
+the [decision record](../to-do/decisions/PROD-05.1-configuration-model.md): the
+36 topic keys Apache Kafka 3.9 defines and the 33 of 4.x, each with its
+`CreateTopics validate_only` verdict on both lines. A class is the writer's at
+write time; the arms judge it against its source and value, never its key.
+
+**Owners.** `logweir backup run --kafka-topic-resources <file>
+[--strimzi-cluster <name>]` reads Strimzi `KafkaTopic` resources (`kubectl get
+kafkatopics -A -o yaml`): a resource labelled `strimzi.io/cluster` (that
+cluster, when named), not annotated `strimzi.io/managed: "false"`, owns the
+topic its `spec.topicName` (else its name) names. The plan's
+`source.topic_owners` declares owners itself; phase −1 refuses, exit 3, a
+declaration naming an unplanned topic, another kind or an unusable reference,
+and a declaration wins over a resource for the same topic.
+
+---
+
+## The nineteen arms
 
 `logweir_core::backup_receipt::BackupReceipt::validate_invariants` implements
 these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
@@ -252,13 +311,13 @@ them ARM FOR ARM, IN ORDER. The messages below are the **exact** refusal text of
 BOTH readers — compared byte-for-byte by
 `crates/logweir-core/tests/backup_receipt.rs` (`backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message`
 over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` over arm 5,
-one `arm_N_…` test per arm 6–11, and
-`validate_invariants_has_exactly_eleven_return_err_statements` over the total),
+one `arm_N_…` test per arm 6–19, and
+`validate_invariants_has_exactly_nineteen_return_err_statements` over the total),
 by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
-over the eighteen documents in `e2e/fixtures/invariants/backup-receipt-index.json`,
+over the twenty-nine documents in `e2e/fixtures/invariants/backup-receipt-index.json`,
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
-from both readers' source and refuses to balance if they are not the same eleven
+from both readers' source and refuses to balance if they are not the same nineteen
 arms in the same order.
 
 Arms 6–11 read `config_coverage` and NOTHING ELSE, and run only when it is
@@ -266,6 +325,12 @@ present — so every receipt without it, which is every receipt written before
 1.1.0, is accepted or refused exactly as before. Within the block, topics are
 visited in name order and arms 8–11 run per topic, in order; the 1.0.0 arms
 always run first.
+
+Arms 12–19 run only when `topic_configuration` is present, after arms 1–11,
+and judge it against `config_coverage` and `source.topics` — so every receipt
+without it, which is every receipt written before 1.3.0, is decided exactly as
+before. Topics in name order; per topic arm 15, then arms 16 and 17 per entry in
+key order, then 18 and 19.
 
 1. **`format_version` parses as semver and its major is `1`.** Checked first, so
    a document from a future major is refused before any other arm is evaluated
@@ -339,6 +404,43 @@ always run first.
 
     > `config_coverage["orders"].timestamp_type "LogAppendTime" from "DYNAMIC_DEFAULT_BROKER_CONFIG" is not a value and source this format defines: the value is "CreateTime" or "LogAppendTime", and the source is "dynamicTopicConfig", "dynamicBrokerConfig", "dynamicDefaultBrokerConfig", "staticBrokerConfig", "defaultConfig" or "unknown"`
 
+12. **`topic_configuration` is present only under a minor of at least 3.**
+
+    > `topic_configuration is present but format_version "1.2.0" predates it: the field is defined from 1.3.0`
+
+13. **`topic_configuration` is present only beside `config_coverage`**, the read
+    its entries are judged against.
+
+    > `topic_configuration is present under format_version "1.3.0" but config_coverage is not: a topic's configuration entries cannot be judged without the read that produced them`
+
+14. **`topic_configuration` covers exactly `source.topics`** — arms 3 and 7's twin.
+
+    > `topic_configuration covers {"orders"} but the named topic set is {"orders", "payments"}`
+
+15. **`entries` are present exactly when the topic's configuration read
+    succeeded** (`captured`, or `notCaptured` with `manifestDiffers`). The
+    coverage is rendered with its reason, `"notCaptured/describeFailed"`.
+
+    > `topic_configuration["payments"].entries present does not fit its config_coverage "captureDenied": entries are recorded exactly when the configuration read succeeded ("captured", or "notCaptured" with reason "manifestDiffers")`
+
+16. **Every entry's source and class are from the closed sets.**
+
+    > `topic_configuration["orders"].entries["segment.ms"] source "dynamicTopicConfig" and portability "portableish" are not a source and class this format defines: the source is "dynamicTopicConfig", "dynamicBrokerConfig", "dynamicDefaultBrokerConfig", "staticBrokerConfig", "defaultConfig" or "unknown", and the class is "portable", "inherited", "removedInKafka4", "clusterBound", "requiresTieredStorage", "providerOnly" or "secret"`
+
+17. **A `secret` carries no value and nothing else lacks one; otherwise
+    `inherited` is exactly a value the topic did not set itself.** A broker
+    default passed off as the topic's portable override is refused here.
+
+    > `topic_configuration["orders"].entries["retention.ms"] is "portable" from "defaultConfig" with a value: an entry is "secret" exactly when it carries no value, and otherwise "inherited" exactly when its source is not "dynamicTopicConfig"`
+
+18. **An `owner` is from the closed sets, with a usable reference.**
+
+    > `topic_configuration["payments"].owner "external" by "kafkaTopicResource" is not an owner this format defines: the kind is "strimzi" or "external", the basis is "kafkaTopicResource" (for "strimzi" only) or "declared", and the reference is 1 to 256 characters with no control character`
+
+19. **A recorded partition count or replication factor is at least 1.**
+
+    > `topic_configuration["orders"] records partitions 6 and replication_factor 0: a recorded count is at least 1`
+
 A block that serde itself cannot read — a `timestamp_type` without its `source`,
 a `coverage` that is not a string — is refused before any arm by both readers
 (`drill verify` exits 1 with serde's message; `verify_scorecard.py` exits 1 with
@@ -377,10 +479,11 @@ would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
 > **What each reader checks today, stated plainly rather than implied.** Both
-> readers run **all eleven arms above** over a `--payload-type
-> backup-receipt` document; arms 1–5 arrived together in Task 5b and arms 6–11
-> together in FX-4, so the two readers never disagreed in between.
-> `logweir drill verify` prints `checked:   the signature AND all eleven
+> readers run **all nineteen arms above** over a `--payload-type
+> backup-receipt` document; arms 1–5 arrived together in Task 5b, arms 6–11
+> together in FX-4 and arms 12–19 together in PROD-05.1, so the two readers
+> never disagreed in between.
+> `logweir drill verify` prints `checked:   the signature AND all nineteen
 > backup-receipt invariants …`; `docs/verify_scorecard.py` prints `verifier:
 > verify_scorecard.py <SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both also print
 > the configuration capture coverage in the same words, one
@@ -388,7 +491,12 @@ would break every existing invocation, every document and
 > <value> from <source>` line per topic — or `config_coverage: not recorded, so
 > every topic's configuration capture is UNKNOWN, never captured`, for every
 > receipt without the block — and `scripts/check-verifier-parity.sh` compares those lines
-> between the two readers on every accepted receipt. Both print a pinned
+> between the two readers on every accepted receipt. Both print the topic
+> configuration model in the same words, one `topic_configuration["<topic>"]:
+> partitions <n>, replication factor <n>, <n> entries (<class> <count>, …),
+> <route>` line per topic — counts and classes, never a value — or
+> `topic_configuration: not recorded, …` for a receipt without the block, and
+> the parity script compares those lines too. Both print a pinned
 > `archive.manifest_version_id` when the receipt carries one (`manifest version:`
 > and `manifest_version_id=`), and both refuse one that is not a string — Rust
 > at deserialisation, the script in its shape layer (FX-7; verdict parity in
@@ -406,7 +514,7 @@ would break every existing invocation, every document and
 > `crates/logweir/tests/cli_verify.rs::the_signature_only_verdict_is_still_reachable`
 > keeps it honest.
 >
-> **Where else the arms are enforced — all eleven since 1.1.0.** At the two places a receipt is
+> **Where else the arms are enforced — all of them, at each version.** At the two places a receipt is
 > WRITTEN: `crates/logweir-evidence/examples/mint_backup_receipt_fixture.rs`
 > validates before it signs, and `logweir backup run` validates the exact
 > document it is about to sign before it signs or uploads anything
@@ -728,6 +836,27 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema` and
   `notCaptured` (`manifestDiffers`), because the engine's capture is
   all-or-nothing and its record for them is empty. Measured on the compose
   stack in `e2e/tests/config_coverage.rs`.
+
+## Upgrade, rollback and old receipts (format 1.3.0)
+
+- **Every receipt this build signs carries `topic_configuration`, at 1.3.0**,
+  pinned or not; an unpinned one still has no `manifest_version_id` key. The
+  payload type keeps `version=1.0.0`.
+- **Readers built before PROD-05.1 accept 1.3.0 receipts** and ignore the
+  block: they compare majors only, arms 6 and 10 read the 1.3 minor as at least
+  1, and no receipt type refuses an unknown field (measured: script 1.19.0 over
+  1.3.0 receipts in `crates/logweir/tests/receipt_dup.rs` before the Python arms
+  existed, and the parity gate's older-reader rows). They print no model, so an
+  auditor who needs it verifies with script 1.20.0 or a `logweir` built from
+  PROD-05.1 on.
+- **Old receipts are never reinterpreted.** A receipt before 1.3.0 records no
+  configuration model; a reader then knows none, and a restore says so.
+- **Rollback.** An older `logweir backup run` writes 1.1.0 or 1.2.0 receipts
+  again; the 1.3.0 receipts already written stay valid under every major-1
+  reader.
+- **Permissions.** Nothing new: the replication factor comes from the same
+  metadata the run already reads (`Describe`), and the entries from FX-4's
+  `DescribeConfigs` read.
 
 ## Upgrade, rollback and old receipts (format 1.2.0)
 

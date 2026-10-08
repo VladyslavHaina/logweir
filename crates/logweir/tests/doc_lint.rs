@@ -1981,6 +1981,9 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         // PROD-08.1 (2026-10-07): complete coverage, and what every 1.4.0
         // scorecard says its verdict covered.
         ("complete coverage", "coverage: complete"),
+        // PROD-05.1 (2026-10-08): every receipt records each topic's
+        // configuration model, and the console defaults from it.
+        ("the topic configuration model", "topic_configuration"),
     ];
     assert_eq!(
         items.len(),

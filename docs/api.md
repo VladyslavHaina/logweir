@@ -174,7 +174,7 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/catalogs` | Recovery catalogs: ten verdict counts, the signer list, and whether the Kubernetes view is a window over a larger archive. |
 | `POST /api/v1/namespaces/{ns}/catalogs` | Connect an existing archive: create a `RecoveryCatalog` **under the name in the body**, because every protection, rehearsal and retention policy references it by that name. |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}` | One catalog. |
-| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns. |
+| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns, and, for an `Available` point recorded from receipt format 1.3.0, its topics' recorded partition count, replication factor, configuration coverage, owner kind and apply route (`topics[]`; absent is not published, never "no topics"). |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}/signers` | The untrusted-signer panel: key ids, point counts, whether the bound policy accepts each one, and the out-of-band fingerprint command. |
 | `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` | Retention: what the last evaluation would remove, what is **actually** enforcing it, which guarantees are in force and by whom, where the approved-plan gate stands, and whether enforcement has degraded. |
 | `GET /api/v1/trust-policies[/{name}]` | The installation's trust policies. **Cluster-scoped** and administrator-only; `unknown` is not `valid`. |

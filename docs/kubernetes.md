@@ -1559,9 +1559,14 @@ no configuration is reconstructed by hand.**
    `VerifiedHistorical`, joined server side with the namespace's `Backup`
    verdicts (`backupVerdict`) — the verdict join is complete
    (`backupVerdictsIncomplete` absent), and the row carries an unredacted
-   receipt key and both digests. The operator names the topics to restore: the
-   view does not publish a point's topic list, and the readiness check reads the
-   manifest for exactly those names.
+   receipt key and both digests. The operator names the topics to restore, and
+   the readiness check reads the manifest for exactly those names. Since
+   PROD-05.1 the view lists an `Available` point's topics with their recorded
+   partition count and replication factor (`PointView.topics[]`, for points
+   whose receipt is format 1.3.0); the wizard defaults the plan's replication
+   factor from them, capped at the target's broker count, and says so. The
+   operator still types the list: a listed topic set is not yet offered as a
+   choice.
 5. **The plan is bound to the point.** It carries `source.backup: <backupId>`
    and `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`;
    the restore point in time defaults to `coveredTo − 1 ms` (the catalog's end
@@ -8537,8 +8542,10 @@ exits 1 instead of assuming the broker is on `CreateTime`.
 
 A `Backup`'s source credential needs DescribeConfigs on every backed-up topic
 for the receipt to record the topic's configuration as `captured`. Without it
-the backup still succeeds, the topic reads `captureDenied`, and a later
-restore's configuration parity names that topic as not assessed
+the backup still succeeds, the topic reads `captureDenied`, its configuration
+model records no settings (only its partition count and replication factor,
+[`topic_configuration`](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130)),
+and a later restore's configuration parity names that topic as not assessed
 ([the receipt field](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
 
 ### 21.7 Skipping a check is not answering it
