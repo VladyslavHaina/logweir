@@ -212,7 +212,8 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 2 | PROD-03.0 | Flag schema-dependent topics | P1 | M2 | impl | — | — | compose | A | Proposed |
 | 2 | PROD-04.2 | Translate positions; reviewed cutover | P1 | M2 | impl | 04.1, 08.1 | — | k8s | A | Proposed |
 | 2 | PROD-05.2 | Apply a reviewed target topic configuration | P1 | M2 | impl | 05.1, 08.1 | — | k8s | A | Proposed |
-| 2 | PROD-11.1 | Replay selection and safe clones | P1 | M2 | impl | 01.1, 08.1 | — | k8s | A | Proposed |
+| 2 | PROD-11.1 | Replay selection and safe clones | P1 | M2 | impl | 01.1, 08.1 | — | k8s | A | In progress |
+| 2 | PROD-11.1a | Safe clones (declared TTL and cleanup of only this execution's targets, `AllowedClusters`, explicit header handling) and the console's advanced selection behind an explicit choice, reusing PLAT-11.2's preview | P1 | M2 | impl | 11.1 | — | k8s | A | Proposed |
 | 2 | PROD-15.1 | Restore under the original name into an absent topic | P1 | M2 | impl | 01.4 | OD-2 | k8s | A | Proposed |
 | 3 | PROD-00.3 | Engine capabilities by route (child rows) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
 | 3 | PROD-00.3a | Committed-only capture (control records and READ_COMMITTED) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
