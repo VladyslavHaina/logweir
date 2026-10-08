@@ -128,6 +128,29 @@ just e2e-up && bash scripts/demo.sh && just pitr
 just e2e-down && just e2e-up && just mvp-demo && just e2e-down
 ```
 
+## Which engine runs
+
+The compose stack's `kafka-backup` service is OSO's released image at the
+pinned digest (`.env`'s `OSO_DIGEST`), and it seeds the drill archive. Every
+engine run through `logweir` — drills, `logweir backup run`, G-PITR,
+record semantics — is `harness::engine_bin()`: `.engine/kafka-backup` where it
+executes (CI's e2e job builds Logweir's engine there with
+`scripts/engine-source.sh build`), else `e2e/fixtures/engine-docker.sh`. The
+shim runs OSO's pinned image under `linux/amd64` by default; set
+`LOGWEIR_E2E_ENGINE_IMAGE` and `LOGWEIR_E2E_ENGINE_PLATFORM` together to run
+another image's engine, such as the runner image's Logweir build natively on
+an arm64 host (PROD-00.2):
+
+```sh
+eval "$(e2e/compose/stack-env.sh --slot 1)"
+LOGWEIR_E2E_ENGINE_IMAGE=logweir:check LOGWEIR_E2E_ENGINE_PLATFORM=linux/arm64 \
+  cargo test -p e2e --features e2e --test pitr_boundary -- --test-threads=1
+```
+
+`engine_version()` reads the engine's own `--version`, and `engine_digest()`
+names Logweir's build-input digest for a `+logweir.` version and OSO's image
+digest otherwise, so a signed document always names the engine that ran.
+
 ## Optional profiles
 
 `--profiles a,b` (or `COMPOSE_PROFILES=a,b`) adds profiles to the stack.

@@ -180,7 +180,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-nine operator-facing changes
+### The thirty operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -1382,6 +1382,52 @@ console ignore the marker: every unbound namespace is `legacy-governed-v1` again
 and a pending confirmation under `default-confirm-v1` is refused
 `ApprovalPolicyMismatch` — fail closed. The installation `TrustPolicy`, both key
 Secrets and their public ConfigMaps stay.
+
+#### 30. The engine is Logweir's build of `kafka-backup` 0.23.3, for amd64 and arm64; the images are signed (PROD-00.2)
+
+**Changed.** The runner image's engine is no longer OSO's released binary. It
+is **Logweir's build of the vendored OSO 0.23.3 source** (OD-3): the tarball is
+checked against its checksum, Logweir's ordered patch folder
+(`third_party/kafka-backup-patches/`) is applied and the engine is compiled
+`--locked` for **linux/amd64 and linux/arm64**, so the runner image, like the
+other three, now has an arm64 variant. `kafka-backup --version` prints
+`kafka-backup 0.23.3+logweir.1`, which `logweir doctor` accepts exactly; OSO's
+own `0.23.3` is named as OSO's release and passes only as the declared
+rollback. The first patch is a lockfile-only bump of three dependencies the
+engine's new `cargo deny` gate found in its shipped graph: rustls 0.23.45
+(RUSTSEC-2026-0285), h2 0.4.19 (RUSTSEC-2026-0258) and spin 0.9.9 (0.9.8 was
+yanked). Engine vulnerabilities are now in `SECURITY.md`'s scope. The image
+declares its engine in `/etc/logweir/engine-identity`, and every scorecard and
+receipt signs that declaration ahead of a Job's `LOGWEIR_ENGINE_VERSION`/
+`LOGWEIR_ENGINE_DIGEST`: new documents say `engine.version: 0.23.3+logweir.1`
+and an `engine.digest` that is Logweir's build-input digest
+(`third_party/kafka-backup-build.env`), not an image digest. From the first
+`main` publication after the merge, CI signs all four images keylessly,
+attests the runner's SBOM and records SLSA provenance.
+**Do:** roll the controller and the runner image together, as before (the
+controller stamps the new identity into every Job; an image that declares its
+engine is signed under its own declaration either way). Verify a digest before
+deploying it with the pinned commands in [install.md](install.md#verify-the-images),
+never with an identity regular expression. A standalone CLI install replaces
+its engine with Logweir's build (copy it out of the runner image, or
+`scripts/engine-source.sh build`) and exports the new
+`LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1` and digest
+([quickstart.md](quickstart.md), step 4). On arm64 nodes, runner Jobs now run
+natively. The identity bootstrap image pinned in the chart predates this
+change and stays amd64-only until it is re-pinned.
+**Scope:** ⟨PARITY⟩
+**Rollback:** for one release, OSO's released binary stays buildable:
+`docker build --platform linux/amd64 --build-arg ENGINE_SOURCE=oso` produces a
+runner that carries it and declares OSO's identity, so its scorecards and
+receipts name OSO's 0.23.3 and its image digest
+([install.md](install.md#rolling-the-engine-back)); set `runnerImage` to it.
+It is amd64-only. An older controller and runner pair runs OSO's 0.23.3 again
+and its `doctor` refuses `0.23.3+logweir.1`. Archives are unaffected in either
+direction: patch 0001 changes no source file, so the segment format and the
+manifest are OSO 0.23.3's. Measured: every parity drill restored, with
+Logweir's build, an archive OSO's binary wrote. The reverse (an archive
+Logweir's build wrote, restored by OSO's binary) is reasoned from that
+identity of source, not run.
 
 ### Verification scope: what "verified" means in this release
 
