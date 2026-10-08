@@ -1069,14 +1069,30 @@ the check and the write. The write then refuses, and because an earlier role may
 already be live the message names the Secrets that **were** created and says
 they must be deleted before a retry, rather than claiming nothing changed.
 
-**The request hash on the object is salted.** Every durable create records
-`api.logweir.dev/request-sha256`. For a destination that request contained an
-entered credential, so the hash is taken over the idempotency scope as well as
-the body: the scope is derived from your `Idempotency-Key`, which is never
-stored or published, and without it the annotation cannot be recomputed from the
-object's public projection. (An object created by an API build older than this
-one carries the unsalted hash and will replay as `409 idempotency_conflict`;
-nothing is deployed yet, so no such object exists outside a test.)
+**No digest covers a credential value.** Every durable create records
+`api.logweir.dev/request-sha256` and `api.logweir.dev/idempotency-scope-sha256`
+on the object, and the same two hashes in its audit record and its `created`
+log line. Both are readable by anyone who may `get` the object — the chart's
+`logweir-viewer` included — and the scope digest is one of them, so it is no
+salt: a hash taken over an entered credential would let such a reader confirm a
+guessed password or secret key offline. So the request is hashed **without**
+its credential values: every write-only field (`auth.credential.*` on a
+connection, `access.<role>.secret.new.*` on a destination) is replaced by the
+constant `<write-only>` before hashing, and two requests that differ only in a
+credential value have identical digests
+(`crates/logweir-api/tests/credential_digests.rs`).
+
+The consequence for retries: **a credential value is not part of a create's
+identity.** A retry under the same `Idempotency-Key` that changes only the
+value replays the first create, with the credential the first attempt wrote; a
+different credential is a new connection or destination, under a new key. An
+object created by an older API build carries a request hash taken over the
+value and replays as `409 idempotency_conflict` (retry with a new key). For a
+destination created with `secret.new` before this build, the old
+`api.logweir.dev/request-sha256` is still a verifier of its secret access key:
+remove it (`kubectl annotate backupdestination <name>
+api.logweir.dev/request-sha256-`), which costs nothing but the replay of that one
+create, or rotate the key.
 
 ### Bounded, honest topic inventory
 

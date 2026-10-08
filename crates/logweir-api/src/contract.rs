@@ -219,7 +219,15 @@ pub struct TlsCaRequest {
 /// Secret: a connection that could name any Secret in the namespace could make
 /// Logweir present another team's credential to a broker of its author's
 /// choosing.
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+///
+/// **IT SERIALIZES WITHOUT ITS VALUES.** `Serialize` is hand-written: every present field becomes
+/// [`WRITE_ONLY_PLACEHOLDER`]. The request DTO is serialized to compute the
+/// idempotency digests this service publishes on the object
+/// (`api.logweir.dev/request-sha256`) and writes into the audit record, and a
+/// digest over a password is an offline confirmation oracle for anyone who
+/// can read the object. With the placeholder, no serialization of this type
+/// — a digest, an audit field, a future debug dump — can carry a value.
+#[derive(Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NewConnectionCredentialRequest {
     /// The SASL password — `scramSha512`, `scramSha256` and `plain`.
@@ -238,6 +246,30 @@ pub struct NewConnectionCredentialRequest {
 impl std::fmt::Debug for NewConnectionCredentialRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("NewConnectionCredentialRequest(<redacted>)")
+    }
+}
+
+/// What every write-only credential field serializes as (PROD-01.3 fix round,
+/// review F1). A constant, so a digest over a serialized request says WHICH
+/// credential fields were entered and nothing about their values: two
+/// requests that differ only in a credential value serialize — and hash —
+/// identically.
+pub const WRITE_ONLY_PLACEHOLDER: &str = "<write-only>";
+
+/// A present write-only field as the placeholder, an absent one as `null` —
+/// the shape the derived `Serialize` gave it, without the value.
+fn write_only(value: Option<&String>) -> Option<&'static str> {
+    value.map(|_| WRITE_ONLY_PLACEHOLDER)
+}
+
+impl Serialize for NewConnectionCredentialRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("NewConnectionCredentialRequest", 3)?;
+        out.serialize_field("password", &write_only(self.password.as_ref()))?;
+        out.serialize_field("certificatePem", &write_only(self.certificate_pem.as_ref()))?;
+        out.serialize_field("privateKeyPem", &write_only(self.private_key_pem.as_ref()))?;
+        out.end()
     }
 }
 
@@ -1634,7 +1666,11 @@ pub struct TransportRequest {
 /// any response, log line, status, annotation or audit record. The Secret is
 /// created and never read back; the only thing that comes out of this field is
 /// a Secret NAME.
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+///
+/// **IT SERIALIZES WITHOUT ITS VALUES**, for the reason
+/// [`NewConnectionCredentialRequest`] gives: the destination create's published
+/// `request-sha256` was the same oracle for an entered secret access key.
+#[derive(Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NewCredentialRequest {
     /// The access key id.
@@ -1651,6 +1687,17 @@ pub struct NewCredentialRequest {
 impl std::fmt::Debug for NewCredentialRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("NewCredentialRequest(<redacted>)")
+    }
+}
+
+impl Serialize for NewCredentialRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("NewCredentialRequest", 3)?;
+        out.serialize_field("accessKeyId", WRITE_ONLY_PLACEHOLDER)?;
+        out.serialize_field("secretAccessKey", WRITE_ONLY_PLACEHOLDER)?;
+        out.serialize_field("sessionToken", &write_only(self.session_token.as_ref()))?;
+        out.end()
     }
 }
 

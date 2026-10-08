@@ -9095,7 +9095,7 @@
         }
       },
       "NewConnectionCredentialRequest": {
-        "description": "**PROD-01.3 security follow-up: the credential, typed ONCE.**\n\nWRITE-ONLY. The value becomes a Secret this service creates — owned by the connection, bound to it (`logweir-binding`) — and is never echoed in any response, log line, status, annotation or audit record; the only thing that comes out of it is the Secret's NAME. This replaces naming an existing Secret: a connection that could name any Secret in the namespace could make Logweir present another team's credential to a broker of its author's choosing.",
+        "description": "**PROD-01.3 security follow-up: the credential, typed ONCE.**\n\nWRITE-ONLY. The value becomes a Secret this service creates — owned by the connection, bound to it (`logweir-binding`) — and is never echoed in any response, log line, status, annotation or audit record; the only thing that comes out of it is the Secret's NAME. This replaces naming an existing Secret: a connection that could name any Secret in the namespace could make Logweir present another team's credential to a broker of its author's choosing.\n\n**IT SERIALIZES WITHOUT ITS VALUES.** `Serialize` is hand-written: every present field becomes [`WRITE_ONLY_PLACEHOLDER`]. The request DTO is serialized to compute the idempotency digests this service publishes on the object (`api.logweir.dev/request-sha256`) and writes into the audit record, and a digest over a password is an offline confirmation oracle for anyone who can read the object. With the placeholder, no serialization of this type — a digest, an audit field, a future debug dump — can carry a value.",
         "type": "object",
         "properties": {
           "certificatePem": {
@@ -9120,7 +9120,7 @@
         "additionalProperties": false
       },
       "NewCredentialRequest": {
-        "description": "A credential value typed once.\n\nWRITE-ONLY. These bytes are turned into a Secret and are never echoed, in any response, log line, status, annotation or audit record. The Secret is created and never read back; the only thing that comes out of this field is a Secret NAME.",
+        "description": "A credential value typed once.\n\nWRITE-ONLY. These bytes are turned into a Secret and are never echoed, in any response, log line, status, annotation or audit record. The Secret is created and never read back; the only thing that comes out of this field is a Secret NAME.\n\n**IT SERIALIZES WITHOUT ITS VALUES**, for the reason [`NewConnectionCredentialRequest`] gives: the destination create's published `request-sha256` was the same oracle for an entered secret access key.",
         "type": "object",
         "required": [
           "accessKeyId",
