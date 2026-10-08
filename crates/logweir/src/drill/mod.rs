@@ -3012,6 +3012,9 @@ fn execute_with_validated_approval(
             &admitted.topic_mapping,
             &plan,
             &c.source_config_coverage,
+            // FX-3: the spec's mode, the one `target_info` signs as
+            // `target.mode`, decides `intended` versus `not_reconstructed`.
+            c.spec.target.mode,
         )
     })?;
     sc.integrity = verified.integrity.clone();
@@ -3670,6 +3673,9 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             // an earlier phase failed has not assessed any configuration, and
             // `Some(vec![])` would claim it had assessed every topic.
             not_assessed: None,
+            // The same for FX-3's field: `Some(vec![])` would claim phase 7
+            // found nothing left unreconstructed.
+            not_reconstructed: None,
         },
         engine_subreport: None,
         // All four zeroed; `phase8_score::run` zeroes them again immediately

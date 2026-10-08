@@ -1626,6 +1626,12 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// count heading and the upgrade path in *Migration and rollback* each list
 /// the product-expansion items by number; an item added without them made
 /// all three false while every pin here stayed green.
+///
+/// Then to twenty-four: item 24 is FX-3's scorecard change, a `newTopic`
+/// restore's not-reconstructed source settings. Its token is the new field's
+/// name, so an item 24 that stops naming what an operator reads after a
+/// restore fails here, and the notes at main `19b5ecd9`, with twenty-three
+/// items, fail the twenty-four pin (FX-3 fix round, 2026-10-07).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1651,9 +1657,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=23).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-three operator-facing changes, `#### 1.` \
-         to `#### 23.` in order; found {numbers:?}"
+        (1..=24).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-four operator-facing changes, `#### 1.` \
+         to `#### 24.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1703,6 +1709,12 @@ fn the_release_notes_carry_every_owed_operator_action() {
         (
             "two inert policy values withdrawn",
             "WITHDRAWN VALUES ARE SET AND IGNORED",
+        ),
+        // FX-3 (2026-10-05): a newTopic restore's scorecard names the source
+        // settings it did not reconstruct, never "intended".
+        (
+            "not-reconstructed source settings",
+            "topic_parity.not_reconstructed",
         ),
     ]) {
         assert!(

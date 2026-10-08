@@ -40,6 +40,13 @@ pub const S3_PORT: &str = "LOGWEIR_E2E_S3_PORT";
 /// (restricted) host ports.
 pub const ACL_PORT: &str = "LOGWEIR_E2E_ACL_PORT";
 pub const ACL_SASL_PORT: &str = "LOGWEIR_E2E_ACL_SASL_PORT";
+/// Profile `cluster3` (FX-3 is its first Rust reader): the three nodes'
+/// host-side PLAINTEXT ports, each advertised as `localhost:<port>`.
+pub const C3_PORTS: [&str; 3] = [
+    "LOGWEIR_E2E_C3_1_PORT",
+    "LOGWEIR_E2E_C3_2_PORT",
+    "LOGWEIR_E2E_C3_3_PORT",
+];
 
 /// One row of the list: a published host port's variable, its default, and
 /// the optional profile that publishes it (`None` for the always-on services).
@@ -294,6 +301,17 @@ pub fn bootstrap_acl() -> String {
 /// bootstrap, where `logweir` is the RESTRICTED principal a row's ACLs name.
 pub fn bootstrap_acl_sasl() -> String {
     format!("localhost:{}", port(ACL_SASL_PORT))
+}
+
+/// Profile `cluster3`: the three-node cluster's host-side PLAINTEXT
+/// bootstrap, all three nodes, comma-separated (replication factor 3 and
+/// `min.insync.replicas` 2 by default).
+pub fn bootstrap_c3() -> String {
+    C3_PORTS
+        .iter()
+        .map(|var| format!("localhost:{}", port(var)))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// A per-stack scratch directory under `base` (relative to the workspace

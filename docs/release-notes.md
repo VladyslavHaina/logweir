@@ -20,8 +20,8 @@ mark without one). The supported path these notes assume is
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
-published image. Items 21 (FX-2), 22 (FX-5) and 23 (FX-10), from the
-product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do
+published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10) and 24 (FX-3), from
+the product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do
 FX-7's additions to item 11 (the execution-claim set check, receipt and
 catalog format 1.2.0, the pin's read by version id) and FX-4's format 1.1.0,
 which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
@@ -179,7 +179,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-three operator-facing changes
+### The twenty-four operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -191,6 +191,8 @@ tracker's fix-now rows FX-2 and FX-5 and are not proven live yet: the PoC
 upgrade that carries each runs its rows. Item 23 is fix-now row FX-10, proven
 offline; the PoC upgrade that carries it checks that the PoC's policy
 document and its digest are unchanged (the PoC sets neither withdrawn key).
+Item 24 is fix-now row FX-3, proven on a compose stack (it changes the
+runner's signed scorecard, not the controller).
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -945,6 +947,45 @@ else changes, because the controller never read either value.
 document. Rolling back only the controller image is also safe, because the
 document still carries both keys at values an older controller accepts.
 
+#### 24. A `newTopic` restore's scorecard names the source settings it did not reconstruct (FX-3)
+
+**Changed.** A restore creates its target topics at the plan's replication
+factor, with `retention.ms=-1` and the target broker's `cleanup.policy`. The
+signed scorecard labelled those deviations from the source
+`intentionally_deviated` in every mode — right for a scratch drill, wrong for a
+`newTopic` restore, whose scorecard therefore signed lost compaction and
+replication factor 1 as intended. Scorecard format `1.2.0` names them in the new
+`topic_parity.not_reconstructed` and also in `unexpected_divergence`, never as
+intended, and `logweir drill verify`, `docs/verify_scorecard.py` 1.17.0 and
+`logweir drill show` say so in words; for a `newTopic` scorecard signed before
+1.2.0 they say its intended entries were not reconstructed. A scratch drill's
+scorecard is unchanged apart from `format_version` and `not_reconstructed: []`.
+No exit code or `outcome` of a scorecard this build signs changes: `topic_parity`
+decides neither. A 1.2.0 scorecard whose lists contradict `not_reconstructed`,
+such as a `newTopic` one that labels these settings intended beside
+`not_reconstructed: []`, is refused by both readers (`drill verify` exit 4, the
+script exit 1), and phase 8 never signs one.
+**Do:** nothing on the upgrade. After a `newTopic` restore, read
+`not_reconstructed` and apply the source's settings once the restore is
+verified ([stability.md](stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings));
+Logweir does not apply them yet (PROD-05). Re-read any `newTopic` scorecard
+signed by an earlier build with the current verifier. Automation that parses
+`intentionally_deviated` or `unexpected_divergence` should expect these entries
+in the second list for `newTopic` runs; how the format change is classified is
+in [stability.md](stability.md#format-120-fx-3-what-a-newtopic-restore-did-not-reconstruct).
+**Scope:** unit rows for each of the four settings in both modes and through
+the whole phase sequence (`crates/logweir/tests/verify_phase.rs`,
+`orchestrator.rs`), the five arms in both readers with the invariant corpus
+and the verifier-parity gate, and a live row on compose
+(`e2e/tests/new_topic_parity.rs`: a compacted, replication-factor-3 source on
+the `cluster3` profile restored as `newTopic` and as a drill, the broker's own
+configuration as the oracle, and a pre-FX-3 binary's restore of the same point
+for contrast). Readers built before FX-3 accept the 1.2.0 scorecards: `logweir`
+and script 1.15.0 at main `b8b9263f`, FX-7's script 1.16.0, and `v0.1.5`
+(measured).
+**Rollback:** an older runner writes 1.1.0 scorecards with the old labels again.
+The 1.2.0 scorecards already written stay valid under older and newer readers.
+
 ### Verification scope: what "verified" means in this release
 
 - **A green badge** means the signed document's signature verified under a key
@@ -1053,7 +1094,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22 and 23, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23 and 24, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.
