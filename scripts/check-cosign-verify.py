@@ -16,9 +16,17 @@ and docs must therefore name, literally:
            --certificate-github-workflow-ref         refs/heads/main
            --certificate-github-workflow-trigger     push
            and no `-regexp` variant of either certificate flag;
-  gh:      --repo VladyslavHaina/logweir (or -R), --signer-workflow
-           VladyslavHaina/logweir/.github/workflows/images.yml, --source-ref
-           refs/heads/main, --cert-oidc-issuer (the same issuer).
+  gh:      --cert-identity <the same exact identity>, --repo
+           VladyslavHaina/logweir (or -R), --source-ref refs/heads/main,
+           --cert-oidc-issuer (the same issuer) and --deny-self-hosted-runners,
+           and no --cert-identity-regex (-i) or --signer-workflow (whose
+           matching of a ref differs between gh releases).
+
+And no flag twice: cosign (cobra/pflag) and gh take the LAST value of a
+repeated flag, so a second `--certificate-identity` after the pinned one would
+verify someone else (review L1). Nor any switch that weakens what is checked:
+`--insecure-ignore-tlog`, `--insecure-ignore-sct`, `--allow-insecure-registry`,
+`--key`, `--certificate`, `--certificate-chain`.
 
 Where an invocation is: a code line (not a comment) of a script, workflow or
 source file, or a line inside a fenced code block of a Markdown file; a line
@@ -40,7 +48,6 @@ ISSUER = "https://token.actions.githubusercontent.com"
 REPOSITORY = "VladyslavHaina/logweir"
 REF = "refs/heads/main"
 TRIGGER = "push"
-SIGNER_WORKFLOW = "VladyslavHaina/logweir/.github/workflows/images.yml"
 
 COSIGN_REQUIRED = {
     "--certificate-identity": IDENTITY,
@@ -49,13 +56,29 @@ COSIGN_REQUIRED = {
     "--certificate-github-workflow-ref": REF,
     "--certificate-github-workflow-trigger": TRIGGER,
 }
-COSIGN_FORBIDDEN = ("--certificate-identity-regexp", "--certificate-oidc-issuer-regexp")
+COSIGN_FORBIDDEN = {
+    "--certificate-identity-regexp": "a regular expression is not a pin",
+    "--certificate-oidc-issuer-regexp": "a regular expression is not a pin",
+    "--insecure-ignore-tlog": "skips the transparency log",
+    "--insecure-ignore-sct": "skips the certificate timestamp",
+    "--allow-insecure-registry": "allows an insecure registry",
+    "--key": "a key replaces the keyless identity",
+    "--certificate": "a supplied certificate replaces the keyless identity",
+    "--certificate-chain": "a supplied chain replaces Fulcio's",
+}
 GH_REQUIRED = {
+    "--cert-identity": IDENTITY,
     "--repo": REPOSITORY,
-    "--signer-workflow": SIGNER_WORKFLOW,
     "--source-ref": REF,
     "--cert-oidc-issuer": ISSUER,
+    "--deny-self-hosted-runners": "",
 }
+GH_FORBIDDEN = {
+    "--cert-identity-regex": "a regular expression is not a pin",
+    "--signer-workflow": "its ref matching differs between gh releases; pin --cert-identity",
+}
+# Flags that take no value: the token after one is never its value.
+BOOLEAN = {"--deny-self-hosted-runners", "--insecure-ignore-sct", "--allow-insecure-registry"}
 
 SKIP_DIRS = {".git", "target", "node_modules", ".engine", ".e2e", ".demo", "upstream"}
 SUFFIXES = {".sh", ".yml", ".yaml", ".md", ".py", ".mjs", ".js", ".rs", ".toml", ".bash"}
@@ -128,37 +151,46 @@ def flags(command):
     except ValueError:
         tokens = command.split()
     out = {}
+    repeated = []
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         if tok == "-R":
             tok = "--repo"
+        elif tok == "-i":
+            tok = "--cert-identity-regex"
         if tok.startswith("--"):
             if "=" in tok:
                 name, value = tok.split("=", 1)
-                out.setdefault(name, value)
-            elif i + 1 < len(tokens):
-                out.setdefault(tok, tokens[i + 1])
-                i += 1
+            elif tok in BOOLEAN or i + 1 >= len(tokens) or tokens[i + 1].startswith("--"):
+                name, value = tok, ""
             else:
-                out.setdefault(tok, "")
+                name, value = tok, tokens[i + 1]
+                i += 1
+            if name in out:
+                repeated.append(name)
+            out[name] = value
         i += 1
-    return out
+    return out, repeated
 
 
 def problems_of(marker, command):
-    got = flags(command)
-    problems = []
-    required = COSIGN_REQUIRED if marker == "cosign verify" else GH_REQUIRED
+    got, repeated = flags(command)
+    problems = [
+        f"{flag} is given twice; the command keeps the LAST value, so a pin can be overridden"
+        for flag in sorted(set(repeated))
+    ]
+    cosign = marker == "cosign verify"
+    required = COSIGN_REQUIRED if cosign else GH_REQUIRED
+    forbidden = COSIGN_FORBIDDEN if cosign else GH_FORBIDDEN
     for flag, want in required.items():
         if flag not in got:
-            problems.append(f"no {flag} {want}")
+            problems.append(f"no {flag} {want}".rstrip())
         elif got[flag] != want:
             problems.append(f"{flag} is `{got[flag]}`, must be exactly `{want}`")
-    if marker == "cosign verify":
-        for flag in COSIGN_FORBIDDEN:
-            if flag in got:
-                problems.append(f"{flag}: a regular expression is not a pin")
+    for flag, why in forbidden.items():
+        if flag in got:
+            problems.append(f"{flag}: {why}")
     return problems
 
 

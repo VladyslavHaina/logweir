@@ -91,10 +91,11 @@ cosign verify-attestation --type spdxjson \
 
 # SLSA provenance:
 gh attestation verify "oci://docker.io/vladyslavhaina/logweir@$DIGEST" \
+  --cert-identity "https://github.com/VladyslavHaina/logweir/.github/workflows/images.yml@refs/heads/main" \
   --repo VladyslavHaina/logweir \
-  --signer-workflow VladyslavHaina/logweir/.github/workflows/images.yml \
   --source-ref refs/heads/main \
-  --cert-oidc-issuer https://token.actions.githubusercontent.com
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  --deny-self-hosted-runners
 ```
 
 Why every pin, and never `--certificate-identity-regexp`: `images.yml` is a
@@ -104,8 +105,12 @@ called it — this repository's `main`, on a push — so a signature another
 repository's workflow made by calling `images.yml` does not verify. The flags
 are cosign's own (`cosign verify --help`; documented for `verify` and
 `verify-attestation` from cosign v2.0.0, and in v2.5.2, which CI uses).
-`scripts/check-cosign-verify.py` refuses a verification command in this
-repository that drops one. A version release (`release.yml`) gives main's
+`gh attestation verify` takes the same exact identity (`--cert-identity`, not
+`--signer-workflow`, whose matching of a ref differs between gh releases) and
+refuses an attestation made on a self-hosted runner. Never give a flag twice:
+both tools keep the last value. `scripts/check-cosign-verify.py` refuses a
+verification command in this repository that drops a pin, repeats a flag or
+adds a switch that weakens the check (`--insecure-ignore-tlog`, `--key`, …). A version release (`release.yml`) gives main's
 publication its version tag without rebuilding, so a release's images carry
 these same main signatures. Publications before PROD-00.2 are unsigned.
 
