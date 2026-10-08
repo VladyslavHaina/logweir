@@ -22,8 +22,9 @@ its record is in the next entry, whose twenty-seven items are what that
 candidate shipped. This entry collects what lands on `main` after that
 publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
 key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
-32 (PROD-05.1) and 33 (PROD-01.3, client authentication modes and the
-credential binding) so far. Items continue the next entry's
+32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the
+credential binding) and 34 (FX-20, the binding for every other credential
+reference) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -475,6 +476,64 @@ a spec naming a new mode, and an older reader refuses a 1.4.0/1.5.0 document
 that names one (the safe direction). An older console would send
 `credentialRef` again; roll the console with the controller.
 
+#### 34. Every other credential reference presents only a credential bound to it (FX-20) — required action
+
+**Changed.** PROD-01.3's binding (item 33) now guards every place a writable
+object names a credential Secret beside an endpoint its author chooses. A
+`BackupDestination`'s `SecretKeys` grants are bound to the destination (its UID
+and its archive route), a `RetentionPolicy`'s delete-capable key to the policy,
+its destination's route and its scope, each `ProtectionPolicy` route's Secret
+to the policy, the sink kind and the PagerDuty endpoint, and an inline
+`archive.secretRef` (a `Backup`, a schedule, a `Restore`'s `sourceArchive`) to
+the location the runner dials — scheme, bucket and endpoint. Every runner
+(`backup run`, `restore run`, the check runner, the catalog sync and evidence
+fetch, `logweir-retention`, `logweir notify deliver`) refuses an unbound or
+foreign Secret with `CredentialBindingMismatch` **before it builds a store or
+composes a request**: exit 3 and the terminal state on a `Backup` or `Restore`,
+the check code on a `Preflight` row, `Enforced=False/CredentialBindingMismatch`
+on a `RetentionPolicy` (nothing is deleted), and
+`notify-result=<sink>:refused` with `NotificationsDelivered=False/
+CredentialBindingMismatch` on a `ProtectionPolicy` (the other sinks are still
+delivered). Editing a PagerDuty route's endpoint changes its binding, so the
+routing key never follows an edit. The values are published on
+`BackupDestination.status.credentialBinding`,
+`RetentionPolicy.status.credentialBinding` and
+`ProtectionPolicy.status.credentialBindings` (additive CRD fields). A Secret
+may carry several bindings (whitespace- or comma-separated); one that matches
+is enough. The product API no longer lets a destination name an existing
+Secret: a create (and `:from-legacy`) refuses `secret.existing`
+(`existing_credential_refused`), `:update-access` accepts only a Secret the
+destination already names, and a rotation's `secret.new` is written to a new
+bound Secret `lwd-<destination>-<role>-<suffix>`. The console's create form
+offers no existing Secret and starts on a new credential.
+**Do:** suspend the schedules that use a credential Secret, apply the CRDs,
+roll the controller, the runner and the console together, then bind every
+existing credential Secret **one at a time with `scripts/bind-credential.py`**
+— dry first, then `--apply --confirm-endpoint` once the credential's owner has
+confirmed the endpoint it prints ([install.md](install.md), *Bind every
+existing credential Secret after the upgrade*). The tool refuses a Secret any
+other object also names (an incident), a Secret owned by or minted for another
+object, and a Secret already bound elsewhere, and writes one key under a
+`resourceVersion` precondition. Remove the pre-PROD-01.3
+`api.logweir.dev/request-sha256` from a console-made destination, and rotate a
+guessable key (its create's audit record keeps the hash). Resume the
+schedules. Until a Secret is bound its runs are refused, closed.
+**Scope:** unit and mock-cluster rows per site, each with its negative control
+(`crates/weirkeeper/tests/{protection_controller,destination_controller,retention_policy_controller,backup_controller,restore_controller,preflight_controller,credential_backstop}.rs`,
+`crates/logweir-api/tests/destinations.rs`), the shipped binaries against a
+loopback sentinel that is never dialled (`notify deliver`, `backup run`,
+`drill run`; `crates/logweir/tests/{notify_deliver,credential_binding}.rs`),
+the real runner driven by the controller's rendered Job
+(`schedule_controller.rs`), the retention worker binary
+(`crates/logweir-retention/tests/worker.rs`), and the upgrade tool's offline
+rows (`scripts/test_bind_credential_rows.py`). The live journey on
+docker-desktop (the PoC's `primary` destination, a thief destination and policy
+against a sentinel) is the next PoC upgrade's.
+**Rollback:** an older controller and runner ignore every binding variable and
+the new status fields; bound Secrets keep working with them. An older console
+offers `existing` again, which this API refuses — roll the console with the
+controller.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -509,7 +568,14 @@ In addition to the next entry's six, in its order:
   (`plaintext`, or TLS with no client certificate) needs nothing.
 - **Remove `api.logweir.dev/request-sha256` from each `BackupDestination` an
   earlier build created with `secret.new`** (item 33), or rotate its key: that
-  hash was taken over the secret access key.
+  hash was taken over the secret access key, and the create's audit record
+  keeps it, so only a rotation retires that copy.
+- **Bind every destination, retention, notification and inline-archive
+  credential Secret, one at a time, with `scripts/bind-credential.py`**
+  (item 34), after suspending the schedules that use them and rolling the
+  controller, the runner and the console together; never in a loop. The tool's
+  refusal of a Secret another object also names is an incident to investigate
+  ([install.md](install.md); [kubernetes.md](kubernetes.md) §20.10).
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -522,7 +588,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32 and 33, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33 and 34, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -549,6 +615,10 @@ connection's Secret bound. To roll back to
    cannot parse it), so delete or re-create those first. The 1.4.0 receipts
    and 1.5.0 scorecards already written stay valid for every reader from
    PROD-01.3 on, and older readers refuse them (the safe direction).
+4. Item 34 needs no rollback step of its own: an older controller and runner
+   ignore the binding variables and the new status fields, and the bound
+   Secrets keep working. Roll the console back with them (an older console
+   offers `existing` on a create again, which only this API refuses).
 
 ---
 

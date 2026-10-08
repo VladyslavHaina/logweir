@@ -1999,6 +1999,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a connection presents only its own credential",
             "logweir-binding",
         ),
+        // FX-20 (2026-10-08): every other credential reference is bound, and
+        // the one-Secret-one-object upgrade tool binds the existing ones.
+        (
+            "every other credential reference is bound",
+            "scripts/bind-credential.py",
+        ),
     ];
     assert_eq!(
         items.len(),

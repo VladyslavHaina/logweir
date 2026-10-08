@@ -1404,6 +1404,63 @@ Schema-specific field verification,
 controller rollout checks, and the safe additive rollback boundary are in
 [kubernetes.md, “Upgrade, rollback and legacy Jobs”](kubernetes.md#upgrade-rollback-and-legacy-jobs).
 
+### Bind every existing credential Secret after the upgrade (FX-20)
+
+From this release every runner refuses a credential whose Secret does not
+carry, under `logweir-binding`, the binding of the object (or, for an inline
+archive, the location) it is used for — destinations' `SecretKeys` grants, a
+`RetentionPolicy`'s delete key, every `ProtectionPolicy` route, an inline
+`archive.secretRef`, and (since PROD-01.3) a `KafkaCluster`'s credential. A
+Secret made by an earlier release carries none, so **every run that uses one is
+refused** (`CredentialBindingMismatch`, nothing sent) until it is bound. That is
+deliberate: never a silent accept. Binding is also the step an attacker would
+want you to automate — an object that names someone else's Secret beside an
+endpoint it controls may already exist — so it is done **one Secret, one
+object, by name, with a dry run**:
+
+1. **Before the roll**, suspend every `BackupSchedule` and `RehearsalSchedule`
+   that uses a credential Secret (its destination's, its connection's or its
+   inline archive's), so their slots are skipped rather than refused.
+2. Apply the CRDs (three additive `status` fields:
+   `BackupDestination.status.credentialBinding`,
+   `RetentionPolicy.status.credentialBinding`,
+   `ProtectionPolicy.status.credentialBindings`) and roll the controller, the
+   runner and the console together, as above.
+3. For each object that names a credential Secret, run
+   `scripts/bind-credential.py` dry, read the endpoint it prints, have the
+   credential's owner confirm it, and apply:
+
+   ```bash
+   python3 scripts/bind-credential.py --context docker-desktop --namespace <ns> \
+     --kind BackupDestination --name <destination> --secret <secret>
+   python3 scripts/bind-credential.py --context docker-desktop --namespace <ns> \
+     --kind BackupDestination --name <destination> --secret <secret> \
+     --apply --confirm-endpoint '<the endpoint it printed>'
+   ```
+
+   `--kind RetentionPolicy`, `--kind ProtectionPolicy` (with `--route` when one
+   Secret serves routes with different bindings), `--kind KafkaCluster`, and,
+   for an inline archive, `--location s3://<bucket> --endpoint <url|aws>` work
+   the same way. The tool refuses — exit 3, nothing written — a Secret that any
+   other object also names (**an incident**: ask the owner which object is
+   theirs, delete the other, treat the credential as exposed if it ever ran), a
+   Secret owned by or minted for another object, a Secret already bound to
+   something else, and an object that has not yet published its binding. A
+   destination with several Secrets needs one run per Secret.
+4. A destination the console created before this release also carries an
+   `api.logweir.dev/request-sha256` annotation hashed over its secret key
+   (PROD-01.3, F1): remove it with `kubectl annotate backupdestination <name>
+   api.logweir.dev/request-sha256-`, and rotate the key if it could be guessed —
+   the audit record of that create holds the same hash, and only a rotation
+   retires it.
+5. **Resume the schedules.**
+
+The mechanism, every refusal surface and the residuals are in
+[kubernetes.md §20.10](kubernetes.md#2010-every-other-credential-reference-is-bound-too-fx-20).
+Rollback is safe: an older controller and runner ignore the binding key and the
+new status fields.
+
+
 ---
 
 ## The install itself

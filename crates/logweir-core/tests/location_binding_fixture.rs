@@ -45,7 +45,10 @@ fn the_tool_and_the_product_compute_one_location_binding() {
         serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture ships"))
             .expect("JSON");
     let cases = doc["cases"].as_array().expect("cases");
-    assert!(cases.len() >= 5, "the fixture is the agreement; it must not be empty");
+    assert!(
+        cases.len() >= 5,
+        "the fixture is the agreement; it must not be empty"
+    );
     for case in cases {
         let url = case["url"].as_str().expect("url");
         let endpoint = case["endpoint"].as_str().expect("endpoint");

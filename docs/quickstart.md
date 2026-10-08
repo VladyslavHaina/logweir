@@ -257,8 +257,11 @@ When the cluster that ran the backups is gone — or this is a fresh installatio
 pointed at an archive another installation wrote — no `Backup`, schedule or
 source connection is needed ([kubernetes.md](kubernetes.md) §7d.1):
 
-1. Create a read-only credential Secret with `kubectl`, and a destination whose
-   `archiveRead` names it by name (*existing Secret name*). Widen `archiveRead`
+1. Create a destination whose `archiveRead` grant is the archive's read-only key
+   pair, entered once on the *Destinations* page (*new*): the console creates a
+   Secret bound to the destination. (With `kubectl`, create the destination, then
+   a Secret carrying the key pair and its `status.credentialBinding` under
+   `logweir-binding` — [kubernetes.md](kubernetes.md) §20.10.) Widen `archiveRead`
    to the catalog row of [install.md](install.md) §3.11, or the catalog will not
    sync.
 2. *Catalog* → *Connect an existing archive* (a `Full` sync). A sync reads the

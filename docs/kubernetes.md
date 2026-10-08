@@ -1530,11 +1530,15 @@ wrote — still has every point, and this is the supported way to restore one.
 **No `Backup`, `BackupSchedule` or source `KafkaCluster` is read at any step, and
 no configuration is reconstructed by hand.**
 
-1. **A read-only credential, by Secret reference.** Create the Secret holding
-   the archive's read-only key pair with `kubectl`, then a `BackupDestination`
-   naming it by NAME (`access.archiveRead: {mode: SecretKeys, secret: {name}}`)
-   — on the console's *Destinations* page choose *existing Secret name*. The
-   console never asks for or shows a key.
+1. **A read-only credential, bound to its destination.** On the console's
+   *Destinations* page enter the archive's read-only key pair once for
+   `archiveRead` (*new*): the console creates the Secret, owned by and bound to
+   the destination, and never shows the key again. With `kubectl`, create the
+   `BackupDestination` naming a Secret by NAME
+   (`access.archiveRead: {mode: SecretKeys, secret: {name}}`), then create that
+   Secret with the key pair and the destination's `status.credentialBinding`
+   under `logweir-binding` (§20.10): a Secret without it is refused by every
+   runner.
 2. **Connect the archive.** Create a `RecoveryCatalog` with
    `spec.destinationRef` and `sync.mode: Full` (the console's *Catalog* page,
    *Connect an existing archive*, or `POST .../catalogs`). The sync Job walks
@@ -1762,9 +1766,21 @@ delivery's verdict returned 200 (the exit code lives on the pod, and the TTL
 controller removes the Job and its pod together). And the pod is proved by the
 Job's own `metadata.uid` on its controller `ownerReference` **before** one byte
 of its log is read — a `notify-result=` line becomes a status field and then an
-API response, so reading a stranger's is defect `SEC-PODLOG`. Only the seven
+API response, so reading a stranger's is defect `SEC-PODLOG`. Only the ten
 `notify-result=` values this build knows are read; nothing else from a pod log
 can reach a status.
+
+**Each sink's Secret is bound to this policy (FX-20).** Every route's
+credential Secret must carry, under `logweir-binding`, the value
+`status.credentialBindings` publishes for it — the policy's UID, the sink kind
+and, for PagerDuty, the endpoint. The delivery Job projects that key beside the
+credential, and `logweir notify deliver` refuses a sink whose Secret carries no
+binding or another policy's, sink's or endpoint's **before composing a body or
+dialling**: it prints `notify-result=<sink>:refused`, still delivers the other
+sinks, and the controller records the attempt `Failed` with
+`NotificationsDelivered=False/CredentialBindingMismatch`. Editing a PagerDuty
+route's `endpoint` changes its binding, so the routing key is never sent to the
+new endpoint until the Secret is bound again (§20.10).
 
 **A sink must be `https://`, and the one way round it is the INSTALLATION's.**
 `logweir notify deliver` refuses a non-`https://` webhook or Slack URL **before
@@ -2020,6 +2036,16 @@ over every dependency kind, dev edges included. Adding the edge to `weirkeeper`,
 
 The first can remove a point and cannot write the document that attributes its
 removal. The second can write that document and cannot remove anything.
+
+**Both are bound (FX-20).** The delete grant's Secret must carry
+`status.credentialBinding` — this policy's UID, the route of the destination
+`destinationRef` resolves to, and `spec.scope.prefix` — under
+`logweir-binding`, and the `evidenceWrite` Secret the destination's own
+binding; the worker refuses either otherwise, before it builds a handle
+(`retention-refusal=CredentialBindingMismatch`,
+`Enforced=False/CredentialBindingMismatch`, nothing deleted). A destination
+deleted and re-created under the same name at another route changes the
+policy's binding, so the delete key never follows the name (§20.10).
 
 **A run with no `evidenceWrite` credential exits 3 having deleted nothing**, and
 is refused before any handle is built. A credential that exists but cannot
@@ -8277,6 +8303,158 @@ false`, no network use before the check), and the pod exits at once
 ([SECURITY.md](../SECURITY.md)). A CA reference is not bound: a CA is public
 and is only ever a local trust anchor, never sent anywhere — and the console
 takes a CA from a ConfigMap only.
+
+### 20.10 Every other credential reference is bound too (FX-20)
+
+§20.9's confused deputy is not peculiar to Kafka connections. Wherever a
+writable object names a credential Secret **beside an endpoint its author
+chooses**, an author who cannot read Secrets could name somebody else's Secret,
+point the endpoint at a host they control, and have Logweir present it there:
+
+| Object | Credential | Presented to | Bound to |
+|---|---|---|---|
+| `ProtectionPolicy` route | PagerDuty routing key (sent in the body); webhook or Slack URL (a bearer token) | the route's `endpoint`; the URL in the Secret | the policy's UID, the sink kind, and the PagerDuty endpoint |
+| `BackupDestination` `SecretKeys` grant | S3 key pair and session token | `spec.storage` | the destination's UID and its whole archive route (bucket, prefix, region, endpoint, addressing, transport) |
+| `RetentionPolicy` `enforcement.credentialSecretRef` | a DELETE-capable S3 key pair | the destination it resolves to | the policy's UID, that destination's route, and `spec.scope.prefix` |
+| inline archive `secretRef` (`Backup`, `BackupSchedule`, `Restore.sourceArchive`, a restore `Preflight`'s legacy source) | S3 key pair | the location the runner dials | the LOCATION: scheme, bucket and endpoint — never the prefix |
+
+For S3, SigV4 never sends the secret key, but every request carries the access
+key id, a signature an endpoint can replay within its window, and any session
+token, in clear headers; for PagerDuty the routing key itself travels.
+
+**The rule is §20.9's.** A credential Secret is used only when its
+`logweir-binding` key equals the binding the controller computed for the object
+and endpoint the Job was built for. Every Job carries the expectation as a
+literal and the Secret's key as an **optional** `secretKeyRef`:
+
+| Credential variables | Binding pair |
+|---|---|
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | `LOGWEIR_ARCHIVE_CREDENTIAL_BINDING[_EXPECTED]` |
+| `LOGWEIR_EVIDENCE_AWS_*` | `LOGWEIR_EVIDENCE_CREDENTIAL_BINDING[_EXPECTED]` |
+| `LOGWEIR_EVIDENCE_READ_AWS_*` (a check pod) | `LOGWEIR_EVIDENCE_READ_CREDENTIAL_BINDING[_EXPECTED]` |
+| `PAGERDUTY_ROUTING_KEY`, `NOTIFY_WEBHOOK_URL`, `NOTIFY_SLACK_WEBHOOK_URL` | `NOTIFY_{PAGERDUTY,WEBHOOK,SLACK}_CREDENTIAL_BINDING[_EXPECTED]` |
+
+Every runner compares the pairs **before it builds a store or composes a
+request**, and refuses an absent or different binding with
+**`CredentialBindingMismatch`**:
+
+* `backup run`, `restore run`/`drill run`: exit 3,
+  `refusal-reason=CredentialBindingMismatch`, the `Backup`'s or `Restore`'s
+  terminal state;
+* the check runner (`Preflight`, the catalog sync, evidence fetch): the
+  `CredentialBindingMismatch` check code on the row, before any store exists;
+* `logweir-retention`: exit 3, `retention-refusal=CredentialBindingMismatch`,
+  `Enforced=False/CredentialBindingMismatch` on the `RetentionPolicy`; nothing
+  is deleted;
+* `logweir notify deliver`: `notify-result=<sink>:refused` for that sink only
+  (the others are still attempted), and
+  `NotificationsDelivered=False/CredentialBindingMismatch` (§7e).
+
+A Job builder that projected a credential without its expectation would hand
+the runner an unchecked credential; `job::build` gives such a credential the
+never-satisfied `unbound:missing-expectation`, so the omission fails closed.
+
+**Changing the endpoint never keeps the credential.** A destination's
+`spec.storage` and `spec.transport.security` are immutable, so another endpoint
+is another destination with another UID. A `RetentionPolicy` is bound to the
+route of the destination its `destinationRef` resolves to NOW, so a destination
+deleted and re-created under the same name elsewhere changes it. A
+`ProtectionPolicy`'s spec is mutable, so its PagerDuty `endpoint` is in the
+binding: edit it, and the routing key is refused until the Secret is bound
+again. An inline archive is bound to its location, so a plan or URL naming
+another bucket or endpoint is refused.
+
+**Where the binding comes from.**
+
+* **The console** never names an existing Secret for a destination: a credential
+  is entered once and becomes a Secret owned by and bound to the destination
+  ([api.md](api.md)); a rotation writes the new value to a new bound Secret.
+* **`kubectl`**: read the object's published binding —
+  `BackupDestination.status.credentialBinding`,
+  `RetentionPolicy.status.credentialBinding`,
+  `ProtectionPolicy.status.credentialBindings[]` (one per route and channel) —
+  and write it into the Secret under `logweir-binding`, as §20.9 shows.
+* **An inline archive** has no object of its own (a `Backup` is one-shot and a
+  schedule mints them), so its Secret is bound to the location:
+  `v1:location:sha256:<hex>` over `scheme`, `bucket` and the endpoint
+  (lower-cased, trailing `/` removed, `aws` for none — the installation's
+  `AWS_ENDPOINT_URL` when the plan or URL names none). Any object in the
+  namespace may then use that Secret, but only at that location — what a
+  `BackupDestination` in the namespace already allows. An inline `Restore`
+  whose plan writes `evidence:` to another bucket or endpoint presents the
+  credential at both, so it needs both bindings (below).
+  `scripts/bind-credential.py --location` computes the value.
+
+**One Secret, several bindings.** `logweir-binding` may hold several bindings
+separated by whitespace or commas; one equal to the expectation is enough. Each
+is an explicit authorization by whoever wrote the Secret — the same act as
+copying the credential into a second Secret, and no wider. Add one by hand only
+for a credential you mean to share (an inline restore's archive and evidence
+buckets, say), never for a Secret another object also names (that is the
+incident in the upgrade below).
+
+**Upgrade: bind one Secret to one object, after an inventory.** A credential
+Secret made by an earlier release carries no binding, and every use of it is
+refused until it does. Binding is the theft §20.9 describes if it is done in a
+loop, so it is done with `scripts/bind-credential.py`, one Secret and one
+object at a time:
+
+1. **Before the roll, suspend** every `BackupSchedule` and `RehearsalSchedule`
+   whose destination, connection or inline archive uses a Secret, and expect
+   in-flight runs re-created after the roll to be refused until step 3.
+2. Apply the CRDs (additive: three `status` fields) and roll the controller,
+   the runner and the console together. Wait for each object to publish its
+   binding.
+3. For each credentialed object, run the tool **dry**, read what it prints,
+   have the credential's owner confirm the endpoint, then apply:
+
+   ```
+   python3 scripts/bind-credential.py --context <ctx> --namespace <ns> \
+     --kind BackupDestination --name primary --secret lwd-primary-archive-write
+   python3 scripts/bind-credential.py --context <ctx> --namespace <ns> \
+     --kind BackupDestination --name primary --secret lwd-primary-archive-write \
+     --apply --confirm-endpoint '<the endpoint it printed>'
+   ```
+
+   `--kind` is `BackupDestination`, `RetentionPolicy`, `ProtectionPolicy`
+   (`--route` when one Secret serves routes with different bindings) or
+   `KafkaCluster`; an inline archive is `--location s3://<bucket> --endpoint
+   <url|aws>`. The tool refuses — exit 3, nothing written — a Secret that any
+   other object names (an **incident**: find out which object is the owner's,
+   delete the other, and treat the credential as exposed if it ever ran), a
+   Secret owned by or minted for another object, a Secret already bound to
+   something else, and an object that does not name the Secret or has not
+   published its binding. It patches one key, preconditioned on the Secret's
+   `resourceVersion`.
+4. **Resume the schedules.**
+
+**A destination created through the console before this release** also carries
+an `api.logweir.dev/request-sha256` taken over the secret key it was created
+with (PROD-01.3's F1): remove it (`kubectl annotate backupdestination <name>
+api.logweir.dev/request-sha256-`), and rotate the key if it could be guessed —
+the same hash is in that create's audit record, which only a rotation retires.
+
+Rollback: an older controller and runner ignore every binding variable and the
+new status fields; bound Secrets keep working, and the extra key is inert.
+
+**What this does not close.**
+
+* The kubelet projects a foreign Secret's value into the refused pod before the
+  runner refuses it (§20.9's residual): the pod mounts no ServiceAccount token,
+  sends nothing first, and exits.
+* **Secret `patch` is equivalent to Secret `get`** for every credential here,
+  as for a connection's (§20.9): grant it accordingly.
+* **A workload-identity grant names a ServiceAccount, not a Secret**, and is not
+  bound: a destination author who names another team's IRSA-annotated
+  ServiceAccount beside an endpoint they control would have requests signed
+  with that role's temporary credentials (FX-20 class sweep, owed).
+* **A destination's CA reference is mutable and not bound.** The endpoint is
+  immutable, so presenting the credential elsewhere still needs a principal who
+  can both edit the CA reference and intercept traffic to that endpoint.
+* **A webhook or Slack URL is the credential**: its host is whatever the
+  Secret's writer put there, and only that writer can change it.
+* **The product API cannot inspect an inline archive's `credentialRef`**: it
+  names a Secret, as before, and the runner enforces the location binding.
 
 ## 21. `Preflight`: what a readiness check proves, and what it cannot
 

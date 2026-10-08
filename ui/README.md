@@ -1753,6 +1753,22 @@ The `#/destinations` tab is in the navigation in **both** modes. Hiding it in
 legacy mode would be worse than showing it: the mode is decided once at boot,
 after the first paint, so the tab would appear and vanish under a reader.
 
+### A destination's credential is entered, never named (FX-20)
+
+The create form offers no *existing Secret*: a new destination's credential is
+typed once (*new*) and becomes a Secret owned by and bound to the destination,
+and the form starts there. The product API refuses `secret.existing` on a
+create (`existing_credential_refused`), because no existing Secret can carry
+the binding of a destination that does not exist yet, and a destination that
+could name any Secret could have Logweir sign requests with another team's key
+at an endpoint its author chose. The *Rotate access* form still offers
+*existing*, for a Secret this destination already names; a new value is written
+to a NEW Secret bound to the destination, and the old one is left for the
+operator to delete. The schedule form's inline-archive Secret field says what
+the Secret must carry (`logweir-binding`, the location's binding), because this
+console never reads a Secret and the runner refuses an unbound one
+([kubernetes.md](../docs/kubernetes.md) §20.10).
+
 ### What the three surfaces show, and the five sentences they will not write
 
 A destination is one archive location written down once, with an identity, so
