@@ -55,8 +55,9 @@ them can approve their own restore, or enforce a deletion plan they wrote.
 
 ### 1. Install
 
-1. Check the floors: Kubernetes 1.29+, amd64-capable nodes for runner Jobs, and
-   engine 0.21.0, with 0.23.3 the pinned engine the images ship
+1. Check the floors: Kubernetes 1.29+, amd64 or arm64 nodes, and engine
+   0.21.0, with Logweir's build of 0.23.3 (`0.23.3+logweir.1`) the engine the
+   images ship
    ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
 2. Choose images: the published digests of the exact CI run you deploy, not
    `latest` ([install.md](install.md), *Choose an image and installation path*).
@@ -446,8 +447,12 @@ which shares no code with Logweir.
 - A **marker topic** on that scratch cluster. This is v0.1's segregation proof:
   if it is absent, phase 0 refuses the drill with exit 3 before anything runs.
   Create it with any name you like and put that name in the spec.
-- The `kafka-backup` binary of the pinned digest on `$PATH`, or the container
-  image, which carries it.
+- Logweir's build of the `kafka-backup` engine on `$PATH`, or the container
+  image, which carries it. Copy it out of the runner image for your
+  architecture (`docker create` the image, then `docker cp
+  <container>:/usr/local/bin/kafka-backup .`), or build it from a checkout
+  with `scripts/engine-source.sh build`. `kafka-backup --version` prints
+  `kafka-backup 0.23.3+logweir.1`.
 
 ### 1. Write the drill spec
 
@@ -501,11 +506,13 @@ logweir doctor \
 `doctor` checks credentials, the engine **version** and glibc floor, target
 reachability, the marker topic and the approver key — before a drill is
 attempted. It compares the engine's own `--version` output against the pinned
-`0.23.3`, as a whole token (`0.23.3+build` or `0.23.3-rc1` is a mismatch); it
-does **not** compute or compare an image digest
-(`third_party/kafka-backup-binary.digest` is quoted in the failure message and
-nowhere else), so a green `ok engine version` line says the right version ran,
-not that the right binary did. Add `--strict` to treat a check it could not perform (for example
+`0.23.3+logweir.1`, Logweir's build, as a whole token (`0.23.3+logweir.2` or
+`0.23.3` is a mismatch; OSO's own `0.23.3` passes only as the declared
+rollback, named as OSO's release). It also refuses an engine whose version is
+not the one the run would sign (`LOGWEIR_ENGINE_VERSION`, or the image's
+`/etc/logweir/engine-identity`). It does **not** compute or compare a digest,
+so a green `ok engine version` line says the right version ran, not that the
+right binary did. Add `--strict` to treat a check it could not perform (for example
 `storage`, with no live bucket to list against) as a failure rather than a skip.
 
 `allowed-clusters.json` must name the target cluster's own id:
@@ -561,8 +568,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
 # Optional engine override. Both doctor and drill run search LOGWEIR_ENGINE_BIN,
 # ./.engine/kafka-backup, /usr/local/bin/kafka-backup, then PATH.
 export LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
-export LOGWEIR_ENGINE_VERSION=0.23.3
-export LOGWEIR_ENGINE_DIGEST=sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db
+export LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1
+export LOGWEIR_ENGINE_DIGEST=sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3
 
 logweir drill run \
   --spec drill.yaml \
@@ -578,9 +585,12 @@ Credentials come from `object_store`'s **own** chain (static keys, then web
 identity / IRSA, ECS, EKS Pod Identity, IMDS). That is **not** the AWS SDK
 chain: `~/.aws/credentials`, `AWS_PROFILE` and SSO are unsupported.
 
-`LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST` are mandatory. An empty
-value is refused with exit 1: a signed scorecard must name the engine image that
-produced the restore.
+`LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST` are mandatory outside the
+runner image. An empty value is refused with exit 1: a signed scorecard must
+name the engine that produced the restore. The values above are Logweir's
+build (`third_party/kafka-backup-build.env`: its version and its build-input
+digest). Inside the runner image the image's own declaration,
+`/etc/logweir/engine-identity`, is what is signed.
 
 `--out` writes `scorecard.json` and its DSSE sidecar beside it as
 `scorecard.sig`.

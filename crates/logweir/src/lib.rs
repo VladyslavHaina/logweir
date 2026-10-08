@@ -22,6 +22,10 @@ pub mod doctor;
 pub mod drill;
 /// The ONE engine-binary resolution `doctor` and `drill run` both consult.
 pub mod engine_bin;
+/// PROD-00.2: the engine identity every scorecard and receipt signs — the
+/// runner image's `/etc/logweir/engine-identity` first, the two environment
+/// variables where there is no image.
+pub mod engine_identity;
 pub mod exit;
 /// Short-lived Kubernetes installation identity bootstrap. This remains in
 /// the signer-capable runner binary; the long-lived controller never links it.

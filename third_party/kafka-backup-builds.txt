@@ -1,0 +1,8 @@
+# Logweir's builds of the kafka-backup engine: one line per build, APPEND-ONLY.
+# `<OSO release>+logweir.<n> <build-input digest>`; the last line is the pair
+# third_party/kafka-backup-build.env builds. A change to the tarball or to a
+# patch is a new build: bump <n> and append (third_party/kafka-backup-patches/README.md).
+# scripts/engine-source.sh refuses a repeated version or digest, an <n> that does
+# not rise, and a last line that is not the build env's; crates/logweir/tests/
+# engine_pin.rs refuses a rewritten line of any build that has shipped.
+0.23.3+logweir.1 sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3

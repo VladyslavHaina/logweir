@@ -91,14 +91,62 @@ engine trait method implements it.
 - Missing engine version or digest refuses a drill rather than creating
   unsigned provenance inside signed evidence.
 - Standalone Logweir binaries need a separately installed engine on `PATH` or
-  at `LOGWEIR_ENGINE_BIN`; the container image carries both. The pinned upstream
-  engine is linux/amd64, so alternate architectures need a verified execution
-  route.
+  at `LOGWEIR_ENGINE_BIN`; the container image carries both, for linux/amd64
+  and linux/arm64 (amendment below).
 
 `OsoCliEngine` currently inherits the refusing default for `validation_run`;
 its `engine_subreport` is therefore null. The upstream operator's restore CR
 write path was rejected because its dry-run gate did not establish a real
 restore. Logweir's own runner Jobs were subsequently admitted by Amendment C.
+
+### Amendment (OD-3, decided 2026-10-07; PROD-00.2): Logweir builds the engine
+
+The engine stays a separate process behind the same four subcommands, but it
+is no longer OSO's published binary. Logweir **builds it from the vendored OSO
+source with its own patch folder**. This supersedes ruling GR6 ("copy the
+unmodified upstream image").
+
+- **The recipe.** `third_party/kafka-backup-v<release>.tar.gz` is checked
+  against its `.sha256`. The ordered patches in
+  `third_party/kafka-backup-patches/` are applied with `git apply` and exact
+  context. The version is stamped, and the engine is compiled `--locked` for
+  linux/amd64 and linux/arm64 in the runner image's `engine-logweir` stage. The
+  recipe is `scripts/engine-source.sh`, and its refusals are the build's gate.
+- **Patch first.** The carrying window is zero: a fix lands as a patch as soon
+  as its oracle passes, with a one-line `Reason:`. It is dropped when an OSO
+  release contains it, because it no longer applies. Upstream PRs are optional
+  and come after shipping, for bug-class fixes only (C1, C4, C5, C6, C12, C14
+  to `kafka-backup`; C13 to `kafka-protocol-rs`), never the filter-rule or
+  SASL-plugin patches. The policy is
+  `third_party/kafka-backup-patches/README.md`.
+- **A version identity of its own.** Logweir's build prints
+  `kafka-backup <release>+logweir.<n>` (`third_party/kafka-backup-build.env`),
+  which no OSO release prints. Its `engine.digest` is the build-input digest
+  over the tarball, the patches and the version. `doctor` pins exactly that
+  version, and names OSO's release distinctly. The runner image declares its
+  engine in `/etc/logweir/engine-identity`, and every scorecard and receipt
+  signs that declaration. The controller states no engine identity in a Job,
+  and the runner refuses to sign a version its engine binary does not print
+  (`--version`, before the engine runs).
+- **One version, one engine.** A change to a patch or the tarball bumps `<n>`
+  and appends the build to `third_party/kafka-backup-builds.txt`; the recipe
+  and the test set refuse a reused version.
+- **Engine CVEs are Logweir's.** `cargo deny` checks the engine's own lockfile
+  after the patches (`scripts/ci-check.sh`, `third_party/kafka-backup-deny.toml`:
+  licences, advisories, bans, and sources limited to crates.io), and
+  `SECURITY.md` takes engine vulnerabilities into scope. The first run
+  found RUSTSEC-2026-0285 (rustls) and RUSTSEC-2026-0258 (h2) in the shipped
+  graph. They landed as patch `0001`, a lockfile bump.
+- **One-release rollback.** `docker build --build-arg ENGINE_SOURCE=oso` still
+  builds a runner image around OSO's released binary, pinned by digest
+  (`third_party/kafka-backup-binary.digest`), for linux/amd64 only. That image
+  declares OSO's identity, so its scorecards and receipts say which engine ran
+  (`docs/install.md`, "Rolling the engine back").
+- **Unchanged:** the four subcommands, the byte-identical restore configuration,
+  the refused keys and the ignored-key inspection above. The engine is still
+  never linked: `deny.toml` still bans `kafka-backup-core` from Logweir's
+  workspace, and the engine compiles in its own workspace from its own
+  lockfile.
 
 ## ADR 0003: Rust
 

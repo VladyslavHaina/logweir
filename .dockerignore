@@ -9,6 +9,11 @@
 /.git
 /upstream
 **/*.tar.gz
+# PROD-00.2: the vendored engine source IS a build input. The Dockerfile's
+# `engine-logweir` stage verifies it against its `.sha256` and compiles it, so
+# the one tarball under third_party/ is let back in by name. It changes only
+# when the pin moves, which is exactly when the engine must recompile.
+!/third_party/kafka-backup-v*.tar.gz
 
 # Task 9, carried from Task 8b's review. `COPY . .` is the last thing before
 # `RUN cargo build` (Dockerfile:144-151), so ANY file that reaches the build

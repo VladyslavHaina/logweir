@@ -248,9 +248,9 @@ pub fn approval_bundle_config_map_name(restore_name: &str) -> String {
 /// MIRRORS `logweir::drill::TARGET_PASSWORD_VAR` AND IS NOT LINKED TO IT.
 /// `weirkeeper` links `logweir-core` and `logweir-verify` and never the
 /// `logweir` binary crate, so the string is restated here — the same shape
-/// [`crate::job::ENGINE_VERSION`] uses for the two engine variables, and for
-/// the same reason: the Job template is where the value has to be, and a test
-/// is what keeps the statement true.
+/// [`crate::job::ENGINE_VERSION_ENV`] uses for the engine variable's name —
+/// because the Job template is where the value has to be, and a test is what
+/// keeps the statement true.
 ///
 /// **The controller never reads it.** It projects a `secretKeyRef` and that is
 /// all; see this module's header for interface **I11**.

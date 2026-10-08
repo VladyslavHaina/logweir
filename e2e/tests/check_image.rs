@@ -11,14 +11,20 @@
 //! is not a gate; these tests are how it is observed to fail.
 //!
 //! CHECK 6 (Task 8b) IS THE ONE ASSERTION WITH NO PRE-HISTORY IN release.yml.
-//! It asserts the shipped `logweir` is an x86-64 ELF, which became a thing that
-//! could go wrong the moment the builder stage stopped being emulated and
-//! started cross-compiling (STANDING RULE 10). It is numbered 6 and runs first;
+//! It asserts the shipped `logweir` is an ELF of the image's own architecture
+//! (x86-64 or, since PROD-00.2, AArch64), which became a thing that could go
+//! wrong the moment the builder stage stopped being emulated and started
+//! cross-compiling (STANDING RULE 10). It is numbered 6 and runs first;
 //! `scripts/check-image.sh` explains both, and
-//! `check_image_rejects_an_image_whose_logweir_is_not_x86_64` is how it is
-//! observed to fail.
+//! `check_image_rejects_an_image_whose_logweir_is_another_architecture` is how
+//! it is observed to fail. CHECK 8 (PROD-00.2) holds the engine to the
+//! identity the image declares; the three `check 8` tests below break it.
 //!
-//! EVERY TEST THAT NEEDS AN IMAGE IS `#[ignore]`d. Building the `linux/amd64`
+//! THE IMAGE MAY BE EITHER PLATFORM. `base_platform()` reads it from the
+//! image, every overlay is built for it, and the synthetic foreign header is
+//! the OTHER architecture's.
+//!
+//! EVERY TEST THAT NEEDS AN IMAGE IS `#[ignore]`d. Building the runner
 //! image is a whole-workspace `cargo build` and must not be dragged into
 //! `just e2e` or `cargo test --workspace`; it was tens of minutes under
 //! emulation before Task 8b and is minutes after it, which is still not a unit
@@ -89,10 +95,50 @@ fn temp_dir(label: &str) -> PathBuf {
     dir
 }
 
+/// The base image's own platform, `linux/amd64` or `linux/arm64`.
+fn base_platform() -> String {
+    let base = require_base();
+    let out = Command::new("docker")
+        .args([
+            "image",
+            "inspect",
+            "--format",
+            "{{.Os}}/{{.Architecture}}",
+            &base,
+        ])
+        .output()
+        .expect("docker is on PATH");
+    assert!(out.status.success(), "docker image inspect `{base}` failed");
+    let platform = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(
+        platform == "linux/amd64" || platform == "linux/arm64",
+        "`{base}` is {platform}; the runner is built for linux/amd64 and linux/arm64"
+    );
+    platform
+}
+
+/// A 20-byte ELF header for the architecture the base image is NOT, as
+/// `printf` octal escapes, and the `e_machine` bytes check 6 must print for it.
+fn foreign_elf_header() -> (&'static str, &'static str) {
+    if base_platform() == "linux/amd64" {
+        // EM_AARCH64 = 0x00b7.
+        (
+            "\\177ELF\\002\\001\\001\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\267\\000",
+            "b7 00",
+        )
+    } else {
+        // EM_X86_64 = 0x003e.
+        (
+            "\\177ELF\\002\\001\\001\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\076\\000",
+            "3e 00",
+        )
+    }
+}
+
 /// Build a one-layer overlay on top of the freshly built image.
 ///
-/// `--platform linux/amd64` is mandatory and not a default: the base is an
-/// amd64 image, and on the arm64 dev host an unqualified `docker build` would
+/// `--platform <the base's own>` is mandatory and not a default: an
+/// unqualified `docker build` on a host of the other architecture would
 /// either fail or (worse) produce something whose architecture nobody stated.
 ///
 /// Every overlay body must `USER root` before its `RUN` and restore
@@ -105,11 +151,12 @@ fn build_overlay(tag: &str, body: &str) {
     let content = format!("FROM {base}\n{body}\n");
     std::fs::write(&dockerfile, content).expect("the overlay Dockerfile is writable");
 
+    let platform = base_platform();
     let out = Command::new("docker")
         .args([
             "build",
             "--platform",
-            "linux/amd64",
+            &platform,
             "-t",
             tag,
             "-f",
@@ -190,52 +237,40 @@ fn assert_rejected(tag: &str, needle: &str) {
 // ------------------------------------------------------------------ check 6
 
 /// TASK 8b's ASSERTION, observed failing. STANDING RULE 10 made the builder
-/// stage run on `$BUILDPLATFORM` and cross-compile to
-/// `x86_64-unknown-linux-gnu`, which removed a 3027-second emulated compile and
-/// created exactly one new way to ship a broken image: a `logweir` built for
-/// the BUILD machine's architecture instead of the target's.
+/// stage run on `$BUILDPLATFORM` and cross-compile to the target's triple,
+/// which removed a 3027-second emulated compile and created exactly one new way
+/// to ship a broken image: a `logweir` built for the BUILD machine's
+/// architecture instead of the target's.
 ///
 /// THE OVERLAY WRITES A 20-BYTE ELF HEADER, not a real foreign binary, and
-/// that is deliberate. A real aarch64 binary cannot be smuggled into an amd64
-/// image on this host — `docker build --platform linux/amd64` will not pull an
-/// arm64 base, and a real cross-architecture binary would also fail checks 1
-/// and 3, so the test could not tell which check caught it. A synthetic header
-/// isolates check 6 exactly: valid magic, valid ELFCLASS64, `e_machine` =
-/// 0x00b7 (EM_AARCH64) at offset 18. Delete check 6 and this test fails,
-/// because check 1 then rejects the file for being unreadable by `ldd` and
-/// says nothing about the architecture. Loosen check 6 to the magic alone and
-/// it fails too, because the magic here is correct.
-///
-/// The bytes, in order: `7f 45 4c 46` (magic), `02` (ELFCLASS64), `01` (LSB),
-/// `01` (EI_VERSION), seven zero bytes of OSABI/ABIVERSION/pad plus two more,
-/// `02 00` (ET_EXEC), `b7 00` (EM_AARCH64).
+/// that is deliberate. A real foreign binary would also fail checks 1 and 3,
+/// so the test could not tell which check caught it. A synthetic header
+/// isolates check 6 exactly: valid magic, valid ELFCLASS64, and the OTHER
+/// architecture's `e_machine` at offset 18 (`foreign_elf_header`). Delete
+/// check 6 and this test fails, because check 1 then rejects the file for
+/// being unreadable by `ldd` and says nothing about the architecture. Loosen
+/// check 6 to the magic alone and it fails too, because the magic here is
+/// correct.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
-fn check_image_rejects_an_image_whose_logweir_is_not_x86_64() {
+#[ignore = "needs a locally built runner image; run `just smoke`"]
+fn check_image_rejects_an_image_whose_logweir_is_another_architecture() {
     let tag = "logweir-check-broken:wrong-arch";
+    let (header, machine) = foreign_elf_header();
     build_overlay(
         tag,
-        "USER root\n\
-         RUN printf '\\177ELF\\002\\001\\001\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\267\\000' \
-         > /usr/local/bin/logweir\n\
-         USER 65532:65532",
+        &format!("USER root\nRUN printf '{header}' > /usr/local/bin/logweir\nUSER 65532:65532"),
     );
-    assert_rejected_naming(tag, &["check 6 (ELF)", "e_machine", "b7 00"]);
+    assert_rejected_naming(tag, &["check 6 (ELF)", "e_machine", machine]);
     remove_overlay(tag);
 }
 
 /// THE OTHER SHIPPED ELF. Task 9 (carried from Task 8b's review) extended check
 /// 6 to `/usr/local/bin/kafka-backup`, which until then was the only binary in
-/// the image whose architecture nothing read. It arrives by `COPY --from=engine`
-/// out of an amd64-only image pinned by digest (`Dockerfile:164`, `:181`), so
-/// the way it goes wrong is a repin at a multi-arch tag or a redirected COPY,
-/// not a compiler flag.
+/// the image whose architecture nothing read. Since PROD-00.2 it is Logweir's
+/// build, cross-compiled like the CLI, so the way it goes wrong is a
+/// redirected COPY or the amd64-only rollback built for arm64.
 ///
-/// SAME SYNTHETIC HEADER, SAME REASON as the test above: a real aarch64 engine
-/// cannot be smuggled into an amd64 image on this host, and a real one would
-/// also fail check 2, so the test could not tell which check caught it. The
-/// bytes are `7f 45 4c 46` (magic), `02` (ELFCLASS64), then `b7 00`
-/// (EM_AARCH64) at offset 18.
+/// SAME SYNTHETIC HEADER, SAME REASON as the test above.
 ///
 /// THIS TEST IS WHAT KEEPS THE NEW ARM FROM BEING A CHECK THAT CANNOT FAIL.
 /// The arm deliberately does NOT fail when the header is unreadable — a MISSING
@@ -243,17 +278,17 @@ fn check_image_rejects_an_image_whose_logweir_is_not_x86_64() {
 /// pins that. A present, readable, foreign header is the case this arm owns,
 /// and this is it.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
-fn check_image_rejects_an_image_whose_engine_is_not_x86_64() {
+#[ignore = "needs a locally built runner image; run `just smoke`"]
+fn check_image_rejects_an_image_whose_engine_is_another_architecture() {
     let tag = "logweir-check-broken:engine-wrong-arch";
+    let (header, machine) = foreign_elf_header();
     build_overlay(
         tag,
-        "USER root\n\
-         RUN printf '\\177ELF\\002\\001\\001\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\267\\000' \
-         > /usr/local/bin/kafka-backup\n\
-         USER 65532:65532",
+        &format!(
+            "USER root\nRUN printf '{header}' > /usr/local/bin/kafka-backup\nUSER 65532:65532"
+        ),
     );
-    assert_rejected_naming(tag, &["check 6 (ELF)", "kafka-backup", "b7 00"]);
+    assert_rejected_naming(tag, &["check 6 (ELF)", "kafka-backup", machine]);
     remove_overlay(tag);
 }
 
@@ -275,7 +310,7 @@ fn check_image_rejects_an_image_whose_engine_is_not_x86_64() {
 /// value over check 3 is that it names the library from `ldd` rather than from
 /// a crash, so "check 1 (ldd)" is the property, not a formatting detail.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
 fn check_image_rejects_an_image_with_an_unresolved_library() {
     let tag = "logweir-check-broken:no-libsasl2";
     build_overlay(
@@ -291,7 +326,7 @@ fn check_image_rejects_an_image_with_an_unresolved_library() {
 /// Deleting the engine leaves checks 1 (logweir's own linkage) intact, so this
 /// overlay isolates check 2 exactly.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
 fn check_image_rejects_an_image_whose_engine_is_missing() {
     let tag = "logweir-check-broken:no-engine";
     build_overlay(
@@ -309,7 +344,7 @@ fn check_image_rejects_an_image_whose_engine_is_missing() {
 /// make `ldd` exit non-zero and fail check 1 instead, which is why the brief
 /// forbids one.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
 fn check_image_rejects_an_image_whose_logweir_cli_fails() {
     let tag = "logweir-check-broken:cli-fails";
     build_overlay(
@@ -327,7 +362,7 @@ fn check_image_rejects_an_image_whose_logweir_cli_fails() {
 /// proves an operator holding nothing but the image can mint the approval
 /// `drill run` refuses to start without.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
 fn check_image_rejects_an_image_that_cannot_mint_an_approval() {
     let tag = "logweir-check-broken:no-approve";
     build_overlay(
@@ -349,7 +384,7 @@ fn check_image_rejects_an_image_that_cannot_mint_an_approval() {
 /// file. The split is only real if the message names the file, so the test
 /// requires the path.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
 fn check_image_rejects_an_image_missing_the_upstream_licence() {
     let tag = "logweir-check-broken:no-licence";
     build_overlay(
@@ -372,7 +407,7 @@ fn check_image_rejects_an_image_missing_the_upstream_licence() {
 /// carried the upstream MIT copy but had lost `LICENSE`/`NOTICE` failed with a
 /// message that pointed at the wrong file.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
 fn check_image_rejects_an_image_missing_the_logweir_licence() {
     let tag = "logweir-check-broken:no-own-licence";
     build_overlay(
@@ -399,7 +434,7 @@ fn check_image_rejects_an_image_missing_the_logweir_licence() {
 /// the one that leaked. Compared before and after rather than asserted empty:
 /// a developer running `just smoke` mid-task has their own edits outstanding.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
 fn check_image_leaves_the_tree_clean_after_a_failed_run() {
     fn porcelain() -> String {
         let out = Command::new("git")
@@ -447,7 +482,7 @@ fn check_image_leaves_the_tree_clean_after_a_failed_run() {
 ///
 /// `RUN` uses `/bin/sh` itself, so the removal is in exec form.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
 fn check_image_rejects_an_image_with_no_shell() {
     let tag = "logweir-check-broken:no-shell";
     build_overlay(
@@ -464,7 +499,7 @@ fn check_image_rejects_an_image_with_no_shell() {
 /// something: the freshly built image is ACCEPTED, with the exit code compared
 /// to 0 exactly rather than merely "not one of the failures".
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
 fn check_image_accepts_the_freshly_built_image() {
     let base = require_base();
     let (code, stderr) = run_check(&base);
@@ -472,27 +507,91 @@ fn check_image_accepts_the_freshly_built_image() {
 }
 
 /// `imagePullPolicy: Never` (Tasks 16/17) needs THIS image in the daemon, and
-/// the engine layer has no arm64 manifest, so an image that built for the host
-/// architecture is not the shipped artifact even though it may pass every
-/// other check here.
+/// it must be one of the two platforms the runner ships for (PROD-00.2:
+/// linux/amd64 and linux/arm64). `base_platform` refuses anything else.
 #[test]
-#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
-fn smoke_builds_amd64() {
-    let base = require_base();
-    let out = Command::new("docker")
-        .args(["image", "inspect", "--format", "{{.Architecture}}", &base])
-        .output()
-        .expect("docker is on PATH");
+#[ignore = "needs a locally built runner image; run `just smoke`"]
+fn smoke_builds_a_shipped_platform() {
+    let platform = base_platform();
     assert!(
-        out.status.success(),
-        "docker image inspect failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        platform == "linux/amd64" || platform == "linux/arm64",
+        "{platform}"
     );
-    let arch = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert_eq!(
-        arch, "amd64",
-        "`{base}` is a {arch} image; `just image` must build --platform linux/amd64"
+}
+
+// ------------------------------------------------------------------ check 8
+
+/// PROD-00.2: an image that declares no engine is refused. Without the file
+/// every Job would sign whatever its environment claims.
+#[test]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
+fn check_image_rejects_an_image_with_no_engine_identity() {
+    let tag = "logweir-check-broken:no-engine-identity";
+    build_overlay(
+        tag,
+        "USER root\nRUN rm -f /etc/logweir/engine-identity\nUSER 65532:65532",
     );
+    assert_rejected_naming(tag, &["check 8 (engine identity)", "engine-identity"]);
+    remove_overlay(tag);
+}
+
+/// PROD-00.2: a declared engine this repository does not build — here another
+/// build number of the same release — is refused, naming both it builds.
+#[test]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
+fn check_image_rejects_an_engine_identity_this_repository_does_not_build() {
+    let tag = "logweir-check-broken:other-build";
+    build_overlay(
+        tag,
+        "USER root\nRUN sed -i 's/+logweir\\.[0-9]*/+logweir.99/' /etc/logweir/engine-identity\n\
+         USER 65532:65532",
+    );
+    assert_rejected_naming(
+        tag,
+        &[
+            "check 8 (engine identity)",
+            "+logweir.99",
+            "neither Logweir's build",
+        ],
+    );
+    remove_overlay(tag);
+}
+
+/// PROD-00.2: the image declares OSO's release (the rollback's identity) while
+/// carrying Logweir's build. On linux/amd64 the engine's own `--version`
+/// contradicts the declaration; on linux/arm64 the rollback cannot exist at
+/// all. Either way the check names it.
+#[test]
+#[ignore = "needs a locally built runner image; run `just smoke`"]
+fn check_image_rejects_a_declaration_the_engine_contradicts() {
+    let root = repo_root();
+    let oso_digest = std::fs::read_to_string(root.join("third_party/kafka-backup-binary.digest"))
+        .expect("the digest file")
+        .trim()
+        .to_string();
+    let build = std::fs::read_to_string(root.join("third_party/kafka-backup-build.env"))
+        .expect("the build env");
+    let release = build
+        .lines()
+        .find_map(|l| l.strip_prefix("ENGINE_VERSION="))
+        .and_then(|v| v.split_once("+logweir."))
+        .map(|(release, _)| release.to_string())
+        .expect("ENGINE_VERSION names its release");
+    let tag = "logweir-check-broken:declares-oso";
+    build_overlay(
+        tag,
+        &format!(
+            "USER root\nRUN printf 'version={release}\\ndigest={oso_digest}\\n' \
+             > /etc/logweir/engine-identity\nUSER 65532:65532"
+        ),
+    );
+    let needle = if base_platform() == "linux/amd64" {
+        "would name an engine"
+    } else {
+        "linux/amd64 only"
+    };
+    assert_rejected_naming(tag, &["check 8 (engine identity)", needle]);
+    remove_overlay(tag);
 }
 
 // --------------------------------------------------------- the argument contract

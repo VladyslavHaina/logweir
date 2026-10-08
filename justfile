@@ -346,20 +346,24 @@ links:
 dod:
     ./scripts/check-dod.sh
 
-# Task 8. Build the runtime image into the LOCAL daemon, linux/amd64 explicitly:
-# the engine layer (Dockerfile:164) has no arm64 manifest, and `imagePullPolicy:
-# Never` (Tasks 16/17) needs the image in the daemon, not in a registry.
+# Task 8. Build the runtime image into the LOCAL daemon, for one platform,
+# stated: `imagePullPolicy: Never` (Tasks 16/17) needs the image in the daemon,
+# not in a registry.
 #
-# Task 8b: THE RUST COMPILE IS NO LONGER EMULATED. The builder stage runs on
-# `$BUILDPLATFORM` and cross-compiles to x86_64, so on an arm64 host this costs
-# minutes rather than the 3044 s Task 8 measured — see the wall-clocks in
-# docs/stability.md, under "Known limitations of v0.1".
+# PROD-00.2: THE RUNNER IS BUILT FOR linux/amd64 AND linux/arm64. Its engine is
+# Logweir's build of the vendored source, compiled for the image's platform, so
+# the recipe takes `${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}` like its three
+# siblings: this host's own architecture by default (nothing emulated), and
+# `LOGWEIR_IMAGE_PLATFORM=linux/amd64` for an amd64 image, which on this host
+# is a cross build (Task 8b: the builder stage runs on `$BUILDPLATFORM`; only
+# the runtime stage's `apt-get` is emulated). `scripts/check-image.sh` reads the
+# image's platform back and checks that architecture.
 #
 # THE NAMED PRODUCER of the local `logweir:check` tag. Tasks 16, 17 and 19 need
 # a locally built image and must call this recipe rather than open-code a
 # `docker build`, so there is one place where the platform is stated.
 image:
-    docker build --platform linux/amd64 -t logweir:check .
+    docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -t logweir:check .
 
 # Task 8 / Phase 1 line item 1f. THE gate for the image, replacing the release
 # workflow, which has never run (no tag has been pushed). One

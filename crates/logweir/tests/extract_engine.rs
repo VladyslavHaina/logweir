@@ -88,13 +88,21 @@ fn the_extracted_engine_reports_the_pinned_version() {
             .unwrap_or_else(|e| panic!("docker run failed ({e}); is Docker running?"));
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr)
     };
-    // The extracted bytes report EXACTLY the pin `doctor` accepts (PROD-00.3f
-    // moved it to 0.23.3; the full-drill floor stays 0.21.0). A whole-token
-    // comparison, as `doctor` makes it: `contains` would accept `0.23.31`.
-    let pin = logweir::doctor::ENGINE_PIN;
+    // The extracted bytes are OSO's RELEASE — the one-release rollback and the
+    // release Logweir's build is made from (PROD-00.2) — and report exactly
+    // that version (PROD-00.3f moved it to 0.23.3; the full-drill floor stays
+    // 0.21.0). A whole-token comparison, as `doctor` makes it: `contains` would
+    // accept `0.23.31`. They never report Logweir's build identity, which only
+    // `scripts/engine-source.sh` stamps.
+    let release = logweir::doctor::ENGINE_UPSTREAM_RELEASE;
     assert!(
-        s.split_ascii_whitespace().any(|t| t == pin),
-        "the extracted engine must report the pinned version {pin}, got: {s}"
+        s.split_ascii_whitespace().any(|t| t == release),
+        "the extracted engine must report OSO's release {release}, got: {s}"
+    );
+    assert!(
+        !s.split_ascii_whitespace()
+            .any(|t| t == logweir::doctor::ENGINE_PIN),
+        "OSO's binary cannot print Logweir's build identity: {s}"
     );
 }
 

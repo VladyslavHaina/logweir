@@ -485,9 +485,10 @@ reversible direction until the owning task rules.
 - **No musl release target.** `rdkafka` vendors and compiles `librdkafka` from
   C, which does not cross-compile to musl without substantially more work than
   v0.1 has ([ADR 0004](architecture.md#adr-0004-kafka-client)). This is not contradicted by
-  the `Dockerfile` cross-compiling to `x86_64-unknown-linux-gnu`: that target
-  has a one-package Debian toolchain and multiarch `:amd64` copies of every
-  C library librdkafka wants, and musl has neither. `release.yml` does not
+  the `Dockerfile` cross-compiling to `x86_64-unknown-linux-gnu` and
+  `aarch64-unknown-linux-gnu`: each glibc target has a one-package Debian
+  toolchain and multiarch copies of every C library librdkafka wants, and musl
+  has neither. `release.yml` does not
   attempt a musl build. Earlier tags carried a non-blocking attempt; it failed
   in `openssl-sys`, which finds no musl OpenSSL on the runner, on every tagged
   run (v0.1.1 through v0.1.5), so it was removed rather than kept as a
@@ -632,9 +633,11 @@ verification. Main publication and versioned releases reuse it; check the
 exact Actions run before deploying a digest. The release checklist records
 evidence per candidate.
 
-The workflow builds `linux/amd64` and `linux/arm64` controller variants on
-native runners, checks each variant, and assembles a manifest list after
-checking the resulting artifacts. The runtime supports
+The workflow builds `linux/amd64` and `linux/arm64` variants of all four
+images (the runner since PROD-00.2) on native runners, checks each variant,
+and assembles a manifest list after checking the resulting artifacts; a `sign`
+job then signs each list keylessly and attests the runner's SBOM and SLSA
+provenance ([install.md](install.md#verify-the-images)). The runtime supports
 `scripts/check-image-weirkeeper.sh --no-exec` for inspecting a foreign
 architecture without executing it.
 
@@ -983,11 +986,15 @@ making Cargo's fingerprint checks dominate test time.
 Notification POSTs use a 5 s connection timeout and 10 s overall timeout.
 Transport failures are logged and do not change a signed drill result.
 
-**Image smoke checks require Docker.** `just smoke` builds the amd64 runner
-image and checks both binaries' architecture, dynamic linkage, versions,
-approval signing and license files. It does not contact an archive or broker.
-The runner builder executes natively and cross-compiles Rust for amd64;
-only foreign runtime-stage commands use emulation on arm64 hosts.
+**Image smoke checks require Docker.** `just smoke` builds the runner image
+for `$LOGWEIR_IMAGE_PLATFORM` (this host's architecture by default) and checks
+both binaries' architecture, dynamic linkage, versions, the engine's declared
+identity, approval signing and license files. It does not contact an archive
+or broker. The runner builder executes natively and cross-compiles Rust,
+Logweir's and the engine's, for the image's platform; only foreign
+runtime-stage commands use emulation. Measured on the arm64 development host
+for PROD-00.2 (cold, 8 CPUs given to Docker): the engine stage alone 767 s,
+with its `cargo build` 8 min 31 s natively for arm64.
 
 Historical development-host measurements (2026-09-09, arm64): the runner's
 cold builder took 121 s, including a 92.1 s Cargo layer; a cached rebuild took
@@ -1088,8 +1095,9 @@ more, below). One machine, not budgets:
 | Console render in Chromium (viewer) | backups list 1.5–2.0 s, history 0.8–1.4 s, schedule detail 1.8–2.1 s, catalog detail 0.7–1.0 s |
 
 **What limited the archive's size is the host, and one product gap.** Every
-run and every evidence read is its own pod of the `linux/amd64` runner image,
-which docker-desktop on Apple silicon runs under emulation: an evidence fetch
+run and every evidence read is its own pod of the `linux/amd64` runner image
+(the runner had no arm64 variant before PROD-00.2), which docker-desktop on
+Apple silicon ran under emulation: an evidence fetch
 took 78 s at the median (p90 167 s), four at a time per namespace
 (`checks.maxEvidenceFetchActivePerNamespace`), so verification drained at about
 two runs a minute. **Nothing bounded manual "Back up now" in that build**
@@ -2315,12 +2323,13 @@ spend).
   shipped — it is the version this plan verified every vendored struct and
   CLI behaviour against (`docs/UPSTREAM-VERSIONS.md` in the planning repo;
   `ae5a102f93b5270927d95d4ccec184b577febb10`). The floor is not the pin:
-  since PROD-00.3f the version pinned by digest in
-  `third_party/kafka-backup-binary.digest` is **0.23.3** (*Supported engine
-  pin*, below).
+  since PROD-00.2 the engine the images ship is Logweir's build of OSO's
+  **0.23.3** source, `0.23.3+logweir.1` (*Supported engine pin*, below).
 
-- **Runtime image floor.** The extracted `kafka-backup` binary is dynamically
-  linked against **glibc >= 2.36** and **libssl3**, and performs TLS
+- **Runtime image floor.** The `kafka-backup` binary is dynamically
+  linked against **glibc >= 2.36** (`ldd`, 2026-10-08: libc, libm and
+  libgcc_s only, for Logweir's build and OSO's 0.23.3 release alike; the
+  image's **libssl3** is for Logweir's own librdkafka), and performs TLS
   connections that need a CA bundle — hence `debian:bookworm-slim` plus
   `ca-certificates` and `libssl3` in the runtime stage, never a musl or
   distroless base (see the `Dockerfile`'s own comment).
@@ -2352,11 +2361,17 @@ spend).
   of an exit code, without a major bump. New flags and new exit codes may be
   added in a minor.
 
-- **Supported engine pin.** The pin is **0.23.3**, OSO's newest release on
-  2026-10-07 (tag commit `afb160e7`, image digest
+- **Supported engine pin.** The engine the images ship is **Logweir's build
+  of OSO 0.23.3**, `kafka-backup 0.23.3+logweir.1` (PROD-00.2, OD-3): the
+  vendored source of OSO's newest release on 2026-10-07 (tag commit
+  `afb160e7`) plus Logweir's patch folder, built for linux/amd64 and
+  linux/arm64 (`third_party/kafka-backup-build.env`; its `engine.digest` is the
+  build-input digest). `doctor` accepts exactly that version, as a whole token,
+  and names OSO's own 0.23.3 binary (image digest
   `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`
-  in `third_party/kafka-backup-binary.digest`); `doctor` accepts exactly that
-  version, as a whole token. It replaced 0.21.0 with PROD-00.3f, which
+  in `third_party/kafka-backup-binary.digest`) as the one-release rollback.
+  `engine.version` and `engine.digest` in signed documents name whichever ran.
+  The release replaced 0.21.0 with PROD-00.3f, which
   evaluated it from source and on the compose stack
   ([decision record](to-do/decisions/PROD-00-engine-route.md) §12): the
   segment format, the three subcommands Logweir runs and every key it renders
@@ -2366,10 +2381,11 @@ spend).
   support table conflicted with the stated full-drill floor and is superseded
   by the [support matrix](support-matrix.md). Moving the pin is a recorded
   decision (OD-3, decided 2026-10-07: Logweir follows the newest OSO release,
-  and builds from source with its own patches once PROD-00.2 lands), never a
-  routine bump: the guard `crates/logweir/tests/engine_pin.rs` fails until every place
-  that names the pin, PROD-01.1's measured contract included, names the new
-  one.
+  and builds it from source with its own patches, which PROD-00.2 landed),
+  never a routine bump: the guards `crates/logweir/tests/engine_pin.rs` and
+  `engine_build.rs` fail until every place that names the build, PROD-01.1's
+  measured contract included, names the new one and the build-input digest is
+  re-recorded.
 
   Two engine behaviours since 0.22.0 are refused by Logweir rather than
   inherited:

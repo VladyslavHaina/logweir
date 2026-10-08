@@ -24,8 +24,17 @@ rendered document; a key, a bearer token or any credential reach the UI page;
 or Logweir write outside its own `logweir/` prefix, delete an archive object,
 or write to a source cluster on any path.
 
-Out of scope — vulnerabilities in `osodevops/kafka-backup`, which Logweir shells
-out to by pinned digest and never links. Report those upstream.
+Also in scope since PROD-00.2 (OD-3) — **the `kafka-backup` engine the images
+ship**. Logweir builds it from the vendored OSO source with its own patch folder
+(`third_party/kafka-backup-patches/`), so a vulnerability in that build is
+Logweir's to fix: in the engine's code, in its dependency graph (its own
+`Cargo.lock`, which `scripts/ci-check.sh` checks with `cargo deny` under
+`third_party/kafka-backup-deny.toml`), or in a patch Logweir carries. Report it
+here. A fix ships as a patch as soon as its oracle passes; reporting it to OSO
+as well is welcome, and is not a condition of the fix. The engine is still a
+separate process Logweir never links, and the one-release rollback image
+(`ENGINE_SOURCE=oso`, OSO's own binary) carries OSO's code as OSO released it:
+report a defect that only it has upstream.
 
 ## What this design does not protect against
 

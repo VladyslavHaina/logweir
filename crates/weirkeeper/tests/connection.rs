@@ -1133,7 +1133,7 @@ fn legacy_restore(cluster: &KafkaCluster, plan: &str) -> Restore {
 /// (`crd_shape::the_runner_image_is_named_once`).
 fn redact_image(mut job: Value) -> Value {
     job["spec"]["template"]["spec"]["containers"][0]["image"] = json!("<runner-image>");
-    as_captured_engine_pin(&mut job);
+    as_captured_engine_identity(&mut job);
     job
 }
 
@@ -1143,38 +1143,32 @@ const GOLDEN_ENGINE_VERSION: &str = "0.21.0";
 const GOLDEN_ENGINE_DIGEST: &str =
     "sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317";
 
-/// The engine pin is not part of the connection contract, and it moves on its
-/// own record (PROD-00.3f moved it to 0.23.3). So each `LOGWEIR_ENGINE_VERSION`
-/// / `LOGWEIR_ENGINE_DIGEST` entry this build renders is ASSERTED to carry the
-/// current pin (`job::ENGINE_VERSION`, `job::ENGINE_DIGEST`) and then put back
-/// to the value the golden captured, so everything else still compares byte
-/// for byte. A Job that rendered any other engine value fails here, and one
-/// that dropped either variable still fails the equality.
-fn as_captured_engine_pin(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            let pinned = match map.get("name").and_then(Value::as_str) {
-                Some("LOGWEIR_ENGINE_VERSION") => {
-                    Some((job::ENGINE_VERSION, GOLDEN_ENGINE_VERSION))
-                }
-                Some("LOGWEIR_ENGINE_DIGEST") => Some((job::ENGINE_DIGEST, GOLDEN_ENGINE_DIGEST)),
-                _ => None,
-            };
-            if let Some((current, captured)) = pinned {
-                assert_eq!(
-                    map.get("value"),
-                    Some(&json!(current)),
-                    "the Job must stamp the CURRENT engine pin"
-                );
-                map.insert("value".into(), json!(captured));
-            }
-            for v in map.values_mut() {
-                as_captured_engine_pin(v);
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(as_captured_engine_pin),
-        _ => {}
-    }
+/// The engine identity is not part of the connection contract. The goldens
+/// were captured when every Job stated it, first in its environment; since
+/// PROD-00.2 (review L3) no Job does — the runner image declares its own
+/// engine and the runner refuses a version its binary does not print. So each
+/// built Job is ASSERTED to carry neither variable, and the pair the golden
+/// captured is put back where it stood, so everything else still compares
+/// byte for byte. A Job that stated an engine identity fails here.
+fn as_captured_engine_identity(job: &mut Value) {
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array_mut()
+        .expect("the runner container carries env");
+    assert!(
+        env.iter().all(|e| !matches!(
+            e["name"].as_str(),
+            Some("LOGWEIR_ENGINE_VERSION" | "LOGWEIR_ENGINE_DIGEST")
+        )),
+        "a Job states the engine identity; the controller must never be its source: {env:?}"
+    );
+    env.insert(
+        0,
+        json!({"name": "LOGWEIR_ENGINE_VERSION", "value": GOLDEN_ENGINE_VERSION}),
+    );
+    env.insert(
+        1,
+        json!({"name": "LOGWEIR_ENGINE_DIGEST", "value": GOLDEN_ENGINE_DIGEST}),
+    );
 }
 
 /// The legacy goldens' own provenance, asserted so a future editor cannot
