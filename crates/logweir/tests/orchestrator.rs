@@ -2338,3 +2338,45 @@ fn a_complete_coverage_plan_finds_a_changed_record_past_the_canary() {
     );
     assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
 }
+
+/// **PROD-11.1, fail closed while the selection is not executable end to
+/// end** (the orchestrator's binding note on the WIP, 2026-10-08). A plan that
+/// states `restore.partitions` — one the archive satisfies, so the refusal is
+/// not the archive's — is refused exit 3, naming `SelectionNotYetExecutable`,
+/// before phase 2: no target topic created, no engine started, no sample
+/// fingerprinted, nothing signed. The control is the same archive with no
+/// selection (`Drill::Passes`), which runs and signs.
+///
+/// KILLS: deleting the refusal (the run would restore and sign a narrowed
+/// selection judged over the whole archive), moving it after the target-topic
+/// creation step or after phase 4.
+#[test]
+fn a_stated_selection_is_refused_before_phase_2_until_it_is_executable() {
+    let f = fixtures::orchestrator_fixture(Drill::StatesAPartitionSelection);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=GuardRefused");
+    assert!(
+        message.starts_with("SelectionNotYetExecutable: this plan states a replay selection"),
+        "{message}"
+    );
+    assert!(
+        fixtures::created_topics(&f).is_empty(),
+        "a refused selection created a target topic: {:?}",
+        fixtures::created_topics(&f)
+    );
+    assert!(fixtures::fingerprint_calls(&f).is_empty(), "before phase 4");
+    assert!(
+        f.ctx
+            .store
+            .get(&format!("logweir/drills/{}.json", f.run_id))
+            .is_err(),
+        "a refused run signs nothing"
+    );
+
+    let control = fixtures::orchestrator_fixture(Drill::Passes);
+    execute_with(&control.args, &control.run_id, &control.ctx)
+        .expect("the same archive without a selection runs");
+    assert_eq!(fixtures::created_topics(&control).len(), 1);
+}

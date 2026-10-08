@@ -2893,7 +2893,30 @@ fn execute_with_validated_approval(
     // plan that states no selection, which runs exactly as before. The same
     // function `build_plan` binds the window with, and the restore preflight
     // previews it with (`logweir_core::replay_selection`).
-    let _replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &facts)?;
+    let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &facts)?;
+    // **FAIL CLOSED until the selection is executable end to end** (the
+    // orchestrator's binding note on PROD-11.1's WIP, 2026-10-08). The plan
+    // grammar, plan construction, phase 5's re-derivation and the restore
+    // preflight's preview are selection-aware; phases 4, 6 and 7 and the
+    // signed `source.selection` block are not yet. So a plan that states a
+    // selection is refused HERE — exit 3, before phase 2, no target topic
+    // created, no engine started, nothing signed — rather than restored and
+    // signed by phases that would judge it over the whole archive.
+    // `orchestrator.rs::a_stated_selection_is_refused_before_phase_2_until_it_is_executable`
+    // pins it; it is removed by the commit that makes the selection
+    // executable and signed.
+    if let Some(r) = &replay_selection {
+        return Err(DrillError::Guard(GuardRefusal(format!(
+            "{SELECTION_NOT_YET_EXECUTABLE}: this plan states a replay selection \
+             (restore.window_start and/or restore.partitions: {} partition(s) from epoch-ms {} \
+             to {}), which this build resolves and previews but does not yet execute and sign; \
+             refused before any target topic is created rather than restored and judged over \
+             the whole archive",
+            r.partitions.len(),
+            r.start_ms,
+            r.end_ms
+        ))));
+    }
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -3625,6 +3648,11 @@ pub fn build_plan(
         offset_report_out,
     )
 }
+
+/// **PROD-11.1, temporary.** The named refusal of a plan that states a replay
+/// selection while phases 4, 6 and 7 and the signed block cannot yet carry
+/// it (fail closed).
+pub const SELECTION_NOT_YET_EXECUTABLE: &str = "SelectionNotYetExecutable";
 
 /// **PROD-11.1.** The plan's replay selection resolved against the archive
 /// set it restores, through the ONE function the restore preflight previews

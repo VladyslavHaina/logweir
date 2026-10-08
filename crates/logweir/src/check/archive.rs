@@ -199,3 +199,66 @@ pub fn segment_keys_for_topics(
     out.dedup();
     out
 }
+
+/// **PROD-11.1.** The manifest's topics in the shape the SHARED replay
+/// selection reads (`logweir_core::replay_selection::ReplaySelection::resolve`),
+/// so the restore preflight previews a plan's selection through the same
+/// function execution restores it with.
+///
+/// The keys stay manifest-relative here (the caller qualifies them, as
+/// [`segment_keys_for`] does). A segment without a key or either timestamp is
+/// skipped, as every walk in this file skips it; a missing offset or record
+/// count reads 0, which only the preview's record bound shows.
+#[must_use]
+pub fn topic_facts(v: &Value) -> Vec<logweir_core::engine::TopicFacts> {
+    use logweir_core::engine::{PartitionFacts, SegmentFacts, TopicFacts};
+    let int = |s: &Value, k: &str| s.get(k).and_then(Value::as_i64).unwrap_or(0);
+    topic_entries(v)
+        .iter()
+        .filter_map(|t| {
+            let name = t.get("name").and_then(Value::as_str)?;
+            Some(TopicFacts {
+                name: name.to_string(),
+                original_partition_count: t
+                    .get("original_partition_count")
+                    .and_then(Value::as_i64)
+                    .and_then(|n| i32::try_from(n).ok()),
+                source_replication_factor: None,
+                configurations: std::collections::BTreeMap::new(),
+                partitions: partition_entries(t)
+                    .iter()
+                    .filter_map(|p| {
+                        let partition_id = p
+                            .get("partition_id")
+                            .and_then(Value::as_i64)
+                            .and_then(|n| i32::try_from(n).ok())?;
+                        Some(PartitionFacts {
+                            partition_id,
+                            segments: segment_entries(p)
+                                .iter()
+                                .filter_map(|s| {
+                                    Some(SegmentFacts {
+                                        key: s.get("key").and_then(Value::as_str)?.to_string(),
+                                        start_offset: int(s, "start_offset"),
+                                        end_offset: int(s, "end_offset"),
+                                        start_timestamp: s
+                                            .get("start_timestamp")
+                                            .and_then(Value::as_i64)?,
+                                        end_timestamp: s
+                                            .get("end_timestamp")
+                                            .and_then(Value::as_i64)?,
+                                        record_count: int(s, "record_count"),
+                                        sha256: String::new(),
+                                        uploaded_at: 0,
+                                    })
+                                })
+                                .collect(),
+                            gaps: Vec::new(),
+                            pruned: Vec::new(),
+                        })
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
+}

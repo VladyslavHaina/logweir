@@ -365,6 +365,24 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
             "The requested point in time is newer than anything this backup set covers. Pick an \
              earlier point, or take a newer backup."
         }
+        CheckCode::SelectionInvalid => {
+            "The plan's restore.window_start or restore.partitions is malformed: a subset for a \
+             topic it does not select, an empty or repeated partition list, or a start at or \
+             after the window's end. Fix the selection in the draft."
+        }
+        CheckCode::WindowStartBeforeCoverage => {
+            "The requested window start is older than anything this backup set covers. It is \
+             refused, never moved to the archive's start. Pick a later start, or another \
+             recovery point."
+        }
+        CheckCode::PartitionNotInBackupSet => {
+            "A selected partition is not in this backup set. Remove it from the selection, or \
+             pick a recovery point that holds it."
+        }
+        CheckCode::SelectionEmpty => {
+            "No archived segment of a selected partition overlaps the requested window, so the \
+             restore would write nothing. Widen the window or the partition selection."
+        }
         CheckCode::TopicNotInBackupSet => {
             "A selected topic is not in this backup set. Remove it from the selection, or pick \
              a recovery point that holds it."

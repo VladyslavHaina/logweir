@@ -8908,3 +8908,298 @@ fn the_catalog_sync_body_is_pinned_for_the_controllers_parser() {
          contract."
     );
 }
+
+// ===========================================================================
+// PROD-11.1 — the replay selection's PREVIEW, through the shared function
+// ===========================================================================
+
+/// `restore_yaml` with extra `restore:` keys (a window start, partitions).
+fn selecting_yaml(point_in_time_ms: i64, extra: &str) -> String {
+    let pit = ms_to_rfc3339(point_in_time_ms);
+    restore_yaml(&pit, &["orders"], "scratch").replace(
+        &format!("  point_in_time: {pit}\n"),
+        &format!("  point_in_time: {pit}\n{extra}"),
+    )
+}
+
+/// The fixture manifest plus a partition 1 whose one segment is early
+/// (epoch-ms 1_757_898_000_000 .. 1_757_898_100_000).
+fn two_partition_manifest() -> serde_json::Value {
+    let mut m = manifest_json();
+    m["topics"][0]["partitions"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "partition_id": 1,
+            "segments": [
+                {"key": "20260915T030000Z/topics/orders/partition=1/segment-0.bin",
+                 "start_timestamp": 1_757_898_000_000i64,
+                 "end_timestamp":   1_757_898_100_000i64}
+            ]
+        }));
+    m
+}
+
+/// **A stated start before the archive's coverage is previewed as refused**
+/// (`WindowStartBeforeCoverage`), and one AT the floor is covered — the
+/// execution guard's rule, from the same function. KILLS: `<=` for `<`, a
+/// preview that clamps the start.
+#[test]
+fn the_preview_refuses_a_window_start_before_coverage() {
+    for (start_ms, want) in [
+        (1_757_897_999_999i64, CheckCode::WindowStartBeforeCoverage),
+        (1_757_898_000_000, CheckCode::PointInTimeCovered),
+    ] {
+        let yaml = selecting_yaml(
+            INSIDE_MS,
+            &format!("  window_start: {}\n", ms_to_rfc3339(start_ms)),
+        );
+        let m = mount(&restore_plan(&yaml, None));
+        let run = drive(
+            &m,
+            &restore_wiring(&yaml, &manifest_json(), FakeProbe::new()),
+        );
+        let row = run.row(CheckId::ArchiveCoverage);
+        assert_eq!(row.code, want, "start {start_ms}");
+        if want == CheckCode::PointInTimeCovered {
+            assert!(
+                row.message
+                    .contains("from epoch-ms 1757898000000 (the plan's stated start)"),
+                "{:?}",
+                row.message
+            );
+        }
+    }
+}
+
+/// A partition the archive does not list, an empty selection and a malformed
+/// subset are each refused by name in the preview, exactly as execution
+/// refuses them. The malformed one stops at `plan.parse`: every later check
+/// is a claim about bytes that state no executable selection.
+#[test]
+fn the_preview_names_an_unlisted_partition_an_empty_selection_and_a_malformed_subset() {
+    let yaml = selecting_yaml(INSIDE_MS, "  partitions:\n    orders: [0, 3]\n");
+    let m = mount(&restore_plan(&yaml, None));
+    let run = drive(
+        &m,
+        &restore_wiring(&yaml, &manifest_json(), FakeProbe::new()),
+    );
+    assert_eq!(
+        run.row(CheckId::ArchiveCoverage).code,
+        CheckCode::PartitionNotInBackupSet
+    );
+
+    // orders/1's only segment ends at epoch-ms 1_757_898_100_000; the window
+    // starts at INSIDE_MS, so a selection of orders/1 alone is empty.
+    let yaml = selecting_yaml(
+        INSIDE_MS + 1_000,
+        &format!(
+            "  window_start: {}\n  partitions:\n    orders: [1]\n",
+            ms_to_rfc3339(INSIDE_MS)
+        ),
+    );
+    let m = mount(&restore_plan(&yaml, None));
+    let run = drive(
+        &m,
+        &restore_wiring(&yaml, &two_partition_manifest(), FakeProbe::new()),
+    );
+    assert_eq!(
+        run.row(CheckId::ArchiveCoverage).code,
+        CheckCode::SelectionEmpty
+    );
+
+    let yaml = selecting_yaml(INSIDE_MS, "  partitions:\n    orders: []\n");
+    let m = mount(&restore_plan(&yaml, None));
+    let run = drive(
+        &m,
+        &restore_wiring(&yaml, &manifest_json(), FakeProbe::new()),
+    );
+    let row = run.row(CheckId::PlanParse);
+    assert_eq!(row.code, CheckCode::SelectionInvalid);
+    assert_eq!(row.state, CheckState::NotReady);
+    assert!(
+        !run.has(CheckId::ArchiveCoverage),
+        "nothing after plan.parse runs"
+    );
+}
+
+/// **The segments row checks the SELECTION's segments.** With a start after
+/// segment 0, a missing segment 0 is not the selection's and the row is
+/// ready; the same archive previewed with no start (the control) reports it
+/// missing. And a partition subset that excludes partition 1 does not look
+/// for its segment. KILLS: the segments row reading the archive's floor or
+/// every partition when the plan states a selection.
+#[test]
+fn the_preview_checks_only_the_segments_the_selection_reads() {
+    let manifest = two_partition_manifest();
+    let archive = |drop: &[&str]| {
+        let mut o = FakeObjects::new()
+            .with_prefix(ARCHIVE_PREFIX)
+            .with_object(MANIFEST_OBJECT_KEY, &serde_json::to_vec(&manifest).unwrap());
+        for key in [
+            "topics/orders/partition=0/segment-0.bin",
+            "topics/orders/partition=0/segment-1.bin",
+            "topics/orders/partition=1/segment-0.bin",
+        ] {
+            if !drop.contains(&key) {
+                o = o.with_object(&format!("kafka-backups/{BACKUP_ID}/{key}"), b"segment");
+            }
+        }
+        o
+    };
+    let wiring = |yaml: &str, objects: FakeObjects| {
+        FakeWiring::default()
+            .with_file(PLAN_FILE, yaml.as_bytes())
+            .with_probe(FakeProbe::new())
+            .with_role(DestinationRole::ArchiveRead, objects)
+    };
+    let missing0 = archive(&[
+        "topics/orders/partition=0/segment-0.bin",
+        "topics/orders/partition=1/segment-0.bin",
+    ]);
+
+    let selecting = selecting_yaml(
+        INSIDE_MS,
+        &format!(
+            "  window_start: {}\n  partitions:\n    orders: [0]\n",
+            ms_to_rfc3339(1_757_901_600_001)
+        ),
+    );
+    let run = drive(
+        &mount(&restore_plan(&selecting, None)),
+        &wiring(&selecting, missing0.clone()),
+    );
+    let row = run.row(CheckId::ArchiveSegments);
+    assert_eq!(row.code, CheckCode::SegmentsPresent, "{:?}", row.message);
+    assert!(
+        row.message.starts_with("all 1 segment(s)"),
+        "{}",
+        row.message
+    );
+
+    let control = selecting_yaml(INSIDE_MS, "");
+    let run = drive(
+        &mount(&restore_plan(&control, None)),
+        &wiring(&control, missing0),
+    );
+    assert_eq!(
+        run.row(CheckId::ArchiveSegments).code,
+        CheckCode::SegmentMissing,
+        "the full selection reads segment 0 and partition 1"
+    );
+}
+
+/// **Preview and execution select the same records: one function, one
+/// answer.** The restore preflight's projection of the manifest JSON
+/// (`check::archive::topic_facts`) and execution's `OsoCliEngine::describe`
+/// of the SAME archive go through `ReplaySelection::resolve` and name the
+/// same segments, partitions, bounds and engine runs, for a start-and-subset
+/// plan and for a full one.
+#[test]
+fn the_preview_and_execution_resolve_the_same_selection() {
+    use logweir_core::engine::{BackupSetRef, DataEngine};
+    use logweir_engine_oso::storage::Store;
+    let dir = tempfile::tempdir().unwrap();
+    let set_dir = dir.path().join("kafka-backups").join(BACKUP_ID);
+    std::fs::create_dir_all(&set_dir).unwrap();
+    let seg = |p: i64, i: i64, t0: i64, t1: i64, o0: i64| {
+        serde_json::json!({
+            "key": format!("{BACKUP_ID}/topics/orders/partition={p}/segment-{i}.bin"),
+            "start_offset": o0, "end_offset": o0 + 9, "record_count": 10,
+            "start_timestamp": t0, "end_timestamp": t1
+        })
+    };
+    let manifest = serde_json::json!({
+        "backup_id": BACKUP_ID,
+        "created_at": 1_757_908_800_000i64,
+        "topics": [
+            {"name": "orders", "partitions": [
+                {"partition_id": 0, "segments": [
+                    seg(0, 0, 1_757_898_000_000, 1_757_901_600_000, 0),
+                    seg(0, 1, 1_757_901_600_001, 1_757_908_800_000, 10)]},
+                {"partition_id": 1, "segments": [
+                    seg(1, 0, 1_757_899_000_000, 1_757_905_000_000, 0)]},
+                {"partition_id": 2, "segments": [
+                    seg(2, 0, 1_757_906_000_000, 1_757_907_000_000, 0)]}
+            ]},
+            {"name": "payments", "partitions": [
+                {"partition_id": 0, "segments": [
+                    seg(0, 0, 1_757_897_000_000, 1_757_899_000_000, 0)]}
+            ]}
+        ]
+    });
+    std::fs::write(
+        set_dir.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let store = Store::read_only_from_url(&logweir_core::engine::StorageUrl::Filesystem {
+        path: dir.path().to_path_buf(),
+    })
+    .unwrap();
+    let preview_store = Store::read_only_from_url(&logweir_core::engine::StorageUrl::Filesystem {
+        path: dir.path().to_path_buf(),
+    })
+    .unwrap();
+    let engine = logweir_engine_oso::engine::OsoCliEngine::new(
+        "/nonexistent/kafka-backup".into(),
+        "v0".into(),
+        "sha256:0".into(),
+        dir.path().to_path_buf(),
+        store,
+    );
+    let facts = engine
+        .describe(&BackupSetRef {
+            backup_id: BACKUP_ID.into(),
+            manifest_key: format!("kafka-backups/{BACKUP_ID}/manifest.json"),
+        })
+        .expect("execution reads the manifest");
+    let mapping: BTreeMap<String, String> = [("orders".to_string(), "restore-orders".to_string())]
+        .into_iter()
+        .collect();
+    for extra in [
+        format!(
+            "  window_start: {}\n  partitions:\n    orders: [2, 0]\n",
+            ms_to_rfc3339(1_757_900_000_000)
+        ),
+        "  partitions:\n    orders: [1]\n".to_string(),
+        format!("  window_start: {}\n", ms_to_rfc3339(1_757_901_600_001)),
+    ] {
+        let yaml = selecting_yaml(1_757_908_000_000, &extra);
+        let spec: logweir_core::spec::DrillSpec = serde_yaml::from_str(&yaml).unwrap();
+        let execution = logweir::drill::resolve_selection(&spec, &mapping, &facts)
+            .expect("execution resolves")
+            .expect("a selection");
+        let preview = logweir_core::replay_selection::ReplaySelection::from_spec(&spec)
+            .unwrap()
+            .resolve(&logweir::check::archive::topic_facts(&manifest))
+            .expect("the preview resolves");
+        let qualified: Vec<String> = preview
+            .segment_keys()
+            .iter()
+            .map(|k| ObjectAccess::qualify(&preview_store, k))
+            .collect();
+        assert_eq!(qualified, execution.segment_keys(), "{extra}");
+        let shape = |r: &logweir_core::replay_selection::ResolvedSelection| {
+            (
+                r.floor_ms,
+                r.start_ms,
+                r.start_source,
+                r.end_ms,
+                r.runs.clone(),
+                r.partitions
+                    .iter()
+                    .map(|p| {
+                        (
+                            p.topic.clone(),
+                            p.partition,
+                            p.records_lower,
+                            p.records_upper,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(shape(&preview), shape(&execution), "{extra}");
+    }
+}

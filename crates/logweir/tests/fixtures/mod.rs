@@ -869,6 +869,9 @@ pub enum Drill {
     /// 300th, far past the 25-record canary a sampled drill reads) changed on
     /// the target: the complete lane counts it and the drill fails.
     VerifiesCompletelyAndFindsAChangedRecord,
+    /// **PROD-11.1.** `Passes`, with the approved plan stating a replay
+    /// selection the archive satisfies: `restore.partitions: {orders: [0]}`.
+    StatesAPartitionSelection,
 }
 
 /// **PROD-08.1.** CRC-32 (IEEE, reflected), bitwise: the KBAK footer's
@@ -1369,6 +1372,8 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         Drill::SelectsALogAppendTimeTopicByProducerTime => format!(
             "restore:\n  point_in_time: \"{FIXTURE_WINDOW_END}\"\n  time_basis: producerTime\n"
         ),
+        // PROD-11.1: a selection the fixture archive satisfies.
+        Drill::StatesAPartitionSelection => "restore:\n  partitions:\n    orders: [0]\n".into(),
         _ => String::new(),
     };
     // PROD-08.1: the complete shapes ask for complete coverage; every other
@@ -1610,6 +1615,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // plan's coverage, the real segment and the one changed record.
         | Drill::VerifiesCompletely
         | Drill::VerifiesCompletelyAndFindsAChangedRecord
+        // PROD-11.1. The engine is the passing one: the variable is the
+        // plan's `restore.partitions`.
+        | Drill::StatesAPartitionSelection
         | Drill::LeavesATopicBehind => {}
     }
 
