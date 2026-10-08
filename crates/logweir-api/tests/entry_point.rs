@@ -57,6 +57,14 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
 }
 
 impl Buffer {
+    /// How many captured lines contain `needle`.
+    fn count(&self, needle: &str) -> usize {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count()
+    }
+
     fn record(&self, audit_id: &str) -> (Value, Value) {
         let text = String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned();
         text.lines()
@@ -888,34 +896,46 @@ async fn a_chain_with_no_client_hop_falls_back_to_the_peer() {
 
 /// **The bound on tracked keys holds under a spray of forwarded addresses,
 /// and a full table locks no one out.** A trusted proxy forwards more
-/// distinct clients than the table holds, inside one window: the table stops
-/// at `MAX_TRACKED_PEERS`, every client past it is still SERVED (without a
-/// window, the audit noting `loginRateUntracked`), and a client that spent its
-/// budget before the spray stays refused — the spray reset nothing.
-/// NEGATIVE CONTROL: the table is FULL, not merely small — every sprayed
-/// address took its own key, so a limiter that keyed this spray on the peer
-/// (one key) fails the equality.
+/// distinct clients than the table holds, inside one window (a table of 64
+/// here, so the row stays fast; the 65,536 of production is held by
+/// `auth::ratelimit::tests`): the table stops at its bound, every client past
+/// it is still SERVED (without a window, each audit line noting
+/// `loginRateUntracked`, and ONE warning for the window, not one per request),
+/// and a client that spent its budget before the spray stays refused — the
+/// spray reset nothing. NEGATIVE CONTROL: the table is FULL, not merely small
+/// — every sprayed address took its own key, so a limiter that keyed this
+/// spray on the peer (one key) fails the equality.
 #[tokio::test]
 async fn the_bound_on_tracked_keys_holds_under_a_spray_of_forwarded_addresses() {
-    use logweir_api::auth::ratelimit::MAX_TRACKED_PEERS;
-    let app = limited_app(ingress_range(), PER_WINDOW);
+    const TABLE: usize = 64;
+    let app = app_with_limiter(
+        ingress_range(),
+        logweir_api::auth::ratelimit::RateLimiter::new(
+            std::time::Duration::from_secs(60),
+            PER_WINDOW,
+        )
+        .with_max_tracked(TABLE),
+    );
     let limiter = || &app.app.state.shared().expect("shared mode").login_limiter;
     spend(&app, INGRESS, &[Some("203.0.113.99"); 3]).await;
-    for i in 0..(MAX_TRACKED_PEERS - 1) {
+    for i in 0..(TABLE - 1) {
         let served = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
         assert_eq!(served.status, 303, "client {i}: {}", served.text());
     }
-    assert_eq!(limiter().tracked(), MAX_TRACKED_PEERS);
+    assert_eq!(limiter().tracked(), TABLE);
     let (log, _guard) = capture();
-    for i in MAX_TRACKED_PEERS..(MAX_TRACKED_PEERS + 64) {
+    for i in TABLE..(TABLE + 64) {
         let served = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
         assert_eq!(served.status, 303, "client {i}: {}", served.text());
-        if i == MAX_TRACKED_PEERS {
-            let (_, notes) = log.record(&served.header("x-request-id").unwrap());
-            assert_eq!(notes["loginRateUntracked"], "tableFull");
-        }
+        let (_, notes) = log.record(&served.header("x-request-id").unwrap());
+        assert_eq!(notes["loginRateUntracked"], "tableFull", "client {i}");
     }
-    assert_eq!(limiter().tracked(), MAX_TRACKED_PEERS);
+    assert_eq!(limiter().tracked(), TABLE);
+    assert_eq!(
+        log.count("the sign-in limiter's table is full of live windows"),
+        1,
+        "one warning a window, not one per request"
+    );
     assert_limited(&sign_in(&app, INGRESS, Some("203.0.113.99")).await);
 }
 

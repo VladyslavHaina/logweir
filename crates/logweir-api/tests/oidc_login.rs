@@ -792,7 +792,7 @@ async fn the_login_surface_is_rate_limited() {
         match limiter.check(peer) {
             Decision::Allowed => allowed += 1,
             Decision::Limited { .. } => limited += 1,
-            Decision::AllowedUntracked => panic!("one key never fills the table"),
+            Decision::AllowedUntracked { .. } => panic!("one key never fills the table"),
         }
     }
     assert_eq!(allowed, logweir_api::auth::ratelimit::LOGIN_PER_WINDOW);

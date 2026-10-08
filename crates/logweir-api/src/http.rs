@@ -241,13 +241,22 @@ pub fn check_login_rate(state: &AppState, parts: &Parts) -> Result<(), ApiError>
     }
     match shared.login_limiter.check(key.address()) {
         crate::auth::ratelimit::Decision::Allowed => Ok(()),
-        crate::auth::ratelimit::Decision::AllowedUntracked => {
+        crate::auth::ratelimit::Decision::AllowedUntracked { announce } => {
             // The table of keys is full of live windows: this new key is
             // served without one rather than locked out. Many addresses are
-            // signing in at once, which an operator wants to see — on this
-            // request's own audit line, not on a second log line per request.
+            // signing in at once, which an operator wants to see: on every
+            // such request's audit line, and in ONE warning a window — never
+            // a second log line per request.
             if let Some(audit) = audit {
                 audit.note("loginRateUntracked", "tableFull");
+            }
+            if announce {
+                tracing::warn!(
+                    tracked = crate::auth::ratelimit::MAX_TRACKED_PEERS,
+                    "the sign-in limiter's table is full of live windows: new clients are \
+                     served without a window until it drains (audit note loginRateUntracked); \
+                     this is logged once a window"
+                );
             }
             Ok(())
         }
