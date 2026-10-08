@@ -15,9 +15,11 @@
 //! | typed listing, type Consumer (KIP-848) | [`GroupVerdict::Capture`], `consumer` |
 //! | typed listing, type Unknown or beyond librdkafka's enum (T4) | `excluded: GroupTypeNotCaptured` |
 //! | name listing only (share, streams, a non-consumer protocol: T3) | `excluded: GroupTypeNotCaptured` |
+//! | name listing only, but the typed listing lost a broker | `failed: TypeUnproven` |
 //! | neither, and the listings are COMPLETE ([`ListingCompleteness`]) | `excluded: GroupNotFound` |
 //! | neither, listings not complete, targeted describe refused 30 | `failed: NotVisibleToPrincipal` (T14) |
-//! | neither, listings not complete, targeted describe answers the classic stand-in "Classic, Dead, no members" with no error | `excluded: GroupNotFound` |
+//! | neither, listings not complete ONLY through this principal's visibility, targeted describe answers the classic stand-in "Classic, Dead, no members" with no error | `excluded: GroupNotFound` |
+//! | the same answer, but the listings lost a broker | `failed: AbsenceUnproven` |
 //! | neither, listings not complete, anything else from the targeted describe | `failed`, with what it said |
 //!
 //! # The traps guarded here
@@ -254,6 +256,20 @@ pub enum IncompleteReason {
     NameListingMissesTypedGroups(Vec<String>),
 }
 
+impl IncompleteReason {
+    /// Whether the reason is about what THIS principal may see (T14), rather
+    /// than a broker the listings lost.
+    #[must_use]
+    pub fn is_visibility(&self) -> bool {
+        matches!(
+            self,
+            IncompleteReason::NoDescribeOnCluster
+                | IncompleteReason::ClusterOperationsNotReported
+                | IncompleteReason::ClusterOperationsUnread(_)
+        )
+    }
+}
+
 /// Whether an id missing from both listings can be called absent without a
 /// targeted call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,6 +366,20 @@ pub enum GroupFailure {
     /// id typed two ways (T6), or a live group no listing showed (it appeared
     /// during classification).
     ListingInconsistent(String),
+    /// No listing shows it, the targeted describe answered the classic
+    /// stand-in, but the listings are incomplete because a BROKER was lost
+    /// (a typed-listing error, `_PARTIAL`, or T19's mismatch), not only
+    /// because of this principal's filtering. On a lost broker the stand-in
+    /// cannot tell an absent id from a share or streams group that broker
+    /// coordinates (both answer "Classic, Dead", §3.1), so absence is not
+    /// proven (PROD-04.0b review L1).
+    AbsenceUnproven(String),
+    /// Only the name listing shows it, but the TYPED listing lost a broker:
+    /// a classic or consumer group that broker coordinates is then missing
+    /// from the typed listing exactly as a share or streams group always is
+    /// (T3), so "other type" is not proven (the type-side twin of
+    /// [`GroupFailure::AbsenceUnproven`]).
+    TypeUnproven(String),
     /// The targeted describe failed for another reason, or answered nothing.
     Unreachable {
         /// The code, when there was one.
@@ -402,6 +432,77 @@ pub fn selected_ids(selected: &[String]) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+/// What a description call answered for one id: the input [`classify_with`]
+/// maps to a [`TargetedAnswer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DescribeAnswer {
+    /// The call answered the id: its per-group error, or its description.
+    Answered {
+        /// The per-group error, as `(code, message)`.
+        error: Option<(i32, String)>,
+        /// librdkafka's state integer.
+        state: u32,
+        /// librdkafka's type integer.
+        group_type: u32,
+        /// How many members the answer listed.
+        members: usize,
+    },
+    /// The call failed as a whole for the id.
+    CallFailed(String),
+}
+
+/// **§5 for every selected id, given the listings and a describe call**: the
+/// whole decision, pure, so it is unit-tested with a fake `describe`
+/// (PROD-04.0b review L3). `describe` is called once, with exactly the ids
+/// [`GroupListings::needs_targeted_describe`] names, and only when there are
+/// any; an id it does not answer fails, it is never assumed absent.
+///
+/// # Errors
+///
+/// A blank selected id, before `describe` is called.
+pub fn classify_with(
+    listings: &GroupListings,
+    selected: &[String],
+    describe: impl FnOnce(&[String]) -> BTreeMap<String, DescribeAnswer>,
+) -> Result<GroupClassification, String> {
+    let selected = selected_ids(selected)?;
+    let targeted_ids = listings.needs_targeted_describe(&selected);
+    let mut targeted = BTreeMap::new();
+    if !targeted_ids.is_empty() {
+        let answers = describe(&targeted_ids);
+        for g in &targeted_ids {
+            let answer = match answers.get(g) {
+                None => TargetedAnswer::NoAnswer(format!("the describe answered nothing for {g}")),
+                Some(DescribeAnswer::CallFailed(e)) => TargetedAnswer::NoAnswer(e.clone()),
+                Some(DescribeAnswer::Answered {
+                    error: Some((code, message)),
+                    ..
+                }) => TargetedAnswer::Refused {
+                    code: *code,
+                    message: message.clone(),
+                },
+                Some(DescribeAnswer::Answered {
+                    error: None,
+                    state,
+                    group_type,
+                    members,
+                }) => TargetedAnswer::Described {
+                    state: *state,
+                    group_type: *group_type,
+                    members: *members,
+                },
+            };
+            targeted.insert(g.clone(), answer);
+        }
+    }
+    Ok(GroupClassification {
+        verdicts: listings.classify(&selected, &targeted),
+        completeness: listings.completeness(),
+        targeted: targeted_ids,
+        unreadable_ids: listings.unreadable_ids,
+    })
 }
 
 /// The typed listing merged by id (T6): one `(type, state, simple)` per id,
@@ -507,37 +608,58 @@ impl GroupListings {
     ) -> Vec<(String, GroupVerdict)> {
         let typed = self.typed_by_id();
         let names: BTreeSet<&str> = self.names.iter().map(|n| n.group_id.as_str()).collect();
-        let complete = self.completeness() == ListingCompleteness::Complete;
+        let completeness = self.completeness();
+        let complete = completeness == ListingCompleteness::Complete;
+        // The stand-in proves absence only against FILTERING (§3.9): when
+        // every reason the listings are incomplete is about this principal's
+        // visibility, a describable id would have been listed.
+        let lost: Vec<String> = match &completeness {
+            ListingCompleteness::Complete => Vec::new(),
+            ListingCompleteness::NotComplete(why) => why
+                .iter()
+                .filter(|r| !r.is_visibility())
+                .map(|r| format!("{r:?}"))
+                .collect(),
+        };
         selected
             .iter()
             .map(|id| {
-                let verdict = match typed.get(id.as_str()) {
-                    Some(Err(why)) => {
-                        GroupVerdict::Failed(GroupFailure::ListingInconsistent(why.clone()))
-                    }
-                    Some(Ok((raw_type, state, is_simple))) => {
-                        match GroupType::from_raw(*raw_type) {
-                            Some(group_type) => GroupVerdict::Capture(CapturableGroup {
-                                group_id: id.clone(),
-                                group_type,
-                                state: *state,
-                                is_simple: *is_simple,
-                            }),
-                            None => GroupVerdict::Excluded(Excluded::GroupTypeNotCaptured {
-                                why: OtherType::UnknownType { raw: *raw_type },
-                            }),
+                let verdict =
+                    match typed.get(id.as_str()) {
+                        Some(Err(why)) => {
+                            GroupVerdict::Failed(GroupFailure::ListingInconsistent(why.clone()))
                         }
-                    }
-                    None if names.contains(id.as_str()) => {
-                        GroupVerdict::Excluded(Excluded::GroupTypeNotCaptured {
-                            why: OtherType::NotInTypedListing,
-                        })
-                    }
-                    None if complete => GroupVerdict::Excluded(Excluded::GroupNotFound {
-                        evidence: Absence::CompleteListing,
-                    }),
-                    None => targeted_verdict(targeted.get(id)),
-                };
+                        Some(Ok((raw_type, state, is_simple))) => {
+                            match GroupType::from_raw(*raw_type) {
+                                Some(group_type) => GroupVerdict::Capture(CapturableGroup {
+                                    group_id: id.clone(),
+                                    group_type,
+                                    state: *state,
+                                    is_simple: *is_simple,
+                                }),
+                                None => GroupVerdict::Excluded(Excluded::GroupTypeNotCaptured {
+                                    why: OtherType::UnknownType { raw: *raw_type },
+                                }),
+                            }
+                        }
+                        None if names.contains(id.as_str()) && self.typed_errors.is_empty() => {
+                            GroupVerdict::Excluded(Excluded::GroupTypeNotCaptured {
+                                why: OtherType::NotInTypedListing,
+                            })
+                        }
+                        None if names.contains(id.as_str()) => {
+                            GroupVerdict::Failed(GroupFailure::TypeUnproven(format!(
+                            "only the name listing shows it, and the typed listing lost a broker \
+                             (codes {:?}): a classic or consumer group that broker coordinates \
+                             would be missing from it too",
+                            self.typed_errors.iter().map(|(c, _)| *c).collect::<Vec<_>>()
+                        )))
+                        }
+                        None if complete => GroupVerdict::Excluded(Excluded::GroupNotFound {
+                            evidence: Absence::CompleteListing,
+                        }),
+                        None => targeted_verdict(targeted.get(id), &lost),
+                    };
                 (id.clone(), verdict)
             })
             .collect()
@@ -545,7 +667,7 @@ impl GroupListings {
 }
 
 /// What a targeted describe of an unlisted id means (§5, T14).
-fn targeted_verdict(answer: Option<&TargetedAnswer>) -> GroupVerdict {
+fn targeted_verdict(answer: Option<&TargetedAnswer>, lost: &[String]) -> GroupVerdict {
     match answer {
         None => GroupVerdict::Failed(GroupFailure::Unreachable {
             code: None,
@@ -565,14 +687,23 @@ fn targeted_verdict(answer: Option<&TargetedAnswer>) -> GroupVerdict {
             message: why.clone(),
         }),
         // The classic stand-in, answered without error: the id is describable,
-        // so a filtered listing would have shown a group of that id (§3.9).
+        // so a FILTERED listing would have shown a group of that id (§3.9).
+        // A listing that lost a broker would not have: no proof (review L1).
         Some(TargetedAnswer::Described {
             state: code::STATE_DEAD,
             group_type: code::TYPE_CLASSIC,
             members: 0,
-        }) => GroupVerdict::Excluded(Excluded::GroupNotFound {
+        }) if lost.is_empty() => GroupVerdict::Excluded(Excluded::GroupNotFound {
             evidence: Absence::TargetedDescribe,
         }),
+        Some(TargetedAnswer::Described {
+            state: code::STATE_DEAD,
+            group_type: code::TYPE_CLASSIC,
+            members: 0,
+        }) => GroupVerdict::Failed(GroupFailure::AbsenceUnproven(format!(
+            "the targeted describe answered the classic stand-in, but the listings lost a broker              ({}): there it cannot tell an absent id from a share or streams group",
+            lost.join(", ")
+        ))),
         Some(TargetedAnswer::Described {
             state,
             group_type,
@@ -915,11 +1046,14 @@ mod tests {
             (code::STATE_DEAD, code::TYPE_CONSUMER, 0),
             (code::STATE_DEAD, code::TYPE_CLASSIC, 1),
         ] {
-            let v = targeted_verdict(Some(&TargetedAnswer::Described {
-                state,
-                group_type: ty,
-                members,
-            }));
+            let v = targeted_verdict(
+                Some(&TargetedAnswer::Described {
+                    state,
+                    group_type: ty,
+                    members,
+                }),
+                &[],
+            );
             assert!(
                 matches!(
                     v,
@@ -1060,6 +1194,156 @@ mod tests {
             l.needs_targeted_describe(&ids(&["pa-absent"])),
             ids(&["pa-absent"])
         );
+    }
+
+    /// L1 of the PROD-04.0b review. Mutant killed: reading the classic
+    /// stand-in as absence when the listings lost a broker.
+    #[test]
+    fn the_stand_in_proves_absence_only_against_filtering() {
+        let stand_in = TargetedAnswer::Described {
+            state: code::STATE_DEAD,
+            group_type: code::TYPE_CLASSIC,
+            members: 0,
+        };
+        let mut t = BTreeMap::new();
+        t.insert("pa-maybe".to_string(), stand_in);
+        // Filtering only: absence is proven.
+        let filtered = fixture(ClusterAccess::Reported(vec![]));
+        assert_eq!(
+            filtered.classify(&ids(&["pa-maybe"]), &t)[0].1,
+            GroupVerdict::Excluded(Excluded::GroupNotFound {
+                evidence: Absence::TargetedDescribe
+            })
+        );
+        // A lost broker, alone or beside filtering: not proven.
+        for access in [all_ops(), ClusterAccess::Reported(vec![])] {
+            let mut lost = fixture(access);
+            lost.typed_errors.push((-185, "Local: Timed out".into()));
+            assert!(
+                matches!(
+                    &lost.classify(&ids(&["pa-maybe"]), &t)[0].1,
+                    GroupVerdict::Failed(GroupFailure::AbsenceUnproven(w)) if w.contains("TypedListingErrors")
+                ),
+                "{:?}",
+                lost.classify(&ids(&["pa-maybe"]), &t)
+            );
+        }
+        let mut partial = fixture(ClusterAccess::NotReported);
+        partial.names_incomplete = Some("_PARTIAL".into());
+        assert!(matches!(
+            partial.classify(&ids(&["pa-maybe"]), &t)[0].1,
+            GroupVerdict::Failed(GroupFailure::AbsenceUnproven(_))
+        ));
+        assert!(IncompleteReason::NoDescribeOnCluster.is_visibility());
+        assert!(IncompleteReason::ClusterOperationsUnread("x".into()).is_visibility());
+        assert!(!IncompleteReason::TypedListingErrors(vec![-185]).is_visibility());
+        assert!(!IncompleteReason::NameListingMissesTypedGroups(vec![]).is_visibility());
+    }
+
+    /// The type-side twin of L1. Mutant killed: reading "names only" as
+    /// "other type" when the typed listing lost a broker.
+    #[test]
+    fn other_type_is_proven_only_by_a_typed_listing_that_lost_no_broker() {
+        let mut lost = fixture(all_ops());
+        lost.typed_errors.push((-185, "Local: Timed out".into()));
+        let v = lost.classify(
+            &ids(&["pa-share-idle", "pa-classic-live"]),
+            &BTreeMap::new(),
+        );
+        assert!(
+            matches!(&v[0].1, GroupVerdict::Failed(GroupFailure::TypeUnproven(w)) if w.contains("-185")),
+            "{v:?}"
+        );
+        assert!(matches!(v[1].1, GroupVerdict::Capture(_)));
+    }
+
+    /// L3 of the PROD-04.0b review: the glue's whole decision, with a fake
+    /// describe. Mutants killed: skipping the describe; calling it on a
+    /// complete listing; describing listed ids; reading a missing answer or
+    /// a failed call as absence.
+    #[test]
+    fn classify_with_describes_exactly_the_unlisted_ids_and_maps_every_answer() {
+        // Complete: the describe is never called.
+        let complete = fixture(all_ops());
+        let c = classify_with(&complete, &ids(&["pa-classic-live", "pa-gone"]), |_| {
+            panic!("a complete listing needs no targeted describe")
+        })
+        .expect("valid");
+        assert!(c.targeted.is_empty());
+        assert_eq!(
+            c.verdicts[1].1,
+            GroupVerdict::Excluded(Excluded::GroupNotFound {
+                evidence: Absence::CompleteListing
+            })
+        );
+        // Filtered: exactly the unlisted ids, in selection order.
+        let filtered = fixture(ClusterAccess::Reported(vec![]));
+        let mut asked = Vec::new();
+        let c = classify_with(
+            &filtered,
+            &ids(&[
+                "pa-hidden",
+                "pa-classic-live",
+                "pa-absent",
+                "pa-odd",
+                "pa-silent",
+                "pa-hidden",
+            ]),
+            |unlisted| {
+                asked = unlisted.to_vec();
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "pa-hidden".to_string(),
+                    DescribeAnswer::Answered {
+                        error: Some((30, "Broker: Group authorization failed".into())),
+                        state: 0,
+                        group_type: 0,
+                        members: 0,
+                    },
+                );
+                m.insert(
+                    "pa-absent".to_string(),
+                    DescribeAnswer::Answered {
+                        error: None,
+                        state: code::STATE_DEAD,
+                        group_type: code::TYPE_CLASSIC,
+                        members: 0,
+                    },
+                );
+                m.insert(
+                    "pa-odd".to_string(),
+                    DescribeAnswer::CallFailed("timed out".into()),
+                );
+                m
+            },
+        )
+        .expect("valid");
+        assert_eq!(
+            asked,
+            ids(&["pa-hidden", "pa-absent", "pa-odd", "pa-silent"])
+        );
+        assert_eq!(c.targeted, asked);
+        let v: BTreeMap<String, GroupVerdict> = c.verdicts.into_iter().collect();
+        assert_eq!(v.len(), 5, "one verdict per distinct id");
+        assert_eq!(
+            v["pa-hidden"],
+            GroupVerdict::Failed(GroupFailure::NotVisibleToPrincipal)
+        );
+        assert_eq!(
+            v["pa-absent"],
+            GroupVerdict::Excluded(Excluded::GroupNotFound {
+                evidence: Absence::TargetedDescribe
+            })
+        );
+        assert!(
+            matches!(&v["pa-odd"], GroupVerdict::Failed(GroupFailure::Unreachable { message, .. }) if message == "timed out")
+        );
+        assert!(matches!(
+            &v["pa-silent"],
+            GroupVerdict::Failed(GroupFailure::Unreachable { code: None, .. })
+        ));
+        assert!(matches!(v["pa-classic-live"], GroupVerdict::Capture(_)));
+        assert!(classify_with(&filtered, &ids(&[" "]), |_| BTreeMap::new()).is_err());
     }
 
     /// Mutants killed: a blank id passing; duplicates producing two entries.

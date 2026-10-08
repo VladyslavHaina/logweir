@@ -12,9 +12,9 @@
 use crate::access::ClusterAccess;
 use crate::acls::{acl_coverage, AclCapture, AuthorizerProbe, RawAcl};
 use crate::groups::{
-    describe_answer, selected_ids, CapturableGroup, DescribeFailure, DescribedObservation,
-    GroupClassification, GroupDescription, GroupListings, MemberDescription, NameEntry,
-    TargetedAnswer, TypedEntry,
+    classify_with, describe_answer, selected_ids, CapturableGroup, DescribeAnswer, DescribeFailure,
+    DescribedObservation, GroupClassification, GroupDescription, GroupListings, MemberDescription,
+    NameEntry, TypedEntry,
 };
 use crate::positions::TopicPartition;
 use crate::rdkafka_reader::RdKafkaReader;
@@ -207,39 +207,29 @@ impl RdKafkaReader {
     /// [`KafkaError::Client`] for a blank selected id, before any call. Every
     /// broker-side failure is a verdict, never an `Err`.
     pub fn classify_groups(&self, selected: &[String]) -> Result<GroupClassification, KafkaError> {
-        let selected = selected_ids(selected).map_err(KafkaError::Client)?;
+        // Refused before any call: a blank id.
+        selected_ids(selected).map_err(KafkaError::Client)?;
         let listings = self.group_listings();
-        let targeted_ids = listings.needs_targeted_describe(&selected);
-        let mut targeted = BTreeMap::new();
-        if !targeted_ids.is_empty() {
-            let answers = self.describe_ids(&targeted_ids);
-            for g in &targeted_ids {
-                let answer = match answers.get(g) {
-                    None => {
-                        TargetedAnswer::NoAnswer(format!("the describe answered nothing for {g}"))
-                    }
-                    Some(Err(e)) => TargetedAnswer::NoAnswer(e.clone()),
-                    Some(Ok(d)) => match &d.error {
-                        Some(e) => TargetedAnswer::Refused {
-                            code: e.code,
-                            message: e.message.display(),
-                        },
-                        None => TargetedAnswer::Described {
+        // The whole decision is `classify_with`'s, pure and unit-tested; this
+        // only supplies the describe call (PROD-04.0b review L3).
+        classify_with(&listings, selected, |ids| {
+            self.describe_ids(ids)
+                .into_iter()
+                .map(|(g, answer)| {
+                    let answer = match answer {
+                        Err(e) => DescribeAnswer::CallFailed(e),
+                        Ok(d) => DescribeAnswer::Answered {
+                            error: d.error.map(|e| (e.code, e.message.display())),
                             state: d.state,
                             group_type: d.group_type,
                             members: d.members.len(),
                         },
-                    },
-                };
-                targeted.insert(g.clone(), answer);
-            }
-        }
-        Ok(GroupClassification {
-            verdicts: listings.classify(&selected, &targeted),
-            completeness: listings.completeness(),
-            targeted: targeted_ids,
-            unreadable_ids: listings.unreadable_ids,
+                    };
+                    (g, answer)
+                })
+                .collect()
         })
+        .map_err(KafkaError::Client)
     }
 
     /// **The description of each captured group**, taken only when it agrees
