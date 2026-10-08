@@ -5932,8 +5932,13 @@ Secrets" forbids one.
 
 ### Exit 3: the discriminator is a KEY NAME in a bounded tail
 
-`TargetTopicConfigRefused` and `CredentialNotRenderable` are both exit 3, and
-the only thing that tells them apart is the runner's `refusal-reason=` line.
+`TargetTopicConfigRefused`, `CredentialNotRenderable` and (since FX-8)
+`PointInTimeByProducerTime` — a point-in-time selection over a source topic
+recorded as `LogAppendTime`, in a plan that does not state
+`restore.time_basis: producerTime`
+([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)) — are all
+exit 3, and the only thing that tells them apart is the runner's
+`refusal-reason=` line.
 **Read §10's note on `refusal-reason=` before writing any reader of it**
 (plan erratum **E4**): the line is the last line of the runner's *stdout*, but
 a pod log is stdout and stderr merged in nondeterministic order, and the pod

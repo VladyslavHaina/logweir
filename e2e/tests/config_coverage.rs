@@ -1924,3 +1924,192 @@ fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
         }
     }
 }
+
+// ============================================================ FX-8
+
+/// [`restore_spec`] with a `restore:` block: `restore.point_in_time` at
+/// `point_ms`, and with `producer_time` also `restore.time_basis:
+/// producerTime` (FX-8).
+fn restore_spec_at_a_point(
+    b: &Backup,
+    topics: &[&str],
+    naming_prefix: &str,
+    bound: bool,
+    point_ms: i64,
+    producer_time: bool,
+) -> String {
+    let basis = if producer_time {
+        "\x20 time_basis: producerTime\n"
+    } else {
+        ""
+    };
+    let block = format!(
+        "restore:\n\x20 point_in_time: \"{}\"\n{basis}",
+        rfc3339(point_ms)
+    );
+    let spec = restore_spec(b, topics, naming_prefix, bound, false);
+    assert_eq!(spec.matches("\nsample:\n").count(), 1, "{spec}");
+    spec.replacen("\nsample:\n", &format!("\n{block}sample:\n"), 1)
+}
+
+/// **FX-8's broker-default arm, live.** A topic with NO `message.timestamp.type`
+/// override, backed up while the broker's DYNAMIC DEFAULT is `LogAppendTime`:
+/// the archive manifest records no override (the engine keeps explicit
+/// overrides only), and the signed receipt records the effective value with
+/// its source (FX-4). Then three restores at a point in time inside the
+/// receipt's covered window, the broker default back to `CreateTime` so the
+/// target needs no override probe:
+///
+/// | restore | plan | expected |
+/// |---|---|---|
+/// | `bound` | bound to the point, no `time_basis` | exit 3, `refusal-reason=PointInTimeByProducerTime`, naming the receipt's record; no target topic; no scorecard |
+/// | `opted` | bound, `time_basis: producerTime` | exit 0 `pass`, `source.time_basis.producer_time == [topic]` |
+/// | `unbound` | not bound, no `time_basis` | exit 0 `pass`, `source.time_basis.not_recorded == [topic]`: nothing the run reads records the type, and it is never read as `CreateTime` |
+///
+/// The negative control the record (§9) asks for is the last row: a reader of
+/// the manifest override alone sees the `bound` plan exactly as the `unbound`
+/// one, so it runs instead of refusing.
+#[test]
+#[ignore = "needs the stack's `acl` profile; see the module doc"]
+fn fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt() {
+    assert_the_authorizer_is_on();
+    use_stack_s3_env();
+    let n = nonce();
+    let topic = format!("fx8-{n}-latdef");
+    let mut guard = ClusterGuard::new();
+    guard.topics.push(topic.clone());
+    create_topic(&topic, &[]);
+    // Two batches a second and a half apart, so the covered window holds
+    // more than one instant and a point inside it is LATER than its floor.
+    produce(&topic, 15);
+    std::thread::sleep(Duration::from_millis(1500));
+    produce(&topic, 15);
+
+    guard.broker_default = true;
+    let broker_default = set_broker_default_timestamp_type(Some("LogAppendTime"));
+    let b = backup(&format!("fx8-{n}-b"), &[&topic], false);
+    set_broker_default_timestamp_type(None);
+    guard.broker_default = false;
+
+    // What the two records say about the topic.
+    let coverage = b
+        .receipt
+        .config_coverage
+        .clone()
+        .expect("the receipt carries config_coverage");
+    let recorded = coverage[&topic]
+        .timestamp_type
+        .as_ref()
+        .map(|v| (v.value.clone(), v.source.clone()));
+    let (manifest_bytes, _) = archive_store(&b.backup_id)
+        .get(&b.receipt.archive.manifest_key)
+        .expect("the manifest");
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).expect("the manifest is JSON");
+    let manifest_configurations = manifest["topics"]
+        .as_array()
+        .and_then(|ts| {
+            ts.iter()
+                .find(|t| t["name"].as_str() == Some(topic.as_str()))
+        })
+        .map(|t| t["configurations"].clone())
+        .unwrap_or(Value::Null);
+
+    // The point: the newest archived record, inside the covered window.
+    let point = b.receipt.covered.to_ms - 1;
+    let target_of = |label: &str| format!("fx8-{n}-{label}-{topic}");
+    // Swept on EVERY exit path, a panicking assertion included.
+    for label in ["bound", "opted", "unbound"] {
+        guard.topics.push(target_of(label));
+    }
+    let run = |label: &str, bound: bool, producer_time: bool| {
+        let prefix = format!("fx8-{n}-{label}-");
+        let r = restore(
+            &bin(),
+            &restore_spec_at_a_point(&b, &[&topic], &prefix, bound, point, producer_time),
+            &format!("{n}-fx8-{label}"),
+            bound,
+            false,
+        );
+        let created = topic_exists(&target_of(label));
+        (r, created)
+    };
+    let (bound, bound_created) = run("bound", true, false);
+    let bound_target = target_of("bound");
+    let (opted, _) = run("opted", true, true);
+    let (unbound, _) = run("unbound", false, false);
+
+    let said = |r: &Restore| {
+        json!({
+            "exit": r.out.status.code(),
+            "outcome": r.scorecard["outcome"],
+            "format_version": r.scorecard["format_version"],
+            "time_basis": r.scorecard["source"]["time_basis"],
+            "tail": tail(&r.out, 6),
+        })
+    };
+    write_evidence(
+        "fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt",
+        &json!({
+            "topic": topic,
+            "broker_default_while_the_backup_ran": broker_default,
+            "receipt_key": b.receipt_key,
+            "receipt_timestamp_type": recorded,
+            "manifest_configurations": manifest_configurations,
+            "point_in_time": rfc3339(point),
+            "covered": [b.receipt.covered.from_ms, b.receipt.covered.to_ms],
+            "bound": said(&bound),
+            "bound_target_created": bound_created,
+            "opted": said(&opted),
+            "unbound": said(&unbound),
+        }),
+    );
+
+    // The broker-default arm's only record is the receipt's.
+    assert_eq!(
+        recorded,
+        Some((
+            "LogAppendTime".to_string(),
+            "dynamicDefaultBrokerConfig".to_string()
+        ))
+    );
+    assert!(
+        manifest_configurations
+            .get("message.timestamp.type")
+            .is_none(),
+        "the manifest records no override for a broker default: {manifest_configurations}"
+    );
+    // bound, no opt-in: refused before any target exists.
+    assert_eq!(bound.out.status.code(), Some(3), "{}", said(&bound));
+    let out = text(&bound.out);
+    assert_eq!(
+        out.lines().rev().find(|l| l.starts_with("refusal-reason=")),
+        Some("refusal-reason=PointInTimeByProducerTime"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "`{topic}` (the bound backup receipt's effective message.timestamp.type \
+             LogAppendTime from dynamicDefaultBrokerConfig)"
+        )),
+        "the refusal names the receipt's record: {out}"
+    );
+    assert!(bound.scorecard.is_null(), "a refused run signs nothing");
+    assert!(!bound_created, "no target topic: {bound_target}");
+    // bound, opt-in: runs and is labelled.
+    assert_eq!(opted.out.status.code(), Some(0), "{}", said(&opted));
+    assert_eq!(opted.scorecard["outcome"], "pass", "{}", said(&opted));
+    assert_eq!(
+        opted.scorecard["source"]["time_basis"],
+        json!({"plan": "producerTime", "producer_time": [topic], "not_recorded": []}),
+        "{}",
+        said(&opted)
+    );
+    // unbound: nothing records the type, so it runs and says so.
+    assert_eq!(unbound.out.status.code(), Some(0), "{}", said(&unbound));
+    assert_eq!(
+        unbound.scorecard["source"]["time_basis"],
+        json!({"producer_time": [], "not_recorded": [topic]}),
+        "{}",
+        said(&unbound)
+    );
+}

@@ -222,7 +222,13 @@ its read succeeded, including `manifestDiffers`; it is ABSENT — "not recorded"
 never assumed `CreateTime` — where the read was denied or failed (arm 10) or
 the broker reported a value outside the two. It is how a restore can tell a
 `LogAppendTime` source whose type is a BROKER DEFAULT (FX-8): the manifest
-carries topic overrides only.
+carries topic overrides only. A restore bound to this receipt reads it: a
+point-in-time selection over a topic recorded here as `LogAppendTime` is
+refused, `PointInTimeByProducerTime`, unless the plan states
+`restore.time_basis: producerTime`
+([the plan field](drill-spec.md#restoretime_basis-fx-8)). The receipt's format
+does not change for it; both readers print one `time basis:` line per such
+topic, because the covered window above is that topic's PRODUCER time.
 
 **What `captured` does not claim.** That every setting of the topic was
 archived: overrides outside the engine's allowlist (`local.retention.ms`, a
