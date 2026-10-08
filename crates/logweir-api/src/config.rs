@@ -83,6 +83,11 @@ struct ConfigFile {
     /// PEM, from a mounted Secret.
     #[serde(default)]
     confirmation_key_file: Option<PathBuf>,
+    /// PROD-16.1 fix round (review L5): the key file is the one the chart's
+    /// identity hook generates, which may not exist yet when this pod
+    /// starts. Without it, a missing key file is a refusal to start.
+    #[serde(default)]
+    confirmation_key_managed: bool,
     /// PROD-16.1: where the installation's fresh-install marker is read — the
     /// public identity ConfigMap the chart's identity hook writes.
     #[serde(default)]
@@ -118,6 +123,20 @@ struct InstallationIdentityFile {
 
 /// `installationIdentity`, validated: a namespace (DNS label) and a ConfigMap
 /// name (DNS subdomain), or absent.
+/// `confirmationKeyManaged` names the file the identity hook writes; it means
+/// nothing without that file.
+fn managed_key(managed: bool, file: Option<&Path>) -> Result<bool, ConfigError> {
+    if managed && file.is_none() {
+        return Err(field(
+            "confirmationKeyManaged",
+            "is true and there is no `confirmationKeyFile`: it marks the configured key file as \
+             the one the identity hook writes after the console starts"
+                .to_string(),
+        ));
+    }
+    Ok(managed)
+}
+
 fn installation_identity(
     file: Option<InstallationIdentityFile>,
 ) -> Result<Option<crate::approval::InstallationIdentityRef>, ConfigError> {
@@ -401,6 +420,9 @@ pub struct Config {
     pub approval_policy_file: Option<PathBuf>,
     /// PLAT-19.2: the console confirmation key file, when one is configured.
     pub confirmation_key_file: Option<PathBuf>,
+    /// PROD-16.1: that file is the identity hook's managed key, which may be
+    /// written after this process starts (`confirmationKeyManaged`).
+    pub confirmation_key_managed: bool,
     /// PROD-16.1: where the fresh-install marker is read, when configured.
     pub installation_identity: Option<crate::approval::InstallationIdentityRef>,
     /// P10: the manual-run create ceilings, per actor, per namespace, per
@@ -662,6 +684,10 @@ impl Config {
             cursor_key: CursorKeySource::RawFile(resolve(base, &cursor_key_file)),
             kubernetes_principal: String::new(),
             approval_policy_file: file.approval_policy_file.map(|p| resolve(base, &p)),
+            confirmation_key_managed: managed_key(
+                file.confirmation_key_managed,
+                file.confirmation_key_file.as_deref(),
+            )?,
             confirmation_key_file: file.confirmation_key_file.map(|p| resolve(base, &p)),
             installation_identity: installation_identity(file.installation_identity)?,
             run_rate_limits: crate::routes::RunRateLimits::default(),
@@ -886,6 +912,10 @@ impl Config {
             }),
             kubernetes_principal: String::new(),
             approval_policy_file: file.approval_policy_file.map(|p| resolve(base, &p)),
+            confirmation_key_managed: managed_key(
+                file.confirmation_key_managed,
+                file.confirmation_key_file.as_deref(),
+            )?,
             confirmation_key_file: file.confirmation_key_file.map(|p| resolve(base, &p)),
             installation_identity: installation_identity(file.installation_identity)?,
             run_rate_limits: crate::routes::RunRateLimits::default(),
@@ -2182,5 +2212,35 @@ mod tests {
             Config::parse(&t, Path::new(".")),
             Err(ConfigError::Field { field: "mode", .. })
         ));
+    }
+
+    /// PROD-16.1 fix round (review L5): `confirmationKeyManaged` marks the
+    /// configured key file as the identity hook's; alone it is refused.
+    #[test]
+    fn the_managed_key_flag_needs_its_key_file() {
+        let base = text("127.0.0.1:8484", "http://127.0.0.1:8484");
+        let managed = Config::parse(
+            &format!("{base}confirmationKeyFile: confirmation/confirmation.key\nconfirmationKeyManaged: true\n"),
+            Path::new("/etc/lw"),
+        )
+        .unwrap();
+        assert!(managed.confirmation_key_managed);
+        let named = Config::parse(
+            &format!("{base}confirmationKeyFile: confirmation/confirmation.key\n"),
+            Path::new("/etc/lw"),
+        )
+        .unwrap();
+        assert!(
+            !named.confirmation_key_managed,
+            "absent is an operator-named key"
+        );
+        let alone = Config::parse(
+            &format!("{base}confirmationKeyManaged: true\n"),
+            Path::new("/etc/lw"),
+        )
+        .err()
+        .expect("the flag without the file is refused")
+        .to_string();
+        assert!(alone.contains("confirmationKeyManaged"), "{alone}");
     }
 }

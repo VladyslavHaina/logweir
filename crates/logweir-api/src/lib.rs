@@ -153,6 +153,7 @@ pub fn preflight(config: &config::Config) -> Result<Preflight, String> {
     let mut approval = approval::ApprovalSettings::load(
         config.approval_policy_file.as_deref(),
         config.confirmation_key_file.as_deref(),
+        config.confirmation_key_managed,
         &config.namespaces,
     )?;
     approval.installation = config.installation_identity.clone();

@@ -375,9 +375,24 @@ async fn the_managed_key_is_read_when_the_identity_hook_has_written_it() {
     ));
     std::fs::create_dir_all(&dir).expect("dir");
     let key_file = dir.join("confirmation.key");
-    let settings =
-        ApprovalSettings::load(None, Some(&key_file), &[NS_A.to_string(), NS_B.to_string()])
-            .expect("a configured key file that does not exist yet is not a startup refusal");
+    // THE FIX ROUND (review L5): only the MANAGED key file may be missing at
+    // start. An operator-named file that is missing is a refusal to start,
+    // naming it — a mistyped path is not "the hook has not run yet".
+    let refused = ApprovalSettings::load(
+        None,
+        Some(&key_file),
+        false,
+        &[NS_A.to_string(), NS_B.to_string()],
+    )
+    .expect_err("an operator-named key file that does not exist refuses to start");
+    assert!(refused.contains("confirmation.key"), "{refused}");
+    let settings = ApprovalSettings::load(
+        None,
+        Some(&key_file),
+        true,
+        &[NS_A.to_string(), NS_B.to_string()],
+    )
+    .expect("the managed key file that does not exist yet is not a startup refusal");
     assert!(settings.confirmation.is_none());
     let settings = ApprovalSettings {
         installation: Some(InstallationIdentityRef {
@@ -439,6 +454,8 @@ async fn the_managed_key_is_read_when_the_identity_hook_has_written_it() {
     // A file that EXISTS and is not a key is still a refusal to start.
     let bad = std::env::temp_dir().join(format!("logweir-prod161-bad-{}", std::process::id()));
     std::fs::write(&bad, "not a key").expect("write");
-    assert!(ApprovalSettings::load(None, Some(&bad), &[NS_A.to_string()]).is_err());
+    for managed in [false, true] {
+        assert!(ApprovalSettings::load(None, Some(&bad), managed, &[NS_A.to_string()]).is_err());
+    }
     let _ = std::fs::remove_file(&bad);
 }

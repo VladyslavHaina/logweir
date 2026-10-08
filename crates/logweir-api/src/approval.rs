@@ -174,8 +174,10 @@ pub struct ApprovalSettings {
     pub policies: ApprovalPolicySet,
     /// The console's confirmation key, when it was readable at startup.
     pub confirmation: Option<ConfirmationKey>,
-    /// PROD-16.1: a configured key file that did not exist at startup (the
-    /// managed key, before the identity hook has run). Read on first use.
+    /// PROD-16.1: the MANAGED key file (`confirmationKeyManaged`) when it
+    /// did not exist at startup — the identity hook writes it after this pod
+    /// starts. Read on first use. An operator-named file that is missing is
+    /// still a refusal to start (the fix round, review L5).
     pub pending_confirmation_file: Option<PathBuf>,
     /// The key read from [`Self::pending_confirmation_file`], once.
     pub late_confirmation: OnceLock<ConfirmationKey>,
@@ -194,6 +196,7 @@ impl ApprovalSettings {
     pub fn load(
         policy_file: Option<&Path>,
         key_file: Option<&Path>,
+        key_managed: bool,
         namespaces: &[String],
     ) -> Result<Self, String> {
         let policies = match policy_file {
@@ -208,12 +211,14 @@ impl ApprovalSettings {
                 ApprovalPolicySet::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?
             }
         };
-        // PROD-16.1: a configured key file that does not exist YET is the
-        // managed key before the identity hook has filled its Secret; it is
-        // read on first use. A file that exists is read now, and a bad one is
-        // still a refusal to start.
+        // PROD-16.1: the MANAGED key file (`confirmationKeyManaged`, which
+        // the chart sets only for the key its identity hook generates) that
+        // does not exist YET is that key before the hook has filled its
+        // Secret; it is read on first use. Any other configured file is read
+        // now: a missing or bad one is a refusal to start, naming the file
+        // (the fix round, review L5 — a mistyped path is not "pending").
         let (confirmation, pending_confirmation_file) = match key_file {
-            Some(path) if !path.exists() => (None, Some(path.to_path_buf())),
+            Some(path) if key_managed && !path.exists() => (None, Some(path.to_path_buf())),
             Some(path) => (Some(ConfirmationKey::from_file(path)?), None),
             None => (None, None),
         };

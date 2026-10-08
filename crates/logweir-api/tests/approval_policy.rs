@@ -1177,9 +1177,10 @@ fn a_bound_namespace_without_a_console_key_refuses_to_start() {
         format!("{POLICIES}namespaces:\n  {NS_A}: team-ordinary\n"),
     )
     .expect("write");
-    let err = ApprovalSettings::load(Some(&path), None, &[NS_A.to_string()]).expect_err("refused");
+    let err =
+        ApprovalSettings::load(Some(&path), None, false, &[NS_A.to_string()]).expect_err("refused");
     assert!(err.contains("confirmationKeyFile"), "{err}");
-    assert!(ApprovalSettings::load(Some(&path), None, &[NS_B.to_string()]).is_ok());
+    assert!(ApprovalSettings::load(Some(&path), None, false, &[NS_B.to_string()]).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
