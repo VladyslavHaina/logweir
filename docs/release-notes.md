@@ -24,8 +24,9 @@ publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
 key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
 32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the credential
 binding), 34 (FX-16, a point-bound restore restores its point's set), 35
-(PROD-00.2, the engine built from the vendored source) and 36 (FX-20, the
-binding for every other credential reference) so far. Items continue the next entry's
+(PROD-00.2, the engine built from the vendored source), 36 (FX-23, an
+early-stopped restore is never signed `pass`) and 37 (FX-20, the binding
+for every other credential reference) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -60,7 +61,11 @@ Item 35 is PROD-00.2 (owner decision OD-3), proven on a compose stack and by
 image checks on both platforms; the PoC refresh that carries it runs the
 runner's signed engine identity, and the first `main` publication after it
 runs the keyless signing.
-Item 36 is fix-now row FX-20, proven by unit, controller, API, console and
+Item 36 is fix-now row FX-23, proven on a compose stack by a SIGTERM to the
+engine mid-restore; it changes the runner's sampled verification and its
+signed scorecard, and the PoC upgrade that carries it runs its sampled
+rehearsal and restore rows unchanged.
+Item 37 is fix-now row FX-20, proven by unit, controller, API, console and
 real-binary rows and on the compose stack (a foreign archive binding writes no
 object to MinIO; a bound one backs up); it changes the controller, every
 runner, the retention worker, the product API, the console and three CRDs'
@@ -641,7 +646,63 @@ Logweir's build, an archive OSO's binary wrote. The reverse (an archive
 Logweir's build wrote, restored by OSO's binary) is reasoned from that
 identity of source, not run.
 
-#### 36. Every other credential reference presents only a credential bound to it (FX-20) — required action
+#### 36. An early-stopped restore is never signed `pass`; `max_partitions` samples every topic first (FX-23)
+
+**Changed.** A restore the engine stopped early — a SIGTERM to the engine
+(`pkill kafka-backup` on a CLI host, `docker stop` of its container) finishes
+the topic it is on, exits 0 and never starts the rest — could be signed `pass`
+by the default sampled verification when `sample.max_partitions` was below the
+number of partitions with records in the window: the cap kept the first
+partitions in manifest order, which is the order the engine restores in, and
+the one count bound over all topics had slack. The sampled verification now
+(a) holds every mapped partition to its own count bound — a segment the
+point in time cuts across proves the one record whose timestamp opens or
+closes it inside the window — so an empty partition the archive proves holds
+records in the window fails, by name; (b) keeps one partition of every topic
+before a second of any under `max_partitions`, and names the topics it could
+not reach in the scorecard's new optional `sample.unsampled_topics`. Every
+sampled scorecard this build signs is format **1.6.0** (MINOR), named topics
+or not, so the version marks the fixed build (
+[stability.md](stability.md#scorecard-format-160-sampleunsampled_topics-and-a-stricter-sampled-check-fx-23));
+and (c) fails a restore whose engine offset report has no entry for such a
+partition — read by streaming past the report's per-record section, so the
+read holds a few kilobytes however large the restore (8.5 KB of heap for a
+235 MB, 2,000,000-record report). All three are new causes for the existing `fail-integrity`, exit 2.
+The in-cluster runner was not exposed (`logweir` is PID 1 there and no
+pod signal reaches the engine), and a scheduled rehearsal never truncated when
+the catalog knew the point's partition count (it drops points larger than its
+cap; a point of unknown size is kept, and its sample now reaches every topic
+first). `verify_scorecard.py` is 1.22.0; both readers say, for every sampled
+`pass`, whether its version proves these checks ran: only 1.6.0 or later does,
+because a 1.4.0 or 1.5.0 document is the same bytes whichever build signed it.
+**Do:** a consumer that matches a scorecard's exact `format_version` must
+accept `1.6.0`: every sampled scorecard is 1.6.0 from this build on (the
+major is unchanged, so both readers and every older reader accept it).
+Otherwise nothing. A correct restore of an archive whose timestamps do not run
+backwards within a segment cannot fail the new checks (one whose timestamps do
+can now fail the per-partition bound where the sum absorbed a record every
+restore drops — [the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps));
+a sampled `pass` from an earlier build over a plan with `max_partitions` below the
+partitions in the window is worth re-checking
+([verify-a-scorecard.md](verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
+One fixture moved: a target holding exactly the wholly-inside count when a
+straddling segment opens inside the window was a pass and is a fail, because
+that segment's first record is missing.
+**Scope:** on compose slot 1 (Kafka 3.7.1, engine 0.23.3 under emulation), a
+two-topic `logweir restore run` whose engine was sent SIGTERM while the first
+topic was landing: the engine finished the first topic, exited 0 and wrote
+nothing to the second. The build before FX-23 signed `pass` (exit 0) at
+`max_partitions` 3 and 1; this build signs `fail-integrity` (exit 2) at both,
+naming every partition of the second topic and the engine report's finding,
+with `sample.unsampled_topics` at `max_partitions: 1`, and both readers accept
+the signed documents (`e2e/tests/stopped_restore.rs`). The review's probe
+holes and controls, one row per fix deciding alone, and 25 mutants (all
+killed) are unit rows (`crates/logweir/tests/stopped_restore.rs`).
+**Rollback:** an older runner samples the first N partitions again, judges one
+aggregate bound and ignores the engine report; the 1.6.0 scorecards already
+written stay valid under both readers, and an older reader ignores the field.
+
+#### 37. Every other credential reference presents only a credential bound to it (FX-20) — required action
 
 **Changed.** PROD-01.3's binding (item 33) now guards every place a writable
 object names a credential Secret beside an endpoint its author chooses. A
@@ -759,7 +820,7 @@ In addition to the next entry's six, in its order:
   `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1` and its digest.
 - **Bind every destination, retention, notification and inline-archive
   credential Secret, one at a time, with `scripts/bind-credential.py`**
-  (item 36), after suspending the schedules that use them and rolling the
+  (item 37), after suspending the schedules that use them and rolling the
   controller, the runner and the console together; never in a loop. The tool's
   refusal of a Secret another object also names is an incident to investigate
   ([install.md](install.md); [kubernetes.md](kubernetes.md) §20.10).
@@ -775,7 +836,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35 and 36, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36 and 37, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -785,7 +846,8 @@ controller), the product API and the console; item 33 changes the controller,
 the runner, the console and the `KafkaCluster` CRD, and needs each credentialed
 connection's Secret bound; item 34 changes the runner only; item 35 changes the
 runner image (its engine and its platforms) and the controller's Job
-environment together; item 36 changes the controller, every runner, the
+environment together; item 36 changes the runner's sampled verification and
+needs nothing; item 37 changes the controller, every runner, the
 retention worker, the product API, the console and the status of three CRDs,
 and needs each destination, retention, notification and inline-archive
 credential Secret bound. To roll back to
@@ -811,7 +873,7 @@ credential Secret bound. To roll back to
    (`ENGINE_SOURCE=oso`, linux/amd64; [install.md](install.md#rolling-the-engine-back))
    rather than an older runner; it declares OSO's 0.23.3, so its documents say
    which engine ran.
-5. Item 36 needs no rollback step of its own (nor does item 34, a runner
+5. Item 37 needs no rollback step of its own (nor does item 34, a runner
    change): an older controller and runner ignore the binding variables and
    the new status fields, and the bound Secrets keep working. Roll the console
    back with them (an older console offers `existing` on a create again,

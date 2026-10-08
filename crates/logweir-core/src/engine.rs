@@ -291,6 +291,87 @@ pub fn expected_restored_count(facts: &BackupSetFacts, floor_ms: i64, pit_ms: i6
     (lower, lower + straddling)
 }
 
+/// **FX-23.** The count bound of ONE partition over `[floor_ms, pit_ms]`,
+/// both ends inclusive: `(lower, upper)`, read from that partition's own
+/// segments.
+///
+/// It is [`expected_restored_count`]'s reading applied to one partition, with
+/// one addition that only RAISES `lower`: a segment the window cuts across
+/// still PROVES one record in the window when its first or its last record's
+/// timestamp lies inside it. `SegmentFacts::start_timestamp` is the timestamp
+/// of the segment's FIRST record and `end_timestamp` that of its LAST
+/// (`kafka-backup-core/src/segment/writer.rs:233-241` in the pinned 0.23.3:
+/// set from the first `add_record`, overwritten by every later one), and the
+/// engine restores every record whose own timestamp is inside the window
+/// (`restore/helpers.rs:66-84`). So such a segment adds 1 to `lower` (it
+/// cannot add 2: a segment with BOTH ends inside is wholly inside) and its
+/// whole `record_count` to `upper`, exactly as before.
+///
+/// # Why per partition (FX-23)
+///
+/// The aggregate bound is one sum over every mapped topic, and a sum has
+/// slack: a restore an engine stopped early (a SIGTERM is seen between
+/// topics, and the engine then exits 0) leaves whole topics empty, and the sum
+/// stayed inside its bound whenever the missing topic's segments straddled
+/// the point in time (they add nothing to `lower`), or the restored topics'
+/// straddling records made up its count. One bound per partition has no
+/// sibling to borrow from, and the straddler's 1 makes "this partition holds
+/// in-window records" a lower bound of at least 1, so an empty partition the
+/// manifest proves non-empty in the window is outside its own bound.
+///
+/// A segment that overlaps the window with neither end inside it (it starts
+/// before `floor_ms` and ends after `pit_ms`) proves nothing: its records may
+/// all lie outside the window. Under the archive-manifest floor no segment of
+/// a named topic starts before the floor, so the case needs a plan whose floor
+/// is not the manifest's.
+pub fn partition_count_bound(p: &PartitionFacts, floor_ms: i64, pit_ms: i64) -> (u64, u64) {
+    let inside = |ts: i64| ts >= floor_ms && ts <= pit_ms;
+    let mut lower = 0u64;
+    let mut straddling = 0u64;
+    for seg in &p.segments {
+        let n = seg.record_count.max(0) as u64;
+        let wholly_inside = seg.start_timestamp >= floor_ms && seg.end_timestamp <= pit_ms;
+        let overlaps = seg.end_timestamp >= floor_ms && seg.start_timestamp <= pit_ms;
+        if wholly_inside {
+            lower += n;
+        } else if overlaps {
+            straddling += n;
+            if n > 0 && (inside(seg.start_timestamp) || inside(seg.end_timestamp)) {
+                lower += 1;
+                straddling -= 1;
+            }
+        }
+    }
+    (lower, lower + straddling)
+}
+
+/// **FX-23.** What the engine's own offset report says it restored, read by
+/// the engine adapter after a restore that exited 0 and handed to phase 7.
+///
+/// The pinned engine writes the report only from the `Ok` arm of a completed
+/// restore (`restore/engine.rs:426-437` in 0.23.3), and an engine stopped by a
+/// SIGTERM returns `Ok` too: it finishes the topic it is on, sees the signal at
+/// the top of its per-topic loop and exits 0 (`:905-909`). Its report then
+/// exists WITHOUT the topics it never started, because an entry is added only
+/// for a segment that produced records (`:1735-1739`, `:1794-1811`). That
+/// absence is the one trace of the early stop Logweir can read, and phase 7
+/// refuses on it. The report is used ONLY as that negative signal: an entry
+/// never vouches for a record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineReport {
+    /// The report was read. Every `(target topic, partition)` it names an
+    /// entry for — the engine keys its entries by the TARGET topic.
+    Read(std::collections::BTreeSet<(String, i32)>),
+    /// There is no report at the path the plan named: the engine did not
+    /// write one (its write failure is a warning upstream), or this engine
+    /// writes none at all (every test double). Phase 7 cannot check it, and
+    /// says so in its log.
+    Absent,
+    /// A file exists and this build cannot read it. Phase 7 cannot check it
+    /// either; the reason is logged.
+    Unreadable(String),
+}
+
 /// Where `RestorePlan.time_window.0` came from. An enum, not a bool, so the
 /// plan's claim about its own floor is a VALUE that can be checked against the
 /// floor it describes — and the one place that check happens is plan
@@ -693,14 +774,20 @@ pub struct PreflightReport {
     pub rendered_restore_sha256: String,
 }
 
-/// Logweir-measured, never engine-reported: `restore` has no --format and
-/// writes no report file [VERIFIED U/kafka-backup/crates/kafka-backup-cli/src/main.rs:47-51].
+/// Logweir-measured, never engine-reported: `restore` has no --format
+/// [VERIFIED U/kafka-backup/crates/kafka-backup-cli/src/main.rs:47-51]. The one
+/// engine artifact carried here, `engine_report`, is its offset-mapping file,
+/// read only for what it LACKS (FX-23).
 #[derive(Debug, Clone)]
 pub struct RestoreFacts {
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
     pub exit_code: i32,
     pub unknown_key_warnings: Vec<String>,
+    /// **FX-23.** The engine's offset report as the adapter read it after the
+    /// restore exited 0 ([`EngineReport`]). `Absent` from an engine that
+    /// writes none.
+    pub engine_report: EngineReport,
 }
 
 /// Task 19 glue: the engine's own `validation run --config validation.yaml

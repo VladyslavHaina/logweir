@@ -2011,6 +2011,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the engine is built from the vendored source",
             "ENGINE_SOURCE=oso",
         ),
+        // FX-23 (2026-10-08): an early-stopped restore is never signed pass,
+        // and a sampled scorecard names the topics its cap left unsampled.
+        (
+            "an early-stopped restore is never signed pass",
+            "sample.unsampled_topics",
+        ),
         // FX-20 (2026-10-08): every other credential reference is bound, and
         // the one-Secret-one-object upgrade tool binds the existing ones.
         (
