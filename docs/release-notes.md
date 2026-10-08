@@ -15,14 +15,354 @@ mark without one). The supported path these notes assume is
 
 ---
 
+## Unreleased — `main` after `v0.2.0-rc.1`
+
+The last tag is `v0.2.0-rc.1` (candidate `56a60ebe`, publication `2c277dc1`);
+its record is in the next entry, whose twenty-seven items are what that
+candidate shipped. This entry collects what lands on `main` after that
+publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
+key by default), 30 (PROD-08.1) and 31 (FX-17, scheduled points in the catalog)
+so far. Items continue the next entry's
+numbering. No candidate is cut from this entry yet, so it carries no candidate
+record; when one is, its record follows [the release checklist](tag1-checklist.md)
+as the next entry's does.
+
+### The operator-facing changes after `v0.2.0-rc.1`
+
+Each item names what changed, what to do, what the claim rests on (its
+verification scope), and how to roll it back. Item 28 is PROD-00.3f, the engine
+pin, proven on a compose stack; the PoC upgrade that carries it runs its
+controller and runner rows. Item 29 is PROD-16.1 (owner decision OD-8), proven
+by unit, mock-cluster and chart rows and a host console journey; its controller
+and hook rows run at the PoC refresh that carries it. Item 30 is row PROD-08.1, proven
+on the compose stack; it changes the runner's signed scorecard and adds a plan
+value no controller renders yet, so the PoC upgrade that carries it runs the
+sampled rows unchanged. Item 31 is fix-now row FX-17, proven on the compose
+stack with the console on the host; it changes the runner (the catalog sync)
+and the console's text, and the PoC upgrade that carries it re-syncs the PoC's
+catalog and checks its first page and the nightly schedule's page.
+
+#### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
+
+**Changed.** The runner image carries `kafka-backup` **0.23.3** (image digest
+`sha256:cc7d5a8a…`, upstream commit `afb160e7`), OSO's newest release on
+2026-10-07, in place of 0.21.0. The segment format, the three engine commands
+Logweir runs and every key it renders are unchanged, and archives written by
+either engine read and restore with the other. `logweir doctor` accepts exactly
+0.23.3, as a whole token: 0.21.0 is now a version mismatch, and so is a suffixed
+`0.23.3+build`. Receipts and scorecards name the engine that ran, so new ones
+say 0.23.3. Two engine behaviours since 0.22.0 are refused instead of
+inherited. A storage location with a plain `http://` endpoint and
+`allow_http: false` is refused at phase 0 with exit 3 (`refusal-reason=GuardRefused`),
+by `drill run`, `restore run` and `backup run` alike, and no engine document
+is rendered with it: the engine now derives plaintext from the scheme and
+would dial the archive in the clear. `VirtualHosted` addressing with a custom
+endpoint stays refused (`AddressingUnsupportedByEngine` /
+`addressing_unsupported_by_engine`); its message no longer names an engine
+version. The full-drill floor stays 0.21.0.
+**Do:** nothing with the chart: the controller stamps the new version into
+every runner Job, so roll the controller **and** runner image together (the
+existing upgrade order). A standalone CLI install replaces its engine binary
+with 0.23.3 (the digest in `third_party/kafka-backup-binary.digest`) and its
+`LOGWEIR_ENGINE_VERSION` / `LOGWEIR_ENGINE_DIGEST` with the new pair
+([quickstart.md](quickstart.md), step 4; `examples/cronjob-drill.yaml`). A spec
+that names an `http://` endpoint must say `allow_http: true`; a saved
+destination already cannot combine the two (rule R3).
+**Scope:** source evaluation of every change from 0.21.0 to 0.23.3
+([decision record](to-do/decisions/PROD-00-engine-route.md) §12: no capability gap
+it lists is fixed, and nothing Logweir reads or renders changed shape). On a
+compose stack (slot 4, Kafka 3.7.1, the engine under `linux/amd64` emulation)
+CI's e2e command passed 177 tests, PROD-01.1's record-semantics contract
+asserted on 0.23.3 included; the demo drill passed with both readers VALID; an
+archive 0.21.0 wrote drilled with 0.23.3, and an archive 0.23.3 wrote drilled
+with 0.21.0, both `pass`. On Kafka 4.3.1 the record-semantics, G-PITR, FX-1,
+FX-7 and full-drill rows passed with the pin as well (34 tests). Unit rows refuse the `http://` combination in each
+of the three engine documents and at phase 0 for drill and backup specs, with
+mutants on those guards and on `doctor`'s pin, and `crates/logweir/tests/engine_pin.rs`
+(CI's workspace run) holds every place that names the pin to one version.
+`engine-matrix` run 37728540932 recorded `pass` for both 0.23.3 rows (Kafka
+3.7.1 and 4.3.1) with PROD-01.1's rows asserted. Its 0.21.0 and 0.22.0 rows
+recorded `fail(e2e suite)` because the pin guard then ran in the package the
+matrix runs with each row's own engine, and stopped those rows before their
+drill suites; it is not an engine finding, and the guard has moved. The
+re-dispatch at the fix tip, run 37736333362, recorded every one of the seven
+declared rows as declared: 0.21.0, 0.22.0 and both 0.23.3 rows `pass`, the
+three below-floor rows `unsupported(lever-absent)`. The controller's
+`LOGWEIR_ENGINE_VERSION` reaches a live runner Job only at the next PoC
+upgrade.
+**Rollback:** an older runner and controller run 0.21.0 again; `doctor` from
+that build refuses 0.23.3. Measured: an archive 0.23.3 wrote restores and
+verifies `pass` when this build drives the 0.21.0 engine. Not run, and reasoned
+from source only: an OLDER Logweir build reading a 0.23.3 archive or receipt.
+The manifest has the keys a 0.21.0 manifest has (`missing_topics` is omitted
+when empty), the segment container is unchanged since 0.18.0, and the vendored
+structs ignore unknown keys.
+
+#### 29. A fresh install needs no approver key; an upgrade changes no namespace's approval (PROD-16.1)
+
+**Changed.** Three approval modes by name: **confirm** (one person clicks
+Create in the console, no key; internal `Ordinary`), **two-person** (PROD-16.2,
+refused by name) and **strict** (an approver's personal key; `Governed` or
+`legacy-governed-v1`). On a FIRST `helm install` (Helm 3.19+ or 4.x) with a
+console, the managed identity and `identity.bootstrapFeatures.consoleKey: true`,
+the identity hook generates the console's `ConsoleConfirmation` key
+(`logweir-console-confirmation`, retained, never regenerated, key loss stops
+the hook) and — when the cluster has no trust of its own (no `TrustPolicy` at
+all, no `TrustRoster/default`) — creates one default `TrustPolicy`
+`logweir-installation` for exactly the installation signer and that generated
+console key, and marks the install (`logweir.dev/approval-default` on
+`logweir-signing-trust`: a claim naming that policy's UID and both key ids,
+honoured by the console and the controller only beside that exact hook-made
+policy). Every namespace without its own policy is then confirm
+(`default-confirm-v1`); an explicit binding always wins. An install without a
+console, with `identity.externalSecret`, or whose console key was adopted from
+a hand-made Secret gets no policy, no marker and no grant: no approver key by
+default only where the console's one click needs it. The `localAdmin` console
+confirms too, as `urn:logweir:local-admin#admin`. `approvalPolicy.default`
+(`confirm` with `allowOrdinaryConfirmation`, or `strict`) overrides the marker;
+`policies[].mode` accepts `confirm`/`strict`. The policy name
+`default-confirm-v1` is now RESERVED beside `legacy-governed-v1`: an
+approval-policy document that declares a policy of that name is refused by the
+chart at render and by the controller and the console at start (which stops
+the controller), so rename such a policy before upgrading; `mode: two-person`
+and a `defaultMode` other than `confirm`/`strict` are refused the same way. The console's configuration gains
+`confirmationKeyManaged` (the managed key may arrive after the console starts;
+an operator-named key file that is missing still refuses to start). The API's
+policy view gains `operatorMode` and `basis`, the create's `authorization` gains
+`operatorMode` (OpenAPI `1.0.0-alpha.2`, additive). Item 29 lands after the
+`v0.2.0-rc.1` publication commit `2c277dc1` and is not in that candidate.
+**The install-only grant.** The `ClusterRole`/`ClusterRoleBinding`
+`<release>-identity-trust` that lets the hook create a cluster-scoped
+`TrustPolicy` is a `post-install` hook of that first install alone, deleted by
+Helm when the install's hooks finish — succeeded or failed on Helm 3.19+ and
+4.x; Helm 3.12–3.18 keeps it after a failed hook, so the chart refuses to render
+it there (`identity.installationTrust needs Helm 3.19.0 or newer`) — and the
+hook deletes it on every exit path it controls, a usage error included.
+**An upgrade changes no namespace's approval mode:** no marker, no trust step,
+every unbound namespace stays `legacy-governed-v1`; the hook only generates the
+console key, or ADOPTS the one a PLAT-19.2 install made by hand under that name.
+One thing does change on upgrade: a `localAdmin` console now confirms
+namespaces ALREADY bound to an `Ordinary` policy (it refused them before), so
+whoever can port-forward to it can authorise a restore there alone.
+**Do:** nothing, to keep today's approval (first rename any policy named `default-confirm-v1`). To opt an older install into
+confirm: a trust administrator adds the key from `logweir-console-trust` to the
+`TrustPolicy` governing those namespaces (`ConsoleConfirmation`), then set
+`approvalPolicy.allowOrdinaryConfirmation: true` and `approvalPolicy.default:
+confirm` and upgrade ([install.md](install.md) §5f). **After a failed first
+install:** `kubectl delete clusterrolebinding,clusterrole
+<release>-identity-trust --ignore-not-found`, then check it is NotFound
+([install.md](install.md) §5f). **Release coordinator, two steps:** the merge
+is inert — `identity.bootstrapFeatures.consoleKey` is `false`, so the chart
+passes the pinned bootstrap image none of the new hook flags; after CI publishes
+the merge's runner, ONE commit re-pins `identity.bootstrapImage` to it,
+refreshes `crates/logweir/tests/fixtures/bootstrap-image-help.txt` from its
+`identity bootstrap --help` and flips the value to `true`
+([install.md](install.md), *Release coordinator: re-pin bootstrap bytes*).
+**Scope:** core rows (the unbound default, the bound marker with every binding
+broken once, an older reader refusing `defaultMode`), identity hook rows (fresh
+install creates trust and a claim the readers honour; no console, an adopted
+console key and any existing TrustPolicy create nothing; upgraded,
+hand-provisioned and adopted identities get neither; a patched marker is
+ignored; the console key generated once, adopted, key loss; the trust grant
+revoked on every exit path the binary controls; the policy body guard),
+controller rows (a refused marker is unmarked, a failed read keeps the last
+verdict), console rows (seven attacks on an upgraded install read legacy and
+sign nothing; a fresh install confirms in one request; only the managed key may
+be missing at start), controller and runner rows over an out-of-tree-signed
+`default-confirm-v1` confirmation, chart rows (the transient grant absent from
+an upgrade render and from installs without a console; the Helm floor, run with
+Helm 3.18.6; every render passes only flags the pinned image's `--help` lists),
+and a host journey (localAdmin console, Playwright, compose slot 3; a real
+ClusterRoleBinding deleted by a failing hook). The PoC refresh that carries it
+runs the live controller rows; the fresh-install rows wait for PROD-14.1's
+clean-install exercise.
+**Rollback:** remove `approvalPolicy.default` first (an older binary refuses a
+document carrying `defaultMode`), and `confirmationKeyManaged` goes with the
+chart (an older console refuses the unknown field). An older controller and
+console ignore the marker: every unbound namespace is `legacy-governed-v1` again
+and a pending confirmation under `default-confirm-v1` is refused
+`ApprovalPolicyMismatch` — fail closed. The installation `TrustPolicy`, both key
+Secrets and their public ConfigMaps stay.
+
+#### 30. A plan can ask phase 7 to verify every record, and the scorecard says what its verdict covered (PROD-08.1)
+
+**Added.** `sample.coverage: complete` in a drill or restore plan makes phase 7
+read every archived segment of every partition of every restored topic, check
+its sha256 against the manifest and decode it, compute the expected output from
+each archived record's OWN timestamp, read every restored record back and
+compare it with that output by `x-original-offset`, headers in order: exact
+per-partition counts of missing, unexpected, duplicate, out-of-order and
+different records, every faulty segment named. The manifest's first/last
+count bound is not consulted, so PROD-01.1's out-of-order cases read right
+there: a skipped segment and a record below the window floor FAIL, and a
+correct point-in-time restore PASSES. `sample.complete_max_records` bounds it;
+a bound that stops it signs `covered: false` and never a pass. Every 1.4.0
+scorecard — sampled or complete — carries the new optional
+`integrity.verification` block: the coverage, what it compared with (the
+archive), whether header order was verified, the verified partitions' capture
+gaps and pruned ranges as structured ranges, and a complete run's archive
+integrity and replay comparison. The scorecard is format **1.4.0**; both
+readers check seven new arms, IV-1 to IV-7, and print `integrity coverage:`
+lines; `verify_scorecard.py` is 1.19.0
+([drill-spec.md](formats/drill-spec.md#samplecoverage-and-samplecomplete_max_records-prod-081),
+[the scorecard format](formats/drill-scorecard.md#integrityverification-format-140),
+[stability.md](stability.md#scorecard-format-140-integrityverification-prod-081),
+[the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
+What changes on the upgrade:
+
+- **A sampled drill fails a restored head that repeats or reorders source
+  offsets** (`x-original-offset`); it used to key that head in a map, where a
+  duplicate collapsed and order was invisible. Only a target the engine wrote
+  wrongly is affected.
+- **Phase 0 refuses**, exit 3, a plan with `coverage: complete` and
+  `max_partitions`, or `complete_max_records` without complete coverage, or a
+  bound of `0`.
+- **A scorecard written by the new runner is format 1.4.0.** Readers built
+  before PROD-08.1 accept it and ignore the block.
+
+**Do:** nothing for existing plans, which stay sampled and byte-identical. To
+verify every record, add `coverage: complete` to the plan's `sample` block and
+re-approve it; budget for a read of the whole archive of the restored
+partitions and of the whole output (measured in the decision record: about a
+minute per GiB of one-KiB records with an optimised build on a laptop, against
+about five seconds for the sampled check), and set `complete_max_records` if a
+run must stop. A `Restore`, a `RehearsalSchedule` and the console cannot ask for
+it yet. **Scope:**
+`crates/logweir/tests/complete_verify.rs` (the fault matrix over real KBAK
+segments: a corrupt unsampled segment, an omitted segment in the store and in
+the target, a duplicate, a reorder, reordered headers, compaction holes,
+non-monotonic timestamps, the bound), `crates/logweir/tests/orchestrator.rs`
+(a complete plan through every phase, and a changed record past the canary),
+the seven arms in both readers with the invariant corpus and the parity gate,
+and planted mutants, each killed. Live, on the compose stack: the complete
+restores added to
+`e2e/tests/record_semantics.rs`'s timestamp, shapes and compaction rows, and
+`complete_coverage_hashes_every_segment_outside_the_window` and
+`complete_coverage_over_faulted_targets_on_the_real_broker_and_archive`.
+**Rollback:** an older runner ignores `sample.coverage`, runs a sampled check
+and signs format 1.3.0 again with no block; the 1.4.0 scorecards already written
+stay valid under both readers.
+
+#### 31. Every scheduled run's recovery point is offered from the Catalog view (FX-17)
+
+**Changed.** The catalog sync publishes each point's backup set id, receipt key
+and manifest key through the product's redactor, which read a manual run's
+set id (a UUID) as an identity but not a scheduled run's
+`<schedule uid>-<yyyymmdd>-<hhmmss>`, or `…-r<k>` for a retry: 52 to 55
+lower-case characters, over the length at which the redactor treats an
+unrecognised run as material. A catalog synced by a runner up to
+`v0.2.0-rc.1` therefore published every SCHEDULED point as
+`backupId: "[redacted]"`, `receiptKey: "[redacted].receipt.json"` and
+`manifestKey: "[redacted].json"`, and the console's Catalog view offered none of
+them ("not offered: … `[redacted].receipt.json` …"): on the PoC, 84 of 370
+points, the whole first page. The redactor now reads exactly the shape the
+controller mints — a lower-case UID, a slot that is a real instant, at most a
+one-digit retry suffix — as an identity, as it does a UUID, so those three
+fields are published whole and the points are offered. Nothing else is
+exempted: a near miss (an impossible date, an upper-case UID, a two-digit
+retry, anything after the slot) is still withheld. The same set id now also
+survives in check details and remedies, where a scheduled set's segment key
+used to read `[redacted]`. When a set id or receipt key does come back
+redacted, the console says so in ONE reason naming the field and its cause
+(an older runner, or a set id chosen for `logweir backup run` that is not a UUID
+or a lower-case name under 40 characters), instead of the old "keeps a ULID
+run id" advice or "no usable backup set id".
+
+What changes on the upgrade:
+
+- **A catalog's published view does not change until its next sync** with the
+  new runner image. Until then its scheduled points stay "not offered", now
+  with the reason above.
+- **A set id chosen for `logweir backup run`** (`--backup-id-override`, or a
+  plan's `backup_id`) that is neither a UUID nor lower-case letters, digits,
+  `.`, `-`, `_` and `=` under 40 characters still has its receipt key withheld:
+  the run id already spends the key's one free component. Its points are listed
+  and not offered, and the row says why.
+- **A `RetentionPolicy` starts weighing scheduled sets one by one.** Every
+  scheduled point used to share the set id `[redacted]` and the manifest key
+  `[redacted].json`, so retention treated them as ONE set: it kept them all
+  (`protected: SharedSegment`) while any one was retained, and refused its plan
+  as out of scope when all were due. No scheduled set was ever expired. After
+  the re-sync each scheduled set is its own set, so those outside `keepLast` /
+  `keepDays` become candidates, and an `Enforce` policy with
+  `requireApprovedPlan: false` deletes them at its next run. A catalog-point
+  readiness check (`Preflight`) compared a plan's set id and receipt key against
+  the redacted row and refused it; it now compares against the whole values.
+
+**Do:** before the runner image rolls, read the plan preview of every
+`Enforce` `RetentionPolicy` with `requireApprovedPlan: false`, or set it to
+`true` until you have read the first plan after the re-sync. After the runner
+image rolls, sync each `RecoveryCatalog` once — set `spec.syncRequest` to a new
+value — rather than wait for its interval.
+**Scope:** `crates/logweir-core/tests/check_contract.rs` (the PoC's set ids
+kept bare and in receipt, manifest and segment keys; thirteen near misses
+withheld; F1's credential probes with the scheduled id as the anchor; the
+fixture `ui/tests/fixtures/set-ids.json` the console's rows read too),
+`crates/logweir/tests/check_cli.rs` (a real catalog sync publishes a scheduled
+point whole, and withholds a forged one), `crates/weirkeeper/tests/cadence.rs`
+(every set id the schedule controller mints survives), the console rows in
+`ui/tests/restore-catalog.spec.js` and `ui/tests/d3.spec.js`, and planted
+mutants, each killed but one equivalent (FX-17). Live, on compose slot 3 with
+the console on the host: seven real backups (four scheduled set ids, one a
+retry) synced by this build's runner were all offered and each opened the
+restore wizard on its point; the same archive synced by the `v0.2.0-rc.1`
+runner image reproduced the PoC's "not offered" rows. Not yet proven on the
+PoC: the upgrade that carries FX-17 re-syncs its catalog.
+**Rollback:** an older runner withholds the scheduled set ids again at the
+catalog's next sync, and the view returns to "not offered" for those points.
+Nothing in the archive changes in either direction.
+
+### Required operator actions after `v0.2.0-rc.1`
+
+In addition to the next entry's six, in its order:
+
+- **Back up the console key too, once it exists** (item 29):
+  `logweir-console-confirmation` and `logweir-console-trust`, beside the
+  installation identity the next entry's step 1 names
+  ([install.md](install.md), *Back up and recover the installation identity*).
+- **Roll the controller and the runner image together** onto the 0.23.3
+  engine, as the next entry's step 6 already orders; a standalone CLI install
+  replaces its engine binary and its `LOGWEIR_ENGINE_VERSION` /
+  `LOGWEIR_ENGINE_DIGEST`, and every spec that names an `http://` archive
+  endpoint says `allow_http: true` (item 28).
+
+### Verification scope after `v0.2.0-rc.1`
+
+- **Complete coverage is a command-line plan value.** Only `logweir drill run`
+  and `logweir restore run` can ask for it (item 30). Record checks in a
+  `Restore` or a rehearsal remain samples, and `verificationScope` still never
+  says `complete`; the signed scorecard says which in
+  `integrity.verification.coverage`.
+
+### Migration and rollback after `v0.2.0-rc.1`
+
+An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30
+and 31, in the order of the next entry's upgrade path. Item 28 moves the engine in
+the controller and runner images together; item 29 adds console and chart
+values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
+change nothing until set; items 30 and 31 change the runner (item 31 also the
+console's text), and item 31 takes effect at each catalog's next sync. To roll back to
+`v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
+
+1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
+   document carrying `defaultMode` at start. Expect unbound namespaces of a
+   fresh install to be `legacy-governed-v1` again under the older build.
+2. Roll the controller and the runner back together (item 28): they run the
+   0.21.0 engine again, and that build's `doctor` refuses 0.23.3. The runner
+   signs format 1.3.0 again, sampled (item 30); the 1.4.0 scorecards already
+   written stay valid under both readers.
+
+---
+
 ## Unreleased — `main` after `v0.1.5`
 
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10), 24 (FX-3), 25
-(FX-13), 26 (FX-11), 27 (FX-8) and 28 (FX-17), from the product-expansion
-tracker's fix-now rows, land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
+(FX-13), 26 (FX-11) and 27 (FX-8), from the product-expansion tracker's fix-now
+rows, land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
 execution-claim set check, receipt and catalog format 1.2.0, the pin's read
 by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
@@ -179,7 +519,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-eight operator-facing changes
+### The twenty-seven operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -199,9 +539,6 @@ FX-11 and is not proven live yet: the PoC upgrade that carries it runs its
 rows.
 Item 27 is fix-now row FX-8, proven on the compose stack; the PoC upgrade that
 carries it runs its refusal and opt-in rows.
-Item 28 is fix-now row FX-17, proven on the compose stack with the console on
-the host; the PoC upgrade that carries it re-syncs the PoC's catalog and checks
-its first page.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -1238,75 +1575,6 @@ Not yet proven on the PoC: the upgrade that carries FX-8 runs those rows.
 selections this build refuses, unlabelled, signing format 1.1.0 again. The 1.3.0
 scorecards already written stay valid under both readers.
 
-#### 28. Every scheduled run's recovery point is offered from the Catalog view (FX-17)
-
-**Changed.** The catalog sync publishes each point's backup set id, receipt key
-and manifest key through the product's redactor, which read a manual run's
-set id (a UUID) as an identity but not a scheduled run's
-`<schedule uid>-<yyyymmdd>-<hhmmss>`, or `…-r<k>` for a retry: 52 to 55
-lower-case characters, over the length at which the redactor treats an
-unrecognised run as material. A catalog synced by a runner up to
-`v0.2.0-rc.1` therefore published every SCHEDULED point as
-`backupId: "[redacted]"`, `receiptKey: "[redacted].receipt.json"` and
-`manifestKey: "[redacted].json"`, and the console's Catalog view offered none of
-them ("not offered: … `[redacted].receipt.json` …"): on the PoC, 84 of 370
-points, the whole first page. The redactor now reads exactly the shape the
-controller mints — a lower-case UID, a slot that is a real instant, at most a
-one-digit retry suffix — as an identity, as it does a UUID, so those three
-fields are published whole and the points are offered. Nothing else is
-exempted: a near miss (an impossible date, an upper-case UID, a two-digit
-retry, anything after the slot) is still withheld. The same set id now also
-survives in check details and remedies, where a scheduled set's segment key
-used to read `[redacted]`. When a set id or receipt key does come back
-redacted, the console says so in ONE reason naming the field and its cause
-(an older runner, or a set id chosen for `logweir backup run` that is not a UUID
-or a lower-case name under 40 characters), instead of the old "keeps a ULID
-run id" advice or "no usable backup set id".
-
-What changes on the upgrade:
-
-- **A catalog's published view does not change until its next sync** with the
-  new runner image. Until then its scheduled points stay "not offered", now
-  with the reason above.
-- **A set id chosen for `logweir backup run`** (`--backup-id-override`, or a
-  plan's `backup_id`) that is neither a UUID nor lower-case letters, digits,
-  `.`, `-`, `_` and `=` under 40 characters still has its receipt key withheld:
-  the run id already spends the key's one free component. Its points are listed
-  and not offered, and the row says why.
-- **A `RetentionPolicy` starts weighing scheduled sets one by one.** Every
-  scheduled point used to share the set id `[redacted]` and the manifest key
-  `[redacted].json`, so retention treated them as ONE set: it kept them all
-  (`protected: SharedSegment`) while any one was retained, and refused its plan
-  as out of scope when all were due. No scheduled set was ever expired. After
-  the re-sync each scheduled set is its own set, so those outside `keepLast` /
-  `keepDays` become candidates, and an `Enforce` policy with
-  `requireApprovedPlan: false` deletes them at its next run. A catalog-point
-  readiness check (`Preflight`) compared a plan's set id and receipt key against
-  the redacted row and refused it; it now compares against the whole values.
-
-**Do:** before the runner image rolls, read the plan preview of every
-`Enforce` `RetentionPolicy` with `requireApprovedPlan: false`, or set it to
-`true` until you have read the first plan after the re-sync. After the runner
-image rolls, sync each `RecoveryCatalog` once — set `spec.syncRequest` to a new
-value — rather than wait for its interval.
-**Scope:** `crates/logweir-core/tests/check_contract.rs` (the PoC's set ids
-kept bare and in receipt, manifest and segment keys; thirteen near misses
-withheld; F1's credential probes with the scheduled id as the anchor; the
-fixture `ui/tests/fixtures/set-ids.json` the console's rows read too),
-`crates/logweir/tests/check_cli.rs` (a real catalog sync publishes a scheduled
-point whole, and withholds a forged one), `crates/weirkeeper/tests/cadence.rs`
-(every set id the schedule controller mints survives), the console rows in
-`ui/tests/restore-catalog.spec.js` and `ui/tests/d3.spec.js`, and planted
-mutants, each killed but one equivalent (FX-17). Live, on compose slot 3 with
-the console on the host: seven real backups (four scheduled set ids, one a
-retry) synced by this build's runner were all offered and each opened the
-restore wizard on its point; the same archive synced by the `v0.2.0-rc.1`
-runner image reproduced the PoC's "not offered" rows. Not yet proven on the
-PoC: the upgrade that carries FX-17 re-syncs its catalog.
-**Rollback:** an older runner withholds the scheduled set ids again at the
-catalog's next sync, and the view returns to "not offered" for those points.
-Nothing in the archive changes in either direction.
-
 ### Verification scope: what "verified" means in this release
 
 - **A green badge** means the signed document's signature verified under a key
@@ -1415,7 +1683,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26, 27 and 28, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26 and 27, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.

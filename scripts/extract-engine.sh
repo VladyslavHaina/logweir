@@ -15,7 +15,7 @@
 #     to a tag.
 #
 #   OSO_REFRESH=1 — THE ONLY PATH THAT MAY CHANGE THE PIN. Resolves
-#     `osodevops/kafka-backup:${OSO_TAG:-v0.21.0}` BY TAG, reads RepoDigests,
+#     `osodevops/kafka-backup:${OSO_TAG:-v0.23.3}` BY TAG, reads RepoDigests,
 #     verifies org.opencontainers.image.revision, and rewrites
 #     third_party/kafka-backup-binary.digest, e2e/compose/.env and the
 #     Dockerfile's `FROM` line. It also re-fetches the MIT licence and the
@@ -33,19 +33,21 @@ cd "${LOGWEIR_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 # GC14 governs what Logweir publishes under its OWN name; pulling upstream's
 # published image is required by Global Constraints 7, 8, 10 and 15 (controller
 # ruling GR6). Logweir publishes nothing under osodevops/.
-TAG="${OSO_TAG:-v0.21.0}"
+TAG="${OSO_TAG:-v0.23.3}"
 IMAGE="osodevops/kafka-backup:${TAG}"
 DIGEST_FILE="third_party/kafka-backup-binary.digest"
 LICENSE_FILE="third_party/LICENSE-MIT"
 TARBALL="third_party/kafka-backup-${TAG}.tar.gz"
 REFRESH="${OSO_REFRESH:-0}"
 
-# The commit `docs/UPSTREAM-VERSIONS.md` (in the planning repo that produced
-# this task, not part of this repo's own tree) pins for kafka-backup v0.21.0.
+# The upstream commit the tag `v0.23.3` pointed at when PROD-00.3f evaluated it
+# (`git ls-remote --tags https://github.com/osodevops/kafka-backup`, 2026-10-07;
+# docs/to-do/decisions/PROD-00-engine-route.md section 12). The pin before it
+# was v0.21.0 = ae5a102f93b5270927d95d4ccec184b577febb10.
 # Keep this in lockstep with TAG above; a mismatch means the tag has been
 # re-pointed to a different commit than the one this plan was verified
 # against, and extraction must refuse to proceed on an unverified build.
-EXPECTED_REVISION="ae5a102f93b5270927d95d4ccec184b577febb10"
+EXPECTED_REVISION="afb160e7f2c69b7c3c28e1b868dd952835a5b0af"
 
 # PROVENANCE, AND IT IS NOT REDUNDANT NOW THAT THE PULL IS BY DIGEST — it is a
 # DIGEST→COMMIT BINDING. Pulling `@sha256:…` proves the bytes are the bytes

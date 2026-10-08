@@ -149,6 +149,7 @@ fn main() {
             mismatches: 0,
             pass_rate_measured: Some(1.0),
             restored_principal_could_consume: None,
+            verification: None,
         },
         topic_parity: TopicParity {
             intentionally_deviated: vec!["cleanup.policy".into(), "retention.ms".into()],

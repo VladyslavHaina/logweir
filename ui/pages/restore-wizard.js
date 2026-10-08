@@ -3731,45 +3731,51 @@ export const GUIDED_SUBMIT_SENTENCE =
   "because its name is minted from these bytes.";
 
 
-/** The approval step under the namespace's EFFECTIVE policy (PLAT-19.2).
+/** The approval step under the namespace's EFFECTIVE policy (PLAT-19.2), in
+ *  the three modes an operator sees (PROD-16.1): `confirm` (one person clicks
+ *  Create; no key), `two-person` (PROD-16.2) and `strict` (an approver's
+ *  personal key).
  *
  *  `policy` is the product API's `ApprovalPolicyView`, or `null` when the mode
  *  cannot know it (legacy `kubectl proxy`) or the read failed -- and `null`
- *  renders exactly today's governed instructions, which is the fail-safe
+ *  renders exactly today's out-of-band instructions, which is the fail-safe
  *  reading: nothing here ever tells an operator a Restore will run on their
- *  confirmation unless the console said the namespace is bound Ordinary. */
+ *  confirmation unless the console said the namespace is under `confirm`. */
 export function approvalPolicyBlock(policy, ticket, ticketErrors) {
   const p = policy !== null && typeof policy === "object" ? policy : null;
   if (p !== null && p.legacy === false && p.mode === "ordinary" &&
     p.ordinaryConfirmationAvailable === false) {
     return (
-      "<h4 id=\"approval-policy-ordinary-unavailable\">Ordinary confirmation is not " +
-      "available here</h4>" +
-      "<p class=\"complaint\">This namespace is bound to approval policy <code>" +
-      esc(p.name) + "</code> (ordinary confirmation), and this console runs in the " +
-      "administrator mode, which does not offer ordinary confirmation: its one identity is " +
-      "whoever holds the port-forward, not a person the confirmation could attest. Submit " +
-      "this restore through the shared console.</p>"
+      "<h4 id=\"approval-policy-ordinary-unavailable\">Confirm: not available yet</h4>" +
+      "<p class=\"complaint\">This namespace is under approval policy <code>" +
+      esc(p.name) + "</code> (confirm: one person confirms in the console), and this console " +
+      "cannot sign a confirmation yet: its confirmation key is not there. The installation's " +
+      "identity hook generates it once, at install; try again in a minute, and if it persists " +
+      "the hook did not finish.</p>"
     );
   }
   if (p !== null && p.legacy === false && p.mode === "ordinary") {
+    const fresh = p.basis === "freshInstall"
+      ? " This installation started in confirm: every namespace without its own approval " +
+        "policy is confirmed in the console."
+      : "";
     return (
-      "<h4 id=\"approval-policy-ordinary\">Ordinary confirmation</h4>" +
-      "<p class=\"note\">This namespace is bound to approval policy <code>" + esc(p.name) +
-      "</code> (ordinary confirmation). Create the Restore is your confirmation: the console " +
-      "signs, as its attestation that you asked, a document naming exactly this Restore, its " +
-      "UID and this plan hash, and the Restore runs once weirkeeper verifies it. No approver " +
-      "and no out-of-band signature are involved.</p>"
+      "<h4 id=\"approval-policy-ordinary\">Confirm: no key needed</h4>" +
+      "<p class=\"note\">This namespace is under approval policy <code>" + esc(p.name) +
+      "</code> (confirm). Create the Restore is your confirmation: the console signs, as its " +
+      "attestation that you asked, a document naming exactly this Restore, its UID and this " +
+      "plan hash, and the Restore runs once weirkeeper verifies it. No approver and no key " +
+      "are involved." + fresh + "</p>"
     );
   }
   if (p !== null && p.legacy === false && p.mode === "governed") {
     return (
-      "<h4 id=\"approval-policy-governed\">Governed approval</h4>" +
-      "<p class=\"note\">This namespace is bound to approval policy <code>" + esc(p.name) +
-      "</code> (governed approval). Create the Restore records the console's confirmation of " +
-      "you as the requester; the Restore runs only after an approver who is NOT you " +
-      "countersigns that confirmation on their own machine and submits it on the Restore's " +
-      "approval page.</p>" +
+      "<h4 id=\"approval-policy-governed\">Strict: an approver's personal key</h4>" +
+      "<p class=\"note\">This namespace is under approval policy <code>" + esc(p.name) +
+      "</code> (strict). Create the Restore records the console's confirmation of you as the " +
+      "requester; the Restore runs only after an approver who is NOT you countersigns that " +
+      "confirmation with their own key, on their own machine, and submits it on the " +
+      "Restore's approval page.</p>" +
       "<div class=\"field\"><label for=\"change-ticket\">Change ticket (required)</label>" +
       "<input id=\"change-ticket\" name=\"ticket\" maxlength=\"128\" value=\"" +
       esc(typeof ticket === "string" ? ticket : "") + "\"" +
@@ -3781,7 +3787,7 @@ export function approvalPolicyBlock(policy, ticket, ticketErrors) {
     );
   }
   return (
-    "<h4>Approve it out of band</h4>" +
+    "<h4>Approve it out of band (strict: an approver's personal key)</h4>" +
     "<p class=\"note\">Run this on the machine that holds the approver's private key. This " +
     "page never sees it.</p>" +
     copyBlock([APPROVE_COMMAND])
@@ -4658,15 +4664,16 @@ function ticketFor(state) {
 }
 
 /** A refusal the namespace's approval POLICY makes before anything is sent
- *  (PLAT-19.2), or `null`: an Ordinary binding in a console that does not
- *  offer ordinary confirmation (D0: the administrator mode "does not expose
- *  Ordinary"). The product API refuses the same request; this says so first. */
+ *  (PLAT-19.2), or `null`: a `confirm` policy this console cannot sign yet --
+ *  PROD-16.1: its confirmation key is not there (the identity hook writes it
+ *  once, at install). The product API refuses the same request; this says so
+ *  first. */
 export function policyRefusal(state) {
   const p = (state || {}).approvalPolicy;
   if (p !== null && typeof p === "object" && p.legacy === false && p.mode === "ordinary" &&
     p.ordinaryConfirmationAvailable === false) {
-    return "namespace policy " + String(p.name) + " is ordinary confirmation, which this " +
-      "console mode does not offer; submit through the shared console";
+    return "namespace policy " + String(p.name) + " is confirm, and this console does not " +
+      "offer it yet: its confirmation key is not there; try again in a minute";
   }
   return null;
 }

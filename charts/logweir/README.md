@@ -858,14 +858,28 @@ own signing key — moving the signer out of the controller's reach is not this
 setting. Each listed namespace costs one watch per namespaced kind (twelve, plus
 their owned Jobs), which is the price of not holding a cluster-wide list.
 
-## `approvalPolicy` — ordinary confirmation and governed approval (PLAT-19.2)
+## `approvalPolicy` — the three modes: confirm, two-person, strict (PLAT-19.2, PROD-16.1)
+
+**confirm** — one person clicks Create in the console, no key (internal
+`Ordinary`); **two-person** — PROD-16.2, refused by name in this release;
+**strict** — an approver's personal key (internal `Governed`, or
+`legacy-governed-v1`). A **fresh install with a console** (the first `helm
+install`, Helm 3.19+ or 4.x, with `api.console.enabled`, the managed identity
+and `identity.bootstrapFeatures.consoleKey: true`) starts every namespace
+without a binding in **confirm**: the identity hook generates the console key,
+creates the default `TrustPolicy` for exactly it and the installation signer
+when the cluster has no trust of its own, and marks the install
+(`identity.installationTrust`; `docs/kubernetes.md` §8, *The three modes*). An
+**upgraded** install keeps `legacy-governed-v1` until you opt in
+(`docs/install.md` §5f).
 
 | value | meaning |
 |---|---|
-| `approvalPolicy.policies` | named policies: `name`, `mode: Governed\|Ordinary`, `maxAgeSeconds` (60..604800; default 900 Ordinary, 86400 Governed), `requireDistinctPrincipal` (Governed only, must be true) |
-| `approvalPolicy.namespaces` | `{<namespace>: <policy>}`; an unbound namespace keeps today's governed approval (`legacy-governed-v1`) |
-| `approvalPolicy.allowOrdinaryConfirmation` | D0's installation floor, default `false`; an Ordinary policy is refused at render and at start without it |
-| `approvalPolicy.confirmationKeySecret` | the console's `ConsoleConfirmation` private key, a Secret with key `confirmation.key`; required when a console-served namespace is bound |
+| `approvalPolicy.default` | what an unbound namespace resolves to: `""` (the fresh-install marker: confirm on a fresh install with a console, else `legacy-governed-v1`), `confirm` (needs `allowOrdinaryConfirmation`), `strict`; rendered as `defaultMode`, which an older binary refuses at start |
+| `approvalPolicy.policies` | named policies: `name`, `mode: confirm\|strict` (or `Ordinary\|Governed`; the chart renders the internal names), `maxAgeSeconds` (60..604800; default 900 confirm, 86400 strict), `requireDistinctPrincipal` (strict only, must be true); `default-confirm-v1` and `legacy-governed-v1` are reserved |
+| `approvalPolicy.namespaces` | `{<namespace>: <policy>}`; an explicit binding always wins over the default |
+| `approvalPolicy.allowOrdinaryConfirmation` | D0's installation floor, default `false`; a confirm policy and `default: confirm` are refused at render and at start without it (the fresh-install marker does not need it) |
+| `approvalPolicy.confirmationKeySecret` | `""`: with `identity.bootstrapFeatures.consoleKey`, the console key the identity hook generates and retains (`logweir-console-confirmation`, mounted `optional` and marked `confirmationKeyManaged` because the hook fills it after the console starts), and without it no key; another name (or the managed name with the feature off): a Secret you manage, key `confirmation.key`, mounted required, needed when a console-served namespace is bound |
 
 **Nothing renders when nothing is set**, so an existing installation sees no
 change. When set, the chart renders one **immutable, content-addressed**
@@ -1098,8 +1112,12 @@ helm install logweir charts/logweir -n logweir-system --create-namespace \
 | `identity.bootstrapImage` | the reviewed runner digest main CI published for `4956785` (amd64); an emptied or mutable value refuses to render unless the development override below is set |
 | `identity.bootstrapImagePullPolicy` | `IfNotPresent`; immutable bytes do not need an `Always` pull |
 | `identity.allowMutableBootstrapImageForDevelopment` | `false`; only the local Docker Desktop/kind override sets it true with pull policy `Never` |
+| `identity.bootstrapFeatures.consoleKey` | `false` until the release coordinator re-pins `identity.bootstrapImage` to a runner carrying the PROD-16.1 identity CLI, and flipped in that same commit: while `false` the chart passes the hook none of the PROD-16.1 flags (console key, installation trust, marker, revocation) and renders none of their objects; `chart_lint` holds every render to the pinned image's `--help` |
 | `identity.publicConfigMapName` | `logweir-signing-trust`; public SPKI, key id, algorithm and trust reference only |
-| `identity.externalSecret.{name,key}` | optional get-only P-256/Ed25519 PKCS#8 adoption source in the release namespace |
+| `identity.externalSecret.{name,key}` | optional get-only P-256/Ed25519 PKCS#8 adoption source in the release namespace; an adopted identity is never marked fresh (PROD-16.1) |
+| `identity.installationTrust.enabled` | `true`: on a FIRST install only (`.Release.IsInstall` and no established signing Secret) with the managed console key (a console, `bootstrapFeatures.consoleKey`, no `externalSecret`), the hook creates one default `TrustPolicy` for exactly the installation signer and the console key it generated — only when the cluster has no `TrustPolicy` and no `TrustRoster/default` — and marks the install `confirm`. Its `create` grant is a `post-install` hook Helm deletes when the install's hooks finish, succeeded or failed, and the hook revokes on every exit path it controls; it renders only on **Helm 3.19+ or 4.x** (older Helm keeps a failed install's hooks; the chart refuses there, naming this value) and never on an upgrade. After a failed first install: `kubectl delete clusterrolebinding,clusterrole <release>-identity-trust --ignore-not-found` (`docs/install.md` §5f) |
+| `identity.installationTrust.policyName` | `logweir-installation` |
+| `identity.installationTrust.allowedTargetClusterIds` | `[]`; written into that policy once, at its creation (`demoKafka.enabled` adds the demo target); edit the policy afterwards |
 | `identity.authorizedRunnerNamespaces` | `[]`; release namespace is implicit, each listed existing namespace receives the same protected signer and runner prerequisites |
 | `identity.kubernetesApiCIDRs` | `[]`; additional exact API `/32` (IPv4) or `/128` (IPv6) endpoints for provider/CNI DNAT behavior, alongside Helm-discovered service/endpoint addresses; broad CIDRs are schema-rejected |
 

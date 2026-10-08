@@ -218,6 +218,45 @@ fn a_globbed_topic_in_the_spec_exits_3_at_phase_0_with_its_reason_line() {
     );
 }
 
+/// **C15 at phase 0** (PROD-00.3f, A-C15-1). An `http://` archive endpoint
+/// with `allow_http: false` exits 3 with its reason line before anything runs:
+/// the pinned engine (0.22.0 and later) derives plaintext from the endpoint's
+/// scheme, so the rendered `false` would not stop a plaintext dial. The
+/// renderer refuses it too, but that is phase 5 and exit 1. The evidence
+/// block's own `allow_http` is untouched, so the source storage is the only
+/// thing this row changes.
+#[test]
+fn an_http_archive_endpoint_without_allow_http_exits_3_at_phase_0() {
+    let example = std::fs::read_to_string("../../examples/drill.yaml").unwrap();
+    // The example states `allow_http: true` twice: the SOURCE storage first,
+    // then the evidence store. Only the first is edited, and the row checks
+    // that the edit landed inside `source.storage`.
+    let at = example
+        .find("    allow_http: true\n")
+        .expect("the source storage states allow_http");
+    assert!(
+        example[..at].contains("source:\n  storage:") && !example[..at].contains("evidence"),
+        "the first allow_http is the source storage's"
+    );
+    let spec = example.replacen("    allow_http: true\n", "    allow_http: false\n", 1);
+    let (code, stdout, stderr) = run_with_spec_capturing_streams(&spec);
+    assert_eq!(code, Some(3), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        last_line(&stdout),
+        "refusal-reason=GuardRefused",
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("source.storage.endpoint is a plain http:// endpoint")
+            && stderr.contains("source.storage.allow_http is false"),
+        "the refusal must name the C15 rule:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(":9000"),
+        "the refusal never echoes the endpoint:\n{stderr}"
+    );
+}
+
 /// **G-EXP at phase 0.** A `${` in a spec topic is refused before anything
 /// runs, and refused as an EXPANSION rather than as a glob — `${` contains two
 /// glob metacharacters, so the order of the two arms decides which fix the

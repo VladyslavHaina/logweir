@@ -749,6 +749,11 @@ fn the_declared_rows_follow_the_documented_floor() {
     let rows = matrix_rows();
     let mut pin_on_default = false;
     let mut newer_broker = false;
+    // PROD-00.3f: the C8 tripwire (the engine's fixed protocol versions on the
+    // newest broker line) is a row for THE PIN, not for whichever engine
+    // happened to carry it. Moving the pin without moving that row would leave
+    // the newest broker exercised only by an engine Logweir no longer ships.
+    let mut pin_on_newer_broker = false;
     for row in &rows {
         let tag = row["tag"].as_str().expect("tag");
         let kafka = row["kafka"].as_str().expect("kafka, as a string");
@@ -766,6 +771,7 @@ fn the_declared_rows_follow_the_documented_floor() {
         }
         pin_on_default |= tag == pin_tag && kafka == default_broker;
         newer_broker |= version(kafka) > version(&default_broker);
+        pin_on_newer_broker |= tag == pin_tag && version(kafka) > version(&default_broker);
     }
     assert!(
         pin_on_default,
@@ -774,6 +780,139 @@ fn the_declared_rows_follow_the_documented_floor() {
     assert!(
         newer_broker,
         "no row runs a broker newer than {default_broker}"
+    );
+    assert!(
+        pin_on_newer_broker,
+        "no row runs the pin {pin_tag} on a broker newer than {default_broker} (the C8 tripwire)"
+    );
+}
+
+/// **No test the matrix runs may compare the engine with the pin** (PROD-00.3f
+/// review H1). Each full row writes ITS engine's digest into
+/// `third_party/kafka-backup-binary.digest` and `.engine/`, then runs the
+/// `e2e` package. A test there that holds the working digest, or the engine,
+/// to a committed statement of the pin is red on every row that is not the
+/// pin, and cargo stops at the first failing binary, before the drill suites:
+/// run 37728540932 lost the v0.21.0 (floor) and v0.22.0 rows that way to
+/// `e2e/tests/engine_pin.rs`, which now lives in `crates/logweir/tests/`.
+///
+/// A code line (not a comment) under `e2e/tests/`, at any depth, must not name
+/// a committed statement of the pin: `doctor`'s `ENGINE_PIN`, the controller's
+/// `job.rs`, the refresh script, the vendored tarball, `doctor`'s accepting
+/// fixture, or the pinned digest as a literal. Reading the digest file to
+/// RECORD which engine ran (the harness's `engine_digest()`) is what the rows
+/// need, and is not a pin statement. `CONTRACT_ENGINE` is gated by design
+/// (`contract_applies`) and is not one either.
+fn pin_statements(code: &str, pinned_digest: &str) -> Vec<String> {
+    let needles = [
+        "ENGINE_PIN",
+        "crates/weirkeeper/src/job.rs",
+        "scripts/extract-engine.sh",
+        "third_party/kafka-backup-v",
+        "fake-engine-ok.sh",
+        pinned_digest,
+    ];
+    code.lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with("//"))
+        .flat_map(|line| {
+            needles
+                .iter()
+                .filter(move |n| line.contains(**n))
+                .map(|n| n.to_string())
+        })
+        .collect()
+}
+
+fn e2e_pin_offenders(dir: &Path, pinned_digest: &str, seen: &mut Vec<PathBuf>) -> Vec<String> {
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            offenders.extend(e2e_pin_offenders(&path, pinned_digest, seen));
+        } else if path.extension().is_some_and(|x| x == "rs") {
+            seen.push(path.clone());
+            let text = std::fs::read_to_string(&path).unwrap();
+            for needle in pin_statements(&text, pinned_digest) {
+                offenders.push(format!("{} names `{needle}`", path.display()));
+            }
+        }
+    }
+    offenders
+}
+
+#[test]
+fn no_e2e_test_compares_the_engine_with_a_committed_pin() {
+    let pinned_digest = read("third_party/kafka-backup-binary.digest")
+        .trim()
+        .to_string();
+    assert!(pinned_digest.starts_with("sha256:"), "{pinned_digest}");
+    let mut seen = Vec::new();
+    let offenders = e2e_pin_offenders(&root().join("e2e/tests"), &pinned_digest, &mut seen);
+    assert!(
+        offenders.is_empty(),
+        "engine-matrix runs `e2e/tests/` with each row's own engine; a pin statement there \
+         turns every non-pin row red before its drill suites run. Move the check to \
+         crates/logweir/tests/engine_pin.rs:\n{}",
+        offenders.join("\n")
+    );
+    // The walk descends and sees the suites the matrix runs.
+    for suite in [
+        "e2e/tests/record_semantics.rs",
+        "e2e/tests/harness/mod.rs",
+        "e2e/tests/full_drill.rs",
+    ] {
+        assert!(
+            seen.iter()
+                .any(|p| p.ends_with(suite.trim_start_matches("e2e/tests/"))),
+            "the walk did not see {suite}"
+        );
+    }
+    assert!(
+        !root().join("e2e/tests/engine_pin.rs").exists(),
+        "the pin guard is back in the package engine-matrix runs"
+    );
+
+    // NEGATIVE CONTROLS. The lines that broke run 37728540932, planted in a
+    // nested directory on disk, are refused; the harness's own recording read
+    // of the digest file and a comment naming the pin are not.
+    let planted = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(planted.path().join("nested")).unwrap();
+    std::fs::write(
+        planted.path().join("nested/engine_pin.rs"),
+        format!(
+            "use logweir::doctor::ENGINE_PIN;\n\
+             fn digest_file() -> String {{ read(\"third_party/kafka-backup-binary.digest\") }}\n\
+             #[test]\nfn t() {{\n    check(&read(\"crates/weirkeeper/src/job.rs\"), ENGINE_PIN, &digest_file());\n\
+             assert_eq!(digest_file(), \"{pinned_digest}\");\n}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        planted.path().join("harness.rs"),
+        "pub fn engine_digest() -> String {\n    \
+         std::fs::read_to_string(root().join(\"third_party/kafka-backup-binary.digest\")).unwrap()\n}\n\
+         // `logweir::doctor::ENGINE_PIN` is the pin; this file never compares with it.\n",
+    )
+    .unwrap();
+    let mut planted_seen = Vec::new();
+    let caught = e2e_pin_offenders(planted.path(), &pinned_digest, &mut planted_seen);
+    assert_eq!(planted_seen.len(), 2, "{planted_seen:?}");
+    for needle in [
+        "ENGINE_PIN",
+        "crates/weirkeeper/src/job.rs",
+        pinned_digest.as_str(),
+    ] {
+        assert!(
+            caught
+                .iter()
+                .any(|o| o.contains("nested/engine_pin.rs") && o.contains(needle)),
+            "the planted pin check must be refused for `{needle}`: {caught:?}"
+        );
+    }
+    assert!(
+        caught.iter().all(|o| !o.contains("harness.rs")),
+        "a recording read of the digest file and a comment are not pin statements: {caught:?}"
     );
 }
 

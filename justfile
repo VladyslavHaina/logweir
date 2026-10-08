@@ -96,6 +96,9 @@ golden:
 # `-1.2.0.json` is frozen beside the new file the same way
 # (`the_frozen_1_1_0_scorecard_schema_does_not_describe_the_time_basis`,
 # `the_frozen_1_2_0_scorecard_schema_does_not_describe_the_time_basis`).
+# PROD-08.1 moved the scorecard to 1.4.0 (`integrity.verification`), and FX-8's
+# `-1.3.0.json` is frozen beside the new file the same way
+# (`the_frozen_1_3_0_scorecard_schema_does_not_describe_the_verification`).
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's constant (`logweir_core::FORMAT_VERSION`,
@@ -103,7 +106,7 @@ golden:
 # `catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION`), which also builds
 # the schema's `$id`. A renumber moves the constant and this line, and keeps
 # the old file frozen beside the new.
-scorecard_schema_version := "1.3.0"
+scorecard_schema_version := "1.4.0"
 receipt_schema_version := "1.2.0"
 catalog_schema_version := "1.2.0"
 

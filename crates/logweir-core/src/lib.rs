@@ -23,7 +23,16 @@
 /// `scorecard_schema_version`, `docs/verify_scorecard.py`'s `FORMAT_VERSION`
 /// and `SCORECARD_TIME_BASIS_SINCE_MINOR`, and the parity script's
 /// `SCORECARD_TIME_BASIS_VERSION`.
-pub const FORMAT_VERSION: &str = "1.3.0";
+///
+/// `1.4.0` since PROD-08.1, which added `integrity.verification`: whether the
+/// verdict covered a sample or every selected record, the structured gap and
+/// pruned ranges, and a complete verification's archive integrity and replay
+/// comparison. Its first minor is [`scorecard::VERIFICATION_SINCE_MINOR`]; a
+/// renumber moves both, the justfile's `scorecard_schema_version`,
+/// `docs/verify_scorecard.py`'s `FORMAT_VERSION` and
+/// `SCORECARD_VERIFICATION_SINCE_MINOR`, and the parity script's
+/// `SCORECARD_VERIFICATION_VERSION`.
+pub const FORMAT_VERSION: &str = "1.4.0";
 
 /// PLAT-19.2 / decision D0: ordinary confirmation and governed approval —
 /// the installation policy set, the policy snapshot and authorization
@@ -55,11 +64,11 @@ pub mod trust;
 
 #[cfg(test)]
 mod tests {
-    /// The one literal pin of the writer's version (FX-8: 1.3.0). Every
+    /// The one literal pin of the writer's version (PROD-08.1: 1.4.0). Every
     /// other test derives the number from the constant, so a renumber is this
     /// line and the constant.
     #[test]
-    fn format_version_is_one_three_zero() {
-        assert_eq!(crate::FORMAT_VERSION, "1.3.0");
+    fn format_version_is_one_four_zero() {
+        assert_eq!(crate::FORMAT_VERSION, "1.4.0");
     }
 }

@@ -44,8 +44,8 @@ concept; the steps below are the same path for any installation.
 |---|---|---|
 | Install, upgrade, CRDs, controller scope | cluster administrator | Helm values ([install.md](install.md)) |
 | Whose keys may approve and attest, per namespace | `logweir-trust-admin` (a `TrustPolicy`), or a cluster administrator (the legacy `TrustRoster/default`) | [keys.md](keys.md); never a namespace operator |
-| How a namespace's restores are approved: `legacy-governed-v1`, `Ordinary` or `Governed` | installation administrator | `approvalPolicy.*` values, one rollout ([install.md](install.md) §5f); never a namespace object |
-| Approving one restore | an approver who is not the requester | `logweir drill approve` / `logweir drill countersign`, on their own machine, with the CLI from the release archive for that machine ([README](../README.md#install)) |
+| How a namespace's restores are approved: **confirm** (one click, no key — a fresh install's default), **strict** (a personal key) or, later, two-person | installation administrator | `approvalPolicy.*` values, one rollout ([install.md](install.md) §5f); never a namespace object |
+| Approving one restore | **confirm**: the requester, in the console. **strict**: an approver who is not the requester | **confirm**: *Create the Restore*. **strict**: `logweir drill approve` / `logweir drill countersign`, on their own machine, with the CLI from the release archive for that machine ([README](../README.md#install)) |
 | Connections, destinations, schedules, backups, restore requests | `logweir-operator` (console role Operator) | the console |
 | Whether archive objects are ever deleted | `logweir-retention-admin`, plus an administrator's approval of each plan digest | a `RetentionPolicy` ([kubernetes.md](kubernetes.md) §7f); the default deletes nothing |
 
@@ -56,13 +56,23 @@ them can approve their own restore, or enforce a deletion plan they wrote.
 ### 1. Install
 
 1. Check the floors: Kubernetes 1.29+, amd64-capable nodes for runner Jobs, and
-   engine 0.21.0 ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
+   engine 0.21.0, with 0.23.3 the pinned engine the images ship
+   ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
 2. Choose images: the published digests of the exact CI run you deploy, not
    `latest` ([install.md](install.md), *Choose an image and installation path*).
 3. Install with Helm and the managed identity — path (c) — declaring every
    namespace where backups and restores will run in
    `identity.authorizedRunnerNamespaces` (those namespaces must exist first).
-   Add `retention.enabled=true` only if you will ever enforce retention.
+   **Turn the console on in this same first install** (`api.enabled`,
+   `api.console.enabled`, `api.console.mode`; step 3 and [install.md](install.md)
+   §5e): a fresh install with a console starts in **confirm**, so its first
+   restore needs no key (Helm 3.19+ or 4.x, and a chart whose
+   `identity.bootstrapFeatures.consoleKey` is on — the release default once its
+   bootstrap image is re-pinned); a console turned on by a later upgrade does
+   not, and then you opt in ([install.md](install.md) §5f). Name the clusters a restore
+   may write into in `identity.installationTrust.allowedTargetClusterIds` if
+   you know them. Add `retention.enabled=true` only if you will ever enforce
+   retention.
 4. Back up the installation identity at once ([install.md](install.md),
    *Back up and recover the installation identity*). Losing it loses the
    ability to sign; losing its public half loses the ability to verify old
@@ -73,22 +83,33 @@ them can approve their own restore, or enforce a deletion plan they wrote.
 
 ### 2. Trust, keys and approval policy
 
+On a **fresh install with the console** there is nothing to do here: the
+identity hook generated the console's key and — on a cluster with no trust of
+its own — created the default `TrustPolicy` `logweir-installation` for it and
+for the installation's signing key, and every namespace without its own policy
+is **confirm** (`installation-trust skipped:…` in the hook's log says when it
+did not, and which public key ids to add to your trust). No
+key file, no `openssl`, no roster ([install.md](install.md) §5f).
+
+The steps below are for what that does not cover — a **strict** namespace, an
+install that existed before this release, or trust you manage yourself:
+
 1. Generate the approver's key pair on the approver's machine; its private half
    never enters the cluster ([install.md](install.md) §1).
-2. Establish trust: the smallest first step is `TrustRoster/default` with the
-   approver key and the installation's signing key from `logweir-signing-trust`
-   ([install.md](install.md) §2). A `TrustPolicy` is the current mechanism —
-   retirement, revocation and overlap rotation — and `logweir trust
-   migrate-roster` writes one from the roster ([keys.md](keys.md)).
-3. Decide each namespace's approval policy. Doing nothing leaves every namespace
-   on `legacy-governed-v1`: an out-of-band signed approval per restore.
-   `Ordinary` (the console's own confirmation) needs the **shared** console;
-   `Governed` needs a change ticket and an independent approver
-   ([install.md](install.md) §5f; [kubernetes.md](kubernetes.md) §8, *Approval
-   policy*).
+2. Establish trust: a `TrustPolicy` — retirement, revocation and overlap
+   rotation — or, the smallest first step on an install without one,
+   `TrustRoster/default` with the approver key and the installation's signing
+   key from `logweir-signing-trust` ([install.md](install.md) §2); `logweir
+   trust migrate-roster` writes a policy from the roster ([keys.md](keys.md)).
+3. Decide each namespace's approval mode: **confirm**, **strict** (a change
+   ticket and an independent approver's key), or leave it on the installation's
+   default ([install.md](install.md) §5f; [kubernetes.md](kubernetes.md) §8,
+   *The three modes*). An older install keeps `legacy-governed-v1` until you opt
+   in.
 
-**Check:** `kubectl --context <ctx> get trustroster default` (or `get
-trustpolicy`) reports its keys loaded.
+**Check:** `kubectl --context <ctx> get trustpolicy logweir-installation`
+reads `DEFAULT true`, `KEYS 2`, `LOADED True` (or your own policy or roster
+reports its keys loaded).
 
 ### 3. Roles and the console
 
@@ -99,8 +120,9 @@ trustpolicy`) reports its keys loaded.
 2. Turn the console on ([install.md](install.md) §5e). `localAdmin` is one
    administrator reached by `kubectl port-forward` — for a lab or break-glass;
    `shared` is the SSO console, needs `controller.watchNamespaces`, an OIDC
-   client and a TLS Ingress, and is the only mode that can serve `Ordinary`
-   confirmation.
+   client and a TLS Ingress. Both serve **confirm**; in `localAdmin` the
+   confirming principal is the one local administrator, so whoever can
+   port-forward to the console can confirm (SECURITY.md).
 3. If the cluster is 1.30+, fence the console's `create secrets` with the
    admission policy ([install.md](install.md) §5b).
 
@@ -193,15 +215,17 @@ always a destination with no `evidenceRead` grant.
    controller verifies such a run only in its archive handle's bucket, and an
    advisory `destination.evidenceReadable` row says when a plan would not be
    verified ([kubernetes.md](kubernetes.md) §15.1a, §21.8).
-4. Get it approved, by the namespace's policy:
-   - `legacy-governed-v1`: download the plan bytes; the approver runs
+4. Get it approved, by the namespace's mode:
+   - **confirm** (a fresh install's default): *Create the Restore* is the
+     approval — the console signs its confirmation of you and the Restore runs
+     once weirkeeper verifies it. No key, nothing to paste;
+   - **strict**, `legacy-governed-v1`: download the plan bytes; the approver runs
      `logweir drill approve … --subject-kind Restore` on their machine and
      records the two files through the console (Approver role) or `kubectl`
      ([kubernetes.md](kubernetes.md) §17);
-   - `Ordinary`: the shared console's confirmation is the authorization;
-   - `Governed`: the console confirms the requester, and a different approver
-     runs `logweir drill countersign` and submits it ([kubernetes.md](kubernetes.md)
-     §8, *Approval policy*).
+   - **strict**, a `Governed` binding: the console confirms the requester, and a
+     different approver runs `logweir drill countersign` and submits it
+     ([kubernetes.md](kubernetes.md) §8, *Approval policy*).
 
 **Check:** the `Approval` reads `Verified=True`, the `Restore` is admitted,
 and its operation page reaches `Succeeded` with a completion panel.
@@ -216,8 +240,10 @@ and its operation page reaches `Succeeded` with a completion panel.
 - **The record check is a sample.** *Records verified in the sampled window* is
   the count read back from the new topics inside the sampled window, and *records
   sampled and matching* is how many of those matched byte for byte. Neither is
-  the total the restore wrote, and no level in this version compares every
-  record (*Terms* below).
+  the total the restore wrote, and a `Restore` cannot ask for a comparison of
+  every record in this version; only the command-line runner can, with
+  `sample.coverage: complete` ([release notes](release-notes.md), item 30;
+  *Terms* below).
 - **Check it without Logweir.** Fetch the scorecard and its sidecar from the
   keys on the `Restore` (`status.evidence`) and run
   `python3 docs/verify_scorecard.py` over them ([verify-a-scorecard.md](verify-a-scorecard.md)).
@@ -469,7 +495,8 @@ logweir doctor \
 `doctor` checks credentials, the engine **version** and glibc floor, target
 reachability, the marker topic and the approver key — before a drill is
 attempted. It compares the engine's own `--version` output against the pinned
-`0.21.0`; it does **not** compute or compare an image digest
+`0.23.3`, as a whole token (`0.23.3+build` or `0.23.3-rc1` is a mismatch); it
+does **not** compute or compare an image digest
 (`third_party/kafka-backup-binary.digest` is quoted in the failure message and
 nowhere else), so a green `ok engine version` line says the right version ran,
 not that the right binary did. Add `--strict` to treat a check it could not perform (for example
@@ -528,8 +555,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
 # Optional engine override. Both doctor and drill run search LOGWEIR_ENGINE_BIN,
 # ./.engine/kafka-backup, /usr/local/bin/kafka-backup, then PATH.
 export LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
-export LOGWEIR_ENGINE_VERSION=0.21.0
-export LOGWEIR_ENGINE_DIGEST=sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317
+export LOGWEIR_ENGINE_VERSION=0.23.3
+export LOGWEIR_ENGINE_DIGEST=sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db
 
 logweir drill run \
   --spec drill.yaml \

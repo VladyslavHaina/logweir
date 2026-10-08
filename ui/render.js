@@ -3139,8 +3139,8 @@ export function verificationScopeSentence(scope) {
   if (typeof s.recordsSampled !== "number" && typeof s.recordsSampledMatching !== "number") {
     return "This restore's record check ran at level " + String(s.level) +
       " and recorded no sampled counts, so how many records were compared is not known here. " +
-      "Whatever it compared, it was a sample: no level in this version performs an exhaustive " +
-      "comparison.";
+      "Whatever it compared, it was a sample: a Restore cannot ask for an exhaustive " +
+      "comparison in this version.";
   }
   const sampled = typeof s.recordsSampled === "number" ? String(s.recordsSampled) : ABSENT;
   const matching = typeof s.recordsSampledMatching === "number"

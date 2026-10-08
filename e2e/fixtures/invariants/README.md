@@ -547,6 +547,59 @@ default, and `plan` is an `Option<String>`): `time_basis_not_an_object`,
 `time_basis_not_recorded_item_not_a_string` and
 `time_basis_plan_not_a_string`.
 
+## PROD-08.1: `integrity.verification` (scorecard format 1.4.0)
+
+Eleven `index.json` cases for the block and its seven arms, IV-1 to IV-7, which
+both readers state in the same position (after `source.time_basis`, before
+`redactions`) and words. Each is `unmodified_example.json` with
+`format_version` and `integrity.verification` set — and, where the case is not
+a pass, `outcome`, `integrity.result`, `integrity.partial_reason` and
+`engine.matrix_verdict` moved off a pass — and nothing else touched. Generated
+by the worker's script (recorded in its report); every literal is in the files.
+
+| case | what it pins |
+|---|---|
+| `verification_1_4_sampled` | ACCEPT: a sampled verification, header order not verified, one capture gap |
+| `verification_1_4_complete_pass` | ACCEPT: a covered, exact complete verification over two partitions, signed `pass` |
+| `verification_1_4_complete_incomplete_partial` | ACCEPT: a complete verification its bound stopped, signed `partial` with the reason |
+| `verification_1_4_complete_duplicate_fail` | ACCEPT: a complete verification that counted a duplicate, signed `fail` |
+| `verification_under_format_1_3_0` | IV-1: the block under `1.3.0` |
+| `verification_coverage_outside_its_set` | IV-2: `coverage: full` |
+| `verification_sampled_claims_header_order` | IV-3: header order `verified` beside sampled coverage |
+| `verification_complete_coverage_without_its_block` | IV-4: `coverage: complete` with no `complete` block |
+| `verification_incomplete_without_a_reason` | IV-5: `covered: false` with no reason |
+| `verification_pass_over_a_missing_record` | IV-6: a `pass` beside a complete block that counts a missing record |
+| `verification_totals_not_the_partitions_sums` | IV-7: a total that is not its partitions' sum |
+
+Since PROD-08.1's review (M-1), IV-6 and IV-7 also carry one case per
+CONJUNCT, each violating exactly that conjunct, so a reader that drops one
+answers with a later arm's words or `VALID` and the walker fails it:
+`verification_iv6_*` (not covered, no partition, a failed segment, an
+unverified segment, segments not all verified, each total fault —
+`missing`, `unexpected`, `duplicates`, `out_of_order`, `mismatched`, matching
+short, restored over — a partition not compared, and partitions inexact with
+exact totals) and `verification_iv7_*` (each of the eight replay sums, the
+segment, verified-segment, decoded-record and offset-hole sums, and the
+accounted segments). Two more pin review L-1: a reason made of a unit
+separator (U+001F) is not blank to either reader —
+`verification_incomplete_reason_a_unit_separator` (ACCEPT) and
+`verification_covered_with_a_unit_separator_reason` (IV-5).
+
+IV-1's message interpolates the document's `format_version`, so its `arm` is the
+literal text before the placeholder. IV-2, IV-3 and IV-4 quote values the Rust
+source spells with `\"`, so their `arm`s are the quote-free text before the
+first quote (IV-2, IV-4) or the clause after the last (IV-3).
+
+Twenty-nine `shape-index.json` cases. Twenty-four are `null:` cases, one per
+plain `u64` count of the block — `complete.archive.*`, `complete.replay.*`,
+`complete.partitions[].*` and `complete.partitions[].replay.*` — which the
+closed u64 arithmetic requires once both walkers go below a block's first level
+(PROD-08.1 made them depth-first: `ReplayComparison` is reached at two paths).
+Five are `message:` cases, because `drill verify` refuses them at
+deserialisation: `verification_not_an_object`,
+`verification_coverage_not_a_string`, `verification_gaps_absent`,
+`verification_covered_not_a_bool` and `verification_partitions_not_an_array`.
+
 ---
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

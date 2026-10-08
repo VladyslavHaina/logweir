@@ -528,9 +528,77 @@ pub struct SampleSpec {
     pub anchor: Anchor,
     #[serde(default)]
     pub max_partitions: Option<u32>,
+    /// **PROD-08.1.** How much of the restore phase 7 verifies: `sampled`
+    /// (the default, and every plan written before this field) or `complete`
+    /// — every archived segment of every restored partition hashed and
+    /// decoded, the expected output computed from each record's OWN timestamp,
+    /// and every restored record compared with it by `x-original-offset`
+    /// (see [`Coverage`]).
+    ///
+    /// `skip_serializing_if` the default, so a plan that does not ask for
+    /// complete coverage serialises byte for byte as it did before the field
+    /// existed (a rehearsal's rendered plan, and its hash, included). A runner
+    /// that predates the field ignores it (the grammar ignores unknown keys),
+    /// runs a sampled drill and signs no `integrity.verification` block, which
+    /// every reader prints as "coverage not recorded", never as complete.
+    #[serde(default, skip_serializing_if = "Coverage::is_sampled")]
+    pub coverage: Coverage,
+    /// **PROD-08.1.** The bound on a `complete` verification: the most
+    /// archived records it decodes, summed over every restored partition.
+    /// Absent means no bound. When the next partition would take the total
+    /// past it, that partition and every later one are NOT compared, and the
+    /// signed `integrity.verification.complete` says so (`covered: false`,
+    /// its `incomplete_reason` naming the bound) — complete coverage is never
+    /// silently replaced by sampling. Refused at phase 0 beside `coverage:
+    /// sampled`, where it would bound nothing the plan asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complete_max_records: Option<u64>,
 }
 fn n25() -> usize {
     25
+}
+
+/// **PROD-08.1.** How much of a restore phase 7 verifies — `sample.coverage`
+/// in the plan, `integrity.verification.coverage` in the signed scorecard
+/// (format 1.4.0).
+///
+/// - **`Sampled`** — today's verification, unchanged: the first
+///   `records_per_partition` records of each sampled partition, reconciled by
+///   their sorted-header fingerprint; the sha256 of the segments those
+///   records came from; and the manifest's count BOUND for the window, which
+///   reads segment first and last timestamps (PROD-01.1 S6, S9).
+/// - **`Complete`** — every archived segment of every partition of every
+///   restored topic is read, its sha256 checked against the manifest and its
+///   records decoded; the expected output is the archived records whose OWN
+///   timestamp is inside the restore window, independent of the engine's
+///   first/last-timestamp segment selection; every restored record is read
+///   back and compared with it by `x-original-offset` — content (with header
+///   order), count, duplicates and order. The contract is
+///   `docs/to-do/decisions/PROD-08.1-integrity-contract.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Coverage {
+    #[default]
+    Sampled,
+    Complete,
+}
+
+impl Coverage {
+    /// The wire spelling, in the plan and in the signed scorecard's
+    /// `integrity.verification.coverage`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Coverage::Sampled => crate::scorecard::COVERAGE_SAMPLED,
+            Coverage::Complete => crate::scorecard::COVERAGE_COMPLETE,
+        }
+    }
+
+    /// `skip_serializing_if` for [`SampleSpec::coverage`].
+    #[must_use]
+    pub fn is_sampled(&self) -> bool {
+        *self == Coverage::Sampled
+    }
 }
 
 /// WHICH records in the sampled window a drill reconciles.

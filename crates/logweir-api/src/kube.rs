@@ -1170,6 +1170,28 @@ impl KubeAdapter {
         self.bounded("get", "configmaps", api.get(name)).await
     }
 
+    /// PROD-16.1: read the installation's public identity ConfigMap, for the
+    /// fresh-install marker on it (`logweir.dev/approval-default`).
+    ///
+    /// NAMED, NEVER LISTED, and the name is configuration
+    /// (`installationIdentity.publicConfigMap`), never a request field. The
+    /// object is public verification material — a key id, an algorithm and a
+    /// public key — and this service reads only its annotations. The grant is
+    /// `get` on that one name in the release namespace
+    /// (`charts/logweir/templates/ui/api-rbac.yaml`, `<release>-api-installation`).
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `NotFound` included.
+    pub async fn get_installation_identity(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<ResultDocument, KubeFailure> {
+        let api: Api<ResultDocument> = Api::namespaced(self.client.clone(), namespace);
+        self.bounded("get", "configmaps", api.get(name)).await
+    }
+
     /// Whether a credential Secret name is already taken, established WITHOUT
     /// a read verb.
     ///

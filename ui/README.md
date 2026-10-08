@@ -805,10 +805,15 @@ block ARE gates, each also refused by the product API:
   "required in Governed"). Create refuses to send without one, and the ticket
   travels beside the create body -- never inside `Restore.spec` -- to be signed
   into the confirmation. An unbound namespace and legacy mode never send one.
-* **In the administrator (`localAdmin`) console an `Ordinary` binding is not
-  offered** (D0: that mode "does not expose Ordinary"). The policy read says
-  `ordinaryConfirmationAvailable: false`; the step says to use the shared
-  console and Create is disabled (`policyRefusal`).
+* **A `confirm` namespace whose console key is not there yet is not offered**
+  (PROD-16.1): the managed key is written by the identity hook after the
+  console starts. The policy read says `ordinaryConfirmationAvailable: false`;
+  the step says so and Create is disabled (`policyRefusal`). The administrator
+  (`localAdmin`) console serves `confirm` like the shared one, as
+  `urn:logweir:local-admin#admin` (amending D0's "does not expose Ordinary").
+  The step names the mode the operator sees -- confirm ("no key needed", and,
+  on a fresh install, why), strict (an approver's personal key) or the
+  out-of-band step -- from the read's `operatorMode` and `basis`.
 
 **The approvals page under a Governed binding** shows the console's
 confirmation documents verbatim in read-only fields (never parsed here, the rule
@@ -1072,7 +1077,9 @@ a contract constant or a plan field and never from prose this page invented:
   manifest's. PLAT-15.1's catalog is where that would come from;
 * the **sampled verification scope**, from the plan's `sample` block, closing
   with the clause D3 section 3.5 makes non-optional -- *a sampled check, not an
-  exhaustive comparison*. No level in this version compares every record;
+  exhaustive comparison*. No restore the console starts compares every record
+  (complete coverage, PROD-08.1, is a plan field the wizard does not offer
+  yet);
 * the **consumer cutover limitation**, byte for byte from `render.js`'s
   `COMPLETION_GUIDANCE` and `TARGET_MODE_MEANING` -- the same fixed sentences
   the completion panel shows afterwards;

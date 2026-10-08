@@ -584,3 +584,89 @@ fn show_names_the_time_basis_in_the_qualifiers_footer() {
         "{line}"
     );
 }
+
+// ------------------------------------------------------------------ PROD-08.1
+
+/// Guarantee: the footer says what the `integrity` row's verdict covered —
+/// `integrity.verification` (scorecard 1.4.0). ABSENT reads "not recorded",
+/// read as a sample; a sampled block says header order was not verified; a
+/// covered complete block shows its exact counts; an incomplete one says
+/// INCOMPLETE and why.
+///
+/// KILLS: deleting the footer line; rendering an absent block as complete;
+/// rendering an incomplete block as covered.
+#[test]
+fn show_names_the_verification_coverage_in_the_qualifiers_footer() {
+    use logweir_core::scorecard::*;
+    let mut sc = fixtures::scorecard_pass();
+    let table = logweir::show::render_table(&sc);
+    assert!(
+        footer_line(&table, "integrity.verification").contains("not recorded"),
+        "{table}"
+    );
+    let sampled = Verification {
+        coverage: COVERAGE_SAMPLED.into(),
+        comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
+        header_order: HEADER_ORDER_NOT_VERIFIED.into(),
+        application: APPLICATION_NOT_ATTEMPTED.into(),
+        gaps: vec![],
+        pruned: vec![],
+        complete: None,
+    };
+    sc.integrity.verification = Some(sampled.clone());
+    let table = logweir::show::render_table(&sc);
+    assert_eq!(
+        footer_line(&table, "integrity.verification").trim_start(),
+        "integrity.verification    sampled (header order notVerified)"
+    );
+    let mut complete = CompleteVerification {
+        covered: true,
+        incomplete_reason: None,
+        max_records: None,
+        window: CompleteWindow {
+            start_ms: None,
+            end_ms: 1,
+        },
+        archive: ArchiveIntegrity {
+            segments: 1,
+            segments_verified: 1,
+            segments_failed: vec![],
+            segments_unverified: vec![],
+            records_decoded: 3,
+            offset_holes: 0,
+        },
+        replay: ReplayComparison {
+            expected: 3,
+            restored: 3,
+            matching: 3,
+            ..ReplayComparison::default()
+        },
+        partitions: vec![],
+    };
+    sc.integrity.verification = Some(Verification {
+        coverage: COVERAGE_COMPLETE.into(),
+        header_order: HEADER_ORDER_VERIFIED.into(),
+        complete: Some(complete.clone()),
+        ..sampled.clone()
+    });
+    let table = logweir::show::render_table(&sc);
+    let line = footer_line(&table, "integrity.verification");
+    assert!(
+        line.contains("complete: every selected record compared (3 expected, 3 restored"),
+        "{line}"
+    );
+    complete.covered = false;
+    complete.incomplete_reason = Some("stopped at the bound".into());
+    sc.integrity.verification = Some(Verification {
+        coverage: COVERAGE_COMPLETE.into(),
+        header_order: HEADER_ORDER_VERIFIED.into(),
+        complete: Some(complete),
+        ..sampled
+    });
+    let table = logweir::show::render_table(&sc);
+    let line = footer_line(&table, "integrity.verification");
+    assert!(
+        line.contains("complete, INCOMPLETE: stopped at the bound"),
+        "{line}"
+    );
+}
