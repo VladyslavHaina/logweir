@@ -389,12 +389,12 @@ pub struct RunnerImage {
 /// deliberately — the CLI path reads them off the binary that will actually
 /// run (`scripts/demo.sh:128-129`) — so the Job template is where they have
 /// to be stated, and the test is what keeps the statement true.
-pub const ENGINE_VERSION: &str = "0.21.0";
+pub const ENGINE_VERSION: &str = "0.23.3";
 /// See [`ENGINE_VERSION`]. The digest of the image the engine binary was
 /// extracted from, byte-identical to
 /// `third_party/kafka-backup-binary.digest`.
 pub const ENGINE_DIGEST: &str =
-    "sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317";
+    "sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db";
 
 /// `LOGWEIR_ENGINE_VERSION`, the env name.
 pub const ENGINE_VERSION_ENV: &str = "LOGWEIR_ENGINE_VERSION";

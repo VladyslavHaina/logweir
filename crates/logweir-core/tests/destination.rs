@@ -312,14 +312,26 @@ fn location_and_transport_are_immutable() {
 
 // ------------------------------------------------------------------ G4
 
-/// D2 G4 / tracker defect ENGINE-PATHSTYLE: engine 0.21.0 forces path-style
-/// whenever an endpoint is set, so virtual-hosted WITH an endpoint is refused
-/// rather than advertised.
+/// D2 G4 / tracker defect ENGINE-PATHSTYLE: the pinned engine forces
+/// path-style whenever an endpoint is set (0.21.0 ignored `path_style`; 0.22.0
+/// and the 0.23.3 pin honour `path_style: true` but still force path-style
+/// with an endpoint), so virtual-hosted WITH an endpoint is refused rather
+/// than advertised.
 #[test]
 fn custom_endpoint_requires_path_style_for_engine() {
     let mut loc = tls_minio();
     loc.addressing = Addressing::VirtualHosted;
-    assert!(engine_compatible(&loc).is_err());
+    let message = engine_compatible(&loc).expect_err("refused on the 0.23.3 pin too");
+    // A-C16-1 (PROD-00.3f): the message names the behaviour and NO engine
+    // version, so it does not go stale at the next bump.
+    assert!(
+        message.contains("path-style") && message.contains("endpoint"),
+        "{message}"
+    );
+    assert!(
+        !message.chars().any(|c| c.is_ascii_digit()),
+        "the ENGINE-PATHSTYLE refusal must name no engine version: {message}"
+    );
 
     loc.addressing = Addressing::PathStyle;
     assert!(engine_compatible(&loc).is_ok());

@@ -210,6 +210,15 @@ pub fn run(
         .into());
     }
 
+    // **C15** (PROD-00.3f), purely local: an `http://` archive endpoint with
+    // `allow_http: false` is refused here, exit 3, before anything runs. The
+    // pinned engine would otherwise derive plaintext from the scheme; the
+    // renderer's own refusal is the phase-5 backstop (exit 1).
+    logweir_core::guard::reject_plaintext_endpoint_without_allow_http(
+        "source.storage",
+        &spec.source.storage,
+    )?;
+
     // The two PURELY LOCAL checks run first, before any network round trip. A
     // local refusal should not need a reachable broker, and putting them first
     // is what lets `guard_cli.rs` distinguish "refused by the mapping guard"

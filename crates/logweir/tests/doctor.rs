@@ -62,7 +62,10 @@ fn check_2_an_engine_of_the_wrong_version_is_named_as_a_mismatch() {
             "../../e2e/fixtures/fake-engine-version.sh",
         )],
     );
-    assert_fails_with(out, "version mismatch: expected 0.21.0");
+    assert_fails_with(
+        out,
+        &format!("version mismatch: expected {}", logweir::doctor::ENGINE_PIN),
+    );
 }
 
 #[test]

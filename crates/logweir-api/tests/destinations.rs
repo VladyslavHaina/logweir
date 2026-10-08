@@ -165,7 +165,23 @@ async fn the_rules_are_evaluated_before_the_object_exists() {
     let response = app
         .post(&path, Some("destination-bad-0006"), &addressing.to_string())
         .await;
-    assert!(field_codes(&response.json()).contains(&"addressing_unsupported_by_engine".to_string()));
+    let problem = response.json();
+    assert!(field_codes(&problem).contains(&"addressing_unsupported_by_engine".to_string()));
+    // A-C16-1 (PROD-00.3f): refused on the 0.23.3 pin as on 0.21.0, and the
+    // message names the behaviour and no engine version.
+    let message = problem["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|e| e["code"] == "addressing_unsupported_by_engine")
+        .and_then(|e| e["message"].as_str())
+        .expect("the refusal carries its message")
+        .to_string();
+    assert!(message.contains("path-style"), "{message}");
+    assert!(
+        !message.chars().any(|c| c.is_ascii_digit()),
+        "the ENGINE-PATHSTYLE refusal names no engine version: {message}"
+    );
 
     // R4: a CA bundle without TLS.
     let mut ca = support::destination_body("d7");

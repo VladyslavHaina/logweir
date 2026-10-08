@@ -1655,6 +1655,20 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// with twenty-six items, fail the twenty-seven pin (FX-8 fix round,
 /// 2026-10-07; item 23 when first written, renumbered after FX-10, FX-3,
 /// FX-13 and FX-11).
+///
+/// Then to twenty-eight: item 28 is PROD-00.3f's engine pin (0.23.3). Its
+/// token is the variable a standalone CLI install must change with the
+/// engine, so an item 28 that stops telling that operator what to change
+/// fails here, and the notes at main's `2c277dc1`, with twenty-seven items,
+/// fail the twenty-eight pin (PROD-00.3f fix round, 2026-10-08; item 25 when
+/// first written, renumbered after FX-13, FX-11 and FX-8).
+///
+/// Then to twenty-nine: item 29 is PROD-16.1, no approver key by default.
+/// Its token is the fresh-install marker's annotation, so an item 29 that
+/// stops naming what decides a fresh install's confirm default fails here;
+/// the notes at main's `a00ae659`, with twenty-eight items, fail the
+/// twenty-nine pin (PROD-16.1, item 25 when first written, renumbered
+/// after FX-13, FX-11, FX-8 and PROD-00.3f, 2026-10-08).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1671,18 +1685,18 @@ fn the_release_notes_carry_every_owed_operator_action() {
     );
 
     // The entry these items belong to: the one headed `main` after `v0.1.5`,
-    // which since the tag holds the `v0.2.0-rc.1` record and stays at its
-    // twenty-seven items. Changes after the tag open their own entry above
-    // it (PROD-08.1 review M-4), checked by
+    // which since the tag holds the `v0.2.0-rc.1` record (items 1–27, and 28
+    // and 29 recorded there after it). PROD-08.1's item opens its own entry
+    // above it (review M-4), checked by
     // `the_entry_after_the_rc1_record_carries_its_own_items`.
     let entry = release_entry(&notes, "Unreleased — `main` after `v0.1.5`");
     let items = release_note_items(entry);
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=27).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-seven operator-facing changes, `#### 1.` \
-         to `#### 27.` in order; found {numbers:?}"
+        (1..=29).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-nine operator-facing changes, `#### 1.` \
+         to `#### 29.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1754,6 +1768,12 @@ fn the_release_notes_carry_every_owed_operator_action() {
             "a LogAppendTime point in time refused or labelled",
             "PointInTimeByProducerTime",
         ),
+        // PROD-00.3f (2026-10-08): the engine pin moved to 0.23.3; a
+        // standalone install changes its engine identity with it.
+        ("the engine pin is 0.23.3", "LOGWEIR_ENGINE_VERSION"),
+        // PROD-16.1 (2026-10-07): no approver key by default, and the marker
+        // an upgrade never reaches.
+        ("no approver key by default", "logweir.dev/approval-default"),
     ]) {
         assert!(
             body.contains(token),
@@ -1925,8 +1945,8 @@ fn release_entry<'a>(notes: &'a str, heading: &str) -> &'a str {
 /// with its token, a scope and a rollback, and its opening paragraph and its
 /// upgrade sentence name every one of them.
 ///
-/// NEGATIVE CONTROLS: the notes at `2c277dc1` (item 28 listed under the rc.1
-/// record, no entry of its own) fail the heading lookup; deleting item 28's
+/// NEGATIVE CONTROLS: the notes at `2c277dc1` (PROD-08.1 listed under the rc.1
+/// record, no entry of its own) fail the heading lookup; deleting its item's
 /// section fails the numbering; dropping `coverage: complete` from it fails
 /// the token.
 #[test]

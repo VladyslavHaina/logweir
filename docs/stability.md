@@ -2087,6 +2087,12 @@ used engine **0.21.0**, digest
 `sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`,
 and Apache Kafka **3.7.1** (KRaft).
 
+On 2026-10-08 PROD-00.3f re-ran the row with the **0.23.3** pin (digest
+`sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`, Kafka
+3.7.1, compose slot 4): 1 passed, the same six of nine records, and both readers
+accept the signed result. Upstream's `pitr_accuracy.rs` at v0.23.3 still
+contains zero assertions.
+
 At the fixed recovery point `T = 1_760_000_000_000`, each of three partitions
 contains records at `T − 1 ms`, `T` and `T + 1 ms`. The restore returns
 **six of the nine records**: the first two from each partition. The boundary
@@ -2130,8 +2136,10 @@ spend).
   the run. `kafka-backup` **0.21.0** is the floor for the full drill as
   shipped — it is the version this plan verified every vendored struct and
   CLI behaviour against (`docs/UPSTREAM-VERSIONS.md` in the planning repo;
-  `ae5a102f93b5270927d95d4ccec184b577febb10`), and it is the version pinned
-  by digest in `third_party/kafka-backup-binary.digest`.
+  `ae5a102f93b5270927d95d4ccec184b577febb10`). The floor is not the pin:
+  since PROD-00.3f the version pinned by digest in
+  `third_party/kafka-backup-binary.digest` is **0.23.3** (*Supported engine
+  pin*, below).
 
 - **Runtime image floor.** The extracted `kafka-backup` binary is dynamically
   linked against **glibc >= 2.36** and **libssl3**, and performs TLS
@@ -2166,21 +2174,44 @@ spend).
   of an exit code, without a major bump. New flags and new exit codes may be
   added in a minor.
 
-- **Supported engine pin.** The full-drill pin is 0.21.0 and the digest in
-  `third_party/kafka-backup-binary.digest`; `doctor` checks that exact version.
-  Older archive-manifest fixtures exercise parsing compatibility, not full
-  runtime support. The old two-minor support table conflicted with the stated
-  full-drill floor and is superseded by the [support matrix](support-matrix.md).
-  Upstream's current release is 0.22.0 (2026-09-07). It was evaluated against
-  this pin in [PROD-00.1](to-do/decisions/PROD-00-engine-route.md). Moving the
-  pin is a recorded decision (OD-3), not a routine bump: `doctor` accepts only
-  0.21.0.
+- **Supported engine pin.** The pin is **0.23.3**, OSO's newest release on
+  2026-10-07 (tag commit `afb160e7`, image digest
+  `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`
+  in `third_party/kafka-backup-binary.digest`); `doctor` accepts exactly that
+  version, as a whole token. It replaced 0.21.0 with PROD-00.3f, which
+  evaluated it from source and on the compose stack
+  ([decision record](to-do/decisions/PROD-00-engine-route.md) §12): the
+  segment format, the three subcommands Logweir runs and every key it renders
+  are unchanged, and no capability gap the decision record lists is fixed by
+  it. The full-drill **floor** stays 0.21.0. Older archive-manifest fixtures
+  exercise parsing compatibility, not full runtime support. The old two-minor
+  support table conflicted with the stated full-drill floor and is superseded
+  by the [support matrix](support-matrix.md). Moving the pin is a recorded
+  decision (OD-3, decided 2026-10-07: Logweir follows the newest OSO release,
+  and builds from source with its own patches once PROD-00.2 lands), never a
+  routine bump: the guard `crates/logweir/tests/engine_pin.rs` fails until every place
+  that names the pin, PROD-01.1's measured contract included, names the new
+  one.
+
+  Two engine behaviours since 0.22.0 are refused by Logweir rather than
+  inherited:
+
+  - an `http://` storage endpoint beside `allow_http: false` is no longer a
+    refusal in the engine, which derives plaintext from the scheme. Logweir
+    refuses that combination at phase 0 (exit 3) and in every engine document
+    it renders (C15);
+  - `path_style: true` is honoured, but a custom endpoint still forces
+    path-style, so `VirtualHosted` addressing with an endpoint stays refused
+    as `AddressingUnsupportedByEngine` (C16).
 
   What OSO's operators run:
 
   - `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0
-    (2026-09-07). Its v0.2.22–v0.2.25 default to v0.19.1.
-  - `kafka-backup-operator` 1.3.0 links `kafka-backup-core` 0.19.2 as a library.
+    (2026-09-07), through v0.4.0 (2026-10-06). Its v0.2.22–v0.2.25 default to
+    v0.19.1.
+  - `kafka-backup-operator` 1.3.0 links `kafka-backup-core` 0.19.2 as a
+    library; its 1.4.0, 1.4.1 and 1.4.2 (2026-10-06/07) link 0.23.0, 0.23.1
+    and 0.23.3.
 
   Archives written by engines before 0.21 carry no segment sha256, so a drill
   over one reports `integrity.result: partial`, never `pass`.
@@ -2238,7 +2269,7 @@ The separate **Never** list records product boundaries, not scheduled work.
 | # | Item | Reason | Citation |
 |---|---|---|---|
 | 1 | **MSK IAM auth** | The `TokenProvider` seam exists and is empty; nothing mints an IAM token. | `crates/logweir-kafka/src/token.rs:1-9` |
-| 2 | **Strimzi as a source** | `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07); its v0.2.22–v0.2.25 default to `v0.19.1`, **below the `0.21.0` floor**, which the matrix reports `unsupported (lever-absent)` and never as a fault. The drill always restores with Logweir's pinned engine, so what matters is the archive. The CLI drill reads 0.21 and 0.22 archives in full, and reads older ones as `partial` (no segment sha256). A non-empty consumer-group snapshot fails the drill until FX-1. No operator-written archive carries a Logweir receipt, so none can enter the catalog. | spec §13; `docs/support-matrix.md`; [PROD-00.1](to-do/decisions/PROD-00-engine-route.md) §7 |
+| 2 | **Strimzi as a source** | `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07), through v0.4.0 (2026-10-06); its v0.2.22–v0.2.25 default to `v0.19.1`, **below the `0.21.0` floor**, which the matrix reports `unsupported (lever-absent)` and never as a fault. The drill always restores with Logweir's pinned engine (0.23.3 since PROD-00.3f), so what matters is the archive. The CLI drill reads 0.21, 0.22 and 0.23 archives in full, and reads older ones as `partial` (no segment sha256). A non-empty consumer-group snapshot fails the drill until FX-1. No operator-written archive carries a Logweir receipt, so none can enter the catalog. | spec §13; `docs/support-matrix.md`; [PROD-00.1](to-do/decisions/PROD-00-engine-route.md) §7 |
 | 3 | **The in-browser WASM verifier** | Tag 1's UI ships no build step and no bundler, so there is nothing to compile a verifier into; verification is the CLI and `docs/verify_scorecard.py`. | spec §8 |
 | 4 | **`OsoCliEngine::validation_run`** | The trait method is not overridden, so the engine's own validation run is never executed and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
 | 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` still only reports; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md) §7f; [release-notes.md](release-notes.md) |

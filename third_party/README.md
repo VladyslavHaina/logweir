@@ -6,8 +6,8 @@ engine, and the **org root's public key**. Nothing here is Logweir code.
 | File | What it is |
 | --- | --- |
 | `kafka-backup-binary.digest` | The immutable `sha256:` image digest the engine binary was extracted from. Never a tag — Docker Hub tags are mutable (Global Constraint 7). |
-| `kafka-backup-v0.21.0.tar.gz` | The upstream source at the pinned tag, force-added past `.gitignore`. |
-| `kafka-backup-v0.21.0.tar.gz.sha256` | Checksum of the tarball above. |
+| `kafka-backup-v0.23.3.tar.gz` | The upstream source at the pinned tag (`v0.23.3` = commit `afb160e7f2c69b7c3c28e1b868dd952835a5b0af`), force-added past `.gitignore`. It replaced `kafka-backup-v0.21.0.tar.gz` with the PROD-00.3f bump; `xtask`'s drift gate requires exactly one tarball here. |
+| `kafka-backup-v0.23.3.tar.gz.sha256` | Checksum of the tarball above. |
 | `LICENSE-MIT` | The upstream MIT licence, redistributed as required (Global Constraint 15). |
 | `org-root.pub.pem` | The org root's **public** key. Un-ignored by name in `/.gitignore`, exactly as `e2e/fixtures/signed/*.pem` is. |
 | `org-root.fingerprint` | One `sha256:` line: the SHA-256 of the SubjectPublicKeyInfo DER encoding of the key above. `COPY`ed into **both** images at `/etc/logweir/org-root.fingerprint`. |

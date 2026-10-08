@@ -1,2 +1,2 @@
 #!/bin/sh
-echo "kafka-backup 0.21.0"
+echo "kafka-backup 0.23.3"

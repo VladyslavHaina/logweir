@@ -1,0 +1,6 @@
+# expect: not available in this release
+approvalPolicy:
+  default: two-person
+  allowOrdinaryConfirmation: true
+  policies: []
+  namespaces: {}

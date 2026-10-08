@@ -15,9 +15,10 @@
 //! answers here move underneath a fixed schema.
 //!
 //! * The ENGINE VERSION decides whether `VirtualHosted` with a custom endpoint
-//!   can be honoured (grounding **G4**, defect ENGINE-PATHSTYLE). Engine 0.21.0
-//!   forces path-style whenever an endpoint is set, so the setting is refused
-//!   here rather than silently ignored at run time.
+//!   can be honoured (grounding **G4**, defect ENGINE-PATHSTYLE). Every engine
+//!   from 0.21.0 to the 0.23.3 pin forces path-style whenever an endpoint is
+//!   set, so the setting is refused here rather than silently ignored at run
+//!   time.
 //! * The CA `ConfigMap` is ANOTHER OBJECT, which CEL cannot read at all: its
 //!   existence, its key, its size and whether its bytes are certificates are
 //!   facts about the cluster and not about this spec.

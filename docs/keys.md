@@ -52,7 +52,13 @@ The public ConfigMap is a publication record, not authorization. Its
 `TrustRoster/default.spec.signingKeys`; a cluster administrator decides whether
 to add the key there or, where a `TrustPolicy` governs the namespace, as a key
 with usage `EvidenceSigning` on that policy (below). A public key arriving
-beside an archive is never trusted merely by proximity.
+beside an archive is never trusted merely by proximity. **Except once, on a
+fresh install (PROD-16.1):** the hook that generated the identity trusts its
+own signer, and the console key, in one default `TrustPolicy` it creates in the
+same run (*The console key and the fresh install's trust*, below) — the
+installation's own keys, both GENERATED in that run, never a key that arrived
+from elsewhere (an adopted hand-made console key is published and trusted by
+nobody automatically).
 
 ## Generating a fixture or externally managed keypair
 
@@ -464,12 +470,13 @@ different fix.
 to an approval policy (`docs/kubernetes.md` §8, *Approval policy*) verifies
 authorization document v2, and the keys it needs on its `TrustPolicy` are:
 
-* the console's key, usage `ConsoleConfirmation` — generate it once
-  (`openssl genpkey -algorithm ed25519 -out confirmation.key`), give the private
-  half to the console as a Secret (`approvalPolicy.confirmationKeySecret`, key
-  `confirmation.key`) and nothing else, and put the public half here;
-  `GET /api/v1/namespaces/{ns}/approval-policy` prints the key id the console
-  loaded. It attests who asked; under an `Ordinary` binding that attestation is
+* the console's key, usage `ConsoleConfirmation` — since PROD-16.1 the identity
+  hook generates it at install (below, *The console key and the fresh
+  install's trust*); a console that names its own Secret
+  (`approvalPolicy.confirmationKeySecret`) still generates it once, gives the
+  private half to the console under `confirmation.key` and nothing else, and
+  puts the public half here; `GET /api/v1/namespaces/{ns}/approval-policy`
+  prints the key id the console loaded. It attests who asked; under an `Ordinary` binding that attestation is
   the whole authorization, and under `Governed` it authorises nothing alone.
 * for a `Governed` namespace, each approver's key, usage `GovernedApproval`,
   with **`principal.id` set to that approver's own `<issuer>#<subject>`** — the
@@ -485,6 +492,49 @@ be governed by a `TrustPolicy` before an approval policy can take effect in it.
 Retiring or revoking the console key refuses every new ordinary confirmation and
 governed request at once (`KeyRetired`/`KeyRevoked`), exactly as for any other
 key; rotate it with an overlap, as below.
+
+### The console key and the fresh install's trust (PROD-16.1)
+
+With a console and the managed identity, `logweir identity bootstrap` manages
+the console's `ConsoleConfirmation` key exactly as it manages the installation
+identity: an Ed25519 key generated ONCE into the retained Secret
+`logweir-console-confirmation` (`helm.sh/resource-policy: keep`), its public
+half — `key-id`, `confirmation.pub.pem`, `algorithm`, `trust-usage:
+ConsoleConfirmation` — in the retained ConfigMap `logweir-console-trust`, never
+regenerated on upgrade or reinstall, and a published public half without its
+private key is **key loss**: the hook stops and says to restore the Secret from
+backup. A Secret of that name made by hand (every PLAT-19.2 install) is adopted
+as it is — and is never trusted automatically: compare its fingerprint out of
+band before you put it on a policy. Back it up with `logweir-signing-key`. The
+chart manages the key only while `identity.bootstrapFeatures.consoleKey` is
+`true` (it moves with the re-pin of the bootstrap image, `docs/install.md`).
+
+**On a fresh install only** — the one hook run that generates the installation
+identity and the console key, with a console — the hook also creates ONE default `TrustPolicy`
+(`logweir-installation`) with exactly two keys, one usage each: the
+installation signer (`EvidenceSigning`, principal
+`install:<release-ns>/logweir-signing-key`) and the console key
+(`ConsoleConfirmation`, principal `console:<release-ns>/logweir-console-confirmation`),
+`notBefore` five minutes before each Secret's creation, `notAfter`
+`9999-12-31T23:59:59Z` (shorten it when you rotate; G2 allows only that), and
+`allowedTargetClusterIds` from the chart. It never creates one beside existing
+trust (ANY `TrustPolicy`, default or namespaced, or `TrustRoster/default`),
+never without a console key it generated, never edits one, and never runs on an
+upgrade. From then on the policy is the
+trust administrator's like any other: retire, revoke, add approver keys.
+
+**No standing grant.** Creating that policy needs `create` on `trustpolicies`,
+which RBAC cannot narrow by name, so the grant (`<release>-identity-trust`)
+exists only as a `post-install` hook of the first install — rendered only on
+Helm 3.19+ or 4.x, which delete it when the install's post-install hooks have
+run, succeeded or failed (older Helm keeps it after a failed hook, so the chart
+refuses there) — and is revoked by the hook itself on every exit path it
+controls. For those seconds, whoever can run a pod as
+`<release>-identity-bootstrap` could create a TrustPolicy — the residual
+SECURITY.md and `docs/kubernetes.md` §8 state; the installer holds
+cluster-admin then anyway. An upgrade renders no such grant. After a failed
+first install, delete it: `kubectl delete clusterrolebinding,clusterrole
+<release>-identity-trust --ignore-not-found` (`docs/install.md` §5f).
 
 ### Migrating from the roster, and rolling back
 

@@ -149,7 +149,8 @@ pub enum Command {
     /// marker topic and approver key — before a drill is attempted.
     //
     // "engine version", not "engine digest": `doctor` compares the engine's
-    // `--version` string against the pinned 0.21.0 and computes NO digest.
+    // `--version` string against the pin (`doctor::ENGINE_PIN`) and computes NO
+    // digest.
     // `third_party/kafka-backup-binary.digest` is read only to interpolate
     // into a failure message. The module's own doc comment said "engine
     // version pinned" and was right; this help text was the wrong one, and it
@@ -338,6 +339,48 @@ pub enum IdentityCmd {
         /// Key within --external-secret-name.
         #[arg(long, requires = "external_secret_name")]
         external_secret_key: Option<String>,
+        /// PROD-16.1: when this run GENERATES the installation identity (a
+        /// fresh install), record on it that unbound namespaces start in
+        /// one-person console confirmation (`confirm`). Never written on an
+        /// identity that already existed or was adopted.
+        #[arg(long)]
+        mark_fresh_install_confirm: bool,
+        /// PROD-16.1: retained Secret holding the console's
+        /// ConsoleConfirmation key, generated exactly once (Ed25519) or
+        /// adopted when it already holds a key. Absent: no console key is
+        /// managed.
+        #[arg(long, requires = "console_public_configmap_name")]
+        console_secret_name: Option<String>,
+        /// Key in --console-secret-name.
+        #[arg(long, default_value = "confirmation.key")]
+        console_secret_key: String,
+        /// Retained ConfigMap carrying the console key's public half.
+        #[arg(long, requires = "console_secret_name")]
+        console_public_configmap_name: Option<String>,
+        /// PROD-16.1: on a fresh install, create this cluster-scoped
+        /// `TrustPolicy` (`default: true`) trusting the installation signer
+        /// (EvidenceSigning) and the console key this run generated
+        /// (ConsoleConfirmation) — once, and never when any TrustPolicy or
+        /// `TrustRoster/default` already exists. Needs the console key and
+        /// the confirm marker: the automatic trust exists for nothing else.
+        #[arg(
+            long,
+            requires_all = ["console_secret_name", "mark_fresh_install_confirm"]
+        )]
+        installation_trust_policy: Option<String>,
+        /// A cluster id restores under the installation's TrustPolicy may
+        /// target (`allowedTargetClusterIds`). Repeatable.
+        #[arg(
+            long = "allowed-target-cluster-id",
+            requires = "installation_trust_policy"
+        )]
+        allowed_target_cluster_ids: Vec<String>,
+        /// PROD-16.1 security review: at the end of every run, delete this
+        /// ClusterRoleBinding — the install-only grant that lets the hook
+        /// create the installation TrustPolicy — so no standing grant
+        /// remains. Absent or not held (404/403) is nothing to revoke.
+        #[arg(long)]
+        revoke_trust_binding: Option<String>,
     },
     /// Copy the already established installation signer into one explicitly
     /// authorized runner namespace. Refuses missing, incomplete, or different

@@ -195,38 +195,35 @@ fn evaluate_engine_version(
         Ok(s.trim().to_string())
     } else {
         Err(format!(
-            "version mismatch: expected 0.21.0, engine reports `{}`",
+            "version mismatch: expected {ENGINE_PIN}, engine reports `{}`",
             s.trim()
         ))
     }
 }
 
-/// Fix round 2, M6: `s.contains("0.21.0")` accepted `0.21.01`, `10.21.0` and
-/// `0.21.0-rc1` — Global Constraint 8 pins an EXACT version. Matches the pin
-/// only when it is not immediately adjacent to another digit or `.` (rules
-/// out `10.21.0` and `0.21.01`) and not immediately followed by `-` (rules
-/// out a `0.21.0-rc1` prerelease suffix), i.e. as a whole version token.
+/// The engine release Logweir pins: the `kafka-backup --version` token
+/// `doctor` accepts, and nothing else. PROD-00.3f moved it from `0.21.0` to
+/// `0.23.3` (`docs/to-do/decisions/PROD-00-engine-route.md` section 12).
+///
+/// It moves with the pin and only with it: `scripts/extract-engine.sh`'s
+/// default `TAG`, the single vendored tarball under `third_party/`,
+/// `weirkeeper::job::ENGINE_VERSION` and PROD-01.1's `CONTRACT_ENGINE` must all
+/// name this version, and `crates/logweir/tests/engine_pin.rs` fails when any
+/// of them does not.
+pub const ENGINE_PIN: &str = "0.23.3";
+
+/// Whether the engine's `--version` output names exactly [`ENGINE_PIN`].
+///
+/// Global Constraint 8 pins an EXACT version. Fix round 2, M6 replaced
+/// `s.contains("0.21.0")`, which accepted `0.21.01`, `10.21.0` and
+/// `0.21.0-rc1`, with an adjacency test. That test still accepted a build
+/// suffix (`0.21.0+anything`), a leading `v` glued to another word and any
+/// other non-digit, non-`.`, non-`-` neighbour. PROD-00.3f makes it a whole
+/// token: the output is split on ASCII whitespace and one token must EQUAL the
+/// pin. `kafka-backup 0.23.3` matches; `0.23.3+build`, `0.23.3-rc1`,
+/// `10.23.3`, `0.23.31`, `v0.23.3` and `0.23.3,` do not.
 fn version_matches(s: &str) -> bool {
-    const PIN: &str = "0.21.0";
-    let bytes = s.as_bytes();
-    let mut start = 0;
-    while let Some(rel) = s.get(start..).and_then(|s| s.find(PIN)) {
-        let idx = start + rel;
-        let before_ok = idx == 0 || {
-            let c = bytes[idx - 1];
-            !(c.is_ascii_digit() || c == b'.')
-        };
-        let after = idx + PIN.len();
-        let after_ok = after >= bytes.len() || {
-            let c = bytes[after];
-            !(c.is_ascii_digit() || c == b'.' || c == b'-')
-        };
-        if before_ok && after_ok {
-            return true;
-        }
-        start = idx + 1;
-    }
-    false
+    s.split_ascii_whitespace().any(|token| token == ENGINE_PIN)
 }
 
 fn check_spec(p: &std::path::Path) -> Result<String, String> {
@@ -912,22 +909,45 @@ mod tests {
 
     #[test]
     fn version_matches_accepts_only_the_exact_pin() {
-        assert!(version_matches("kafka-backup 0.21.0"));
-        assert!(version_matches("kafka-backup 0.21.0\n"));
-        assert!(version_matches("0.21.0"));
+        assert_eq!(ENGINE_PIN, "0.23.3", "the pin moved from 0.21.0 to 0.23.3");
+        assert!(version_matches("kafka-backup 0.23.3"));
+        assert!(version_matches("kafka-backup 0.23.3\n"));
+        assert!(version_matches("0.23.3"));
+        assert!(version_matches("kafka-backup\t0.23.3\r\n"));
+        // The previous pins are mismatches now, never "close enough".
+        assert!(!version_matches("kafka-backup 0.21.0"));
+        assert!(!version_matches("kafka-backup 0.22.0"));
         assert!(!version_matches("kafka-backup 0.19.1"));
-        assert!(
-            !version_matches("kafka-backup 0.21.01"),
-            "must reject a longer patch number"
-        );
-        assert!(
-            !version_matches("kafka-backup 10.21.0"),
-            "must reject a different major version"
-        );
-        assert!(
-            !version_matches("kafka-backup 0.21.0-rc1"),
-            "must reject a prerelease suffix"
-        );
+        // So are the pin's sibling patch releases, released or not, and the
+        // same patch number on the next minor: "exactly 0.23.3" is not "any
+        // 0.23.x" (review M1: a matcher accepting any released 0.23.<digit>
+        // passed every row above).
+        for sibling in [
+            "kafka-backup 0.23.0",
+            "kafka-backup 0.23.1",
+            "kafka-backup 0.23.2",
+            "kafka-backup 0.23.4",
+            "kafka-backup 0.23.9",
+            "kafka-backup 0.24.3",
+            "kafka-backup 1.23.3",
+        ] {
+            assert!(!version_matches(sibling), "must reject `{sibling}`");
+        }
+        // Every neighbour that makes a different version string.
+        for other in [
+            "kafka-backup 0.23.31",
+            "kafka-backup 10.23.3",
+            "kafka-backup 0.23.3-rc1",
+            "kafka-backup 0.23.3+anything",
+            "kafka-backup 0.23.3+build.7",
+            "kafka-backup v0.23.3",
+            "kafka-backup 0.23.3,",
+            "kafka-backup=0.23.3",
+            "kafka-backup 0.23",
+            "",
+        ] {
+            assert!(!version_matches(other), "must reject `{other}`");
+        }
     }
 
     fn fake_output(exit_code: i32, stdout: &str, stderr: &str) -> std::process::Output {
@@ -963,12 +983,19 @@ mod tests {
     fn evaluate_engine_version_names_a_real_version_mismatch_when_the_engine_ran_successfully() {
         let out = fake_output(0, "kafka-backup 0.19.1\n", "");
         let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).unwrap_err();
-        assert!(e.contains("version mismatch: expected 0.21.0"), "got: {e}");
+        assert!(e.contains("version mismatch: expected 0.23.3"), "got: {e}");
+        // The old pin is a mismatch, named as one (PROD-00.3f).
+        let out = fake_output(0, "kafka-backup 0.21.0\n", "");
+        let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).unwrap_err();
+        assert!(
+            e.contains("version mismatch: expected 0.23.3, engine reports `kafka-backup 0.21.0`"),
+            "got: {e}"
+        );
     }
 
     #[test]
     fn evaluate_engine_version_passes_on_an_exact_pin_match() {
-        let out = fake_output(0, "kafka-backup 0.21.0\n", "");
+        let out = fake_output(0, "kafka-backup 0.23.3\n", "");
         assert!(evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).is_ok());
     }
 
