@@ -78,6 +78,31 @@ fn walk(v: &serde_yaml::Value, path: String, out: &mut Vec<String>) {
 /// refused as well as the opening ones — a scanner that accepted `a]b`
 /// because the class was never opened would be reasoning about the glob
 /// dialect's grammar instead of about whether the string is a plain name.
+/// **C15 at the spec layer** (PROD-00.3f): a spec whose storage is an
+/// `http://` endpoint with `allow_http: false` is refused before anything
+/// runs, with exit 3, like destination rule R3. The renderers refuse the same
+/// combination again for every engine document
+/// (`logweir_engine_oso::render_restore::render_storage_block`), but a
+/// renderer refusal is reached after phase 0 and is exit 1.
+///
+/// The message names the field and never the endpoint's value: an endpoint
+/// string is operator input that could carry userinfo.
+pub fn reject_plaintext_endpoint_without_allow_http(
+    field: &str,
+    storage: &crate::engine::StorageUrl,
+) -> Result<(), GuardRefusal> {
+    if storage.plaintext_endpoint_without_allow_http() {
+        return Err(GuardRefusal(format!(
+            "{field}.endpoint is a plain http:// endpoint but {field}.allow_http is false. \
+             The pinned engine (kafka-backup 0.22.0 and later) derives plaintext transport \
+             from an http:// endpoint whatever allow_http says, so it would dial the archive \
+             in the clear although the spec asked for no plaintext. Set allow_http: true to \
+             state plaintext explicitly, or use an https:// endpoint."
+        )));
+    }
+    Ok(())
+}
+
 pub const GLOB_METACHARACTERS: [char; 6] = ['*', '?', '[', ']', '{', '}'];
 
 /// GC18(c) rail 1, and guard **G-GLOB**: no topic include entry may contain a

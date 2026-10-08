@@ -552,6 +552,58 @@ fn backup_run_refuses_a_glob_topic() {
     );
 }
 
+/// **C15 at phase −1** (PROD-00.3f, A-C15-1). An `http://` archive endpoint
+/// with `allow_http: false` is refused before any client exists: the pinned
+/// engine (0.22.0 and later) would derive plaintext from the scheme and ignore
+/// the rendered `false`. The same spec with `allow_http: true` is the control
+/// that reaches the engine, so the refusal is this rule's and nothing else's.
+#[test]
+fn backup_run_refuses_an_http_endpoint_without_allow_http() {
+    let plaintext_unstated = spec_yaml("mvp-demo", "[orders]", "")
+        .replace("  allow_http: true\n", "  allow_http: false\n");
+    assert!(plaintext_unstated.contains("endpoint: http://"));
+    let f = fixture(
+        &plaintext_unstated,
+        &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+    );
+    let reader = StubReader::unreachable();
+    let engine = RecordingEngine::one_topic();
+    let store = empty_archive();
+
+    assert_eq!(
+        run(&f.args, &reader, &engine, &store),
+        ExitCode::GuardRefused
+    );
+    let msg = guard_message(exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err());
+    assert!(
+        msg.contains("storage.endpoint is a plain http:// endpoint")
+            && msg.contains("storage.allow_http is false"),
+        "{msg}"
+    );
+    assert!(
+        !msg.contains("127.0.0.1"),
+        "the refusal never echoes the endpoint: {msg}"
+    );
+    assert!(
+        engine.plans.lock().unwrap().is_empty(),
+        "a refused plan must never reach the engine"
+    );
+
+    // The control: plaintext stated explicitly is not this rule's business.
+    let f = fixture(
+        &spec_yaml("mvp-demo", "[orders]", ""),
+        &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+    );
+    match exec(&f.args, "run-1", &reader, &engine, &store, &store) {
+        Err(BackupError::Guard(refusal)) => assert!(
+            !refusal.0.contains("allow_http"),
+            "allow_http: true must not trip C15: {}",
+            refusal.0
+        ),
+        _ => {}
+    }
+}
+
 /// GC18(c)'s rail 1 again, from the other end: an allowlist whose absence
 /// means "everything" is not an allowlist. `serde` makes the field required,
 /// so the shape a templating mistake actually produces is the EMPTY list.

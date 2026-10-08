@@ -50,6 +50,12 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
         .into());
     }
 
+    // 1b. **C15** (PROD-00.3f): an `http://` archive endpoint with
+    //     `allow_http: false` is refused here, exit 3, before any client
+    //     exists. The pinned engine would otherwise derive plaintext from the
+    //     scheme; `render_storage_block`'s refusal is the backstop (exit 1).
+    logweir_core::guard::reject_plaintext_endpoint_without_allow_http("storage", &spec.storage)?;
+
     // 2. GC18(c) rail 1 / **G-GLOB**, at the SPEC layer.
     //
     //    `render_backup::render` carries the identical call, and that is NOT

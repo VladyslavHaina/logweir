@@ -95,6 +95,15 @@ pub enum RenderError {
     /// connection its author configured to verify.
     #[error("a TLS CA file (ssl_ca_location) was attached to a connection whose security protocol is not TLS; the CA is refused rather than dropped, because dropping it would dial without TLS a connection configured to be verified")]
     TlsCaWithoutTls,
+    /// **C15** (PROD-00.3f): an S3 storage block whose endpoint is plain
+    /// `http://` while `allow_http` is false. Engine 0.22.0 and later derive
+    /// plaintext transport from the endpoint's scheme on the YAML path, so the
+    /// rendered `allow_http: false` would not stop a plaintext dial. Refused
+    /// in `render_storage_block`, which every engine document (backup,
+    /// restore, validate-restore) goes through. Carries no payload: the
+    /// endpoint is operator input and is never echoed.
+    #[error("the storage endpoint is a plain http:// endpoint but allow_http is false; the pinned engine (kafka-backup 0.22.0 and later) derives plaintext transport from an http:// endpoint whatever allow_http says, so this document would dial the archive in the clear (C15). Refused rather than rendered")]
+    PlaintextEndpointWithoutAllowHttp,
 }
 
 /// The rendered backup document and the SHA-256 of the EXACT bytes a caller
