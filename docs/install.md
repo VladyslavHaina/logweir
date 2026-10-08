@@ -308,8 +308,9 @@ them is published by CI only after the commit that adds them, so:
    `bash scripts/render-install.sh --check` and
    `cargo test -p logweir --test chart_lint`.
 
-Both steps are done for PROD-16.1: the bootstrap image is pinned to runner rev
-`2fe8d907` (`sha256:ea106328…`) and the value is `true` by default. End users
+Both steps are done for PROD-16.1: `identity.bootstrapImage` is pinned to the
+runner main CI published for rev `2fe8d907` (the digest is in
+`charts/logweir/values.yaml`) and the value is `true` by default. End users
 supply neither a key nor an image hash.
 
 ---
