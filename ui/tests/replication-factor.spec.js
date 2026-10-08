@@ -977,8 +977,13 @@ test("prod051_a_target_with_room_takes_the_sources_factor_and_the_differs_note_g
   assert.equal(byId(step4, "replication-differs"), null);
   assert.equal(byId(step4, "replication-source"), null,
     "the not-known note is not shown when the factor IS known");
-  const review = visible(renderRecoveryLimits(state));
-  assert.ok(review.includes("3 (the source's, as recovery catalog `archive` records point"), review);
+  // The catalog and the point are code spans on the page, like every other
+  // name the console shows.
+  const reviewHtml = renderRecoveryLimits(state);
+  assert.ok(reviewHtml.includes("as recovery catalog <code>archive</code> records point <code>" +
+    catalogPointId() + "</code>"), reviewHtml);
+  const review = visible(reviewHtml);
+  assert.ok(review.includes("3 (the source's, as recovery catalog archive records point"), review);
 });
 
 test("prod051_the_default_follows_the_selected_subset", async () => {
@@ -1118,7 +1123,7 @@ test("prod051_the_mount_reads_the_backups_catalog_row_before_the_first_paint", a
   assert.equal(view.find("#replication-factor").getAttribute("value"), "2",
     "the source's 3, capped at the target's 2 brokers, on the FIRST paint");
   assert.match(visible(view.html()),
-    /This plan asks for 2 \(capped at the target's 2 brokers; the source's is 3, as recovery catalog `primary` records point `lwp1-7e7e/,
+    /This plan asks for 2 \(capped at the target's 2 brokers; the source's is 3, as recovery catalog primary records point lwp1-7e7e/,
     "NEGATIVE CONTROL: \"(the target's 2 brokers; the source's replication factor is not " +
     "published\" -- the mount never reading the catalog -- fails this");
 });

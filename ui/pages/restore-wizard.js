@@ -3357,7 +3357,7 @@ export function renderReplicationField(state) {
         messageText(problems.replicationFactor) + "</p>"
       : "") +
     "<p class=\"note\" id=\"replication-basis\">This plan asks for " +
-    esc(replicationText(s)) + ".</p>" +
+    messageText(replicationText(s)) + ".</p>" +
     (replicationMayDiffer(choice)
       ? "<p class=\"note\" id=\"replication-differs\">" + esc(REPLICATION_DIFFERS_NOTE) + "</p>"
       : "") +
@@ -3418,7 +3418,7 @@ export function renderRecoveryLimits(state) {
   return (
     "<h4 id=\"recovery-limits\">What this recovery changes, and what it does not</h4>" +
     facts([
-      ["target replication factor", esc(replicationText(s))],
+      ["target replication factor", messageText(replicationText(s))],
       ["target partition counts", partitions === null ? cell(null) : esc(partitions)],
       ["target mode", cell(mode)],
     ]) +
@@ -3912,7 +3912,7 @@ export function renderPlanStep(prepared, state) {
       ["plan hash", renderable ? "<code id=\"plan-hash-value\">" + esc(p.hash) + "</code>" : cell(null)],
       ["Restore metadata.name", renderable ? "<code>" + esc(p.restoreName) + "</code>" : cell(null)],
       ["Approval metadata.name", renderable ? "<code>" + esc(p.approvalName) + "</code>" : cell(null)],
-      ["replication factor", "<span id=\"review-replication\">" + esc(replicationText(s)) +
+      ["replication factor", "<span id=\"review-replication\">" + messageText(replicationText(s)) +
         "</span>"],
       // FX-8: THE CLOCK THE POINT IS READ ON, beside the plan that states it.
       ["time basis", "<span id=\"review-time-basis\">" + esc(timeBasisText(s)) + "</span>"],
