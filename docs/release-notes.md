@@ -21,8 +21,8 @@ The last tag is `v0.2.0-rc.1` (candidate `56a60ebe`, publication `2c277dc1`);
 its record is in the next entry, whose twenty-seven items are what that
 candidate shipped. This entry collects what lands on `main` after that
 publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
-key by default), 30 (PROD-08.1) and 31 (FX-17, scheduled points in the catalog)
-so far. Items continue the next entry's
+key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog)
+and 32 (FX-16, a point-bound restore restores its point's set) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -40,7 +40,11 @@ value no controller renders yet, so the PoC upgrade that carries it runs the
 sampled rows unchanged. Item 31 is fix-now row FX-17, proven on the compose
 stack with the console on the host; it changes the runner (the catalog sync)
 and the console's text, and the PoC upgrade that carries it re-syncs the PoC's
-catalog and checks its first page and the nightly schedule's page.
+catalog and checks its first page and the nightly schedule's page. Item 32 is
+fix-now row FX-16, proven by unit, phase-sequence and real-binary rows and on the
+compose stack; it changes the runner only, and the PoC upgrade that carries it
+runs a console catalog-point restore (the binding's reads under the store
+contract).
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -345,6 +349,65 @@ for those points, and retention treats every scheduled set as one shared set
 again. Nothing in the archive changes on the rollback itself; sets an
 `Enforce` policy deleted in between stay deleted.
 
+#### 32. A point-bound restore restores its point's own set, or nothing (FX-16)
+
+**Changed.** A plan bound to a recovery point (`source.point`) had the point's
+receipt, signature and manifest verified, and then restored whichever set
+`source.backup` named — `latestCompleted` included — while everything the
+runner takes from that receipt (the configuration capture coverage phases 3
+and 7 compare against, the timestamp types the time basis is decided from,
+the manifest pin) was applied to that set's records. The runner now refuses
+such a run, exit 3, the message opening `PointBindingSetMismatch`
+(`refusal-reason=GuardRefused`, so a `Restore` reads `exitReason:
+GuardRefused`):
+
+- **before any broker is contacted**, when `source.backup` is not the
+  receipt's set. `backup: latestCompleted` beside a bound point is always
+  refused: it names whichever set is newest when the run starts;
+- **after the set is described and before any target topic exists**, when the
+  set about to be restored is not the one the binding verified: another set
+  id, another manifest key (a copy of the set under another prefix), another
+  manifest digest, or another manifest version (the manifest written again
+  during the run).
+
+The binding also reads the receipt, its signature and the manifest through the
+restore's own archive handle: under the store contract, the controller-named
+credential and CA, where it used the environment-driven client before.
+
+What changes on the upgrade:
+
+- **Console, catalog-route and rehearsal restores** name the point's set
+  already and run as before.
+- **A hand-written point-bound plan that says `backup: latestCompleted`** (the
+  standalone disaster path) is refused. Name the point's set instead
+  (`source.backup: <the receipt's backup_id>`, which `logweir catalog list`
+  shows) and approve the new plan.
+
+**Do:** before the runner image rolls, change every standalone point-bound
+plan that says `backup: latestCompleted` to name its point's set, and approve
+it again. Nothing else.
+**Scope:** `crates/logweir/src/drill/binding.rs` (the plan half: another set
+and `latestCompleted` refused although the point verifies; each of the four
+restored-set disagreements refused alone, naming itself),
+`crates/logweir/tests/orchestrator.rs` (each disagreement refused with no target
+topic, no fingerprint and no scorecard; the matching set runs; the set check
+comes before FX-8's time basis), `crates/logweir/tests/restore_phase.rs` (the
+real binary refuses both plan shapes before phase 0, the bootstrap never
+dialled), source guards in `crates/logweir/src/drill/mod.rs` (where the check
+sits; the verified set travels with the coverage; one archive-handle
+constructor), and planted mutants, each killed (FX-16). Live, on compose slot 4
+with engine 0.23.3 (`e2e/tests/point_set_binding.rs`): the plan bound to point
+A and naming A restored A's 30 records; naming a later set B or
+`latestCompleted` was refused before phase 0, and a byte-identical copy of A
+under another prefix and a copy with an edited manifest were refused after
+phase 0 and before phase 2, with no target topic in any refused run; the build
+before FX-16 restored all four under A's receipt (B's 45 records, or the
+copy), signed `pass`. Not yet proven on the PoC: a catalog-point restore after
+the upgrade that carries FX-16.
+**Rollback:** an older runner restores whatever `source.backup` names again,
+`latestCompleted` included, and reads the binding through the environment's
+client. No archive, catalog or evidence object changes in either direction.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -366,6 +429,9 @@ In addition to the next entry's six, in its order:
 - **After the runner image rolls, set each `RecoveryCatalog`'s
   `spec.syncRequest` to a new value** so its view is published again by the
   new runner (item 31).
+- **Before the runner image rolls, name the point's set in every standalone
+  point-bound plan that says `backup: latestCompleted`**, and approve it again
+  (item 32).
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -377,11 +443,11 @@ In addition to the next entry's six, in its order:
 
 ### Migration and rollback after `v0.2.0-rc.1`
 
-An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30
-and 31, in the order of the next entry's upgrade path. Item 28 moves the engine in
+An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
+31 and 32, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
-change nothing until set; items 30 and 31 change the runner (item 31 also the
+change nothing until set; items 30, 31 and 32 change the runner (item 31 also the
 console's text), and item 31 takes effect at each catalog's next sync. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 

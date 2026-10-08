@@ -1990,6 +1990,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "scheduled points offered after a re-sync",
             "spec.syncRequest",
         ),
+        // FX-16 (2026-10-08): a point-bound restore restores its point's own
+        // set or is refused; a standalone plan naming `latestCompleted` is.
+        (
+            "a bound restore restores its point's set",
+            "PointBindingSetMismatch",
+        ),
     ];
     assert_eq!(
         items.len(),

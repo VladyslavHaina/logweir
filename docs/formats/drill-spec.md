@@ -67,6 +67,13 @@ is chosen by `source.backup` (`latestCompleted` or a pinned backup id) and no
 binding is checked. Every plan written before this block existed therefore
 still loads, still verifies byte for byte, and still runs unchanged.
 
+**Present, `source.backup` names the point's own set** — the receipt's
+`backup_id`, `nightly-7` above (FX-16). A bound plan whose `source.backup` is
+another set, or `latestCompleted` (which names whichever set is newest when the
+run starts, so it can stop being the point's set at the next backup), is
+refused; the console, the catalog route and every rehearsal render the point's
+set.
+
 **Why it is in the plan and not in the Job's environment.** The environment is
 the controller's word for it; the plan is what the approver signed. Binding the
 point into plan bytes means the approval covers *which archive object this
@@ -84,7 +91,8 @@ client is constructed and before anything is written, the runner:
    `point_id`. The identity is content-derived, so it is never *believed*: a
    point id that had to be taken on trust would be a label anyone could
    relabel;
-4. checks the receipt's own `archive.manifest_sha256` equals `manifest_sha256`;
+4. checks the receipt's own `archive.manifest_sha256` equals `manifest_sha256`,
+   and its `backup_id` equals `source.backup` (FX-16);
 5. verifies the receipt's **signature** (its `.sig` sidecar, DSSE, payload
    type `application/vnd.logweir.backup-receipt+json;version=1.0.0`) against the
    evidence-signing keyring passed as `--evidence-keys`, and judges the key
@@ -95,8 +103,20 @@ client is constructed and before anything is written, the runner:
    installation this one trusts wrote the receipt; this one proves the
    *archive* does.
 
+The receipt, its signature and the manifest are read through the same archive
+handle the restore uses (under the store contract, the controller-named
+credential and CA). And once the set chosen by `source.backup` has been
+described — after phase 0, before phase 2 — the runner checks it is the set the
+receipt describes: the same set id, the same manifest key, the digest of the
+manifest it just read equal to `manifest_sha256`, and the same version id the
+binding's read answered. Everything the run takes from the receipt (FX-4's
+capture coverage, FX-8's recorded timestamp types, FX-7's pin) is about that
+set alone.
+
 A digest or identity mismatch is **exit 3**, with `PointBindingMismatch` at the
 start of the refusal message — the tampered-bundle case, moved to the archive.
+A plan or a restored set that is not the point's set is **exit 3** with
+`PointBindingSetMismatch`, before any target topic of the restore exists.
 A signature fault is **exit 3** with `PointUntrusted`: no keyring, a keyring
 holding no key, a receipt with no sidecar, a sidecar that does not parse, a
 signature no key in the keyring verifies, or a key the keyring's lifecycle

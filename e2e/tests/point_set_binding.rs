@@ -11,7 +11,7 @@
 //! | `other-set` | bound to A, `backup: B` (a later set beside A) | exit 3 `PointBindingSetMismatch` before phase 0; no target topic | restores B under A's receipt |
 //! | `latest` | bound to A, `backup: latestCompleted` (resolves to B) | exit 3 `PointBindingSetMismatch` before phase 0; no target topic | restores B under A's receipt |
 //! | `copy` | bound to A, `backup: A`, storage pointed at a byte-identical copy of A under another prefix | exit 3 `PointBindingSetMismatch` after `describe` (phase 0 ran) and before phase 2: the manifest key is not the receipt's; no target topic | restores the copy under A's receipt |
-//! | `edited` | as `copy`, over a copy whose manifest is re-serialised compact (same content, other bytes) | exit 3 naming the manifest key AND digest; no target topic | restores it under A's receipt |
+//! | `edited` | as `copy`, over a copy whose manifest carries one more trailing newline (same document, other bytes) | exit 3 naming the manifest key AND digest; no target topic | restores it under A's receipt |
 //!
 //! The binding (receipt digest, point id, signature under the mounted
 //! evidence keyring, the manifest at the receipt's key) verifies in EVERY run:
@@ -587,8 +587,9 @@ fn a_bound_restore_restores_its_points_set_or_nothing() {
     let window = (a.receipt.covered.from_ms, b.receipt.covered.to_ms);
 
     // A byte-identical copy of set A under another prefix, and an EDITED copy
-    // whose manifest is the same JSON re-serialised (compact): other bytes,
-    // same content, so the engine restores it as happily as the original.
+    // whose manifest is the same JSON with one more trailing newline: other
+    // bytes, same content, so the engine restores it as happily as the
+    // original.
     let copy_prefix = format!("fx16-{n}-copy");
     let edit_prefix = format!("fx16-{n}-edit");
     for p in [&copy_prefix, &edit_prefix] {
@@ -618,10 +619,16 @@ fn a_bound_restore_restores_its_points_set_or_nothing() {
         digest(&original_manifest),
         "the copy's manifest is byte-identical"
     );
-    // The engine writes its manifest pretty-printed, so the edit is the
-    // COMPACT serialisation of the same document.
-    let edited: Value = serde_json::from_slice(&original_manifest).expect("the manifest parses");
-    let edited = serde_json::to_vec(&edited).expect("re-serialises");
+    // The edit is the same document plus one trailing newline: other bytes
+    // whatever layout the engine (any engine-matrix line) writes, and JSON
+    // that every reader still parses as the same manifest.
+    let mut edited = original_manifest.clone();
+    edited.push(b'\n');
+    assert_eq!(
+        serde_json::from_slice::<Value>(&edited).expect("the edit parses"),
+        serde_json::from_slice::<Value>(&original_manifest).expect("the original parses"),
+        "the same document"
+    );
     assert_ne!(digest(&edited), digest(&original_manifest), "other bytes");
     let edit_manifest_key = a
         .receipt
