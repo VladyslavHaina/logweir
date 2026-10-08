@@ -897,10 +897,12 @@ runner's notification body adds `integrity.coverage`/`covered` and its metrics
 [api.md](api.md#the-restores-coverage-prod-081a), [metrics.md](metrics.md)).
 
 **`covered: false` is never a pass, anywhere.** The `Restore` badge's
-`Verified` condition is `CompleteNotCovered` beside it even over a status whose
-other fields say pass, so the API's `verifiedSuccess`, the console's badge and
-list verdict and a rehearsal's `lastSucceeded` all refuse it; the notification
-and the metrics label carry `fail-integrity`.
+`Verified` condition is `CompleteNotCovered` beside it: for a real one
+(`fail-integrity`, exit 2), because the rule reads `covered` before the
+outcome, and even over a status whose other fields say pass. The API's
+`verifiedSuccess`, the console's badge and list verdict and a rehearsal's
+`lastSucceeded` all refuse it; the notification and the metrics label carry
+`fail-integrity`, and `logweir_drill_integrity_complete_covered` is 0.
 
 **The standing authorization signs the coverage (format 1.1.0).** A rehearsal
 scope gains optional `coverage` and `completeMaxRecords`; the plan's coverage
@@ -940,7 +942,15 @@ real controller, the console in a browser) run at the next PoC upgrade.
 **Rollback:** an older controller ignores the spec fields (an older CRD prunes
 them) and runs the plan as written; it does not copy the status fields, and
 the console then reads "not recorded". An older runner or controller ignores a
-1.1.0 scope's fields and refuses every complete plan (fail closed).
+1.1.0 scope's fields: it never runs a complete verification under it (a
+complete plan with no `max_partitions` is refused as unbounded), and it reads a
+scope that signs only complete coverage as a sampled one. With BOTH rolled back, a
+hand-written standing `Restore` with a sampled plan runs under such a scope (a
+rehearsal slot cannot: its `templateDigest` no longer matches), so before
+rolling both back, delete the standing `Approval` of every authorization whose
+scope states `coverage: complete`. The version class of format 1.1.0 is an
+open owner decision for that reason
+([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)).
 
 ### Required operator actions after `v0.2.0-rc.1`
 

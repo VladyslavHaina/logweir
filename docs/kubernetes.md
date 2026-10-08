@@ -2703,7 +2703,10 @@ scope must itself say `coverage: complete` (document format 1.1.0, below):
 over the mounted bundle — requires the plan's coverage to equal the signed one.
 A scope that states no `coverage`, which is every scope signed before this
 field, authorises sampled rehearsals only, so a complete plan under it is
-refused by name; a scope that says `complete` refuses a sampled plan too. When
+refused by name; a scope that says `complete` refuses a sampled plan too (a
+runner and a controller both older than format 1.1.0 read such a scope as a
+sampled one:
+[stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)). When
 the scope states `completeMaxRecords`, the plan's bound must be present and no
 larger. The runner cannot see `templateDigest`; it can see the signed scope, so
 an approver who signed sampled rehearsals never finds a complete one run in
@@ -6353,11 +6356,16 @@ segment that would not decode), compares only part of the restore. It signs
 `integrity.verification.complete.covered: false` with the reason, its
 `integrity.result` is never `pass` (scorecard arm IV-6), its outcome is
 `fail-integrity` and the runner exits 2. **It is never a pass, anywhere:** the
-`Verified` condition's reason is `CompleteNotCovered` even over a status whose
-other fields said pass (§15.2), the product API's `verifiedSuccess` is `false`,
-the console's badge and list verdict say so, a rehearsal over it is
-`lastFailed`, the runner's notification body carries `integrity.covered: false`
-and its metrics `logweir_drill_integrity_complete_covered 0`.
+`Verified` condition's reason is `CompleteNotCovered` (§15.2; the badge rule
+reads `covered` before the outcome, so a real one is named by this reason and
+not by `OutcomeNotPass`, and so is a status whose other fields said pass), the
+product API's `verifiedSuccess` is `false`, the console's badge and list
+verdict say so, a rehearsal over it is `lastFailed`, the runner's notification
+body carries `integrity.covered: false` and its metrics
+`logweir_drill_integrity_complete_covered 0`. Alert on either: the condition's
+reason `CompleteNotCovered`, or the gauge
+`logweir_drill_integrity_complete_covered == 0` in the runner's metrics
+textfile ([metrics.md](metrics.md)).
 
 **What the status carries.** Beside `integrity.level`/`result`/`partialReason`,
 the controller copies from the signed scorecard: `integrity.coverage`
@@ -6951,7 +6959,7 @@ Both rules also appear on the object itself, as a `Verified` condition whose
 `reason` is `Verified`, `VerificationInvalid`, `VerificationNotAttempted`,
 `VerificationUntrusted`, `ExitCodeNotZero`, `OutcomeNotPass` or
 `CompleteNotCovered` (a complete verification that did not cover the restore,
-whatever else the status says — PROD-08.1a), and whose
+whatever else the status says, judged before the outcome — PROD-08.1a), and whose
 `message` is the badge label.
 
 Since PLAT-19.1 the green rule reads `result == Valid` **and**
