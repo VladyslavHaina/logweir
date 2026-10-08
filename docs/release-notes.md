@@ -1012,9 +1012,9 @@ contention needs the quota fixed instead. **Scope:**
 `LimitRange` refusal, the Job cancelled), `recovery_catalog_controller.rs` (the
 running pass and the harvest of the cancelled Job), `backup_selection.rs` (the
 `Backup` ends `PodCreationForbidden` and creates no runner Job),
-`kafka_cluster_controller.rs` (`reachable` untouched, the status before the
-TTL), `protection_controller.rs` (cancel, status, TTL, and the third attempt is
-the last) and `retention_policy_controller.rs` (harvested, counted, and degraded
+`kafka_cluster_controller.rs` (`reachable` and `observedAt` untouched, the
+status before the TTL), `protection_controller.rs` (cancel, status, TTL, and the third attempt is
+the last) and `retention_policy_controller.rs` (named at once, harvested with its lease released only after the cancelled Job has finished, counted, and degraded
 on the third). Each row has a negative control with no event, or another Job's,
 which keeps the path from before, and `check_framework.rs` pins both grace
 boundaries and the no-pod pre-filter. Planted mutants were each killed (FX-11).

@@ -56,9 +56,10 @@
 //! controller's only trace is a `FailedCreate` Event on the Job. Once the Job
 //! has had no pod for 30 seconds and that Event says why
 //! ([`crate::check::refused_pod_creation`], the `Preflight` grace and the same
-//! matcher), the Job is cancelled and the run is harvested at once:
-//! `Enforced=False` / `PodCreationForbidden`, the admission's own words, and a
-//! failed run counted toward `EnforcementDegraded` like any other — never
+//! matcher), the Job is cancelled and `Enforced=False` / `PodCreationForbidden`
+//! names the admission's own words at once. The run is harvested when the
+//! cancelled Job has finished (the lease is held until then): a failed run
+//! counted toward `EnforcementDegraded` like any other — never
 //! `RunInProgress` until `enforcement.deadlineSeconds` and then "produced no
 //! exit code". Nothing was deleted, because nothing ran.
 //!
@@ -991,8 +992,19 @@ impl Pass<'_> {
             // all while the Job's own status counts a pod or it is younger than
             // the 30-second grace; otherwise one pod list and, when it finds
             // none, one events list by the Job's UID. The Job is cancelled and
-            // the run harvested now — the harvest patches the TTL, after its
-            // status lands, exactly as for a finished run.
+            // the status names the refusal NOW.
+            //
+            // THE RUN IS NOT HARVESTED IN THIS PASS, AND THE LEASE STAYS (FX-11
+            // review L1). The lease must never die before the run it protects
+            // (`LEASE_MARGIN_SECONDS`), and a cancelled Job is not yet a
+            // finished one: a pod the Job controller admitted between this
+            // pass's pod list and its processing of the deadline patch could
+            // still run until the Job controller kills it. The Job finishes
+            // within about a second, its watch (`owns(jobs)`) wakes the next
+            // pass, and THAT pass harvests it through `harvest_run`, which
+            // proves "no pod" at the finish (`finished_without_pod`) — or reads
+            // the exit code of a pod that did start — and only then releases
+            // the lease, counts the run and patches the TTL.
             if let Some(refusal) =
                 check::refused_pod_creation(self.ctx.client, &self.namespace, &job, self.ctx.now)
                     .await?
@@ -1001,14 +1013,14 @@ impl Pass<'_> {
                 warn!(
                     policy = %self.name, namespace = %self.namespace, run = %run_id,
                     job = %job_name, code = refusal.code.as_str(),
-                    "the retention run's pod was refused at creation; the Job is cancelled and \
-                     the run is recorded as failed, naming the refusal. Nothing was deleted"
+                    "the retention run's pod was refused at creation; the Job is cancelled, the \
+                     status names the refusal, and the run is recorded once the Job has \
+                     finished. Nothing was deleted"
                 );
-                let report = RunReport {
-                    refused: Some(refusal.message),
-                    ..RunReport::default()
-                };
-                return Ok(Some(self.harvest(&run_id, Some(&job), &report).await?));
+                return Ok(Some(
+                    self.report_refused(&run_id, &job_name, &refusal.message)
+                        .await?,
+                ));
             }
             return Ok(Some(self.report_running(&run_id, &job_name).await?));
         }
@@ -1090,6 +1102,58 @@ impl Pass<'_> {
             ready: "True",
             ready_reason: REASON_POLICY_READY,
             enforced_reason: REASON_RUN_IN_PROGRESS,
+            enforcement: ENFORCEMENT_LOGWEIR_WORKER,
+            points_evaluated: 0,
+            candidates: 0,
+            protected: 0,
+            skipped: 0,
+            plan_sha256: None,
+            job_name: Some(job_name.to_string()),
+            deletes_performed: 0,
+        })
+    }
+
+    /// The pass that CANCELLED a run whose pod was refused at creation — FX-11.
+    ///
+    /// `Enforced=False` / `PodCreationForbidden` with the admission's words, so
+    /// the refusal is on the object the moment it is known; and nothing else.
+    /// `lastEnforcement`, the lease and `consecutiveRunFailures` are left for
+    /// the harvest of the finished Job (review L1, see `tracked_run`).
+    async fn report_refused(
+        &self,
+        run_id: &str,
+        job_name: &str,
+        admission: &str,
+    ) -> Result<Outcome, ReconcileError> {
+        let conditions = self.conditions(&[
+            (
+                CONDITION_READY,
+                "True",
+                REASON_POLICY_READY,
+                "the policy resolves".to_string(),
+            ),
+            (
+                CONDITION_ENFORCED,
+                "False",
+                REASON_POD_CREATION_FORBIDDEN,
+                format!(
+                    "retention run {run_id} never started ({REASON_POD_CREATION_FORBIDDEN}), so \
+                     nothing was deleted: {admission}. Job {job_name} is cancelled; the run is \
+                     recorded, and its lease released, once the Job has finished"
+                ),
+            ),
+        ]);
+        let mut status = json!({
+            "enforcement": ENFORCEMENT_LOGWEIR_WORKER,
+            "conditions": conditions,
+        });
+        self.adopt_generation(&mut status);
+        self.patch_status(status).await?;
+        Ok(Outcome {
+            phase: RetentionPhase::Running,
+            ready: "True",
+            ready_reason: REASON_POLICY_READY,
+            enforced_reason: REASON_POD_CREATION_FORBIDDEN,
             enforcement: ENFORCEMENT_LOGWEIR_WORKER,
             points_evaluated: 0,
             candidates: 0,

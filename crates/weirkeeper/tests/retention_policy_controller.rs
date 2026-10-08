@@ -6725,14 +6725,22 @@ fn run_job_patches(f: &Fixture) -> Vec<Value> {
         .collect()
 }
 
-/// **FX-11: A RETENTION RUN WHOSE POD IS REFUSED IS HARVESTED AT ONCE AS
-/// `PodCreationForbidden`, NAMING THE REFUSAL, AND COUNTED.** The quota and the
-/// missing-ServiceAccount forms both. Before FX-11 the run read
-/// `RunInProgress` until `enforcement.deadlineSeconds` and then `RunFailed`,
-/// "produced no exit code".
+/// **FX-11: A RETENTION RUN WHOSE POD IS REFUSED NAMES THE REFUSAL AT ONCE,
+/// AND IS HARVESTED — LEASE RELEASED, FAILURE COUNTED — ONLY ONCE ITS
+/// CANCELLED JOB HAS FINISHED.** The quota and the missing-ServiceAccount
+/// forms both. Before FX-11 the run read `RunInProgress` until
+/// `enforcement.deadlineSeconds` and then `RunFailed`, "produced no exit code".
+///
+/// Pass 1, the fail-fast: the Job is cancelled and `Enforced` names the
+/// refusal, but NOTHING about the run is recorded yet — no `lastEnforcement`,
+/// no `lease` key, no count, no TTL (review L1: the lease must never die
+/// before the run it protects, and a cancelled Job is not a finished one).
+/// Pass 2, the cancelled Job has finished with no pod: the harvest records
+/// the run, releases the lease, counts it, and patches the TTL after the status.
 ///
 /// KILLS: the Events read dropped; the message not propagated; the early
-/// cancel dropped; the failure not counted.
+/// cancel dropped; the failure not counted; the lease released by the
+/// fail-fast pass (L1).
 #[tokio::test]
 async fn fx11_a_retention_pod_the_namespace_refuses_is_harvested_naming_it() {
     for (message, words) in [
@@ -6742,6 +6750,7 @@ async fn fx11_a_retention_pod_the_namespace_refuses_is_harvested_naming_it() {
             "serviceaccount \"logweir-retention\" not found",
         ),
     ] {
+        // ---- pass 1: running, refused — named and cancelled, not harvested
         let f = podless_run_pass(false, Some(message), 0).await;
         let enforced = f.condition("Enforced");
         assert_eq!(enforced["status"], "False", "{:?}", f.seen());
@@ -6752,6 +6761,50 @@ async fn fx11_a_retention_pod_the_namespace_refuses_is_harvested_naming_it() {
             "the refusal's own words: {said}"
         );
         assert!(!said.contains("no exit code"), "{said}");
+        for patch in f.status_patches() {
+            for key in ["lease", "lastEnforcement", "consecutiveRunFailures"] {
+                assert!(
+                    patch["status"].get(key).is_none(),
+                    "the fail-fast pass leaves `{key}` to the harvest of the FINISHED Job; \
+                     the lease must not die before the run it protects (L1): {patch}"
+                );
+            }
+        }
+        let patches = run_job_patches(&f);
+        assert_eq!(
+            patches.len(),
+            1,
+            "the cancel, and no TTL yet: {:?}",
+            f.seen()
+        );
+        assert_eq!(patches[0]["spec"]["activeDeadlineSeconds"], json!(1));
+        let lists: Vec<String> = f
+            .seen()
+            .iter()
+            .filter(|(_, u)| u.split('?').next().unwrap_or("").ends_with("/events"))
+            .map(|(_, u)| u.replace("%3D", "="))
+            .collect();
+        assert_eq!(lists.len(), 1, "{lists:?}");
+        assert!(lists[0].contains("involvedObject.uid=j1-fx11"), "{lists:?}");
+
+        // ---- pass 2: the cancelled Job has finished, still with no pod ------
+        let f = podless_run_pass(true, Some(message), 0).await;
+        let enforced = f.condition("Enforced");
+        assert_eq!(enforced["reason"], ctrl::REASON_POD_CREATION_FORBIDDEN);
+        assert!(enforced["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(words));
+        let raw = f
+            .status_patches()
+            .into_iter()
+            .find(|p| p["status"].get("lastEnforcement").is_some())
+            .expect("the harvest");
+        assert_eq!(
+            raw["status"]["lease"],
+            Value::Null,
+            "NOW the lease is released"
+        );
         let status = f.status();
         assert_eq!(
             status["consecutiveRunFailures"],
@@ -6763,12 +6816,9 @@ async fn fx11_a_retention_pod_the_namespace_refuses_is_harvested_naming_it() {
             "harvested"
         );
         assert_eq!(status["lastEnforcement"]["exitCode"], Value::Null);
-        assert_eq!(status["lease"], Value::Null, "the lease is released");
-
         let patches = run_job_patches(&f);
-        assert_eq!(patches.len(), 2, "the cancel, then the TTL: {:?}", f.seen());
-        assert_eq!(patches[0]["spec"]["activeDeadlineSeconds"], json!(1));
-        assert!(patches[1]["spec"]["ttlSecondsAfterFinished"].is_i64());
+        assert_eq!(patches.len(), 1, "only the TTL: {:?}", f.seen());
+        assert!(patches[0]["spec"]["ttlSecondsAfterFinished"].is_i64());
         let seen = f.seen();
         let status_at = seen
             .iter()
@@ -6782,13 +6832,6 @@ async fn fx11_a_retention_pod_the_namespace_refuses_is_harvested_naming_it() {
             status_at < ttl_at,
             "the status lands before the TTL: {seen:?}"
         );
-        let lists: Vec<String> = seen
-            .iter()
-            .filter(|(_, u)| u.split('?').next().unwrap_or("").ends_with("/events"))
-            .map(|(_, u)| u.replace("%3D", "="))
-            .collect();
-        assert_eq!(lists.len(), 1, "{lists:?}");
-        assert!(lists[0].contains("involvedObject.uid=j1-fx11"), "{lists:?}");
     }
 }
 
