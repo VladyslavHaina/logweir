@@ -189,6 +189,39 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
         "logweir_drill_integrity_result{{cluster=\"{cluster}\",result=\"{result}\"}} 1\n"
     ));
 
+    // PROD-08.1a: HOW MUCH was verified, beside how it came out. One series
+    // per document carrying `integrity.verification` (format 1.4.0); none for
+    // an older one, which is "not recorded" and never read as complete. A
+    // complete verification adds whether it COVERED every partition: 0 is a
+    // run whose outcome is never `pass` (arm IV-6), and alerting on
+    // `logweir_drill_integrity_complete_covered == 0` names that cause
+    // where `logweir_drill_runs_total{outcome="fail-integrity"}` cannot.
+    if let Some(verification) = sc.integrity.verification.as_ref() {
+        let coverage = match verification.coverage.as_str() {
+            logweir_core::scorecard::COVERAGE_COMPLETE => "complete",
+            _ => "sampled",
+        };
+        o.push_str(
+            "# HELP logweir_drill_integrity_coverage 1 for the coverage the scorecard says it \
+             verified: sampled or complete.\n\
+             # TYPE logweir_drill_integrity_coverage gauge\n",
+        );
+        o.push_str(&format!(
+            "logweir_drill_integrity_coverage{{cluster=\"{cluster}\",coverage=\"{coverage}\"}} 1\n"
+        ));
+        if let Some(complete) = verification.complete.as_ref() {
+            o.push_str(
+                "# HELP logweir_drill_integrity_complete_covered 1 when a complete verification \
+                 covered every restored partition, 0 when it did not (never a pass).\n\
+                 # TYPE logweir_drill_integrity_complete_covered gauge\n",
+            );
+            o.push_str(&format!(
+                "logweir_drill_integrity_complete_covered{{cluster=\"{cluster}\"}} {}\n",
+                u8::from(complete.covered)
+            ));
+        }
+    }
+
     o.push_str(
         "# HELP logweir_evidence_lock_verified 1 only after a provider readback.\n\
          # TYPE logweir_evidence_lock_verified gauge\n",

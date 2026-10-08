@@ -877,6 +877,12 @@ pub enum Drill {
     /// every objective is met, so a non-pass here can only come from the
     /// orchestrator handing phase 7 the report phase 6 read.
     EngineReportLacksTheTopic,
+    /// **PROD-08.1a.** `VerifiesCompletely`, with the plan's
+    /// `sample.complete_max_records` at 1: the one partition's 500 archived
+    /// records are past the bound, so it is NOT compared and the signed block
+    /// says `covered: false` — the run the notification and the metrics must
+    /// never read as a pass.
+    VerifiesCompletelyPastItsBound,
 }
 
 /// **PROD-08.1.** CRC-32 (IEEE, reflected), bitwise: the KBAK footer's
@@ -1388,9 +1394,13 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     // shape's spec bytes are what they were.
     let completely = matches!(
         shape,
-        Drill::VerifiesCompletely | Drill::VerifiesCompletelyAndFindsAChangedRecord
+        Drill::VerifiesCompletely
+            | Drill::VerifiesCompletelyAndFindsAChangedRecord
+            | Drill::VerifiesCompletelyPastItsBound
     );
-    let coverage_line = if completely {
+    let coverage_line = if shape == Drill::VerifiesCompletelyPastItsBound {
+        "  coverage: complete\n  complete_max_records: 1\n"
+    } else if completely {
         "  coverage: complete\n"
     } else {
         ""
@@ -1626,6 +1636,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // plan's coverage, the real segment and the one changed record.
         | Drill::VerifiesCompletely
         | Drill::VerifiesCompletelyAndFindsAChangedRecord
+        | Drill::VerifiesCompletelyPastItsBound
         | Drill::LeavesATopicBehind => {}
     }
 
