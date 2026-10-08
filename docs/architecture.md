@@ -14,6 +14,7 @@ and the [support matrix](support-matrix.md).
 | `logweir` | CLI, admission, backup/restore orchestration, evidence signing. |
 | `logweir-core` | Format types, deterministic checks and the engine interface; no I/O, clock or entropy reads. |
 | `logweir-kafka` | Fingerprints and broker interfaces; the `client` feature provides the `rdkafka` implementation. |
+| `logweir-rdkafka-ffi` | The one crate that may contain `unsafe`: the librdkafka calls the safe `rdkafka` API lacks, returning owned values; only `logweir-kafka` depends on it (ADR 0004's amendment). |
 | `logweir-engine-oso` | Upstream wire types, independent `.kbak` decoding, configuration rendering and subprocess execution. |
 | `logweir-store` | Object storage, including restricted evidence writes and read-only controller handles. |
 | `logweir-evidence` | Signing keys and signing API; re-exports the verification API. |
@@ -141,6 +142,35 @@ reactor; workspace feature unification can hide the latter in tests.
 The C/cmake build complicates musl cross-compilation, so v0.1 has no musl release
 target and one Kafka reader implementation. Reconsidering a pure-Rust reader
 requires checking the new client's full admin API and release targets.
+
+**Amendment (PROD-01.4 and PROD-04.0; OD-6 (a2), decided 2026-10-05; landed by
+PROD-04.0b).** Logweir calls librdkafka functions the safe rdkafka API lacks,
+through `rdkafka::bindings`, in exactly one FFI perimeter: the crate
+`logweir-rdkafka-ffi`, which alone does not carry `#![forbid(unsafe_code)]`,
+and which `logweir-kafka` depends on. Every other crate root carries
+`#![forbid(unsafe_code)]`; `scripts/check-unsafe-scope.sh` (in `just lint`)
+enforces the perimeter and the attribute, and bars code-shaped `unsafe`
+outside it.
+
+The perimeter wraps ListConsumerGroups, DescribeConsumerGroups,
+DescribeCluster and DescribeAcls, and the legacy group listing
+(`rd_kafka_list_groups`, for the names of every group type: rust-rdkafka
+0.36.2's wrapper builds a member slice from a NULL pointer for a group without
+members and hides each group's error). PROD-01.4a adds DescribeTopics. It
+wraps ListConsumerGroupOffsets, AlterConsumerGroupOffsets and CreateAcls only
+once a row needs them. It reads error codes and C enums as integers, and
+reports every value librdkafka clamps to Unknown as not representable.
+Consumer positions are read and committed through the safe consumer API, from
+a consumer that never subscribes, which needs no exception.
+
+A wrapper leaves the perimeter once a released rust-rdkafka offers its call
+safely. When none is left, the perimeter is deleted with its crate.
+
+The rule against a custom protocol path for operations an existing client
+provides stands. Operations no linked client provides (share-group and
+streams-group description, share-group start offsets, DescribeProducers,
+ListTransactions) are unsupported until a row funds a protocol path through its
+own amendment.
 
 ## ADR 0005: estimation history
 
