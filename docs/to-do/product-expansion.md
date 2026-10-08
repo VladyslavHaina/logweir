@@ -159,7 +159,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 4 | FX-9a | A Linux shim for `just test-shifted-clock` (macOS only today; Linux refuses) | P3 | M3 | infra | FX-9 | — | none | C | Proposed |
 | 0 | FX-10 | Apply or withdraw configured values that reach nothing (two inert chart defaults; the retention caps' parse) | P2 | M1 | fix | — | — | none | A | Done |
 | 0 | FX-16 | Refuse a restore whose backup set is not the bound point's (manifest digest) | P1 | M1 | fix | — | — | compose | A | Proposed |
-| 0 | FX-17 | The catalog view offers no point on its first page ("not offered: … receipt key as [redacted]") | P1 | M1 | fix | — | — | k8s | A | Proposed |
+| 0 | FX-17 | The catalog view offers no point on its first page ("not offered: … receipt key as [redacted]") | P1 | M1 | fix | — | — | k8s | A | In progress |
 | 0 | FX-18 | Test and harness hygiene: the `logweir-api` connection-ceiling test flakes under host load; the PoC harnesses cannot name a browser executable | P3 | M1 | infra | — | — | none | C | Proposed |
 | 0 | FX-19 | A probe Job Kubernetes is deleting reads as a crash: `reachable` flaps for seconds and each probe cycle logs about 12 WARN lines | P2 | M1 | fix | FX-11 | — | none | A | Proposed |
 | 0 | FX-15 | FX-10's owed items: non-default rows for five configured values (evidence-fetch pool, restore manual-run gate, `api.console.*`, `identity.*`, a Backup's `visibilityAttestations`), the unread `legacyArchiveAddressing` fields, and a retention refusal's reason on its status | P3 | M3 | fix | — | — | none | A | Proposed |

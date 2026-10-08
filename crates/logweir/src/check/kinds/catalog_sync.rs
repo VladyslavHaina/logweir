@@ -80,8 +80,14 @@
 //!   archive anchor;
 //! * **everything else copied out of the archive passes the whole
 //!   `check_contract::redact`**, long-run clause included: a `pointId` is 37
-//!   characters and a `backupId` or `runId` shorter still, so the clause costs
-//!   nothing there and catches a credential planted in one;
+//!   characters and a `runId` 26, so the clause costs nothing there and
+//!   catches a credential planted in one. A `backupId` is NOT always shorter:
+//!   a scheduled run's is `<schedule uid>-<slot>[-r<k>]`, 52 to 55
+//!   characters, and the redactor withheld it — and with it the receipt and
+//!   manifest keys built from it — from every scheduled point until
+//!   `check_contract::is_scheduled_set_id` named it an identity, as a UUID
+//!   already was (FX-17). `backupId` is the plan binding's `source.backup`;
+//!   a redacted one is a point the console cannot offer;
 //! * the entry's `remedy` is a fixed table in this file and a signer's
 //!   `principalHint` is never emitted at all, so no adopter free text is
 //!   relayed.
@@ -1499,11 +1505,14 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
     //
     //   * `redact`        — the whole rule set, long-run clause included, for
     //                       every value that is neither a key nor a digest.
-    //                       A `pointId` is 37 characters and a real `backupId`
-    //                       or `runId` is shorter still, so the 40-character
-    //                       clause costs nothing here and catches a credential
-    //                       planted in one by anyone who can write a new key
-    //                       under the archive prefix.
+    //                       A `pointId` is 37 characters and a `runId` 26, so
+    //                       the 40-character clause costs nothing there and
+    //                       catches a credential planted in one by anyone who
+    //                       can write a new key under the archive prefix. A
+    //                       SCHEDULED `backupId` is 52-55 characters and is
+    //                       kept because the redactor reads it as an identity
+    //                       (`is_scheduled_set_id`, FX-17), not because it is
+    //                       short.
     //   * `redact_path`   — the same rules, the long-run clause still weighed
     //                       per RUN, but a run may also be public by being
     //                       object-key SHAPED without an anchor. For object
