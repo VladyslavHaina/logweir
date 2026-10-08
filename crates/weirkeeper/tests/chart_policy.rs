@@ -1292,7 +1292,7 @@ fn accesses(text: &str, access: &str) -> Vec<usize> {
         .filter(|(at, _)| {
             let after = text[at + access.len()..].chars().next();
             let before = text[..*at].chars().next_back();
-            !after.is_some_and(ident) && !(starts_ident && before.is_some_and(ident))
+            !(after.is_some_and(ident) || (starts_ident && before.is_some_and(ident)))
         })
         .map(|(at, _)| at)
         .collect()
