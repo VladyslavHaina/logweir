@@ -12,6 +12,11 @@
 //!    peer, or that the peer did not vouch for as `X-Forwarded-Proto: https`,
 //!    is refused `421 misdirected_request` before routing — audit code
 //!    `untrusted_entry_point` — while the two kubelet probes stay reachable.
+//!
+//! And one thing D0's 2026-10-07 amendment adds (FX-13), at the end of this
+//! file: the sign-in limiter counts a request against the forwarded client
+//! only when the peer is a trusted proxy under that same decision, and
+//! against the peer otherwise. A bucket refuses; it is never an identity.
 
 mod support;
 
@@ -52,6 +57,14 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
 }
 
 impl Buffer {
+    /// How many captured lines contain `needle`.
+    fn count(&self, needle: &str) -> usize {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count()
+    }
+
     fn record(&self, audit_id: &str) -> (Value, Value) {
         let text = String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned();
         text.lines()
@@ -634,4 +647,426 @@ async fn the_audited_client_skips_proxies_trusted_through_the_service() {
     assert_eq!(response.status, 200, "{}", response.text());
     let (record, _) = log.record(&response.header("x-request-id").unwrap());
     assert_eq!(record["forwardedFor"], "203.0.113.50");
+}
+
+// ------------------------------------------------------------------------
+// FX-13: the sign-in limiter's key, through the real router. Behind one
+// ingress every request has the ingress as its peer, so a peer key is one
+// global budget. These rows use a limiter of three per minute, so a budget is
+// spent in four requests; `/auth/login` answers 303 while one lasts.
+// ------------------------------------------------------------------------
+
+const PER_WINDOW: u32 = 3;
+const SECOND_INGRESS: &str = "10.42.0.18";
+
+fn ingress_range() -> Arc<logweir_api::trusted_proxy::TrustedProxies> {
+    Arc::new(logweir_api::trusted_proxy::TrustedProxies::from_cidrs(
+        vec![Cidr::parse("10.42.0.0/16").unwrap()],
+    ))
+}
+
+fn limited_app(
+    proxies: Arc<logweir_api::trusted_proxy::TrustedProxies>,
+    per_window: u32,
+) -> SharedApp {
+    app_with_limiter(
+        proxies,
+        logweir_api::auth::ratelimit::RateLimiter::new(
+            std::time::Duration::from_secs(60),
+            per_window,
+        ),
+    )
+}
+
+fn app_with_limiter(
+    proxies: Arc<logweir_api::trusted_proxy::TrustedProxies>,
+    limiter: logweir_api::auth::ratelimit::RateLimiter,
+) -> SharedApp {
+    SharedApp::new(
+        FakeKube::new(),
+        support::idp::MockIdp::new(ISSUER, &[]),
+        SharedOptions {
+            trusted_proxies: Some(proxies),
+            login_limiter: Some(limiter),
+            ..SharedOptions::default()
+        },
+    )
+}
+
+/// One `GET /auth/login` from `peer`, with `X-Forwarded-For: xff` if given.
+async fn sign_in(app: &SharedApp, peer: &str, xff: Option<&str>) -> TestResponse {
+    let headers: Vec<(&str, &str)> = xff.map(|v| ("x-forwarded-for", v)).into_iter().collect();
+    get(app, "/auth/login", Some(peer), &headers).await
+}
+
+/// Spend `PER_WINDOW` sign-ins, each served, then show the next is refused.
+async fn spend(app: &SharedApp, peer: &str, xffs: &[Option<&str>]) {
+    assert_eq!(xffs.len(), PER_WINDOW as usize);
+    for xff in xffs {
+        let served = sign_in(app, peer, *xff).await;
+        assert_eq!(served.status, 303, "{peer} {xff:?}: {}", served.text());
+    }
+}
+
+fn assert_limited(response: &TestResponse) {
+    response.assert_problem(429, "rate_limited");
+    assert!(
+        response.header("retry-after").is_some(),
+        "a 429 carries Retry-After"
+    );
+}
+
+/// **Two clients behind one trusted proxy get separate budgets.** Client A
+/// spends its three; client B, through the same ingress pod a moment later, is
+/// still served, and the audit says the bucket was the forwarded client's —
+/// a basis, never the address as an actor.
+///
+/// NEGATIVE CONTROL, IN THE TEST: the same requests against a console that
+/// trusts no proxy reproduce the defect — B is refused because A spent the
+/// ingress's one budget. A limiter that ignored the header fails the first
+/// half; the control shows the rows can tell the two apart.
+#[tokio::test]
+async fn two_clients_behind_one_trusted_proxy_get_separate_budgets() {
+    let (log, _guard) = capture();
+    let app = limited_app(ingress_range(), PER_WINDOW);
+    spend(&app, INGRESS, &[Some("203.0.113.50"); 3]).await;
+    let a_again = sign_in(&app, INGRESS, Some("203.0.113.50")).await;
+    assert_limited(&a_again);
+    let (record, notes) = log.record(&a_again.header("x-request-id").unwrap());
+    assert_eq!(notes["loginRateKey"], "forwardedClient");
+    assert_eq!(record["forwardedFor"], "203.0.113.50");
+    assert_eq!(record["actorId"], "", "a bucket is never an actor");
+    assert_eq!(record["failureCode"], "rate_limited");
+
+    let b = sign_in(&app, INGRESS, Some("203.0.113.51")).await;
+    assert_eq!(b.status, 303, "{}", b.text());
+    let (_, notes) = log.record(&b.header("x-request-id").unwrap());
+    assert_eq!(notes["loginRateKey"], "forwardedClient");
+
+    // The defect, reproduced: nobody trusted, so the ingress is a peer like
+    // any other and its one budget is everyone's.
+    let untrusting = limited_app(
+        Arc::new(logweir_api::trusted_proxy::TrustedProxies::from_cidrs(
+            Vec::new(),
+        )),
+        PER_WINDOW,
+    );
+    spend(&untrusting, INGRESS, &[Some("203.0.113.50"); 3]).await;
+    let b = sign_in(&untrusting, INGRESS, Some("203.0.113.51")).await;
+    assert_limited(&b);
+    let (_, notes) = log.record(&b.header("x-request-id").unwrap());
+    assert_eq!(notes["loginRateKey"], "peer");
+}
+
+/// **The same client through two trusted proxies shares one budget**, whether
+/// the second ingress pod received it directly or behind the first (a chain
+/// of two). NEGATIVE CONTROL: another client through the second pod is still
+/// served, so the refusal is the client's budget, not the pod's.
+#[tokio::test]
+async fn the_same_client_through_two_trusted_proxies_shares_one_budget() {
+    let (_log, _guard) = capture();
+    let app = limited_app(ingress_range(), PER_WINDOW);
+    let served = sign_in(&app, INGRESS, Some("203.0.113.50")).await;
+    assert_eq!(served.status, 303);
+    let served = sign_in(&app, SECOND_INGRESS, Some("203.0.113.50")).await;
+    assert_eq!(served.status, 303);
+    let served = sign_in(&app, SECOND_INGRESS, Some("203.0.113.50, 10.42.0.17")).await;
+    assert_eq!(served.status, 303);
+    assert_limited(&sign_in(&app, SECOND_INGRESS, Some("203.0.113.50")).await);
+    assert_limited(&sign_in(&app, INGRESS, Some("203.0.113.50")).await);
+
+    let other = sign_in(&app, SECOND_INGRESS, Some("203.0.113.51")).await;
+    assert_eq!(other.status, 303, "{}", other.text());
+}
+
+/// **A forged `X-Forwarded-For` from an untrusted peer is ignored**: a pod
+/// that dials the console directly and invents a new client for every request
+/// is still counted as itself, and refused on its fourth. A client of the
+/// ingress cannot do it either: the leftmost hops it writes are never read.
+/// NEGATIVE CONTROL: another untrusted peer is unaffected, and the same
+/// invented chain through the ingress is keyed on the hop the ingress added.
+#[tokio::test]
+async fn a_forged_header_from_an_untrusted_peer_is_ignored() {
+    let (log, _guard) = capture();
+    let app = limited_app(ingress_range(), PER_WINDOW);
+    spend(
+        &app,
+        POD_ELSEWHERE,
+        &[
+            Some("198.51.100.1"),
+            Some("198.51.100.2"),
+            Some("198.51.100.3"),
+        ],
+    )
+    .await;
+    let forged = sign_in(&app, POD_ELSEWHERE, Some("198.51.100.4")).await;
+    assert_limited(&forged);
+    let (record, notes) = log.record(&forged.header("x-request-id").unwrap());
+    assert_eq!(notes["loginRateKey"], "peer");
+    assert_eq!(
+        record["forwardedFor"], "",
+        "an untrusted peer's header is not even recorded"
+    );
+
+    let neighbour = sign_in(&app, "10.99.3.5", Some("198.51.100.4")).await;
+    assert_eq!(neighbour.status, 303, "{}", neighbour.text());
+
+    // Through the ingress, a client that writes a fresh leftmost hop every
+    // time is still the hop the ingress appended.
+    spend(
+        &app,
+        INGRESS,
+        &[
+            Some("198.51.100.11, 203.0.113.60"),
+            Some("198.51.100.12, 203.0.113.60"),
+            Some("198.51.100.13, 203.0.113.60"),
+        ],
+    )
+    .await;
+    assert_limited(&sign_in(&app, INGRESS, Some("198.51.100.14, 203.0.113.60")).await);
+}
+
+/// **A trusted set that is not ready, or is older than its `MAX_AGE`, trusts
+/// nobody** — the same answer the entry point's gate gets. Before the Service
+/// is read, the ingress pod is a plain peer and its forwarded clients share
+/// its budget; once read, a new client has its own (the NEGATIVE CONTROL that
+/// shows the header is honoured when it should be); once the read is stale,
+/// the next new client is the peer's again and refused.
+#[tokio::test]
+async fn a_trusted_set_that_is_not_ready_or_too_old_trusts_nobody() {
+    let (_log, _guard) = capture();
+    let proxies = Arc::new(logweir_api::trusted_proxy::TrustedProxies::new(
+        Vec::new(),
+        proxy_service(),
+    ));
+    let app = limited_app(Arc::clone(&proxies), PER_WINDOW);
+    let pod = "10.1.0.7";
+    assert!(!proxies.ready());
+    spend(
+        &app,
+        pod,
+        &[
+            Some("203.0.113.70"),
+            Some("203.0.113.71"),
+            Some("203.0.113.72"),
+        ],
+    )
+    .await;
+    assert_limited(&sign_in(&app, pod, Some("203.0.113.73")).await);
+
+    proxies.replace_at([pod.parse().unwrap()], std::time::Instant::now());
+    assert!(proxies.ready());
+    let fresh = sign_in(&app, pod, Some("203.0.113.74")).await;
+    assert_eq!(fresh.status, 303, "{}", fresh.text());
+
+    let old = std::time::Instant::now()
+        .checked_sub(logweir_api::trusted_proxy::MAX_AGE + std::time::Duration::from_secs(1))
+        .expect("the clock is past the window");
+    proxies.replace_at([pod.parse().unwrap()], old);
+    assert!(!proxies.ready());
+    assert_limited(&sign_in(&app, pod, Some("203.0.113.75")).await);
+}
+
+/// **A header with no client hop falls back to the peer.** A chain made only
+/// of trusted proxies (the request began inside the proxy tier), a hop that is
+/// not an address, and no header at all are all counted against the ingress
+/// pod itself, and so share its one budget. NEGATIVE CONTROL: a real client
+/// through the same pod is still served, so the refusal is the fallback
+/// bucket's and not a global one.
+#[tokio::test]
+async fn a_chain_with_no_client_hop_falls_back_to_the_peer() {
+    let (log, _guard) = capture();
+    let app = limited_app(ingress_range(), PER_WINDOW);
+    spend(
+        &app,
+        INGRESS,
+        &[Some("10.42.0.9, 10.42.0.17"), Some("not-an-address"), None],
+    )
+    .await;
+    let proxies_only = sign_in(&app, INGRESS, Some("10.42.0.9")).await;
+    assert_limited(&proxies_only);
+    let (_, notes) = log.record(&proxies_only.header("x-request-id").unwrap());
+    assert_eq!(notes["loginRateKey"], "peer");
+    assert_limited(&sign_in(&app, INGRESS, Some("unknown")).await);
+    assert_limited(&sign_in(&app, INGRESS, None).await);
+
+    let client = sign_in(&app, INGRESS, Some("203.0.113.81")).await;
+    assert_eq!(client.status, 303, "{}", client.text());
+    // A proxy that appends `ip:port` (review L2) names a client too, not the
+    // fallback: served while the peer's budget is spent.
+    let with_port = sign_in(&app, INGRESS, Some("203.0.113.82:4711")).await;
+    assert_eq!(with_port.status, 303, "{}", with_port.text());
+    let (_, notes) = log.record(&with_port.header("x-request-id").unwrap());
+    assert_eq!(notes["loginRateKey"], "forwardedClient");
+}
+
+/// **The bound on tracked keys holds under a spray of forwarded addresses,
+/// and a full table locks no one out.** A trusted proxy forwards more
+/// distinct clients than the table holds, inside one window (a table of 64
+/// here, so the row stays fast; the 65,536 of production is held by
+/// `auth::ratelimit::tests`): the table stops at its bound, every client past
+/// it is still SERVED (without a window, each audit line noting
+/// `loginRateUntracked`, and ONE warning for the window, not one per request),
+/// and a client that spent its budget before the spray stays refused — the
+/// spray reset nothing. NEGATIVE CONTROL: the table is FULL, not merely small
+/// — every sprayed address took its own key, so a limiter that keyed this
+/// spray on the peer (one key) fails the equality.
+#[tokio::test]
+async fn the_bound_on_tracked_keys_holds_under_a_spray_of_forwarded_addresses() {
+    const TABLE: usize = 64;
+    let app = app_with_limiter(
+        ingress_range(),
+        logweir_api::auth::ratelimit::RateLimiter::new(
+            std::time::Duration::from_secs(60),
+            PER_WINDOW,
+        )
+        .with_max_tracked(TABLE),
+    );
+    let limiter = || &app.app.state.shared().expect("shared mode").login_limiter;
+    spend(&app, INGRESS, &[Some("203.0.113.99"); 3]).await;
+    for i in 0..(TABLE - 1) {
+        let served = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
+        assert_eq!(served.status, 303, "client {i}: {}", served.text());
+    }
+    assert_eq!(limiter().tracked(), TABLE);
+    let (log, _guard) = capture();
+    for i in TABLE..(TABLE + 64) {
+        let served = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
+        assert_eq!(served.status, 303, "client {i}: {}", served.text());
+        let (_, notes) = log.record(&served.header("x-request-id").unwrap());
+        assert_eq!(notes["loginRateUntracked"], "tableFull", "client {i}");
+    }
+    assert_eq!(limiter().tracked(), TABLE);
+    assert_eq!(
+        log.count("the sign-in limiter's table is full of live windows"),
+        1,
+        "one warning a window, not one per request"
+    );
+    assert_limited(&sign_in(&app, INGRESS, Some("203.0.113.99")).await);
+}
+
+fn sprayed(i: usize) -> String {
+    let [_, _, hi, lo] = (i as u32).to_be_bytes();
+    format!("198.18.{hi}.{lo}")
+}
+
+/// **There is no global bucket** (the FX-13 security reviews: a ceiling over
+/// all clients is the original lockout at a higher threshold). Forty distinct
+/// clients through the trusted ingress, each spending exactly its own twenty
+/// sign-in requests in one window — 800, more than the 600 a minute the
+/// withdrawn ceiling admitted — are every one served by the shipped login
+/// limiter. NEGATIVE CONTROL: each client's twenty-first is refused, by its
+/// own key.
+#[tokio::test]
+async fn no_global_bucket_exists_behind_the_trusted_ingress() {
+    use logweir_api::auth::ratelimit::{RateLimiter, LOGIN_PER_WINDOW};
+    let app = app_with_limiter(ingress_range(), RateLimiter::for_login());
+    let clients: Vec<String> = (0..40).map(|i| format!("203.0.113.{}", 100 + i)).collect();
+    assert!(clients.len() as u32 * LOGIN_PER_WINDOW > 600);
+    for round in 0..LOGIN_PER_WINDOW {
+        for client in &clients {
+            let served = sign_in(&app, INGRESS, Some(client)).await;
+            assert_eq!(
+                served.status,
+                303,
+                "{client} request {round}: {}",
+                served.text()
+            );
+        }
+    }
+    for client in &clients {
+        assert_limited(&sign_in(&app, INGRESS, Some(client)).await);
+    }
+}
+
+/// **A client rotating IPv6 addresses inside its `/64` spends one budget**
+/// (the FX-13 security review). Three sign-ins from three addresses of one
+/// `/64`, through the trusted ingress, spend it; a fourth, fresh address of
+/// the same `/64` is refused by the KEY. NEGATIVE CONTROL: a client in the
+/// next `/64` over is served, so the refusal is the `/64`'s and not a global
+/// one.
+#[tokio::test]
+async fn a_client_rotating_ipv6_addresses_in_its_64_spends_one_budget() {
+    let (log, _guard) = capture();
+    let app = limited_app(ingress_range(), PER_WINDOW);
+    spend(
+        &app,
+        INGRESS,
+        &[
+            Some("2001:db8:aa:1::1"),
+            Some("2001:db8:aa:1:8a2e:370:7334:1"),
+            Some("2001:db8:aa:1:ffff:ffff:ffff:fffe"),
+        ],
+    )
+    .await;
+    let rotated = sign_in(&app, INGRESS, Some("2001:db8:aa:1:dead:beef:0:4")).await;
+    assert_limited(&rotated);
+    let (_, notes) = log.record(&rotated.header("x-request-id").unwrap());
+    assert_eq!(notes["loginRateKey"], "forwardedClient");
+
+    let neighbour = sign_in(&app, INGRESS, Some("2001:db8:aa:2::1")).await;
+    assert_eq!(neighbour.status, 303, "{}", neighbour.text());
+}
+
+/// **IPv4 clients behind a NAT64 translator get their own budgets** (review
+/// L1). A server-side NAT64 or SIIT translator presents every IPv4 client in
+/// the well-known prefix `64:ff9b::/96`; folded to its `/64` they would all
+/// share one budget, the pre-FX-13 defect for every IPv4 user. NEGATIVE
+/// CONTROL: the same client's fourth request is refused, so the key is the
+/// embedded IPv4 address, not the full IPv6 one.
+#[tokio::test]
+async fn ipv4_clients_behind_a_nat64_translator_get_their_own_budgets() {
+    let (_log, _guard) = capture();
+    let app = limited_app(ingress_range(), PER_WINDOW);
+    spend(&app, INGRESS, &[Some("64:ff9b::c633:6401"); 3]).await;
+    assert_limited(&sign_in(&app, INGRESS, Some("64:ff9b::198.51.100.1")).await);
+    let other = sign_in(&app, INGRESS, Some("64:ff9b::c633:6402")).await;
+    assert_eq!(other.status, 303, "{}", other.text());
+}
+
+/// **A refused code exchange names the provider's HTTP status in the console
+/// log** (review M1: an operator must be able to alert on the provider
+/// throttling this client, which reads as `code_exchange_failed` in the audit
+/// whether the code was junk or the provider answered 429). A callback with
+/// a valid login cookie and a code the provider refuses is `401`, the audit
+/// failure stays `code_exchange_failed`, and the WARN line carries
+/// `the provider answered HTTP 400` (the mock's answer to an unknown code).
+/// NEGATIVE CONTROL: the line is the sign-in refusal's own, once.
+#[tokio::test]
+async fn a_refused_code_exchange_names_the_providers_status_in_the_log() {
+    let (log, _guard) = capture();
+    let app = limited_app(ingress_range(), PER_WINDOW);
+    let login = sign_in(&app, INGRESS, Some("203.0.113.130")).await;
+    assert_eq!(login.status, 303, "{}", login.text());
+    let cookie = login
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .find(|c| c.starts_with("__Host-logweir_login="))
+        .expect("the login cookie is set")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let location = login.header("location").expect("a redirect has a Location");
+    let query: std::collections::BTreeMap<String, String> =
+        serde_urlencoded::from_str(location.split_once('?').unwrap().1).unwrap();
+    let callback = get(
+        &app,
+        &format!("/auth/callback?code=not-a-code&state={}", query["state"]),
+        Some(INGRESS),
+        &[("cookie", &cookie), ("x-forwarded-for", "203.0.113.130")],
+    )
+    .await;
+    callback.assert_problem(401, "unauthenticated");
+    let (record, _) = log.record(&callback.header("x-request-id").unwrap());
+    assert_eq!(record["failureCode"], "code_exchange_failed");
+    assert_eq!(app.idp.token_calls(), 1);
+    assert_eq!(
+        log.count("the provider answered HTTP 400"),
+        1,
+        "the refusal's log line names the provider's status"
+    );
+    assert_eq!(log.count("a sign-in was refused"), 1);
 }

@@ -547,3 +547,40 @@ fn the_parity_row_names_what_a_new_topic_restore_did_not_reconstruct() {
     sc.topic_parity.not_reconstructed = Some(vec![]);
     assert!(row(&sc).ends_with("unexpected []"), "{}", row(&sc));
 }
+
+// ------------------------------------------------------------------- FX-8
+
+/// Guarantee: the footer says which clock a restore's time selection read —
+/// `source.time_basis` (scorecard 1.3.0) — and an ABSENT block reads "not
+/// recorded", never an em dash: a document from before FX-8 makes no claim
+/// that its selections used the topics' own clocks. An empty block is the em
+/// dash; a non-empty list is named with its topics.
+///
+/// KILLS: deleting the footer line; rendering an absent block as an em dash.
+#[test]
+fn show_names_the_time_basis_in_the_qualifiers_footer() {
+    let mut sc = fixtures::scorecard_pass();
+    sc.source.time_basis = None;
+    let table = logweir::show::render_table(&sc);
+    assert!(
+        footer_line(&table, "source.time_basis").contains("not recorded"),
+        "{table}"
+    );
+    sc.source.time_basis = Some(logweir_core::scorecard::TimeBasisLabel::default());
+    let table = logweir::show::render_table(&sc);
+    assert!(
+        footer_line(&table, "source.time_basis").ends_with('\u{2014}'),
+        "{table}"
+    );
+    sc.source.time_basis = Some(logweir_core::scorecard::TimeBasisLabel {
+        plan: Some("producerTime".into()),
+        producer_time: vec!["lat".into()],
+        not_recorded: vec!["old".into()],
+    });
+    let table = logweir::show::render_table(&sc);
+    let line = footer_line(&table, "source.time_basis");
+    assert!(
+        line.contains("SELECTED BY PRODUCER TIME [lat]") && line.contains("NOT RECORDED [old]"),
+        "{line}"
+    );
+}

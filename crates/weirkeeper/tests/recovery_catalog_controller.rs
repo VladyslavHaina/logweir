@@ -1871,3 +1871,200 @@ async fn a_catalogs_own_sync_mode_and_deep_check_reach_its_plan() {
         "and checks each point as hard as the spec asked"
     );
 }
+
+// ===========================================================================
+// FX-11 — a sync pod the namespace refuses at creation
+// ===========================================================================
+
+/// The admission's words for a quota-refused sync pod.
+const QUOTA_REFUSAL: &str = "Error creating: pods \"sync-pod-q8z4m\" is forbidden: exceeded \
+     quota: compute, requested: limits.cpu=500m, used: limits.cpu=2, limited: limits.cpu=2";
+
+/// A sync Job created at `created` that has NO pod: unfinished, or failed on
+/// its (collapsed) deadline.
+fn podless_job(stem: &str, created: DateTime<Utc>, deadline_hit: bool) -> String {
+    let mut job: Value =
+        serde_json::from_str(&job_body(stem, JOB_UID_2, "sha256:x", None)).expect("a Job");
+    job["metadata"]["creationTimestamp"] = json!(stamp(created));
+    job["status"] = if deadline_hit {
+        json!({"conditions": [{"type": "Failed", "status": "True",
+                               "reason": "DeadlineExceeded",
+                               "lastTransitionTime": stamp(created + chrono::Duration::seconds(40))}]})
+    } else {
+        json!({})
+    };
+    job.to_string()
+}
+
+fn sync_events(events: &[(&str, &str, &str)]) -> String {
+    let items: Vec<Value> = events
+        .iter()
+        .map(|(name, uid, message)| {
+            json!({
+                "apiVersion": "v1", "kind": "Event",
+                "metadata": {"name": format!("{name}.1"), "namespace": NS},
+                "involvedObject": {"apiVersion": "batch/v1", "kind": "Job", "name": name,
+                                   "namespace": NS, "uid": uid},
+                "reason": "FailedCreate", "type": "Warning", "message": message
+            })
+        })
+        .collect();
+    json!({"apiVersion": "v1", "kind": "EventList", "metadata": {}, "items": items}).to_string()
+}
+
+/// A catalog whose second sync (`token-2`) is in flight as `stem`.
+fn in_flight(stem: &str) -> RecoveryCatalog {
+    let first = request_stem("token-1");
+    let published_at = at(2026, 9, 16, 11, 55, 0);
+    let mut status = published_status(&first, "token-1", published_at);
+    status["observedSyncRequest"] = json!("token-2");
+    status["lastSyncJob"] = json!({"name": stem});
+    catalog(json!({"syncRequest": "token-2"}), status)
+}
+
+fn podless_routes(stem: &'static str, job: String, events: String) -> Vec<Route> {
+    vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        route("GET", job_path(stem), job.clone()),
+        route(
+            "GET",
+            "/pods",
+            json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}).to_string(),
+        ),
+        route("GET", "/events", events),
+        route("PATCH", job_path(stem), job),
+        status_route(),
+    ]
+}
+
+fn sync_cancels(f: &Fixture, stem: &str) -> usize {
+    f.bodies
+        .lock()
+        .expect("the body recorder")
+        .iter()
+        .filter(|b| {
+            b.method == "PATCH"
+                && b.uri
+                    .split('?')
+                    .next()
+                    .unwrap_or("")
+                    .ends_with(&format!("/jobs/{stem}"))
+                && serde_json::from_str::<Value>(&b.body)
+                    .is_ok_and(|v| v["spec"]["activeDeadlineSeconds"] == json!(1))
+        })
+        .count()
+}
+
+fn event_lists(f: &Fixture) -> Vec<String> {
+    f.seen()
+        .into_iter()
+        .filter(|(m, u)| m == "GET" && u.split('?').next().unwrap_or("").ends_with("/events"))
+        .map(|(_, u)| u.replace("%3D", "="))
+        .collect()
+}
+
+/// **FX-11: A QUOTA-REFUSED SYNC POD IS `PodCreateRejected` 30 SECONDS AFTER
+/// THE JOB, NAMING THE QUOTA, AND THE HARVEST THAT FOLLOWS KEEPS THE CAUSE.**
+///
+/// Pass 1: the sync Job is 45 s old with no pod and a `FailedCreate` Event —
+/// the Job is cancelled and `Synced` names `PodCreateRejected` with the
+/// admission's words. Pass 2: the cancelled Job has failed on its collapsed
+/// deadline — the harvest publishes `Synced=False/PodCreateRejected` and
+/// `lastSyncJob.refusalReason`, not `DeadlineExceeded`. Before FX-11 both
+/// passes read no Events: `PodNotStarted` for fifteen minutes, then
+/// `DeadlineExceeded`.
+///
+/// KILLS: the Events read dropped at either pass; the message not propagated;
+/// the early cancel dropped.
+#[tokio::test]
+async fn fx11_a_sync_pod_the_quota_refuses_is_named_and_cancelled() {
+    let stem = leak(request_stem("token-2"));
+    let created = now() - chrono::Duration::seconds(45);
+    let events = sync_events(&[(stem, JOB_UID_2, QUOTA_REFUSAL)]);
+
+    // ---- pass 1: running, refused ---------------------------------------
+    let f1 = fixture(podless_routes(
+        stem,
+        podless_job(stem, created, false),
+        events.clone(),
+    ));
+    let outcome = run_at(&f1, &in_flight(stem), now()).await;
+    assert_eq!(
+        outcome.synced_reason,
+        "PodCreateRejected",
+        "{:?}",
+        f1.seen()
+    );
+    let status = f1.patched_status();
+    let synced = condition(&status, "Synced");
+    assert_eq!(synced["reason"], "PodCreateRejected");
+    let said = synced["message"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("exceeded quota: compute") && said.contains("limits.cpu=500m"),
+        "the admission's own words reach the object: {said}"
+    );
+    assert_eq!(sync_cancels(&f1, stem), 1, "{:?}", f1.seen());
+    let lists = event_lists(&f1);
+    assert_eq!(lists.len(), 1, "{lists:?}");
+    assert!(
+        lists[0].contains(&format!("involvedObject.uid={JOB_UID_2}")),
+        "{lists:?}"
+    );
+    assert_no_delete(&f1);
+
+    // ---- pass 2: the cancelled Job has failed; the harvest keeps the cause
+    let f2 = fixture(podless_routes(
+        stem,
+        podless_job(stem, created, true),
+        events,
+    ));
+    let outcome = run_at(&f2, &in_flight(stem), now() + chrono::Duration::seconds(5)).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Failed, "{:?}", f2.seen());
+    let status = f2.patched_status();
+    let synced = condition(&status, "Synced");
+    assert_eq!(synced["status"], "False");
+    assert_eq!(synced["reason"], "PodCreateRejected", "{status}");
+    assert!(synced["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("exceeded quota: compute"));
+    assert_eq!(status["lastSyncJob"]["refusalReason"], "PodCreateRejected");
+    assert_eq!(
+        sync_cancels(&f2, stem),
+        0,
+        "a finished Job is never cancelled: {:?}",
+        f2.seen()
+    );
+}
+
+/// **FX-11 NEGATIVE CONTROL.** The same podless Job with no `FailedCreate`
+/// Event is `PodNotStarted` while it runs and `DeadlineExceeded` once it dies —
+/// the pre-FX-11 path, unchanged — and nothing is cancelled early.
+#[tokio::test]
+async fn fx11_control_no_event_keeps_the_deadline_path() {
+    let stem = leak(request_stem("token-2"));
+    let created = now() - chrono::Duration::seconds(45);
+
+    let f1 = fixture(podless_routes(
+        stem,
+        podless_job(stem, created, false),
+        sync_events(&[]),
+    ));
+    let outcome = run_at(&f1, &in_flight(stem), now()).await;
+    assert_eq!(outcome.synced_reason, "PodNotStarted", "{:?}", f1.seen());
+    assert_eq!(sync_cancels(&f1, stem), 0);
+    assert_eq!(event_lists(&f1).len(), 1, "the Events were read");
+
+    let f2 = fixture(podless_routes(
+        stem,
+        podless_job(stem, created, true),
+        sync_events(&[]),
+    ));
+    let outcome = run_at(&f2, &in_flight(stem), now() + chrono::Duration::seconds(5)).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Failed);
+    assert_eq!(
+        condition(&f2.patched_status(), "Synced")["reason"],
+        "DeadlineExceeded"
+    );
+}

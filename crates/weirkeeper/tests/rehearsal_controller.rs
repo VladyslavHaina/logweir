@@ -85,7 +85,35 @@ fn at(s: &str) -> DateTime<Utc> {
 // Builders
 // ---------------------------------------------------------------------------
 
+thread_local! {
+    /// FX-8 (review M-1): whether [`spec_value`] states
+    /// `point.timeBasis: producerTime`. Off for every row but the FX-8 ones,
+    /// which set it for their own thread, so the other rows' digests are what
+    /// they were.
+    static TIME_BASIS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with [`spec_value`] stating `point.timeBasis: producerTime`, and
+/// restores the default after, whatever `f` does.
+async fn with_time_basis<T, F: std::future::Future<Output = T>>(
+    on: bool,
+    f: impl FnOnce() -> F,
+) -> T {
+    let before = TIME_BASIS.with(|t| t.replace(on));
+    let out = f().await;
+    TIME_BASIS.with(|t| t.set(before));
+    out
+}
+
 fn spec_value() -> Value {
+    let mut spec = spec_value_base();
+    if TIME_BASIS.with(std::cell::Cell::get) {
+        spec["point"]["timeBasis"] = json!("producerTime");
+    }
+    spec
+}
+
+fn spec_value_base() -> Value {
     json!({
         "schedule": "0 3 * * 0",
         "suspend": false,
@@ -4726,4 +4754,220 @@ async fn the_rehearsal_plan_carries_the_schedules_own_sample_bounds_and_replicat
         plan.target.default_replication_factor, 3,
         "the scratch topics are created at the schedule's own replication factor"
     );
+}
+
+// ===========================================================================
+// FX-8 review M-1: a rehearsal can accept a selection by producer time
+// ===========================================================================
+
+/// **The opt-in reaches every slot's plan, and nothing else does.** A schedule
+/// stating `spec.point.timeBasis: producerTime` renders
+/// `restore.time_basis: producerTime` into the frozen plan bytes, exactly as
+/// the chosen point becomes `restore.point_in_time`; the plan stays inside the
+/// signed scope, and the runner's own decision ACCEPTS it over a source topic
+/// the manifest records as `LogAppendTime` (and labels it). The same schedule
+/// without the field renders no `time_basis` at all, and that plan is the one
+/// the runner refuses.
+///
+/// KILLS: `render_plan` ignoring the field (the opted plan carries none and
+/// the runner refuses it); rendering it whatever the schedule says (the
+/// control carries one).
+#[tokio::test]
+async fn a_schedule_that_accepts_producer_time_renders_it_into_the_slots_plan() {
+    let cluster = cluster_value(true, Some(TARGET_CLUSTER_ID));
+    let opted = with_time_basis(true, || fired_plan_bytes(&cluster)).await;
+    let plain = with_time_basis(false, || fired_plan_bytes(&cluster)).await;
+    let opted_plan: logweir_core::spec::DrillSpec =
+        serde_yaml::from_str(&opted).expect("the runner's own grammar");
+    let plain_plan: logweir_core::spec::DrillSpec =
+        serde_yaml::from_str(&plain).expect("the runner's own grammar");
+    assert_eq!(
+        opted_plan.restore.time_basis,
+        Some(logweir_core::spec::TimeBasis::ProducerTime),
+        "the schedule's opt-in is in the slot's plan:\n{opted}"
+    );
+    assert!(opted.contains("time_basis: producerTime"), "{opted}");
+    assert_eq!(plain_plan.restore.time_basis, None);
+    assert!(
+        !plain.contains("time_basis"),
+        "absent, the bytes carry none:\n{plain}"
+    );
+    assert_eq!(
+        opted_plan.restore.point_in_time, plain_plan.restore.point_in_time,
+        "the field changes the clock's acceptance and not the point"
+    );
+
+    // What the runner decides over each plan, for an archive whose manifest
+    // records `orders` as a LogAppendTime topic override.
+    let facts = lat_archive_facts(&opted_plan);
+    let topics = vec!["orders".to_string()];
+    let coverage = logweir_core::backup_receipt::SourceConfigCoverage::unknown();
+    let label = logweir_core::time_basis::decide(&opted_plan, &facts, &coverage, &topics)
+        .expect("a rehearsal that accepted producer time runs");
+    assert_eq!(label.producer_time, topics);
+    assert_eq!(label.plan.as_deref(), Some("producerTime"));
+    let refusal = logweir_core::time_basis::decide(&plain_plan, &facts, &coverage, &topics)
+        .expect_err("a rehearsal that did not is refused");
+    assert!(
+        refusal.starts_with("PointInTimeByProducerTime: "),
+        "{refusal}"
+    );
+}
+
+/// A one-topic archive whose manifest records `orders` with the topic override
+/// `message.timestamp.type=LogAppendTime`, one segment covering the plan's
+/// window.
+fn lat_archive_facts(plan: &logweir_core::spec::DrillSpec) -> logweir_core::engine::BackupSetFacts {
+    let end = plan
+        .restore
+        .point_in_time
+        .expect("a rehearsal plan states its point")
+        .timestamp_millis();
+    logweir_core::engine::BackupSetFacts {
+        backup_id: plan.source.backup.clone(),
+        created_at: now(),
+        source_cluster_id: None,
+        manifest_sha256: MANIFEST_SHA.to_string(),
+        manifest_version_id: None,
+        consumer_group_snapshot_sha256: None,
+        topics: vec![logweir_core::engine::TopicFacts {
+            name: "orders".into(),
+            original_partition_count: Some(1),
+            source_replication_factor: Some(1),
+            configurations: [(
+                "message.timestamp.type".to_string(),
+                "LogAppendTime".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            partitions: vec![logweir_core::engine::PartitionFacts {
+                partition_id: 0,
+                segments: vec![logweir_core::engine::SegmentFacts {
+                    key: "orders/0/0.kbak".into(),
+                    start_offset: 0,
+                    end_offset: 9,
+                    start_timestamp: end - 60_000,
+                    end_timestamp: end,
+                    record_count: 10,
+                    sha256: String::new(),
+                    uploaded_at: end,
+                }],
+                gaps: vec![],
+                pruned: vec![],
+            }],
+        }],
+    }
+}
+
+/// **The opt-in is inside the standing authorization.** The field is part of
+/// the sealed spec `templateDigest` covers: a schedule that states it has a
+/// different digest, an authorization signed for the schedule WITHOUT it
+/// refuses the schedule WITH it (`AuthorizationInvalid`, naming the digest the
+/// opted spec hashes to) before any `Restore` exists, and the digest of a schedule that
+/// states none is byte-for-byte what it was before FX-8 (the field is not
+/// serialised).
+///
+/// KILLS: `template_bytes` dropping `point.timeBasis` (the two digests agree
+/// and the opted slot fires under the old authorization).
+#[tokio::test]
+async fn the_time_basis_is_inside_the_standing_authorization() {
+    let base_bytes = rehearsal::template_bytes(&schedule().spec).expect("the bytes");
+    assert!(
+        !String::from_utf8_lossy(&base_bytes).contains("timeBasis"),
+        "a schedule that states no time basis serialises none, so its digest is unchanged"
+    );
+    let base_digest = template_digest();
+    let opted_digest = with_time_basis(true, || async { template_digest() }).await;
+    assert_ne!(base_digest, opted_digest, "the opt-in is inside the digest");
+
+    // The authorization signed the schedule WITHOUT the field; the schedule
+    // states it.
+    let (client, recorder, bodies) = mock_client_recording_bodies(happy_routes());
+    let opted_schedule = with_time_basis(true, || async { schedule() }).await;
+    let outcome = rs::reconcile_schedule(&opted_schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    let rs::Verdict::Skipped(skip) = &outcome.verdict else {
+        panic!(
+            "an authorization over another template fired: {:?}",
+            outcome.verdict
+        )
+    };
+    assert_eq!(skip.reason, rehearsal::SkipReason::AuthorizationInvalid);
+    // Refused at the Approval's own `planHash`, the first of the two places
+    // the digest is compared, naming the digest the opted spec hashes to.
+    assert!(
+        skip.detail.contains("sealed spec hashes to") && skip.detail.contains(&opted_digest),
+        "{skip}"
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    assert_eq!(last_skip(&bodies).as_deref(), Some("AuthorizationInvalid"));
+}
+
+/// **A slot the runner refuses names the refusal on the schedule.** A slot's
+/// `Restore` that ended exit 3 with `exitReason: PointInTimeByProducerTime`
+/// (a schedule without the opt-in, over a `LogAppendTime` topic) is recorded as
+/// `lastFailed.reason: PointInTimeByProducerTime` with
+/// `RehearsalHealthy=False` — never a silent failure, never a generic reason.
+///
+/// KILLS: the failure reason ignoring `exitReason` (the row then reads the
+/// stored `reason` or nothing).
+#[tokio::test]
+async fn a_slot_refused_point_in_time_by_producer_time_is_named_on_the_schedule() {
+    let refused = json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Restore",
+        "metadata": {"name": "logweir-rehearsal-weekly-orders-20260913-030000", "namespace": NS, "uid": "r1", "resourceVersion": "3"},
+        "spec": {
+            "planBytes": "{}",
+            "sourceArchive": {"url": "s3://x"},
+            "backupSetRef": "b",
+            "pointInTime": "2026-09-13T02:00:00Z",
+            "target": {"clusterRef": {"name": TARGET}, "mode": "scratch", "topicNaming": {"prefix": "rehearsal-"}},
+            "deadlineSeconds": 3600
+        },
+        "status": {
+            "phase": "Failed",
+            "exitCode": 3,
+            "exitReason": "PointInTimeByProducerTime",
+            "reason": "guard-refused",
+            "conditions": [{
+                "type": "Failed",
+                "status": "True",
+                "reason": "GuardRefused",
+                "message": "the runner refused the plan",
+                "lastTransitionTime": FINISHED_AT
+            }]
+        }
+    });
+    let mut table = happy_routes();
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/restores/logweir-rehearsal-weekly-orders-20260913-030000",
+        status: 200,
+        body: refused.to_string(),
+    });
+    let (client, _, bodies) = mock_client_recording_bodies(table);
+    let schedule = schedule_with(json!({
+        "activeRestoreRef": {"name": "logweir-rehearsal-weekly-orders-20260913-030000"}
+    }));
+    rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    let patch = patch_bodies(&bodies)
+        .into_iter()
+        .find(|b| b.pointer("/status/lastFailed").is_some())
+        .expect("a status patch records the failure");
+    assert_eq!(
+        patch
+            .pointer("/status/lastFailed/reason")
+            .and_then(Value::as_str),
+        Some("PointInTimeByProducerTime"),
+        "{patch}"
+    );
+    let health = patch["status"]["conditions"]
+        .as_array()
+        .and_then(|c| c.iter().find(|c| c["type"] == "RehearsalHealthy").cloned())
+        .expect("RehearsalHealthy is published");
+    assert_eq!(health["status"], "False", "{health}");
 }

@@ -20,12 +20,11 @@ mark without one). The supported path these notes assume is
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
-published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10) and 24 (FX-3), from
-the product-expansion tracker's fix-now rows, and item 25 (PROD-00.3f, the
-engine pin), land after `fdb48cd8`, and so do
-FX-7's additions to item 11 (the execution-claim set check, receipt and
-catalog format 1.2.0, the pin's read by version id) and FX-4's format 1.1.0,
-which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
+published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10), 24 (FX-3), 25
+(FX-13), 26 (FX-11) and 27 (FX-8), from the product-expansion tracker's fix-now
+rows, and item 28 (PROD-00.3f, the engine pin), land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
+execution-claim set check, receipt and catalog format 1.2.0, the pin's read
+by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
@@ -180,7 +179,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-five operator-facing changes
+### The twenty-eight operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -193,9 +192,15 @@ upgrade that carries each runs its rows. Item 23 is fix-now row FX-10, proven
 offline; the PoC upgrade that carries it checks that the PoC's policy
 document and its digest are unchanged (the PoC sets neither withdrawn key).
 Item 24 is fix-now row FX-3, proven on a compose stack (it changes the
-runner's signed scorecard, not the controller). Item 25 is PROD-00.3f, the
-engine pin, proven on a compose stack; the PoC upgrade that carries it runs its
-controller and runner rows.
+runner's signed scorecard, not the controller).
+Item 25 is fix-now row FX-13 and is not proven live yet: the PoC upgrade that
+carries it runs two clients through Traefik. Item 26 is fix-now row
+FX-11 and is not proven live yet: the PoC upgrade that carries it runs its
+rows.
+Item 27 is fix-now row FX-8, proven on the compose stack; the PoC upgrade that
+carries it runs its refusal and opt-in rows.
+Item 28 is PROD-00.3f, the engine pin, proven on a compose stack; the PoC
+upgrade that carries it runs its controller and runner rows.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -989,7 +994,250 @@ and script 1.15.0 at main `b8b9263f`, FX-7's script 1.16.0, and `v0.1.5`
 **Rollback:** an older runner writes 1.1.0 scorecards with the old labels again.
 The 1.2.0 scorecards already written stay valid under older and newer readers.
 
-#### 25. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
+#### 25. The sign-in limit counts each client behind the trusted ingress, not the ingress (FX-13)
+
+**Changed.** `/auth/login` and `/auth/callback` allow 20 requests a minute.
+The count was kept per **socket peer**, and behind the shared console's
+ingress every request has the ingress as its peer, so the limit was one budget
+for everyone: about ten sign-ins a minute across all users, and one
+unauthenticated client could block every sign-in for a minute at a time. The
+count is now kept per **client**: when the socket peer is a trusted proxy
+(`api.console.trustedProxyService` or `trustedProxyCidrs`, the same check the
+`requireTrustedProxy` gate makes), the client is the rightmost
+`X-Forwarded-For` hop that is not itself a trusted proxy; from any other peer,
+or with no usable hop, it is the peer, as before. Only `X-Forwarded-For` is
+read, never `Forwarded`. An IPv6 client is counted by its `/64`. There is no
+budget over all clients, on purpose — a global one, at any height, is a
+lockout for whoever holds enough addresses — and when 65,536 clients hold live
+windows in one console process, a new client is served without a window
+instead of refused. The forwarded address chooses a counter only; it is never
+an identity, a grant or an audit actor ([api.md](api.md), *Rate limits*;
+D0's amendment of 2026-10-07).
+
+What an operator sees after the console image is upgraded:
+
+- **Through the ingress, with a trusted proxy configured** (the PoC profile:
+  `trustedProxyService: {namespace: traefik, name: traefik}`), **and the
+  client's own address reaching the ingress**: one person's failed or repeated
+  sign-ins no longer refuse anyone else's. If kube-proxy or a load balancer
+  replaces client addresses before Traefik (the Traefik chart's default
+  `externalTrafficPolicy: Cluster` on a multi-node cluster, a load balancer in
+  instance mode), clients through one node still share its budget: keep the
+  address with `externalTrafficPolicy: Local`, the PROXY protocol, or an L7 hop
+  trusted at both Traefik and the console.
+- **New audit notes** on sign-in requests: `loginRateKey` (`forwardedClient`
+  or `peer`, which counter the request spent) and, only when the table is
+  full, `loginRateUntracked: tableFull`, with at most one warning a minute in
+  the console log.
+- **No trusted proxy configured:** nothing changes; the ingress is the peer,
+  and its one budget is still everyone's.
+
+**Do:** if sign-ins are refused `429` behind the ingress after the upgrade,
+check that the ingress is a trusted proxy (`trustedProxyService` naming the
+ingress controller's Service) — the audit's `loginRateKey: peer` on a request
+that came through it says it is not. Keep the ingress from passing a client's
+own `X-Forwarded-For` through: Traefik's `forwardedHeaders.trustedIPs: []`
+with `insecure: false` (its default, and `deploy/poc/traefik.values.yaml`)
+deletes it. Check `trustedProxyCidrs`: without `requireTrustedProxy` a range
+has no width floor, and a range wider than the ingress's pods now lets a
+client in it choose its sign-in budget, including another client's. And plan
+for the residual this design leaves at the identity provider: sign-in
+requests reach it authenticated as this console, so a many-address attack can
+spend the provider's per-client quota for it. Set that quota generously,
+alert on `loginRateUntracked` and on the warning `a sign-in was refused` that
+names `the provider answered HTTP 429`, and keep the in-cluster administrator
+mode (`kubectl port-forward`) as the break-glass path ([api.md](api.md),
+*Rate limits*).
+**Scope:** `crates/logweir-api/src/http.rs` (`login_rate_key`, six unit rows),
+`crates/logweir-api/src/auth/ratelimit.rs` (the `/64` fold and the NAT64
+prefix, no global budget, the 65,536-key bound with its memory, the sweep rate
+and the once-a-window warning), and ten rows through the real router in
+`crates/logweir-api/tests/entry_point.rs` (two clients, one client through two
+proxies, a forged header from an untrusted peer, an unread and a stale proxy
+Service, a chain with no client hop, an IPv6 `/64`, NAT64 clients, a spray
+past the table, 40 clients × 20 requests all served, and a refused exchange
+naming the provider's status), with the mutants of the FX-13 report and its
+review killed. Not
+yet proven live: the PoC upgrade that carries FX-13 runs two clients through
+Traefik. **Rollback:** an older console image keys the limit on the socket
+peer again — one budget behind the ingress — and writes neither audit note.
+Nothing is stored; the counters are in memory.
+
+#### 26. A Job pod the namespace refuses is reported at once, in the admission's words, by every kind (FX-11)
+
+**Changed.** A pod a `ResourceQuota`, a `LimitRange`, an admission webhook or a
+missing ServiceAccount refuses at creation leaves one trace: the Job
+controller's `FailedCreate` event on the Job. Only a `Backup`'s and a
+`Restore`'s runner, a `Preflight` and an evidence fetch read it. The other
+Job-owning controllers read no events, so their objects waited out the Job's
+own deadline and then named only that: `PodNotStarted` and `DeadlineExceeded`
+on a `TopicDiscovery` and a catalog sync, `Resolving` and then
+`DiscoveryFailed` on a dynamic `Backup`, `ProbeRunning` for two minutes and
+then `NoExitCode` on a `KafkaCluster`, "the delivery Job finished with no exit
+code" three times on a `ProtectionPolicy`, and `RunFailed` "produced no exit
+code" on a `RetentionPolicy`. Every one of them now reads the event through the
+shared waiting classifier. Once the Job has had no pod for 30 seconds (the
+`Preflight` grace) and the event says why, the Job is cancelled and the object
+names the refusal with the admission's own words: `PodCreateRejected` for the
+check kinds, and `PodCreationForbidden` for the runner kinds. That is the
+`KafkaCluster`'s `Reachable` condition and `status.reason`, a delivery attempt's
+`lastError`, a retention run's `Enforced` condition, and a dynamic `Backup`'s
+terminal state ([kubernetes.md](kubernetes.md) §12, *The runner's requests
+and limits*, lists each kind).
+
+What changes on the upgrade:
+
+- **New values where alert rules and dashboards match.** A `KafkaCluster` can
+  carry `status.reason: PodCreationForbidden` where it carried `NoExitCode`, a
+  `RetentionPolicy` can carry `Enforced=False/PodCreationForbidden` where it
+  carried `RunFailed`, and a dynamic `Backup` whose discovery pod is refused
+  ends `PodCreationForbidden` where it ended `DiscoveryFailed`.
+- **A schedule no longer retries a refused discovery.** `DiscoveryFailed` is
+  retried by a `BackupSchedule`'s `spec.retry`; `PodCreationForbidden` is
+  not, exactly as for a `Backup` whose runner pod is refused. The next slot
+  runs normally.
+- **A probe that produced no verdict clears `reachable` and is probed again**
+  (PoC batch 1, O-1). A probe Job that crashed, lost its pod, was refused, or
+  printed no contract line used to leave an earlier `reachable: true` beside
+  `Reachable=Unknown`, and a crashed or refused one was never replaced, so the
+  connection was never probed again (all twelve PoC connections, for a week).
+  Now `reachable` is cleared (`clusterId` is kept, as the identity last
+  observed), the finished Job gets the usual five-minute TTL, and the next
+  probe runs on the ordinary cadence. A refusal never writes `observedAt`.
+  **A `Restore` or a rehearsal against a cluster whose newest probe could not
+  vouch for it is now refused `ClusterNotReachable`** where a stale `true`
+  used to admit it; the next successful probe, within about five and a half
+  minutes, admits it again. On the upgrade, every connection stuck behind a
+  terminal probe Job reads `reachable` cleared on its first pass and is
+  re-probed within one cadence.
+- **A `RetentionPolicy` that declares a provider rule clears an earlier
+  evaluation.** `mode: ExternalLifecycle` writes `Evaluated=Unknown`; a policy
+  that was `Report` or `Enforce` before kept its `lastEvaluation` beside it,
+  so the console showed a plan preview this mode never makes. It is now
+  cleared, and the next evaluation (in `Report` or `Enforce`) writes a fresh one.
+- **Retries stay bounded.** A refused delivery is a failed attempt, so it is
+  retried by the ordinary backoff, three attempts in all. A refused retention
+  run counts toward `EnforcementDegraded`, so three in a row stop scheduling.
+- **The cost.** One `list` of core `events`, by `involvedObject.uid` with
+  `limit=20`, per pass of a Job that has had no pod for 30 seconds. A Job
+  whose pod exists costs nothing. The `list` on `events` is the grant the
+  `weirkeeper` role has carried since `Preflight`, bound in every namespace
+  the controller acts in under both binding modes.
+
+**Do:** see which namespaces refuse Logweir pods today. Each line is a Job the
+Job controller could not give a pod:
+
+```bash
+kubectl --context <ctx> get events -A --field-selector reason=FailedCreate \
+  -o custom-columns=NS:.metadata.namespace,JOB:.involvedObject.name,WHY:.message
+```
+
+Before the upgrade, list the connections whose `reachable` rests on an
+earlier probe than their newest verdict: `kubectl --context <ctx> get
+kafkaclusters -A` and look for a `REACHABLE` value beside a reason other than
+`Reachable` or `ProbeReportedUnreachable`. Each one is cleared on the
+upgrade and re-probed; a `Restore` waiting to be admitted against it waits
+for that probe. Give each namespace a `LimitRange` default, or room in its `ResourceQuota`,
+for Jobs that state no resources. Add `PodCreationForbidden` wherever an alert
+rule or dashboard matches `NoExitCode`, `DiscoveryFailed` or `RunFailed` on
+these kinds. A schedule that relied on `spec.retry` to ride out quota
+contention needs the quota fixed instead. **Scope:**
+`crates/weirkeeper/tests/topic_discovery_controller.rs` (a quota and a
+`LimitRange` refusal, the Job cancelled), `recovery_catalog_controller.rs` (the
+running pass and the harvest of the cancelled Job), `backup_selection.rs` (the
+`Backup` ends `PodCreationForbidden` and creates no runner Job),
+`kafka_cluster_controller.rs` (`reachable` cleared, `observedAt` untouched,
+the status before the TTL, a crashed Job replaced), `protection_controller.rs` (cancel, status, TTL, and the third attempt is
+the last) and `retention_policy_controller.rs` (named at once, harvested with its lease released only after the cancelled Job has finished, counted, and degraded
+on the third). Each row has a negative control with no event, or another Job's,
+which keeps the path from before, and `check_framework.rs` pins both grace
+boundaries and the no-pod pre-filter. Planted mutants were each killed (FX-11).
+Not yet proven live: the PoC upgrade that carries FX-11 runs its rows.
+**Rollback:** an older controller reads no events in these kinds again, and
+refused pods wait out their Job's deadline as before. An object this build
+ended (a `TopicDiscovery`, a `Backup`) keeps its `PodCreateRejected` or
+`PodCreationForbidden`. A `KafkaCluster`, a delivery and a retention policy
+are rewritten by the older controller's next verdict; an older controller
+leaves a crashed probe's Job in place again, and an ExternalLifecycle policy's
+cleared `lastEvaluation` stays absent until its next evaluation. Nothing has to be
+deleted, and the role is unchanged.
+
+#### 27. A point-in-time restore of a `LogAppendTime` topic is refused unless its plan selects by producer time (FX-8)
+
+**Changed.** The archive holds each record's PRODUCER timestamp, so a
+point-in-time restore of a topic on `message.timestamp.type=LogAppendTime`
+selected records by the producers' clocks and was signed `pass`: PROD-01.1
+restored, at a recovery point in 2001, six records the broker had appended in
+2026. The runner now refuses a plan that selects such a topic by time — it
+states `restore.point_in_time`, or its `sample.window_end` cuts the archive —
+with exit 3 and `refusal-reason=PointInTimeByProducerTime`, after the archive
+is described and before any target topic is created. The topic counts as
+`LogAppendTime` when the archive manifest records that topic override, or when
+the bound, verified backup receipt recorded it as the topic's effective value
+(a broker-wide default; receipts since FX-4). A plan that states
+`restore.time_basis: producerTime`, approved with it, runs, and its signed
+scorecard — format **1.3.0** — lists the topic under
+`source.time_basis.producer_time`. A topic selected by time whose type nothing
+recorded runs and is listed under `source.time_basis.not_recorded`. Full
+restores still run. `logweir drill verify`, `verify_scorecard.py` 1.18.0 and
+`logweir drill show` print the label; both verifiers also say, for a backup
+receipt, which topics it records as `LogAppendTime`. The controller copies the
+signed label onto `Restore.status.timeBasis` (a new optional status field) and
+the product API serves it as `timeBasis`; the console's Restore detail shows the
+signed lists and warns about a topic whose type was not recorded. The console's
+restore wizard offers the opt-in, shows it on the review step and warns when a
+plan takes it
+([stability.md](stability.md#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time),
+[drill-spec.md](formats/drill-spec.md#restoretime_basis-fx-8),
+[the scorecard format](formats/drill-scorecard.md#sourcetime_basis-format-130)).
+
+What changes on the upgrade:
+
+- **A point-in-time `Restore` of a `LogAppendTime` topic** that ran before is
+  refused after the runner image is upgraded: `Failed`, exit 3, `exitReason:
+  PointInTimeByProducerTime`, nothing created. The remedy is a new plan with
+  `restore.time_basis: producerTime` and a new approval, when restoring by the
+  producers' clocks is what you want.
+- **A `RehearsalSchedule` over such a topic** that states no
+  `spec.point.timeBasis` has every slot refused the same way, and records
+  `lastFailed.reason: PointInTimeByProducerTime` with `RehearsalHealthy=False`.
+  The new optional `spec.point.timeBasis: producerTime` renders the opt-in into
+  every slot's plan; it is inside `templateDigest`, so it takes a new schedule
+  and a new standing authorization ([kubernetes.md](kubernetes.md) §7g). The CRD
+  gains the field: apply the CRDs before the controller rolls.
+- **A scorecard written by the new runner is format 1.3.0.** Readers built
+  before FX-8 accept it and ignore the block.
+
+**Do:** before the runner image rolls, find the source topics your
+point-in-time restores and rehearsals name that are `LogAppendTime`, by topic
+override or by the broker's default. With `--all` the describe prints every
+topic's EFFECTIVE value, a broker default included (its synonym reads
+`DYNAMIC_DEFAULT_BROKER_CONFIG`), so this one command names both kinds:
+
+```bash
+kafka-configs.sh --bootstrap-server <source> --describe --entity-type topics --all \
+  | awk '/configs for topic/ {t=$5} /^ *message.timestamp.type=LogAppendTime/ {print t}'
+```
+
+For each, decide whether a restore by the producers' clocks is acceptable; if
+it is, add `restore.time_basis: producerTime` to the plan and re-approve it.
+For a `RehearsalSchedule` over such a topic, create a new schedule with
+`spec.point.timeBasis: producerTime` and sign its authorization, or suspend the
+old one. **Scope:**
+`crates/logweir-core/src/time_basis.rs` (both arms, the opt-in, the unknown
+case and the `CreateTime` control), `crates/logweir/tests/orchestrator.rs`
+(refused before any target topic, the label, the opt-in inside the approved
+bytes, the broker-default arm), the four scorecard arms in both readers with
+the invariant corpus and the parity gate, the console rows, and planted
+mutants, each killed (FX-8). Live, on the compose stack:
+`e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output`
+and `e2e/tests/config_coverage.rs::fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt`.
+Not yet proven on the PoC: the upgrade that carries FX-8 runs those rows.
+**Rollback:** an older runner ignores `restore.time_basis` and runs the
+selections this build refuses, unlabelled, signing format 1.1.0 again. The 1.3.0
+scorecards already written stay valid under both readers.
+
+#### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
 **Changed.** The runner image carries `kafka-backup` **0.23.3** (image digest
 `sha256:cc7d5a8a…`, upstream commit `afb160e7`), OSO's newest release on
@@ -1143,7 +1391,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22, 23, 24 and 25, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26, 27 and 28, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.
@@ -1258,7 +1506,8 @@ policy or roster ([keys.md](keys.md)).
   submission, read-only protection, rehearsal, retention and trust policies,
   the namespace's approval policy, cadence previews, and the shared console's
   sign-in routes (`/auth/login`, `/auth/callback`, session logout). Its
-  component schemas grew from 66 to 257; none was removed.
+  component schemas grew from 66 to 258 (FX-8 added `RestoreTimeBasisView`,
+  served as a restore's optional `timeBasis`); none was removed.
 - **No in-place runner signing-key cutover** ([keys.md](keys.md), step 2 of
   *The supported procedure*).
 - **Restore admission does not hold on a retention lease** (above).

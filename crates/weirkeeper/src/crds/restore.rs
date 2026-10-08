@@ -176,6 +176,30 @@ pub struct Integrity {
     pub partial_reason: Option<String>,
 }
 
+/// **FX-8.** The signed scorecard's `source.time_basis` (format 1.3.0), as
+/// the controller read it: which source topics the restore's time selection
+/// read by the PRODUCERS' clocks (recorded `LogAppendTime`, accepted by the
+/// plan's `restore.time_basis: producerTime`), and which it selected by time
+/// while their timestamp type was NOT RECORDED. The scorecard's snake_case
+/// names in this resource's camelCase.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreTimeBasis {
+    /// The approved plan's `restore.time_basis`: `producerTime`, or absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 32))]
+    pub plan: Option<String>,
+    /// Source topics selected by producer time.
+    #[serde(default)]
+    #[schemars(length(max = 256), inner(length(max = 249)))]
+    pub producer_time: Vec<String>,
+    /// Source topics selected by time whose timestamp type was not recorded:
+    /// the clock their point in time was read on is unknown.
+    #[serde(default)]
+    #[schemars(length(max = 256), inner(length(max = 249)))]
+    pub not_recorded: Vec<String>,
+}
+
 /// What phase 0 found out about the target topics before writing anything.
 ///
 /// Guard **G-TS**. Not a scorecard field: it is returned by phase 0 in
@@ -457,6 +481,16 @@ pub struct RestoreStatus {
     /// What the run achieved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured: Option<Measured>,
+    /// **FX-8 (review M-2).** The signed scorecard's `source.time_basis`,
+    /// copied when the controller read the document, like `outcome` and
+    /// `integrity`: a CLAIM until `evidence.verification` says `Valid`.
+    /// ABSENT means not recorded — a scorecard before format 1.3.0, a run
+    /// that signed none (a refusal), or one not read yet — and is never read
+    /// as "every selection used the topics' own clocks". Absent too when the
+    /// document's block is malformed or a list holds more than 256 topics: a
+    /// partial list would be a claim the signed document does not make.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_basis: Option<RestoreTimeBasis>,
     /// What was asked for, and whether it was met (interface **I34**).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objectives: Option<Objectives>,

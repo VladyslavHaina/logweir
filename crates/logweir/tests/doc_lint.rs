@@ -1633,11 +1633,35 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// restore fails here, and the notes at main `19b5ecd9`, with twenty-three
 /// items, fail the twenty-four pin (FX-3 fix round, 2026-10-07).
 ///
-/// Then to twenty-five: item 25 is PROD-00.3f's engine pin (0.23.3). Its token
-/// is the variable a standalone CLI install must change with the engine, so an
-/// item 25 that stops telling that operator what to change fails here, and the
-/// notes at the branch base `fcaae178`, with twenty-four items, fail the
-/// twenty-five pin (PROD-00.3f, 2026-10-08).
+/// Then to twenty-five: item 25 is FX-13's sign-in limit, counted per client
+/// behind the trusted ingress instead of per socket peer. Its token is the
+/// audit note an operator reads to tell which counter a refused sign-in
+/// spent. The notes at main's `fcaae178`, with twenty-four items, fail the
+/// twenty-five pin, and so does an item 25 without its token (FX-13, after
+/// FX-3 took 24, 2026-10-07).
+///
+/// Then to twenty-six: item 26 is FX-11's — every Job-owning controller now
+/// reports a pod the namespace refused at creation, with new reason values
+/// where alert rules match and a refused discovery no schedule retries. Its
+/// token is the read that shows an operator which namespaces refuse Logweir
+/// pods today. The notes at main's `99e3802e`, with twenty-five items, fail
+/// the twenty-six pin (FX-11, after FX-13 took 25, 2026-10-07).
+///
+/// Then to twenty-seven: item 27 is FX-8's runner change (a point-in-time
+/// restore of a `LogAppendTime` topic is refused unless its plan selects by
+/// producer time). Its token is the refusal an operator will see on the
+/// `Restore`, and it is held, below, to the pre-upgrade inventory of the
+/// topics it applies to and to the opt-in. The notes at main's `917f0241`,
+/// with twenty-six items, fail the twenty-seven pin (FX-8 fix round,
+/// 2026-10-07; item 23 when first written, renumbered after FX-10, FX-3,
+/// FX-13 and FX-11).
+///
+/// Then to twenty-eight: item 28 is PROD-00.3f's engine pin (0.23.3). Its
+/// token is the variable a standalone CLI install must change with the
+/// engine, so an item 28 that stops telling that operator what to change
+/// fails here, and the notes at main's `2c277dc1`, with twenty-seven items,
+/// fail the twenty-eight pin (PROD-00.3f fix round, 2026-10-08; item 25 when
+/// first written, renumbered after FX-13, FX-11 and FX-8).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1663,9 +1687,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=25).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-five operator-facing changes, `#### 1.` \
-         to `#### 25.` in order; found {numbers:?}"
+        (1..=28).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-eight operator-facing changes, `#### 1.` \
+         to `#### 28.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1721,6 +1745,21 @@ fn the_release_notes_carry_every_owed_operator_action() {
         (
             "not-reconstructed source settings",
             "topic_parity.not_reconstructed",
+        ),
+        // FX-13 (2026-10-07): the sign-in limit per client behind the
+        // trusted ingress, and the audit note that says which counter.
+        ("the sign-in limit per client", "loginRateKey"),
+        // FX-11 (2026-10-07): every Job-owning controller reports a refused
+        // pod; the operator's read of which namespaces refuse one today.
+        (
+            "a refused Job pod is reported by every kind",
+            "--field-selector reason=FailedCreate",
+        ),
+        // FX-8 (2026-10-07): a point-in-time restore of a LogAppendTime topic
+        // is refused unless its plan selects by producer time.
+        (
+            "a LogAppendTime point in time refused or labelled",
+            "PointInTimeByProducerTime",
         ),
         // PROD-00.3f (2026-10-08): the engine pin moved to 0.23.3; a
         // standalone install changes its engine identity with it.
@@ -1817,6 +1856,27 @@ fn the_release_notes_carry_every_owed_operator_action() {
                  name it: {text}"
             );
         }
+    }
+
+    // ITEM 27 OWES the inventory an operator runs before the runner rolls --
+    // which source topics are LogAppendTime, by override or broker default,
+    // printed by name (review L-4) -- and the opt-in that restores them
+    // knowingly (FX-8).
+    let (_, fx8) = items
+        .iter()
+        .find(|(n, _)| *n == 27)
+        .expect("docs/release-notes.md carries item 27");
+    for owed in [
+        // Review L-4: the inventory prints topic NAMES, and `--all` covers
+        // a broker default too.
+        "/^ *message.timestamp.type=LogAppendTime/ {print t}",
+        "restore.time_basis: producerTime",
+        "RehearsalSchedule",
+    ] {
+        assert!(
+            fx8.contains(owed),
+            "docs/release-notes.md item 27 (FX-8) no longer carries `{owed}` in its own section"
+        );
     }
 
     // The six required actions, numbered, in the section that orders them.

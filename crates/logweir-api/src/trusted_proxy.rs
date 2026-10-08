@@ -41,9 +41,11 @@
 //! reuse, and IP allocators do not hand a released address straight back.
 //!
 //! NOTHING HERE IS AN IDENTITY INPUT. As with the static list, a trusted peer
-//! may only have its forwarded headers RECORDED and satisfy the entry-point
-//! gate; no authentication, authorization, redirect or callback decision reads
-//! a forwarded header (D0).
+//! may only have its forwarded headers RECORDED, choose the sign-in
+//! rate-limit bucket by its `X-Forwarded-For` (`crate::http::login_rate_key`,
+//! FX-13; a bucket can only refuse), and satisfy the entry-point gate; no
+//! authentication, authorization, redirect or callback decision reads a
+//! forwarded header (D0, amended 2026-10-07).
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;

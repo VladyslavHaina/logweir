@@ -258,6 +258,7 @@ for e in entries:
 PYEOF
 
 receipt_count=0
+receipt_tb_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
     receipt_count=$((receipt_count + 1))
@@ -319,6 +320,36 @@ $rust_cov
   python:
 $py_cov"
         fi
+        # FX-8: both readers name each topic whose recorded effective
+        # `message.timestamp.type` is LogAppendTime — its covered window is the
+        # producers' time — in the SAME `time basis:` lines, one per such topic
+        # in name order. The expected topics are read from the DOCUMENT, not
+        # from the case's name, so a case added later is held to it too; and
+        # at least one accepted case must carry such a topic (below), so a
+        # reader that dropped the lines cannot pass by silence.
+        rust_tb="$(grep -oE 'time basis: .*' "$tmp/rust.all" || true)"
+        py_tb="$(grep -oE 'time basis: .*' "$tmp/py.all" || true)"
+        if [ "$rust_tb" != "$py_tb" ]; then
+            fail "$name: the two readers print DIFFERENT time-basis lines.
+  rust:
+$rust_tb
+  python:
+$py_tb"
+        fi
+        want_tb="$("$PY" -c 'import json, sys
+cov = json.load(open(sys.argv[1])).get("config_coverage") or {}
+for t in sorted(cov):
+    if ((cov[t] or {}).get("timestamp_type") or {}).get("value") == "LogAppendTime":
+        print("time basis: " + json.dumps(t) + " is LogAppendTime")' "$doc")"
+        got_tb="$(printf '%s\n' "$rust_tb" | sed -n 's/^\(time basis: ".*" is LogAppendTime\).*/\1/p')"
+        if [ "$got_tb" != "$want_tb" ]; then
+            fail "$name: the time-basis lines do not name exactly the receipt's LogAppendTime topics.
+  want:
+$want_tb
+  got:
+$rust_tb"
+        fi
+        [ -z "$want_tb" ] || receipt_tb_cases=$((receipt_tb_cases + 1))
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -326,6 +357,9 @@ done <<< "$(cat "$tmp/receipt-cases.tsv")"
 
 if [ "$receipt_count" -eq 0 ]; then
     fail "walked zero backup-receipt cases; e2e/fixtures/invariants/backup-receipt-index.json is empty or unreadable"
+fi
+if [ "$receipt_tb_cases" -eq 0 ]; then
+    fail "no accepted backup-receipt case records a LogAppendTime topic, so the time-basis lines (FX-8) were never compared"
 fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
 
@@ -888,3 +922,144 @@ for refusal in "dropped-not-moved-1.2.0|NR-2|$NR2_MSG" \
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (arm $arm)"
 done
 echo "check-verifier-parity: both readers accept 1.2.0 scorecards, say the same about reconstruction, and refuse a not-reconstructed setting an older reader could not see, a newTopic document with the scratch labels, and a decided setting the block omits"
+
+# ---------------------------------------------------------------------------
+# TIME-BASIS LOOP (FX-8): the scorecard's `source.time_basis`, and what its
+# exit 0 says about the clock a restore's time selection read.
+# ---------------------------------------------------------------------------
+#
+# Four documents both readers ACCEPT, and the `time basis:` lines each must
+# print — the SAME lines from both:
+#
+#   absent-1.0.0     the frozen 1.0.0 document, no block: the one line saying
+#                    it was NOT RECORDED, never silence
+#   empty            the block with both lists empty: no line (the claim that
+#                    nothing was selected by producer time or with an
+#                    unrecorded type)
+#   producer-time    `plan: producerTime` and one topic selected by producer
+#                    time: its line
+#   not-recorded     one topic selected by time with no recorded type: its line
+#
+# and two both readers REFUSE with the same full text: arm TB-3 (a topic
+# selected by producer time in a document whose plan did not accept it) and
+# arm TB-1 (the block under a version that predates it). Generated and signed
+# here with the throwaway fixture key, like the fourth loop's documents.
+#
+# The scorecard format that defines `source.time_basis` —
+# `logweir_core::FORMAT_VERSION` at FX-8 and `TIME_BASIS_SINCE_MINOR`; a
+# renumber moves all three.
+SCORECARD_TIME_BASIS_VERSION="1.3.0"
+mkdir -p "$tmp/scorecard-tb"
+"$PY" - "$ROOT" "$tmp/scorecard-tb" "$SC_PT" "$SCORECARD_TIME_BASIS_VERSION" <<'PYEOF'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+root, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+current = sys.argv[4]
+fix = root / "e2e" / "fixtures" / "signed"
+key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+base = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
+
+
+def with_block(version, block):
+    d = json.loads(json.dumps(base))
+    d["format_version"] = version
+    d["source"]["time_basis"] = block
+    return d
+
+
+cases = {
+    "absent-1.0.0": json.loads(json.dumps(base)),
+    "empty": with_block(current, {"producer_time": [], "not_recorded": []}),
+    "producer-time": with_block(
+        current, {"plan": "producerTime", "producer_time": ["orders"], "not_recorded": []}),
+    "not-recorded": with_block(current, {"producer_time": [], "not_recorded": ["orders"]}),
+    "producer-time-without-the-plan": with_block(
+        current, {"producer_time": ["orders"], "not_recorded": []}),
+    "block-under-1.1.0": with_block("1.1.0", {"producer_time": [], "not_recorded": []}),
+}
+for name, doc in cases.items():
+    payload = (json.dumps(doc, indent=2) + "\n").encode()
+    t = pt.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{name}.json").write_bytes(payload)
+    (out / f"{name}.sig").write_text(json.dumps(
+        {"payloadType": pt,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+PYEOF
+
+for name in absent-1.0.0 empty producer-time not-recorded; do
+    doc="$tmp/scorecard-tb/$name.json"
+    sig="$tmp/scorecard-tb/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 0 ] || { cat "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 0"; }
+    [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 0"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_line="$(grep -oE 'time basis: .*' "$tmp/rust.all" || true)"
+    py_line="$(grep -oE 'time basis: .*' "$tmp/py.all" || true)"
+    if [ "$rust_line" != "$py_line" ]; then
+        fail "scorecard/$name: the two readers say different things about the time basis.
+  rust:   $rust_line
+  python: $py_line"
+    fi
+    case "$name" in
+        absent-1.0.0) want="time basis: not recorded, so whether a time selection read a LogAppendTime topic's producer timestamps is unknown" ;;
+        empty) want="" ;;
+        producer-time) want="time basis: SELECTED BY PRODUCER TIME for orders (recorded as LogAppendTime; the approved plan states restore.time_basis: producerTime)" ;;
+        not-recorded) want="time basis: timestamp type NOT RECORDED for orders, so its time selection may have read producer timestamps" ;;
+    esac
+    if [ "$rust_line" != "$want" ]; then
+        fail "scorecard/$name: expected the time-basis line to be \"$want\", got: \"$rust_line\""
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (time basis)"
+done
+
+# The two refusals, on FULL text once each reader's own prefix is stripped: the
+# script's `INVALID: `, and on the Rust side `RUST_PREFIX` plus the scorecard's
+# `scorecard invariant violated: ` (an `InvariantError`'s Display).
+for name in producer-time-without-the-plan block-under-1.1.0; do
+    doc="$tmp/scorecard-tb/$name.json"
+    sig="$tmp/scorecard-tb/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 4"; }
+    [ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 1"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
+    py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
+    case "$name" in
+        producer-time-without-the-plan) want_msg='source.time_basis.producer_time names a topic but source.time_basis.plan is not "producerTime"; a selection by producer time is one the approved plan accepted, never a default' ;;
+        block-under-1.1.0) want_msg="source.time_basis is present but format_version \"1.1.0\" predates it: the field is defined from $SCORECARD_TIME_BASIS_VERSION" ;;
+    esac
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
+        fail "scorecard/$name: the refusal differs between the two readers or from its arm.
+  rust:   $rust_msg
+  python: $py_msg
+  want:   $want_msg"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (time basis refused)"
+done
+echo "check-verifier-parity: both readers accept $SCORECARD_TIME_BASIS_VERSION scorecards, say the same about the time basis, and refuse a producer-time selection the plan did not accept"

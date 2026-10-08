@@ -243,8 +243,28 @@ fn restore_spec(
     pit: Option<i64>,
     sample: (i64, i64),
 ) -> serde_yaml::Value {
+    restore_spec_with_basis(backup_id, source, prefix, pit, sample, false)
+}
+
+/// `restore_spec`, and with `producer_time` the plan also states
+/// `restore.time_basis: producerTime` (FX-8): it accepts a point-in-time
+/// selection by the producers' clocks over a `LogAppendTime` source, which the
+/// runner otherwise refuses with `PointInTimeByProducerTime`.
+fn restore_spec_with_basis(
+    backup_id: &str,
+    source: &str,
+    prefix: &str,
+    pit: Option<i64>,
+    sample: (i64, i64),
+    producer_time: bool,
+) -> serde_yaml::Value {
+    let basis = if producer_time {
+        "\x20 time_basis: producerTime\n"
+    } else {
+        ""
+    };
     let restore_block = pit
-        .map(|ms| format!("restore:\n\x20 point_in_time: \"{}\"\n", rfc3339(ms)))
+        .map(|ms| format!("restore:\n\x20 point_in_time: \"{}\"\n{basis}", rfc3339(ms)))
         .unwrap_or_default();
     let (boot, endpoint) = (kafka::bootstrap(), kafka::s3_endpoint());
     serde_yaml::from_str(&format!(
@@ -307,6 +327,10 @@ fn verdict(r: &Run) -> Value {
     json!({
         "exit": r.out.status.code(),
         "outcome": sc["outcome"],
+        // FX-8: what the signed document says about the clock the selection
+        // read, and the refusal line a refused run ends with.
+        "time_basis": sc["source"]["time_basis"],
+        "refusal_reason": pick("refusal-reason=").into_iter().last(),
         "integrity": sc["integrity"],
         "records_restored": sc["sample"]["records_restored"],
         "summary": pick("run ").into_iter().find(|l| l.starts_with("run ")),
@@ -454,8 +478,22 @@ fn restore(
     pit: Option<i64>,
     sample: (i64, i64),
 ) -> Restored {
+    restore_with_basis(row, label, backup_id, source, pit, sample, false)
+}
+
+/// `restore`, with the plan's `restore.time_basis: producerTime` when
+/// `producer_time` (FX-8).
+fn restore_with_basis(
+    row: &mut Row,
+    label: &str,
+    backup_id: &str,
+    source: &str,
+    pit: Option<i64>,
+    sample: (i64, i64),
+    producer_time: bool,
+) -> Restored {
     let (prefix, target) = row.target(label, source);
-    let spec = restore_spec(backup_id, source, &prefix, pit, sample);
+    let spec = restore_spec_with_basis(backup_id, source, &prefix, pit, sample, producer_time);
     let run = run_restore_within(spec, RESTORE_DEADLINE_SECS);
     let verdict = verdict(&run);
     eprintln!(
@@ -1365,6 +1403,14 @@ fn non_monotonic_create_time_inside_a_wholly_inside_segment() {
 /// * end to end: every record's timestamp and timestamp type change;
 /// * point in time: selection follows the producer's clock, so a recovery
 ///   point in 2001 restores records the source did not hold until the run.
+///
+/// **FX-8.** That point-in-time restore is now REFUSED, exit 3,
+/// `refusal-reason=PointInTimeByProducerTime`, before any target topic is
+/// created, because the manifest records the topic override
+/// `message.timestamp.type=LogAppendTime`; the SAME plan with
+/// `restore.time_basis: producerTime` runs as before and its signed scorecard
+/// lists the topic under `source.time_basis.producer_time`. The full restore
+/// is not a selection by time, so it still runs, unlabelled.
 #[test]
 fn log_append_time_source_versus_restored_output() {
     let mut row = Row::new("lat");
@@ -1410,14 +1456,27 @@ fn log_append_time_source_versus_restored_output() {
     // existed then, so the model is empty.
     let archived_create_time = archive.records.iter().all(|r| r.timestamp < C0 + 10_000);
     let pit = C0 + 1500;
-    let pit_restore = archived_create_time.then(|| {
+    // FX-8: the plan WITHOUT the opt-in is refused before any target exists.
+    let refused = archived_create_time.then(|| {
         restore(
+            &mut row,
+            "pit-refused",
+            &backup_id,
+            &topic,
+            Some(pit),
+            (C0 - 1000, pit),
+        )
+    });
+    let refused_target_created = refused.as_ref().map(|r| topic_exists(&r.target));
+    let pit_restore = archived_create_time.then(|| {
+        restore_with_basis(
             &mut row,
             "pit",
             &backup_id,
             &topic,
             Some(pit),
             (C0 - 1000, pit),
+            true,
         )
     });
     let (rep_pit, e2e_pit) = match &pit_restore {
@@ -1429,6 +1488,9 @@ fn log_append_time_source_versus_restored_output() {
     };
     let mut restores: Vec<(&str, &Restored, &[Divergence], &[Divergence])> =
         vec![("full", &full, &rep_full[..], &e2e_full[..])];
+    if let Some(r) = &refused {
+        restores.push(("pit-refused", r, &[], &[]));
+    }
     if let Some(pr) = &pit_restore {
         restores.push(("pit", pr, &rep_pit[..], &e2e_pit[..]));
     }
@@ -1445,6 +1507,7 @@ fn log_append_time_source_versus_restored_output() {
             "archive_holds_producer_create_time": archived_create_time,
             "manifest_configurations": manifest_configurations(&archive, &topic),
             "point_in_time": pit,
+            "pit_refused_target_created": refused_target_created,
             "target_timestamp_types": target_ts_types,
             "source_append_times": source.iter().map(|r| r.timestamp).collect::<Vec<_>>(),
             "archive_timestamps": archive.records.iter().map(|r| r.timestamp).collect::<Vec<_>>(),
@@ -1463,8 +1526,53 @@ fn log_append_time_source_versus_restored_output() {
         "the archive must hold the producers' CreateTime"
     );
     assert_verdict("lat full", &full, 0, "pass");
+    // FX-8: the full restore is not a selection by time: its block is written
+    // and names nothing.
+    assert_eq!(
+        full.verdict["time_basis"],
+        json!({"producer_time": [], "not_recorded": []}),
+        "lat full: {}",
+        full.verdict
+    );
+    // FX-8: the point in time WITHOUT the opt-in is refused, exit 3, before
+    // any target topic exists, naming the topic and the manifest's record.
+    let r = refused.as_ref().expect("the refused restore ran");
+    assert_eq!(
+        (
+            r.verdict["exit"].as_i64(),
+            r.verdict["refusal_reason"].as_str()
+        ),
+        (Some(3), Some("refusal-reason=PointInTimeByProducerTime")),
+        "lat pit-refused: {}",
+        r.verdict
+    );
+    assert!(
+        r.verdict["outcome"].is_null(),
+        "a refused run signs nothing: {}",
+        r.verdict
+    );
+    assert_eq!(
+        refused_target_created,
+        Some(false),
+        "the refusal comes before any target topic is created: {}",
+        r.target
+    );
+    let said = r.verdict["stderr_tail"].to_string() + &r.verdict["stdout_tail"].to_string();
+    assert!(
+        said.contains(&format!(
+            "`{topic}` (the archive manifest's topic override message.timestamp.type=LogAppendTime)"
+        )),
+        "the refusal names the topic and its record: {said}"
+    );
+    // ...and WITH it the same point runs, labelled.
     let pr = pit_restore.as_ref().expect("the point-in-time restore ran");
     assert_verdict("lat pit", pr, 0, "pass");
+    assert_eq!(
+        pr.verdict["time_basis"],
+        json!({"plan": "producerTime", "producer_time": [topic.clone()], "not_recorded": []}),
+        "lat pit: {}",
+        pr.verdict
+    );
     // The per-RECORD timestamp type is not in the archive, but the topic's
     // explicit `message.timestamp.type` override is in the manifest's
     // `configurations` — the one place a later reader can learn the source

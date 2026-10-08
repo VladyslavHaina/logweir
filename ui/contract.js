@@ -684,6 +684,16 @@ const RESTORE_TARGET = shapeOf(
   { clusterRef: objectOf(NAME_REF), mode: str, topicPrefix: str },
 );
 
+// FX-8 (review M-2): the signed scorecard's `source.time_basis` as the
+// controller copied it -- which source topics the restore selected by the
+// producers' clocks, and which with an unrecorded timestamp type. Absent is
+// not recorded.
+const RESTORE_TIME_BASIS = shapeOf(
+  "RestoreTimeBasisView",
+  { producerTime: listOf(str), notRecorded: listOf(str) },
+  { plan: str },
+);
+
 const RESTORE = shapeOf(
   "Restore",
   {
@@ -696,7 +706,7 @@ const RESTORE = shapeOf(
   {
     createdAt: str, planBytes: opaque,
     sourceDestinationRef: objectOf(NAME_REF), evidenceDestinationRef: objectOf(NAME_REF),
-    queue: objectOf(RUN_QUEUE),
+    queue: objectOf(RUN_QUEUE), timeBasis: objectOf(RESTORE_TIME_BASIS),
   },
 );
 

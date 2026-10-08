@@ -86,8 +86,9 @@ use crate::conditions::{
     REASON_DISCOVERY_RUNNING, REASON_RESOLVED, TERMINAL_STATE_DISCOVERY_FAILED,
     TERMINAL_STATE_DISCOVERY_INCOMPLETE, TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE,
     TERMINAL_STATE_INVALID_TOPIC_SELECTION, TERMINAL_STATE_JOB_NAME_CONFLICT,
-    TERMINAL_STATE_REFERENT_NOT_FOUND, TERMINAL_STATE_SELECTION_EMPTY,
-    TERMINAL_STATE_SELECTION_TOO_LARGE, TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
+    TERMINAL_STATE_POD_CREATION_FORBIDDEN, TERMINAL_STATE_REFERENT_NOT_FOUND,
+    TERMINAL_STATE_SELECTION_EMPTY, TERMINAL_STATE_SELECTION_TOO_LARGE,
+    TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
 };
 use crate::connection::{self, ConnectionUse, ResolvedConnection};
 use crate::controllers::backup::{
@@ -1178,6 +1179,26 @@ async fn resolve_inner(
 
     let api: Api<Backup> = Api::namespaced(client.clone(), namespace);
     if !job_finished(&job) {
+        // FX-11: A DISCOVERY POD THE NAMESPACE REFUSED ENDS THE RUN NOW. No
+        // request at all while the Job's own status counts a pod or it is
+        // younger than the 30-second grace (`check::waiting::no_pod_counted`);
+        // otherwise one pod list and, when it finds none, one events list by
+        // the Job's UID. The same `FailedCreate` row `check::classify` reads
+        // once the Job has finished, so both ends name the same refusal.
+        if let Some(refusal) = check::refused_pod_creation(client, namespace, &job, now)
+            .await
+            .map_err(BackupError::Api)?
+        {
+            check::cancel(client, namespace, &job, &uid)
+                .await
+                .map_err(BackupError::Api)?;
+            return Err(discovery_refused(
+                &job_name,
+                &name,
+                refusal.code,
+                &refusal.message,
+            ));
+        }
         write_status(&api, backup, resolving_status_patch(backup, &job_name, now)).await?;
         return Ok(Inner::Pending);
     }
@@ -1417,14 +1438,17 @@ async fn observe(
     };
 
     let expect = expectations_for(client, namespace, job_name, uid).await?;
+    // FX-11: the Events that explain a pod that never started, read only when
+    // the classifier could use one. A discovery pod a `ResourceQuota` or a
+    // `LimitRange` refused at creation used to read `Resolving` until the
+    // Job's deadline and then end `DiscoveryFailed` without the admission's
+    // words; it now ends `PodCreationForbidden`, saying them, 30 seconds after
+    // the Job.
+    let events = check::job_events(client, namespace, job, pod.as_ref(), now).await;
     let observation = check::classify(&check::Input {
         job,
         pod: pod.as_ref(),
-        // EMPTY: `events: list` is a grant this controller does not hold, and
-        // `manifest_lint::every_call_site_has_a_grant` fails the moment an
-        // `Api<Event>` appears here without it. Every pod-status-sourced
-        // waiting code still works.
-        events: &[],
+        events: &events,
         log: log.as_deref(),
         expect: &expect,
         now,
@@ -1438,16 +1462,16 @@ async fn observe(
             write_status(&api, backup, resolving_status_patch(backup, job_name, now)).await?;
             return Ok(Inner::Pending);
         }
+        // NO CANCEL HERE: this function only ever sees a FINISHED Job (the
+        // unfinished one is failed fast, and cancelled, in `resolve_inner`), and
+        // a finished Job is not cancellable (`check::is_cancellable`).
         check::CheckPhase::Failed => {
-            return Err(BackupError::Refused(
-                discovery_failure_state(observation.reason),
-                format!(
-                    "the topic discovery Job {job_name} for {name} did not produce a usable \
-                     result ({}): {}",
-                    observation.reason,
-                    redact(&observation.message)
-                ),
-            ))
+            return Err(discovery_refused(
+                job_name,
+                &name,
+                observation.reason,
+                &observation.message,
+            ));
         }
         check::CheckPhase::Succeeded => {}
     }
@@ -1586,6 +1610,21 @@ async fn observe(
     Ok(Inner::Resolved(Box::new(selection)))
 }
 
+/// The refusal a discovery Job that did not produce a usable result ends its
+/// `Backup` with: [`discovery_failure_state`]'s terminal state, and a message
+/// naming the Job, the classifier's code and its (redacted) explanation — for
+/// a refused pod, the admission's own words (FX-11).
+fn discovery_refused(job_name: &str, name: &str, code: CheckCode, message: &str) -> BackupError {
+    BackupError::Refused(
+        discovery_failure_state(code),
+        format!(
+            "the topic discovery Job {job_name} for {name} did not produce a usable result \
+             ({code}): {}",
+            redact(message)
+        ),
+    )
+}
+
 /// D1 §7.2 R3's split: which refusals a retry could survive.
 ///
 /// `DiscoveryResultUnreadable` is the MALFORMED-OUTPUT class and is not
@@ -1593,6 +1632,14 @@ async fn observe(
 /// again. Everything else is operational (an unreachable broker, a pod that
 /// never started, a deadline) and a retry — which is a NEW `Backup`, and
 /// therefore a fresh discovery — can succeed.
+///
+/// A pod the namespace refused at creation is NEITHER: it is
+/// `PodCreationForbidden` (FX-11), the state a `Backup`'s runner reaches for
+/// the same refusal, rather than `DiscoveryFailed`, which reads as a broker
+/// problem. A new `Backup` can succeed once the namespace admits the pod, but
+/// a schedule's `spec.retry` does NOT retry it: `PodCreationForbidden` is not
+/// in [`crate::cadence::RETRYABLE_TERMINAL_STATES`], exactly as for a refused
+/// runner pod (decision confirmed by the orchestrator, 2026-10-07).
 ///
 /// Both are terminal for THIS run: `Backup.spec` is CEL-immutable, so a requeue
 /// could never resolve differently, and D1 §7.7 says a refused dynamic run is
@@ -1603,6 +1650,16 @@ pub fn discovery_failure_state(code: CheckCode) -> &'static str {
         CheckCode::ResultUnreadable
         | CheckCode::CheckContractMismatch
         | CheckCode::RunnerContractUnsupported => TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE,
+        // FX-11: THE RUNNER KIND'S OWN WORD FOR A REFUSED POD. A `Backup`'s
+        // runner Job whose pod is refused at creation ends
+        // `PodCreationForbidden` (`diagnostics::Code::runner_ready_reason`);
+        // its discovery Job's pod, refused by the same `ResourceQuota`, ends
+        // the same `Backup` with the same terminal state, and the message
+        // carries the admission's words. `DiscoveryFailed` would send an
+        // operator to the broker.
+        CheckCode::PodCreateRejected | CheckCode::RunnerServiceAccountMissing => {
+            TERMINAL_STATE_POD_CREATION_FORBIDDEN
+        }
         _ => TERMINAL_STATE_DISCOVERY_FAILED,
     }
 }

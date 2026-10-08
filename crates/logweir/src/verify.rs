@@ -143,6 +143,10 @@ pub struct VerifyReport {
     pub target_mode: TargetMode,
     pub intentionally_deviated: Vec<String>,
     pub not_reconstructed: Option<Vec<String>>,
+    /// `source.time_basis` (scorecard 1.3.0, FX-8), carried as read: `None`
+    /// is NOT RECORDED (a document before 1.3.0), never "every selection used
+    /// the topic's own clock".
+    pub time_basis: Option<logweir_core::scorecard::TimeBasisLabel>,
 }
 
 /// The configuration-parity line both readers print for a scorecard (FX-4),
@@ -232,6 +236,70 @@ pub fn coverage_lines(
                 None => "message.timestamp.type not recorded".to_string(),
             };
             format!("config_coverage[{topic:?}]: {coverage}, {timestamp}")
+        })
+        .collect()
+}
+
+/// The time-basis lines both readers print for a scorecard (FX-8): one per
+/// non-empty list of `source.time_basis`, the one line that says it was not
+/// recorded, or nothing when the restore selected no topic by producer time
+/// and none with an unrecorded timestamp type. `docs/verify_scorecard.py`
+/// prints the same lines from the same cases, and
+/// `scripts/check-verifier-parity.sh` compares every line starting
+/// `time basis:` between the two readers.
+#[must_use]
+pub fn time_basis_lines(label: Option<&logweir_core::scorecard::TimeBasisLabel>) -> Vec<String> {
+    let Some(label) = label else {
+        return vec![
+            "time basis: not recorded, so whether a time selection read a LogAppendTime \
+             topic's producer timestamps is unknown"
+                .to_string(),
+        ];
+    };
+    let mut lines = Vec::new();
+    if !label.producer_time.is_empty() {
+        lines.push(format!(
+            "time basis: SELECTED BY PRODUCER TIME for {} (recorded as LogAppendTime; the \
+             approved plan states restore.time_basis: producerTime)",
+            label.producer_time.join(", ")
+        ));
+    }
+    if !label.not_recorded.is_empty() {
+        lines.push(format!(
+            "time basis: timestamp type NOT RECORDED for {}, so its time selection may have \
+             read producer timestamps",
+            label.not_recorded.join(", ")
+        ));
+    }
+    lines
+}
+
+/// The time-basis lines both readers print for a BACKUP RECEIPT (FX-8): one
+/// per topic whose recorded effective `message.timestamp.type` is
+/// `LogAppendTime` (FX-4's `config_coverage`). The receipt's format is
+/// unchanged; what it already records is said in words, because its covered
+/// window — what the catalog and the console offer as recovery points — reads
+/// that topic's PRODUCER timestamps. `scripts/check-verifier-parity.sh`
+/// compares these lines between the two readers.
+#[must_use]
+pub fn receipt_time_basis_lines(
+    block: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
+) -> Vec<String> {
+    block
+        .into_iter()
+        .flatten()
+        .filter(|(_, entry)| {
+            entry
+                .timestamp_type
+                .as_ref()
+                .is_some_and(|t| t.value == logweir_core::time_basis::LOG_APPEND_TIME)
+        })
+        .map(|(topic, _)| {
+            format!(
+                "time basis: {topic:?} is LogAppendTime, so the archive holds its producers' \
+                 timestamps and the covered window reads them; a restore that selects it by \
+                 time is refused unless its plan states restore.time_basis: producerTime"
+            )
         })
         .collect()
 }
@@ -511,6 +579,7 @@ pub fn verify_scorecard(
         target_mode: sc.target.mode,
         intentionally_deviated: sc.topic_parity.intentionally_deviated.clone(),
         not_reconstructed: sc.topic_parity.not_reconstructed.clone(),
+        time_basis: sc.source.time_basis.clone(),
     }))
 }
 
@@ -552,6 +621,10 @@ fn print_report(r: &VerifyReport) {
         &r.intentionally_deviated,
     ) {
         println!("parity:    {line}");
+    }
+    // FX-8: nor a selection by the source topics' own clocks it does not claim.
+    for line in time_basis_lines(r.time_basis.as_ref()) {
+        println!("time:      {line}");
     }
 }
 
@@ -596,6 +669,10 @@ fn print_backup_receipt(
     // line that says it was not recorded, which is UNKNOWN and never captured.
     for line in coverage_lines(config_coverage) {
         println!("coverage:  {line}");
+    }
+    // FX-8: the covered window of a LogAppendTime topic is its producers' time.
+    for line in receipt_time_basis_lines(config_coverage) {
+        println!("time:      {line}");
     }
     println!(
         "checked:   the signature AND all eleven backup-receipt invariants \

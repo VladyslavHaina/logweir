@@ -5102,3 +5102,246 @@ fn the_chart_renders_the_hatch_under_the_name_this_controller_reads() {
          heard of the hatch cannot be posting alerts in cleartext"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FX-11 — a delivery pod the namespace refuses at creation
+// ---------------------------------------------------------------------------
+
+/// The admission's words for a quota-refused delivery pod.
+const QUOTA_REFUSAL: &str = "Error creating: pods \"notify-x2b9c\" is forbidden: exceeded quota: \
+     compute, requested: limits.memory=64Mi, used: limits.memory=1Gi, limited: limits.memory=1Gi";
+
+/// A delivery Job with NO pod, created 45 s before [`now`] and controlled by
+/// the policy: still running (its status counts nothing), or failed on its
+/// deadline.
+fn podless_delivery_job(name: &str, failed: bool) -> String {
+    let status = if failed {
+        json!({"conditions": [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded"}]})
+    } else {
+        json!({})
+    };
+    json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {
+            "name": name, "namespace": NS, "uid": JOB_UID,
+            "creationTimestamp": p::rfc3339(now() - Duration::seconds(45)),
+            "ownerReferences": [{
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "ProtectionPolicy",
+                "name": POLICY, "uid": POLICY_UID, "controller": true,
+                "blockOwnerDeletion": false
+            }]
+        },
+        "spec": {},
+        "status": status
+    })
+    .to_string()
+}
+
+fn delivery_events(job_name: &str, message: Option<&str>) -> String {
+    let items: Vec<Value> = message
+        .map(|m| {
+            json!({
+                "apiVersion": "v1", "kind": "Event",
+                "metadata": {"name": format!("{job_name}.1"), "namespace": NS},
+                "involvedObject": {"apiVersion": "batch/v1", "kind": "Job", "name": job_name,
+                                   "namespace": NS, "uid": JOB_UID},
+                "reason": "FailedCreate", "type": "Warning", "message": m
+            })
+        })
+        .into_iter()
+        .collect();
+    json!({"apiVersion": "v1", "kind": "EventList", "metadata": {}, "items": items}).to_string()
+}
+
+/// A policy with one open `Staleness` alert whose `attempts`-th delivery is
+/// `Pending` as `job_name`, and the routes a pass over it needs.
+fn pending_delivery(
+    attempts: i64,
+    job: impl Fn(&str) -> String,
+    message: Option<&str>,
+) -> (ProtectionPolicy, Vec<Route>, &'static str) {
+    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
+    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, attempts);
+    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
+    let policy = policy_with(
+        {
+            let mut value = spec_value();
+            merge(
+                &mut value,
+                &json!({"objectives": {"requireCatalogAvailability": false}}),
+            );
+            value
+        },
+        json!({
+            "alerts": [{
+                "key": key, "kind": "Staleness", "state": "Open",
+                "openedAt": at(4), "transition": 1, "notifiedTransition": 1,
+                "delivery": {
+                    "state": "Pending", "attempts": attempts,
+                    "lastAttemptAt": p::rfc3339(now() - Duration::seconds(45)),
+                    "jobRef": {"name": job_name.clone()}
+                }
+            }]
+        }),
+    );
+    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
+    routes.push(ok(job_path, job(&job_name)));
+    routes.push(ok(
+        "/pods",
+        json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}).to_string(),
+    ));
+    routes.push(ok("/events", delivery_events(&job_name, message)));
+    routes.push(patch(STATUS_PATH));
+    routes.push(patch(job_path));
+    (policy, routes, job_path)
+}
+
+fn job_patch_bodies(body_log: &BodyRecorder, job_path: &str) -> Vec<Value> {
+    bodies(body_log)
+        .into_iter()
+        .filter(|(m, u, _)| m == "PATCH" && path_of(u).ends_with(job_path))
+        .map(|(_, _, b)| serde_json::from_str(&b).expect("JSON"))
+        .collect()
+}
+
+/// **FX-11: A QUOTA-REFUSED DELIVERY POD IS A FAILED ATTEMPT 30 SECONDS AFTER
+/// ITS JOB, NAMING THE QUOTA — AND THE RETRY WAITS FOR THE BACKOFF.** Before
+/// FX-11 the attempt stayed `Pending` for the Job's 120-second deadline and was
+/// then recorded "the delivery Job finished with no exit code".
+///
+/// KILLS: the Events read dropped; the message not propagated; the early
+/// cancel dropped; a retry created in the same pass (a retry storm).
+#[test]
+fn fx11_a_delivery_pod_the_quota_refuses_is_a_failed_attempt_naming_the_quota() {
+    let (policy, routes, job_path) = pending_delivery(
+        1,
+        |name| podless_delivery_job(name, false),
+        Some(QUOTA_REFUSAL),
+    );
+    let (outcome, recorder, body_log) = drive(&policy, routes);
+    let calls = requests(&recorder);
+    let status = last_status_patch(&body_log);
+    let delivery = &status["status"]["alerts"][0]["delivery"];
+    assert_eq!(delivery["state"], json!("Failed"), "{calls:?}");
+    assert_eq!(
+        delivery["attempts"],
+        json!(1),
+        "the refused attempt is attempt 1"
+    );
+    let said = delivery["lastError"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("PodCreationForbidden")
+            && said.contains("exceeded quota: compute")
+            && said.contains("limits.memory=64Mi"),
+        "the refusal and the admission's own words: {said}"
+    );
+    assert!(!said.contains("no exit code"), "{said}");
+    assert_eq!(
+        condition(&status, "NotificationsDelivered")["reason"],
+        json!("DeliveryFailed")
+    );
+
+    let patches = job_patch_bodies(&body_log, job_path);
+    assert_eq!(patches.len(), 2, "the cancel, then the TTL: {calls:?}");
+    assert_eq!(patches[0]["spec"]["activeDeadlineSeconds"], json!(1));
+    assert!(patches[1]["spec"]["ttlSecondsAfterFinished"].is_i64());
+    let status_at = calls
+        .iter()
+        .position(|(m, u)| m == "PATCH" && u.contains("/status"))
+        .expect("a status write");
+    let job_patch_at: Vec<usize> = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, (m, u))| m == "PATCH" && path_of(u).ends_with(job_path))
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        job_patch_at[0] < status_at && status_at < job_patch_at[1],
+        "cancel, then the status, then the TTL: {calls:?}"
+    );
+    assert_eq!(outcome.ttl_patched, 1);
+    assert!(
+        !calls
+            .iter()
+            .any(|(m, u)| m == "POST" && path_of(u).ends_with("/jobs")),
+        "the next attempt waits for the backoff; it is not created in this pass: {calls:?}"
+    );
+    let lists: Vec<String> = calls
+        .iter()
+        .filter(|(_, u)| path_of(u).ends_with("/events"))
+        .map(|(_, u)| u.replace("%3D", "="))
+        .collect();
+    assert_eq!(lists.len(), 1, "{lists:?}");
+    assert!(
+        lists[0].contains(&format!("involvedObject.uid={JOB_UID}")),
+        "{lists:?}"
+    );
+}
+
+/// **FX-11: THE THIRD REFUSED ATTEMPT EXHAUSTS THE RETRIES, AND NAMES THE
+/// QUOTA.** A third attempt whose Job died on its deadline without ever having
+/// a pod is recorded with the refusal — not "no exit code" — and no fourth Job
+/// is created: three attempts in all.
+#[test]
+fn fx11_the_third_refused_attempt_is_the_last() {
+    let (policy, routes, job_path) = pending_delivery(
+        3,
+        |name| podless_delivery_job(name, true),
+        Some(QUOTA_REFUSAL),
+    );
+    let (_, recorder, body_log) = drive(&policy, routes);
+    let calls = requests(&recorder);
+    let status = last_status_patch(&body_log);
+    let delivery = &status["status"]["alerts"][0]["delivery"];
+    assert_eq!(delivery["state"], json!("Failed"), "{calls:?}");
+    assert_eq!(delivery["attempts"], json!(3));
+    let said = delivery["lastError"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("PodCreationForbidden") && said.contains("exceeded quota"),
+        "{said}"
+    );
+    assert_eq!(
+        p::next_attempt_at(&serde_json::from_value(delivery.clone()).expect("an AlertDelivery")),
+        None,
+        "no fourth attempt"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|(m, u)| m == "POST" && path_of(u).ends_with("/jobs")),
+        "{calls:?}"
+    );
+    let patches = job_patch_bodies(&body_log, job_path);
+    assert_eq!(
+        patches.len(),
+        1,
+        "a finished Job is never cancelled; only the TTL"
+    );
+    assert!(patches[0]["spec"]["ttlSecondsAfterFinished"].is_i64());
+}
+
+/// **FX-11 NEGATIVE CONTROL.** With no `FailedCreate` Event the podless
+/// delivery keeps the pre-FX-11 path: `Pending` and nothing cancelled while
+/// it runs; "no exit code" once its Job has died.
+#[test]
+fn fx11_control_a_podless_delivery_with_no_event_keeps_the_old_path() {
+    let (policy, routes, job_path) =
+        pending_delivery(1, |name| podless_delivery_job(name, false), None);
+    let (_, recorder, body_log) = drive(&policy, routes);
+    let status = last_status_patch(&body_log);
+    assert_eq!(
+        status["status"]["alerts"][0]["delivery"]["state"],
+        json!("Pending"),
+        "{:?}",
+        requests(&recorder)
+    );
+    assert!(job_patch_bodies(&body_log, job_path).is_empty());
+
+    let (policy, routes, _) = pending_delivery(1, |name| podless_delivery_job(name, true), None);
+    let (_, _, body_log) = drive(&policy, routes);
+    let status = last_status_patch(&body_log);
+    assert_eq!(
+        status["status"]["alerts"][0]["delivery"]["lastError"],
+        json!("the delivery Job finished with no exit code")
+    );
+}

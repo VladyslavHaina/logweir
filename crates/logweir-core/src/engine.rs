@@ -295,6 +295,36 @@ pub struct TopicFacts {
     pub partitions: Vec<PartitionFacts>,
 }
 
+impl TopicFacts {
+    /// **FX-8.** The newest record timestamp the manifest RECORDS for this
+    /// topic: the maximum, over every segment of every partition, of the
+    /// segment's first AND last record timestamp. `None` when the manifest
+    /// records no segment for the topic.
+    ///
+    /// Both ends, because a segment's bounds are its first and last records'
+    /// timestamps and not its minimum and maximum (PROD-01.1 S6): with
+    /// out-of-order timestamps the first record can be the later one.
+    ///
+    /// A LOWER bound on the newest archived timestamp, never the value itself:
+    /// a record inside a segment can be later than both ends, which only
+    /// decoding the segment shows (PROD-01.1b). `crate::time_basis` reads it
+    /// both ways, and only one is certain (review L-1): a window END below it
+    /// certainly excludes an archived record, so that window is a time
+    /// selection; a window end at or after it excludes nothing THE MANIFEST
+    /// SHOWS, and is treated as no selection, though with out-of-order
+    /// timestamps inside a segment the engine can still drop a later record.
+    /// That residue is PROD-01.1b's, and the scorecard format and
+    /// `docs/stability.md` say so where the empty lists are described.
+    #[must_use]
+    pub fn newest_recorded_timestamp_ms(&self) -> Option<i64> {
+        self.partitions
+            .iter()
+            .flat_map(|p| p.segments.iter())
+            .map(|seg| seg.start_timestamp.max(seg.end_timestamp))
+            .max()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PartitionFacts {
     pub partition_id: i32,

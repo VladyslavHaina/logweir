@@ -158,6 +158,89 @@ fn the_frozen_1_1_0_scorecard_schema_is_still_the_1_1_0_schema() {
     );
 }
 
+/// FX-8: the 1.1.0 scorecard schema is FROZEN beside the 1.3.0 one, the way
+/// FX-4 froze the 1.0.0 one. It still describes every document written before
+/// the bump: it names itself 1.1.0, carries FX-4's `not_assessed` and does NOT
+/// describe `source.time_basis`. The current schema does, as an OPTIONAL field
+/// whose two lists are required inside it, so a document before 1.3.0 without
+/// the block still validates against it.
+#[test]
+fn the_frozen_1_1_0_scorecard_schema_does_not_describe_the_time_basis() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.1.0.json"
+    ))
+    .expect("the frozen 1.1.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.1.0.json"
+    );
+    assert!(frozen["definitions"]["TopicParity"]["properties"]["not_assessed"].is_object());
+    let source = &frozen["definitions"]["SourceInfo"]["properties"];
+    assert!(source["backup_id"].is_object());
+    assert!(
+        source.get("time_basis").is_none(),
+        "the frozen 1.1.0 schema must not describe the 1.3.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_ne!(
+        current["$id"], frozen["$id"],
+        "the current schema is a NEW file beside the frozen one, never the 1.1.0 file regenerated"
+    );
+    let source = &current["definitions"]["SourceInfo"];
+    assert!(source["properties"]["time_basis"].is_object());
+    assert!(
+        !source["required"]
+            .as_array()
+            .expect("SourceInfo has required fields")
+            .iter()
+            .any(|r| r == "time_basis"),
+        "time_basis is OPTIONAL: a document before 1.3.0 without it must still validate"
+    );
+    let label = &current["definitions"]["TimeBasisLabel"];
+    let required: Vec<&str> = label["required"]
+        .as_array()
+        .expect("TimeBasisLabel has required fields")
+        .iter()
+        .filter_map(|r| r.as_str())
+        .collect();
+    assert_eq!(
+        required,
+        vec!["not_recorded", "producer_time"],
+        "both lists are REQUIRED inside the block and `plan` is not: an absent list is never \
+         read as empty"
+    );
+}
+
+/// FX-8: the 1.2.0 scorecard schema (FX-3's) is FROZEN beside the 1.3.0 one.
+/// It names itself 1.2.0, carries FX-3's `not_reconstructed` and does NOT
+/// describe `source.time_basis`.
+#[test]
+fn the_frozen_1_2_0_scorecard_schema_does_not_describe_the_time_basis() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.2.0.json"
+    ))
+    .expect("the frozen 1.2.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.2.0.json"
+    );
+    assert!(frozen["definitions"]["TopicParity"]["properties"]["not_reconstructed"].is_object());
+    assert!(
+        frozen["definitions"]["SourceInfo"]["properties"]
+            .get("time_basis")
+            .is_none(),
+        "the frozen 1.2.0 schema must not describe the 1.3.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
+    assert!(
+        current["definitions"]["TopicParity"]["properties"]["not_reconstructed"].is_object(),
+        "the current schema keeps FX-3's field"
+    );
+}
+
 #[test]
 fn schema_declares_the_format_version_const() {
     let v: serde_json::Value =

@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "FX-8's plan: the same wizard state as plan-fields.json, plus `timeBasis: producerTime`,",
+    "the operator's acceptance of a point-in-time selection by PRODUCER time over a",
+    "`LogAppendTime` source. It renders `restore.time_basis` in plan-time-basis.golden.yaml.",
+    "",
+    "Both sides read this file: ui/tests/time-basis.spec.js renders it and byte-compares the",
+    "result with the golden, and crates/logweir/tests/ui_lint.rs deserialises the golden into",
+    "`logweir_core::spec::RestoreSpec` and asserts `restore.time_basis` is",
+    "`TimeBasis::ProducerTime` -- RestoreSpec has no deny_unknown_fields, so a misspelt key",
+    "would otherwise be dropped silently, and the run refused, after the approval.",
+    "",
+    "Regenerate with `node ui/tests/emit-plan.js plan-time-basis-fields.json > ui/tests/fixtures/plan-time-basis.golden.yaml`."
+  ],
+  "name": "orders-pitr-4471",
+  "backupSetRef": "01JB7Z0000000000000000000B",
+  "topics": [
+    "orders",
+    "payments"
+  ],
+  "pointInTime": "2026-09-07T14:05:00Z",
+  "source": {
+    "bucket": "kafka-backups",
+    "prefix": "drill-demo",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  },
+  "target": {
+    "bootstrapServers": [
+      "localhost:9092"
+    ],
+    "mode": "newTopic",
+    "topicPrefix": "restore-20260907T140500Z-",
+    "topicMappingPrefix": "restore-20260907T140500Z-",
+    "markerTopic": "logweir.scratch",
+    "replicationFactor": 1,
+    "teardown": "delete"
+  },
+  "sample": {
+    "windowStart": "2026-09-07T12:00:00Z",
+    "windowEnd": "2026-09-07T15:00:00Z",
+    "recordsPerPartition": 25,
+    "anchor": "head"
+  },
+  "objectives": {
+    "rtoSeconds": 900,
+    "rpoSeconds": 300,
+    "passRate": 1.0
+  },
+  "evidence": {
+    "bucket": "logweir-evidence",
+    "prefix": "logweir/",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  },
+  "timeBasis": "producerTime"
+}
