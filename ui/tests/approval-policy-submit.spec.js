@@ -2,8 +2,10 @@
 // wizard's ONE submit sends, and refuses to send, under the namespace's
 // approval policy.
 //
-//   * H1: a console in the administrator mode does not offer ordinary
-//     confirmation (D0). The page says so, disables Create, and sends nothing.
+//   * H1, as PROD-16.1 amends it: a console that cannot sign a `confirm`
+//     confirmation (its managed key is not there yet) says so, disables
+//     Create, and sends nothing; a localAdmin console that can, confirms like
+//     the shared one — the administrator mode now serves `confirm`.
 //   * L1: a Governed policy requires a change ticket (D0). The page asks for
 //     one, refuses to send without it, and sends it beside the create body;
 //     an unbound namespace never sends one.
@@ -79,7 +81,7 @@ function recorder() {
   };
 }
 
-test("an_administrator_console_offers_no_ordinary_confirmation_and_sends_nothing", async () => {
+test("a_console_without_its_confirmation_key_yet_offers_no_confirm_and_sends_nothing", async () => {
   const state = wizardState(ORDINARY_LOCAL);
   assert.ok(typeof policyRefusal(state) === "string");
   const block = approvalPolicyBlock(ORDINARY_LOCAL);
@@ -128,4 +130,37 @@ test("an_unbound_namespace_never_sends_a_ticket", async () => {
   assert.ok(!approvalPolicyBlock(UNBOUND).includes("change-ticket"));
   const legacy = wizardState(null, "CHG-1");
   assert.equal(restoreBody(legacy, await preparePlan(legacy)).ticket, undefined);
+});
+
+// PROD-16.1: a FRESH install's unbound namespace, served by the localAdmin
+// console, is `confirm` — the block says no key is needed and why, and the
+// submit sends with no ticket and no refusal. NEGATIVE CONTROL: the same view
+// with the key not there yet refuses, naming the key.
+const FRESH_CONFIRM = Object.freeze({
+  name: "default-confirm-v1", mode: "ordinary", operatorMode: "confirm", basis: "freshInstall",
+  legacy: false, ordinaryConfirmationAvailable: true, ticketRequired: false,
+});
+
+test("a_fresh_install_confirms_an_unbound_namespace_with_no_key_in_one_submit", async () => {
+  const block = approvalPolicyBlock(FRESH_CONFIRM);
+  assert.ok(block.includes("id=\"approval-policy-ordinary\""), block);
+  assert.match(block, /no key needed/i);
+  assert.match(block, /This installation started in confirm/);
+  assert.doesNotMatch(block, /logweir drill/, "no command for a key holder");
+  const state = wizardState(FRESH_CONFIRM);
+  assert.equal(policyRefusal(state), null);
+  const api = recorder();
+  await submitRestore(state, api);
+  assert.equal(api.creates.length, 1);
+  assert.equal(api.creates[0].body.ticket, undefined);
+
+  const pending = Object.assign({}, FRESH_CONFIRM, { ordinaryConfirmationAvailable: false });
+  assert.match(String(policyRefusal(wizardState(pending))), /key is not there/);
+  assert.ok(approvalPolicyBlock(pending).includes("approval-policy-ordinary-unavailable"));
+});
+
+test("a_strict_namespace_names_the_personal_key_and_the_legacy_one_the_out_of_band_step", () => {
+  assert.match(approvalPolicyBlock(GOVERNED, "CHG-1"), /Strict: an approver's personal key/);
+  assert.match(approvalPolicyBlock(UNBOUND), /Approve it out of band \(strict/);
+  assert.match(approvalPolicyBlock(null), /Approve it out of band/);
 });

@@ -734,9 +734,12 @@ const APPROVAL = shapeOf(
 // operation) or `awaitingApproval` (route to its approval page); `mode` is
 // `governed` or `ordinary`. Read as strings, and compared by the one function
 // that routes on them, `ui/pages/restore-wizard.js`'s `frozenDecision`.
+// PROD-16.1: `operatorMode` is confirm | two-person | strict, the operator's
+// name for `mode`; required, as the schema requires it (the console and the
+// API ship together until the OpenAPI document is frozen).
 const RESTORE_AUTHORIZATION = shapeOf(
   "RestoreRoutingView",
-  { mode: str, policy: str, legacy: bool, state: str, approvalName: str },
+  { mode: str, operatorMode: str, policy: str, legacy: bool, state: str, approvalName: str },
   { policyDigest: str, confirmationName: str, requester: str, expiresAt: str },
 );
 
@@ -745,6 +748,9 @@ const APPROVAL_POLICY = shapeOf(
   "ApprovalPolicyView",
   {
     namespace: str, name: str, mode: str, legacy: bool,
+    // PROD-16.1: the operator's mode name, and why the namespace resolves so
+    // (binding | configured | freshInstall | legacy).
+    operatorMode: str, basis: str,
     requireDistinctPrincipal: bool, installationDigest: str,
     ordinaryConfirmationAvailable: bool, ticketRequired: bool,
   },
