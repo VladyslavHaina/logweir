@@ -736,6 +736,15 @@ fn verify(ctx: &Ctx, mapping: &BTreeMap<String, String>) -> Value {
     })
 }
 
+/// "first" or "second" for a TARGET topic, from the suffix `targets` gives it.
+fn topic_role_of_target(t: &str) -> &'static str {
+    if t.ends_with("-a") {
+        "first"
+    } else {
+        "second"
+    }
+}
+
 fn topic_role(ctx: &Ctx, src: &str) -> &'static str {
     if ctx.sources.first().map(String::as_str) == Some(src) {
         "first"
@@ -1331,24 +1340,28 @@ fn k3(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     let unpaused = kafka::compose_broker("unpause");
     thaw.armed = false;
     let after = settled(&[&ta, &tb, &ta2, &tb2]);
-    let unacked_of = |log: &str, t: &String| -> BTreeMap<String, i64> {
+    // Per target partition of BOTH topics: the twins need not be in the same
+    // topic when the broker freezes (one may already be in its second).
+    let unacked_of = |log: &str, ts: [&String; 2]| -> BTreeMap<String, i64> {
         let acked = acknowledged(log);
-        after[t]
-            .iter()
-            .map(|(p, h)| {
-                (
-                    p.to_string(),
-                    h - acked.get(&(t.clone(), *p)).copied().unwrap_or(0),
-                )
+        ts.iter()
+            .flat_map(|t| {
+                let acked = &acked;
+                after[*t].iter().map(move |(p, h)| {
+                    (
+                        format!("{}/{p}", topic_role_of_target(t)),
+                        h - acked.get(&((*t).clone(), *p)).copied().unwrap_or(0),
+                    )
+                })
             })
             .collect()
     };
     let (log1, log1b) = (logs(&e1), logs(&e1b));
-    let unacked = unacked_of(&log1, &ta);
-    let unacked_b = unacked_of(&log1b, &ta2);
+    let unacked = unacked_of(&log1, [&ta, &tb]);
+    let unacked_b = unacked_of(&log1b, [&ta2, &tb2]);
     let unacked_total: i64 = unacked.values().sum();
     let unacked_total_b: i64 = unacked_b.values().sum();
-    let landed_b_first: i64 = after[&ta2].values().sum();
+    let landed_b_total: i64 = after[&ta2].values().sum::<i64>() + after[&tb2].values().sum::<i64>();
     o.put("kill_reached_mid_topic", json!(reached));
     o.put("pause_exit", json!(paused.status.code()));
     o.put("unpause_exit", json!(unpaused.status.code()));
@@ -1393,10 +1406,10 @@ fn k3(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     );
     o.expect("twin b: the engine's re-run exits 0", exit2b == Some(0));
     o.expect(
-        "twin b: the re-run duplicates every landed record, the unacknowledged batch included",
-        count(&vb, "first", "duplicates") == landed_b_first
+        "twin b: the re-run duplicates every landed record, the unacknowledged batches included",
+        count(&vb, "first", "duplicates") + count(&vb, "second", "duplicates") == landed_b_total
             && count(&vb, "first", "missing") == 0
-            && exact(&vb, "second"),
+            && count(&vb, "second", "missing") == 0,
     );
     o
 }
