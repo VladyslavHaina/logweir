@@ -961,6 +961,88 @@ async fn the_installation_policys_ceilings_reach_discovery_admission_and_the_pla
     );
 }
 
+/// **FX-10 fix round (review L1): the installation's `hardMaxTopics` reaches
+/// the HARVEST too, not only the plan.**
+///
+/// `hardMaxTopics` has two readers that decide something. The plan asks the
+/// runner for at most that many entries
+/// ([`the_installation_policys_ceilings_reach_discovery_admission_and_the_plan`]);
+/// and a runner that did not honour its plan — a bug, or a skewed runner image
+/// — has its surplus cut on harvest to the SAME ceiling, before a single chunk
+/// is written. The second reader had no row: the review's mutant M5 (the
+/// harvest's ceiling read as the compiled-in 50 000) survived all 1 719 tests.
+///
+/// The chart's tuned document says `hardMaxTopics: 100`, and the request asks
+/// for 20 000:
+///
+/// * a relay of 101 entries is STORED as 100 — one chunk, `counts.returned`
+///   100, `truncated`, `MaxTopics`, and the digest over the 100 stored — while
+///   `counts.listed` keeps the broker's 101;
+/// * CONTROL: the same relay under the compiled-in defaults (50 000, so the
+///   request's own 20 000 binds) is stored whole: 101, not truncated.
+///
+/// MUTANT (FX-10 review M5): `storable_entry_ceiling(effective_max_topics(…,
+/// 50_000))` at the harvest. The guard
+/// `chart_policy::every_installation_policy_value_reaches_its_field_and_a_reader_at_a_non_default_value`
+/// fails on it too: it counts every read of the field.
+#[tokio::test]
+async fn the_installation_policys_topic_ceiling_cuts_what_the_harvest_stores() {
+    let entries: Vec<TopicEntry> = (0..101)
+        .map(|i| TopicEntry::new(&format!("over-{i:03}"), 3))
+        .collect();
+    let inventory = inventory_of(&entries, counts_for(&entries, 0));
+    let harvest = |policy: Option<Route>| {
+        let mut extra = vec![Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 201,
+            body: "{}".to_string(),
+        }];
+        extra.extend(policy);
+        mock_client_recording_bodies(finished_routes(relay_log(&entries, &inventory), extra))
+    };
+
+    // UNDER THE CHART'S DOCUMENT: cut to 100.
+    let (client, _r, bodies) = harvest(Some(tuned_policy_route()));
+    let outcome = td::reconcile_discovery(&running(), &tuned(client))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.phase, PHASE_SUCCEEDED);
+    assert_eq!(outcome.chunks_written, 1);
+    let status = status_of(&bodies);
+    assert_eq!(
+        status["result"]["counts"]["returned"],
+        json!(100),
+        "101 relayed, and the installation's hardMaxTopics is 100: {status}"
+    );
+    assert_eq!(status["result"]["counts"]["listed"], json!(101));
+    assert_eq!(status["result"]["truncated"], json!(true));
+    assert_eq!(status["result"]["truncationReason"], json!("MaxTopics"));
+    assert_eq!(
+        status["result"]["topicsSha256"],
+        json!(topic_tsv_sha256(&entries[..100])),
+        "the digest is over the 100 entries that were stored"
+    );
+
+    // CONTROL: under the compiled-in defaults the same relay is stored whole.
+    let (client, _r, bodies) = harvest(None);
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.phase, PHASE_SUCCEEDED);
+    let status = status_of(&bodies);
+    assert_eq!(
+        status["result"]["counts"]["returned"],
+        json!(101),
+        "CONTROL: the request's 20 000 binds, so nothing is cut: {status}"
+    );
+    assert_eq!(status["result"]["truncated"], json!(false));
+    assert_eq!(
+        status["result"]["topicsSha256"],
+        json!(topic_tsv_sha256(&entries))
+    );
+}
+
 /// **FX-10: the installation policy's fresh window reaches `freshUntil`.**
 ///
 /// The chart's tuned document says `freshSeconds: 60`, so an inventory the

@@ -701,228 +701,341 @@ fn the_withdrawn_fields_are_rendered_at_the_parsers_compatibility_values_and_rea
     }
 }
 
+/// One controller site that reads a parsed policy field.
+struct Site {
+    /// The source under `crates/weirkeeper/src/`.
+    file: &'static str,
+    /// Text that occurs EXACTLY ONCE in that file — compared with every
+    /// whitespace character removed, so rustfmt's line breaks do not matter —
+    /// and that contains one of the field's `access` spellings: it names this
+    /// site and no other.
+    needle: &'static str,
+    /// The test file (under `crates/weirkeeper/tests/`) and the `fn` that
+    /// drives THIS site at a NON-default value and asserts the effect — or why
+    /// no row does, pointing at the FX-10 report.
+    proof: Result<(&'static str, &'static str), &'static str>,
+}
+
 /// One installation-policy value, followed end to end.
 struct Followed {
     /// The dotted `values.yaml` path an administrator sets.
     value: &'static str,
     /// The dotted path in the parsed `Policy`'s JSON (its wire names).
     field: &'static str,
-    /// The controller source (under `crates/weirkeeper/src/`) that reads the
-    /// parsed field, and a needle in it — or `None` with the reason no reader
-    /// exists yet.
-    reader: Result<(&'static str, &'static str), &'static str>,
-    /// The test file (under `crates/weirkeeper/tests/`) and the `fn` that
-    /// drives the reader at a NON-default value and asserts the effect.
-    proof: Option<(&'static str, &'static str)>,
+    /// Every spelling a controller read of the parsed field takes. EVERY
+    /// occurrence of any of them in `crates/weirkeeper/src` (whitespace
+    /// removed, the parser itself excepted) must be one of `sites`, so a reader
+    /// nobody listed fails the guard. The FX-10 review's L1: three reads of
+    /// `hardMaxTopics` hid behind one needle, and the harvest's could be
+    /// replaced by its default with every test green.
+    access: &'static [&'static str],
+    /// Every read site, or `Err` with the reason no reader exists yet.
+    sites: Result<&'static [Site], &'static str>,
 }
 
 /// The table [`every_installation_policy_value_reaches_its_field_and_a_reader_at_a_non_default_value`]
 /// holds complete: every `values.yaml` leaf the policy document is rendered
-/// from, and every field the parser keeps.
+/// from, every field the parser keeps, and every place a controller reads one.
 const FOLLOWED: &[Followed] = &[
     Followed {
         value: "checks.maxActivePerNamespace",
         field: "checks.maxActivePerNamespace",
-        reader: Ok(("check/limits.rs", "policy.max_active_per_namespace")),
-        proof: Some((
-            "topic_discovery_controller.rs",
-            "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
-        )),
+        access: &[".max_active_per_namespace"],
+        sites: Ok(&[Site {
+            file: "check/limits.rs",
+            needle: "counts.namespace >= policy.max_active_per_namespace",
+            proof: Ok((
+                "topic_discovery_controller.rs",
+                "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
+            )),
+        }]),
     },
     Followed {
         value: "checks.maxActiveTotal",
         field: "checks.maxActiveTotal",
-        reader: Ok(("check/limits.rs", "policy.max_active_total")),
-        proof: Some(("check_framework.rs", "limits_queues_over_namespace_cap")),
+        access: &[".max_active_total"],
+        sites: Ok(&[Site {
+            file: "check/limits.rs",
+            needle: "counts.total >= policy.max_active_total",
+            proof: Ok(("check_framework.rs", "limits_queues_over_namespace_cap")),
+        }]),
     },
     Followed {
         value: "checks.maxActiveDiscoveriesPerConnection",
         field: "checks.maxActiveDiscoveriesPerConnection",
-        reader: Ok((
-            "check/limits.rs",
-            "policy.max_active_discoveries_per_connection",
-        )),
-        proof: Some((
-            "topic_discovery_controller.rs",
-            "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
-        )),
+        access: &[".max_active_discoveries_per_connection"],
+        sites: Ok(&[Site {
+            file: "check/limits.rs",
+            needle: "counts.per_connection >= policy.max_active_discoveries_per_connection",
+            proof: Ok((
+                "topic_discovery_controller.rs",
+                "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
+            )),
+        }]),
     },
     Followed {
         value: "checks.maxEvidenceFetchActivePerNamespace",
         field: "checks.maxEvidenceFetchActivePerNamespace",
-        reader: Ok((
-            "check/limits.rs",
-            "policy.max_evidence_fetch_active_per_namespace",
-        )),
-        proof: Some((
-            "check_framework.rs",
-            "every_check_ceiling_is_the_policys_own_at_a_non_default_value",
-        )),
+        access: &[".max_evidence_fetch_active_per_namespace"],
+        sites: Ok(&[
+            Site {
+                file: "check/limits.rs",
+                needle:
+                    "counts.evidence_namespace >= policy.max_evidence_fetch_active_per_namespace",
+                proof: Ok((
+                    "check_framework.rs",
+                    "every_check_ceiling_is_the_policys_own_at_a_non_default_value",
+                )),
+            },
+            Site {
+                file: "evidence_fetch.rs",
+                needle: "inputs.checks.max_evidence_fetch_active_per_namespace, inputs.attempt",
+                proof: Err(
+                    "the queue message names the ceiling the admission above applied; it \
+                     decides nothing (FX-10 report, class-sweep row 4). The caller's wiring \
+                     at a non-default value is FX-10 report, Class sweep owed, item 1.",
+                ),
+            },
+        ]),
     },
     Followed {
         value: "checks.discovery.freshSeconds",
         field: "discovery.freshSeconds",
-        reader: Ok((
-            "controllers/topic_discovery.rs",
-            "load.policy().discovery.fresh_seconds",
-        )),
-        proof: Some((
-            "topic_discovery_controller.rs",
-            "the_installation_policys_fresh_window_reaches_fresh_until",
-        )),
+        access: &[".discovery.fresh_seconds", "discovery_policy.fresh_seconds"],
+        sites: Ok(&[Site {
+            file: "controllers/topic_discovery.rs",
+            needle: "fresh_until( observed_at, load.policy().discovery.fresh_seconds",
+            proof: Ok((
+                "topic_discovery_controller.rs",
+                "the_installation_policys_fresh_window_reaches_fresh_until",
+            )),
+        }]),
     },
     Followed {
         value: "checks.discovery.retentionSeconds",
         field: "discovery.retentionSeconds",
-        reader: Ok((
-            "controllers/topic_discovery.rs",
+        access: &[
+            ".discovery.retention_seconds",
             "discovery_policy.retention_seconds",
-        )),
-        proof: Some((
-            "topic_discovery_controller.rs",
-            "the_installation_policys_collector_rules_reach_the_collector",
-        )),
+        ],
+        sites: Ok(&[Site {
+            file: "controllers/topic_discovery.rs",
+            needle: "collect_expired( &api, &namespace, discovery_policy.retention_seconds,",
+            proof: Ok((
+                "topic_discovery_controller.rs",
+                "the_installation_policys_collector_rules_reach_the_collector",
+            )),
+        }]),
     },
     Followed {
         value: "checks.discovery.keepPerConnection",
         field: "discovery.keepPerConnection",
-        reader: Ok((
-            "controllers/topic_discovery.rs",
+        access: &[
+            ".discovery.keep_per_connection",
             "discovery_policy.keep_per_connection",
-        )),
-        proof: Some((
-            "topic_discovery_controller.rs",
-            "the_installation_policys_collector_rules_reach_the_collector",
-        )),
+        ],
+        sites: Ok(&[Site {
+            file: "controllers/topic_discovery.rs",
+            needle: "discovery_policy.keep_per_connection, now,",
+            proof: Ok((
+                "topic_discovery_controller.rs",
+                "the_installation_policys_collector_rules_reach_the_collector",
+            )),
+        }]),
     },
     Followed {
         value: "checks.discovery.hardMaxTopics",
         field: "discovery.hardMaxTopics",
-        reader: Ok((
-            "controllers/topic_discovery.rs",
-            "load.policy().discovery.hard_max_topics",
-        )),
-        proof: Some((
-            "topic_discovery_controller.rs",
-            "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
-        )),
+        access: &[
+            ".discovery.hard_max_topics",
+            "discovery_policy.hard_max_topics",
+        ],
+        sites: Ok(&[
+            // The plan the runner is given.
+            Site {
+                file: "controllers/topic_discovery.rs",
+                needle: "&resolved, load.policy().discovery.hard_max_topics, &policy_digest,",
+                proof: Ok((
+                    "topic_discovery_controller.rs",
+                    "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
+                )),
+            },
+            // The log line after the Job is created.
+            Site {
+                file: "controllers/topic_discovery.rs",
+                needle: "max_topics = effective_max_topics( discovery.spec.request.max_topics, \
+                         load.policy().discovery.hard_max_topics )",
+                proof: Err(
+                    "a log line: it names the ceiling the plan above carries and decides \
+                     nothing (FX-10 report, class-sweep row 8)",
+                ),
+            },
+            // The harvest's cut of a relay that ignored its plan.
+            Site {
+                file: "controllers/topic_discovery.rs",
+                needle: "storable_entry_ceiling(effective_max_topics( \
+                         discovery.spec.request.max_topics, \
+                         load.policy().discovery.hard_max_topics,",
+                proof: Ok((
+                    "topic_discovery_controller.rs",
+                    "the_installation_policys_topic_ceiling_cuts_what_the_harvest_stores",
+                )),
+            },
+        ]),
     },
     Followed {
         value: "checks.discovery.visibilityAttestations",
         field: "discovery.visibilityAttestations",
-        reader: Ok((
-            "controllers/topic_discovery.rs",
-            "load.policy().discovery.visibility_attestations",
-        )),
-        proof: Some((
-            "topic_discovery_controller.rs",
-            "an_administrator_attestation_is_the_only_route_to_attested_complete",
-        )),
+        access: &[
+            ".discovery.visibility_attestations",
+            "discovery_policy.visibility_attestations",
+        ],
+        sites: Ok(&[
+            // An interactive discovery's verdict.
+            Site {
+                file: "controllers/topic_discovery.rs",
+                needle: "attestation_candidate( &load.policy().discovery.visibility_attestations,",
+                proof: Ok((
+                    "topic_discovery_controller.rs",
+                    "an_administrator_attestation_is_the_only_route_to_attested_complete",
+                )),
+            },
+            // A Backup's run-time discovery's verdict.
+            Site {
+                file: "controllers/backup_selection.rs",
+                needle: "super::topic_discovery::attestation_candidate( \
+                         &load.policy().discovery.visibility_attestations,",
+                proof: Err(
+                    "a Backup's run-time discovery reads its policy reference from the process \
+                     environment, and no row serves it a document carrying an attestation: \
+                     FX-10 report, Class sweep owed, item 6",
+                ),
+            },
+        ]),
     },
     Followed {
         value: "checks.preflight.retentionSeconds",
         field: "preflight.retentionSeconds",
-        reader: Ok((
-            "controllers/preflight.rs",
-            "policy.policy().preflight.retention_seconds",
-        )),
-        proof: Some((
-            "configured_values.rs",
-            "the_installation_policys_preflight_window_reaches_the_preflight_collector",
-        )),
+        access: &[".preflight.retention_seconds"],
+        sites: Ok(&[Site {
+            file: "controllers/preflight.rs",
+            needle: "let retention = policy.policy().preflight.retention_seconds;",
+            proof: Ok((
+                "configured_values.rs",
+                "the_installation_policys_preflight_window_reaches_the_preflight_collector",
+            )),
+        }]),
     },
     Followed {
         value: "runs.maxManualBackupsActivePerNamespace",
         field: "runs.maxManualBackupsActivePerNamespace",
-        reader: Ok((
-            "run_pool.rs",
-            "PoolKind::Backup => policy.runs.max_manual_backups_active_per_namespace",
-        )),
-        proof: Some((
-            "configured_values.rs",
-            "the_installation_policys_manual_backup_ceiling_admits_the_sixth_run",
-        )),
+        access: &[".max_manual_backups_active_per_namespace"],
+        sites: Ok(&[Site {
+            file: "run_pool.rs",
+            needle: "PoolKind::Backup => policy.runs.max_manual_backups_active_per_namespace",
+            proof: Ok((
+                "configured_values.rs",
+                "the_installation_policys_manual_backup_ceiling_admits_the_sixth_run",
+            )),
+        }]),
     },
     Followed {
         value: "runs.maxManualRestoresActivePerNamespace",
         field: "runs.maxManualRestoresActivePerNamespace",
-        reader: Ok((
-            "run_pool.rs",
-            "PoolKind::Restore => policy.runs.max_manual_restores_active_per_namespace",
-        )),
-        proof: Some((
-            "configured_values.rs",
-            "the_installation_policys_manual_restore_ceiling_is_the_one_the_pool_applies",
-        )),
+        access: &[".max_manual_restores_active_per_namespace"],
+        sites: Ok(&[Site {
+            file: "run_pool.rs",
+            needle: "PoolKind::Restore => policy.runs.max_manual_restores_active_per_namespace",
+            proof: Ok((
+                "configured_values.rs",
+                "the_installation_policys_manual_restore_ceiling_is_the_one_the_pool_applies",
+            )),
+        }]),
     },
     Followed {
         value: "engine.allowUnverifiedCustomCa",
         field: "engine.allowUnverifiedCustomCa",
-        reader: Ok((
-            "controllers/backup.rs",
-            "policy.engine.allow_unverified_custom_ca",
-        )),
-        proof: Some((
-            "configured_values.rs",
-            "the_installation_policys_custom_ca_switch_reaches_backup_and_restore_admission",
-        )),
+        access: &[".allow_unverified_custom_ca"],
+        sites: Ok(&[Site {
+            file: "controllers/backup.rs",
+            needle: "ENGINE_CUSTOM_CA_VERIFIED || policy.engine.allow_unverified_custom_ca",
+            proof: Ok((
+                "configured_values.rs",
+                "the_installation_policys_custom_ca_switch_reaches_backup_and_restore_admission",
+            )),
+        }]),
     },
     Followed {
         value: "evidence.controllerIdentityLocations",
         field: "evidence.controllerIdentityLocations",
-        reader: Ok(("destination.rs", ".controller_identity_locations")),
-        proof: Some((
-            "preflight_controller.rs",
-            "an_evidence_read_grant_no_pod_holds_is_named_and_projects_nothing",
-        )),
+        access: &[".controller_identity_locations"],
+        sites: Ok(&[Site {
+            file: "destination.rs",
+            needle: "policy .evidence .controller_identity_locations .iter()",
+            proof: Ok((
+                "preflight_controller.rs",
+                "an_evidence_read_grant_no_pod_holds_is_named_and_projects_nothing",
+            )),
+        }]),
     },
+    // The four `legacyArchiveAddressing` fields are read off the block the
+    // Preflight controller passes as `addressing`.
     Followed {
         value: "archive.s3.endpoint",
         field: "legacyArchiveAddressing.endpoint",
-        reader: Ok((
-            "controllers/preflight.rs",
-            "or_installation(&addressing.endpoint)",
-        )),
-        proof: Some((
-            "preflight_controller.rs",
-            "a_legacy_plan_without_an_endpoint_takes_the_installations_legacy_addressing",
-        )),
+        access: &["addressing.endpoint", ".legacy_archive_addressing.endpoint"],
+        sites: Ok(&[Site {
+            file: "controllers/preflight.rs",
+            needle: "or_installation(&addressing.endpoint)",
+            proof: Ok((
+                "preflight_controller.rs",
+                "a_legacy_plan_without_an_endpoint_takes_the_installations_legacy_addressing",
+            )),
+        }]),
     },
     Followed {
         value: "archive.s3.region",
         field: "legacyArchiveAddressing.region",
-        reader: Ok((
-            "controllers/preflight.rs",
-            "or_installation(&addressing.region)",
-        )),
-        proof: Some((
-            "preflight_controller.rs",
-            "a_legacy_plan_without_an_endpoint_takes_the_installations_legacy_addressing",
-        )),
+        access: &["addressing.region", ".legacy_archive_addressing.region"],
+        sites: Ok(&[Site {
+            file: "controllers/preflight.rs",
+            needle: "or_installation(&addressing.region)",
+            proof: Ok((
+                "preflight_controller.rs",
+                "a_legacy_plan_without_an_endpoint_takes_the_installations_legacy_addressing",
+            )),
+        }]),
     },
     // PUBLISHED, READ BY NOTHING YET — listed, not hidden. Both values DO reach
     // a reader through the Deployment's env (`AWS_ALLOW_HTTP`,
     // `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` → `retention::storage_url_for`,
     // `configured_values.rs`); it is their copy in this document that nothing
-    // reads.
+    // reads. The access count holds them at zero readers, so the day one
+    // appears this table must name it.
     Followed {
         value: "archive.s3.allowHttp",
         field: "legacyArchiveAddressing.allowHttp",
-        reader: Err(
+        access: &[
+            "addressing.allow_http",
+            ".legacy_archive_addressing.allow_http",
+        ],
+        sites: Err(
             "D2 §3.12 (b): `POST …/destinations:from-legacy` is to read it, and refuses with \
              branch (c) today; the restore readiness check takes transport from the PLAN \
              (D-SEAMS S5). FX-10 report, Class sweep owed.",
         ),
-        proof: None,
     },
     Followed {
         value: "archive.s3.virtualHostedStyle",
         field: "legacyArchiveAddressing.virtualHostedStyle",
-        reader: Err(
+        access: &[
+            "addressing.virtual_hosted_style",
+            ".legacy_archive_addressing.virtual_hosted_style",
+        ],
+        sites: Err(
             "D2 §3.12 (b), as allowHttp; the readiness check derives addressing from the \
              plan and the endpoint (engine G4). FX-10 report, Class sweep owed.",
         ),
-        proof: None,
     },
 ];
 
@@ -947,11 +1060,29 @@ const FOLLOWED: &[Followed] = &[
 ///    defaults — `maxActivePerNamespace` and
 ///    `maxEvidenceFetchActivePerNamespace` are both 4 — fails here, where the
 ///    default renders could not tell);
-/// 4. the named reader site exists, and so does the named proof row, which
-///    drives that reader at a non-default value.
+/// 4. EVERY place a controller reads the field is a listed site, and every
+///    listed site is such a place: each site's needle occurs exactly once in
+///    its file and contains one read, and the reads it points at are exactly
+///    the occurrences of the field's `access` spellings across
+///    `crates/weirkeeper/src` (whitespace removed, the parser excepted). Each
+///    site names the row that drives it at a non-default value, or says why
+///    none does and points at the FX-10 report.
 ///
-/// A field with no reader is listed with its reason (`reader: Err`), never
-/// dropped: that is how `legacyArchiveAddressing.allowHttp` stays visible.
+/// Step 4 used to take one needle per field and test it with `contains`. The
+/// FX-10 review (L1, mutant M5) showed what that misses: the needle for
+/// `hardMaxTopics` occurred THREE times — the plan, a log line and the
+/// harvest's cut — so the harvest's read could be replaced by the compiled-in
+/// default with this row and all 1 719 weirkeeper tests green. Now that
+/// mutant fails here (two reads where the table lists three) and in
+/// `topic_discovery_controller::the_installation_policys_topic_ceiling_cuts_what_the_harvest_stores`.
+///
+/// **What it cannot see:** a read through a binding the `access` list does not
+/// spell (`let p = &load.policy().discovery; … p.hard_max_topics`). The list
+/// carries the spellings the tree uses today.
+///
+/// A field with no reader is listed with its reason (`sites: Err`), never
+/// dropped, and held at zero reads: that is how
+/// `legacyArchiveAddressing.allowHttp` stays visible.
 #[test]
 fn every_installation_policy_value_reaches_its_field_and_a_reader_at_a_non_default_value() {
     let values = values();
@@ -1029,35 +1160,140 @@ fn every_installation_policy_value_reaches_its_field_and_a_reader_at_a_non_defau
         );
     }
 
-    // 4. The reader site and the proof row exist.
+    // 4. EVERY read site is listed, and each listed site exists and is proven.
+    //    The controller sources, whitespace removed (rustfmt may break a chain
+    //    anywhere), the parser excepted: it defines the fields and holds their
+    //    range rules, and reads nothing on a controller's behalf.
+    let src = repo().join("crates/weirkeeper/src");
+    let parser = src.join("check/policy.rs");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    let sources: BTreeMap<String, String> = files
+        .iter()
+        .filter(|p| **p != parser)
+        .map(|p| {
+            let rel = p
+                .strip_prefix(&src)
+                .expect("under src")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text =
+                std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            (rel, squeezed(&text))
+        })
+        .collect();
     for f in FOLLOWED {
-        match f.reader {
-            Ok((file, needle)) => {
-                let path = repo().join("crates/weirkeeper/src").join(file);
-                let text = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        // Every place the field is read, by any of its spellings.
+        let mut reads: std::collections::BTreeSet<(String, usize)> =
+            std::collections::BTreeSet::new();
+        for (file, text) in &sources {
+            for access in f.access {
+                reads.extend(
+                    accesses(text, access)
+                        .into_iter()
+                        .map(|at| (file.clone(), at)),
+                );
+            }
+        }
+        match f.sites {
+            Ok(sites) => {
+                let mut listed: std::collections::BTreeSet<(String, usize)> =
+                    std::collections::BTreeSet::new();
+                for site in sites {
+                    let text = sources
+                        .get(site.file)
+                        .unwrap_or_else(|| panic!("`{}`: no source {}", f.field, site.file));
+                    let needle = squeezed(site.needle);
+                    let found: Vec<usize> = text.match_indices(&needle).map(|(i, _)| i).collect();
+                    assert_eq!(
+                        found.len(),
+                        1,
+                        "`{}`'s reader `{}` must occur exactly once in {}, so it names one site; \
+                         it occurs {} times",
+                        f.field,
+                        site.needle,
+                        site.file,
+                        found.len()
+                    );
+                    let within: Vec<usize> = f
+                        .access
+                        .iter()
+                        .flat_map(|access| accesses(&needle, access))
+                        .collect();
+                    assert_eq!(
+                        within.len(),
+                        1,
+                        "`{}`'s reader `{}` must contain exactly one read of the field ({:?})",
+                        f.field,
+                        site.needle,
+                        f.access
+                    );
+                    assert!(
+                        listed.insert((site.file.to_string(), found[0] + within[0])),
+                        "`{}` lists the read in `{}` twice",
+                        f.field,
+                        site.needle
+                    );
+                    match site.proof {
+                        Ok((test_file, test_fn)) => {
+                            let path = repo().join("crates/weirkeeper/tests").join(test_file);
+                            let text = std::fs::read_to_string(&path)
+                                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                            assert!(
+                                text.contains(&format!("fn {test_fn}(")),
+                                "`{}`'s proof row `{test_fn}` is not in {test_file}",
+                                f.field
+                            );
+                        }
+                        Err(reason) => assert!(
+                            reason.contains("FX-10 report"),
+                            "`{}`'s unproven reader `{}` must say why, pointing at the report",
+                            f.field,
+                            site.needle
+                        ),
+                    }
+                }
+                assert_eq!(
+                    reads, listed,
+                    "every read of `{}` ({:?}) in crates/weirkeeper/src must be a listed site, and \
+                     every listed site a read: a reader the table does not name is a reader no \
+                     row is known to drive",
+                    f.field, f.access
+                );
+            }
+            Err(reason) => {
                 assert!(
-                    text.contains(needle),
-                    "`{}` names reader `{needle}` in {file}, and it is not there",
+                    reason.contains("FX-10 report"),
+                    "`{}` is listed as unread; its reason must point at the report",
                     f.field
                 );
-                let (test_file, test_fn) = f
-                    .proof
-                    .unwrap_or_else(|| panic!("`{}` has a reader and no proof row", f.field));
-                let path = repo().join("crates/weirkeeper/tests").join(test_file);
-                let text = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
                 assert!(
-                    text.contains(&format!("fn {test_fn}(")),
-                    "`{}`'s proof row `{test_fn}` is not in {test_file}",
+                    reads.is_empty(),
+                    "`{}` is listed as read by nothing, and is read at {reads:?}: name the \
+                     reader and its proof row",
                     f.field
                 );
             }
-            Err(reason) => assert!(
-                f.proof.is_none() && reason.contains("FX-10 report"),
-                "`{}` is listed as unread; its reason must point at the report",
-                f.field
-            ),
         }
     }
+}
+
+/// `text` with every whitespace character removed.
+fn squeezed(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Where `access` occurs in `text` as a whole spelling: not followed by an
+/// identifier character, and — when it starts with one — not preceded by one.
+fn accesses(text: &str, access: &str) -> Vec<usize> {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let starts_ident = access.chars().next().is_some_and(ident);
+    text.match_indices(access)
+        .filter(|(at, _)| {
+            let after = text[at + access.len()..].chars().next();
+            let before = text[..*at].chars().next_back();
+            !after.is_some_and(ident) && !(starts_ident && before.is_some_and(ident))
+        })
+        .map(|(at, _)| at)
+        .collect()
 }
