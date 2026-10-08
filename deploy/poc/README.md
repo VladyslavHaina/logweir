@@ -430,6 +430,15 @@ for crd in $(ls poc-secrets/chart/logweir-chart/crds | sed 's/\.yaml$//'); do
 done
 # Prints nothing when every live CRD is the new chart's:
 kubectl --context "$CTX" diff --server-side --force-conflicts -f poc-secrets/chart/logweir-chart/crds/
+# 1b. The demo brokers keep their data in an emptyDir. If the new chart changes
+#     either Kafka StatefulSet's pod template, step 2 replaces the pod and EVERY
+#     topic is lost. Prints nothing when the brokers are untouched. A change to
+#     the objects' own labels (helm.sh/chart) is harmless; ANY line under
+#     spec.template is not: stop, or accept losing the demo topics and re-seed
+#     them afterwards.
+helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
+  -f deploy/poc/logweir.values.yaml --show-only templates/demo-kafka/kafka.yaml \
+  | kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" diff -l app.kubernetes.io/component=demo-kafka -f -
 # 2. Controller, runner and console images TOGETHER, approval bindings unchanged.
 helm upgrade logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --kube-context "$CTX" \
   -n "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml \
