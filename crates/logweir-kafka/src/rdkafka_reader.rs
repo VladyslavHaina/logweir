@@ -445,6 +445,26 @@ impl ClusterReader for RdKafkaReader {
             .collect())
     }
 
+    fn replication_factors(&self, topics: &[String]) -> Result<BTreeMap<String, u32>, KafkaError> {
+        if topics.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let md = self
+            .consumer
+            .fetch_metadata(None, T)
+            .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        Ok(md
+            .topics()
+            .iter()
+            .filter(|t| t.error().is_none() && topics.iter().any(|n| n == t.name()))
+            .filter_map(|t| {
+                let factor =
+                    replication_factor_of(t.partitions().iter().map(|p| p.replicas().len()))?;
+                Some((t.name().to_string(), factor))
+            })
+            .collect())
+    }
+
     fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
         let md = self
             .consumer
@@ -954,6 +974,17 @@ impl TopicDeleter for RdKafkaReader {
     }
 }
 
+/// **PROD-05.1.** A topic's replication factor from its partitions' replica
+/// counts: the SMALLEST. A partition mid-reassignment lists the replicas being
+/// added beside the ones being removed, so the largest count can exceed the
+/// topic's factor; the smallest never does. `None` for a topic with no
+/// partitions (metadata the principal could not read) or a count of zero —
+/// NOT RECORDED, never `0`.
+fn replication_factor_of(replica_counts: impl Iterator<Item = usize>) -> Option<u32> {
+    let smallest = replica_counts.min()?;
+    u32::try_from(smallest).ok().filter(|n| *n >= 1)
+}
+
 #[cfg(test)]
 mod tests {
     //! These need the `client` feature (this whole file is gated on it) but
@@ -966,6 +997,21 @@ mod tests {
     //! (`BorrowedMessage` has no public constructor) and is not attempted
     //! here — see the Task 10 fix report's "unproven without a live broker"
     //! list.
+
+    /// L5 (PROD-05.1 fix round): the SMALLEST replica count is the factor —
+    /// a partition mid-reassignment (four replicas listed while the topic's
+    /// factor is three) must not raise it, and an RF-1 partition beside RF-3
+    /// ones is what a restore can count on. No partitions, or a zero, is NOT
+    /// RECORDED.
+    #[test]
+    fn the_replication_factor_is_the_smallest_replica_count() {
+        use super::replication_factor_of;
+        assert_eq!(replication_factor_of([3, 4, 3].into_iter()), Some(3));
+        assert_eq!(replication_factor_of([3, 1, 3].into_iter()), Some(1));
+        assert_eq!(replication_factor_of([2].into_iter()), Some(2));
+        assert_eq!(replication_factor_of(std::iter::empty()), None);
+        assert_eq!(replication_factor_of([0, 3].into_iter()), None);
+    }
 
     /// **THE TLS CLIENT PINS HOSTNAME VERIFICATION AND TRUSTS THE PROJECTED
     /// CA** — PLAT-07.1 review findings H1 and H2.

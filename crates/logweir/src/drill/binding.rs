@@ -999,6 +999,8 @@ mod tests {
                 to_ms: 2,
             },
             config_coverage: None,
+            topic_configuration: None,
+            owner_detection: None,
         }
     }
 

@@ -184,7 +184,10 @@ always a destination with no `evidenceRead` grant.
 2. In the wizard, choose the target connection (a `target` role), the topics and
    the new-topic mapping, and the point in time inside the covered window.
    Restores only ever write **new** topics. Check the **replication factor** in
-   step 4: it defaults to the target's broker count, at most 3, when a
+   step 4: it defaults to the source's factor when a recovery catalog's view of
+   the point records it (the largest of the selected topics', from backups
+   whose receipt is format 1.3.0 or later), capped at the target's broker
+   count; otherwise to the target's broker count, at most 3, when a
    *Discover topics* of the target connection has read it (until the controller
    collects that discovery, a day by default; past the discovery's freshness,
    15 minutes by default, the count sets the default but refuses no factor),

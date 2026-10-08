@@ -4099,3 +4099,103 @@ async fn a_synced_policy_store_resolves_the_catalog_without_a_list() {
         verdict("Verified", true)
     );
 }
+
+// ===========================================================================
+// PROD-05.1: a point's topics travel from the runner's entry into the view
+// ===========================================================================
+
+/// Four topics: `ledger`'s replication factor and `notes`'s partition count
+/// were NOT RECORDED (the shape engine 0.23.3's manifest leaves, FX-21), and
+/// the run read `KafkaTopic` resources (`ownerDetection`).
+fn with_topics(mut e: Value) -> Value {
+    e["topics"] = json!([
+        {"name": "audit", "partitions": 1, "replicationFactor": 1, "configCoverage": "captured"},
+        {"name": "ledger", "partitions": 4, "configCoverage": "captured"},
+        {"name": "notes", "replicationFactor": 2, "configCoverage": "captured"},
+        {"name": "orders", "partitions": 6, "replicationFactor": 3, "configCoverage": "captured",
+         "owner": "strimzi"},
+    ]);
+    e["ownerDetection"] = json!(["kafkaTopicResources"]);
+    e
+}
+
+/// The topics parse, survive the merge of two copies of one point (a copy
+/// that lists them fills one that does not), and reach the published row
+/// unchanged; an entry listing more than the grammar allows is skipped and
+/// counted like any other malformed entry.
+#[test]
+fn a_points_topics_reach_the_view_and_an_unbounded_list_is_malformed() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let point = "lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let body = versioned(&page_block(1, 1, &[with_topics(ok_entry(point, 1))]));
+    let parsed = view::parse_body(&body, 5000).expect("an entry with topics parses");
+    let listed = parsed.pages[0].entries[0].clone();
+    assert_eq!(listed.topics.len(), 4);
+    assert_eq!(listed.topics[3].replication_factor, Some(3));
+    assert_eq!(listed.topics[3].owner.as_deref(), Some("strimzi"));
+    // M3 (fix round): an absent count stays absent through the parse.
+    assert_eq!(listed.topics[1].replication_factor, None);
+    assert_eq!(listed.topics[2].partitions, None);
+    assert_eq!(
+        listed.owner_detection.as_deref(),
+        Some(&["kafkaTopicResources".to_string()][..])
+    );
+
+    // A copy at a second location that lists no topics (an older runner)
+    // merges with one that does, in either order: the list is kept.
+    let mut bare = entry(point, 1, "s3://copy/p");
+    bare.topics.clear();
+    for order in [
+        vec![bare.clone(), listed.clone()],
+        vec![listed.clone(), bare],
+    ] {
+        let merged = view::merge_entries(order);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].topics, listed.topics);
+        let row = view::view_entry(merged[0].clone(), &trust, now());
+        assert_eq!(row.topics, listed.topics);
+        assert_eq!(row.topics_omitted, None);
+        // Where the run looked for owners travels WITH the list (M2).
+        assert_eq!(row.owner_detection, listed.owner_detection);
+        // M3: the published row carries no key for a count nobody recorded.
+        let published = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            published["topics"][1],
+            json!({"name": "ledger", "partitions": 4, "configCoverage": "captured"}),
+            "{published}"
+        );
+        assert_eq!(
+            published["topics"][2],
+            json!({"name": "notes", "replicationFactor": 2, "configCoverage": "captured"}),
+            "{published}"
+        );
+        assert_eq!(published["ownerDetection"], json!(["kafkaTopicResources"]));
+    }
+
+    // An `ownerDetection` longer than the sources the format defines is
+    // malformed, like an unbounded topic list.
+    let mut talkative = with_topics(ok_entry("lwp1-dddddddddddddddddddddddddddddddd", 4));
+    talkative["ownerDetection"] = json!(["declared", "kafkaTopicResources", "labels"]);
+    let body = versioned(&page_block(1, 1, &[talkative]));
+    let parsed = view::parse_body(&body, 5000).expect("skipped, never fatal");
+    assert_eq!(parsed.pages[0].entries.len(), 0);
+    assert_eq!(parsed.skipped_entries, 1);
+
+    let mut wide = ok_entry("lwp1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 2);
+    wide["topics"] = json!((0..view::MAX_ENTRY_TOPICS + 1)
+        .map(|i| json!({"name": format!("t{i}")}))
+        .collect::<Vec<_>>());
+    let body = versioned(&page_block(1, 1, &[wide]));
+    let parsed = view::parse_body(&body, 5000).expect("skipped, never fatal");
+    assert_eq!(parsed.pages[0].entries.len(), 0);
+    assert_eq!(parsed.skipped_entries, 1);
+
+    // The count of what the runner left out travels too.
+    let mut omitted = ok_entry("lwp1-cccccccccccccccccccccccccccccccc", 3);
+    omitted["topicsOmitted"] = json!(70);
+    let body = versioned(&page_block(1, 1, &[omitted]));
+    let parsed = view::parse_body(&body, 5000).expect("parses");
+    let row = view::view_entry(parsed.pages[0].entries[0].clone(), &trust, now());
+    assert!(row.topics.is_empty());
+    assert_eq!(row.topics_omitted, Some(70));
+}

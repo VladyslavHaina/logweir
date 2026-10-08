@@ -38,8 +38,9 @@
 ///
 /// It still names keys Kafka 4.0 removed (`message.format.version`,
 /// `message.downconversion.enable`, `message.timestamp.difference.max.ms`) —
-/// PROD-05.1's portability table is where that matters; for coverage it only
-/// means those keys can never be present on a 4.x broker to disagree about.
+/// PROD-05.1's portability table (`logweir_core::topic_configuration::TABLE`)
+/// marks an override of one `removedInKafka4`; for coverage it only means
+/// those keys can never be present on a 4.x broker to disagree about.
 pub const RECOVERY_TOPIC_CONFIG_KEYS: [&str; 24] = [
     "cleanup.policy",
     "compression.type",

@@ -112,6 +112,8 @@ fn fixture(spec: &str, allowed: &str) -> Fixture {
             out: None,
             receipt_out: None,
             backup_id_override: None,
+            kafka_topic_resources: None,
+            strimzi_cluster: None,
         },
     }
 }
@@ -550,6 +552,124 @@ fn backup_run_refuses_a_glob_topic() {
         msg.contains("mandatory named-topic allowlist with no wildcard"),
         "{msg}"
     );
+}
+
+/// **PROD-05.1 at phase −1.** A declared owner this build cannot record — an
+/// unplanned topic, another kind, an unusable reference — is refused, exit 3,
+/// before anything is dialled; a valid one is not (the control).
+#[test]
+fn backup_run_refuses_a_declared_owner_it_cannot_record() {
+    let owners = |topic: &str, kind: &str, reference: &str| {
+        format!(
+            "  topic_owners:\n  - topic: {topic}\n    kind: {kind}\n    reference: \"{reference}\"\n"
+        )
+    };
+    for (extra, said) in [
+        (
+            owners("clicks", "external", "tf"),
+            "which is not one of source.topics",
+        ),
+        (
+            owners("orders", "terraform", "tf"),
+            "is not \"strimzi\" or \"external\"",
+        ),
+        (
+            owners("orders", "external", "  "),
+            "must be 1 to 256 characters",
+        ),
+        // L3 (fix round): one topic declared twice — which of the two the
+        // receipt would carry is not the operator's to guess.
+        (
+            format!(
+                "{}{}",
+                owners("orders", "external", "terraform: a"),
+                "  - topic: orders\n    kind: external\n    reference: \"terraform: b\"\n"
+            ),
+            "source.topic_owners declares topic \"orders\" more than once",
+        ),
+    ] {
+        let f = fixture(
+            &spec_yaml("mvp-demo", "[orders]", &extra),
+            &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+        );
+        let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+        let engine = RecordingEngine::one_topic();
+        let store = empty_archive();
+        assert_eq!(
+            run(&f.args, &reader, &engine, &store),
+            ExitCode::GuardRefused,
+            "{said}"
+        );
+        let msg =
+            guard_message(exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err());
+        assert!(msg.contains(said), "{msg}");
+    }
+}
+
+/// **PROD-05.1: owners reach the receipt.** A Strimzi `KafkaTopic` given with
+/// `--kafka-topic-resources` owns its topic, and a declaration in the plan is
+/// laid over it; without the file and the declaration nothing is owned (the
+/// control). And the receipt says WHERE the run looked (`owner_detection`, fix
+/// round M2): nowhere is an empty list — the owner NOT CHECKED — and an empty
+/// `topic_owners: []` is the operator saying no topic has one.
+#[test]
+fn declared_and_detected_owners_reach_the_receipts_model() {
+    let declared = concat!(
+        "  topic_owners:\n  - topic: orders\n    kind: external\n",
+        "    reference: \"terraform: kafka_topic.orders\"\n",
+    );
+    for (extra, resources, want, looked) in [
+        ("", false, None, &[][..]),
+        ("  topic_owners: []\n", false, None, &["declared"][..]),
+        (
+            "",
+            true,
+            Some(("strimzi", "kafkaTopicResource", "kafka/orders-kt")),
+            &["kafkaTopicResources"][..],
+        ),
+        (
+            declared,
+            true,
+            Some(("external", "declared", "terraform: kafka_topic.orders")),
+            &["declared", "kafkaTopicResources"][..],
+        ),
+    ] {
+        let mut f = fixture(
+            &spec_yaml("mvp-demo", "[orders]", extra),
+            &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+        );
+        if resources {
+            let path = f._dir.path().join("kafkatopics.yaml");
+            std::fs::write(
+                &path,
+                concat!(
+                    "apiVersion: kafka.strimzi.io/v1beta2\nkind: KafkaTopic\nmetadata:\n",
+                    "  name: orders-kt\n  namespace: kafka\n  labels:\n",
+                    "    strimzi.io/cluster: prod\nspec:\n  topicName: orders\n",
+                ),
+            )
+            .unwrap();
+            f.args.kafka_topic_resources = Some(path);
+            f.args.strimzi_cluster = Some("prod".into());
+        }
+        let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+        let engine = RecordingEngine::one_topic();
+        let (store, _k, _b) = archive_for("mvp-demo");
+        let outcome = exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
+        let got = outcome.topic_configuration["orders"]
+            .owner
+            .as_ref()
+            .map(|o| (o.kind.clone(), o.basis.clone(), o.reference.clone()));
+        assert_eq!(
+            got,
+            want.map(|(k, b, r)| (k.to_string(), b.to_string(), r.to_string())),
+            "extra {extra:?}, resources {resources}"
+        );
+        assert_eq!(
+            outcome.owner_detection, looked,
+            "extra {extra:?}, resources {resources}"
+        );
+    }
 }
 
 /// **C15 at phase −1** (PROD-00.3f, A-C15-1). An `http://` archive endpoint
@@ -1051,7 +1171,21 @@ fn backup_run_writes_a_signed_receipt() {
     // The document says what the run measured — spot-checked on the fields an
     // auditor reads first, so a receipt full of defaults cannot pass this row.
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
-    assert_eq!(receipt.format_version, "1.1.0");
+    // PROD-05.1: every receipt this build signs carries `topic_configuration`,
+    // so every one is 1.3.0.
+    assert_eq!(receipt.format_version, "1.3.0");
+    // …one model entry per named topic, and — the read having failed — NO
+    // entries: NOT RECORDED, never an empty "no configuration".
+    let model = receipt
+        .topic_configuration
+        .as_ref()
+        .expect("a 1.3.0 receipt this build signs carries topic_configuration");
+    assert_eq!(
+        model.keys().cloned().collect::<Vec<_>>(),
+        vec!["orders".to_string()]
+    );
+    assert_eq!(model["orders"].entries, None);
+    assert_eq!(model["orders"].owner, None);
     // FX-4: the block is ALWAYS written, one entry per named topic. This
     // file's `StubReader` implements no configuration read at all, so the
     // coverage it can establish is the WEAKEST: `notCaptured` because the read

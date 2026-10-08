@@ -9987,6 +9987,48 @@
           }
         }
       },
+      "PointTopicView": {
+        "description": "**PROD-05.1.** One topic of a recovery point, as the catalog's view lists it: what the archive records of its layout and how its configuration is held. Never a configuration value — the settings themselves are in the signed receipt and the point record, not in a listing.",
+        "type": "object",
+        "required": [
+          "applyRoute",
+          "name"
+        ],
+        "properties": {
+          "applyRoute": {
+            "description": "How the topic's configuration reaches a target (`logweir_core::topic_configuration::apply_route`): `desiredStateExport` for a topic a declarative owner manages — a restore exports its desired state for the owner to apply instead of changing it through Kafka's admin API, which the owner would revert; `adminApi` for a topic with no owner where the backup run looked for one (the point's `ownerDetection` is not empty); and `unknown` where it did not look, or the view does not say where it looked. An owner nobody checked for is never published as the admin-API route.",
+            "type": "string"
+          },
+          "configCoverage": {
+            "description": "`captured`, `notCaptured` or `captureDenied` — whether the archive's record of the topic's configuration is complete (FX-4). Absent is unknown, never `captured`.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The source topic's name.",
+            "type": "string"
+          },
+          "owner": {
+            "description": "The declarative owner's kind (`strimzi`, `external`), when one manages the topic's configuration.",
+            "type": "string",
+            "nullable": true
+          },
+          "partitions": {
+            "description": "The source's partition count, as the archive's manifest records it (the receipt's `topic_configuration[<name>].partitions`). Absent when the manifest records none, or the point predates the configuration model: unknown, never zero.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0,
+            "nullable": true
+          },
+          "replicationFactor": {
+            "description": "The source's replication factor, as the backup run read it from the source cluster's metadata: the smallest replica count among the topic's partitions. When that read was unavailable the run warned and recorded the archive manifest's value where the manifest carries one; otherwise the factor is absent — unknown, never a default. The console's restore wizard defaults a plan's factor from it, capped by the target's broker count.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0,
+            "nullable": true
+          }
+        }
+      },
       "PointView": {
         "description": "One recovery point, with its two verdicts kept apart.",
         "type": "object",
@@ -10048,6 +10090,14 @@
             "type": "string",
             "nullable": true
           },
+          "ownerDetection": {
+            "description": "**PROD-05.1.** Where the backup run looked for declarative owners, beside `topics`: `declared` (the plan's `source.topic_owners`) and `kafkaTopicResources` (Strimzi `KafkaTopic` resources). EMPTY says it looked nowhere, so every un-owned topic's `applyRoute` is `unknown`. ABSENT is NOT PUBLISHED.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
           "pointId": {
             "description": "The content-derived point identity.",
             "type": "string"
@@ -10082,6 +10132,20 @@
           "signerKeyId": {
             "description": "The key that signed it, when one was identified.",
             "type": "string",
+            "nullable": true
+          },
+          "topics": {
+            "description": "**PROD-05.1.** The point's topics with their recorded layout, from a point record that agreed with its verified receipt. ABSENT is NOT PUBLISHED — a catalog synced by an older runner, a point recorded before format 1.3.0, a point that is not `Available` — and never \"no topics\". At most 64.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PointTopicView"
+            }
+          },
+          "topicsOmitted": {
+            "description": "How many topics the view left out of `topics` (the point names more than 64, or the sync's byte budget could not hold them), so a reader never takes a partial list for the point's topic set.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0,
             "nullable": true
           },
           "verification": {

@@ -14,8 +14,12 @@ every existing doc describe: project `logweir-e2e`, `kafka-broker-1` with its
 five listeners on host ports 9092 (plaintext), 9095 (pods) and 9097 (SCRAM),
 MinIO on 9000 and 9001, and `just e2e-up` / `just e2e` / `just e2e-down`.
 `docker compose config` renders byte for byte what it rendered before these
-parameters existed. The default stack is shared: on the orchestrated run, hold
-`claude/compose-lock.sh` while you use it.
+parameters existed, except for two broker settings PROD-04.0d added for share
+groups (`KAFKA_SHARE_COORDINATOR_STATE_TOPIC_*`, below). The 3.7 broker does
+not use them: it starts and serves as before and never logs them, but its
+DescribeConfigs now reports both as sensitive entries with no value (below).
+The default stack is shared: on the
+orchestrated run, hold `claude/compose-lock.sh` while you use it.
 
 ## Parallel stacks: slots
 
@@ -134,7 +138,8 @@ just e2e-down && just e2e-up && just mvp-demo && just e2e-down
 `just e2e-up` brings them up in the same `--wait` (each profile's setup feeds a
 long-running service with a healthcheck); `just e2e-down` removes every profile.
 `compose/profile-smoke.sh` smokes the active profiles, one negative control per
-behaviour, from the host side (published ports) and in-network. It bounds every
+behaviour, from the host side (published ports) and in-network; name `groups`
+to smoke the groups fixture as well (`profile-smoke.sh groups`). It bounds every
 container with `timeout` or `gtimeout` when present (this host's
 `/tmp/lwtimeout` otherwise), and warns once and runs unbounded with none.
 
@@ -146,7 +151,8 @@ container with `timeout` or `gtimeout` when present (this host's
 | `objectstore` | `objectstore` (+ setup) | SeaweedFS 4.48 beside MinIO: `kafka-backups`, `logweir-evidence`, `kafka-backups-locked` (Object Lock) and `kafka-backups-2`, credentials `minioadmin`/`minioadmin` | 9130 | PROD-09.1 (PROD-09.2, REPLACE-MINIO) |
 | `registry` | `registry` | Karapace 6.2.3, Schema-Registry-compatible, schemas in `_schemas` on `kafka-broker-1`, BACKWARD compatibility | 9141 | PROD-03.0 (PROD-03.1, 03.2) |
 | `streams` | `streams-wordcount` (+ topics) | Apache Kafka's WordCountDemo from the broker line's own image, group `logweir-e2e-wordcount`, in-memory state stores | none | PROD-06.1 (PROD-04.x, 06.2) |
-| `acl` | `kafka-acl` (+ setup) | A single-node cluster that ENFORCES ACLs (KRaft's StandardAuthorizer, `allow.everyone.if.no.acl.found=true`). Every PLAINTEXT client, in-network on `kafka-acl:9094` or host-side on 9150, is `User:ANONYMOUS`, a super user; the SCRAM-SHA-512 user `logweir` (password `logweir-e2e-not-a-secret`) on 9151 is the restricted principal a row's ACLs name. The marker topic exists. Harness: `bootstrap_acl()`, `bootstrap_acl_sasl()` | 9150-9151 | FX-4 (PROD-04.0d extends it; PROD-05.3) |
+| `streams-protocol` | `streams-protocol-wordcount` (+ topics) | The same idea on the STREAMS rebalance protocol (KIP-1071, `group.protocol=streams`): Apache Kafka's WordCountProcessorDemo, group `logweir-e2e-streams-protocol`, a Streams group that `kafka-groups.sh --list` types `Streams` and the consumer-group tools do not show. It reads `streams-plaintext-input` and writes `streams-wordcount-processor-output`, so it runs beside `streams` (two WordCountDemos would share one output topic). In-memory store, changelog-backed, no repartition topic; counts are forwarded on stream-time punctuation, i.e. once a later record arrives. **4.x lines only** (measured on 4.3.1): on 3.x the application exits and `up --wait` fails. The groups fixture's streams member | none | PROD-04.0d (PROD-04.1, 04.2, 06.1, 06.x) |
+| `acl` | `kafka-acl` (+ setup) | A single-node cluster that ENFORCES ACLs (KRaft's StandardAuthorizer, `super.users=User:ANONYMOUS`, `allow.everyone.if.no.acl.found=true`). Every PLAINTEXT client, in-network on `kafka-acl:9094` or host-side on 9150, is `User:ANONYMOUS`, a super user; the SCRAM-SHA-512 user `logweir` (password `logweir-e2e-not-a-secret`) on 9151 is the restricted principal a row's ACLs name. The marker topic exists. PROD-04.0 §3.9's visibility state is opt-in: `e2e/compose/groups.sh visibility apply` / `remove` (below). Harness: `bootstrap_acl()`, `bootstrap_acl_sasl()` | 9150-9151 | FX-4 (PROD-04.0d extends it; PROD-04.1, 04.2, PROD-05.1's `topic_configuration.rs`, run on `--kafka 3.9` and `--kafka 4.3`; PROD-05.3) |
 | `txn` | reserved | The transactional producer PROD-01.1 builds | — | PROD-01.1 |
 
 The **owner** changes a profile's services without asking; anyone else extends
@@ -154,7 +160,9 @@ it by adding a service, or asks the owner. A profile is torn down by
 `just e2e-down` like the rest; the auth certificates stay in
 `.e2e/auth/<project>/` (gitignored) and are reused by the next `up`.
 
-Limits worth knowing: the auth listeners are host-facing (an in-network client
+Limits worth knowing: the `streams-protocol` profile and the groups fixture's
+consumer, share and streams groups need a 4.x line (the groups fixture falls
+back to classic groups by itself; the profile fails `up` on 3.x); the auth listeners are host-facing (an in-network client
 uses `kafka-auth:9094`, plaintext); the Streams application keeps its state in
 memory, because RocksDB's native library needs `libstdc++`, which the
 Alpine-based `apache/kafka` image lacks; `objectstore` does not replace MinIO
@@ -163,6 +171,94 @@ inside `kafka-acl` as the super user and removes what it added, and the
 restricted principal's `kafka-topics.sh --describe` needs DescribeConfigs
 too, because it reads the topic's configuration (measured on 3.7.1); every
 behaviour above was measured with Docker Compose v5.0.2.
+
+## The groups fixture: one group of each type, and groups a principal cannot see
+
+[`compose/groups.sh`](compose/groups.sh) (PROD-04.0d) builds the consumer-group
+fixture PROD-04.1, 04.2 and 05.3's acceptance rows name (the record is
+[`PROD-04.0-admin-path.md`](../docs/to-do/decisions/PROD-04.0-admin-path.md),
+§3 and §10) on the stack the shell addresses. It is a helper, not a profile:
+run it after `just e2e-up`, and `just e2e-down` removes everything it made.
+
+```sh
+eval "$(e2e/compose/stack-env.sh --slot 1 --kafka 4.3 --profiles acl)"
+just e2e-up
+e2e/compose/groups.sh up                    # the set below, on kafka-broker-1; idempotent
+e2e/compose/groups.sh stop classic-live     # returns once pa-classic-live is Empty
+e2e/compose/groups.sh start classic-live    # returns once it is Stable again
+e2e/compose/groups.sh list                  # GROUP TYPE STATE, as the broker reports them
+e2e/compose/groups.sh visibility apply      # §3.9 on kafka-acl; `remove` undoes it
+e2e/compose/profile-smoke.sh groups acl     # the fixture's smoke
+just e2e-down
+```
+
+**The set follows the broker's finalized features** (`kafka-features.sh
+describe`): classic groups always, consumer groups with `group.version` ≥ 1,
+share groups with `share.version` ≥ 1, streams groups with `streams.version`
+≥ 1. That is every type on the 4.3 line and classic only on 3.9 (measured on
+4.3.1 and 3.9.2). `list` prints the type the BROKER reports (`kafka-groups.sh`
+on 4.x, `kafka-consumer-groups.sh --list --type` on 3.9); 3.7.1's tools cannot
+report one, and `list` prints `-` there.
+
+| Group | Type | State | How |
+|---|---|---|---|
+| `pa-classic-empty` | Classic | Empty | a console consumer read 12 records of `pa-orders` and left |
+| `pa-classic-live` | Classic | Stable | member `classic-live` |
+| `pa-consumer-empty` | Consumer (KIP-848) | Empty | as `pa-classic-empty`, `group.protocol=consumer` |
+| `pa-consumer-live` | Consumer | Stable | member `consumer-live` |
+| `pa-share-idle` | Share (KIP-932) | Empty | a share consumer read 10 records of `pa-share-in` and left; its start offsets are readable |
+| `pa-share-live` | Share | Stable | member `share-live` |
+| `logweir-e2e-streams-protocol` | Streams (KIP-1071) | Stable | member `streams`: the `streams-protocol` profile's application, which `up` starts |
+
+Topics on `kafka-broker-1`: `pa-orders` (3 partitions, 30 keyed records) and
+`pa-share-in` (2 partitions, 40 keyed records). Both share groups carry the
+group configuration `share.auto.offset.reset=earliest`, set before their
+first member joins. An id no one created (say `pa-absent`) is the absent
+group of AP-04.1-1.
+
+**Members stop cleanly.** The three live consumers run inside
+`kafka-broker-1`, each bounded by `timeout` (`GROUPS_MEMBER_SECONDS`, default
+7200). `stop` sends SIGTERM through a bracketed, anchored pattern
+(`[g]roup NAME$`), so the consumer closes and LEAVES its group, which is
+Empty at the first check after its process exits (`stop` says so, and the
+smoke requires it; a member killed without leaving would hold the group for
+`session.timeout.ms`, 45 s); the pattern never matches the shell that carries it (PROD-04.0
+§3.3's first control killed its own `sh -c`) or a neighbouring member. The
+streams member is stopped and started with `docker compose`. While a member
+lives, a reset of its group is refused (the group is active); once `stop`
+returns, the same reset commits and reads back — the control AP-04.2-1 relies
+on.
+
+**Share-group state on one broker.** Every single-node broker
+(`kafka-broker-1`, `kafka-auth`, `kafka-cluster2`, `kafka-acl`) sets
+`share.coordinator.state.topic.replication.factor=1` and `…min.isr=1`, as the
+offsets and transaction topics already were. With the defaults (3 and 2)
+`__share_group_state` is never created on one broker, so share groups get
+members but no share-partition state (§3.8). A 3.x broker does not use either
+key, but it does not hide them: DescribeConfigs on the broker reports both as
+STATIC entries, `sensitive=true` with a null value, because a key the broker
+cannot type is withheld (§3.9's mechanism, the same as `super.users` on `acl`).
+Measured on 3.7.1 and 3.9.2, where the broker starts, serves as before and
+never logs them. A row that reads a 3.x single-node broker's configuration
+(PROD-05.3) therefore sees two more "set, value withheld" keys.
+
+**Groups a principal cannot see (§3.9), on `acl`.** `visibility apply`, as the
+super user on `kafka-acl`: topic `pa-orders`; groups `pa-visible` and
+`pa-hidden`, each created by a non-member commit (offsets 5 and 7 on partition
+0); and ACLs that name only `User:ops`: Describe and Read on group
+`pa-hidden`, Describe on the cluster. The restricted `User:logweir` then has
+neither Describe on the cluster nor on `pa-hidden`, so its group listing omits
+`pa-hidden` with no error, a targeted describe of it is refused
+(GroupAuthorizationException), and DescribeAcls is refused
+(ClusterAuthorizationException). Granting it Describe on the cluster unfilters
+the listing (the smoke's negative control). It is OPT-IN because its cluster
+ACL takes every cluster operation from the restricted principal, which the
+profile's other rows (FX-4's) expect it to have; `visibility remove` deletes
+the ACLs, both groups and the topic.
+
+Owner: PROD-04.0d; PROD-04.1, 04.2 and 05.3 are the first consumers. Extend it
+as a profile is extended; a new member or group goes in `groups.sh`'s `SET`
+and in `smoke_groups`.
 
 ## Extending the fixtures
 
