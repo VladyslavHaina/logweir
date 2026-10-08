@@ -207,6 +207,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/mcp-round3.spec.js` | **the human-like pass, round 3**: the wizard's focused status kept clear of its sticky footer, step texts that show names as code, "Restore this point" only for a role that can restore, and the no-role header -- each with the behaviour it replaced. |
 | `tests/check-deadline.spec.js` | **P15 and its class**: every follower reads its check until the check's own deadline, backs off while it does, and says so -- with *Run the check again* -- when the deadline passes without a result: the deadline pinned to the product's own numbers, the follow on node's mock timers, and each page (the readiness panel, the schedule form, *Test connection*, *Discover topics*, *Test access*) with a check that settles at 100 s and one that never does. Restore step 5's two rows are in `mutation.spec.js`. |
 | `tests/restore-semantics.spec.js` | **FX-6**: step 6 says what a restore copies, above Create -- the decision record's sentence word for word, its two identifiers as code, visible (a direct child of step 6, never folded into a wrapper) with each of the four approval-policy blocks, and on the step on screen -- each row with its negative control. |
+| `tests/time-basis.spec.js` | **FX-8**: the restore wizard's time-basis box -- unticked by default and never ticked by the page, the note under it (what it means, the refusal it avoids, and that the page cannot see each topic's timestamp type), the plan line `time_basis: "producerTime"` exactly when ticked and pre-FX-8 bytes when not (the golden pair `plan-time-basis.golden.yaml`, which `ui_lint.rs` also parses into the runner's `RestoreSpec`), the hash it moves, the review row, the draft, the mounted wizard, and the Restore detail's row read from the approved plan -- each row with its negative control. |
 | `tests/replication-factor.spec.js` | **FX-5**: the restore wizard's replication factor -- the default rule (the source's factor capped at the target's brokers, else the target's broker count at most 3, else the grammar's 1 said as such), the broker count read from a discovery of the target (a fresh one, or one past its freshness alone, which sets the default with its age and refuses nothing), the 4-broker boundary of the ceiling, the input, the `ReplicationFactorExceedsBrokers` refusal on step 4, in the stepper, on the review step and in the submit, the review row with where the factor came from, the sentence that the factor can differ from the source's (on both steps and in this README and the quickstart), the readiness warning that names the factor, the draft, and both mounts' reads (a Backup point and a catalog point) -- each row with its negative control. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
@@ -1255,6 +1256,63 @@ kept before the upgrade carries no factor and gets the default. The
 `brokerCount` field is additive: an older API omits it, and the wizard then
 reads no count and says so. Rolling the console back restores the old fixed 1.
 Rows: `ui/tests/replication-factor.spec.js`.
+
+## The time basis: a point in time over a `LogAppendTime` topic (FX-8)
+
+**Every console restore states a point in time, and the runner now refuses one
+over a `LogAppendTime` topic** unless the plan accepts selection by producer
+time. The archive holds each record's producer timestamp, not the broker's
+append time, so such a point selects by the producers' clocks; PROD-01.1
+measured a point in 2001 restoring records appended in 2026, signed `pass`. The
+runner refuses before it creates anything (`PointInTimeByProducerTime`, exit 3)
+when the archive manifest or the bound receipt records the topic as
+`LogAppendTime`
+([stability.md](../docs/stability.md#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time)).
+
+**Step 3 carries the opt-in**: *Select by producer time*, with the note under
+it naming the plan line `restore.time_basis: producerTime`. It is unticked by default and the page
+never ticks it, because ticking it is the operator's acceptance, which the
+approver then signs with the plan. Ticked, the plan carries
+`time_basis: "producerTime"` under `restore:`, which moves the plan hash; the
+runner restores the topic by its producers' clocks and the signed scorecard
+lists it under `source.time_basis.producer_time`. Unticked, the plan is
+byte-identical to what this page wrote before FX-8. The note under the box
+(`TIME_BASIS_NOTE`) says what it means and what the page cannot see: each
+topic's timestamp type is recorded in the archive manifest and the backup
+receipt, which the runner reads and this page does not, so the box is offered
+on every plan and names no topic. The review step's **time basis** row says
+which way the plan reads, and a Restore's detail page reads the same from its
+approved plan bytes, beside the runner's own reason (`PointInTimeByProducerTime`
+on a refused one).
+
+**When the plan opts in, the review step warns** (`TIME_BASIS_OPTED_WARNING`,
+`#review-time-basis-warning`): the restore takes the records whose producer
+timestamps are at or before the point, not the ones the broker had appended by
+then, and the page cannot see which topics are `LogAppendTime`.
+
+**After the run, the Restore detail shows what was SIGNED** (FX-8 review M-2).
+The *time basis (signed)* row reads `status.timeBasis` -- the scorecard's
+`source.time_basis`, copied by the controller and served by the product API as
+`timeBasis` -- and names the topics selected by producer time and the ones
+selected with the timestamp type NOT RECORDED. Like every scorecard fact on the
+page it is labelled a claim until the evidence verifies. A topic whose type was
+not recorded also gets a warning paragraph (`#restore-time-basis-unrecorded`):
+the clock its point in time was read on is unknown. An absent block reads "not
+recorded", never "none".
+
+**Limits.** Before the run the console cannot know which topics are
+`LogAppendTime`: the catalog view does not carry the receipt's per-topic
+`config_coverage`, so the box, its note and the review warning name no topic;
+projecting it is a follow-up. The FX-6 sentence above stays true and
+unchanged: restored timestamps of a `LogAppendTime` topic are still the
+producers' `CreateTime`.
+
+**Upgrade and rollback.** A Restore created before this keeps its plan bytes,
+which state no time basis; if its topic is `LogAppendTime` and its runner is
+upgraded first, it is refused, and a retry builds a new plan where the box can
+be ticked. A draft kept before the upgrade carries no choice and comes back
+unticked. Rolling the console back removes the box; a plan already approved with
+the line keeps it. Rows: `ui/tests/time-basis.spec.js`.
 
 ## The readiness check holds the submit
 

@@ -951,11 +951,15 @@ impl Pass<'_> {
 
     async fn report_running(&mut self, job: &Job) -> Result<Outcome, ReconcileError> {
         let expect = frame_expectations(job, &self.uid);
-        let observation = check::observe(
+        // FX-11: the Job's Events are read when its pod has not started, so a
+        // pod a `ResourceQuota` or a `LimitRange` refused at creation is
+        // `PodCreateRejected`, with the admission's words, 30 seconds after
+        // the Job — and is cancelled below — instead of `PodNotStarted` until
+        // the deadline fifteen minutes away.
+        let observation = check::observe_reading_events(
             self.ctx.client,
             &self.namespace,
             job,
-            &[],
             &expect,
             self.ctx.now,
         )
@@ -1002,11 +1006,14 @@ impl Pass<'_> {
     async fn harvest(&mut self, job: &Job) -> Result<Outcome, ReconcileError> {
         let job_name = job.name_any();
         let expect = frame_expectations(job, &self.uid);
-        let observation = check::observe(
+        // THE SAME READ AS `report_running`, and it has to be: the Job that
+        // pass cancelled finishes with `DeadlineExceeded`, and a harvest that
+        // read no Events would publish that consequence instead of the
+        // refusal that caused it.
+        let observation = check::observe_reading_events(
             self.ctx.client,
             &self.namespace,
             job,
-            &[],
             &expect,
             self.ctx.now,
         )

@@ -1,3 +1,8 @@
+use crate::positions::{
+    commit_request, fetch_request, valid_bound, CommitError, CommittedPosition, GroupListing,
+    GroupPositions, PositionsError, TopicPartition, DEFAULT_POSITION_BOUND,
+};
+use crate::rdkafka_positions::GroupHandle;
 use crate::reader::{
     empty_broker_config_answer, empty_topic_config_answer, AuthConfig, ClusterReader,
     ConfigEntryObservation, ConfigSourceKind, ConsumedRecord, KafkaError, NewTopicSpec,
@@ -20,6 +25,15 @@ const T: Duration = Duration::from_secs(20);
 pub struct RdKafkaReader {
     consumer: BaseConsumer,
     admin: AdminClient<DefaultClientContext>,
+    /// The connection `connect` dialled with ([`RdKafkaReader::client_config`]),
+    /// kept so [`RdKafkaReader::committed_positions`] and
+    /// [`RdKafkaReader::commit_positions`] can open a per-group handle on the
+    /// same cluster as the same principal. It holds the SASL password, as the
+    /// two clients above already do inside librdkafka; this type has no
+    /// `Debug` and never prints it.
+    base: ClientConfig,
+    /// The bound of one positions fetch or commit wait (PROD-04.0a).
+    position_bound: Duration,
     /// The drill's own scratch-topic namespace. `TopicDeleter::delete_topics`
     /// refuses any name that does not start with this prefix, and refuses
     /// EVERYTHING until it is set via `with_scratch_prefix` — `connect`
@@ -161,8 +175,88 @@ impl RdKafkaReader {
         Ok(Self {
             consumer,
             admin,
+            base,
+            position_bound: DEFAULT_POSITION_BOUND,
             scratch_prefix: None,
         })
+    }
+
+    /// Sets the bound of every later [`RdKafkaReader::committed_positions`]
+    /// fetch and [`RdKafkaReader::commit_positions`] wait (default
+    /// [`DEFAULT_POSITION_BOUND`], 15 s).
+    ///
+    /// # Errors
+    ///
+    /// [`KafkaError::Client`] outside 2 s..=300 s
+    /// ([`crate::positions::valid_bound`]).
+    pub fn with_position_bound(mut self, bound: Duration) -> Result<Self, KafkaError> {
+        self.position_bound = valid_bound(bound).map_err(KafkaError::Client)?;
+        Ok(self)
+    }
+
+    /// **PROD-04.0a.** The committed positions of `group` on exactly
+    /// `partitions`, read with ONE RequireStable OffsetFetch from a fresh
+    /// handle that carries the group's id and can never subscribe, join or
+    /// commit implicitly (`rdkafka_positions`), dropped before this returns.
+    ///
+    /// - One entry per requested partition, in request order. A partition
+    ///   with no committed offset is [`PartitionPosition::NoCommittedPosition`],
+    ///   never offset 0; so is every partition of an ABSENT group and of a
+    ///   SHARE group (K7), so classify the group before reading meaning into
+    ///   it (PROD-04.0 §5).
+    /// - A pending transactional offset commit makes the whole bounded fetch
+    ///   time out: [`PositionsError::PositionsUnstable`] for a group the
+    ///   caller's listing shows, [`PositionsError::NotVisibleOrUnreachable`]
+    ///   for one it does not ([`GroupListing`]). The pre-transaction position
+    ///   is never returned.
+    /// - A refusal of this principal on the group is
+    ///   [`PositionsError::NotAuthorized`] (listed) or
+    ///   [`PositionsError::NotVisibleToPrincipal`] (not listed), when the
+    ///   broker said so, either as the answer or as the coordinator lookup's
+    ///   refusal on the handle's queue.
+    /// - Leader epochs are not exposed by this route: every
+    ///   [`CommittedPosition::leader_epoch`] is `None`.
+    ///
+    /// Takes at most about the bound, plus the handle's own teardown.
+    ///
+    /// [`PartitionPosition::NoCommittedPosition`]: crate::positions::PartitionPosition::NoCommittedPosition
+    pub fn committed_positions(
+        &self,
+        group: &str,
+        partitions: &[TopicPartition],
+        listing: GroupListing,
+    ) -> Result<GroupPositions, PositionsError> {
+        fetch_request(partitions)?;
+        GroupHandle::open(&self.base, group, self.position_bound)
+            .map_err(PositionsError::Client)?
+            .committed_positions(partitions, listing)
+    }
+
+    /// **PROD-04.0a.** Commits `positions` for `group` in ONE synchronous
+    /// OffsetCommit from a non-member (generation −1, empty member id), from a
+    /// fresh handle that can never subscribe or join, dropped before this
+    /// returns.
+    ///
+    /// - The broker refuses the WHOLE request while the group has members:
+    ///   [`CommitError::GroupActive`], nothing changed (§3.3). A share group
+    ///   is [`CommitError::NotAConsumerGroup`]; a principal without Read on
+    ///   the group [`CommitError::NotAuthorized`]; no coordinator within the
+    ///   bound [`CommitError::NotVisibleOrUnreachable`], nothing sent.
+    /// - An ABSENT group id is created by the commit as a simple classic
+    ///   group (K3): classify the target first (PROD-04.0 §4.3, §5).
+    /// - Only each position's offset is committed, with leader epoch −1 and
+    ///   [`crate::positions::COMMIT_METADATA_MARKER`] as its metadata.
+    /// - Any other failure is [`CommitError::Failed`] with its integer code;
+    ///   [`CommitError::may_have_applied`] says whether to read back first.
+    pub fn commit_positions(
+        &self,
+        group: &str,
+        positions: &[(TopicPartition, CommittedPosition)],
+    ) -> Result<(), CommitError> {
+        commit_request(positions)?;
+        GroupHandle::open(&self.base, group, self.position_bound)
+            .map_err(CommitError::Client)?
+            .commit_positions(positions)
     }
 
     /// Scopes this reader's `delete_topics` to names beginning with

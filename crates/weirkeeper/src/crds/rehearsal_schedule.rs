@@ -205,6 +205,39 @@ pub struct PointSelector {
     /// Whether the point's evidence must verify. `true` in v1 (I2).
     #[serde(default = "default_true")]
     pub require_verified_evidence: bool,
+    /// **FX-8.** Which clock this rehearsal's point in time may be read on,
+    /// rendered into every slot's plan as `restore.time_basis` exactly as the
+    /// chosen point becomes `restore.point_in_time`.
+    ///
+    /// The archive holds each record's PRODUCER timestamp, so a point in time
+    /// over a source topic recorded as `LogAppendTime` (the archive manifest's
+    /// topic override, or the bound receipt's effective value) selects by the
+    /// producers' clocks, and the runner refuses it with
+    /// `PointInTimeByProducerTime` unless the plan accepts that. ABSENT — every
+    /// schedule written before FX-8 — accepts nothing: such a slot is refused,
+    /// and the schedule's `lastFailed.reason` names the refusal.
+    /// `producerTime` accepts it: the slot runs, and its signed scorecard lists
+    /// the topic under `source.time_basis.producer_time`.
+    ///
+    /// INSIDE THE STANDING AUTHORIZATION. `templateDigest` is the digest of
+    /// this spec minus `suspend`, so a schedule that states the field has a
+    /// different digest from one that does not, and needs its own signed
+    /// authorization; the spec is sealed, so the field cannot be added later.
+    /// Absent, it is not serialised, so every existing schedule's digest is
+    /// what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_basis: Option<RehearsalTimeBasis>,
+}
+
+/// `spec.point.timeBasis`'s closed value set (FX-8): the plan grammar's
+/// `restore.time_basis`, `logweir_core::spec::TimeBasis`, in the CRD's
+/// camelCase. Any other spelling is refused at admission.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RehearsalTimeBasis {
+    /// Select by the timestamp the archive holds — each producer's
+    /// `CreateTime` — knowingly, for a `LogAppendTime` source topic.
+    ProducerTime,
 }
 
 /// Where a rehearsal writes.

@@ -209,5 +209,36 @@ $diff_rc). Regenerate with: node ui/tests/emit-plan.js plan-point-fields.json > 
 fi
 echo "== plan golden: $point_golden is byte-identical to node ui/tests/emit-plan.js plan-point-fields.json =="
 
+# THE TIME-BASIS GOLDEN (FX-8): the same three arms for a plan that accepts a
+# point-in-time selection by producer time, whose `restore.time_basis` the
+# runner reads to decide between refusing and labelling. `ui_lint.rs` asserts
+# the value ARRIVES in `RestoreSpec` -- a misspelt key would parse and be
+# dropped, and the run would be refused after the approval.
+tb_golden="ui/tests/fixtures/plan-time-basis.golden.yaml"
+[ -f "$tb_golden" ] || {
+  echo "check-ui-behaviour: $tb_golden is missing. Regenerate with: node ui/tests/emit-plan.js \
+plan-time-basis-fields.json > $tb_golden" >&2; exit 1; }
+tmp="$(mktemp "${TMPDIR:-/tmp}/logweir-plan-time-basis-golden.XXXXXX")"
+set +e
+node ui/tests/emit-plan.js plan-time-basis-fields.json > "$tmp"
+emit_rc=$?
+set -e
+if [ "$emit_rc" -ne 0 ]; then
+  rm -f "$tmp"
+  echo "check-ui-behaviour: node ui/tests/emit-plan.js plan-time-basis-fields.json exited $emit_rc." >&2
+  exit "$emit_rc"
+fi
+set +e
+diff -u "$tb_golden" "$tmp"
+diff_rc=$?
+set -e
+rm -f "$tmp"
+if [ "$diff_rc" -ne 0 ]; then
+  echo "check-ui-behaviour: the committed time-basis golden and the emitter disagree (diff exited \
+$diff_rc). Regenerate with: node ui/tests/emit-plan.js plan-time-basis-fields.json > $tb_golden" >&2
+  exit "$diff_rc"
+fi
+echo "== plan golden: $tb_golden is byte-identical to node ui/tests/emit-plan.js plan-time-basis-fields.json =="
+
 echo "== ui behaviour gate: $count test(s) under ui/tests/, node $v, LOGWEIR_BIN=$LOGWEIR_BIN =="
 exit 0

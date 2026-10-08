@@ -2732,7 +2732,27 @@ fn execute_with_validated_approval(
     // dropped. It changes nothing this run does or signs.
     let (facts, notices) = c.engine.describe_with_notices(&set)?;
     surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
-    sc.source = source_info(&facts);
+    // **FX-8: THE TIME BASIS, decided here and nowhere later.** The first point
+    // at which both of its records are in hand — the archive manifest just
+    // described (a topic's `message.timestamp.type` override) and the VERIFIED
+    // receipt's coverage the context was born with (its effective type, the
+    // broker-default arm) — and BEFORE phase 2, so a refused plan has read the
+    // target and nothing else: no target topic of this restore is created
+    // (`create_target_topics` runs after phase 5) and the engine never starts.
+    // Exit 3, `refusal-reason=PointInTimeByProducerTime`.
+    //
+    // Phase 0 has run, so on a target broker whose OWN default is
+    // `LogAppendTime` its override probe has created and deleted one probe
+    // topic first, as it does before every refusal after phase 0 — the one
+    // documented exception to exit 3 (`docs/stability.md`).
+    //
+    // `orchestrator.rs::the_time_basis_refusal_creates_no_target_topic`
+    // fails if this moves after the creation step.
+    let selected: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
+    let time_basis =
+        logweir_core::time_basis::decide(&c.spec, &facts, &c.source_config_coverage, &selected)
+            .map_err(|refusal| DrillError::Guard(GuardRefusal(refusal)))?;
+    sc.source = source_info(&facts, time_basis);
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -3594,6 +3614,10 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             manifest_sha256: String::new(),
             manifest_version_id: None,
             captured_by_logweir: false,
+            // FX-8: decided after the archive is described, by
+            // `time_basis::decide`; a draft that never got that far has not
+            // decided it.
+            time_basis: None,
         },
         target: TargetInfo {
             cluster_id: String::new(),
@@ -3695,13 +3719,19 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
     }
 }
 
-fn source_info(facts: &logweir_core::engine::BackupSetFacts) -> SourceInfo {
+fn source_info(
+    facts: &logweir_core::engine::BackupSetFacts,
+    time_basis: logweir_core::scorecard::TimeBasisLabel,
+) -> SourceInfo {
     SourceInfo {
         backup_id: facts.backup_id.clone(),
         manifest_sha256: facts.manifest_sha256.clone(),
         manifest_version_id: facts.manifest_version_id.clone(),
         // See `new_scorecard`: phase −1 is Task 24's (GR4 Part B).
         captured_by_logweir: false,
+        // FX-8: ALWAYS written once decided, so a 1.3.0 document's empty lists
+        // are a claim and an absent block means "not recorded" (pre-1.3.0).
+        time_basis: Some(time_basis),
     }
 }
 
@@ -3921,6 +3951,82 @@ mod tests {
             !ctx.contains("SourceConfigCoverage::unknown()"),
             "context() must not store UNKNOWN whatever it is given"
         );
+    }
+
+    /// **FX-8 review X3b: the time-basis opt-in is read in ONE place, from
+    /// the approved plan, and from nothing else.** A behaviour test cannot see
+    /// an opt-in that is ALSO honoured from an environment variable or a
+    /// flag: every plan it runs is honoured the same way. So the sources are
+    /// read: `time_basis::decide` reads `spec.restore.time_basis` once for the
+    /// decision, reaches no environment, and is called exactly once, with the
+    /// context's `spec` — parsed from the bytes phase 1 verified against the
+    /// approval — and nothing in the runner writes the field.
+    #[test]
+    fn the_time_basis_opt_in_is_read_once_from_the_approved_plan() {
+        let core = include_str!("../../../logweir-core/src/time_basis.rs");
+        let core = core
+            .split("#[cfg(test)]")
+            .next()
+            .expect("time_basis.rs has a production half");
+        assert_eq!(
+            core.matches(
+                "let accepted = spec.restore.time_basis == Some(TimeBasis::ProducerTime);"
+            )
+            .count(),
+            1,
+            "the decision reads the opt-in once, from the spec"
+        );
+        assert_eq!(
+            core.matches("accepted").count(),
+            2,
+            "`accepted` is bound once and read once, in the LogAppendTime arm"
+        );
+        for banned in [
+            "std::env",
+            "env::var",
+            "var_os",
+            "getenv",
+            "OnceLock",
+            "lazy_static",
+        ] {
+            assert!(
+                !core.contains(banned),
+                "time_basis.rs must not reach `{banned}`: the opt-in is the approved plan's alone"
+            );
+        }
+        let src = include_str!("mod.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("mod.rs production half");
+        assert_eq!(
+            prod.matches("logweir_core::time_basis::decide(").count(),
+            1,
+            "one decision per run"
+        );
+        let call = prod
+            .split("logweir_core::time_basis::decide(")
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .expect("the decide call");
+        assert!(
+            call.trim_start().starts_with("&c.spec,"),
+            "decide must be given the context's approved spec: {call}"
+        );
+        for file in [
+            include_str!("mod.rs"),
+            include_str!("phase0_admit.rs"),
+            include_str!("phase1_approval.rs"),
+            include_str!("binding.rs"),
+        ] {
+            let prod = file.split("#[cfg(test)]").next().unwrap_or(file);
+            assert!(
+                !prod.contains("restore.time_basis =")
+                    && !prod.contains("TimeBasis::ProducerTime")
+                    && !prod.contains("RestoreSpecBlock {"),
+                "nothing in the runner writes the plan's time basis"
+            );
+        }
     }
 
     fn a_scorecard() -> Scorecard {

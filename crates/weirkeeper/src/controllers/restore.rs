@@ -3553,6 +3553,53 @@ pub struct ScorecardObservation {
     pub sample_window_start: Option<String>,
     /// `sample.window_end`, under the same rule.
     pub sample_window_end: Option<String>,
+    /// `source.time_basis` (format 1.3.0, FX-8 review M-2), the source of
+    /// `status.timeBasis`. `None` when the document carries no such block,
+    /// when it is not an object of an optional string `plan` and two arrays
+    /// of strings, or when a list holds more than
+    /// [`TIME_BASIS_TOPICS_MAX`] entries.
+    pub time_basis: Option<crate::crds::restore::RestoreTimeBasis>,
+}
+
+/// `status.timeBasis` (FX-8 review M-2) from a read scorecard: written
+/// whenever the document carried the block — its two empty lists included,
+/// which are a claim — and never invented for one that did not. ONE helper
+/// for both writers of scorecard facts (the terminal patch and the
+/// evidence-fetch relay's), so neither can drop it alone.
+#[must_use]
+pub fn time_basis_value(o: &ScorecardObservation) -> Option<Value> {
+    o.time_basis
+        .as_ref()
+        .and_then(|tb| serde_json::to_value(tb).ok())
+}
+
+/// `status.timeBasis`' per-list `maxItems` (`crds/restore.rs`).
+pub const TIME_BASIS_TOPICS_MAX: usize = 256;
+
+/// `source.time_basis` read as [`crate::crds::restore::RestoreTimeBasis`] —
+/// all of it, or nothing (see [`ScorecardObservation::time_basis`]).
+fn time_basis_block(block: &Value) -> Option<crate::crds::restore::RestoreTimeBasis> {
+    let block = block.as_object()?;
+    let list = |name: &str| -> Option<Vec<String>> {
+        let items = block.get(name)?.as_array()?;
+        if items.len() > TIME_BASIS_TOPICS_MAX {
+            return None;
+        }
+        items
+            .iter()
+            .map(|t| t.as_str().map(str::to_string))
+            .collect()
+    };
+    let plan = match block.get("plan") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(p)) => Some(p.clone()),
+        Some(_) => return None,
+    };
+    Some(crate::crds::restore::RestoreTimeBasis {
+        plan,
+        producer_time: list("producer_time")?,
+        not_recorded: list("not_recorded")?,
+    })
 }
 
 /// `Restore.status.completion.newTopics`'s `maxItems` (`crds/restore.rs`).
@@ -3629,6 +3676,7 @@ pub fn scorecard_observation(bytes: &[u8]) -> Option<ScorecardObservation> {
         integrity_records_sampled_matching: i("/integrity/records_sampled_matching"),
         sample_window_start: s("/sample/window_start").filter(|t| is_rfc3339(t)),
         sample_window_end: s("/sample/window_end").filter(|t| is_rfc3339(t)),
+        time_basis: doc.pointer("/source/time_basis").and_then(time_basis_block),
     })
 }
 
@@ -4404,7 +4452,12 @@ async fn evidence_fetch_pass(
 /// [`completion_patch_value`]).
 ///
 /// Returns `(evidence_facts, facts)`.
-fn scorecard_facts(
+///
+/// Public so the relay path's facts can be asserted without a relay (FX-8
+/// review M-2: `status.timeBasis` is written by this and by the terminal
+/// patch, and a row on each keeps either from dropping it alone).
+#[must_use]
+pub fn scorecard_facts(
     o: &ScorecardObservation,
     result: &crate::verification::VerificationResult,
     status: Option<&crate::crds::restore::RestoreStatus>,
@@ -4443,6 +4496,12 @@ fn scorecard_facts(
         if !block.is_empty() {
             facts.insert(key.to_string(), Value::Object(block));
         }
+    }
+    // FX-8 (review M-2): the signed time basis, so the console can show what
+    // the run selected by producer time and what it selected with an
+    // unrecorded type.
+    if let Some(v) = time_basis_value(o) {
+        facts.insert("timeBasis".to_string(), v);
     }
     if let Some(state) = window_not_covered(
         status.and_then(|s| s.exit_code).unwrap_or(0),
@@ -5509,6 +5568,11 @@ pub fn finished_status_patch(
         let measured = measured_block(o);
         if !measured.is_empty() {
             status.insert("measured".to_string(), Value::Object(measured));
+        }
+        // FX-8 (review M-2): the signed time basis, from the same read, by the
+        // same helper the evidence-fetch relay's facts use.
+        if let Some(v) = time_basis_value(o) {
+            status.insert("timeBasis".to_string(), v);
         }
         // `completion` IS NOT HERE, ON PURPOSE: it is published only beside a
         // `Valid` verification verdict (`completion_patch_value`), and this

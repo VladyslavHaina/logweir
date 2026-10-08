@@ -1191,6 +1191,18 @@ function projectRestore(item) {
     status.newTopics = item.newTopics.slice();
   }
   queueOf(item, status);
+  // FX-8 (review M-2): THE SIGNED TIME BASIS, under the custom resource's own
+  // name (`status.timeBasis`), so the Restore detail reads it the same way in
+  // both modes. Absent stays absent: not recorded, never "none".
+  if (item.timeBasis !== null && item.timeBasis !== undefined) {
+    status.timeBasis = {
+      producerTime: item.timeBasis.producerTime.slice(),
+      notRecorded: item.timeBasis.notRecorded.slice(),
+    };
+    if (typeof item.timeBasis.plan === "string") {
+      status.timeBasis.plan = item.timeBasis.plan;
+    }
+  }
   object.status = status;
   return object;
 }

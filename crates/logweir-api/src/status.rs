@@ -76,6 +76,10 @@ pub const REFUSAL_STATES: &[&str] = &[
     "PlanConfigMapConflict",
     "PlanHashMismatch",
     "ReferentNotFound",
+    // FX-8: the runner's refusal of a time selection by producer time over a
+    // `LogAppendTime` source. It arrives with exit 3, which is `refused`
+    // already; listed so the vocabulary names every runner refusal state.
+    "PointInTimeByProducerTime",
     "TargetTopicConfigRefused",
 ];
 

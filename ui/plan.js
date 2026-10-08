@@ -84,6 +84,25 @@ export function defaultTopicPrefix(pointInTime) {
   );
 }
 
+/** `restore.time_basis`'s one value (FX-8): `logweir_core::spec::TimeBasis::
+ *  ProducerTime`'s wire spelling. */
+export const TIME_BASIS_PRODUCER_TIME = "producerTime";
+
+/** The plan's `restore.time_basis`, or `null` when it states none: absent,
+ *  `null` and the empty string all mean "not stated". Any other value throws,
+ *  as every other field this emitter cannot render does. */
+function timeBasisOf(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  if (value !== TIME_BASIS_PRODUCER_TIME) {
+    throw new TypeError(
+      "timeBasis must be \"" + TIME_BASIS_PRODUCER_TIME + "\" or absent, not " + String(value),
+    );
+  }
+  return value;
+}
+
 /** Renders the restore plan document as a UTF-8 string. Its grammar is the
  *  runner's restore.yaml, defined once in spec 03-spec.md section 6.1: the
  *  document logweir/examples/restore.yaml shows and RestoreSpec deserialises
@@ -158,6 +177,18 @@ export function renderPlanBytes(fields) {
   // guard exists to refuse, so this emitter has no field for one.
   out.push("restore:");
   out.push("  point_in_time: " + quote(needed(f.pointInTime, "pointInTime")));
+  // WHICH CLOCK THAT POINT IS READ ON (FX-8), and only when the operator chose
+  // one. The archive holds each record's PRODUCER timestamp, so for a
+  // `LogAppendTime` topic the point selects by the producers' clocks; the
+  // runner refuses that (`PointInTimeByProducerTime`) unless the plan says
+  // `time_basis: producerTime`. Absent, the bytes are what they were before
+  // FX-8, so every existing plan and its hash are unchanged. One value, and
+  // anything else throws: a typo here must never become the opt-in, and the
+  // runner's grammar would refuse it after the approval anyway.
+  const timeBasis = timeBasisOf(f.timeBasis);
+  if (timeBasis !== null) {
+    out.push("  time_basis: " + quote(timeBasis));
+  }
 
   out.push("sample:");
   out.push("  window_start: " + quote(needed(sample.windowStart, "sample.windowStart")));

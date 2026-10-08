@@ -2183,6 +2183,30 @@ pub fn classify_delivery(exit_code: Option<i32>, log_tail: &[&str]) -> (Delivery
     }
 }
 
+/// What a delivery attempt whose pod was REFUSED AT CREATION means — FX-11.
+///
+/// [`DeliveryState::Failed`], retried like any other failed attempt (three in
+/// all): a `ResourceQuota` that refused one pod may admit the next once other
+/// pods finish. The sentence names the shared terminal state a `Backup`'s or a
+/// `Restore`'s runner reaches for the same refusal, `PodCreationForbidden`,
+/// and carries `admission` — the Job controller's `FailedCreate` message,
+/// already redacted by [`crate::check::waiting`] — so the operator reads the
+/// quota rather than [`classify_delivery`]'s "no exit code".
+///
+/// NOT A POD LOG. [`known_result`]'s rule — no byte of a pod's output reaches
+/// the status — is untouched: a pod that was never created wrote nothing, and
+/// this text is an API-server Event, the same one a `Preflight` publishes.
+#[must_use]
+pub fn refused_delivery(admission: &str) -> (DeliveryState, String) {
+    (
+        DeliveryState::Failed,
+        format!(
+            "the delivery Job never ran ({}), so nothing was posted: {admission}",
+            crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN
+        ),
+    )
+}
+
 fn sinks(results: &[&'static str]) -> String {
     if results.is_empty() {
         return "no notify-result line".to_string();
