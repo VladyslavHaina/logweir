@@ -1004,6 +1004,7 @@ Deferred. Revisit only with demand evidence that replicators do not serve.
   - Version and architecture constraints show before installation.
   - The time to the first verified restore is recorded.
 - **Tests/evidence:** Clean docker-desktop install, upgrade and rollback, private CA, no public network once artifacts are prepared, lost original CRs, unsupported CPU/image combinations; the timed journey and remaining manual steps.
+- **Clean install (owner, 2026-10-08):** the owner authorized deleting the PoC for this row's clean-install exercise. Back up the installation identity and console key first, keep the MinIO archive data where it costs little, run the fresh install from the published chart (this also closes PROD-16.1's fresh-install rows F1–F4), and leave that install running as the new shared-mode PoC.
 - **North-star measurement (moved from PROD-14.3, 2026-10-07):** measure with the draft definition ns-def 0.1 (`north-star.md` §1–§9, kept with the 14.3 drafts). The clock stops at the first qualifying Restore's `status.evidence.verification.verifiedAt`, with the independent re-check's lag recorded beside it. Where to measure is decided when 14.1 is dispatched; re-run the draft's citation check at that commit.
 - **Dependencies:** PROD-14.0, 01.2, 16.1 (no approver key by default); PLAT-15.2, 19.2, 20.2. **Handoff:** canonical guide, compatibility manifest and measured usability.
 
