@@ -7,7 +7,8 @@ Decision record for **PROD-08.1** ("Complete archive integrity and exact counts"
 - Kind: implementation row (Tier A). It ships the complete verification, the signed fields and
   this contract, which PROD-03.2, 04.2, 05.2, 08.2, 08.3, 11.1 and 12.1 consume.
 - Engine: `kafka-backup` v0.21.0 (the pinned source and image of
-  [PROD-01.1](PROD-01.1-record-semantics.md)).
+  [PROD-01.1](PROD-01.1-record-semantics.md)) when the row was built; the live rows were re-run on
+  v0.23.3 after PROD-00.3f moved the pin (§6).
 - Code: `crates/logweir/src/drill/phase7_verify/complete.rs` (the complete lane),
   `crates/logweir/src/drill/phase7_verify.rs` (`run_with_coverage`, `lineage_faults`),
   `crates/logweir/src/drill/phase4_sample.rs` (the complete selection),
@@ -208,7 +209,7 @@ and four accepted documents through both, and `e2e/fixtures/invariants/` carries
   `crates/logweir/tests/phases_2_4.rs` (the complete selection), `crates/logweir/tests/show.rs`,
   `crates/logweir/tests/cli_verify.rs`, `docs/test_verify_scorecard.py`.
 
-## 6. Live evidence (compose slot 2, engine 0.21.0, Kafka 3.7.1)
+## 6. Live evidence (compose slot 2, engine 0.21.0 and again 0.23.3, Kafka 3.7.1)
 
 Each PROD-01.1 row restores its archive a second time with `coverage: complete`:
 
@@ -235,6 +236,13 @@ And two rows of their own:
 
 Outcome files: `.e2e/logweir-e2e-s2/record-semantics/*.json` (copied to the orchestrator's
 artifacts for `prod-08-1`).
+
+**Re-run on engine 0.23.3** (PROD-00.3f moved the pin while this row was in review; its
+`CONTRACT_ENGINE` is 0.23.3): at the fix-round tip every row above, and
+`complete_coverage_discloses_a_compaction_hole_inside_the_span` (one compaction hole inside the
+span per partition, `offset_holes: 3`, `pass`), gave the same verdicts — the whole
+`record_semantics.rs` 11 passed, 3 ignored; `full_drill.rs` 15 passed. The cost figures in §7
+were measured on 0.21.0 and were not re-measured.
 
 ## 7. Cost (for PROD-10.1)
 
