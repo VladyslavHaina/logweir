@@ -749,6 +749,11 @@ fn the_declared_rows_follow_the_documented_floor() {
     let rows = matrix_rows();
     let mut pin_on_default = false;
     let mut newer_broker = false;
+    // PROD-00.3f: the C8 tripwire (the engine's fixed protocol versions on the
+    // newest broker line) is a row for THE PIN, not for whichever engine
+    // happened to carry it. Moving the pin without moving that row would leave
+    // the newest broker exercised only by an engine Logweir no longer ships.
+    let mut pin_on_newer_broker = false;
     for row in &rows {
         let tag = row["tag"].as_str().expect("tag");
         let kafka = row["kafka"].as_str().expect("kafka, as a string");
@@ -766,6 +771,7 @@ fn the_declared_rows_follow_the_documented_floor() {
         }
         pin_on_default |= tag == pin_tag && kafka == default_broker;
         newer_broker |= version(kafka) > version(&default_broker);
+        pin_on_newer_broker |= tag == pin_tag && version(kafka) > version(&default_broker);
     }
     assert!(
         pin_on_default,
@@ -774,6 +780,10 @@ fn the_declared_rows_follow_the_documented_floor() {
     assert!(
         newer_broker,
         "no row runs a broker newer than {default_broker}"
+    );
+    assert!(
+        pin_on_newer_broker,
+        "no row runs the pin {pin_tag} on a broker newer than {default_broker} (the C8 tripwire)"
     );
 }
 

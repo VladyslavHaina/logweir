@@ -2,7 +2,7 @@
 //!
 //! PROD-00.3f moved the pin from `kafka-backup` 0.21.0 to 0.23.3
 //! (`docs/to-do/decisions/PROD-00-engine-route.md` section 12). A bump touches
-//! seven places, and a bump that misses one is quiet:
+//! nine places, and a bump that misses one is quiet:
 //!
 //! | place | what goes wrong when it lags |
 //! |---|---|
@@ -13,6 +13,7 @@
 //! | the `Dockerfile` engine stage | the image ships another engine than the one the digest file names |
 //! | PROD-01.1's `CONTRACT_ENGINE` (`record_semantics.rs`) | every contract row on the new engine records its outcome, asserts NOTHING, and stays green (A-3f-1) |
 //! | `e2e/fixtures/fake-engine-ok.sh` | `doctor`'s own tests stop exercising the accepting path |
+//! | `examples/cronjob-drill.yaml` and `docs/quickstart.md`'s `export` lines | an adopter's scheduled drill signs scorecards naming an engine its image does not carry |
 //!
 //! So this file reads each of them and compares it with `ENGINE_PIN`. It is a
 //! text scan in the default test set: no Docker, no network, no stack. Every
@@ -159,6 +160,43 @@ fn check_fake_engine(src: &str, pin: &str) -> Result<(), String> {
     }
 }
 
+/// The adopter-facing statements of the engine identity a standalone run must
+/// export: `LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST`, as the
+/// CronJob example's `value:` lines and as the quickstart's `export` lines.
+fn check_documented_identity(src: &str, pin: &str, digest: &str) -> Result<(), String> {
+    let mut version_seen = false;
+    let mut digest_seen = false;
+    let lines: Vec<&str> = src.lines().map(str::trim).collect();
+    for (i, line) in lines.iter().enumerate() {
+        for (name, want, seen) in [
+            ("LOGWEIR_ENGINE_VERSION", pin, &mut version_seen),
+            ("LOGWEIR_ENGINE_DIGEST", digest, &mut digest_seen),
+        ] {
+            let value = if let Some(v) = line.strip_prefix(&format!("export {name}=")) {
+                Some(v.to_string())
+            } else if *line == format!("- name: {name}") {
+                lines
+                    .get(i + 1)
+                    .and_then(|next| next.strip_prefix("value: "))
+                    .map(|v| v.trim_matches('"').to_string())
+            } else {
+                None
+            };
+            if let Some(v) = value {
+                if v != want {
+                    return Err(format!("{name} is documented as {v}, the pin is {want}"));
+                }
+                *seen = true;
+            }
+        }
+    }
+    if version_seen && digest_seen {
+        Ok(())
+    } else {
+        Err("the engine version or digest is not stated".to_string())
+    }
+}
+
 fn digest_file() -> String {
     read("third_party/kafka-backup-binary.digest")
         .trim()
@@ -229,6 +267,14 @@ fn doctors_accepting_fixture_prints_the_pin() {
     check_fake_engine(&read("e2e/fixtures/fake-engine-ok.sh"), ENGINE_PIN).unwrap();
 }
 
+#[test]
+fn the_documented_standalone_identity_names_the_pin() {
+    for file in ["examples/cronjob-drill.yaml", "docs/quickstart.md"] {
+        check_documented_identity(&read(file), ENGINE_PIN, &digest_file())
+            .unwrap_or_else(|e| panic!("{file}: {e}"));
+    }
+}
+
 /// THE NEGATIVE CONTROLS: each check above, over a copy of the real file that
 /// lags to the old pin, refuses. A-3f-1's own control is the first one: the
 /// old `CONTRACT_ENGINE` on the new pin fails.
@@ -289,4 +335,25 @@ fn every_check_refuses_a_copy_that_lags_to_the_old_pin() {
 
     let fake = read("e2e/fixtures/fake-engine-ok.sh").replace(ENGINE_PIN, OLD_PIN);
     assert!(check_fake_engine(&fake, ENGINE_PIN).is_err());
+
+    for file in ["examples/cronjob-drill.yaml", "docs/quickstart.md"] {
+        let text = read(file);
+        let old_version = text
+            .replace(&format!("=\"{ENGINE_PIN}\""), &format!("=\"{OLD_PIN}\""))
+            .replace(&format!("\"{ENGINE_PIN}\""), &format!("\"{OLD_PIN}\""))
+            .replace(
+                &format!("LOGWEIR_ENGINE_VERSION={ENGINE_PIN}"),
+                &format!("LOGWEIR_ENGINE_VERSION={OLD_PIN}"),
+            );
+        assert!(
+            check_documented_identity(&old_version, ENGINE_PIN, &digest).is_err(),
+            "{file}: the old version"
+        );
+        let old_digest = text.replace(&digest, OLD_DIGEST);
+        assert!(
+            check_documented_identity(&old_digest, ENGINE_PIN, &digest).is_err(),
+            "{file}: the old digest"
+        );
+    }
+    assert!(check_documented_identity("nothing here", ENGINE_PIN, &digest).is_err());
 }
