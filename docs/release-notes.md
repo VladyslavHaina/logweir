@@ -552,7 +552,7 @@ the upgrade that carries FX-16.
 `latestCompleted` included, and reads the binding through the environment's
 client. No archive, catalog or evidence object changes in either direction.
 
-#### 36. One crate holds all `unsafe` code; consumer-group and ACL reads land behind it (PROD-04.0b)
+#### 37. One crate holds all `unsafe` code; consumer-group and ACL reads land behind it (PROD-04.0b)
 
 **Added, inside the build; no command uses it yet.** Logweir now calls the
 librdkafka functions that the safe `rdkafka` API lacks (OD-6 (a2); ADR 0004's
