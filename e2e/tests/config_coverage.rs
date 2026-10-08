@@ -2,7 +2,7 @@
 //! **FX-4 — topic-configuration capture coverage, and the denied-read class,
 //! observed live.**
 //!
-//! Three rows, each `#[ignore]`d because each needs the stack's `acl` profile
+//! Four rows, each `#[ignore]`d because each needs the stack's `acl` profile
 //! (`e2e/README.md`): `kafka-acl` runs KRaft's StandardAuthorizer, every
 //! PLAINTEXT client on it is User:ANONYMOUS and a super user, and the SCRAM
 //! user `logweir` is the restricted principal whose DescribeConfigs the rows
@@ -13,6 +13,7 @@
 //! | `a_denied_describe_configs_is_a_refusal_at_every_reader` | T13 at the reader: rdkafka 0.36.2 answers a refused topic or broker with ZERO entries and no error; `RdKafkaReader` and `KafkaInventory` now return the refusal; the restore readiness row `target.timestampBound` goes from READY (the pre-fix flattening of that live answer) to UNKNOWN |
 //! | `phase_0_never_assumes_create_time_for_a_refused_broker_read` | T13 at phase 0, by PROCESS: on a `LogAppendTime` broker, a restore identity without cluster DescribeConfigs is admitted as `CreateTime` by the pre-FX-4 binary (`FX4_BEFORE_BIN`) and stopped at phase 0 by this build |
 //! | `capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity` | FX-4 itself: a DENIED DescribeConfigs is `captureDenied` (and empties its neighbour's manifest record: `notCaptured`); overrides and a broker-default and a topic-override `LogAppendTime` are `captured` with their timestamp type and source; the catalog point copies them; a point-bound restore's parity is `notAssessed` exactly where the capture was not; a restore identity that may not DescribeConfigs its TARGET topics gets `targetReadDenied` for a topic whose backup recorded no overrides, and exit 1 in phase 6 with no scorecard for one that did (the pinned engine describes such a target itself); every not-assessed topic also leaves its fail-safe entry in `unexpected_divergence` (review M5), and the signed scorecards are kept for the old-reader check |
+//! | `fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt` | FX-8's broker-default arm: a topic with no override, backed up under a dynamic broker default of `LogAppendTime`, is recorded only by the receipt; a point-in-time restore bound to that receipt is refused (`PointInTimeByProducerTime`, no target topic), runs labelled `producer_time` with `restore.time_basis: producerTime`, and unbound runs labelled `not_recorded` |
 //!
 //! # Running them
 //!
