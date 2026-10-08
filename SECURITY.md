@@ -29,7 +29,7 @@ out to by pinned digest and never links. Report those upstream.
 
 ## What this design does not protect against
 
-These four are **accepted residuals**, not undiscovered bugs. They are stated
+These are **accepted residuals**, not undiscovered bugs. They are stated
 here, in `README.md` and in `docs/kubernetes.md` so that nobody has to discover
 them; a report that one of them is true is not a vulnerability report.
 
@@ -53,6 +53,35 @@ them; a report that one of them is true is not a vulnerability report.
 - **`self_attested: false` means only "two different keys".** One person
   holding both keypairs satisfies it. It is not evidence of an independent
   auditor, and a scorecard that carries it should not be read as one.
+- **In the console approval modes, the console can approve alone** (PROD-16.1,
+  OD-8). Under `confirm` (internal `Ordinary`) — the default of a fresh
+  install with a console — whoever controls the console pod, its
+  `logweir-console-confirmation` key Secret, or the identity provider can
+  confirm a restore with no second person, exactly as an `Ordinary` binding
+  always accepted. Namespaces that cannot accept that are bound `strict`
+  (a personal-key approval), or the installation sets
+  `approvalPolicy.default: strict`.
+- **The in-cluster administrator console confirms as one shared identity.**
+  In `localAdmin` mode the confirming principal is
+  `urn:logweir:local-admin#admin`: whoever can reach that console — the
+  Kubernetes permission to port-forward to it, already full console
+  administrator authority — can confirm a restore alone.
+- **A fresh install's trust step holds `create` on `TrustPolicy` for its
+  install alone.** RBAC cannot narrow `create` by name, so the identity hook's
+  grant (`<release>-identity-trust`) is rendered only on a first install with
+  no existing identity, only as a `post-install` hook that Helm deletes when
+  the install's hooks finish, and the hook deletes its own binding right after
+  creating the one policy. For that window, whoever can run a pod as
+  `<release>-identity-bootstrap` in the release namespace could create a
+  TrustPolicy; the installer holds cluster-admin then anyway. No standing
+  grant remains (`docs/kubernetes.md` §8).
+- **On a fresh install, the trust administrator and the installation
+  administrator can each change approval, as before.** The fresh-install
+  `confirm` default is honoured only beside the `TrustPolicy` the identity
+  hook created in the same run (a bound marker: policy UID, both key ids,
+  provenance); editing that policy, or the approval-policy document, changes
+  approval. On an install that existed before PROD-16.1 a marker patched into
+  the identity ConfigMap changes nothing.
 
 ## Cryptography
 

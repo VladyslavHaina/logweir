@@ -21,7 +21,8 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10) and 24 (FX-3), from
-the product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do
+the product-expansion tracker's fix-now rows, and 25 (PROD-16.1, no approver key
+by default) land after `fdb48cd8`, and so do
 FX-7's additions to item 11 (the execution-claim set check, receipt and
 catalog format 1.2.0, the pin's read by version id) and FX-4's format 1.1.0,
 which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
@@ -123,7 +124,8 @@ Do these before rolling the controller, in this order. Each is also listed
 under its item below.
 
 1. **Back up the installation identity** (`logweir-signing-key` and
-   `logweir-signing-trust`) and export the trust material
+   `logweir-signing-trust`, and — once the console key exists, item 25 —
+   `logweir-console-confirmation` and `logweir-console-trust`) and export the trust material
    (`logweir trust export`) — [install.md](install.md), *Back up and recover
    the installation identity*.
 2. **Grant every retention delete credential `s3:GetObject` on
@@ -179,7 +181,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-four operator-facing changes
+### The twenty-five operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -192,7 +194,9 @@ upgrade that carries each runs its rows. Item 23 is fix-now row FX-10, proven
 offline; the PoC upgrade that carries it checks that the PoC's policy
 document and its digest are unchanged (the PoC sets neither withdrawn key).
 Item 24 is fix-now row FX-3, proven on a compose stack (it changes the
-runner's signed scorecard, not the controller).
+runner's signed scorecard, not the controller). Item 25 is PROD-16.1 (owner
+decision OD-8), proven by unit, mock-cluster and chart rows and a host console
+journey; its controller and hook rows run at the PoC refresh that carries it.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -986,6 +990,57 @@ and script 1.15.0 at main `b8b9263f`, FX-7's script 1.16.0, and `v0.1.5`
 **Rollback:** an older runner writes 1.1.0 scorecards with the old labels again.
 The 1.2.0 scorecards already written stay valid under older and newer readers.
 
+#### 25. A fresh install needs no approver key; an upgrade changes no namespace's approval (PROD-16.1)
+
+**Changed.** Three approval modes by name: **confirm** (one person clicks
+Create in the console, no key; internal `Ordinary`), **two-person** (PROD-16.2,
+refused by name) and **strict** (an approver's personal key; `Governed` or
+`legacy-governed-v1`). On a FIRST `helm install` with a console and the managed
+identity, the identity hook generates the console's `ConsoleConfirmation` key
+(`logweir-console-confirmation`, retained, never regenerated, key loss stops
+the hook), creates one default `TrustPolicy` `logweir-installation` for the
+installation signer and the console key, and marks the install
+(`logweir.dev/approval-default` on `logweir-signing-trust`: a claim naming that
+policy's UID and both key ids, honoured by the console and the controller only
+beside that exact hook-made policy). Every namespace without its own policy is
+then confirm (`default-confirm-v1`); an explicit binding always wins. The
+`localAdmin` console confirms too, as `urn:logweir:local-admin#admin`.
+`approvalPolicy.default` (`confirm` with `allowOrdinaryConfirmation`, or
+`strict`) overrides the marker; `policies[].mode` accepts `confirm`/`strict`.
+The grant that lets the hook create a cluster-scoped `TrustPolicy` exists only
+during that first install's post-install hooks and is revoked by the hook. The
+API's policy view gains `operatorMode` and `basis`, the create's
+`authorization` gains `operatorMode` (OpenAPI `1.0.0-alpha.2`, additive).
+**An upgrade changes no namespace's approval:** no marker, no trust step, every
+unbound namespace stays `legacy-governed-v1`; the hook only generates the
+console key, or ADOPTS the one a PLAT-19.2 install made by hand under that name.
+**Do:** nothing, to keep today's approval. To opt an older install into
+confirm: a trust administrator adds the key from `logweir-console-trust` to the
+`TrustPolicy` governing those namespaces (`ConsoleConfirmation`), then set
+`approvalPolicy.allowOrdinaryConfirmation: true` and `approvalPolicy.default:
+confirm` and upgrade ([install.md](install.md) §5f). **Release coordinator:**
+re-pin `identity.bootstrapImage` to a runner carrying this identity CLI before
+release ([install.md](install.md), *Release coordinator: re-pin bootstrap
+bytes*): the chart passes the hook four new flags an older runner refuses.
+**Scope:** core rows (the unbound default, the bound marker with every binding
+broken once, an older reader refusing `defaultMode`), identity hook rows (fresh
+install creates trust and a claim the readers honour; upgraded, hand-provisioned
+and adopted identities get neither; a patched marker is ignored; the console key
+generated once, adopted, key loss; the trust grant revoked in every run; the
+policy body guard), console rows (seven attacks on an upgraded install read
+legacy and sign nothing; a fresh install confirms in one request; the managed
+key read when the hook writes it), controller and runner rows over an
+out-of-tree-signed `default-confirm-v1` confirmation, chart rows (the transient
+grant absent from an upgrade render, the grants pinned) and a host journey
+(localAdmin console, Playwright, compose slot 3). The PoC refresh that carries
+it runs the live controller rows.
+**Rollback:** remove `approvalPolicy.default` first (an older binary refuses a
+document carrying `defaultMode`). An older controller and console ignore the
+marker: every unbound namespace is `legacy-governed-v1` again and a pending
+confirmation under `default-confirm-v1` is refused `ApprovalPolicyMismatch` —
+fail closed. The installation `TrustPolicy`, both key Secrets and their public
+ConfigMaps stay.
+
 ### Verification scope: what "verified" means in this release
 
 - **A green badge** means the signed document's signature verified under a key
@@ -1082,6 +1137,9 @@ is converted and no stored object is rewritten
     `runnerResources`** (item 21) that must not run uncapped: an older
     controller drops the block and fires its next slot. A `Restore` this build
     refused `ExecutionSpecInvalid` stays `Failed`.
+11. **Remove `approvalPolicy.default`** (item 25): an older binary refuses a
+    document carrying `defaultMode` at start. Expect unbound namespaces of a
+    fresh install to be `legacy-governed-v1` again under the older build.
 
 **How this upgrade is rehearsed.** From `v0.1.5` (the last version tag: 6 →
 14 CRDs, the managed identity adopting a hand-provisioned signer, the console
@@ -1094,7 +1152,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22, 23 and 24, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23, 24 and 25, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.

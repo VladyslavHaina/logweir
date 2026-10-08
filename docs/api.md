@@ -149,7 +149,7 @@ anything not listed is `404`.
 | `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. An optional `topicMapping` declares the mapping the caller previewed and is checked against the prefix this request stores — see below. |
 | `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status, including — for a verified authorization document v2 — `authorization {mode, policyName, policyDigest, requester, confirmationKeyId}`. |
 | `POST /api/v1/namespaces/{ns}/restores/{name}/approval` | PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation (Approver role; never the requester); in an unbound namespace an approver records the two `logweir drill approve` files. See *Approval policy*. |
-| `GET /api/v1/namespaces/{ns}/approval-policy` | PLAT-19.2: the namespace's effective approval policy, the installation document's digest and the console confirmation key id. |
+| `GET /api/v1/namespaces/{ns}/approval-policy` | PLAT-19.2: the namespace's effective approval policy, the installation document's digest and the console confirmation key id. PROD-16.1: `operatorMode` (`confirm` \| `two-person` \| `strict`) and `basis` (`binding` \| `configured` \| `freshInstall` \| `legacy`) — why an unbound namespace resolves as it does; the create's `authorization` carries `operatorMode` too. |
 | `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
 | `GET /api/v1/namespaces/{ns}/destinations` | `BackupDestination` rows: the canonical URL, the endpoint, the transport, the addressing and the controller's `Valid` verdict. |
 | `POST /api/v1/namespaces/{ns}/destinations` | Create a destination **under the name in the body**, because every schedule, backup and restore references it by that name. |
@@ -222,7 +222,8 @@ Refused **before anything is created** (no Restore, no Approval):
 
 | request | answer |
 |---|---|
-| an `Ordinary`-bound namespace in a **`localAdmin`** console — D0: that mode "does not expose Ordinary"; its one identity is the port-forward administrator, not a person a confirmation could attest | `409 policy_mismatch`; use the shared console. `GET .../approval-policy` says `ordinaryConfirmationAvailable: false` |
+| a `confirm` namespace (an `Ordinary` policy, or `default-confirm-v1`) while the console's confirmation key is not there yet — PROD-16.1: the identity hook writes the managed key after the console starts | `409 policy_mismatch`, naming the key; `GET .../approval-policy` says `ordinaryConfirmationAvailable: false`. Since PROD-16.1 a **`localAdmin`** console confirms too, as `urn:logweir:local-admin#admin`; only `two-person` (PROD-16.2) is refused there |
+| the fresh-install marker cannot be read (the public identity ConfigMap or the `TrustPolicy` it names answers an error other than `404`) | the read's own error (`kubernetes_unavailable`, `upstream_timeout`, …); nothing is created rather than a fresh install's Restore parked on the legacy path |
 | a `Governed`-bound namespace without `ticket`, or a blank / padded / over-128-character one (D0: the ticket is "required in Governed") | `422`, field `ticket` (`required` / `invalid`) |
 | `ticket` in an unbound namespace, which signs nothing (`logweir drill approve --ticket` carries it there) | `422`, field `ticket`, `not_accepted` |
 

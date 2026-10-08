@@ -378,9 +378,17 @@ refuses it as an attempted rotation. Keep the external source reachable on
 subsequent upgrades while those values remain configured, or clear both
 external values after verifying the published key id.
 
-The approver identity remains independent and operator-managed. Generate it in
-your approved key system; this OpenSSL example is only for the approver, whose
-private half never enters the cluster:
+With a console (`api.console.enabled`), the same hook also generates the
+console's `ConsoleConfirmation` key into the retained Secret
+`logweir-console-confirmation` and publishes its public half in ConfigMap
+`logweir-console-trust`, with the same create-once, key-loss and adoption
+rules; on a first install it also creates the installation's default
+`TrustPolicy` for both keys (§5f). Back the console Secret up with the identity.
+
+An approver identity — needed only for a **strict** namespace — remains
+independent and operator-managed. Generate it in your approved key system;
+this OpenSSL example is only for the approver, whose private half never enters
+the cluster:
 
 ```bash
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out approver.pem && openssl pkey -in approver.pem -pubout -out approver.pub.pem
@@ -394,6 +402,13 @@ The roster below is the legacy fallback every namespace no policy governs
 resolves to; it is still the smallest first-install step, and nothing has to be
 migrated off it. A namespace a policy governs never consults the roster
 ([kubernetes.md](kubernetes.md) §8, *Trust resolution*).
+
+**A fresh managed install needs neither** (PROD-16.1): its identity hook
+creates the default `TrustPolicy` `logweir-installation` for the installation
+signer and the console key (§5f). Create the roster below only for an install
+that does not get one — an upgrade, `identity.installationTrust.enabled: false`,
+or a cluster whose trust you manage yourself; a `TrustRoster/default` that
+exists before the first install makes the hook create nothing.
 
 ```bash
 kubectl --context docker-desktop apply -f config/samples/trustroster.yaml
@@ -1028,42 +1043,96 @@ objects and executes nothing, so removing it stops no backup, cancels no restore
 and loses no evidence. Existing installations that never set the flag see no
 change at all.
 
-### 5f. Ordinary confirmation and governed approval (`approvalPolicy.*`, optional)
+### 5f. Approval modes: confirm, two-person, strict (`approvalPolicy.*`)
 
-Without this step every namespace keeps today's governed approval
-(`legacy-governed-v1`) and nothing below applies. To bind namespaces to an
-approval policy (PLAT-19.2; the contract, the enforcement points and
-upgrade/rollback are in `docs/kubernetes.md` §8, *Approval policy*):
+Three modes (`docs/kubernetes.md` §8, *The three modes*): **confirm** — one
+person clicks Create in the console, no key (internal `Ordinary`);
+**two-person** — PROD-16.2, not in this release; **strict** — an approver's
+personal key (internal `Governed`, or today's `legacy-governed-v1`).
 
-1. Put the keys on the `TrustPolicy` that governs each namespace you will bind
-   (`docs/keys.md`, *Key usage separation*): the console's
-   `ConsoleConfirmation` public key, and for a Governed namespace each
-   approver's `GovernedApproval` key with `principal.id` = the approver's
-   `<issuer>#<subject>`.
-2. Create the console's key Secret in the release namespace:
+**A fresh install with the console needs no step here.** A first `helm
+install` with `api.console.enabled` and the managed identity (path (c)): the
+identity hook generates the console's key (`logweir-console-confirmation`,
+retained like the installation identity), creates ONE default `TrustPolicy`
+(`identity.installationTrust.policyName`, default `logweir-installation`)
+trusting the installation signer (`EvidenceSigning`) and the console key
+(`ConsoleConfirmation`), and marks the install so that every namespace without
+its own policy is **confirm**. The first restore is confirmed in the console
+— in `localAdmin` mode too, as `urn:logweir:local-admin#admin` — and nobody
+runs `openssl`, edits a `TrustPolicy` or copies a key. What still needs a
+person is not a key: the clusters a restore may write into, which the policy
+reads from `identity.installationTrust.allowedTargetClusterIds` at that first
+install (`demoKafka` adds its own target) and a trust administrator edits
+afterwards (`kubectl patch trustpolicy logweir-installation --type merge -p
+'{"spec":{"allowedTargetClusterIds":["<cluster id>"]}}'`).
 
-   ```bash
-   openssl genpkey -algorithm ed25519 -out confirmation.key
-   kubectl --context <ctx> -n <release-ns> create secret generic \
-     logweir-console-confirmation --from-file=confirmation.key
-   openssl pkey -in confirmation.key -pubout -out confirmation.pub.pem
-   rm confirmation.key
-   ```
+Check it:
 
-3. Set `approvalPolicy.policies`, `approvalPolicy.namespaces`,
-   `approvalPolicy.confirmationKeySecret`, and — only if a policy is Ordinary —
-   `approvalPolicy.allowOrdinaryConfirmation: true`
-   (`charts/logweir/examples/approval-policy.values.yaml`), and upgrade. The
-   chart renders one immutable ConfigMap and mounts it into the controller and
-   the console; `helm lint` refuses an Ordinary policy without the floor, an
-   undeclared policy, and a console-served bound namespace without the key.
+```bash
+kubectl --context <ctx> get trustpolicy logweir-installation        # DEFAULT true, KEYS 2
+kubectl --context <ctx> -n <release-ns> get configmap logweir-signing-trust \
+  -o jsonpath='{.metadata.annotations.logweir\.dev/approval-default}{"\n"}'
+# confirm;policy=logweir-installation;uid=…;signing=…;console=…
+```
 
-Upgrade CRDs first (the `Approval` status gains `authorization`), then the
-controller and runner image, then the console, then set the binding. Changing
-a policy later is a rollout of both Deployments; Restores confirmed under the
-old policy and not yet admitted must be submitted again.
+The hook creates the policy only when the cluster has none of its own (no
+other `default: true` policy, none of that name, no `TrustRoster/default`) and
+then prints `installation-trust skipped:…` with the two public key ids to add
+to yours; without the hook-made policy nothing is marked and the install starts
+strict. The grant that lets the hook create a cluster-scoped `TrustPolicy`
+exists only during that first install's post-install hooks and the hook revokes
+it itself; no standing grant remains (§8 of `docs/kubernetes.md`, *The
+install-only trust grant*). **An install whose first hook run failed after
+generating the identity starts strict** — a later run does not finish the
+step; opt in as below.
 
-### 5a. The installation policy `ConfigMap` (optional, and what it unlocks)
+**Choosing a mode.** `approvalPolicy.default: strict` keeps every unbound
+namespace on `legacy-governed-v1` even on a fresh install;
+`approvalPolicy.default: confirm` (with `allowOrdinaryConfirmation: true`)
+makes them confirm. Bind namespaces explicitly with `approvalPolicy.policies`
+(`mode: confirm` or `strict`) and `approvalPolicy.namespaces`
+(`charts/logweir/examples/approval-policy.values.yaml`); an explicit binding
+always wins. For a `strict` namespace put each approver's `GovernedApproval`
+key, with `principal.id` = the approver's `<issuer>#<subject>`, on the
+`TrustPolicy` that governs it (`docs/keys.md`, *Key usage separation*).
+
+**An install that existed before this release keeps its approval**: the upgrade
+generates (or adopts) the console key and changes nothing else — no marker, no
+trust, every unbound namespace stays `legacy-governed-v1`. To opt it into
+confirm, the same two gates as before, step by step:
+
+1. Upgrade (CRDs, then the controller and runner image, then the console), so
+   the hook publishes the console key: `kubectl --context <ctx> -n <release-ns>
+   get configmap logweir-console-trust -o yaml` (key id, `confirmation.pub.pem`).
+2. As a trust administrator (`logweir-trust-admin`), add that public key to the
+   `TrustPolicy` that governs the namespaces, `usages: [ConsoleConfirmation]`,
+   `state: Active`, a `principal.id` such as `console:<release-ns>/logweir-console-confirmation`.
+3. As the installation administrator, set `approvalPolicy.allowOrdinaryConfirmation:
+   true` and `approvalPolicy.default: confirm` (or bind the namespaces to a
+   `confirm` policy), and upgrade. That is a rollout of both Deployments.
+
+A console that names its own key Secret (`approvalPolicy.confirmationKeySecret`
+set to another name) keeps managing it by hand, as in PLAT-19.2: the public half
+on the `TrustPolicy` with usage `ConsoleConfirmation`, the private half in that
+Secret under `confirmation.key`. A Secret named `logweir-console-confirmation`
+made by hand is adopted by the hook as the managed key.
+
+**Before release, the bootstrap image must be re-pinned** (*Release
+coordinator: re-pin bootstrap bytes* above): the chart now passes the hook
+`--console-secret-name`, `--installation-trust-policy`,
+`--mark-fresh-install-confirm` and `--revoke-trust-binding`, which a runner
+older than PROD-16.1 refuses — the hook fails and so does the install.
+
+**Rollback.** `helm rollback` to a release before PROD-16.1: remove
+`approvalPolicy.default` first (an older binary refuses a document carrying
+`defaultMode` at start). An older controller and console ignore the marker, so
+every unbound namespace is `legacy-governed-v1` again and a pending
+`default-confirm-v1` confirmation is refused `ApprovalPolicyMismatch` — fail
+closed; nothing approves until an approver key is on the trust. The
+installation `TrustPolicy`, both key Secrets and their public ConfigMaps are
+retained (an older controller reads the policy, so evidence keeps verifying).
+
+### 5a. The installation policy `ConfigMap` (optional, and what it unlocks)### 5a. The installation policy `ConfigMap` (optional, and what it unlocks)
 
 The controller reads one administrator-owned document, `weirkeeper-policy`, in
 the **release** namespace, under the key `policy.json`. **It is optional**: an
