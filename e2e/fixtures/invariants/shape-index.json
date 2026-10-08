@@ -691,5 +691,14 @@
   "python_exit": 1,
   "rust_reason": "signature verified but the payload is not a scorecard: invalid type: map, expected a sequence",
   "python_reason": "integrity.verification is not an object of the shape the writer gives it: four strings, two arrays of offset ranges and an optional complete block"
+ },
+ {
+  "id": "unsampled_topics_not_an_array",
+  "file": "unsampled_topics_not_an_array.json",
+  "check": "message:sample.unsampled_topics is not an array of strings",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"orders\", expected a sequence",
+  "python_reason": "sample.unsampled_topics is not an array of strings"
  }
 ]

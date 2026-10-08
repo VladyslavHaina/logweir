@@ -47,6 +47,11 @@ pub struct Restored {
     /// reads this field yet — Task 21a/22 still have to wire it into the
     /// scorecard — but it can no longer be lost here.
     pub unknown_key_warnings: Vec<String>,
+    /// **FX-23.** `RestoreFacts.engine_report`, forwarded for phase 7, which
+    /// refuses an engine report that lacks a mapped partition the manifest
+    /// proves holds records in the window (an engine a SIGTERM stopped exits 0
+    /// between topics and reports only the topics it finished).
+    pub engine_report: logweir_core::engine::EngineReport,
 }
 
 /// A restore that wrote nothing is not a restore. `dry_run` is refused by the
@@ -123,5 +128,6 @@ pub fn run(
         finished_at: facts.finished_at,
         restored_end_offsets,
         unknown_key_warnings: facts.unknown_key_warnings,
+        engine_report: facts.engine_report,
     })
 }
