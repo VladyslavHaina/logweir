@@ -2026,6 +2026,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "every other credential reference is bound",
             "scripts/bind-credential.py",
         ),
+        // FX-24 (2026-10-08): a connection that sends nothing meets the
+        // console's header deadline, and the console no longer serves HTTP/2,
+        // so an ingress configured for an `h2c` backend must go back to 1.1.
+        (
+            "a silent connection meets the console's header deadline",
+            "h2c",
+        ),
     ];
     assert_eq!(
         items.len(),
