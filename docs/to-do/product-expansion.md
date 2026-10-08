@@ -162,7 +162,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | FX-12 | Pass `now` into weirkeeper's evidence verification (trust-window clock reads) | P2 | M1 | fix | FX-9 | — | none | A | Proposed |
 | 0 | FX-13 | Key the sign-in limiter on the trusted-proxy client address | P1 | M1 | fix | — | — | none | A | Proposed |
 | 0 | FX-14 | FX-7's and PROD-08.4's owed items: the restore preflight reads the pinned manifest version; minimal grants name `s3:GetObjectVersion`; the surviving fail-safe mutant MR-L2; two wrong field descriptions | P2 | M1 | fix | FX-7 | — | compose | A | Proposed |
-| 0 | PROD-00.1 | Evaluate the engine; decide a route per capability | P1 | M1 | research | — | — | compose | B | In progress |
+| 0 | PROD-00.1 | Evaluate the engine; decide a route per capability | P1 | M1 | research | — | — | compose | B | Done |
 | 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | Done |
 | 0 | PROD-01.4 | Define topic identity and generations | P1 | M2 | research | — | — | none | B | Done |
 | 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | Done |
@@ -345,6 +345,15 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Tests/evidence:** Compose demo drill and `just pitr` on 0.22.0; an `engine-matrix` run; a source citation per capability.
 - **Dependencies:** None. **Handoff:** OD-3 proposal, the capability table and the PROD-00.3 child rows.
 
+
+**PROD-00.1 — Done (2026-10-07).**
+- **Ownership:** worker `prod-00-1` (a run, a fix round and rounds 3–4 after run 36542777892's red v0.22.0 row), independent Tier-B review `claude/prod-00-1.review.md` (ACCEPT-WITH-FIXES, fixed). Merged as `e4145dbf` (branch tip `6c23fe36`) in integration batch 1 (`dce54bda`); main CI run 37363593960 green.
+- **Decision record:** `docs/to-do/decisions/PROD-00-engine-route.md` routes 19 capabilities (the 12 the task names, C13–C17 found in source, C18 and C19), each with source citations in the pinned tarball and in v0.22.0, a route, a cost, the supplier constraint, its dependents and numbered acceptance rows; §4 evaluates 0.22.0 with runs, §7 records how operator-written archives (engine 0.19–0.22) import and verify, §8 gave OD-3's options (decided 2026-10-07), §9 the child rows.
+- **engine-matrix:** seven causes of the red scheduled runs repaired (`d5d0be9b`, `ff9aa14a`); six declared rows, green only when each records what it declares. Evidence: run 36575640011 at the branch tip, all green; run 37363689044 on main `dce54bda`, attempt 2 (2026-10-07, after the GitHub incident cancelled two rows), all six rows and publish green.
+- **Support docs:** `docs/support-matrix.md` and `docs/stability.md` engine and operator statements corrected to evidence (`9817252e`, `eaf391b0`).
+- **Child rows:** 00.3a–e (routes F, behind 00.2), 00.3f–i and 00.3o on the ledger since 2026-10-07; 00.3j deferred with MSK IAM (OD-3); 00.3k (only if PROD-02.3 picks the engine's continuous mode), 00.3l (topic IDs went the OD-6 FFI route), 00.3m (only if a broker row fails) stay in §9 until their triggers fire; 00.3n needs its own trust-model decision.
+- **Limits:** OSO shipped 0.23.0–0.23.3 after the record (the last on 2026-10-07); 00.3f re-evaluates on the newest release, including 0.23.0's rewritten `partition_router.rs`.
+- **Artifacts:** `claude/artifacts/prod-00-1/`.
 ### PROD-00.2 — Build the engine from the vendored source
 
 - **Issue:** The runner copies OSO's amd64-only binary and never builds the vendored source. That blocks arm64 nodes, forces emulation on the arm64 development host (distorting benchmarks), leaves engine CVEs waiting for upstream and makes every fork option theoretical. No image is signed or ships an SBOM or provenance, `cargo deny` never sees the engine's dependency tree, and `SECURITY.md` excludes engine vulnerabilities.
