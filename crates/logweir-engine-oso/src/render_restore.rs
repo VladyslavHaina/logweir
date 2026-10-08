@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// **PROD-11.1.** One engine run of a restore plan.
 ///
 /// The pinned engine's `restore.source_partitions` is a run-wide filter: it
-/// applies to every topic the run restores (`restore/engine.rs:1253-1263` and
+/// applies to every topic the run restores (`restore/engine.rs:1253-1264` and
 /// `restore/preflight.rs:253` in the 0.23.3 source). A plan whose topics carry
 /// DIFFERENT partition subsets is therefore restored by one run per distinct
 /// subset, plus one unfiltered run for the topics without one

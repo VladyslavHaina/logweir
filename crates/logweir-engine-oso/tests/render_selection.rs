@@ -1,7 +1,7 @@
 //! **PROD-11.1 — the engine runs a partition selection needs.**
 //!
 //! The pinned engine's `restore.source_partitions` is a run-wide filter: it
-//! applies to every topic of one run (`restore/engine.rs:1253-1263` in the
+//! applies to every topic of one run (`restore/engine.rs:1253-1264` in the
 //! 0.23.3 source). So a plan whose topics carry DIFFERENT subsets renders one
 //! document per distinct subset, plus one unfiltered document for the topics
 //! without one — and a plan with no subset renders the one document it always
