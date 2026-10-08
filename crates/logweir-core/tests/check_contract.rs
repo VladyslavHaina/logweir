@@ -1972,6 +1972,11 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
             "an upper-case uid",
             format!("{}-20260925-065500", SCHEDULE_UID.to_uppercase()),
         ),
+        // Thirty-six characters where the UID belongs that are not a UUID.
+        (
+            "not a uid",
+            "nightly-backups-of-the-prod-cluster1-20260925-065500".to_string(),
+        ),
         // A schedule NAME where the UID belongs.
         (
             "a schedule name",
