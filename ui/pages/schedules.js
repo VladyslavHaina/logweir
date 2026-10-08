@@ -3493,6 +3493,15 @@ function renderPolicyFields(name, values, errors) {
  *  it is a whole-policy replace, every field it holds is a field it SENDS, and
  *  a field being cleared inside a closed `<details>` is exactly the surprise
  *  that panel's own sentence exists to prevent. */
+/** FX-20: what an inline archive's Secret must carry. The runner refuses it
+ *  otherwise, before any request is signed; this service never reads a Secret,
+ *  so it says so here rather than discovering it on the first run. */
+export const INLINE_ARCHIVE_BINDING_HELP =
+  "The Secret must carry a `logweir-binding` key holding this archive location's binding " +
+  "(its bucket and endpoint), or every run refuses it as CredentialBindingMismatch before " +
+  "anything is sent. A saved destination avoids this: its credential is entered once and bound " +
+  "to it.";
+
 function renderPolicyLocation(name, values, errors, destinations, collapseInline, current) {
   const all = Array.isArray(destinations) ? destinations : [];
   const inline =
@@ -3505,7 +3514,8 @@ function renderPolicyLocation(name, values, errors, destinations, collapseInline
     "\">archive credential (Secret name)</label><input id=\"" +
     esc(policyId(name, "archiveSecret")) + "\" name=\"archiveSecret\" value=\"" +
     esc(String(values.archiveSecret || "")) + "\">" +
-    "<p class=\"help\">Only its name is sent.</p></div>";
+    "<p class=\"help\">Only its name is sent. " + messageText(INLINE_ARCHIVE_BINDING_HELP) +
+    "</p></div>";
   const chosen = String(values.destination || "");
   const pin = chosenDestination(all, values);
   return (

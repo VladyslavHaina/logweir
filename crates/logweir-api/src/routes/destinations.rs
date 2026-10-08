@@ -768,10 +768,49 @@ pub(crate) fn validate_location(
 // Building the stored object
 // ======================================================================
 
+/// How a `secret.new` value's Secret is named — FX-20.
+///
+/// A CREATE names it `lwd-<destination>-<role>` (D2 §8.1), deterministic so a
+/// replay of the same request adopts the Secret its earlier attempt wrote. A
+/// ROTATION (`:update-access`) cannot reuse that name — it is taken by the
+/// value being rotated, and this service may neither read nor overwrite a
+/// Secret — and since FX-20 it may not name an existing Secret either, so it
+/// writes the new value under `lwd-<destination>-<role>-<suffix>`, a name
+/// derived from the request id that no earlier Secret holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialNaming<'a> {
+    /// `lwd-<destination>-<role>`.
+    Create,
+    /// `lwd-<destination>-<role>-<suffix>`.
+    Rotation(&'a str),
+}
+
+impl CredentialNaming<'_> {
+    /// The Secret name this naming gives `role` of `destination`.
+    #[must_use]
+    pub fn name(self, destination: &str, role: DestinationRoleDto) -> String {
+        match self {
+            Self::Create => credential_secret_name(destination, role),
+            Self::Rotation(suffix) => {
+                format!("{}-{suffix}", credential_secret_name(destination, role))
+            }
+        }
+    }
+}
+
+/// The rotation suffix for one request: eight hex characters of a digest of
+/// the request id, so two rotations never share a name and the name carries
+/// nothing about the value.
+#[must_use]
+pub fn rotation_suffix(request_id: &str) -> String {
+    logweir_core::ids::sha256_hex(format!("lwd-rotation\n{request_id}").as_bytes())[..8].to_string()
+}
+
 fn secret_ref_for(
     destination: &str,
     role: DestinationRoleDto,
     grant: &AccessGrantRequest,
+    naming: CredentialNaming<'_>,
 ) -> Option<S3SecretKeysRef> {
     let source = grant.secret.as_ref()?;
     if let Some(existing) = &source.existing {
@@ -790,7 +829,7 @@ fn secret_ref_for(
     }
     let new = source.new.as_ref()?;
     Some(S3SecretKeysRef {
-        name: credential_secret_name(destination, role),
+        name: naming.name(destination, role),
         access_key_id_key: DEFAULT_ACCESS_KEY_ID_KEY.to_string(),
         secret_access_key_key: DEFAULT_SECRET_ACCESS_KEY_KEY.to_string(),
         session_token_key: new
@@ -829,11 +868,12 @@ fn build_grant(
     destination: &str,
     role: DestinationRoleDto,
     grant: &AccessGrantRequest,
+    naming: CredentialNaming<'_>,
 ) -> AccessGrant {
     match grant.mode {
         AccessModeDto::SecretKeys => AccessGrant {
             mode: AccessMode::SecretKeys,
-            secret: secret_ref_for(destination, role, grant),
+            secret: secret_ref_for(destination, role, grant, naming),
             workload_identity: None,
         },
         _ => AccessGrant {
@@ -844,11 +884,15 @@ fn build_grant(
     }
 }
 
-fn build_evidence_read(destination: &str, grant: &AccessGrantRequest) -> EvidenceReadAccessGrant {
+fn build_evidence_read(
+    destination: &str,
+    grant: &AccessGrantRequest,
+    naming: CredentialNaming<'_>,
+) -> EvidenceReadAccessGrant {
     match grant.mode {
         AccessModeDto::SecretKeys => EvidenceReadAccessGrant {
             mode: EvidenceReadMode::SecretKeys,
-            secret: secret_ref_for(destination, DestinationRoleDto::EvidenceRead, grant),
+            secret: secret_ref_for(destination, DestinationRoleDto::EvidenceRead, grant, naming),
             workload_identity: None,
         },
         AccessModeDto::WorkloadIdentity => EvidenceReadAccessGrant {
@@ -869,28 +913,131 @@ fn build_evidence_read(destination: &str, grant: &AccessGrantRequest) -> Evidenc
     }
 }
 
-/// The stored `spec.access` for a validated request.
+/// The stored `spec.access` for a validated CREATE request.
 #[must_use]
 pub fn build_access(destination: &str, access: &AccessRequest) -> AccessBlock {
+    build_access_named(destination, access, CredentialNaming::Create)
+}
+
+/// The stored `spec.access` for a validated request, naming each `secret.new`
+/// Secret by `naming`.
+#[must_use]
+pub fn build_access_named(
+    destination: &str,
+    access: &AccessRequest,
+    naming: CredentialNaming<'_>,
+) -> AccessBlock {
     AccessBlock {
         archive_write: build_grant(
             destination,
             DestinationRoleDto::ArchiveWrite,
             &access.archive_write,
+            naming,
         ),
         archive_read: access
             .archive_read
             .as_ref()
-            .map(|g| build_grant(destination, DestinationRoleDto::ArchiveRead, g)),
+            .map(|g| build_grant(destination, DestinationRoleDto::ArchiveRead, g, naming)),
         evidence_write: access
             .evidence_write
             .as_ref()
-            .map(|g| build_grant(destination, DestinationRoleDto::EvidenceWrite, g)),
+            .map(|g| build_grant(destination, DestinationRoleDto::EvidenceWrite, g, naming)),
         evidence_read: access
             .evidence_read
             .as_ref()
-            .map(|g| build_evidence_read(destination, g)),
+            .map(|g| build_evidence_read(destination, g, naming)),
     }
+}
+
+/// FX-20: refuse every `secret.existing` that names a Secret `allowed` does
+/// not contain.
+///
+/// A destination that could name ANY existing Secret could make Logweir sign
+/// requests with a credential its author cannot read and send them — the
+/// access key id, a replayable signature and any session token — to an
+/// endpoint its author chose. This service cannot read a Secret to see whom it
+/// is bound to, so on a create `allowed` is empty (no existing Secret can
+/// already be bound to an object that does not exist yet), and on
+/// `:update-access` it is the Secrets the stored destination already names
+/// (keeping a grant as it is, or moving one of this destination's Secrets to
+/// another of its roles, adds no credential to it).
+pub(crate) fn refuse_existing_secrets(
+    access: &AccessRequest,
+    allowed: &std::collections::BTreeSet<String>,
+    errors: &mut Vec<FieldError>,
+) {
+    for (field, grant) in [
+        ("access.archiveWrite", Some(&access.archive_write)),
+        ("access.archiveRead", access.archive_read.as_ref()),
+        ("access.evidenceWrite", access.evidence_write.as_ref()),
+        ("access.evidenceRead", access.evidence_read.as_ref()),
+    ] {
+        let Some(existing) = grant
+            .and_then(|g| g.secret.as_ref())
+            .and_then(|s| s.existing.as_ref())
+        else {
+            continue;
+        };
+        if allowed.contains(&existing.name) {
+            continue;
+        }
+        errors.push(FieldError::new(
+            format!("{field}.secret.existing"),
+            "existing_credential_refused",
+            "a destination no longer names an existing Secret it does not already use: a \
+             destination that could name any Secret could make Logweir sign requests with a \
+             credential its author cannot read and send them to an endpoint its author chose. \
+             Enter the credential once in secret.new; it becomes a Secret owned by and bound \
+             to this destination",
+        ));
+    }
+}
+
+/// The Secret names a stored destination's `SecretKeys` grants name.
+fn referenced_secrets(access: &AccessBlock) -> std::collections::BTreeSet<String> {
+    [
+        access.archive_write.secret.as_ref(),
+        access.archive_read.as_ref().and_then(|g| g.secret.as_ref()),
+        access
+            .evidence_write
+            .as_ref()
+            .and_then(|g| g.secret.as_ref()),
+        access
+            .evidence_read
+            .as_ref()
+            .and_then(|g| g.secret.as_ref()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|s| s.name.clone())
+    .collect()
+}
+
+/// FX-20: the binding a Secret this service writes for `destination` carries
+/// under `logweir-binding` — the destination's UID and its archive route, the
+/// value its `status.credentialBinding` publishes and every runner expects.
+///
+/// # Errors
+///
+/// `internal_error` when the stored object carries no UID (the API server
+/// always assigns one, so that is a defect, and nothing is written).
+fn destination_binding_of(destination: &BackupDestination) -> Result<String, ApiError> {
+    let uid = destination
+        .meta()
+        .uid
+        .as_deref()
+        .filter(|u| !u.trim().is_empty())
+        .ok_or_else(|| {
+            ApiError::new(
+                ProblemCode::InternalError,
+                "The credential could not be prepared: the destination has no UID to bind it \
+                 to. Nothing was written to it.",
+            )
+        })?;
+    Ok(logweir_core::credential_binding::destination_binding(
+        uid,
+        &location_of(&destination.spec).archive_storage_url(),
+    ))
 }
 
 fn build_storage(storage: &StorageRequest) -> StorageLocation {
@@ -987,10 +1134,19 @@ fn build_credential_secret(
     role: DestinationRoleDto,
     new: &crate::contract::NewCredentialRequest,
     request_id: &str,
+    secret_name: String,
+    binding: &str,
 ) -> WriteOnlyCredential {
     let name = destination.meta().name.clone().unwrap_or_default();
     let uid = destination.meta().uid.clone().unwrap_or_default();
     let mut data = BTreeMap::from([
+        // FX-20: THE BINDING, BESIDE THE VALUE IT GUARDS. Public — a UID and
+        // a digest of the location — and what every runner compares before it
+        // signs a request with these keys.
+        (
+            logweir_core::credential_binding::CREDENTIAL_BINDING_KEY.to_string(),
+            BASE64.encode(binding.as_bytes()),
+        ),
         (
             DEFAULT_ACCESS_KEY_ID_KEY.to_string(),
             BASE64.encode(new.access_key_id.as_bytes()),
@@ -1008,7 +1164,7 @@ fn build_credential_secret(
     }
     WriteOnlyCredential {
         metadata: ObjectMeta {
-            name: Some(credential_secret_name(&name, role)),
+            name: Some(secret_name),
             namespace: Some(namespace.to_string()),
             labels: Some(BTreeMap::from([
                 (MANAGED_BY_LABEL.to_string(), MANAGED_BY_VALUE.to_string()),
@@ -1101,10 +1257,11 @@ async fn refuse_taken_credential_names(
     namespace: &str,
     destination: &str,
     access: &AccessRequest,
+    naming: CredentialNaming<'_>,
 ) -> Result<(), ApiError> {
     let mut taken = Vec::new();
     for (role, _) in planned_credentials(access) {
-        let name = credential_secret_name(destination, role);
+        let name = naming.name(destination, role);
         let probe = probe_secret(namespace, &name);
         if state
             .kube()
@@ -1130,9 +1287,10 @@ async fn refuse_taken_credential_names(
             "{} already exist{}, so the credential{} you entered {} NOT written and nothing at \
              all was created — not the destination, and not any other credential in this \
              request. This service holds `create` on Secrets and nothing else: it cannot read \
-             the existing value to compare it, and it cannot overwrite it. Rotate the content \
-             out of band (kubectl, or your secret manager), or point the grant at a different \
-             existing Secret with `secret.existing`.",
+             the existing value to compare it, and it cannot overwrite it. Rotate it with \
+             `:update-access` and `secret.new`, which writes the value under a new name bound \
+             to this destination, or rotate the content out of band (kubectl, or your secret \
+             manager) keeping its `logweir-binding`.",
             taken
                 .iter()
                 .map(|n| format!("`{n}`"))
@@ -1211,9 +1369,17 @@ async fn create_new_credentials(
     access: &AccessRequest,
     request_id: &str,
     on_existing: ExistingCredential,
+    naming: CredentialNaming<'_>,
 ) -> Result<CredentialOutcome, ApiError> {
     let mut outcome = CredentialOutcome::default();
     let destination_name = destination.meta().name.clone().unwrap_or_default();
+    // FX-20: computed ONCE, before the first write, so a destination with no
+    // UID writes nothing at all.
+    let binding = if planned_credentials(access).is_empty() {
+        String::new()
+    } else {
+        destination_binding_of(destination)?
+    };
     let grants: [(DestinationRoleDto, Option<&AccessGrantRequest>); 4] = [
         (
             DestinationRoleDto::ArchiveWrite,
@@ -1237,7 +1403,15 @@ async fn create_new_credentials(
         let Some(new) = grant.secret.as_ref().and_then(|s| s.new.as_ref()) else {
             continue;
         };
-        let secret = build_credential_secret(namespace, destination, role, new, request_id);
+        let secret = build_credential_secret(
+            namespace,
+            destination,
+            role,
+            new,
+            request_id,
+            naming.name(&destination_name, role),
+            &binding,
+        );
         match state.kube().create_credential(namespace, &secret).await {
             Ok(reference) => {
                 // THE LOG LINE IS A NAME. Not a key, not a length, not a
@@ -1252,7 +1426,7 @@ async fn create_new_credentials(
                 outcome.created.push(reference.name);
             }
             Err(KubeFailure::AlreadyExists) => {
-                let name = credential_secret_name(&destination_name, role);
+                let name = naming.name(&destination_name, role);
                 match on_existing {
                     ExistingCredential::AcceptAsReplay => outcome.replayed.push(name),
                     ExistingCredential::Refuse => {
@@ -1285,10 +1459,10 @@ async fn create_new_credentials(
                                 "The Secret `{name}` already exists, so the credential you \
                                  entered was NOT written.{already} This service holds `create` \
                                  on Secrets and nothing else: it cannot read the existing value \
-                                 to compare it, and it cannot overwrite it. Rotate `{name}`'s \
-                                 content out of band (kubectl, or your secret manager), or point \
-                                 this grant at a different existing Secret with \
-                                 `secret.existing`."
+                                 to compare it, and it cannot overwrite it. Retry the rotation \
+                                 (it writes under a new name), or rotate `{name}`'s content out \
+                                 of band (kubectl, or your secret manager) keeping its \
+                                 `logweir-binding`."
                             ),
                         ));
                     }
@@ -1503,6 +1677,18 @@ pub async fn create(
     let key = IdempotencyKey::from_headers(&headers)?;
     let mut request: CreateDestinationRequest = read_json(body, MAX_JSON_BODY).await?;
     validate_create(&request)?;
+    // FX-20: a NEW destination names no existing Secret. None can carry the
+    // binding of an object that does not exist yet, so every one would be a
+    // Secret written for something else.
+    let mut errors = Vec::new();
+    refuse_existing_secrets(
+        &request.access,
+        &std::collections::BTreeSet::new(),
+        &mut errors,
+    );
+    if !errors.is_empty() {
+        return Err(ApiError::destination_invalid(errors));
+    }
     if request.access_carries_a_value() {
         authorize_also(&state, &actor, &ns, Action::WriteCredential)?;
     }
@@ -1541,7 +1727,14 @@ pub async fn create(
     // AND NOTHING IS WRITTEN UNTIL EVERY NAME IS KNOWN TO BE FREE. Not the
     // destination, and not the first of four Secrets.
     if !replaying {
-        refuse_taken_credential_names(&state, &ns, &request.name, &request.access).await?;
+        refuse_taken_credential_names(
+            &state,
+            &ns,
+            &request.name,
+            &request.access,
+            CredentialNaming::Create,
+        )
+        .await?;
     }
     let created = create_named_idempotent(
         &state,
@@ -1566,6 +1759,7 @@ pub async fn create(
         } else {
             ExistingCredential::Refuse
         },
+        CredentialNaming::Create,
     )
     .await?;
     note_credentials(&actor, &outcome);
@@ -1684,6 +1878,18 @@ pub async fn update_access(
         authorize_also(&state, &actor, &ns, Action::WriteCredential)?;
     }
     let object = get_object::<BackupDestination>(&state, &actor, &ns, &name).await?;
+    // FX-20: a rotation keeps or re-arranges the Secrets this destination
+    // already names, and enters every other credential as a value; it never
+    // adopts a Secret written for something else.
+    let mut errors = Vec::new();
+    refuse_existing_secrets(
+        &request.access,
+        &referenced_secrets(&object.spec.access),
+        &mut errors,
+    );
+    if !errors.is_empty() {
+        return Err(ApiError::destination_invalid(errors));
+    }
     let generation = object.meta().generation.unwrap_or_default();
     if generation != request.expected_generation {
         return Err(ApiError::new(
@@ -1718,7 +1924,12 @@ pub async fn update_access(
     // `:update-access` carries no `Idempotency-Key`, so there is no record
     // that could make an existing name this request's own: it is always a
     // refusal.
-    refuse_taken_credential_names(&state, &ns, &name, &request.access).await?;
+    // A ROTATION WRITES UNDER A NEW NAME (FX-20): the deterministic
+    // `lwd-<destination>-<role>` is held by the value being rotated, which
+    // this service can neither read nor overwrite.
+    let suffix = rotation_suffix(&request_id);
+    let naming = CredentialNaming::Rotation(&suffix);
+    refuse_taken_credential_names(&state, &ns, &name, &request.access, naming).await?;
     let outcome = create_new_credentials(
         &state,
         &ns,
@@ -1726,9 +1937,10 @@ pub async fn update_access(
         &request.access,
         &request_id,
         ExistingCredential::Refuse,
+        naming,
     )
     .await?;
-    let access = build_access(&name, &request.access);
+    let access = build_access_named(&name, &request.access, naming);
     let access_json = serde_json::json!({
         "archiveWrite": access.archive_write,
         "archiveRead": access.archive_read,
@@ -1969,6 +2181,11 @@ pub async fn from_legacy(
         _ => {}
     }
     validate_access(&request.access, &mut errors);
+    refuse_existing_secrets(
+        &request.access,
+        &std::collections::BTreeSet::new(),
+        &mut errors,
+    );
     if !errors.is_empty() {
         return Err(ApiError::destination_invalid(errors));
     }

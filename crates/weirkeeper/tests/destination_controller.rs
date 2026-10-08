@@ -1025,6 +1025,12 @@ fn two_destinations_render_distinct_complete_environments() {
                 "lw-a-writer".to_string(),
                 "secret-access-key".to_string()
             ),
+            // FX-20: the Secret's own binding, beside the credential it guards.
+            (
+                "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING".to_string(),
+                "lw-a-writer".to_string(),
+                "logweir-binding".to_string()
+            ),
         ]
     );
     assert_eq!(
@@ -1045,10 +1051,22 @@ fn two_destinations_render_distinct_complete_environments() {
                 "lw-b-writer".to_string(),
                 "token".to_string()
             ),
+            (
+                "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING".to_string(),
+                "lw-b-writer".to_string(),
+                "logweir-binding".to_string()
+            ),
         ],
         "dest-b's grant declares a sessionTokenKey and dest-a's does not; a session token \
          nobody configured is a token that does not exist"
     );
+    // FX-20: each Job expects ITS destination's binding, so dest-a's Secret
+    // named by dest-b would be refused.
+    assert_eq!(
+        env_a.literal(logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        Some(a.credential_binding().as_str())
+    );
+    assert_ne!(a.credential_binding(), b.credential_binding());
 
     // ---- And the plan storage blocks are different locations.
     assert_eq!(
@@ -1282,7 +1300,9 @@ fn evidence_and_archive_differ_in_prefix_and_credential() {
         names,
         vec![
             "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID",
-            "LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY"
+            "LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY",
+            // FX-20: the evidence Secret's binding, against this destination's.
+            "LOGWEIR_EVIDENCE_CREDENTIAL_BINDING"
         ],
         "SEPARATELY NAMED so neither store's credential can shadow the other's: `AWS_*` is the \
          archive's"
@@ -2129,4 +2149,165 @@ async fn a_ca_bundle_in_binary_data_is_read_and_refused_by_content() {
         .await
         .expect("the reconcile completes");
     assert_eq!(verdict.reason, CheckCode::CaBundleKeyMissing.as_str());
+}
+
+// ===========================================================================
+// FX-20: a destination's Secrets are bound to it, and every Job checks
+// ===========================================================================
+
+fn literal_of<'a>(env: &'a weirkeeper::destination::DestinationEnv, name: &str) -> Option<&'a str> {
+    env.literal(name)
+}
+
+/// **Every `SecretKeys` grant brings its binding pair; the expectation is
+/// this destination's UID and route; the frozen snapshot expects exactly what
+/// the live resolution did; a workload identity projects no pair; and an
+/// object with no UID projects the fail-closed expectation.**
+///
+/// KILLS: the pair dropped from `render_job_env`; the binding key required (a
+/// pod that never starts instead of a named refusal); the snapshot rendering a
+/// different expectation; the UID or the route left out of the digest.
+#[test]
+fn fx20_every_secret_grant_brings_its_binding_pair_and_the_snapshot_agrees() {
+    use logweir_core::credential_binding as cb;
+    let policy = Policy::defaults();
+    let a =
+        destination::resolve(&dest_a(), DestinationRole::ArchiveWrite, &policy).expect("resolves");
+    let env = a.job_env();
+    let expected = cb::destination_binding(UID_A, &a.plan_storage());
+    assert_eq!(a.credential_binding(), expected);
+    assert_eq!(
+        literal_of(&env, cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        Some(expected.as_str())
+    );
+    let pair = env
+        .from_secret
+        .iter()
+        .find(|e| e.name == cb::ARCHIVE_CREDENTIAL_BINDING_ENV)
+        .expect("the projected binding");
+    assert_eq!(pair.secret_name, "lw-a-writer");
+    assert_eq!(pair.key, cb::CREDENTIAL_BINDING_KEY);
+    assert!(pair.optional, "an unbound Secret must reach the runner");
+    assert!(env
+        .from_secret
+        .iter()
+        .filter(|e| e.name.starts_with("AWS_"))
+        .all(|e| !e.optional));
+    // The frozen block renders the same pair (the CA file differs only until
+    // the bytes are read, which is `the_snapshot_renders_the_same_job_env`'s).
+    let frozen = a.snapshot().job_env();
+    assert_eq!(
+        literal_of(&frozen, cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        Some(expected.as_str())
+    );
+    assert_eq!(frozen.from_secret, env.from_secret);
+    assert_eq!(a.snapshot().credential_binding(), expected);
+
+    // Another destination expects ANOTHER binding, so dest-a's Secret named
+    // by dest-b would be refused.
+    let b =
+        destination::resolve(&dest_b(), DestinationRole::ArchiveWrite, &policy).expect("resolves");
+    assert_ne!(b.credential_binding(), expected);
+
+    // A workload identity has no Secret, so no pair.
+    let mut wi = dest_a_value();
+    wi["spec"]["access"]["archiveWrite"] = serde_json::json!({
+        "mode": "WorkloadIdentity", "workloadIdentity": {"serviceAccountName": "sa"}
+    });
+    let wi =
+        destination::resolve(&build(wi), DestinationRole::ArchiveWrite, &policy).expect("resolves");
+    assert!(literal_of(&wi.job_env(), cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV).is_none());
+
+    // FAIL CLOSED without a UID.
+    let mut no_uid = a.clone();
+    no_uid.uid = String::new();
+    assert_eq!(
+        literal_of(
+            &no_uid.job_env(),
+            cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV
+        ),
+        Some(cb::UNBOUND_NO_UID)
+    );
+}
+
+/// **A Restore whose evidence destination names the SOURCE destination's
+/// Secret is refused: the evidence pair expects the EVIDENCE destination's
+/// binding.** The two grants are equal by name, so the evidence store would
+/// reuse the archive credential (`LOGWEIR_EVIDENCE_CREDENTIALS=archive`) — and
+/// present it to the evidence destination's route. The archive pair alone
+/// cannot see that: the Secret IS bound to the source.
+///
+/// CONTROL: one destination for both (a Backup) projects no second pair.
+///
+/// KILLS: the evidence pair omitted in the `archive` arm; the archive
+/// destination's binding expected on the evidence pair.
+#[test]
+fn fx20_an_evidence_destination_reusing_the_source_secret_is_bound_to_itself() {
+    use logweir_core::credential_binding as cb;
+    let policy = Policy::defaults();
+    let source =
+        destination::resolve(&dest_a(), DestinationRole::ArchiveRead, &policy).expect("resolves");
+    // The thief's evidence destination: another object, another endpoint,
+    // naming the source's reader Secret on its evidenceWrite grant.
+    let mut thief = dest_a_value();
+    thief["metadata"]["name"] = serde_json::json!("thief");
+    thief["metadata"]["uid"] = serde_json::json!("eeeeeeee-0000-4000-8000-0000000000ee");
+    thief["spec"]["storage"]["endpoint"] = serde_json::json!("https://attacker.example:9000");
+    thief["spec"]["access"]["evidenceWrite"] = serde_json::json!({
+        "mode": "SecretKeys",
+        "secret": {"name": "lw-a-reader", "accessKeyIdKey": "access-key-id",
+                   "secretAccessKeyKey": "secret-access-key"}
+    });
+    let evidence = destination::resolve(&build(thief), DestinationRole::EvidenceWrite, &policy)
+        .expect("resolves");
+    let env = evidence.evidence_env(&source).expect("one namespace");
+    assert_eq!(
+        literal_of(&env, weirkeeper::destination::EVIDENCE_CREDENTIALS_ENV),
+        Some("archive"),
+        "the grants are equal by name, so the archive credential is reused"
+    );
+    assert_eq!(
+        literal_of(&env, cb::EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        Some(evidence.credential_binding().as_str()),
+        "…and it must be bound to the EVIDENCE destination too"
+    );
+    assert_ne!(evidence.credential_binding(), source.credential_binding());
+    let pair = env
+        .from_secret
+        .iter()
+        .find(|e| e.name == cb::EVIDENCE_CREDENTIAL_BINDING_ENV)
+        .expect("the evidence pair");
+    assert_eq!(pair.secret_name, "lw-a-reader");
+
+    // CONTROL: the same destination for both projects nothing twice.
+    let same = destination::resolve(&dest_a(), DestinationRole::EvidenceRead, &policy)
+        .expect("resolves")
+        .evidence_env(&source)
+        .expect("same grant");
+    assert!(same.from_secret.is_empty());
+    assert!(literal_of(&same, cb::EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV).is_none());
+}
+
+/// **`status.credentialBinding` is published from the UID and the immutable
+/// route, and absent without a UID.**
+#[test]
+fn fx20_the_status_publishes_the_destination_binding() {
+    let dest = dest_a();
+    let verdict = weirkeeper::destination::evaluate(&dest, &CaObservation::NotDeclared);
+    let now = chrono::Utc::now();
+    let status = status_for(&dest, &verdict, now);
+    let policy = Policy::defaults();
+    let resolved =
+        destination::resolve(&dest, DestinationRole::ArchiveWrite, &policy).expect("resolves");
+    assert_eq!(
+        status.credential_binding,
+        Some(resolved.credential_binding())
+    );
+    let mut no_uid = dest_a_value();
+    no_uid["metadata"]
+        .as_object_mut()
+        .expect("metadata")
+        .remove("uid");
+    let no_uid = build(no_uid);
+    assert_eq!(status_for(&no_uid, &verdict, now).credential_binding, None);
 }

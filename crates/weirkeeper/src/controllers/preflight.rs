@@ -4171,6 +4171,8 @@ pub fn legacy_source_destination(
             secret_access_key_key: super::backup::ARCHIVE_SECRET_KEY.to_string(),
             session_token_key: None,
         },
+        // FX-20: an inline archive — its Secret is bound to the location.
+        inline_archive: true,
     })
 }
 
@@ -4813,10 +4815,23 @@ impl Inputs {
                         key: token.clone(),
                     });
                 }
+                // FX-20: the evidenceRead Secret's binding, optional, beside
+                // it, against THIS destination's binding.
+                from_secret.push(crate::job::EnvFromSecret {
+                    name: logweir_core::credential_binding::EVIDENCE_READ_CREDENTIAL_BINDING_ENV
+                        .to_string(),
+                    secret_name: secret.clone(),
+                    optional: true,
+                    key: logweir_core::credential_binding::CREDENTIAL_BINDING_KEY.to_string(),
+                });
                 return Ok(EvidenceReadPlan::Separate(
                     GrantRef::static_secret(secret.clone()),
                     destination::DestinationEnv {
-                        literals: Vec::new(),
+                        literals: vec![(
+                            logweir_core::credential_binding::EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV
+                                .to_string(),
+                            primary.credential_binding(),
+                        )],
                         from_secret,
                         service_account_name: None,
                     },

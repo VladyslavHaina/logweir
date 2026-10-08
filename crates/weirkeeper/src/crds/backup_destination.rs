@@ -478,6 +478,17 @@ pub struct BackupDestinationStatus {
     /// new instant; an unchanged one keeps the stored one (erratum E11(d)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<Time>,
+    /// FX-20: the binding every `SecretKeys` Secret this destination names
+    /// must carry under its `logweir-binding` key —
+    /// `v1:<uid>:sha256:<digest of the archive route>` — for any runner to
+    /// present the credential at all. Public (a UID and a digest, never a
+    /// credential). The console writes it into the Secrets it creates; an
+    /// operator who creates a Secret with `kubectl` copies it from here. A
+    /// Secret without it, or with another destination's, is refused
+    /// (`CredentialBindingMismatch`) before any request is signed. Absent
+    /// only on an object with no UID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_binding: Option<String>,
     /// The condition set. One type, `Valid`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,

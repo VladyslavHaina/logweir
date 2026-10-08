@@ -55,3 +55,8 @@ thiserror.workspace = true
 [dev-dependencies]
 # The fake clock's instants in the table rows.
 chrono.workspace = true
+
+# `unsafe_code = "forbid"` for every target of this package, tests and build
+# scripts included (the root Cargo.toml's `[workspace.lints.rust]`).
+[lints]
+workspace = true

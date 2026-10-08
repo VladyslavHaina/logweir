@@ -2144,6 +2144,7 @@ pub fn is_suppressed(
 /// | 1 | `notify-result=none:unconfigured` | [`DeliveryState::Suppressed`] — nothing was configured for this kind, which for `RecoveryCompleted` with PagerDuty-only routes is BY DESIGN and is not retried |
 /// | 1 | at least one `…:failed` | [`DeliveryState::Failed`], retried |
 /// | 3 | none | the document was unreadable and nothing was posted: [`DeliveryState::Failed`], retried (the ConfigMap is immutable, so a retry re-reads the same bytes and fails the same way — three attempts and then a named, permanent `DeliveryFailed`) |
+/// | 1 | at least one `…:refused` | FX-20: [`DeliveryState::Failed`], and the message OPENS with `CredentialBindingMismatch` ([`binding_refused`]): a route's Secret is not bound to this policy, sink and endpoint, so nothing was posted to that sink |
 /// | other / absent | — | [`DeliveryState::Failed`] |
 #[must_use]
 pub fn classify_delivery(exit_code: Option<i32>, log_tail: &[&str]) -> (DeliveryState, String) {
@@ -2153,6 +2154,24 @@ pub fn classify_delivery(exit_code: Option<i32>, log_tail: &[&str]) -> (Delivery
         .filter_map(known_result)
         .collect();
     let unconfigured = results.contains(&"none:unconfigured");
+    let refused: Vec<&'static str> = results
+        .iter()
+        .filter_map(|r| r.strip_suffix(":refused"))
+        .collect();
+    if exit_code == Some(1) && !refused.is_empty() {
+        return (
+            DeliveryState::Failed,
+            format!(
+                "{}: the credential Secret of the {} route is not bound to this policy, its \
+                 sink and its endpoint, so the delivery Job refused it and posted nothing to it; \
+                 set the Secret's `logweir-binding` key to the value status.credentialBindings \
+                 names ({})",
+                logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH,
+                refused.join(" and "),
+                sinks(&results)
+            ),
+        );
+    }
     match exit_code {
         Some(0) => (
             DeliveryState::Delivered,
@@ -2220,15 +2239,33 @@ fn sinks(results: &[&'static str]) -> String {
 pub const NOTIFY_RESULT_PREFIX: &str = "notify-result=";
 
 /// Every `notify-result=` value this build understands.
-pub const NOTIFY_RESULTS: [&str; 7] = [
+///
+/// FX-20 adds `<sink>:refused`: the sink's credential Secret did not carry
+/// the binding the controller expected, so the deliverer posted nothing to it
+/// (it never dialled). An older controller reading the line finds no known
+/// value and reports the exit code alone — still `Failed`.
+pub const NOTIFY_RESULTS: [&str; 10] = [
     "pagerduty:ok",
     "pagerduty:failed",
+    "pagerduty:refused",
     "webhook:ok",
     "webhook:failed",
+    "webhook:refused",
     "slack:ok",
     "slack:failed",
+    "slack:refused",
     "none:unconfigured",
 ];
+
+/// Whether a ledger entry's last delivery failed because a route's Secret was
+/// refused for its binding — FX-20. Read from the controller's OWN message
+/// ([`classify_delivery`] writes it from a closed table), never from a pod log.
+#[must_use]
+pub fn binding_refused(delivery: &crate::crds::protection_policy::AlertDelivery) -> bool {
+    delivery.last_error.as_deref().is_some_and(|e| {
+        e.starts_with(logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH)
+    })
+}
 
 /// A `notify-result=` value mapped to the `'static` spelling this build knows,
 /// or `None`.

@@ -1800,6 +1800,7 @@ anyone with pod read can see — the same reason `logweir cluster-probe` takes i
 | `NOTIFY_WEBHOOK_URL` | `webhook` | one POST of the event document |
 | `NOTIFY_SLACK_WEBHOOK_URL` | `slack` | one POST of `{"text": …}` |
 | `PAGERDUTY_ENDPOINT` | — | not a sink: the PagerDuty service region, `https://` only, US default |
+| `NOTIFY_{PAGERDUTY,WEBHOOK,SLACK}_CREDENTIAL_BINDING[_EXPECTED]` | — | not sinks (FX-20): each sink Secret's `logweir-binding` and the controller's expectation; when an expectation is set and the two differ, that sink is `refused` |
 
 **A variable that is present and blank is not a configured sink.** `std::env::var` returns `Ok("")`
 — not `Err(NotPresent)` — for a Kubernetes `env:` entry with an empty `value:`, and a `secretKeyRef`
@@ -1824,6 +1825,13 @@ and stderr merged in nondeterministic order.
 notify-result=none:unconfigured
 ```
 
+**FX-20 adds a third per-sink value, `refused`**: the sink's credential Secret
+carried no `logweir-binding`, or one written for another policy, sink or
+endpoint, so nothing was composed or dialled for it; the other sinks are still
+attempted. An older controller knows no `refused` value and reads such a run by
+its exit code alone (`Failed`). The set of values is closed: `ok`, `failed`,
+`refused`, and `none:unconfigured`.
+
 `none` is not a sink and cannot collide with one, and `unconfigured` is deliberately not `failed`:
 a sink that refused and an alert with nowhere to go are different findings that an operator fixes
 in different places. **Do not read a bare exit 0 as delivered.** Before this line existed, "nothing
@@ -1837,7 +1845,7 @@ controller's retries exhaust and `NotificationsDelivered=False` is the correct r
 | code | meaning |
 |---|---|
 | **0** | every configured sink accepted, and at least one was configured |
-| **1** | at least one configured sink did not accept (`notify-result=…:failed` says which), **or** no sink was configured at all (`notify-result=none:unconfigured`) |
+| **1** | at least one configured sink did not accept (`notify-result=…:failed` says which), or was refused before anything was built or dialled because its credential Secret is not bound to this policy, sink and endpoint (`notify-result=…:refused`, FX-20), **or** no sink was configured at all (`notify-result=none:unconfigured`) |
 | **3** | the event document is missing, unreadable, larger than a ConfigMap can hold, of another `format_version` major, or malformed — **nothing was posted** |
 
 **2 and 4 are never returned by this subcommand**, and that is a contract rather than an accident.

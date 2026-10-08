@@ -14,7 +14,7 @@ re-derives the expected set from `Cargo.lock` and fails naming any `name@version
 this file has lost, so a hand edit is caught by a test that reads the lockfile
 rather than this document.
 
-**Packages in the resolved graph: 402.**
+**Packages in the resolved graph: 403.**
 
 ## What this file is, and what `deny.toml` is
 
@@ -64,7 +64,7 @@ attributed in [NOTICE](NOTICE) instead.
 | licence file | 305 |
 | `authors` field | 68 |
 | neither; the fact is stated | 16 |
-| this workspace | 13 |
+| this workspace | 14 |
 
 ## Assets copied into the console (not Cargo packages)
 
@@ -1236,6 +1236,12 @@ S3 server.
 - Copyright source: this workspace
 
 ### logweir-kafka@0.1.0
+
+- SPDX: `Apache-2.0`
+- Copyright: Copyright 2026 The Logweir Authors
+- Copyright source: this workspace
+
+### logweir-rdkafka-ffi@0.1.0
 
 - SPDX: `Apache-2.0`
 - Copyright: Copyright 2026 The Logweir Authors

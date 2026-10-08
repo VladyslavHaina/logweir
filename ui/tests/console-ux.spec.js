@@ -733,14 +733,15 @@ test("mcp_10_the_destination_form_opens_from_a_button_and_shows_only_the_chosen_
   const html = renderDestinationForm({ draft: {}, state: { phase: "idle" } });
   assert.match(html, /^<details class="create-disclosure" id="destination-create-disclosure"><summary class="button primary">Create destination<\/summary>/,
     "BEFORE: the form was always expanded under the list, a 4,300 px page");
-  // archiveWrite starts on `existing`: its Secret name shows, the new-key and
-  // ServiceAccount inputs do not. archiveRead starts `absent`: nothing shows.
+  // archiveWrite starts on `new` (FX-20: a create never names an existing
+  // Secret): its new-key inputs show, the Secret-name and ServiceAccount inputs
+  // do not. archiveRead starts `absent`: nothing shows.
   const role = (name) => html.slice(html.indexOf("id=\"destination-" + name + "\""),
     html.indexOf("</fieldset>", html.indexOf("id=\"destination-" + name + "\"")));
   const write = role("archiveWrite");
-  assert.match(write, /data-grant-inputs="secret">/);
+  assert.match(write, /data-grant-inputs="keys">/);
   assert.match(write, /data-grant-inputs="sa" hidden>/);
-  assert.match(write, /data-grant-inputs="keys" hidden>/);
+  assert.match(write, /data-grant-inputs="secret" hidden>/);
   const read = role("archiveRead");
   for (const group of ["secret", "sa", "keys"]) {
     assert.match(read, new RegExp("data-grant-inputs=\"" + group + "\" hidden>"),

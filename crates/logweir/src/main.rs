@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use clap::Parser;
 use logweir::drill::InvokedAs;
 use logweir::{cli, exit, schema, show, verify};

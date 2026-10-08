@@ -47,7 +47,17 @@ thiserror.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+# `tests/offset_report_memory.rs` reads a child process's peak RSS through
+# `getrusage`, a safe API, because a counting global allocator needs `unsafe`
+# (forbidden here by the workspace lint). Already in the graph through
+# `object_store`; only the `resource` feature is added.
+nix = { version = "0.31", default-features = false, features = ["resource"] }
 
 [features]
 default = []
 e2e = []
+
+# `unsafe_code = "forbid"` for every target of this package, tests and build
+# scripts included (the root Cargo.toml's `[workspace.lints.rust]`).
+[lints]
+workspace = true

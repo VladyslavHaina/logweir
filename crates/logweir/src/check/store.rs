@@ -422,12 +422,30 @@ pub fn prefix_for(plan: &DestinationPlan, role: DestinationRole) -> String {
 /// # Errors
 /// [`StoreFailure`] when the projected CA file cannot be read.
 pub fn options_for(plan: &DestinationPlan, budget: Duration) -> Result<StoreOptions, StoreFailure> {
+    refuse_unbound_credentials(&|k| std::env::var(k).ok())?;
     let opts = match plan.credentials {
         CredentialMode::Static => StoreOptions::static_from_env(),
         CredentialMode::WorkloadIdentity => StoreOptions::workload_identity(),
         CredentialMode::Ambient => StoreOptions::ambient(),
     };
     finish_options(plan, opts, budget)
+}
+
+/// FX-20: refuse to build ANY store while this pod carries an object-store
+/// credential whose Secret is not bound to the destination (or archive
+/// location) the controller built the check for — `CredentialBindingMismatch`,
+/// before a request is signed. Every store a check opens goes through
+/// [`options_for`] or [`grant_options`], so this is the one gate.
+///
+/// # Errors
+///
+/// [`StoreFailure`] with [`CheckCode::CredentialBindingMismatch`], naming the
+/// variable and never a value.
+pub fn refuse_unbound_credentials(
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), StoreFailure> {
+    crate::credential_binding::check_store_bindings_with(env)
+        .map_err(|e| StoreFailure::new(CheckCode::CredentialBindingMismatch, e.to_string()))
 }
 
 /// The destination's trust material and this check's budget, over a chosen
@@ -530,6 +548,7 @@ pub fn grant_options(
     budget: Duration,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<StoreOptions, StoreFailure> {
+    refuse_unbound_credentials(env)?;
     let Some(grant) = grant else {
         return options_for(plan, budget);
     };

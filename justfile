@@ -13,11 +13,13 @@ lint:
     ./scripts/check-invariant-corpus.sh
     python3 scripts/test_k8s_scram_seed.py
     python3 scripts/test_plat06_case_e_rows.py
+    python3 scripts/test_bind_credential_rows.py
     ./scripts/check-one-signer.sh
     ./scripts/check-no-archive-write.sh
     ./scripts/check-ui-offline.sh
     ./scripts/check-ui-behaviour.sh
     ./scripts/check-unverified-labels.sh
+    ./scripts/check-unsafe-scope.sh
 
 # Dependency-graph guard for the signing API's allowed consumers.
 check-one-signer:

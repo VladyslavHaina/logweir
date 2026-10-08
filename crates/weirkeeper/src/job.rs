@@ -716,6 +716,25 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
             value_from: None,
         });
     }
+    // FX-20: THE BACKSTOP. A credential projected from a Secret with no
+    // binding expectation beside it would reach the runner as a "hand-run"
+    // credential, which nothing checks. Every builder in this crate projects
+    // the pair itself; one that forgets gets the never-satisfied expectation
+    // here, and its runner refuses the credential (fail closed) instead of
+    // presenting it unchecked.
+    for (credential, _, expected) in logweir_core::credential_binding::GUARDED_CREDENTIALS {
+        let projected = spec.env_from_secret.iter().any(|e| e.name == credential);
+        let has_expectation = spec.env_literal.iter().any(|(n, _)| n == expected);
+        if projected && !has_expectation {
+            env.push(EnvVar {
+                name: expected.to_string(),
+                value: Some(
+                    logweir_core::credential_binding::UNBOUND_MISSING_EXPECTATION.to_string(),
+                ),
+                value_from: None,
+            });
+        }
+    }
     for e in &spec.env_from_secret {
         env.push(EnvVar {
             name: e.name.clone(),
