@@ -45,10 +45,8 @@ sha256_of() { # file -> hex
 }
 
 expected_platforms() { # product -> os/arch,... as main CI publishes it (docs/gates.md)
-  case "$1" in
-    logweir) echo linux/amd64 ;;
-    *) echo linux/amd64,linux/arm64 ;;
-  esac
+  # All four, since PROD-00.2 built the runner's engine from source for arm64.
+  echo linux/amd64,linux/arm64
 }
 
 # Anonymous registry reads: an EMPTY Docker configuration, so "exists for the

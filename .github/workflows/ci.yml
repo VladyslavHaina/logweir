@@ -91,6 +91,12 @@ jobs:
   publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [check, e2e]
+    # images.yml's `sign` job signs keylessly (PROD-00.2): a reusable
+    # workflow's jobs get no more than this job grants.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/images.yml
     with:
       tag: sha-${{ github.sha }}

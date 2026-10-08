@@ -139,6 +139,15 @@ RUN set -eux; \
       "$triple" "$gnu" > /etc/logweir-cross.env; \
     . /etc/logweir-cross.env; \
     rustup target add "$TRIPLE"
+# cargo-auditable (PROD-00.2), a host tool: `cargo auditable build` embeds the
+# exact list of crates linked into each binary in a section of the binary
+# itself. That is what lets an SBOM of the IMAGE name the Rust crates inside
+# both shipped binaries — the engine's included — rather than only the Debian
+# packages beside them (`scripts/ci-images.sh sbom` requires both crate sets),
+# and what lets `cargo audit bin` check a shipped engine against advisories
+# without its source. Pinned and `--locked`; a separate layer, so a version
+# move does not re-run the apt layer.
+RUN cargo install cargo-auditable --locked --version 0.7.7
 # HOW THE CROSS BUILD IS WIRED, as ENV rather than a `.cargo/config.toml`, so
 # that `docker history` shows it and no file arriving through `COPY . .` can
 # shadow it. Both targets are named; cargo and the `cc`/`cmake` crates read
@@ -188,7 +197,7 @@ RUN bash scripts/engine-source.sh prepare /engine/src
 RUN set -eu; \
     . /etc/logweir-cross.env; \
     cd /engine/src; \
-    cargo build --locked --release --target "$TRIPLE" --bin kafka-backup; \
+    cargo auditable build --locked --release --target "$TRIPLE" --bin kafka-backup; \
     mkdir -p /out; \
     cp "target/$TRIPLE/release/kafka-backup" /out/kafka-backup; \
     cp LOGWEIR-ENGINE-IDENTITY /out/engine-identity
@@ -247,7 +256,7 @@ COPY . .
 # a second invocation would pay the link twice and cache as a separate layer.
 RUN set -eu; \
     . /etc/logweir-cross.env; \
-    cargo build --release --target "$TRIPLE" -p logweir -p logweir-retention; \
+    cargo auditable build --release --target "$TRIPLE" -p logweir -p logweir-retention; \
     mkdir -p /out; \
     cp "target/$TRIPLE/release/logweir" "target/$TRIPLE/release/logweir-retention" /out/
 

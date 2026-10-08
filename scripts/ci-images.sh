@@ -6,8 +6,10 @@ cd "$(dirname "$0")/.."
 
 : "${GITHUB_SHA:?}" "${NS:?}"
 [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$NS" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || exit 1
-products=(weirkeeper logweir-ui logweir-console)
-if [[ "${ARCH:-}" == amd64 ]]; then products+=(logweir); fi
+# All four images on both architectures. The runner joined arm64 with PROD-00.2:
+# its engine is Logweir's build of the vendored source, compiled for each
+# platform, where OSO's own binary existed for linux/amd64 only.
+products=(weirkeeper logweir-ui logweir-console logweir)
 
 check_image() {
   local product="$1" ref="$2"
@@ -278,9 +280,7 @@ case "${1:-}" in
     products=(logweir weirkeeper logweir-ui logweir-console)
     # Validate the complete candidate set before moving any public tag.
     for product in "${products[@]}"; do
-      arches=(amd64)
-      if [[ "$product" != logweir ]]; then arches+=(arm64); fi
-      for arch in "${arches[@]}"; do
+      for arch in amd64 arm64; do
         file="image-digests/$product-$arch.json"
         jq -e --arg sha "$GITHUB_SHA" --arg product "$product" --arg arch "$arch" \
           '.sha == $sha and .product == $product and .arch == $arch and (.digest | test("^sha256:[0-9a-f]{64}$"))' "$file" >/dev/null
@@ -290,10 +290,8 @@ case "${1:-}" in
     done
     for product in "${products[@]}"; do
       repo="docker.io/$NS/$product"
-      refs=("$repo@$(jq -r .digest "image-digests/$product-amd64.json")")
-      if [[ "$product" != logweir ]]; then
-        refs+=("$repo@$(jq -r .digest "image-digests/$product-arm64.json")")
-      fi
+      refs=("$repo@$(jq -r .digest "image-digests/$product-amd64.json")"
+            "$repo@$(jq -r .digest "image-digests/$product-arm64.json")")
       docker buildx imagetools create --prefer-index=false --tag "$repo:$TAG" "${refs[@]}"
       digest=$(docker buildx imagetools inspect "$repo:$TAG" --format '{{json .Manifest}}' | jq -er .digest)
       [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
@@ -327,5 +325,69 @@ case "${1:-}" in
       echo 'Verified main and latest tags for all four images.' >> "$GITHUB_STEP_SUMMARY"
     fi
     ;;
-  *) echo 'usage: ci-images.sh check|candidates|promote|chart|chart-package <dir>|chart-push <package>' >&2; exit 2 ;;
+  sbom)
+    # PROD-00.2: the runner candidate's SBOM, from the exact digest the registry
+    # returned for this architecture (`candidates` wrote it), never from the
+    # local tag. Both binaries are built with `cargo auditable`, so the image
+    # scan names the Rust crates inside them; a document that lists neither
+    # the engine's crate nor Logweir's is refused rather than published as an
+    # SBOM that silently covers only the Debian packages.
+    : "${SYFT:?}"
+    [[ "${ARCH:-}" == amd64 || "${ARCH:-}" == arm64 ]] || exit 1
+    digest=$(jq -er --arg sha "$GITHUB_SHA" 'select(.sha == $sha and .product == "logweir") | .digest' \
+      "image-digests/logweir-$ARCH.json")
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+    out="image-digests/logweir-$ARCH.spdx.json"
+    "$SYFT" scan "registry:docker.io/$NS/logweir@$digest" --platform "linux/$ARCH" \
+      -o "spdx-json=$out"
+    for crate in kafka-backup-core kafka-backup-cli logweir-core rustls; do
+      jq -e --arg c "$crate" '[.packages[] | select(.name == $c)] | length > 0' "$out" >/dev/null \
+        || { echo "the SBOM of logweir@$digest lists no \`$crate\`: the binaries were not built with cargo auditable" >&2; exit 1; }
+    done
+    echo "- SBOM of docker.io/$NS/logweir@$digest (linux/$ARCH): $(jq '.packages | length' "$out") packages" \
+      >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+    ;;
+  sign)
+    # PROD-00.2: keyless signatures (cosign, GitHub OIDC -> Fulcio, logged in
+    # Rekor) for the four published indexes and every platform manifest in
+    # them, and the runner's SBOM attested to each platform's candidate digest.
+    : "${RUNNER_DIGEST:?}" "${CONTROLLER_DIGEST:?}" "${UI_DIGEST:?}" "${CONSOLE_DIGEST:?}"
+    for pair in "logweir=$RUNNER_DIGEST" "weirkeeper=$CONTROLLER_DIGEST" \
+                "logweir-ui=$UI_DIGEST" "logweir-console=$CONSOLE_DIGEST"; do
+      product=${pair%%=*} digest=${pair#*=}
+      [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "no digest for $product" >&2; exit 1; }
+      cosign sign --yes --recursive "docker.io/$NS/$product@$digest"
+    done
+    for arch in amd64 arm64; do
+      digest=$(jq -er --arg sha "$GITHUB_SHA" 'select(.sha == $sha and .product == "logweir") | .digest' \
+        "image-digests/logweir-$arch.json")
+      cosign attest --yes --type spdxjson --predicate "image-digests/logweir-$arch.spdx.json" \
+        "docker.io/$NS/logweir@$digest"
+    done
+    ;;
+  verify-signatures)
+    # What an adopter runs (docs/install.md, "Verify the images"): each index
+    # is signed by THIS repository's images.yml on main, and each runner
+    # platform carries the SBOM attestation. A signature by any other identity
+    # does not verify.
+    : "${RUNNER_DIGEST:?}" "${CONTROLLER_DIGEST:?}" "${UI_DIGEST:?}" "${CONSOLE_DIGEST:?}"
+    identity="^https://github\.com/${GITHUB_REPOSITORY:?}/\.github/workflows/images\.yml@refs/heads/main$"
+    issuer=https://token.actions.githubusercontent.com
+    for pair in "logweir=$RUNNER_DIGEST" "weirkeeper=$CONTROLLER_DIGEST" \
+                "logweir-ui=$UI_DIGEST" "logweir-console=$CONSOLE_DIGEST"; do
+      product=${pair%%=*} digest=${pair#*=}
+      cosign verify --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" \
+        "docker.io/$NS/$product@$digest" >/dev/null
+      echo "- verified: docker.io/$NS/$product@$digest" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+    done
+    for arch in amd64 arm64; do
+      digest=$(jq -er --arg sha "$GITHUB_SHA" 'select(.sha == $sha and .product == "logweir") | .digest' \
+        "image-digests/logweir-$arch.json")
+      cosign verify-attestation --type spdxjson --certificate-identity-regexp "$identity" \
+        --certificate-oidc-issuer "$issuer" "docker.io/$NS/logweir@$digest" >/dev/null
+      echo "- verified SBOM attestation: docker.io/$NS/logweir@$digest (linux/$arch)" \
+        >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+    done
+    ;;
+  *) echo 'usage: ci-images.sh check|candidates|sbom|promote|sign|verify-signatures|chart|chart-package <dir>|chart-push <package>' >&2; exit 2 ;;
 esac
