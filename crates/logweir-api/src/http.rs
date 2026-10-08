@@ -129,7 +129,7 @@ fn rightmost_untrusted_hop<'a>(
     hops.iter()
         .rev()
         .copied()
-        .find(|hop| hop_address(hop).map_or(true, |ip| !trusted.contains(ip)))
+        .find(|hop| hop_address(hop).is_none_or(|ip| !trusted.contains(ip)))
 }
 
 /// The forwarded client address, but ONLY when the immediate peer is inside a
