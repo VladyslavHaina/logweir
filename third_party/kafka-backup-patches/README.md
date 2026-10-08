@@ -6,9 +6,13 @@ set of changes Logweir carries on top of that source. OD-3 (decided
 2026-10-07, `docs/to-do/product-expansion.md`) is the decision; ADR 0002's
 amendment in `docs/architecture.md` records it.
 
-The folder is **empty of patches** until the first fix lands: Logweir's build
-is then the OSO release's own source, built by Logweir, and it carries
-Logweir's version identity (below) so nobody mistakes it for OSO's binary.
+Without patches, Logweir's build is the OSO release's own source, built by
+Logweir; it still carries Logweir's version identity (below), so nobody
+mistakes it for OSO's binary.
+
+| Patch | What it fixes | Oracle |
+| --- | --- | --- |
+| `0001-lockfile-rustls-h2-spin.patch` | The engine's Cargo.lock only: rustls 0.23.43 → 0.23.45 (RUSTSEC-2026-0285) with rustls-webpki 0.103.13 → 0.103.15, h2 0.4.15 → 0.4.19 (RUSTSEC-2026-0258), and the yanked spin 0.9.8 → 0.9.9. The first run of the engine's `cargo deny` gate (PROD-00.2) found all three in the shipped graph; Logweir's own graph already carries these versions. | `scripts/ci-check.sh`'s engine `cargo deny` (fails on the unpatched lock), and PROD-00.2's parity suites |
 
 ## The policy: patch first
 
@@ -34,9 +38,10 @@ Logweir's version identity (below) so nobody mistakes it for OSO's binary.
   digits and hyphens. The digits order the set, they are unique, and the
   build applies the patches in that order. Nothing else lives here except
   this README.
-- Line 1 is `Reason: <one line>`; line 2 is either `Upstream: https://…` or
-  blank; then a blank line, then a unified diff against the extracted source
-  root (`a/crates/…`, `b/crates/…`), as `git diff` writes it.
+- Line 1 is `Reason: <one line>`. Line 2 is either blank, or
+  `Upstream: https://…` followed by a blank line 3. Then comes a unified diff
+  against the extracted source root (`a/Cargo.lock`, `a/crates/…`), as
+  `git diff` writes it.
 - The build applies each patch with `git apply` (exact context, no fuzz), so
   a patch that does not apply cleanly fails the build instead of landing
   somewhere else.

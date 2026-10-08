@@ -392,7 +392,7 @@ pub const ENGINE_VERSION: &str = "0.23.3+logweir.1";
 /// the patch folder and the version), byte-identical to `ENGINE_DIGEST` in
 /// `third_party/kafka-backup-build.env`.
 pub const ENGINE_DIGEST: &str =
-    "sha256:fb04aa95f2a09085018044f2a498b12b8eda6d1762d47ea3e2e61d077b908def";
+    "sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3";
 
 /// `LOGWEIR_ENGINE_VERSION`, the env name.
 pub const ENGINE_VERSION_ENV: &str = "LOGWEIR_ENGINE_VERSION";

@@ -3,7 +3,17 @@
 #
 # Upstream publishes `osodevops/kafka-backup` for linux/amd64 ONLY, so the
 # binary `scripts/extract-engine.sh` pulls out of the pinned image is a Linux
-# ELF. On darwin/arm64 — the machine this repo is developed on — exec'ing it
+# ELF.
+#
+# WHICH ENGINE (PROD-00.2). By default the digest-pinned OSO image under
+# linux/amd64, as before. `LOGWEIR_E2E_ENGINE_IMAGE` and
+# `LOGWEIR_E2E_ENGINE_PLATFORM`, set TOGETHER, run another image's
+# `kafka-backup` instead — the runner image carries Logweir's build at
+# /usr/local/bin/kafka-backup, for linux/arm64 (native on an Apple Silicon
+# host) and linux/amd64 — which is how the from-source engine runs the same
+# suites as OSO's binary (docs/to-do/decisions/PROD-00-engine-route.md §13).
+# One of the two without the other is refused: an image run under a platform
+# it was not chosen for is a different engine from the one named. On darwin/arm64 — the machine this repo is developed on — exec'ing it
 # fails with ENOEXEC (`logweir doctor` reports exit 126). On a linux/amd64 CI
 # runner the native binary runs directly and this script is never used;
 # `e2e/tests/harness/mod.rs::engine_bin` probes `--version` (permitted by
@@ -34,10 +44,21 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-digest=$(tr -d '[:space:]' < "$root/third_party/kafka-backup-binary.digest")
-if [ -z "$digest" ]; then
-  echo "engine-docker: third_party/kafka-backup-binary.digest is empty" >&2
-  exit 1
+if [ -n "${LOGWEIR_E2E_ENGINE_IMAGE:-}" ] || [ -n "${LOGWEIR_E2E_ENGINE_PLATFORM:-}" ]; then
+  if [ -z "${LOGWEIR_E2E_ENGINE_IMAGE:-}" ] || [ -z "${LOGWEIR_E2E_ENGINE_PLATFORM:-}" ]; then
+    echo "engine-docker: set LOGWEIR_E2E_ENGINE_IMAGE and LOGWEIR_E2E_ENGINE_PLATFORM together" >&2
+    exit 1
+  fi
+  image="$LOGWEIR_E2E_ENGINE_IMAGE"
+  platform="$LOGWEIR_E2E_ENGINE_PLATFORM"
+else
+  digest=$(tr -d '[:space:]' < "$root/third_party/kafka-backup-binary.digest")
+  if [ -z "$digest" ]; then
+    echo "engine-docker: third_party/kafka-backup-binary.digest is empty" >&2
+    exit 1
+  fi
+  image="osodevops/kafka-backup@$digest"
+  platform=linux/amd64
 fi
 
 # The one host directory the engine reads and writes: the rendered
@@ -66,14 +87,14 @@ mkdir -p "$mount"
 #   NOTHING when the caller does not have it set, so a plaintext run is
 #   unaffected: no variable is created inside the container.
 exec docker run --rm -i \
-  --platform linux/amd64 \
+  --platform "$platform" \
   --user 0:0 \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e RUST_LOG \
   -e LOGWEIR_SOURCE_PASSWORD -e LOGWEIR_TARGET_PASSWORD \
   -v "$mount:$mount" \
   -w "$mount" \
   --entrypoint /bin/bash \
-  "osodevops/kafka-backup@$digest" \
+  "$image" \
   -c 'gw=$(getent hosts host.docker.internal | cut -d" " -f1 | head -1)
       if [ -z "$gw" ]; then echo "engine-docker: no host.docker.internal" >&2; exit 1; fi
       printf "%s\tlocalhost\n%s\thost.docker.internal\n::1\tip6-localhost ip6-loopback\n" \

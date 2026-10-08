@@ -193,7 +193,7 @@ mod tests {
     use super::*;
 
     const LOGWEIR_DIGEST: &str =
-        "sha256:fb04aa95f2a09085018044f2a498b12b8eda6d1762d47ea3e2e61d077b908def";
+        "sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3";
     const OSO_DIGEST: &str =
         "sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db";
 
