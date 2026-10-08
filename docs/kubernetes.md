@@ -6181,7 +6181,9 @@ manifest, the install file and every rendered chart copy.
 
 Plus `create` on `restores` — one per due rehearsal slot, and nothing in the
 crate updates, replaces or deletes a `Restore` — and `list` on core `events`,
-which is how a check pod that never started can say why.
+which is how a Job pod that never started can say why: every Job-owning
+reconciler reads its own Jobs' and pods' events, by `involvedObject.uid`
+(FX-11, §12).
 
 **The controller holds no `delete` on any of the five, and none on anything
 except the two transient check kinds** (`TopicDiscovery`, `Preflight`), whose
