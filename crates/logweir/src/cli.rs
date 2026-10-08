@@ -370,6 +370,12 @@ pub enum IdentityCmd {
             requires = "installation_trust_policy"
         )]
         allowed_target_cluster_ids: Vec<String>,
+        /// PROD-16.1 security review: at the end of every run, delete this
+        /// ClusterRoleBinding — the install-only grant that lets the hook
+        /// create the installation TrustPolicy — so no standing grant
+        /// remains. Absent or not held (404/403) is nothing to revoke.
+        #[arg(long)]
+        revoke_trust_binding: Option<String>,
     },
     /// Copy the already established installation signer into one explicitly
     /// authorized runner namespace. Refuses missing, incomplete, or different

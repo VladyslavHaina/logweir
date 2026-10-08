@@ -526,9 +526,57 @@ check_console_grants() {
   echo "  through every binding that reaches it, in every rendered variant."
 }
 
+# PROD-16.1 security review: WHO MAY CREATE A TrustPolicy. `create` cannot be
+# narrowed by resourceName, and a TrustPolicy decides whose keys authorise and
+# attest cluster-wide, so in every rendered variant exactly two ClusterRoles may
+# hold it: the human `logweir-trust-admin` (shipped unbound), and the identity
+# hook's `<release>-identity-trust` — and that one only as an INSTALL-ONLY,
+# SELF-DELETING hook (`helm.sh/hook: post-install`, delete policy with
+# `hook-succeeded` and `hook-failed`), so no standing grant remains. Any other
+# holder, or that one as an ordinary release object, is refused.
+check_trust_creators() {
+  for render_file in charts/logweir/rendered/*.yaml; do
+    awk -v file="$render_file" '
+      function flush() {
+        if (kind == "ClusterRole" && creates) {
+          if (name == "logweir-trust-admin") {
+            # the human role, unbound by the chart
+          } else if (name ~ /-identity-trust$/) {
+            if (hook != "post-install" || policy !~ /hook-succeeded/ || policy !~ /hook-failed/) {
+              print file ": ClusterRole " name " grants create on trustpolicies as a standing grant (helm.sh/hook=" hook ", delete-policy=" policy "); it must be a post-install hook deleted when the install hooks finish"
+            }
+          } else {
+            print file ": ClusterRole " name " grants create on trustpolicies; only logweir-trust-admin and the install-only identity hook may"
+          }
+        }
+        kind = ""; name = ""; hook = ""; policy = ""; creates = 0; trust_rule = 0
+      }
+      /^---/ { flush(); next }
+      /^kind: / { kind = $2 }
+      /^  name: / { if (name == "") name = $2 }
+      /^    helm.sh\/hook: / { hook = $2 }
+      /^    helm.sh\/hook-delete-policy: / { policy = $2 }
+      /^ *resources:/ { trust_rule = ($0 ~ /"trustpolicies"/) }
+      /^ *- trustpolicies$/ { trust_rule = 1 }
+      /^ *verbs:/ { if (trust_rule && $0 ~ /"create"/) creates = 1; trust_rule = 0 }
+      END { flush() }
+    ' "$render_file"
+  done > "${TMPDIR:-/tmp}/logweir-trust-creators.$$"
+  if [ -s "${TMPDIR:-/tmp}/logweir-trust-creators.$$" ]; then
+    echo "render-install: a TrustPolicy creator outside the two allowed holders:" >&2
+    sed 's/^/  /' "${TMPDIR:-/tmp}/logweir-trust-creators.$$" >&2
+    rm -f "${TMPDIR:-/tmp}/logweir-trust-creators.$$"
+    exit 1
+  fi
+  rm -f "${TMPDIR:-/tmp}/logweir-trust-creators.$$"
+  echo "render-install: only logweir-trust-admin and the install-only identity hook may create a"
+  echo "  TrustPolicy, and the hook's grant is a self-deleting post-install hook, in every variant."
+}
+
 if [ "${1:-}" = "--check" ]; then
   check_enforcement_image
   check_console_grants
+  check_trust_creators
   # `mktemp` and not a fixed path: two agents running this at once must not
   # write the same temporary file.
   tmp="$(mktemp "${TMPDIR:-/tmp}/logweir-install-check.XXXXXX")"
@@ -562,5 +610,6 @@ fi
 
 check_enforcement_image
 check_console_grants
+check_trust_creators
 render > "$OUT"
 echo "render-install: wrote $OUT ($(grep -c '^kind:' "$OUT") documents)."

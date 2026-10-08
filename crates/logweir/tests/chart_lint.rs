@@ -1273,6 +1273,8 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
             "logweir-signing-trust",
             "--installation-trust-policy",
             "logweir-installation",
+            "--revoke-trust-binding",
+            "logweir-identity-trust",
         ],
         args
     );
@@ -1280,9 +1282,51 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
     // PROD-16.1 — THE TRUST GRANT, least privilege: `list` to see what trust
     // the cluster has and `create` for the one policy (RBAC cannot narrow
     // `create` by name — the residual docs/kubernetes.md §8 states), `get` on
-    // the one roster name; no get/update/patch/delete on TrustPolicy, no
-    // Secret, no wildcard. Bound to the bootstrap account alone.
+    // the one roster name, `delete` on its OWN binding by name (the hook
+    // revokes it after the trust step); no get/update/patch/delete on
+    // TrustPolicy, no Secret, no wildcard. Bound to the bootstrap account
+    // alone, and — the security review of 428a481a — INSTALL-ONLY AND
+    // TRANSIENT: a `post-install` hook (never upgrade or rollback), weighted
+    // before the Job that spends it, deleted by Helm when the install's
+    // post-install hooks have run, succeeded or failed.
     let trust_role = find(&docs, "ClusterRole", "logweir-identity-trust");
+    let job_weight: i64 = find(&docs, "Job", "logweir-identity-bootstrap").value["metadata"]
+        ["annotations"]["helm.sh/hook-weight"]
+        .as_str()
+        .and_then(|w| w.parse().ok())
+        .expect("the Job's weight");
+    for (kind, object) in [
+        ("ClusterRole", trust_role),
+        (
+            "ClusterRoleBinding",
+            find(&docs, "ClusterRoleBinding", "logweir-identity-trust"),
+        ),
+    ] {
+        let annotations = &object.value["metadata"]["annotations"];
+        assert_eq!(
+            annotations["helm.sh/hook"].as_str(),
+            Some("post-install"),
+            "{kind}: the trust grant exists for the install alone — never post-upgrade or \
+             post-rollback"
+        );
+        let policy = annotations["helm.sh/hook-delete-policy"]
+            .as_str()
+            .unwrap_or_default();
+        for needed in ["hook-succeeded", "hook-failed", "before-hook-creation"] {
+            assert!(
+                policy.split(',').any(|p| p == needed),
+                "{kind}: delete policy {policy:?} lacks {needed}: no standing grant may remain"
+            );
+        }
+        let weight: i64 = annotations["helm.sh/hook-weight"]
+            .as_str()
+            .and_then(|w| w.parse().ok())
+            .expect("a weight");
+        assert!(
+            weight < job_weight,
+            "{kind}: weight {weight} must precede the Job's {job_weight}"
+        );
+    }
     let trust_rules = trust_role.value["rules"]
         .as_sequence()
         .expect("trust rules");
@@ -1318,9 +1362,28 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
                 vec!["get".to_string()],
                 vec!["default".to_string()]
             ),
+            (
+                vec!["clusterrolebindings".to_string()],
+                vec!["delete".to_string()],
+                vec!["logweir-identity-trust".to_string()]
+            ),
         ],
-        "the identity hook's cluster grant is exactly list+create TrustPolicy and get the roster"
+        "the identity hook's cluster grant is exactly list+create TrustPolicy, get the roster \
+         and delete its own binding"
     );
+    // THE GUARD that keeps it off an upgrade and off an existing identity is
+    // the template's (`helm template` cannot render a lookup): check-chart.sh
+    // renders `--is-upgrade` and requires the grant and its arguments absent.
+    let template = read("charts/logweir/templates/identity.yaml");
+    assert!(
+        template.contains(
+            "{{- $freshTrust := and $trust.enabled .Release.IsInstall (not $existingSecret) }}"
+        ),
+        "the trust grant is rendered only on a first install into a namespace with no identity"
+    );
+    assert!(template.contains("{{- if $freshTrust }}\n# PROD-16.1: THE FRESH INSTALL'S TRUST"));
+    let gate = read("scripts/check-chart.sh");
+    assert!(gate.contains("the install-only trust grant is absent from an upgrade render"));
     let trust_binding = find(&docs, "ClusterRoleBinding", "logweir-identity-trust");
     assert_eq!(
         trust_binding.value["subjects"],

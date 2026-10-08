@@ -777,6 +777,34 @@ if [ "$rc" -ne 0 ] || ! grep -q "secretName: logweir-console-confirmation" "$tmp
 else
   echo "   rc=$rc  (a console-served binding with the managed identity renders the generated key)"
 fi
+# PROD-16.1 security review: THE INSTALL-ONLY TRUST GRANT. An upgrade render
+# (and a rollback, which Helm renders as an upgrade) carries neither the
+# ClusterRole/Binding that lets the hook create a TrustPolicy nor the arguments
+# that would spend it; a first-install render carries both. (An install over an
+# EXISTING identity is the `lookup` half of the same guard, which only a
+# connected render can see; docs/kubernetes.md §8.)
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --is-upgrade ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" > "$tmp/upgrade.yaml" 2> "$tmp/upgrade.err"
+rc=$?
+if [ "$rc" -ne 0 ] || grep -q "name: $RELEASE-identity-trust$" "$tmp/upgrade.yaml" \
+  || grep -q -- "--installation-trust-policy" "$tmp/upgrade.yaml" \
+  || grep -q -- "--mark-fresh-install-confirm" "$tmp/upgrade.yaml" \
+  || ! grep -q -- "--revoke-trust-binding" "$tmp/upgrade.yaml"; then
+  echo "FAIL: the install-only trust grant is absent from an upgrade render — it was not (or the render failed)" >&2
+  sed 's/^/      /' "$tmp/upgrade.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (the install-only trust grant is absent from an upgrade render; the revocation stays)"
+fi
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" > "$tmp/install.yaml" 2> "$tmp/install.err"
+if ! grep -q "name: $RELEASE-identity-trust$" "$tmp/install.yaml" \
+  || ! grep -q -- "--mark-fresh-install-confirm" "$tmp/install.yaml"; then
+  echo "FAIL: a first-install render with a console lost the fresh install's trust grant or marker" >&2
+  fail=1
+else
+  echo "   rc=0  (a first-install render with a console carries the transient grant and the marker)"
+fi
 # PROD-16.1: the operator's mode names render as the internal ones, and an
 # explicit unbound default renders as defaultMode.
 helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \

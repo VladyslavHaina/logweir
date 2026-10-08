@@ -38,6 +38,7 @@ fn main() -> std::process::ExitCode {
             console_public_configmap_name,
             installation_trust_policy,
             allowed_target_cluster_ids,
+            revoke_trust_binding,
         }) => logweir::identity::run(&logweir::identity::BootstrapArgs {
             namespace,
             secret_name,
@@ -58,6 +59,7 @@ fn main() -> std::process::ExitCode {
                     allowed_target_cluster_ids,
                 }
             }),
+            revoke_trust_binding,
         }),
         cli::Command::Identity(cli::IdentityCmd::Distribute {
             source_namespace,

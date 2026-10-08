@@ -113,6 +113,9 @@ pub struct BootstrapArgs {
     pub console: Option<ConsoleKeyArgs>,
     /// PROD-16.1: the installation `TrustPolicy`, when the chart asks for one.
     pub installation_trust: Option<InstallationTrustArgs>,
+    /// PROD-16.1 security review: the install-only ClusterRoleBinding that
+    /// grants the trust step, deleted at the end of every run.
+    pub revoke_trust_binding: Option<String>,
 }
 
 /// The retained objects of the console's `ConsoleConfirmation` key.
@@ -312,6 +315,29 @@ trait IdentityStore {
     fn trust_roster_exists(&mut self) -> Result<bool, String>;
     /// PROD-16.1: create the installation `TrustPolicy`.
     fn create_trust_policy(&mut self, policy: &Value) -> Result<CreateResult, String>;
+    /// PROD-16.1 security review: delete one ClusterRoleBinding by name.
+    fn delete_cluster_role_binding(&mut self, name: &str) -> Result<Revocation, String>;
+}
+
+/// What deleting the install's trust grant found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Revocation {
+    /// It was bound, and now it is not.
+    Revoked,
+    /// It was not there (404) — the normal answer on every later run.
+    Absent,
+    /// This account does not hold it (403) — the grant was never rendered.
+    NotHeld,
+}
+
+impl Revocation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked",
+            Self::Absent => "absent",
+            Self::NotHeld => "not-held",
+        }
+    }
 }
 
 /// What one bootstrap run established.
@@ -320,6 +346,9 @@ struct Report {
     identity: Outcome,
     console: Option<Outcome>,
     trust: Option<String>,
+    /// The install's trust grant, after this run: revoked, absent, not held,
+    /// or a failure to delete it (which Helm's hook cleanup then covers).
+    revocation: Option<String>,
 }
 
 pub fn run(args: &BootstrapArgs) -> ExitCode {
@@ -330,6 +359,9 @@ pub fn run(args: &BootstrapArgs) -> ExitCode {
             print_outcome("identity-ready", &report.identity);
             if let Some(console) = &report.console {
                 print_outcome("console-confirmation-ready", console);
+            }
+            if let Some(revocation) = &report.revocation {
+                println!("installation-trust-grant {revocation}");
             }
             if let Some(trust) = &report.trust {
                 println!("installation-trust {trust}");
@@ -368,6 +400,30 @@ fn bootstrap_all(
     args: &BootstrapArgs,
     now: DateTime<Utc>,
 ) -> Result<Report, String> {
+    let result = bootstrap_steps(store, args, now);
+    // PROD-16.1 security review: NO STANDING GRANT. Whatever the steps did,
+    // the install-only ClusterRoleBinding that let this account create a
+    // TrustPolicy is deleted now; Helm's hook cleanup deletes it too.
+    let revocation = args.revoke_trust_binding.as_deref().map(|name| {
+        match store.delete_cluster_role_binding(name) {
+            Ok(outcome) => format!("{name}:{}", outcome.as_str()),
+            Err(error) => {
+                eprintln!("installation-trust-grant {name}: could not be deleted: {error}");
+                format!("{name}:delete-failed")
+            }
+        }
+    });
+    result.map(|mut report| {
+        report.revocation = revocation;
+        report
+    })
+}
+
+fn bootstrap_steps(
+    store: &mut impl IdentityStore,
+    args: &BootstrapArgs,
+    now: DateTime<Utc>,
+) -> Result<Report, String> {
     let identity = bootstrap(store, args)?;
     let console = match &args.console {
         Some(console) => Some(bootstrap_console(store, console)?),
@@ -382,6 +438,7 @@ fn bootstrap_all(
         identity,
         console: console.map(|(outcome, _, _)| outcome),
         trust,
+        revocation: None,
     })
 }
 
@@ -886,6 +943,7 @@ fn fresh_install_trust(
         &trust.allowed_target_cluster_ids,
         confirm.is_some(),
     );
+    guard_installation_policy(&policy, &signing.key_id, confirm.as_deref())?;
 
     let mut attempt = 0;
     let outcome = loop {
@@ -921,6 +979,62 @@ fn fresh_install_trust(
     };
     record_fresh_install(store, &recorded, claim.as_ref())?;
     Ok(Some(recorded))
+}
+
+/// BELT AND BRACES (PROD-16.1 security review): the one TrustPolicy this hook
+/// may create declares EXACTLY the installation signer with `EvidenceSigning`
+/// and, when a console key is trusted, that key with `ConsoleConfirmation` —
+/// never another key, never another usage, never a namespace list — and is the
+/// default policy. Checked on the bytes about to be POSTed.
+fn guard_installation_policy(
+    policy: &Value,
+    signing_key_id: &str,
+    console_key_id: Option<&str>,
+) -> Result<(), String> {
+    let mut wanted = vec![(signing_key_id, "EvidenceSigning")];
+    if let Some(console) = console_key_id {
+        wanted.push((console, CONSOLE_CONFIRMATION_USAGE));
+    }
+    let keys = policy
+        .pointer("/spec/keys")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let declared: Vec<(String, Vec<String>)> = keys
+        .iter()
+        .map(|k| {
+            (
+                k.get("keyId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                k.get("usages")
+                    .and_then(Value::as_array)
+                    .map(|u| {
+                        u.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, Vec<String>)> = wanted
+        .iter()
+        .map(|(id, usage)| ((*id).to_string(), vec![(*usage).to_string()]))
+        .collect();
+    let shape_ok = policy.pointer("/spec/default").and_then(Value::as_bool) == Some(true)
+        && policy.pointer("/spec/namespaces").is_none();
+    if declared == expected && shape_ok {
+        Ok(())
+    } else {
+        Err(
+            "refusing to create an installation TrustPolicy that is not exactly the installation \
+             signer (EvidenceSigning) and the console key (ConsoleConfirmation), default: true"
+                .to_string(),
+        )
+    }
 }
 
 /// What the fresh install's trust step did.
@@ -1200,6 +1314,7 @@ impl KubernetesStore {
             mark_fresh_install_confirm: false,
             console: None,
             installation_trust: None,
+            revoke_trust_binding: None,
         };
         let mut store = Self::in_cluster(&bootstrap_args)?;
         store.source_namespace = Some(args.source_namespace.clone());
@@ -1483,6 +1598,25 @@ impl IdentityStore for KubernetesStore {
             }
             Err(ureq::Error::Status(409, _)) => Ok(CreateResult::AlreadyExists),
             Err(error) => Err(api_error("create", "trustpolicies", &name, error)),
+        }
+    }
+
+    fn delete_cluster_role_binding(&mut self, name: &str) -> Result<Revocation, String> {
+        validate_name("ClusterRoleBinding", name)?;
+        let url = format!(
+            "{}/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/{name}",
+            self.base_url
+        );
+        match self
+            .agent
+            .delete(&url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .call()
+        {
+            Ok(_) => Ok(Revocation::Revoked),
+            Err(ureq::Error::Status(404, _)) => Ok(Revocation::Absent),
+            Err(ureq::Error::Status(403, _)) => Ok(Revocation::NotHeld),
+            Err(error) => Err(api_error("delete", "clusterrolebindings", name, error)),
         }
     }
 }
@@ -1786,6 +1920,11 @@ mod tests {
         /// Trust calls that fail before one succeeds.
         trust_failures: u32,
         next_uid: u32,
+        /// The install-only trust grant: `Some(true)` bound, `Some(false)`
+        /// deleted, `None` never rendered (an upgrade).
+        grant: Option<bool>,
+        /// The order of the calls that matter: create, then revoke.
+        calls: Vec<&'static str>,
     }
 
     fn empty_private(created_at: &str) -> PrivateRecord {
@@ -1861,6 +2000,8 @@ mod tests {
                 create_conflict_with: None,
                 trust_failures: 0,
                 next_uid: 0,
+                grant: Some(true),
+                calls: Vec::new(),
             }
         }
 
@@ -2000,6 +2141,12 @@ mod tests {
                 self.policies.push(winner);
                 return Ok(CreateResult::AlreadyExists);
             }
+            assert_eq!(
+                self.grant,
+                Some(true),
+                "a TrustPolicy is only ever created while the install's grant is bound"
+            );
+            self.calls.push("create-trust-policy");
             self.next_uid += 1;
             let uid = format!("00000000-0000-4000-8000-{:012}", self.next_uid);
             let mut stored = policy.clone();
@@ -2007,6 +2154,19 @@ mod tests {
             self.created_policies.push(stored.clone());
             self.policies.push(stored);
             Ok(CreateResult::Created { uid })
+        }
+
+        fn delete_cluster_role_binding(&mut self, name: &str) -> Result<Revocation, String> {
+            assert_eq!(name, "logweir-identity-trust");
+            self.calls.push("revoke-grant");
+            Ok(match self.grant {
+                Some(true) => {
+                    self.grant = Some(false);
+                    Revocation::Revoked
+                }
+                Some(false) => Revocation::Absent,
+                None => Revocation::NotHeld,
+            })
         }
     }
 
@@ -2020,6 +2180,7 @@ mod tests {
             mark_fresh_install_confirm: false,
             console: None,
             installation_trust: None,
+            revoke_trust_binding: None,
         }
     }
 
@@ -2037,6 +2198,7 @@ mod tests {
                 policy_name: "logweir-installation".into(),
                 allowed_target_cluster_ids: vec!["tQmDMMCERvy6yIB-vuOZCQ".into()],
             }),
+            revoke_trust_binding: Some("logweir-identity-trust".into()),
             ..args(false)
         }
     }
@@ -3016,5 +3178,160 @@ mod tests {
         let error = store.trust_policies().unwrap_err();
         handle.join().unwrap();
         assert!(error.contains("HTTP 403"), "{error}");
+    }
+
+    // ------------------------------------------------------------------
+    // PROD-16.1 security review: no standing trust grant
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn the_fresh_install_revokes_its_trust_grant_right_after_creating_the_policy() {
+        let mut store = MemoryStore::fresh();
+        let report = bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
+        assert_eq!(
+            report.trust.as_deref(),
+            Some("created:logweir-installation")
+        );
+        assert_eq!(store.calls, vec!["create-trust-policy", "revoke-grant"]);
+        assert_eq!(store.grant, Some(false), "no standing grant after the run");
+        assert_eq!(
+            report.revocation.as_deref(),
+            Some("logweir-identity-trust:revoked")
+        );
+    }
+
+    #[test]
+    fn every_later_run_finds_no_grant_and_creates_nothing() {
+        // An upgrade: the grant was never rendered (403: not held).
+        let old = SigningKey::generate_p256();
+        let mut upgraded = MemoryStore::fresh();
+        write_private(&mut upgraded.private, &pem(&old));
+        upgraded.establish_public(&public_material(&old).unwrap());
+        upgraded.grant = None;
+        let report =
+            bootstrap_all(&mut upgraded, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
+        assert_eq!(
+            upgraded.calls,
+            vec!["revoke-grant"],
+            "no create on an upgrade"
+        );
+        assert_eq!(
+            report.revocation.as_deref(),
+            Some("logweir-identity-trust:not-held")
+        );
+        // A grant left bound by an install whose Helm client died before
+        // its cleanup: the next run revokes it, and still creates nothing.
+        let mut lingering = MemoryStore::fresh();
+        write_private(&mut lingering.private, &pem(&old));
+        lingering.establish_public(&public_material(&old).unwrap());
+        let report =
+            bootstrap_all(&mut lingering, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
+        assert_eq!(lingering.calls, vec!["revoke-grant"]);
+        assert_eq!(lingering.grant, Some(false));
+        assert_eq!(
+            report.revocation.as_deref(),
+            Some("logweir-identity-trust:revoked")
+        );
+    }
+
+    #[test]
+    fn a_failed_trust_step_still_revokes_the_grant() {
+        let mut down = MemoryStore::fresh();
+        down.trust_failures = TRUST_ATTEMPTS;
+        assert!(bootstrap_all(&mut down, &chart_args(), at("2026-10-07T10:01:00Z")).is_err());
+        assert_eq!(down.grant, Some(false), "revoked even when the hook fails");
+    }
+
+    /// BELT AND BRACES: the one policy body this hook may POST.
+    #[test]
+    fn the_hook_creates_only_the_signer_and_the_console_key_as_the_default() {
+        let signing = public_material(&SigningKey::generate_p256()).unwrap();
+        let console = public_material(&SigningKey::generate_ed25519()).unwrap();
+        let key = |m: &PublicMaterial, usage: &'static str, principal: &str| {
+            (
+                m.clone(),
+                usage,
+                principal.to_string(),
+                "d",
+                "2026-10-07T09:55:00Z".to_string(),
+            )
+        };
+        let exact = installation_trust_policy(
+            "logweir-installation",
+            "ns",
+            &[
+                key(&signing, "EvidenceSigning", "install:ns/s"),
+                key(&console, CONSOLE_CONFIRMATION_USAGE, "console:ns/c"),
+            ],
+            &[],
+            true,
+        );
+        assert_eq!(
+            guard_installation_policy(&exact, &signing.key_id, Some(&console.key_id)),
+            Ok(())
+        );
+        // NEGATIVE CONTROLS: another key, another usage, a namespace list,
+        // not the default, the console key where none was asked for.
+        let other = public_material(&SigningKey::generate_p256()).unwrap();
+        let mut extra = exact.clone();
+        extra["spec"]["keys"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"keyId": other.key_id, "usages": ["GovernedApproval"]}));
+        let mut governed = exact.clone();
+        governed["spec"]["keys"][1]["usages"] = json!(["GovernedApproval"]);
+        let mut scoped = exact.clone();
+        scoped["spec"]["namespaces"] = json!(["prod"]);
+        let mut not_default = exact.clone();
+        not_default["spec"]["default"] = json!(false);
+        for (what, body, console_id) in [
+            ("an extra key", &extra, Some(console.key_id.as_str())),
+            ("GovernedApproval", &governed, Some(console.key_id.as_str())),
+            ("a namespace list", &scoped, Some(console.key_id.as_str())),
+            (
+                "not the default",
+                &not_default,
+                Some(console.key_id.as_str()),
+            ),
+            ("an unrequested console key", &exact, None),
+        ] {
+            assert!(
+                guard_installation_policy(body, &signing.key_id, console_id).is_err(),
+                "{what} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_revocation_deletes_the_one_binding_by_name() {
+        let (base_url, handle) = one_response(200, "OK");
+        let mut store = store_for_http(base_url);
+        assert_eq!(
+            store
+                .delete_cluster_role_binding("logweir-identity-trust")
+                .unwrap(),
+            Revocation::Revoked
+        );
+        let request = String::from_utf8_lossy(&handle.join().unwrap()).to_string();
+        assert!(
+            request.starts_with(
+                "DELETE /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/logweir-identity-trust HTTP/1.1"
+            ),
+            "{request}"
+        );
+        for (status, reason, expected) in [
+            (404, "Not Found", Revocation::Absent),
+            (403, "Forbidden", Revocation::NotHeld),
+        ] {
+            let (base_url, handle) = one_response(status, reason);
+            let mut store = store_for_http(base_url);
+            assert_eq!(
+                store
+                    .delete_cluster_role_binding("logweir-identity-trust")
+                    .unwrap(),
+                expected
+            );
+            handle.join().unwrap();
+        }
     }
 }

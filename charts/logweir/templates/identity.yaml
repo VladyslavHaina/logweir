@@ -29,6 +29,16 @@ named no other Secret).
 {{- $existingConsoleSecret := lookup "v1" "Secret" .Release.Namespace $consoleSecret }}
 {{- $existingConsolePublic := lookup "v1" "ConfigMap" .Release.Namespace $consolePublic }}
 {{- $trust := .Values.identity.installationTrust }}
+{{- /*
+PROD-16.1 security review: THE ONE GUARD for the fresh install's trust step. A
+first `helm install` (`.Release.IsInstall`; `helm upgrade --install` of a release
+that does not exist yet is one too) into a namespace with no established
+signing Secret — the same `lookup` that decides the identity placeholder above.
+An upgrade, a rollback, and a reinstall over a retained identity are none of
+these, so they render neither the grant nor the arguments that would spend it.
+*/ -}}
+{{- $freshTrust := and $trust.enabled .Release.IsInstall (not $existingSecret) }}
+{{- $trustGrant := printf "%s-identity-trust" .Release.Name }}
 {{- $allowedTargets := $trust.allowedTargetClusterIds | default list }}
 {{- if .Values.demoKafka.enabled }}
 {{- $allowedTargets = append $allowedTargets .Values.demoKafka.clusterIds.target }}
@@ -217,19 +227,32 @@ subjects:
     name: {{ .Release.Name }}-identity-bootstrap
     namespace: {{ .Release.Namespace }}
 ---
-{{- if $trust.enabled }}
-# PROD-16.1: THE FRESH INSTALL'S TRUST. In the one run that GENERATES the
-# installation identity, the hook reads which trust the cluster already has
-# (`list` on TrustPolicy, `get` on the one roster name) and, when it has none,
-# creates ONE default TrustPolicy trusting the installation signer and the
-# console key. `create` cannot be narrowed by resourceName in RBAC, so this
-# grant is the residual docs/kubernetes.md §8 states: whoever can run a pod as
-# `<release>-identity-bootstrap` can create a TrustPolicy. No get, update,
-# patch or delete on the kind: the hook never edits or removes trust.
+{{- if $freshTrust }}
+# PROD-16.1: THE FRESH INSTALL'S TRUST, AND ONLY FOR THE INSTALL. In the one run
+# that GENERATES the installation identity, the hook reads which trust the
+# cluster already has (`list` TrustPolicy, `get` the one roster name) and, when
+# it has none, creates ONE default TrustPolicy trusting the installation signer
+# and the console key. `create` cannot be narrowed by resourceName in RBAC, so
+# this grant must not outlive the install (security review of 428a481a): it is
+# rendered only under `$freshTrust`, as a `post-install` hook — never upgrade
+# or rollback — weighted before the Job that spends it, and deleted by Helm
+# when the install's post-install hooks have run, succeeded or failed
+# (`hook-succeeded`, `hook-failed`; Helm v4.0.1 `pkg/action/hooks.go`
+# `execHook` deletes every earlier `hook-succeeded` hook when a later one
+# fails). The hook ALSO deletes this binding itself right after its trust step
+# (`delete` on this one binding name), so the grant is gone even before Helm's
+# cleanup. The installer already holds cluster-admin for the CRDs and
+# ClusterRoles of this chart; for those seconds, whoever can run a pod as
+# `<release>-identity-bootstrap` in the release namespace could create a
+# TrustPolicy — the residual docs/kubernetes.md §8 states.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ .Release.Name }}-identity-trust
+  name: {{ $trustGrant }}
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
   labels:
     {{- include "logweir.labels" . | nindent 4 }}
     app.kubernetes.io/component: identity-bootstrap
@@ -241,18 +264,26 @@ rules:
     resources: ["trustrosters"]
     resourceNames: ["default"]
     verbs: ["get"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    resourceNames: [{{ $trustGrant | quote }}]
+    verbs: ["delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ .Release.Name }}-identity-trust
+  name: {{ $trustGrant }}
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
   labels:
     {{- include "logweir.labels" . | nindent 4 }}
     app.kubernetes.io/component: identity-bootstrap
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ .Release.Name }}-identity-trust
+  name: {{ $trustGrant }}
 subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}-identity-bootstrap
@@ -316,16 +347,23 @@ spec:
             - --console-public-configmap-name
             - {{ $consolePublic }}
             {{- end }}
-            {{- if $trust.enabled }}
+            {{- if $freshTrust }}
             - --installation-trust-policy
             - {{ $trust.policyName }}
             {{- range $id := $allowedTargets }}
             - --allowed-target-cluster-id
             - {{ $id | quote }}
             {{- end }}
-            {{- end }}
             {{- if include "logweir.freshInstallConfirm" . }}
             - --mark-fresh-install-confirm
+            {{- end }}
+            {{- end }}
+            {{- if $trust.enabled }}
+            {{- /* Every run: revoke the install's trust grant if it is still bound
+            (after the trust step; or left behind by an install whose Helm
+            client died before its hook cleanup). 403 or 404: nothing held. */}}
+            - --revoke-trust-binding
+            - {{ $trustGrant }}
             {{- end }}
           resources:
             {{- toYaml .Values.identity.resources | nindent 12 }}
