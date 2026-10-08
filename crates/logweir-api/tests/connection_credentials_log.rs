@@ -127,7 +127,12 @@ async fn no_entered_credential_reaches_the_log() {
             &sasl_body("plain", false).to_string(),
         )
         .await;
-    assert_eq!(refused.status, 422, "{}", String::from_utf8_lossy(&refused.body));
+    assert_eq!(
+        refused.status,
+        422,
+        "{}",
+        String::from_utf8_lossy(&refused.body)
+    );
 
     let text = String::from_utf8_lossy(&buffer.0.lock().unwrap()).into_owned();
     assert!(
@@ -142,4 +147,3 @@ async fn no_entered_credential_reaches_the_log() {
         assert!(!String::from_utf8_lossy(&response.body).contains(SEEDED_PASSWORD));
     }
 }
-

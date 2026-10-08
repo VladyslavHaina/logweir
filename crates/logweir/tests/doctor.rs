@@ -234,7 +234,10 @@ fn check_7_a_target_credential_bound_to_another_connection_is_named() {
         [
             ENGINE_OK[0],
             ("LOGWEIR_TARGET_PASSWORD", password),
-            ("LOGWEIR_TARGET_CREDENTIAL_BINDING_EXPECTED", "v1:this-uid:sha256:00"),
+            (
+                "LOGWEIR_TARGET_CREDENTIAL_BINDING_EXPECTED",
+                "v1:this-uid:sha256:00",
+            ),
             ("LOGWEIR_TARGET_CREDENTIAL_BINDING", binding),
         ]
     };
