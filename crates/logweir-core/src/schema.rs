@@ -43,15 +43,17 @@ pub fn scorecard_schema() -> String {
 /// stop describing the type.
 ///
 /// **The current file is the newest MINOR** (FX-7 fix round, review M-2):
-/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_MANIFEST_VERSION>.json`
-/// (`1.2.0`, FX-7's `archive.manifest_version_id`), its `$id` built from that
+/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_TOPIC_CONFIGURATION>.json`
+/// (`1.3.0`, PROD-05.1's `topic_configuration`), its `$id` built from that
 /// ONE constant, so a renumber is the constant and a file name
 /// (`docs/stability.md`: a MINOR bump is "a new schema file beside the old
 /// one"). The older files are FROZEN beside it and never regenerated:
 /// `schemas/logweir-backup-receipt-1.0.0.json` describes every receipt written
 /// before FX-4 (`the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`),
-/// and FX-4's `-1.1.0.json` (`config_coverage`) every receipt written without
-/// a pin (`the_frozen_1_1_0_receipt_schema_is_still_fx4s`).
+/// FX-4's `-1.1.0.json` (`config_coverage`) every receipt written without a
+/// pin before PROD-05.1 (`the_frozen_1_1_0_receipt_schema_is_still_fx4s`), and
+/// FX-7's `-1.2.0.json` (`archive.manifest_version_id`) every pinned one
+/// before it (`the_frozen_1_2_0_receipt_schema_is_still_fx7s`).
 pub fn backup_receipt_schema() -> String {
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
         s.option_nullable = true;
@@ -62,7 +64,7 @@ pub fn backup_receipt_schema() -> String {
         .into_root_schema_for::<BackupReceipt>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-        crate::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
+        crate::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');
