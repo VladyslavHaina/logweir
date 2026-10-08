@@ -486,6 +486,62 @@ fn restore_with_basis(
 ) -> Restored {
     let (prefix, target) = row.target(label, source);
     let spec = restore_spec_with_basis(backup_id, source, &prefix, pit, sample, producer_time);
+    restore_spec_run(row, label, target, spec)
+}
+
+/// **PROD-08.1.** `restore`, with `sample.coverage: complete` in the plan:
+/// phase 7 hashes and decodes every segment of every restored partition,
+/// computes the expected output from each record's own timestamp, and
+/// compares every restored record with it by `x-original-offset`. The signed
+/// result is `verdict["integrity"]["verification"]` ([`complete_block`]).
+fn restore_complete(
+    row: &mut Row,
+    label: &str,
+    backup_id: &str,
+    source: &str,
+    pit: Option<i64>,
+    sample: (i64, i64),
+) -> Restored {
+    let (prefix, target) = row.target(label, source);
+    let mut spec = restore_spec(backup_id, source, &prefix, pit, sample);
+    spec.get_mut("sample")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .expect("the spec has a sample block")
+        .insert("coverage".into(), "complete".into());
+    restore_spec_run(row, label, target, spec)
+}
+
+/// The signed complete block of a complete restore (PROD-08.1).
+fn complete_block(r: &Restored) -> &Value {
+    &r.verdict["integrity"]["verification"]["complete"]
+}
+
+/// Every finding a complete restore's block lists, one per line.
+fn complete_findings(r: &Restored) -> String {
+    complete_block(r)["partitions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|p| {
+            let at = format!("p{}", p["partition"]);
+            p["findings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f.as_str())
+                .map(move |f| format!("{at}: {f}"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn restore_spec_run(
+    row: &mut Row,
+    label: &str,
+    target: String,
+    spec: serde_yaml::Value,
+) -> Restored {
     let run = run_restore_within(spec, RESTORE_DEADLINE_SECS);
     let verdict = verdict(&run);
     eprintln!(
@@ -1248,6 +1304,20 @@ fn non_monotonic_create_time_below_the_window_floor() {
     let in_window = |x: &Rec| x.timestamp <= pit;
     let rep_pit = replay(&archive, in_window, &rp.observed);
     let e2e_pit = end_to_end(&source, &source, in_window, &rp.observed);
+    // PROD-08.1 (acceptance row 08-3): the same two restores with complete
+    // coverage, whose expected output has no lower bound under an archive
+    // floor — so the record below the floor is expected, and missing.
+    let rc = restore_complete(&mut row, "cfull", &backup_id, &topic, None, (T, T + 10_000));
+    let rcp = restore_complete(
+        &mut row,
+        "cpit",
+        &backup_id,
+        &topic,
+        Some(pit),
+        (T + 2000, pit),
+    );
+    let rep_c = replay(&archive, |_| true, &rc.observed);
+    let rep_cp = replay(&archive, in_window, &rcp.observed);
     record_outcome(
         "ts-floor",
         &source,
@@ -1256,6 +1326,8 @@ fn non_monotonic_create_time_below_the_window_floor() {
         &[
             ("full", &r, &rep[..], &e2e[..]),
             ("pit", &rp, &rep_pit[..], &e2e_pit[..]),
+            ("complete full", &rc, &rep_c[..], &[][..]),
+            ("complete pit", &rcp, &rep_cp[..], &[][..]),
         ],
         &cap,
         json!({"layout": "p0 [T+2000, T+1000, T+3000, T+4000]; p1 [T+2000 x3, T+2500]; p2 [T+2100..T+2400]",
@@ -1272,6 +1344,20 @@ fn non_monotonic_create_time_below_the_window_floor() {
     }
     assert_verdict("ts-floor full", &r, 2, "fail-integrity");
     assert_verdict("ts-floor pit", &rp, 0, "pass");
+    // PROD-08.1, 08-3: complete coverage reports the record below the floor
+    // MISSING in both restores — at the point too, where the sampled drill
+    // above signs `pass` — until PROD-01.1b moves the floor.
+    for (what, c) in [("complete full", &rc), ("complete pit", &rcp)] {
+        assert_verdict(&format!("ts-floor {what}"), c, 2, "fail-integrity");
+        let b = complete_block(c);
+        assert_eq!(b["covered"], true, "{what}: {b}");
+        assert_eq!(b["replay"]["missing"], 1, "{what}: {b}");
+        assert!(
+            complete_findings(c).contains("p0: source offset 1 is missing from the target"),
+            "{what}: {}",
+            complete_findings(c)
+        );
+    }
     mutants_are_caught(
         "ts-floor",
         |o| keys(&end_to_end(&source, &source, |_| true, o)),
@@ -1308,12 +1394,18 @@ fn non_monotonic_create_time_skipped_at_the_point_in_time() {
     let cap = capture(&source, &archive);
     let rep = replay(&archive, in_window, &r.observed);
     let e2e = end_to_end(&source, &source, in_window, &r.observed);
+    // PROD-08.1 (acceptance row 08-1): the same restore, complete coverage.
+    let rc = restore_complete(&mut row, "cpit", &backup_id, &topic, Some(pit), (T, pit));
+    let rep_c = replay(&archive, in_window, &rc.observed);
     record_outcome(
         "ts-pit",
         &source,
         &source,
         &archive,
-        &[("pit", &r, &rep[..], &e2e[..])],
+        &[
+            ("pit", &r, &rep[..], &e2e[..]),
+            ("complete pit", &rc, &rep_c[..], &[][..]),
+        ],
         &cap,
         json!({"point_in_time": pit,
                "layout": "p0 [T+2000..T+2300 | T+9000, T+2500, T+9100, T+9200]; p1 [T+2000, T+5000 x3]; p2 [T+2000..T+2300 | T+2400, T+4000, T+4500, T+5000]"}),
@@ -1323,6 +1415,21 @@ fn non_monotonic_create_time_skipped_at_the_point_in_time() {
     }
     let lost = with_class("missing", &[(0, 5)]);
     assert_verdict("ts-pit", &r, 0, "pass");
+    // PROD-08.1, 08-1: the expected output, from each record's own timestamp,
+    // holds p0@5; the engine skipped its segment; complete coverage FAILS
+    // naming it, where the sampled drill above signs `pass`.
+    assert_verdict("ts-pit complete", &rc, 2, "fail-integrity");
+    let b = complete_block(&rc);
+    assert_eq!(
+        (&b["replay"]["expected"], &b["replay"]["missing"]),
+        (&json!(17), &json!(1)),
+        "{b}"
+    );
+    assert!(
+        complete_findings(&rc).contains("p0: source offset 5 is missing from the target"),
+        "{}",
+        complete_findings(&rc)
+    );
     assert_eq!(keys(&cap), BTreeSet::new(), "capture: {:#?}", render(&cap));
     assert_eq!(keys(&rep), lost, "replay: {:#?}", render(&rep));
     assert_eq!(keys(&e2e), lost, "end to end: {:#?}", render(&e2e));
@@ -1356,12 +1463,18 @@ fn non_monotonic_create_time_inside_a_wholly_inside_segment() {
     let cap = capture(&source, &archive);
     let rep = replay(&archive, in_window, &r.observed);
     let e2e = end_to_end(&source, &source, in_window, &r.observed);
+    // PROD-08.1 (acceptance row 08-2): the same restore, complete coverage.
+    let rc = restore_complete(&mut row, "cpit", &backup_id, &topic, Some(pit), (T, pit));
+    let rep_c = replay(&archive, in_window, &rc.observed);
     record_outcome(
         "ts-bound",
         &source,
         &source,
         &archive,
-        &[("pit", &r, &rep[..], &e2e[..])],
+        &[
+            ("pit", &r, &rep[..], &e2e[..]),
+            ("complete pit", &rc, &rep_c[..], &[][..]),
+        ],
         &cap,
         json!({"point_in_time": pit,
                "layout": "p0 [T+2000, T+6000, T+2400, T+2600]; p1 [T+2000..T+2300 | T+9000..T+9300]; p2 [T+2000..T+2300]"}),
@@ -1371,6 +1484,26 @@ fn non_monotonic_create_time_inside_a_wholly_inside_segment() {
     }
     let exact = BTreeSet::new();
     assert_verdict("ts-bound", &r, 2, "fail-integrity");
+    // PROD-08.1, 08-2: the exact model does not fail the correct restore the
+    // first/last count bound fails above.
+    assert_verdict("ts-bound complete", &rc, 0, "pass");
+    let b = complete_block(&rc);
+    assert_eq!(b["covered"], true, "{b}");
+    assert_eq!(
+        (
+            &b["replay"]["expected"],
+            &b["replay"]["restored"],
+            &b["replay"]["matching"]
+        ),
+        (&json!(11), &json!(11), &json!(11)),
+        "{b}"
+    );
+    assert_eq!(
+        keys(&rep_c),
+        exact,
+        "complete replay: {:#?}",
+        render(&rep_c)
+    );
     assert_eq!(keys(&cap), exact, "capture: {:#?}", render(&cap));
     assert_eq!(keys(&rep), exact, "replay: {:#?}", render(&rep));
     assert_eq!(keys(&e2e), exact, "end to end: {:#?}", render(&e2e));
@@ -1735,9 +1868,20 @@ fn keys_nulls_tombstones_and_duplicate_headers() {
         None,
         (T - 1000, T + 10_000),
     );
+    // PROD-08.1 (acceptance row 08-6): complete coverage compares headers in
+    // order, with every occurrence.
+    let rc = restore_complete(
+        &mut row,
+        "cfull",
+        &backup_id,
+        &topic,
+        None,
+        (T - 1000, T + 10_000),
+    );
     let cap = capture(&source, &archive);
     let rep = replay(&archive, |_| true, &r.observed);
     let e2e = end_to_end(&source, &source, |_| true, &r.observed);
+    let rep_c = replay(&archive, |_| true, &rc.observed);
     let find = |recs: &[Rec], p: i32, off: i64, by_lineage: bool| -> Value {
         recs.iter()
             .find(|x| {
@@ -1756,7 +1900,10 @@ fn keys_nulls_tombstones_and_duplicate_headers() {
         &source,
         &source,
         &archive,
-        &[("full", &r, &rep[..], &e2e[..])],
+        &[
+            ("full", &r, &rep[..], &e2e[..]),
+            ("complete full", &rc, &rep_c[..], &[][..]),
+        ],
         &cap,
         json!({
             "p0@4 headers": {"source": find(&source, 0, 4, false), "archive": find(&archive.records, 0, 4, false), "target": find(&r.observed, 0, 4, true)},
@@ -1770,6 +1917,29 @@ fn keys_nulls_tombstones_and_duplicate_headers() {
     // two x-original-offset headers, the output one); p0@4's loss happened at
     // capture, so the drill does not detect it.
     assert_verdict("shapes", &r, 2, "fail-integrity");
+    // PROD-08.1: complete coverage fails the same record, p0@6 (its archive
+    // holds two x-original-offset headers, the output one), and only it:
+    // p0@4's loss is in the archive too (V3).
+    assert_verdict("shapes complete", &rc, 2, "fail-integrity");
+    let b = complete_block(&rc);
+    assert_eq!(
+        (
+            &b["replay"]["mismatched"],
+            &b["replay"]["missing"],
+            &b["replay"]["unexpected"]
+        ),
+        (&json!(1), &json!(0), &json!(0)),
+        "{b}"
+    );
+    assert!(
+        complete_findings(&rc).contains("p0: source offset 6 at target offset"),
+        "{}",
+        complete_findings(&rc)
+    );
+    assert_eq!(
+        rc.verdict["integrity"]["verification"]["header_order"], "verified",
+        "a complete verification compares headers in order"
+    );
     assert_eq!(
         keys(&cap),
         with_class("headers-collapsed", &[(0, 4)]),
@@ -1886,9 +2056,20 @@ fn compacted_topic_committed_input_versus_restored_output() {
         None,
         archive_span(&archive),
     );
+    // PROD-08.1: complete coverage over the compacted archive's sparse
+    // source offsets.
+    let rc = restore_complete(
+        &mut row,
+        "cfull",
+        &backup_id,
+        &topic,
+        None,
+        archive_span(&archive),
+    );
     let cap = capture(&source, &archive);
     let rep = replay(&archive, |_| true, &r.observed);
     let e2e = end_to_end(&source, &source, |_| true, &r.observed);
+    let rep_c = replay(&archive, |_| true, &rc.observed);
     let target_configs = if topic_exists(&r.target) {
         logweir_kafka::reader::ClusterReader::topic_configs(&reader(), &r.target)
             .map(|m| json!(m))
@@ -1902,7 +2083,10 @@ fn compacted_topic_committed_input_versus_restored_output() {
         &source,
         &source,
         &archive,
-        &[("full", &r, &rep[..], &e2e[..])],
+        &[
+            ("full", &r, &rep[..], &e2e[..]),
+            ("complete full", &rc, &rep_c[..], &[][..]),
+        ],
         &cap,
         json!({
             "source_offsets": source.iter().map(|x| (x.partition, x.offset)).collect::<Vec<_>>(),
@@ -1915,6 +2099,12 @@ fn compacted_topic_committed_input_versus_restored_output() {
     }
     let exact = BTreeSet::new();
     assert_verdict("compact", &r, 0, "pass");
+    // PROD-08.1: the compacted log is restored exactly as archived; complete
+    // coverage passes it, every partition compared.
+    assert_verdict("compact complete", &rc, 0, "pass");
+    let b = complete_block(&rc);
+    assert_eq!(b["covered"], true, "{b}");
+    assert_eq!(b["replay"]["expected"], json!(source.len()), "{b}");
     assert_eq!(keys(&cap), exact, "capture: {:#?}", render(&cap));
     assert_eq!(keys(&rep), exact, "replay: {:#?}", render(&rep));
     assert_eq!(keys(&e2e), exact, "end to end: {:#?}", render(&e2e));
