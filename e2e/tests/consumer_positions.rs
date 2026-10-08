@@ -11,8 +11,8 @@
 //! | `a_live_classic_member_makes_the_commit_refused_for_the_whole_group` | a Stable classic group refuses the commit `GroupActive`, readback unchanged; once the member leaves, the same commit applies | the control itself: a row that passed while the member lived would have applied nothing |
 //! | `a_consumer_protocol_group_refuses_while_live_and_takes_positions_when_empty` | the same for a KIP-848 group (4.x lines; skipped, saying so, below 4.0) | as above |
 //! | `an_absent_group_answers_at_once_with_no_position_and_a_commit_creates_it` | an absent id answers within a fraction of the bound with `NoCommittedPosition` everywhere, is not created by the read, and IS created (simple, Empty) by a commit (K3) | an absent group read as a timeout or as offset 0 fails |
-//! | `a_pending_transactional_offset_makes_the_group_unstable_never_the_old_position` | while a TxnOffsetCommit is pending the bounded fetch is `PositionsUnstable` for the group, never the pre-transaction position; after the abort the old position reads | a `read_uncommitted` fetch (no RequireStable) returns the stale position meanwhile: the protection is the API's |
-//! | `a_group_hidden_from_the_principal_is_never_absent` (`#[ignore]`, profile `acl`) | a group whose only ACL names another principal is `NotVisibleToPrincipal` (not listed) or `NotAuthorized` (listed), never absent: the coordinator lookup's refusal is read off the handle's queue; its commit is refused `NotAuthorized` and nothing changes; a topic the principal may not Describe is `TopicNotAuthorized` per partition | the same principal on a visible group reads its position; granting Read and Describe makes the same commit apply |
+//! | `a_pending_transactional_offset_makes_the_group_unstable_never_the_old_position` | while a TxnOffsetCommit is pending the bounded fetch is `PositionsUnstable` for the group, never the pre-transaction position, and returns after its bound and within [`OVER_BOUND`] of it; after the abort the old position reads | a `read_uncommitted` fetch (no RequireStable) returns the stale position meanwhile: the protection is the API's |
+//! | `a_group_hidden_from_the_principal_is_never_absent` (`#[ignore]`, profile `acl`) | a group whose only ACL names another principal is `NotVisibleToPrincipal` (not listed) or `NotAuthorized` (listed), never absent: the coordinator lookup's refusal is read off the handle's queue; its commit is refused `NotAuthorized` and nothing changes; every timed-out call returns within its bound plus [`OVER_BOUND`]; a topic the principal may not Describe is `TopicNotAuthorized` per partition | the same principal on a visible group reads its position; granting Read and Describe makes the same commit apply |
 //!
 //! # Running them
 //!
@@ -55,6 +55,29 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// and well above the time any answered call takes (the absent row measures
 /// that).
 const BOUND: Duration = Duration::from_secs(6);
+
+/// What a timed-out call may take beyond [`BOUND`] through `RdKafkaReader`: a
+/// fresh handle, the call, and the handle's teardown. Measured on this host
+/// against the 6 s bound, on 4.3.1, 3.9.2 and 3.7.1 (PROD-04.0a runs and the
+/// review's slot-4 run): timed-out fetches 6101–6108 ms, refused commits
+/// 6113–6134 ms, so at most 134 ms over. 3 s is more than twenty times that,
+/// room for a loaded CI runner, and far below what a dropped bound costs (the
+/// review's mutant waited 20 s; with no deadline the call never returns).
+const OVER_BOUND: Duration = Duration::from_secs(3);
+
+/// **A timed-out call waited its bound and no longer** (review M1): a call
+/// that returned early did not wait for an answer, and one that returned late
+/// did not apply the bound it reports.
+fn assert_timed_out_within(what: &str, took: Duration, budget: Duration) {
+    assert!(
+        took >= BOUND - Duration::from_millis(500),
+        "{what}: waited out its {BOUND:?} bound ({took:?})"
+    );
+    assert!(
+        took < budget,
+        "{what}: returned within {budget:?} ({took:?}); the bound was not applied"
+    );
+}
 
 // ============================================================ processes
 
@@ -606,11 +629,13 @@ fn a_live_classic_member_makes_the_commit_refused_for_the_whole_group() {
 #[test]
 fn a_consumer_protocol_group_refuses_while_live_and_takes_positions_when_empty() {
     let version = default_cluster().version();
+    // An unreadable version is a failure, never "not applicable": a skip that
+    // passes on a parse error would hide the row on every line (review L6).
     let major: u32 = version
         .split('.')
         .next()
         .and_then(|m| m.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or_else(|| panic!("unparseable broker version {version:?}"));
     if major < 4 {
         eprintln!(
             "SKIPPED (not applicable): broker {version} has no KIP-848 consumer groups by default"
@@ -739,7 +764,8 @@ fn a_pending_transactional_offset_makes_the_group_unstable_never_the_old_positio
     let unstable = r
         .committed_positions(&group, std::slice::from_ref(&p0), GroupListing::Listed)
         .expect_err("a pending transactional offset never reads as a position");
-    let unstable_ms = started.elapsed().as_millis() as u64;
+    let unstable_took = started.elapsed();
+    let unstable_ms = unstable_took.as_millis() as u64;
     assert_eq!(
         unstable,
         PositionsError::PositionsUnstable {
@@ -747,13 +773,13 @@ fn a_pending_transactional_offset_makes_the_group_unstable_never_the_old_positio
             bound: BOUND
         }
     );
-    assert!(
-        started.elapsed() >= BOUND - Duration::from_millis(500),
-        "the fetch waited out its bound ({unstable_ms} ms)"
-    );
+    assert_timed_out_within("listed pending fetch", unstable_took, BOUND + OVER_BOUND);
+    let started = Instant::now();
     let unlisted = r
         .committed_positions(&group, std::slice::from_ref(&p0), GroupListing::NotListed)
         .expect_err("the same timeout");
+    let unlisted_took = started.elapsed();
+    assert_timed_out_within("unlisted pending fetch", unlisted_took, BOUND + OVER_BOUND);
     assert_eq!(
         unlisted,
         PositionsError::NotVisibleOrUnreachable {
@@ -785,7 +811,7 @@ fn a_pending_transactional_offset_makes_the_group_unstable_never_the_old_positio
             "broker": c.version(), "topic": topic, "group": group,
             "readUncommittedWhilePending": format!("{stale_answer:?}"),
             "listedWhilePending": unstable.to_string(), "listedMs": unstable_ms,
-            "unlistedWhilePending": unlisted.to_string(),
+            "unlistedWhilePending": unlisted.to_string(), "unlistedMs": unlisted_took.as_millis() as u64,
             "afterAbort": pos_json(settled.get(&p0).expect("p0")),
         }),
     );
@@ -920,11 +946,13 @@ fn a_group_hidden_from_the_principal_is_never_absent() {
     let unlisted = restricted
         .committed_positions(&hidden, std::slice::from_ref(&p0), GroupListing::NotListed)
         .expect_err("a hidden group never reads as absent");
-    let unlisted_ms = started.elapsed().as_millis() as u64;
+    let unlisted_took = started.elapsed();
+    let unlisted_ms = unlisted_took.as_millis() as u64;
     let started = Instant::now();
     let listed = restricted
         .committed_positions(&hidden, std::slice::from_ref(&p0), GroupListing::Listed)
         .expect_err("nor as a position");
+    let listed_took = started.elapsed();
     // The coordinator lookup's GROUP_AUTHORIZATION_FAILED reaches the
     // handle's queue (rdkafka_cgrp.c:797-807) while the fetch waits out its
     // bound, so the safe route NAMES the refusal. A reader that ignored the
@@ -943,17 +971,21 @@ fn a_group_hidden_from_the_principal_is_never_absent() {
         },
         "listed: refused on the group"
     );
-    assert!(
-        started.elapsed() >= BOUND - Duration::from_millis(500),
-        "the refusal is read after the bound: the safe fetch itself only times out"
-    );
+    // The refusal is read after the bound (the safe fetch itself only times
+    // out), and no later than the bound plus the measured overhead.
+    assert_timed_out_within("unlisted hidden fetch", unlisted_took, BOUND + OVER_BOUND);
+    assert_timed_out_within("listed hidden fetch", listed_took, BOUND + OVER_BOUND);
 
     // Its commit is refused, and nothing changes.
     let started = Instant::now();
     let commit = restricted
         .commit_positions(&hidden, &[(p0.clone(), at(9))])
         .expect_err("the hidden group refuses this principal's commit");
-    let commit_ms = started.elapsed().as_millis() as u64;
+    let commit_took = started.elapsed();
+    let commit_ms = commit_took.as_millis() as u64;
+    // The coordinator wait is `session.timeout.ms` (the bound) plus at most
+    // librdkafka's one-second timeout scan; twice the bound covers it.
+    assert_timed_out_within("hidden commit", commit_took, 2 * BOUND + OVER_BOUND);
     assert_eq!(
         commit,
         CommitError::NotAuthorized {
@@ -1010,7 +1042,7 @@ fn a_group_hidden_from_the_principal_is_never_absent() {
             "visibleGroup": visible, "hiddenGroup": hidden,
             "visible": vis.partitions.iter().map(|(t, p)| json!({"tp": t.to_string(), "answer": pos_json(p)})).collect::<Vec<_>>(),
             "hiddenNotListed": unlisted.to_string(), "hiddenNotListedMs": unlisted_ms,
-            "hiddenListed": listed.to_string(),
+            "hiddenListed": listed.to_string(), "hiddenListedMs": listed_took.as_millis() as u64,
             "hiddenCommit": commit.to_string(), "hiddenCommitMs": commit_ms,
             "afterGrant": "applied 9",
         }),

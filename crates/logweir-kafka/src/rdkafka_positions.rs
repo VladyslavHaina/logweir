@@ -76,6 +76,21 @@ pub(crate) fn raw_offset(offset: Offset) -> i64 {
     }
 }
 
+/// Whether an error the handle's queue delivered is the broker refusing this
+/// principal on the group: GROUP_AUTHORIZATION_FAILED, which librdkafka posts
+/// for a refused coordinator lookup (`rdkafka_cgrp.c:797-807`) and rust-rdkafka
+/// delivers as `MessageConsumption` (or `…Fatal`). NOTHING ELSE counts: a
+/// transport, authentication or TLS error on the same queue says the broker was
+/// not reached or not trusted, and calling that a refusal would send an
+/// operator to fix ACLs for a network fault.
+pub(crate) fn is_group_refusal(e: &RdError) -> bool {
+    matches!(
+        e,
+        RdError::MessageConsumption(RDKafkaErrorCode::GroupAuthorizationFailed)
+            | RdError::MessageConsumptionFatal(RDKafkaErrorCode::GroupAuthorizationFailed)
+    )
+}
+
 /// A non-member consumer of ONE group, which can only read and commit that
 /// group's positions. See the module documentation.
 pub(crate) struct GroupHandle {
@@ -108,16 +123,25 @@ impl GroupHandle {
     /// assigns, so the queue carries nothing else a caller could lose.
     fn group_refusal_seen(&self) -> bool {
         let mut seen = false;
+        let mut empty = 0;
         // Bounded: a queue cannot hold more than a handful of events here.
+        // One `None` is not "empty": rust-rdkafka's zero-timeout poll also
+        // answers `None` after it consumes a non-error event
+        // (`base_consumer.rs:142-170`), so a refusal queued behind one would
+        // be missed. Two in a row are.
         for _ in 0..64 {
             match self.consumer.poll(Duration::ZERO) {
-                None => break,
-                Some(Err(RdError::MessageConsumption(c) | RdError::MessageConsumptionFatal(c)))
-                    if c == RDKafkaErrorCode::GroupAuthorizationFailed =>
-                {
-                    seen = true
+                None => {
+                    empty += 1;
+                    if empty == 2 {
+                        break;
+                    }
                 }
-                Some(_) => {}
+                Some(Err(e)) if is_group_refusal(&e) => {
+                    empty = 0;
+                    seen = true;
+                }
+                Some(_) => empty = 0,
             }
         }
         seen
@@ -359,6 +383,111 @@ mod tests {
         ] {
             assert_eq!(c as i32, n, "{c:?}");
         }
+    }
+
+    /// **L3: only GROUP_AUTHORIZATION_FAILED is the group refusal.** Mutant:
+    /// count any queued error (a transport, authentication or TLS failure) as
+    /// the refusal, which would label a network fault `NotAuthorized`.
+    #[test]
+    fn only_a_group_authorization_failure_is_the_refusal() {
+        use RDKafkaErrorCode as C;
+        assert!(is_group_refusal(&RdError::MessageConsumption(
+            C::GroupAuthorizationFailed
+        )));
+        assert!(is_group_refusal(&RdError::MessageConsumptionFatal(
+            C::GroupAuthorizationFailed
+        )));
+        for not in [
+            RdError::MessageConsumption(C::BrokerTransportFailure),
+            RdError::MessageConsumption(C::Authentication),
+            RdError::MessageConsumption(C::AllBrokersDown),
+            RdError::MessageConsumption(C::SaslAuthenticationFailed),
+            RdError::MessageConsumption(C::TopicAuthorizationFailed),
+            RdError::MessageConsumptionFatal(C::ClusterAuthorizationFailed),
+            RdError::MetadataFetch(C::GroupAuthorizationFailed),
+            RdError::PartitionEOF(0),
+        ] {
+            assert!(!is_group_refusal(&not), "{not:?}");
+        }
+    }
+
+    /// The bound the bound rows use: librdkafka's minimum this crate accepts.
+    const UNIT_BOUND: Duration = crate::positions::MIN_POSITION_BOUND;
+    /// What an unanswered call may take beyond its bound. Measured on the
+    /// development host (2026-10-08, five runs, other builds running): a fetch
+    /// returned 2000.9–2003.3 ms after a 2 s bound and a commit 2001.8–2007.1 ms
+    /// (`artifacts/prod-04-0a/fix-bound-measure.log`). The commit can also wait
+    /// up to one more second for librdkafka's timeout scan, which runs once a
+    /// second (`rdkafka_cgrp.c:5809-5830`). So the margins are 1.5 s over the
+    /// fetch's bound and 2.5 s over the commit's: room for a loaded CI runner,
+    /// and far below what a dropped bound costs (no fetch deadline at all, or
+    /// librdkafka's 45 s `session.timeout.ms`).
+    const FETCH_MARGIN: Duration = Duration::from_millis(1500);
+    const COMMIT_MARGIN: Duration = Duration::from_millis(2500);
+
+    /// **M1: an unanswered fetch returns within its bound.** No broker: the
+    /// bootstrap is the dead loopback port, so no coordinator ever answers, the
+    /// handle's queue fills with connection errors, and the fetch can only time
+    /// out. Mutants: the fetch waiting a longer or no deadline (the row's upper
+    /// bound fails); a fetch that does not wait (the lower bound fails); and a
+    /// drain that counts the queued transport errors as the group refusal
+    /// (`NotVisibleToPrincipal` instead of `NotVisibleOrUnreachable`).
+    #[test]
+    fn an_unanswered_fetch_returns_within_its_bound() {
+        let h = GroupHandle::open(&base(), "cpos-unit-g", UNIT_BOUND).expect("local");
+        let started = std::time::Instant::now();
+        let got = h.committed_positions(&[TopicPartition::new("t", 0)], GroupListing::NotListed);
+        let took = started.elapsed();
+        eprintln!("unanswered fetch, bound {UNIT_BOUND:?}: took {took:?}");
+        assert_eq!(
+            got,
+            Err(PositionsError::NotVisibleOrUnreachable {
+                group: "cpos-unit-g".into(),
+                bound: UNIT_BOUND
+            }),
+            "no coordinator and no refusal: unreachable, never NotVisibleToPrincipal"
+        );
+        assert!(
+            took >= UNIT_BOUND - Duration::from_millis(100),
+            "the fetch waited its bound ({took:?})"
+        );
+        assert!(
+            took < UNIT_BOUND + FETCH_MARGIN,
+            "the fetch returned within its bound plus {FETCH_MARGIN:?} ({took:?})"
+        );
+    }
+
+    /// **M1, the commit's twin: an unanswered commit returns within its
+    /// bound** (the coordinator wait is `session.timeout.ms`, set to the bound;
+    /// librdkafka's default is 45 s). Nothing is sent, so nothing applied.
+    #[test]
+    fn an_unanswered_commit_returns_within_its_bound() {
+        let h = GroupHandle::open(&base(), "cpos-unit-g", UNIT_BOUND).expect("local");
+        let p = CommittedPosition {
+            offset: 3,
+            leader_epoch: None,
+            metadata: None,
+        };
+        let started = std::time::Instant::now();
+        let got = h.commit_positions(&[(TopicPartition::new("t", 0), p)]);
+        let took = started.elapsed();
+        eprintln!("unanswered commit, bound {UNIT_BOUND:?}: took {took:?}");
+        assert_eq!(
+            got,
+            Err(CommitError::NotVisibleOrUnreachable {
+                group: "cpos-unit-g".into(),
+                bound: UNIT_BOUND
+            }),
+            "no coordinator and no refusal: unreachable, and nothing sent"
+        );
+        assert!(
+            took >= UNIT_BOUND - Duration::from_millis(100),
+            "the commit waited for a coordinator ({took:?})"
+        );
+        assert!(
+            took < UNIT_BOUND + COMMIT_MARGIN,
+            "the commit returned within its bound plus {COMMIT_MARGIN:?} ({took:?})"
+        );
     }
 
     /// Bad input is refused before a handle exists or anything is sent.
