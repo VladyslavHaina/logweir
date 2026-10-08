@@ -37,7 +37,7 @@
 #   pa-consumer-live   consumer  Stable  member consumer-live
 #   pa-share-idle      share     Empty   a share consumer read 10 records and left
 #   pa-share-live      share     Stable  member share-live
-#   logweir-e2e-wordcount-streams  streams  Stable  member streams: the
+#   logweir-e2e-streams-protocol  streams  Stable  member streams: the
 #                      `streams-protocol` profile's application, which `up`
 #                      starts (docker compose) on a line with streams groups
 #
@@ -102,16 +102,19 @@ T=/opt/kafka/bin
 B=kafka-broker-1:9094
 A=kafka-acl:9094
 MEMBER_SECONDS=${GROUPS_MEMBER_SECONDS:-7200}
-STREAMS_GROUP=logweir-e2e-wordcount-streams
+STREAMS_GROUP=logweir-e2e-streams-protocol
 
 say() { echo "groups: $*" >&2; }
 die() { echo "groups: $*" >&2; exit 1; }
 
 # A bash command inside kafka-broker-1 (kexec) or kafka-acl (aexec), bounded.
-kexec() { bounded 120 docker compose -f "$COMPOSE_FILE_PATH" exec -T kafka-broker-1 bash -c "$1"; }
-aexec() { bounded 120 docker compose -f "$COMPOSE_FILE_PATH" --profile acl exec -T kafka-acl bash -c "$1"; }
+# stdin is /dev/null: `docker compose exec` attaches stdin even with -T, and
+# inside a `while read … done <<EOF` loop it would swallow the loop's input
+# (measured: the first exec ate the rest of the group list).
+kexec() { bounded 120 docker compose -f "$COMPOSE_FILE_PATH" exec -T kafka-broker-1 bash -c "$1" </dev/null; }
+aexec() { bounded 120 docker compose -f "$COMPOSE_FILE_PATH" --profile acl exec -T kafka-acl bash -c "$1" </dev/null; }
 # docker compose on the streams-protocol profile's application.
-streams_compose() { bounded "$1" docker compose -f "$COMPOSE_FILE_PATH" --profile streams-protocol "${@:2}"; }
+streams_compose() { bounded "$1" docker compose -f "$COMPOSE_FILE_PATH" --profile streams-protocol "${@:2}" </dev/null; }
 
 # ---------------------------------------------------------------- the line
 FEATURES=""
@@ -166,8 +169,8 @@ state_of() {
     | awk -v g="$1" '$1 == g && NF >= 4 { s = $(NF - 1) } END { print s }'
 }
 wait_state() { # group kind want seconds
-  local s="" i
-  for i in $(seq 1 $(($4 / 3 + 1))); do
+  local s=""
+  for _ in $(seq 1 $(($4 / 3 + 1))); do
     s=$(state_of "$1" "$2")
     [ "$s" = "$3" ] && return 0
     sleep 3
@@ -207,7 +210,7 @@ start_member() {
   else
     say "start $g ($kind)"
     bounded 60 docker compose -f "$COMPOSE_FILE_PATH" exec -d -T kafka-broker-1 bash -c \
-      "mkdir -p /tmp/lw-groups; exec timeout $MEMBER_SECONDS $(member_cmd "$g" "$kind") > /tmp/lw-groups/$g.log 2>&1" \
+      "mkdir -p /tmp/lw-groups; exec timeout $MEMBER_SECONDS $(member_cmd "$g" "$kind") > /tmp/lw-groups/$g.log 2>&1" </dev/null \
       || die "could not start $g's member"
   fi
   wait_state "$g" "$kind" Stable 120 || die "$g did not become Stable"

@@ -743,7 +743,7 @@ services:
     healthcheck:
       # A Streams group is not a consumer group: kafka-consumer-groups.sh does
       # not describe it, kafka-streams-groups.sh does.
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-streams-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group logweir-e2e-wordcount-streams --state | grep -q -w Stable"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-streams-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group logweir-e2e-streams-protocol --state | grep -q -w Stable"]
       interval: 10s
       timeout: 20s
       retries: 18

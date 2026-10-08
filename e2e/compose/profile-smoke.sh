@@ -303,7 +303,7 @@ smoke_acl_visibility() {
 # counts must be the application's — the same stop/restart controls as
 # smoke_streams, on its own output topic.
 smoke_streams_protocol() {
-  local out n last g=logweir-e2e-wordcount-streams
+  local out n last g=logweir-e2e-streams-protocol
   n="${RUN}p"
   pconsume() {
     innet "$T/kafka-console-consumer.sh --bootstrap-server kafka-broker-1:9094 --topic streams-wordcount-processor-output --from-beginning --timeout-ms $1 --property print.key=true --property key.separator== 2>/dev/null"
@@ -312,6 +312,10 @@ smoke_streams_protocol() {
     innet "printf '%s\\n' $* | $T/kafka-console-producer.sh --bootstrap-server kafka-broker-1:9094 --topic streams-plaintext-input"
   }
   platest() { printf '%s\n' "$1" | grep "^$n=" | tail -1; }
+  # The demo forwards its counts on STREAM-TIME punctuation (every second of
+  # RECORD time), so a count reaches the output only once a later record
+  # advances stream time: a tick line, produced two seconds later.
+  ptick() { sleep 2; pproduce "'${n}tick'" > /dev/null; }
   # 1. The broker types the group Streams (KIP-1071) ...
   out=$(innet "$T/kafka-groups.sh --bootstrap-server kafka-broker-1:9094 --list")
   if printf '%s' "$out" | awk -v g="$g" '$1 == g && $2 == "Streams" { f = 1 } END { exit !f }'; then pass streams-protocol.group-type "$(printf '%s' "$out" | awk -v g="$g" '$1 == g' | tr -s ' ')"; else fail streams-protocol.group-type "$(printf '%s' "$out" | tail -4 | tr '\n' ' ')"; fi
@@ -321,17 +325,20 @@ smoke_streams_protocol() {
   if ! printf '%s' "$out" | grep -qx "$g"; then pass streams-protocol.not-a-consumer-group "kafka-consumer-groups.sh --list omits $g"; else fail streams-protocol.not-a-consumer-group "$g is listed as a consumer group"; fi
   # 2. Two lines through the running application: exactly 2.
   pproduce "'$n alpha'" "'$n beta'" > /dev/null
+  ptick
   last=$(platest "$(pconsume 30000)")
   if [ "$last" = "$n=2" ]; then pass streams-protocol.wordcount "$last on streams-wordcount-processor-output"; else fail streams-protocol.wordcount "latest '$last', want $n=2"; fi
   # 3. NEGATIVE CONTROL: stopped, a third line counts nothing.
   bounded 120 $DC --profile streams-protocol stop streams-protocol-wordcount > /dev/null 2>&1
   pproduce "'$n gamma'" > /dev/null
+  ptick
   last=$(platest "$(pconsume 10000)")
   if [ "$last" = "$n=2" ]; then pass streams-protocol.stopped-app-counts-nothing "the count stayed at $last"; else fail streams-protocol.stopped-app-counts-nothing "latest '$last' with the app stopped, want $n=2"; fi
   out=$(innet "$T/kafka-streams-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group $g --state")
   if printf '%s' "$out" | awk -v g="$g" '$1 == g && $(NF - 1) == "Empty" { f = 1 } END { exit !f }'; then pass streams-protocol.stopped-group-empty "$g is Empty once the application stops"; else fail streams-protocol.stopped-group-empty "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   # 4. Restarted, it catches up from its committed position and changelog: 3.
   bounded 300 $DC --profile streams-protocol up -d --wait streams-protocol-wordcount > /dev/null 2>&1
+  ptick
   last=$(platest "$(pconsume 30000)")
   if [ "$last" = "$n=3" ]; then pass streams-protocol.restart-catches-up "after a restart: $last"; else fail streams-protocol.restart-catches-up "latest '$last' after the restart, want $n=3"; fi
 }
@@ -341,7 +348,7 @@ smoke_streams_protocol() {
 # features call for — computed here independently of the helper — with each
 # group's type and state, the members' stop/start, and the share state.
 smoke_groups() {
-  local out feat has_c=0 has_s=0 has_t=0 g want t s rows
+  local out feat has_c=0 has_s=0 has_t=0 g want t s rows live
   out=$(bounded 1200 bash e2e/compose/groups.sh up 2>&1)
   if [ $? = 0 ]; then pass groups.up "$(printf '%s' "$out" | grep -m1 'kafka-broker-1: classic')"; else fail groups.up "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; return; fi
   feat=$(innet "$T/kafka-features.sh --bootstrap-server kafka-broker-1:9094 describe")
@@ -358,7 +365,7 @@ pa-consumer-live Consumer Stable"
 pa-share-idle Share Empty
 pa-share-live Share Stable"
   [ $has_t = 1 ] && rows="$rows
-logweir-e2e-wordcount-streams Streams Stable"
+logweir-e2e-streams-protocol Streams Stable"
   out=$(bounded 600 bash e2e/compose/groups.sh list 2>/dev/null)
   while read -r g t want; do
     if printf '%s' "$out" | awk -v g="$g" -v t="$t" -v w="$want" '$1 == g && $2 == t && $3 == w { f = 1 } END { exit !f }'; then pass "groups.$g" "$t, $want"; else fail "groups.$g" "want $t $want; list: $(printf '%s' "$out" | awk -v g="$g" '$1 == g' | tr -s ' ')"; fi
@@ -370,7 +377,7 @@ EOF
     # ListConsumerGroups-only reader sees — must NOT show the share and
     # streams groups, or they are not really of those types.
     out=$(innet "$T/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --list")
-    if printf '%s' "$out" | grep -qx pa-classic-live && ! printf '%s' "$out" | grep -qx 'pa-share-idle\|pa-share-live\|logweir-e2e-wordcount-streams'; then pass groups.consumer-listing-omits-share-streams "kafka-consumer-groups.sh --list: $(printf '%s' "$out" | grep '^pa-' | sort | tr '\n' ' ')"; else fail groups.consumer-listing-omits-share-streams "$(printf '%s' "$out" | tr '\n' ' ')"; fi
+    if printf '%s' "$out" | grep -qx pa-classic-live && ! printf '%s' "$out" | grep -qx 'pa-share-idle\|pa-share-live\|logweir-e2e-streams-protocol'; then pass groups.consumer-listing-omits-share-streams "kafka-consumer-groups.sh --list: $(printf '%s' "$out" | grep '^pa-' | sort | tr '\n' ' ')"; else fail groups.consumer-listing-omits-share-streams "$(printf '%s' "$out" | tr '\n' ' ')"; fi
   else
     # A 3.x line: the helper made classic groups only, because a
     # consumer-protocol member cannot join here at all.
@@ -381,7 +388,10 @@ EOF
   # reset (it is active); once `stop` returns, the same reset commits and
   # reads back (PROD-04.0 §3.3's control) — and the OTHER live groups are
   # still Stable, so the bracketed pattern stopped only its own member.
-  local m mg others reset rb
+  local m mg others want_others reset rb
+  # The live groups of this line, sorted: a stop must leave every OTHER one
+  # Stable (an unanchored or unbracketed pattern can take a neighbour down).
+  live=$(printf '%s\n' "$rows" | awk '$3 == "Stable" { print $1 }' | sort)
   for m in classic-live consumer-live; do
     [ "$m" = consumer-live ] && [ $has_c != 1 ] && continue
     mg=pa-$m
@@ -390,8 +400,9 @@ EOF
     if printf '%s' "$out" | grep -q 'inactive\|is Stable\|current state is Stable'; then pass "groups.$m.live-refuses-reset" "$(printf '%s' "$out" | grep -o -m1 'Assignments can only be reset[^.]*')"; else fail "groups.$m.live-refuses-reset" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
     out=$(bounded 300 bash e2e/compose/groups.sh stop "$m" 2>&1)
     s=$?
-    others=$(bounded 600 bash e2e/compose/groups.sh list 2>/dev/null | awk -v g="$mg" '$1 != g && $3 == "Stable" { print $1 }' | tr '\n' ' ')
-    if [ $s = 0 ] && [ -n "$others" ]; then pass "groups.$m.stop" "$mg Empty; still Stable: $others"; else fail "groups.$m.stop" "rc $s; still Stable: '$others'; $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+    others=$(bounded 600 bash e2e/compose/groups.sh list 2>/dev/null | awk -v g="$mg" '$1 != g && $3 == "Stable" { print $1 }' | sort | tr '\n' ' ')
+    want_others=$(printf '%s\n' "$live" | grep -vx "$mg" | tr '\n' ' ')
+    if [ $s = 0 ] && [ "$others" = "$want_others" ]; then pass "groups.$m.stop" "$mg Empty; every other live group still Stable: $others"; else fail "groups.$m.stop" "rc $s; Stable: '$others', want '$want_others'; $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
     out=$(innet "$reset")
     rb=$(innet "$T/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group $mg --offsets" | awk -v g="$mg" '$1 == g && $2 == "pa-orders" && $3 == 0 { print $4 }')
     if printf '%s' "$out" | awk -v g="$mg" '$1 == g && $3 == 0 && $NF == 1 { f = 1 } END { exit !f }' && [ "$rb" = 1 ]; then pass "groups.$m.stopped-accepts-reset" "pa-orders 0 committed at 1, read back $rb"; else fail "groups.$m.stopped-accepts-reset" "readback '$rb': $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
