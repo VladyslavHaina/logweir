@@ -186,9 +186,46 @@ async fn read_marker(
     ))
 }
 
+/// What one read did to the marker handle, for the log.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MarkerRead<E> {
+    /// The verdict differs from the last one (or is the first).
+    Changed(Result<InstallationMarker, MarkerRefusal>),
+    /// The same verdict as the last read.
+    Unchanged,
+    /// The read failed; the handle keeps what it held.
+    Failed(E),
+}
+
+/// THE CONTROLLER'S LAST MILE (PROD-16.1 fix round, review M1): one read's
+/// effect on the handle. An honoured marker is `FreshInstallConfirm`; a
+/// REFUSED marker is `Unmarked` — never anything else — and a failed read
+/// keeps the last verdict (the marker is create-once, so an API-server blip
+/// must not flip an honoured install back to strict, and a handle that was
+/// never set is `Unmarked`).
+pub fn apply_marker_read<E>(
+    handle: &MarkerHandle,
+    last: &mut Option<Result<InstallationMarker, MarkerRefusal>>,
+    read: Result<Result<InstallationMarker, MarkerRefusal>, E>,
+) -> MarkerRead<E> {
+    match read {
+        Ok(verdict) => {
+            handle.set(verdict.unwrap_or(InstallationMarker::Unmarked));
+            if *last == Some(verdict) {
+                MarkerRead::Unchanged
+            } else {
+                *last = Some(verdict);
+                MarkerRead::Changed(verdict)
+            }
+        }
+        Err(error) => MarkerRead::Failed(error),
+    }
+}
+
 /// Read the marker every [`MARKER_POLL_SECONDS`] until the process ends. A
 /// marker that is not honoured is unmarked, logged as a WARN whenever the
-/// verdict changes; a failed read keeps the last verdict.
+/// verdict changes; a failed read keeps the last verdict
+/// ([`apply_marker_read`]).
 pub async fn poll_marker(
     client: kube::Client,
     namespace: String,
@@ -197,29 +234,23 @@ pub async fn poll_marker(
 ) {
     let mut last: Option<Result<InstallationMarker, MarkerRefusal>> = None;
     loop {
-        match read_marker(&client, &namespace, &name).await {
-            Ok(verdict) => {
-                handle.set(verdict.unwrap_or(InstallationMarker::Unmarked));
-                if last != Some(verdict) {
-                    match verdict {
-                        Ok(marker) => tracing::info!(
-                            configmap = %format!("{namespace}/{name}"),
-                            marker = ?marker,
-                            "the installation's fresh-install marker; an unbound namespace without \
-                             a defaultMode resolves to default-confirm-v1 only when it is \
-                             FreshInstallConfirm"
-                        ),
-                        Err(refusal) => tracing::warn!(
-                            configmap = %format!("{namespace}/{name}"),
-                            refusal = refusal.as_str(),
-                            "a fresh-install marker is present and NOT honoured: unbound \
-                             namespaces stay legacy-governed-v1"
-                        ),
-                    }
-                    last = Some(verdict);
-                }
-            }
-            Err(error) => tracing::warn!(
+        let read = read_marker(&client, &namespace, &name).await;
+        match apply_marker_read(&handle, &mut last, read) {
+            MarkerRead::Changed(Ok(marker)) => tracing::info!(
+                configmap = %format!("{namespace}/{name}"),
+                marker = ?marker,
+                "the installation's fresh-install marker; an unbound namespace without \
+                 a defaultMode resolves to default-confirm-v1 only when it is \
+                 FreshInstallConfirm"
+            ),
+            MarkerRead::Changed(Err(refusal)) => tracing::warn!(
+                configmap = %format!("{namespace}/{name}"),
+                refusal = refusal.as_str(),
+                "a fresh-install marker is present and NOT honoured: unbound \
+                 namespaces stay legacy-governed-v1"
+            ),
+            MarkerRead::Unchanged => {}
+            MarkerRead::Failed(error) => tracing::warn!(
                 configmap = %format!("{namespace}/{name}"),
                 %error,
                 marker = ?handle.get(),
@@ -436,5 +467,71 @@ mod tests {
         })
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(set.resolve("team-a").mode(), ApprovalMode::Ordinary);
+    }
+
+    /// THE CONTROLLER'S LAST MILE (PROD-16.1 fix round, review M1, whose
+    /// mutant R3 — `unwrap_or(FreshInstallConfirm)` — survived every suite).
+    #[test]
+    fn a_refused_marker_is_unmarked_and_a_failed_read_keeps_the_last_verdict() {
+        let handle = MarkerHandle::default();
+        let mut last = None;
+        // Never read: unmarked.
+        assert_eq!(handle.get(), InstallationMarker::Unmarked);
+        // A read that fails before any verdict keeps unmarked.
+        assert_eq!(
+            apply_marker_read(&handle, &mut last, Err::<Result<_, _>, _>("503")),
+            MarkerRead::Failed("503")
+        );
+        assert_eq!(handle.get(), InstallationMarker::Unmarked);
+        // An honoured marker.
+        assert_eq!(
+            apply_marker_read(
+                &handle,
+                &mut last,
+                Ok::<_, &str>(Ok(InstallationMarker::FreshInstallConfirm))
+            ),
+            MarkerRead::Changed(Ok(InstallationMarker::FreshInstallConfirm))
+        );
+        assert_eq!(handle.get(), InstallationMarker::FreshInstallConfirm);
+        // The same verdict again is not logged again.
+        assert_eq!(
+            apply_marker_read(
+                &handle,
+                &mut last,
+                Ok::<_, &str>(Ok(InstallationMarker::FreshInstallConfirm))
+            ),
+            MarkerRead::Unchanged
+        );
+        // A failed read after it keeps it (an API-server blip).
+        assert_eq!(
+            apply_marker_read(&handle, &mut last, Err::<Result<_, _>, _>("timeout")),
+            MarkerRead::Failed("timeout")
+        );
+        assert_eq!(handle.get(), InstallationMarker::FreshInstallConfirm);
+        // EVERY refusal is unmarked — a forged or replaced marker turns the
+        // controller strict at once.
+        for refusal in [
+            MarkerRefusal::NotAClaim,
+            MarkerRefusal::OtherIdentity,
+            MarkerRefusal::PolicyMissing,
+            MarkerRefusal::PolicyReplaced,
+            MarkerRefusal::NotHookMade,
+            MarkerRefusal::NotDefault,
+            MarkerRefusal::KeysDiffer,
+        ] {
+            handle.set(InstallationMarker::FreshInstallConfirm);
+            let mut fresh_last = Some(Ok(InstallationMarker::FreshInstallConfirm));
+            assert_eq!(
+                apply_marker_read(&handle, &mut fresh_last, Ok::<_, &str>(Err(refusal))),
+                MarkerRead::Changed(Err(refusal))
+            );
+            assert_eq!(handle.get(), InstallationMarker::Unmarked, "{refusal:?}");
+            // And the reconcilers see legacy for an unbound namespace.
+            let source = PolicySource::new(Arc::new(ApprovalPolicySet::default()), handle.clone());
+            assert_eq!(
+                source.effective().resolve("unbound"),
+                EffectivePolicy::Legacy
+            );
+        }
     }
 }
