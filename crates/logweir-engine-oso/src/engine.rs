@@ -84,6 +84,120 @@ pub fn read_engine_report(path: &std::path::Path) -> EngineReport {
     }
 }
 
+/// FX-23: whatever is at a report path before a restore is NOT that
+/// restore's. The default path is per run, but `--offset-report-out` may name
+/// a fixed one, and a report an earlier run left there would be read as this
+/// run's (and uploaded by phase 8 as its evidence) whenever the engine writes
+/// none. Removed first, so after the run the file is the engine's or absent.
+fn remove_stale_report(path: &std::path::Path) -> Result<(), EngineError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(EngineError::Operational(format!(
+            "{}: an earlier offset report could not be removed before the restore, and it \
+             would be read as this run's: {e}",
+            path.display()
+        ))),
+    }
+}
+
+/// **PROD-11.1.** One `PreflightReport` for a plan restored by several engine
+/// runs (one per distinct partition subset). The verdict-bearing fields can
+/// only get worse by merging: `valid` and `header_preflight_honoured` hold
+/// only when they hold for EVERY run, every run's errors, warnings, coverage
+/// findings and dropped keys are kept, and the counts are summed. One run's
+/// report is returned unchanged.
+pub fn merge_preflight_reports(mut reports: Vec<PreflightReport>) -> PreflightReport {
+    if reports.len() == 1 {
+        return reports.pop().expect("one report");
+    }
+    let mut out = PreflightReport {
+        valid: true,
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        segments_to_process: 0,
+        records_to_restore: 0,
+        time_range: None,
+        partitions: Vec::new(),
+        header_preflight_honoured: !reports.is_empty(),
+        unknown_key_warnings: Vec::new(),
+        rendered_restore_sha256: String::new(),
+    };
+    let mut digests = Vec::new();
+    for r in reports {
+        out.valid &= r.valid;
+        out.errors.extend(r.errors);
+        out.warnings.extend(r.warnings);
+        out.segments_to_process += r.segments_to_process;
+        out.records_to_restore += r.records_to_restore;
+        out.time_range = match (out.time_range, r.time_range) {
+            (Some((a, b)), Some((c, d))) => Some((a.min(c), b.max(d))),
+            (x, None) | (None, x) => x,
+        };
+        out.partitions.extend(r.partitions);
+        out.header_preflight_honoured &= r.header_preflight_honoured;
+        for w in r.unknown_key_warnings {
+            if !out.unknown_key_warnings.contains(&w) {
+                out.unknown_key_warnings.push(w);
+            }
+        }
+        digests.push(r.rendered_restore_sha256);
+    }
+    out.rendered_restore_sha256 = digests.join(",");
+    out
+}
+
+/// **PROD-11.1.** The offset report of a restore made of several engine runs:
+/// every run's report is checked (FX-23) only when every run's was READ — the
+/// union of their entries, the runs restoring disjoint topics. Otherwise the
+/// first run's report that could not be read (Unreadable before Absent) is the
+/// answer, and phase 7 checks nothing from it, as for one run.
+pub fn merge_engine_reports(reports: Vec<EngineReport>) -> EngineReport {
+    let mut union = std::collections::BTreeSet::new();
+    let mut absent = false;
+    for r in reports {
+        match r {
+            EngineReport::Read(entries) => union.extend(entries),
+            EngineReport::Unreadable(why) => return EngineReport::Unreadable(why),
+            EngineReport::Absent => absent = true,
+        }
+    }
+    if absent {
+        EngineReport::Absent
+    } else {
+        EngineReport::Read(union)
+    }
+}
+
+/// **PROD-11.1.** The evidence file a multi-run restore leaves at the plan's
+/// `offset_report` path, which phase 8 uploads: a JSON ARRAY with one element
+/// per engine run, in run order — that run's report, byte for byte, or `null`
+/// when the run wrote none. The bytes are concatenated, never parsed, so the
+/// per-record section of a large report is never held in memory (FX-23 review
+/// M1). A one-run restore keeps the engine's own report as before.
+pub fn compose_offset_reports(runs: &[PathBuf], out: &std::path::Path) -> Result<(), EngineError> {
+    use std::io::Write as _;
+    let op = |e: std::io::Error| EngineError::Operational(format!("{}: {e}", out.display()));
+    let mut f = std::io::BufWriter::new(std::fs::File::create(out).map_err(op)?);
+    f.write_all(b"[").map_err(op)?;
+    for (i, path) in runs.iter().enumerate() {
+        if i > 0 {
+            f.write_all(b",\n").map_err(op)?;
+        }
+        match std::fs::File::open(path) {
+            Ok(mut src) => {
+                std::io::copy(&mut src, &mut f).map_err(op)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                f.write_all(b"null").map_err(op)?;
+            }
+            Err(e) => return Err(EngineError::Operational(format!("{}: {e}", path.display()))),
+        }
+    }
+    f.write_all(b"]\n").map_err(op)?;
+    f.flush().map_err(op)
+}
+
 pub struct OsoCliEngine {
     binary: PathBuf,
     version: String,
@@ -102,7 +216,13 @@ pub struct OsoCliEngine {
     /// refuse a divergence. `Mutex`, not `RefCell`: `DataEngine`'s methods take
     /// `&self` and the orchestrator holds this behind a trait object whose auto
     /// traits must not narrow.
-    phase5_render: std::sync::Mutex<Option<String>>,
+    ///
+    /// PROD-11.1: ONE DIGEST PER ENGINE RUN, in run order. A plan whose
+    /// partition subsets differ between topics is several engine runs
+    /// (`render_restore::runs`), each with its own document; phase 6 refuses
+    /// unless it would restore exactly the documents phase 5 validated, in the
+    /// same order. A plan with no subset is one run, one digest, as before.
+    phase5_render: std::sync::Mutex<Option<Vec<String>>>,
 }
 
 impl OsoCliEngine {
@@ -128,6 +248,202 @@ impl OsoCliEngine {
         std::fs::write(&p, body)
             .map_err(|e| EngineError::Operational(format!("{}: {e}", p.display())))?;
         Ok(p)
+    }
+
+    /// One engine run's `validate-restore` over the document already written
+    /// at `cfg` (PROD-11.1: `preflight` calls it once per run).
+    fn validate_one_run(
+        &self,
+        cfg: &std::path::Path,
+        doc: &str,
+        digest: &str,
+    ) -> Result<PreflightReport, EngineError> {
+        let run = subprocess::run_engine(
+            &self.binary,
+            &[
+                "validate-restore",
+                "--config",
+                cfg.to_str().ok_or_else(|| {
+                    EngineError::Operational(format!("{}: not valid UTF-8", cfg.display()))
+                })?,
+                "--format",
+                "json",
+            ],
+            &mut |_, _| {},
+        )?;
+        self.assert_no_dropped_logweir_key(doc, &run.unknown_key_warnings)?;
+        // validate-restore exits 1 on !valid || !errors.is_empty()
+        // [VERIFIED U/kafka-backup/crates/kafka-backup-cli/src/commands/
+        // validate_restore.rs:39-42], so exit 1 with parsable JSON is a
+        // RESULT, not an operational failure. Only unparsable output is.
+        // stdout is LOG LINES followed by the JSON object: the command logs
+        // `info!("Validating restore configuration from: {}", ...)` (line 21)
+        // and `RestoreEngine::new`/`dry_run()` log further, all through the
+        // same stdout-defaulting fmt layer, before
+        // `println!("{}", serde_json::to_string_pretty(&report)?)` (line 30)
+        // [VERIFIED validate_restore.rs:5,21,30,39-42 and main.rs:553-556].
+        // `RUST_LOG=warn` (set in `run_engine`) removes the info! lines at the
+        // source; slicing from the first `{` is the belt to that brace,
+        // because a WARN line would otherwise still break the parse.
+        let json = run
+            .stdout
+            .find('{')
+            .map(|i| &run.stdout[i..])
+            .ok_or_else(|| {
+                EngineError::Operational(format!(
+                    "validate-restore exited {} and printed no JSON object\nstdout: {}\nstderr: {}",
+                    run.exit_code,
+                    captured(&run.stdout),
+                    captured(&run.stderr)
+                ))
+            })?;
+        let r: vendored::manifest::DryRunReport = serde_json::from_str(json).map_err(|e| {
+            EngineError::Operational(format!(
+                "validate-restore exited {} and its stdout is not a DryRunReport: {e}\nstdout: {}",
+                run.exit_code,
+                captured(&run.stdout)
+            ))
+        })?;
+
+        // Readback (1) of spec §9.3 phase 5: an engine that IGNORES
+        // `header_preflight` defaults to Auto (config.rs:972-980),
+        // offset_recovery_requested is false (preflight.rs:196-198), so
+        // scan_required is false and report.header_preflight stays None.
+        let hp = r.header_preflight.as_ref();
+        let honoured = hp
+            .map(|h| h.scan_performed && h.mode == "full")
+            .unwrap_or(false);
+
+        let partitions = hp
+            .map(|h| {
+                h.partitions
+                    .iter()
+                    .map(|p| PartitionCoverage {
+                        topic: p.topic.clone(),
+                        partition: p.partition,
+                        detail: p.detail(),
+                        state: match &p.state {
+                            vendored::preflight::PartitionCoverageState::Full => {
+                                CoverageState::Full
+                            }
+                            vendored::preflight::PartitionCoverageState::Partial => {
+                                CoverageState::Partial
+                            }
+                            vendored::preflight::PartitionCoverageState::Missing => {
+                                CoverageState::Missing
+                            }
+                            vendored::preflight::PartitionCoverageState::Empty => {
+                                CoverageState::Empty
+                            }
+                            vendored::preflight::PartitionCoverageState::DataMissing => {
+                                CoverageState::DataMissing
+                            }
+                            vendored::preflight::PartitionCoverageState::Corrupt => {
+                                CoverageState::Corrupt
+                            }
+                            vendored::preflight::PartitionCoverageState::Indeterminate => {
+                                CoverageState::Indeterminate
+                            }
+                            vendored::preflight::PartitionCoverageState::Unknown(s) => {
+                                CoverageState::Unknown(s.clone())
+                            }
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(PreflightReport {
+            valid: r.valid,
+            errors: r.errors,
+            warnings: r.warnings,
+            segments_to_process: r.segments_to_process,
+            records_to_restore: r.records_to_restore,
+            time_range: r.time_range,
+            partitions,
+            header_preflight_honoured: honoured,
+            unknown_key_warnings: run.unknown_key_warnings,
+            rendered_restore_sha256: digest.to_string(),
+        })
+    }
+
+    /// One engine run's `restore` over `doc` (PROD-11.1: `restore` calls it
+    /// once per run, in order). `which` is `(index, count, the run's topic
+    /// mapping)`, for the failure message.
+    fn restore_one_run(
+        &self,
+        config_name: &str,
+        doc: &str,
+        report_path: &std::path::Path,
+        obs: &mut dyn PhaseObserver,
+        which: (usize, usize, &std::collections::BTreeMap<String, String>),
+    ) -> Result<RestoreFacts, EngineError> {
+        let cfg = self.write(config_name, doc)?;
+        // FX-23: whatever is at the report path now is NOT this restore's. The
+        // default path is per run, but `--offset-report-out` may name a fixed
+        // one, and a report an earlier run left there would be read below as
+        // this run's (and uploaded by phase 8 as its evidence) whenever this
+        // engine writes none. Removed first, so after the run the file is this
+        // engine's or it is absent.
+        remove_stale_report(report_path)?;
+        let started_at = chrono::Utc::now();
+        let run = subprocess::run_engine(
+            &self.binary,
+            &[
+                "restore",
+                "--config",
+                cfg.to_str().ok_or_else(|| {
+                    EngineError::Operational(format!("{}: not valid UTF-8", cfg.display()))
+                })?,
+            ],
+            &mut |stream, line| obs.engine_line(stream, line),
+        )?;
+        let finished_at = chrono::Utc::now();
+        // Fix (post-review): exit code checked BEFORE the dropped-key check,
+        // not after. With the order reversed, a run that both dropped a key
+        // we rendered AND failed would return only the dropped-key error —
+        // losing the exit code and stderr, which are the more actionable,
+        // primary evidence for an outright failure. A run that dropped a key
+        // but otherwise EXITED 0 still gets the dropped-key error, from the
+        // `assert_no_dropped_logweir_key` call below.
+        //
+        // Fix (post-review): stdout is now included too, not just stderr —
+        // by this crate's own finding (see subprocess.rs), the engine's log
+        // lines (including a dropped-key warning, on the real binary) go to
+        // stdout, so a failure message carrying only stderr can omit the very
+        // line that explains the failure.
+        if run.exit_code != 0 {
+            let (index, count, mapping) = which;
+            let of_runs = if count > 1 {
+                format!(
+                    " (engine run {} of {count}, topics {})",
+                    index + 1,
+                    mapping.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            } else {
+                String::new()
+            };
+            return Err(EngineError::Operational(format!(
+                "kafka-backup restore exited {}{of_runs}\nstdout: {}\nstderr: {}",
+                run.exit_code,
+                captured(&run.stdout),
+                captured(&run.stderr)
+            )));
+        }
+        self.assert_no_dropped_logweir_key(doc, &run.unknown_key_warnings)?;
+        // `restore` has no --format; the exit code is its only machine-readable
+        // VERDICT, so every timing here is OURS. Its offset-mapping report is
+        // read for one thing only (FX-23): an engine a SIGTERM stopped between
+        // topics exits 0 and writes a report without the topics it never
+        // started, and phase 7 refuses a report that lacks a mapped partition
+        // the manifest proves holds records in the window.
+        Ok(RestoreFacts {
+            started_at,
+            finished_at,
+            exit_code: run.exit_code,
+            unknown_key_warnings: run.unknown_key_warnings,
+            engine_report: read_engine_report(report_path),
+        })
     }
 
     /// Rendered documents are the coupling surface; a key WE rendered that the
@@ -425,9 +741,16 @@ impl DataEngine for OsoCliEngine {
         // same reason: `preflight` is reached only after phase 0's guards have
         // run, so Global Constraint 11's exit 3 ("refused by a guard, before
         // anything runs") does not describe it.
-        let (doc, rendered_restore_sha256) = render_restore::render_and_digest(plan)
+        //
+        // PROD-11.1: every engine run's document, rendered and written before
+        // any engine is spawned (a plan with no subset is one run and writes
+        // `restore.yaml`, exactly as before).
+        let runs = render_restore::render_all_and_digest(plan)
             .map_err(|e| EngineError::Operational(e.to_string()))?;
-        let cfg = self.write("restore.yaml", &doc)?;
+        let mut written = Vec::with_capacity(runs.len());
+        for (run, doc, digest) in &runs {
+            written.push((self.write(&run.config_file_name(), doc)?, doc, digest));
+        }
         // T0-14. Memoised HERE, immediately after the write and before the
         // engine is spawned, because the field's meaning is "the digest of the
         // bytes that are now on disk as restore.yaml" — that is the document
@@ -438,114 +761,12 @@ impl DataEngine for OsoCliEngine {
         // unreachable after a phase-5 error) and would make the memo depend on
         // the engine's behaviour rather than on our own write.
         *self.phase5_render.lock().expect("phase5_render mutex") =
-            Some(rendered_restore_sha256.clone());
-        let run = subprocess::run_engine(
-            &self.binary,
-            &[
-                "validate-restore",
-                "--config",
-                cfg.to_str().ok_or_else(|| {
-                    EngineError::Operational(format!("{}: not valid UTF-8", cfg.display()))
-                })?,
-                "--format",
-                "json",
-            ],
-            &mut |_, _| {},
-        )?;
-        self.assert_no_dropped_logweir_key(&doc, &run.unknown_key_warnings)?;
-        // validate-restore exits 1 on !valid || !errors.is_empty()
-        // [VERIFIED U/kafka-backup/crates/kafka-backup-cli/src/commands/
-        // validate_restore.rs:39-42], so exit 1 with parsable JSON is a
-        // RESULT, not an operational failure. Only unparsable output is.
-        // stdout is LOG LINES followed by the JSON object: the command logs
-        // `info!("Validating restore configuration from: {}", ...)` (line 21)
-        // and `RestoreEngine::new`/`dry_run()` log further, all through the
-        // same stdout-defaulting fmt layer, before
-        // `println!("{}", serde_json::to_string_pretty(&report)?)` (line 30)
-        // [VERIFIED validate_restore.rs:5,21,30,39-42 and main.rs:553-556].
-        // `RUST_LOG=warn` (set in `run_engine`) removes the info! lines at the
-        // source; slicing from the first `{` is the belt to that brace,
-        // because a WARN line would otherwise still break the parse.
-        let json = run
-            .stdout
-            .find('{')
-            .map(|i| &run.stdout[i..])
-            .ok_or_else(|| {
-                EngineError::Operational(format!(
-                    "validate-restore exited {} and printed no JSON object\nstdout: {}\nstderr: {}",
-                    run.exit_code,
-                    captured(&run.stdout),
-                    captured(&run.stderr)
-                ))
-            })?;
-        let r: vendored::manifest::DryRunReport = serde_json::from_str(json).map_err(|e| {
-            EngineError::Operational(format!(
-                "validate-restore exited {} and its stdout is not a DryRunReport: {e}\nstdout: {}",
-                run.exit_code,
-                captured(&run.stdout)
-            ))
-        })?;
-
-        // Readback (1) of spec §9.3 phase 5: an engine that IGNORES
-        // `header_preflight` defaults to Auto (config.rs:972-980),
-        // offset_recovery_requested is false (preflight.rs:196-198), so
-        // scan_required is false and report.header_preflight stays None.
-        let hp = r.header_preflight.as_ref();
-        let honoured = hp
-            .map(|h| h.scan_performed && h.mode == "full")
-            .unwrap_or(false);
-
-        let partitions = hp
-            .map(|h| {
-                h.partitions
-                    .iter()
-                    .map(|p| PartitionCoverage {
-                        topic: p.topic.clone(),
-                        partition: p.partition,
-                        detail: p.detail(),
-                        state: match &p.state {
-                            vendored::preflight::PartitionCoverageState::Full => {
-                                CoverageState::Full
-                            }
-                            vendored::preflight::PartitionCoverageState::Partial => {
-                                CoverageState::Partial
-                            }
-                            vendored::preflight::PartitionCoverageState::Missing => {
-                                CoverageState::Missing
-                            }
-                            vendored::preflight::PartitionCoverageState::Empty => {
-                                CoverageState::Empty
-                            }
-                            vendored::preflight::PartitionCoverageState::DataMissing => {
-                                CoverageState::DataMissing
-                            }
-                            vendored::preflight::PartitionCoverageState::Corrupt => {
-                                CoverageState::Corrupt
-                            }
-                            vendored::preflight::PartitionCoverageState::Indeterminate => {
-                                CoverageState::Indeterminate
-                            }
-                            vendored::preflight::PartitionCoverageState::Unknown(s) => {
-                                CoverageState::Unknown(s.clone())
-                            }
-                        },
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(PreflightReport {
-            valid: r.valid,
-            errors: r.errors,
-            warnings: r.warnings,
-            segments_to_process: r.segments_to_process,
-            records_to_restore: r.records_to_restore,
-            time_range: r.time_range,
-            partitions,
-            header_preflight_honoured: honoured,
-            unknown_key_warnings: run.unknown_key_warnings,
-            rendered_restore_sha256,
-        })
+            Some(runs.iter().map(|(_, _, d)| d.clone()).collect());
+        let mut reports = Vec::with_capacity(written.len());
+        for (cfg, doc, digest) in written {
+            reports.push(self.validate_one_run(&cfg, doc, digest)?);
+        }
+        Ok(merge_preflight_reports(reports))
     }
 
     fn restore(
@@ -569,18 +790,23 @@ impl DataEngine for OsoCliEngine {
         // including the engine's own `validate-restore`. The ADR that would
         // carry this ruling is gated on open question O2 and is deferred; see
         // docs/stability.md.
-        let (doc, six) = render_restore::render_and_digest(plan)
+        //
+        // PROD-11.1: the comparison is over EVERY run's document, in order.
+        let runs = render_restore::render_all_and_digest(plan)
             .map_err(|e| EngineError::Operational(e.to_string()))?;
+        let six: Vec<String> = runs.iter().map(|(_, _, d)| d.clone()).collect();
         match self
             .phase5_render
             .lock()
             .expect("phase5_render mutex")
             .as_deref()
         {
-            Some(five) if five != six => {
+            Some(five) if five != six.as_slice() => {
                 return Err(EngineError::Operational(format!(
                     "rendered restore.yaml diverged between phase 5 and phase 6: \
-                     phase 5 validated {five}, phase 6 would restore {six} — refusing"
+                     phase 5 validated {}, phase 6 would restore {} — refusing",
+                    five.join(","),
+                    six.join(",")
                 )));
             }
             Some(_) => {}
@@ -591,71 +817,48 @@ impl DataEngine for OsoCliEngine {
                 ))
             }
         }
-        let cfg = self.write("restore.yaml", &doc)?;
-        // FX-23: whatever is at the report path now is NOT this restore's. The
-        // default path is per run, but `--offset-report-out` may name a fixed
-        // one, and a report an earlier run left there would be read below as
-        // this run's (and uploaded by phase 8 as its evidence) whenever this
-        // engine writes none. Removed first, so after the run the file is this
-        // engine's or it is absent.
-        match std::fs::remove_file(&plan.offset_report) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(EngineError::Operational(format!(
-                    "{}: an earlier offset report could not be removed before the restore, \
-                     and it would be read as this run's: {e}",
-                    plan.offset_report.display()
-                )))
+        let count = runs.len();
+        // PROD-11.1: with several runs, `plan.offset_report` is the composed
+        // report Logweir writes after the last run; whatever an earlier run
+        // left there is not this restore's (FX-23's rule, below, per path).
+        if count > 1 {
+            remove_stale_report(&plan.offset_report)?;
+        }
+        let mut started_at = None;
+        let mut unknown_key_warnings: Vec<String> = Vec::new();
+        let mut reports = Vec::with_capacity(count);
+        let mut report_paths = Vec::with_capacity(count);
+        for (run, doc, _) in &runs {
+            let report_path = run.path(&plan.offset_report);
+            let facts = self.restore_one_run(
+                &run.config_file_name(),
+                doc,
+                &report_path,
+                obs,
+                (run.index, count, &run.topic_mapping),
+            )?;
+            started_at.get_or_insert(facts.started_at);
+            for w in facts.unknown_key_warnings {
+                if !unknown_key_warnings.contains(&w) {
+                    unknown_key_warnings.push(w);
+                }
             }
+            reports.push(facts.engine_report);
+            report_paths.push(report_path);
         }
-        let started_at = chrono::Utc::now();
-        let run = subprocess::run_engine(
-            &self.binary,
-            &[
-                "restore",
-                "--config",
-                cfg.to_str().ok_or_else(|| {
-                    EngineError::Operational(format!("{}: not valid UTF-8", cfg.display()))
-                })?,
-            ],
-            &mut |stream, line| obs.engine_line(stream, line),
-        )?;
         let finished_at = chrono::Utc::now();
-        // Fix (post-review): exit code checked BEFORE the dropped-key check,
-        // not after. With the order reversed, a run that both dropped a key
-        // we rendered AND failed would return only the dropped-key error —
-        // losing the exit code and stderr, which are the more actionable,
-        // primary evidence for an outright failure. A run that dropped a key
-        // but otherwise EXITED 0 still gets the dropped-key error, from the
-        // `assert_no_dropped_logweir_key` call below.
-        //
-        // Fix (post-review): stdout is now included too, not just stderr —
-        // by this crate's own finding (see subprocess.rs), the engine's log
-        // lines (including a dropped-key warning, on the real binary) go to
-        // stdout, so a failure message carrying only stderr can omit the very
-        // line that explains the failure.
-        if run.exit_code != 0 {
-            return Err(EngineError::Operational(format!(
-                "kafka-backup restore exited {}\nstdout: {}\nstderr: {}",
-                run.exit_code,
-                captured(&run.stdout),
-                captured(&run.stderr)
-            )));
-        }
-        self.assert_no_dropped_logweir_key(&doc, &run.unknown_key_warnings)?;
-        // `restore` has no --format; the exit code is its only machine-readable
-        // VERDICT, so every timing here is OURS. Its offset-mapping report is
-        // read for one thing only (FX-23): an engine a SIGTERM stopped between
-        // topics exits 0 and writes a report without the topics it never
-        // started, and phase 7 refuses a report that lacks a mapped partition
-        // the manifest proves holds records in the window.
+        let engine_report = if count > 1 {
+            compose_offset_reports(&report_paths, &plan.offset_report)?;
+            merge_engine_reports(reports)
+        } else {
+            reports.pop().unwrap_or(EngineReport::Absent)
+        };
         Ok(RestoreFacts {
-            started_at,
+            started_at: started_at.unwrap_or(finished_at),
             finished_at,
-            exit_code: run.exit_code,
-            unknown_key_warnings: run.unknown_key_warnings,
-            engine_report: read_engine_report(&plan.offset_report),
+            exit_code: 0,
+            unknown_key_warnings,
+            engine_report,
         })
     }
 

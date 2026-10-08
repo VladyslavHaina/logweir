@@ -752,6 +752,9 @@ pub struct PreflightReport {
     /// Paths the engine logged as `Ignoring unknown config key <path>`.
     pub unknown_key_warnings: Vec<String>,
     /// `sha256:<hex>` over the exact bytes written as `restore.yaml` at phase 5.
+    /// For a plan restored by several engine runs (PROD-11.1: one per
+    /// distinct partition subset), every run's digest in run order, joined by
+    /// `,`.
     /// Phase 6 re-renders, re-hashes and refuses on divergence (T0-14; ruling
     /// R-E: the refusal is exit 1, operational, no artifact — by phase 6 the
     /// guards have run and `validate-restore` has already executed, so GC11's
