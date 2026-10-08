@@ -1990,6 +1990,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "scheduled points offered after a re-sync",
             "spec.syncRequest",
         ),
+        // PROD-01.3 (2026-10-08): three new auth modes, and the credential
+        // binding every credentialed connection's Secret must carry.
+        (
+            "a connection presents only its own credential",
+            "logweir-binding",
+        ),
     ];
     assert_eq!(
         items.len(),

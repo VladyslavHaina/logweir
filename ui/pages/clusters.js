@@ -131,7 +131,7 @@ export const CLUSTER_DRAFT_FIELDS = Object.freeze([
  *  to the connection. These names are on no draft list, are never rendered
  *  with a value, and travel to `ui/client.js` off the custom resource's own
  *  fields (`clusterBody`'s non-enumerable `__credential`), so neither a draft,
- *  a JSON dump nor the legacy path can carry them. */
+ *  a JSON dump nor the legacy form can carry them. */
 export const WRITE_ONLY_CLUSTER_FIELDS = Object.freeze([
   "enteredPassword", "enteredCertificatePem", "enteredPrivateKeyPem",
 ]);
