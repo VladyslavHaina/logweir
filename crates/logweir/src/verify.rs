@@ -149,8 +149,9 @@ pub struct VerifyReport {
     pub time_basis: Option<logweir_core::scorecard::TimeBasisLabel>,
     /// `integrity.verification` (scorecard 1.4.0, PROD-08.1), carried as
     /// read: `None` is NOT RECORDED (a document before 1.4.0), read as a
-    /// SAMPLED verdict and never as a complete one.
-    pub verification: Option<logweir_core::scorecard::Verification>,
+    /// SAMPLED verdict and never as a complete one. Boxed: the block is the
+    /// largest thing a report carries, and `Verdict` holds a report by value.
+    pub verification: Option<Box<logweir_core::scorecard::Verification>>,
 }
 
 /// The verification-coverage lines both readers print for a scorecard
@@ -646,7 +647,7 @@ pub fn verify_scorecard(
         intentionally_deviated: sc.topic_parity.intentionally_deviated.clone(),
         not_reconstructed: sc.topic_parity.not_reconstructed.clone(),
         time_basis: sc.source.time_basis.clone(),
-        verification: sc.integrity.verification.clone(),
+        verification: sc.integrity.verification.clone().map(Box::new),
     }))
 }
 
@@ -694,7 +695,7 @@ fn print_report(r: &VerifyReport) {
         println!("time:      {line}");
     }
     // PROD-08.1: nor a verdict over every record when it covered a sample.
-    for line in verification_lines(r.verification.as_ref()) {
+    for line in verification_lines(r.verification.as_deref()) {
         println!("coverage:  {line}");
     }
 }
