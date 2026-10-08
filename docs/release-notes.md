@@ -147,13 +147,13 @@ confirm: a trust administrator adds the key from `logweir-console-trust` to the
 confirm` and upgrade ([install.md](install.md) §5f). **After a failed first
 install:** `kubectl delete clusterrolebinding,clusterrole
 <release>-identity-trust --ignore-not-found`, then check it is NotFound
-([install.md](install.md) §5f). **Release coordinator, two steps:** the merge
-is inert — `identity.bootstrapFeatures.consoleKey` is `false`, so the chart
-passes the pinned bootstrap image none of the new hook flags; after CI publishes
-the merge's runner, ONE commit re-pins `identity.bootstrapImage` to it,
-refreshes `crates/logweir/tests/fixtures/bootstrap-image-help.txt` from its
-`identity bootstrap --help` and flips the value to `true`
-([install.md](install.md), *Release coordinator: re-pin bootstrap bytes*).
+([install.md](install.md) §5f). **Release coordinator, two steps (both done):** the merge
+was inert (`identity.bootstrapFeatures.consoleKey` `false`); after CI published
+the merge's runner, one commit re-pinned `identity.bootstrapImage` to runner rev
+`2fe8d907`, refreshed `crates/logweir/tests/fixtures/bootstrap-image-help.txt`
+from its `identity bootstrap --help` and set the value `true` by default
+([install.md](install.md), *Release coordinator: re-pin bootstrap bytes*). An
+operator who pins an older bootstrap image sets it `false`.
 **Scope:** core rows (the unbound default, the bound marker with every binding
 broken once, an older reader refusing `defaultMode`), identity hook rows (fresh
 install creates trust and a claim the readers honour; no console, an adopted
