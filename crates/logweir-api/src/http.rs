@@ -102,21 +102,34 @@ fn forwarded_for_hops(headers: &http::HeaderMap) -> Vec<&str> {
         .collect()
 }
 
+/// One `X-Forwarded-For` hop as an address: a bare IP address, or a socket
+/// address (`203.0.113.5:4711`, `[2001:db8::5]:443`) with its port dropped.
+/// Some proxies append the second form (Azure Application Gateway does); a
+/// hop is written by the proxy that received it, so its form is that proxy's
+/// and choosing it gives the client nothing (FX-13 review L2). Anything else
+/// — `unknown`, a bracketed address with no port, a name — is not an address.
+fn hop_address(hop: &str) -> Option<IpAddr> {
+    hop.parse::<IpAddr>()
+        .ok()
+        .or_else(|| hop.parse::<std::net::SocketAddr>().ok().map(|s| s.ip()))
+}
+
 /// THE RIGHTMOST HOP THE TRUSTED PROXIES DID NOT ADD. A proxy APPENDS the
 /// address it received from, so everything left of its entry was sent by the
 /// client and may be invented; walking from the right past our own proxies'
 /// addresses finds the first hop none of them vouch for — the client as the
-/// outermost trusted proxy saw it (review L4). A hop that is not an IP address
-/// cannot be a trusted proxy, so the walk stops there and returns it. `None`
-/// when there are no hops, or when every hop is a trusted proxy.
+/// outermost trusted proxy saw it (review L4). A hop that is not an address
+/// ([`hop_address`]) cannot be a trusted proxy, so the walk stops there and
+/// returns it. `None` when there are no hops, or when every hop is a trusted
+/// proxy.
 fn rightmost_untrusted_hop<'a>(
     trusted: &crate::trusted_proxy::TrustedProxies,
     hops: &[&'a str],
 ) -> Option<&'a str> {
-    hops.iter().rev().copied().find(|hop| {
-        hop.parse::<IpAddr>()
-            .map_or(true, |ip| !trusted.contains(ip))
-    })
+    hops.iter()
+        .rev()
+        .copied()
+        .find(|hop| hop_address(hop).map_or(true, |ip| !trusted.contains(ip)))
 }
 
 /// The forwarded client address, but ONLY when the immediate peer is inside a
@@ -153,7 +166,7 @@ pub enum LoginRateKey {
     ForwardedClient(IpAddr),
     /// The socket peer: it is not a trusted proxy, or it is and its
     /// `X-Forwarded-For` is absent, names only trusted proxies, or ends in a
-    /// hop that is not an IP address.
+    /// hop that is not an address ([`hop_address`]).
     Peer(IpAddr),
 }
 
@@ -191,7 +204,7 @@ impl LoginRateKey {
 /// EVERYTHING ELSE IS THE PEER. An untrusted peer's header is never read, so a
 /// forged one cannot move a request out of its own bucket. A trusted peer
 /// whose header is absent, names only trusted proxies (the request began
-/// inside the proxy tier) or ends in a hop that is not an IP address is
+/// inside the proxy tier) or ends in a hop that is not an address is
 /// counted against the peer, as every request was before.
 ///
 /// ONLY `X-Forwarded-For`. Traefik, the supported ingress, deletes a client's
@@ -212,7 +225,7 @@ pub fn login_rate_key(
         return LoginRateKey::Peer(peer);
     }
     let hops = forwarded_for_hops(headers);
-    match rightmost_untrusted_hop(trusted, &hops).and_then(|hop| hop.parse::<IpAddr>().ok()) {
+    match rightmost_untrusted_hop(trusted, &hops).and_then(hop_address) {
         Some(client) => LoginRateKey::ForwardedClient(client),
         None => LoginRateKey::Peer(peer),
     }
@@ -910,6 +923,10 @@ mod tests {
             // A malformed hop the CLIENT sent, left of the appended one, is
             // never read.
             &["not-an-address, 203.0.113.50"][..],
+            // A proxy that appends `ip:port` (review L2): the port is dropped,
+            // and a trusted hop with a port is still skipped.
+            &["198.51.100.66, 203.0.113.50:4711"][..],
+            &["198.51.100.66, 203.0.113.50:4711, 10.42.0.9:80"][..],
         ] {
             assert_eq!(
                 key(&t, values, "10.42.0.17"),
@@ -917,6 +934,22 @@ mod tests {
                 "{values:?}"
             );
         }
+    }
+
+    /// **A bracketed IPv6 socket address is its address.** NEGATIVE CONTROL:
+    /// the same address bracketed without a port is not an address, and
+    /// falls back to the peer.
+    #[test]
+    fn a_socket_address_hop_is_keyed_on_its_address() {
+        let t = ingress();
+        assert_eq!(
+            key(&t, &["[2001:db8::5]:443"], "10.42.0.17"),
+            LoginRateKey::ForwardedClient(addr("2001:db8::5"))
+        );
+        assert_eq!(
+            key(&t, &["[2001:db8::5]"], "10.42.0.17"),
+            LoginRateKey::Peer(addr("10.42.0.17"))
+        );
     }
 
     /// **An untrusted peer's header is never read.** NEGATIVE CONTROL: the
@@ -1000,8 +1033,8 @@ mod tests {
             &["10.42.0.9, 10.42.0.17"][..],
             &["203.0.113.50, not-an-address"][..],
             &["unknown"][..],
-            &["203.0.113.50:4711"][..],
             &["[2001:db8::1]"][..],
+            &["203.0.113.50:not-a-port"][..],
         ] {
             assert_eq!(key(&t, values, "10.42.0.17"), peer, "{values:?}");
         }

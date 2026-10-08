@@ -887,11 +887,17 @@ async fn a_chain_with_no_client_hop_falls_back_to_the_peer() {
     assert_limited(&proxies_only);
     let (_, notes) = log.record(&proxies_only.header("x-request-id").unwrap());
     assert_eq!(notes["loginRateKey"], "peer");
-    assert_limited(&sign_in(&app, INGRESS, Some("203.0.113.80:4711")).await);
+    assert_limited(&sign_in(&app, INGRESS, Some("unknown")).await);
     assert_limited(&sign_in(&app, INGRESS, None).await);
 
     let client = sign_in(&app, INGRESS, Some("203.0.113.81")).await;
     assert_eq!(client.status, 303, "{}", client.text());
+    // A proxy that appends `ip:port` (review L2) names a client too, not the
+    // fallback: served while the peer's budget is spent.
+    let with_port = sign_in(&app, INGRESS, Some("203.0.113.82:4711")).await;
+    assert_eq!(with_port.status, 303, "{}", with_port.text());
+    let (_, notes) = log.record(&with_port.header("x-request-id").unwrap());
+    assert_eq!(notes["loginRateKey"], "forwardedClient");
 }
 
 /// **The bound on tracked keys holds under a spray of forwarded addresses,
@@ -1000,4 +1006,67 @@ async fn a_client_rotating_ipv6_addresses_in_its_64_spends_one_budget() {
 
     let neighbour = sign_in(&app, INGRESS, Some("2001:db8:aa:2::1")).await;
     assert_eq!(neighbour.status, 303, "{}", neighbour.text());
+}
+
+/// **IPv4 clients behind a NAT64 translator get their own budgets** (review
+/// L1). A server-side NAT64 or SIIT translator presents every IPv4 client in
+/// the well-known prefix `64:ff9b::/96`; folded to its `/64` they would all
+/// share one budget, the pre-FX-13 defect for every IPv4 user. NEGATIVE
+/// CONTROL: the same client's fourth request is refused, so the key is the
+/// embedded IPv4 address, not the full IPv6 one.
+#[tokio::test]
+async fn ipv4_clients_behind_a_nat64_translator_get_their_own_budgets() {
+    let (_log, _guard) = capture();
+    let app = limited_app(ingress_range(), PER_WINDOW);
+    spend(&app, INGRESS, &[Some("64:ff9b::c633:6401"); 3]).await;
+    assert_limited(&sign_in(&app, INGRESS, Some("64:ff9b::198.51.100.1")).await);
+    let other = sign_in(&app, INGRESS, Some("64:ff9b::c633:6402")).await;
+    assert_eq!(other.status, 303, "{}", other.text());
+}
+
+/// **A refused code exchange names the provider's HTTP status in the console
+/// log** (review M1: an operator must be able to alert on the provider
+/// throttling this client, which reads as `code_exchange_failed` in the audit
+/// whether the code was junk or the provider answered 429). A callback with
+/// a valid login cookie and a code the provider refuses is `401`, the audit
+/// failure stays `code_exchange_failed`, and the WARN line carries
+/// `the provider answered HTTP 400` (the mock's answer to an unknown code).
+/// NEGATIVE CONTROL: the line is the sign-in refusal's own, once.
+#[tokio::test]
+async fn a_refused_code_exchange_names_the_providers_status_in_the_log() {
+    let (log, _guard) = capture();
+    let app = limited_app(ingress_range(), PER_WINDOW);
+    let login = sign_in(&app, INGRESS, Some("203.0.113.130")).await;
+    assert_eq!(login.status, 303, "{}", login.text());
+    let cookie = login
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .find(|c| c.starts_with("__Host-logweir_login="))
+        .expect("the login cookie is set")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let location = login.header("location").expect("a redirect has a Location");
+    let query: std::collections::BTreeMap<String, String> =
+        serde_urlencoded::from_str(location.split_once('?').unwrap().1).unwrap();
+    let callback = get(
+        &app,
+        &format!("/auth/callback?code=not-a-code&state={}", query["state"]),
+        Some(INGRESS),
+        &[("cookie", &cookie), ("x-forwarded-for", "203.0.113.130")],
+    )
+    .await;
+    callback.assert_problem(401, "unauthenticated");
+    let (record, _) = log.record(&callback.header("x-request-id").unwrap());
+    assert_eq!(record["failureCode"], "code_exchange_failed");
+    assert_eq!(app.idp.token_calls(), 1);
+    assert_eq!(
+        log.count("the provider answered HTTP 400"),
+        1,
+        "the refusal's log line names the provider's status"
+    );
+    assert_eq!(log.count("a sign-in was refused"), 1);
 }

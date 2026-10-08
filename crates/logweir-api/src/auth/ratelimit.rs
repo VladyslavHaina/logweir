@@ -11,11 +11,16 @@
 //!    sign-in takes no password at this service. A callback reaches the
 //!    provider only with a login cookie this service minted, whose `state`
 //!    must match (`login.rs:214`, `login.rs:225`), and the code it carries is
-//!    exchanged once, with that cookie's PKCE verifier, at the provider's
-//!    token endpoint (`login.rs:231` → `oidc.rs:577`, `oidc.rs:604`): the
-//!    provider makes authorization codes single-use, short-lived and
-//!    unguessable (RFC 6749 §4.1.2 and §10.10) and binds each to the verifier
-//!    (RFC 7636). More attempts buy an attacker nothing but load.
+//!    exchanged with that cookie's PKCE verifier at the provider's token
+//!    endpoint (`login.rs:231` → `oidc.rs:577`, `oidc.rs:604`): the provider
+//!    makes authorization codes single-use, short-lived and unguessable
+//!    (RFC 6749 §4.1.2 and §10.10) and binds each to the verifier (RFC 7636).
+//!    More attempts buy an attacker nothing but load. THE LOGIN COOKIE IS NOT
+//!    SINGLE-USE HERE: it is sealed and stateless, it opens for
+//!    `LOGIN_STATE_SECONDS` (600 s, `session.rs:36`; checked for authenticity
+//!    and age only, `session.rs:241-256`), and nothing records a used
+//!    `state`, so one `/auth/login` arms any number of callbacks inside the
+//!    callback key's own budget — each one a token request (point 3).
 //!
 //! 2. NO AMPLIFICATION: AT MOST ONE PROVIDER REQUEST PER REQUEST. Readiness
 //!    warms the discovery and JWKS caches before a replica takes traffic
@@ -28,28 +33,41 @@
 //!    unknown `kid` in the provider's OWN ID token forces at most one refetch
 //!    per `JWKS_MIN_REFETCH` per process (a minute, `oidc.rs:43`,
 //!    `oidc.rs:505`, `oidc.rs:644`). A cold or expired cache adds at most the
-//!    discovery `GET` and a JWKS `GET`, and the result serves every later
-//!    request. One to one is no amplification; the provider limits its own
-//!    traffic, and this service only promises not to multiply it.
+//!    discovery `GET` and a JWKS `GET`; a fetch that SUCCEEDS then serves
+//!    every later request, while a failed one is not cached, so during a
+//!    provider outage each request tries again — still at most three. A
+//!    constant per request is no amplification.
 //!
-//! 3. AN ATTACKER WITH N KEYS GETS N BOUNDED BUDGETS, AND PAST THE TABLE,
-//!    UNTRACKED SERVICE. Each key is held to [`LOGIN_PER_WINDOW`] and none can
-//!    spend another's. Past [`MAX_TRACKED_PEERS`] live keys a new key is
-//!    served without a window ([`Decision::AllowedUntracked`]). Neither gives
-//!    the attacker anything beyond what N addresses can already send the
-//!    provider directly: the provider's endpoints are public, and every
-//!    request here costs it at most one (2).
+//! 3. BUT IT IS CONCENTRATION: THE PROVIDER SEES THIS SERVICE, NOT THE
+//!    ATTACKER. Each key is held to [`LOGIN_PER_WINDOW`] and none can spend
+//!    another's; past [`MAX_TRACKED_PEERS`] live keys a new key is served
+//!    without a window ([`Decision::AllowedUntracked`]). An attacker with N
+//!    keys therefore gets N bounded budgets, and its callbacks reach the
+//!    provider AUTHENTICATED AS THIS CLIENT (`client_secret`, `oidc.rs:585-597`)
+//!    AND FROM THIS SERVICE'S ADDRESS — not as the unauthenticated requests
+//!    from N addresses it could send the provider directly. A provider that
+//!    throttles per client or per source can therefore refuse this service's
+//!    sign-ins under a many-address attack: a sign-in outage AT THE PROVIDER,
+//!    for every operator, while it lasts.
 //!
-//! 4. AVAILABILITY OUTRANKS A TIGHTER BOUND. For a recovery tool, operators
-//!    signing in during an incident matter more than any bound on load, so
-//!    nothing here can refuse a client that is within its own budget. There
-//!    is NO GLOBAL BUDGET: behind an ingress the old peer key was one, and one
-//!    client could lock everyone out; a ceiling over all clients, however
-//!    high, is the same lockout at a higher threshold (30 addresses, or one
-//!    IPv6 customer's `/56`, at 600 a minute). And a FULL TABLE NEVER
-//!    REFUSES: refusing new keys there is a cheap lockout too — an IPv6 `/52`
-//!    is 4,096 `/64`s — which is why the table is 65,536 keys and serves a
-//!    new key untracked, rather than refusing it, when it is full.
+//! 4. A DISTRIBUTED ATTACKER CAN CAUSE A SIGN-IN OUTAGE EITHER WAY, AND
+//!    AVAILABILITY DECIDES WHERE. With no budget over all clients, it takes
+//!    enough addresses to spend the provider's quota for this client. With
+//!    one, it takes far fewer: a global cap here GUARANTEES the outage at a
+//!    volume far below any provider's quota — the old peer key was such a
+//!    cap, and one client locked everyone out; a 600-a-minute ceiling is 30
+//!    addresses, or one IPv6 customer's `/56`. For a recovery tool, operators
+//!    signing in during an incident outrank a tighter bound, so there is NO
+//!    GLOBAL BUDGET and nothing refuses a client that is within its own. For
+//!    the same reason a FULL TABLE NEVER REFUSES: refusing new keys there is
+//!    a cheap lockout too — an IPv6 `/52` is 4,096 `/64`s — which is why the
+//!    table is 65,536 keys and serves a new key untracked when it is full.
+//!    What the operator does about the residual (`docs/api.md`, *Rate
+//!    limits*): set the provider's per-client limits for this client
+//!    generously; alert on `loginRateUntracked` and on refused exchanges
+//!    whose log line says `the provider answered HTTP 429`; and keep a
+//!    break-glass path that does not sign in through the provider — the
+//!    in-cluster administrator mode, reached by `kubectl port-forward`.
 //!
 //! THE KEY IS THE CLIENT AS THE TRUSTED PROXY SAW IT, AND OTHERWISE THE PEER.
 //! Behind the shared console's ingress every request has the ingress as its
@@ -62,8 +80,9 @@
 //!   `X-Forwarded-For` hop that is not itself a trusted proxy: the address the
 //!   outermost trusted proxy received the request from, which a client cannot
 //!   choose (everything left of it is client-sent and is never read);
-//! - otherwise, and whenever that hop is absent or is not an IP address, or the
-//!   chain names only trusted proxies, the key is the socket peer.
+//! - otherwise, and whenever that hop is absent or is not an address (a bare
+//!   IP, or `ip:port` with the port dropped), or the chain names only trusted
+//!   proxies, the key is the socket peer.
 //!
 //! `X-Forwarded-For` is the only header read, because it is the one the
 //! supported ingress writes: Traefik (`deploy/poc/traefik.values.yaml`,
@@ -75,7 +94,9 @@
 //! AN IPv6 KEY IS ITS `/64` ([`bucket_of`]). A per-client key is only as good
 //! as the client's inability to change it, and an IPv6 client holds a whole
 //! `/64` at least: keyed per address it could take a fresh budget for every
-//! request. [`IPV6_KEY_PREFIX`] says why `/64` and not wider.
+//! request. [`IPV6_KEY_PREFIX`] says why `/64` and not wider. An address in
+//! the well-known NAT64 prefix `64:ff9b::/96` is keyed as the IPv4 client it
+//! embeds instead, so IPv4 clients behind a translator are not one budget.
 //!
 //! A BUCKET IS NOT AN IDENTITY. D0 allows forwarded values for transport
 //! facts only — never for an identity or a grant (amended 2026-10-07 for this
@@ -149,15 +170,35 @@ pub const MAX_TRACKED_PEERS: usize = 65_536;
 /// How many times a window a full table may be swept for expired windows.
 pub const SWEEPS_PER_WINDOW: u32 = 16;
 
-/// The bucket an address is counted in: an IPv4-mapped IPv6 address as its
-/// IPv4 address, any other IPv6 address as its [`IPV6_KEY_PREFIX`] network,
-/// an IPv4 address as itself.
+/// The RFC 6052 well-known NAT64 prefix, `64:ff9b::/96`, as its top 96 bits.
+const NAT64_WELL_KNOWN_PREFIX: u128 = 0x0064_ff9b_0000_0000_0000_0000;
+
+/// The bucket an address is counted in:
+///
+/// - an IPv4-mapped IPv6 address (`::ffff:0:0/96`) as its IPv4 address;
+/// - an address in the well-known NAT64 prefix `64:ff9b::/96` (RFC 6052) as
+///   the IPv4 address it embeds: behind a server-side NAT64 or SIIT
+///   translator every IPv4 client arrives in that one `/96`, and folding it to
+///   its `/64` would put them all in one budget (FX-13 review L1). A client
+///   cannot pick such a source address without the translator answering for
+///   it. A network-specific prefix (RFC 8215's `64:ff9b:1::/48`, or any
+///   other) places the IPv4 bits by its own length, which this service does
+///   not know, so it folds to its `/64` like any IPv6 address — the pre-FX-13
+///   single budget for those clients, never a bypass;
+/// - any other IPv6 address as its [`IPV6_KEY_PREFIX`] network;
+/// - an IPv4 address as itself.
 #[must_use]
 pub fn bucket_of(address: IpAddr) -> IpAddr {
     match address.to_canonical() {
         IpAddr::V6(v6) => {
+            let bits = u128::from(v6);
+            if bits >> 32 == NAT64_WELL_KNOWN_PREFIX {
+                // The low 32 bits are the IPv4 address; truncation is the point.
+                #[allow(clippy::cast_possible_truncation)]
+                return IpAddr::V4(std::net::Ipv4Addr::from(bits as u32));
+            }
             let mask = u128::MAX << (128 - IPV6_KEY_PREFIX);
-            IpAddr::V6(std::net::Ipv6Addr::from(u128::from(v6) & mask))
+            IpAddr::V6(std::net::Ipv6Addr::from(bits & mask))
         }
         v4 @ IpAddr::V4(_) => v4,
     }
@@ -454,9 +495,18 @@ mod tests {
         // A different peer has its own window.
         assert_eq!(limiter.check_at(ip(2), start), Decision::Allowed);
 
-        // Past the window the allowance returns.
+        // Past the window the allowance returns — and only the allowance:
+        // the renewed window is limited again (review, informational: a
+        // window that was never renewed left a key unlimited after its first
+        // minute, and only an unrelated row noticed).
         let later = start + Duration::from_secs(61);
-        assert_eq!(limiter.check_at(ip(1), later), Decision::Allowed);
+        for i in 0..3 {
+            assert_eq!(limiter.check_at(ip(1), later), Decision::Allowed, "{i}");
+        }
+        assert!(matches!(
+            limiter.check_at(ip(1), later),
+            Decision::Limited { .. }
+        ));
     }
 
     #[test]
@@ -522,6 +572,26 @@ mod tests {
         assert_eq!(bucket_of(v6("::ffff:203.0.113.5")), v6("203.0.113.5"));
         assert_ne!(bucket_of(v6("::ffff:203.0.113.6")), v6("203.0.113.5"));
         assert_eq!(bucket_of(v6("203.0.113.5")), v6("203.0.113.5"));
+        // NAT64's well-known prefix embeds the IPv4 client (review L1): two
+        // IPv4 clients behind the translator are two buckets, and one of them
+        // is the same bucket as that client arriving natively. A
+        // network-specific prefix is an ordinary /64.
+        assert_eq!(bucket_of(v6("64:ff9b::c000:205")), v6("192.0.2.5"));
+        assert_eq!(bucket_of(v6("64:ff9b::192.0.2.6")), v6("192.0.2.6"));
+        assert_ne!(
+            bucket_of(v6("64:ff9b::c000:205")),
+            bucket_of(v6("64:ff9b::c000:206"))
+        );
+        assert_eq!(
+            bucket_of(v6("64:ff9b:1::c000:205")),
+            v6("64:ff9b:1::"),
+            "RFC 8215's local-use prefix is not unwrapped"
+        );
+        assert_eq!(
+            bucket_of(v6("64:ff9b:0:0:1::5")),
+            v6("64:ff9b::"),
+            "only the /96 is the well-known prefix"
+        );
 
         let limiter = RateLimiter::new(Duration::from_secs(60), 3);
         let start = Instant::now();

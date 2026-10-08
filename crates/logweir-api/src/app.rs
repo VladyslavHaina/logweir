@@ -62,10 +62,11 @@ pub struct SharedMode {
     pub streams: Arc<StreamSlots>,
     /// The session lifetime in seconds.
     pub session_max_age_seconds: i64,
-    /// The proxy peers whose forwarded headers may be RECORDED and who may
-    /// satisfy the entry-point gate: `trustedProxyCidrs`, and the serving
-    /// endpoints of `trustedProxyService` (chart gap G6). Never an identity
-    /// input.
+    /// The proxy peers whose forwarded headers may be RECORDED, whose
+    /// `X-Forwarded-For` chooses the sign-in rate-limit bucket
+    /// (`crate::http::login_rate_key`, FX-13), and who may satisfy the
+    /// entry-point gate: `trustedProxyCidrs`, and the serving endpoints of
+    /// `trustedProxyService` (chart gap G6). Never an identity input.
     pub trusted_proxies: Arc<crate::trusted_proxy::TrustedProxies>,
     /// Whether the entry point refuses any request that did not arrive
     /// through one of those proxies over HTTPS
