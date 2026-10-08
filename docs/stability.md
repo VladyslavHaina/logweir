@@ -113,21 +113,16 @@ catalog point are untouched.
   it against `format_version` (NR-1) or against the two lists every reader
   already has (NR-2, NR-3), as FX-4's receipt arms 6 and 7 judge
   `config_coverage` against `format_version` and `source.topics`.
-- **PENDING THE OWNER'S RULING: the content of the two existing lists.** In a
-  `newTopic` document, entries of the existing shape
-  `"<target topic>: <key>"` leave `intentionally_deviated` and are written into
-  `unexpected_divergence` instead. That is a change to existing fields'
-  content, which the rule above calls MAJOR unless ruled otherwise, and OD-7's
-  follow-up ruling covers FX-4's entry only. It is FX-4's class, a change that
-  can only weaken an older reader's conclusion: what such a reader showed as
-  intended it now shows as unexpected, and no verdict moves, because no reader
-  has a `topic_parity` arm and `outcome` does not depend on it (measured, the
-  next bullet). It is implemented as if MINOR and is not MINOR until the owner
-  rules. If the owner rules it MAJOR, the choices are format `2.0.0`, which
-  needs two maintainer approvals and makes every older reader refuse every new
-  scorecard, or leaving `intentionally_deviated` as it was and carrying the
-  correction in `not_reconstructed` alone, a plain MINOR under which every
-  older reader keeps reading the old label.
+- **The content of the two existing lists is MINOR: the owner ruled it on
+  2026-10-07, OD-7's third case** (the rule above). In a `newTopic` document,
+  entries of the existing shape `"<target topic>: <key>"` leave
+  `intentionally_deviated` and are written into `unexpected_divergence`
+  instead. That is new content in two existing fields, and it can only move a
+  reader's verdict to the safer side, from intended to not intended: what an
+  older reader showed as intended it now shows as unexpected. It makes no
+  verdict stronger, and no verdict moves at all, because no reader has a
+  `topic_parity` arm and `outcome` does not depend on it (measured, the next
+  bullet). A scratch drill's lists are unchanged.
 - **Readers built before FX-3 accept every 1.2.0 document** (measured on FX-3's
   live and synthetic 1.2.0 scorecards with `logweir` and `verify_scorecard.py`
   1.15.0 at main `b8b9263f`, and with the released `v0.1.5` runner image and

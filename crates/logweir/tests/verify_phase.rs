@@ -3762,20 +3762,59 @@ fn a_new_topic_restore_whose_target_read_was_refused_still_names_its_replication
     assert!(out.topic_parity.intentionally_deviated.is_empty());
 }
 
-/// **FX-3's classification, stated in ONE place and not claimed MINOR.** The
-/// new field and arms NR-1..NR-3 fall under OD-7 (a); moving a `newTopic`
-/// restore's deviations out of `intentionally_deviated` and into the existing
-/// `unexpected_divergence` changes two existing fields' content, which OD-7's
-/// follow-up ruling (FX-4's entry only) does not cover. `docs/stability.md`'s
-/// FX-3 section says it is pending the owner's ruling, implemented as if
-/// MINOR, and no other document restates or resolves it.
+/// The bullet `docs/stability.md`'s FX-3 section carried from 2026-10-05 until
+/// the owner ruled, verbatim (whitespace-flattened). It is kept here only so
+/// [`fx3_stale_wording`] is proven to catch it.
+const FX3_PENDING_BULLET_OF_2026_10_05: &str = "- **PENDING THE OWNER'S RULING: the content \
+     of the two existing lists.** In a `newTopic` document, entries of the existing shape \
+     `\"<target topic>: <key>\"` leave `intentionally_deviated` and are written into \
+     `unexpected_divergence` instead. That is a change to existing fields' content, which the \
+     rule above calls MAJOR unless ruled otherwise, and OD-7's follow-up ruling covers FX-4's \
+     entry only. It is FX-4's class, a change that can only weaken an older reader's \
+     conclusion: what such a reader showed as intended it now shows as unexpected, and no \
+     verdict moves, because no reader has a `topic_parity` arm and `outcome` does not depend \
+     on it (measured, the next bullet). It is implemented as if MINOR and is not MINOR until \
+     the owner rules. If the owner rules it MAJOR, the choices are format `2.0.0`, which needs \
+     two maintainer approvals and makes every older reader refuse every new scorecard, or \
+     leaving `intentionally_deviated` as it was and carrying the correction in \
+     `not_reconstructed` alone, a plain MINOR under which every older reader keeps reading \
+     the old label.";
+
+/// The wording that would say FX-3's classification is still open, in a
+/// whitespace-flattened, lowercased document.
+fn fx3_stale_wording(flat_lowercase: &str) -> Vec<&'static str> {
+    [
+        "pending the owner's ruling",
+        "pending the owner’s ruling",
+        "implemented as if minor",
+        "not minor until the owner rules",
+        "if the owner rules it major",
+    ]
+    .into_iter()
+    .filter(|stale| flat_lowercase.contains(stale))
+    .collect()
+}
+
+/// **FX-3's classification is RULED, and no document calls it pending.** The
+/// new field and arms NR-1..NR-3 are MINOR under OD-7 (a). Moving a
+/// `newTopic` restore's deviations out of `intentionally_deviated` and into
+/// the existing `unexpected_divergence` is new content in two existing
+/// fields; the owner ruled it MINOR on 2026-10-07 as OD-7's third, general
+/// case (it can only move a reader's verdict to the safer side).
+/// `docs/stability.md`'s FX-3 section states that ruling, and no document or
+/// FX-3 source comment still says the classification awaits it.
 ///
-/// When the owner rules, this test changes with the section, as FX-4's OD-7
-/// test did. Negative controls: the section without the pending bullet, a
-/// second copy of it in another document, or a sentence calling the change
-/// MINOR, fails here.
+/// Negative controls: [`FX3_PENDING_BULLET_OF_2026_10_05`] must trip
+/// [`fx3_stale_wording`] (asserted first, so the check cannot go blind), and
+/// restoring that bullet in `docs/stability.md`, or a "pending" sentence in
+/// any listed file, fails here.
 #[test]
-fn fx3s_change_to_the_two_existing_lists_is_pending_the_owners_ruling_in_one_place() {
+fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pending() {
+    assert_eq!(
+        fx3_stale_wording(&FX3_PENDING_BULLET_OF_2026_10_05.to_lowercase()).len(),
+        4,
+        "the stale-wording check must catch every pending phrase of the 2026-10-05 bullet"
+    );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let flat = |rel: &str| -> String {
         std::fs::read_to_string(root.join(rel))
@@ -3793,8 +3832,9 @@ fn fx3s_change_to_the_two_existing_lists_is_pending_the_owners_ruling_in_one_pla
         .next()
         .expect("the section");
     for said in [
-        "**PENDING THE OWNER'S RULING: the content of the two existing lists.**",
-        "It is implemented as if MINOR and is not MINOR until the owner rules.",
+        "**The content of the two existing lists is MINOR: the owner ruled it on 2026-10-07, \
+         OD-7's third case** (the rule above).",
+        "It makes no verdict stronger",
         "**The field and its three arms are MINOR** under the owner's OD-7 (a)",
     ] {
         assert!(
@@ -3802,26 +3842,24 @@ fn fx3s_change_to_the_two_existing_lists_is_pending_the_owners_ruling_in_one_pla
             "docs/stability.md's FX-3 section no longer says: {said}"
         );
     }
-    let mut places = 0;
     for doc in [
         "docs/stability.md",
         "docs/formats/drill-scorecard.md",
         "docs/verify-a-scorecard.md",
         "docs/release-notes.md",
+        "docs/formats/backup-receipt.md",
         "e2e/fixtures/invariants/README.md",
         "MAINTAINERS.md",
+        "docs/verify_scorecard.py",
+        "crates/logweir-core/src/scorecard.rs",
+        "crates/logweir/src/drill/phase7_verify.rs",
+        "crates/logweir/src/verify.rs",
+        "crates/logweir/src/show.rs",
     ] {
-        let text = flat(doc);
-        places += text.matches("PENDING THE OWNER'S RULING").count();
-        for claim in [
-            "the change to the two existing lists is MINOR",
-            "FX-3's entries in `unexpected_divergence` are MINOR",
-        ] {
-            assert!(!text.contains(claim), "{doc} claims {claim:?}");
-        }
+        let stale = fx3_stale_wording(&flat(doc).to_lowercase());
+        assert!(
+            stale.is_empty(),
+            "{doc} still calls FX-3's classification pending: {stale:?}"
+        );
     }
-    assert_eq!(
-        places, 1,
-        "FX-3's pending ruling is stated in exactly one place"
-    );
 }
