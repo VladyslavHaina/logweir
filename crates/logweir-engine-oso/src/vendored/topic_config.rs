@@ -2,8 +2,11 @@
 //! backup's configuration coverage is checked against (FX-4).
 //!
 //! SOURCE: U/kafka-backup/crates/kafka-backup-core/src/backup/engine.rs @ tag
-//! v0.21.0 (`third_party/kafka-backup-v0.21.0.tar.gz`, sha256
-//! `0252a83735148331c16d7c4e737a41f099c0f52eda5d7a66db75b8848ddc405b`):
+//! v0.21.0 (the tarball vendored then, sha256
+//! `0252a83735148331c16d7c4e737a41f099c0f52eda5d7a66db75b8848ddc405b`; since
+//! PROD-00.3f the tree vendors `third_party/kafka-backup-v0.23.3.tar.gz`, whose
+//! `capture_topic_configs` is at `:701` and allowlist at `:1156`, and xtask's
+//! `LIST_CHECKS` holds this list to the pinned tarball):
 //! `capture_topic_configs` at `:686-721` keeps an entry when
 //! `entry.is_topic_override() && !entry.read_only && !entry.is_sensitive &&
 //! is_recovery_topic_config(&entry.name)` and its value is present

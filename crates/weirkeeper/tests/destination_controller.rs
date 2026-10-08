@@ -395,8 +395,9 @@ async fn a_valid_destination_publishes_its_url_digest_and_ca_digest() {
 }
 
 /// **ENGINE-PATHSTYLE.** `VirtualHosted` with a custom endpoint is a setting
-/// engine 0.21.0 cannot honour, so it is REFUSED rather than served as
-/// path-style behind the operator's back.
+/// the pinned engine cannot honour (0.21.0 through the 0.23.3 pin), so it is
+/// REFUSED rather than served as path-style behind the operator's back. The
+/// condition's message names no engine version (PROD-00.3f, A-C16-1).
 #[test]
 fn virtual_hosted_with_a_custom_endpoint_is_refused() {
     let mut value = dest_a_unreconciled();
@@ -413,6 +414,11 @@ fn virtual_hosted_with_a_custom_endpoint_is_refused() {
     assert!(
         verdict.message.contains("path-style") && verdict.message.contains("endpoint"),
         "the refusal names the engine behaviour rather than saying `invalid`: {}",
+        verdict.message
+    );
+    assert!(
+        !verdict.message.chars().any(|c| c.is_ascii_digit()),
+        "A-C16-1: the condition message names no engine version: {}",
         verdict.message
     );
 }

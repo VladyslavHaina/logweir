@@ -260,7 +260,16 @@ pub fn render_topic_mapping_block(
 /// `render_validation::render` so the two documents can never disagree about
 /// the archive: one arm set, one golden per backend. Every free-text field
 /// goes through `yaml_scalar`.
+///
+/// **C15** (PROD-00.3f): a plain `http://` endpoint with `allow_http: false`
+/// is REFUSED here, before a single key is written, because the pinned engine
+/// (0.22.0 and later) would derive plaintext from the scheme and ignore the
+/// rendered `false`. This is the one function every engine document's storage
+/// block goes through, so no document of any kind can carry the combination.
 pub(crate) fn render_storage_block(storage: &StorageUrl) -> Result<String, RenderError> {
+    if storage.plaintext_endpoint_without_allow_http() {
+        return Err(RenderError::PlaintextEndpointWithoutAllowHttp);
+    }
     Ok(match storage {
         StorageUrl::S3 {
             bucket,

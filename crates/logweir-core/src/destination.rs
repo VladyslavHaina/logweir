@@ -459,23 +459,33 @@ pub fn validate_transition(
     }
 }
 
-/// D2 G4: the pinned engine (kafka-backup 0.21.0) ignores `path_style` and
-/// FORCES path-style addressing whenever an endpoint is set
-/// (`kafka-backup-core/src/storage/s3.rs:66`). So `VirtualHosted` with a custom
-/// endpoint is a setting the engine cannot honour, and Logweir refuses it
-/// rather than advertising a behaviour it does not have (tracker defect
-/// ENGINE-PATHSTYLE).
+/// D2 G4: the pinned engine FORCES path-style addressing whenever an endpoint
+/// is set. kafka-backup 0.21.0 ignored `path_style` outright
+/// (`kafka-backup-core/src/storage/s3.rs:64-67`); 0.22.0 and the 0.23.3 pin
+/// honour `path_style: true`, but `use_path_style(endpoint, path_style)` is
+/// still `path_style || endpoint.is_some()` (`storage/s3.rs:55-57` and
+/// `:78-80` at v0.23.3). So `VirtualHosted` with a custom endpoint is a
+/// setting the engine cannot honour, and Logweir refuses it rather than
+/// advertising a behaviour it does not have (tracker defect ENGINE-PATHSTYLE;
+/// PROD-00 decision record, C16).
 ///
-/// `VirtualHosted` with NO endpoint is AWS S3's own default and is fine.
+/// The refusal names NO engine version (PROD-00.3f, A-C16-1): it is true of
+/// every engine since 0.21.0, and a version in the message is a sentence that
+/// goes stale at the next bump. `VirtualHosted` with NO endpoint is AWS S3's
+/// own default and is fine.
 pub fn engine_compatible(loc: &DestinationLocation) -> Result<(), &'static str> {
     if loc.addressing == Addressing::VirtualHosted && loc.endpoint.is_some() {
-        return Err(
-            "engine 0.21.0 forces path-style addressing whenever a custom endpoint is set, so \
-             storage.addressing VirtualHosted with storage.endpoint cannot be honoured",
-        );
+        return Err(ENGINE_PATHSTYLE_MESSAGE);
     }
     Ok(())
 }
+
+/// The ENGINE-PATHSTYLE refusal, shared by the product API
+/// (`addressing_unsupported_by_engine`) and the controller
+/// (`AddressingUnsupportedByEngine`). Version-neutral by contract.
+pub const ENGINE_PATHSTYLE_MESSAGE: &str =
+    "the pinned engine forces path-style addressing whenever a custom endpoint is set, so \
+     storage.addressing VirtualHosted with storage.endpoint cannot be honoured";
 
 impl DestinationLocation {
     /// `s3://<bucket>[/<prefix>]` — what `status.canonicalUrl` publishes and

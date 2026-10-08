@@ -149,7 +149,8 @@ pub enum Command {
     /// marker topic and approver key — before a drill is attempted.
     //
     // "engine version", not "engine digest": `doctor` compares the engine's
-    // `--version` string against the pinned 0.21.0 and computes NO digest.
+    // `--version` string against the pin (`doctor::ENGINE_PIN`) and computes NO
+    // digest.
     // `third_party/kafka-backup-binary.digest` is read only to interpolate
     // into a failure message. The module's own doc comment said "engine
     // version pinned" and was right; this help text was the wrong one, and it

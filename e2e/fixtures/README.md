@@ -66,7 +66,11 @@ repository's test suite.
 
 `segments/upstream-0.21.0.kbak` and `manifests/0.21.json` are captured from a
 **real** archive produced by the digest-pinned engine, refreshed by
-`scripts/e2e-seed.sh`. They are **not byte-reproducible** — each record carries
+`scripts/e2e-seed.sh` on the default stack. The committed pair is 0.21.0
+bytes; since the pin moved to 0.23.3 (PROD-00.3f) a refresh writes 0.23.3
+bytes under the same names. The segment container is byte-identical from
+0.18.0 to 0.23.3 and the manifest shape since 0.22.0, so the names say where
+the pair started, not which engine a refreshed pair came from. They are **not byte-reproducible** — each record carries
 its own produce timestamp, so the zstd frames and the manifest timestamps differ
 on every run. A CI job that seeds must never `git diff --exit-code` afterwards.
 The committed pair is checked instead by the Docker-free default test set, in
@@ -93,9 +97,13 @@ account of what the groups had committed.
 
 **Engine.** `kafka-backup 0.21.0` (`kafka-backup --version`), image
 `osodevops/kafka-backup@sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`,
-the pin in `third_party/kafka-backup-binary.digest`. The writer is
-`snapshot_consumer_groups` in `crates/kafka-backup-core/src/backup/engine.rs`
-of `third_party/kafka-backup-v0.21.0.tar.gz` (lines 846-933).
+the pin when they were made. The writer is `snapshot_consumer_groups` in
+`crates/kafka-backup-core/src/backup/engine.rs` of the v0.21.0 source
+(lines 846-933). The pin is 0.23.3 since PROD-00.3f; its writer
+(`backup/engine.rs:903-988` in `third_party/kafka-backup-v0.23.3.tar.gz`)
+writes the same shape, which `cargo xtask sync-upstream` and its tests hold
+the vendored reader to, and `e2e/tests/consumer_group_snapshot.rs` passed on
+it (decision record `PROD-00-engine-route.md` §12).
 
 **How they were made** (2026-09-29, on compose slot 1, `logweir-e2e-s1`:
 `apache/kafka:3.7.1` in KRaft mode, the `confluentinc/cp-kafka:7.6.0` tools and

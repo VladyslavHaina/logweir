@@ -53,6 +53,33 @@ pub enum StorageUrl {
 }
 
 impl StorageUrl {
+    /// **C15** (`docs/to-do/decisions/PROD-00-engine-route.md` 3.15): an S3
+    /// location whose endpoint is plain `http://` while `allow_http` is false.
+    ///
+    /// Engine 0.21.0 refused that document before any connection ("HTTP
+    /// error: builder error"). From 0.22.0 on, including the 0.23.3 pin, the
+    /// engine's YAML path ORs `allow_http` with the endpoint's scheme
+    /// (`storage/config.rs:116-118` and `storage/mod.rs:58-73` at v0.23.3,
+    /// unchanged since 0.22.0), logs "enabling allow_http" and dials the
+    /// endpoint in the clear. YAML cannot tell `allow_http: false` from an
+    /// absent key, so the only safe place to keep the combination out of the
+    /// engine is before a document exists. The scheme is compared without
+    /// regard to ASCII case, which is stricter than the engine's own
+    /// case-sensitive test.
+    pub fn plaintext_endpoint_without_allow_http(&self) -> bool {
+        match self {
+            Self::S3 {
+                endpoint: Some(endpoint),
+                allow_http: false,
+                ..
+            } => endpoint
+                .trim_start()
+                .get(..7)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://")),
+            _ => false,
+        }
+    }
+
     /// The key prefix, for the object_store wrapper's own listing. `filesystem`
     /// has none: upstream's variant carries only `path`.
     pub fn prefix(&self) -> &str {

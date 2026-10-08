@@ -56,7 +56,8 @@ them can approve their own restore, or enforce a deletion plan they wrote.
 ### 1. Install
 
 1. Check the floors: Kubernetes 1.29+, amd64-capable nodes for runner Jobs, and
-   engine 0.21.0 ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
+   engine 0.21.0, with 0.23.3 the pinned engine the images ship
+   ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
 2. Choose images: the published digests of the exact CI run you deploy, not
    `latest` ([install.md](install.md), *Choose an image and installation path*).
 3. Install with Helm and the managed identity — path (c) — declaring every
@@ -469,7 +470,8 @@ logweir doctor \
 `doctor` checks credentials, the engine **version** and glibc floor, target
 reachability, the marker topic and the approver key — before a drill is
 attempted. It compares the engine's own `--version` output against the pinned
-`0.21.0`; it does **not** compute or compare an image digest
+`0.23.3`, as a whole token (`0.23.3+build` or `0.23.3-rc1` is a mismatch); it
+does **not** compute or compare an image digest
 (`third_party/kafka-backup-binary.digest` is quoted in the failure message and
 nowhere else), so a green `ok engine version` line says the right version ran,
 not that the right binary did. Add `--strict` to treat a check it could not perform (for example
@@ -528,8 +530,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
 # Optional engine override. Both doctor and drill run search LOGWEIR_ENGINE_BIN,
 # ./.engine/kafka-backup, /usr/local/bin/kafka-backup, then PATH.
 export LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
-export LOGWEIR_ENGINE_VERSION=0.21.0
-export LOGWEIR_ENGINE_DIGEST=sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317
+export LOGWEIR_ENGINE_VERSION=0.23.3
+export LOGWEIR_ENGINE_DIGEST=sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db
 
 logweir drill run \
   --spec drill.yaml \

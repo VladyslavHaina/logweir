@@ -22,7 +22,7 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10), 24 (FX-3), 25
 (FX-13), 26 (FX-11) and 27 (FX-8), from the product-expansion tracker's fix-now
-rows, land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
+rows, and item 28 (PROD-00.3f, the engine pin), land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
 execution-claim set check, receipt and catalog format 1.2.0, the pin's read
 by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
@@ -179,7 +179,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-seven operator-facing changes
+### The twenty-eight operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -199,6 +199,8 @@ FX-11 and is not proven live yet: the PoC upgrade that carries it runs its
 rows.
 Item 27 is fix-now row FX-8, proven on the compose stack; the PoC upgrade that
 carries it runs its refusal and opt-in rows.
+Item 28 is PROD-00.3f, the engine pin, proven on a compose stack; the PoC
+upgrade that carries it runs its controller and runner rows.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -1235,6 +1237,62 @@ Not yet proven on the PoC: the upgrade that carries FX-8 runs those rows.
 selections this build refuses, unlabelled, signing format 1.1.0 again. The 1.3.0
 scorecards already written stay valid under both readers.
 
+#### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
+
+**Changed.** The runner image carries `kafka-backup` **0.23.3** (image digest
+`sha256:cc7d5a8a…`, upstream commit `afb160e7`), OSO's newest release on
+2026-10-07, in place of 0.21.0. The segment format, the three engine commands
+Logweir runs and every key it renders are unchanged, and archives written by
+either engine read and restore with the other. `logweir doctor` accepts exactly
+0.23.3, as a whole token: 0.21.0 is now a version mismatch, and so is a suffixed
+`0.23.3+build`. Receipts and scorecards name the engine that ran, so new ones
+say 0.23.3. Two engine behaviours since 0.22.0 are refused instead of
+inherited. A storage location with a plain `http://` endpoint and
+`allow_http: false` is refused at phase 0 with exit 3 (`refusal-reason=GuardRefused`),
+by `drill run`, `restore run` and `backup run` alike, and no engine document
+is rendered with it: the engine now derives plaintext from the scheme and
+would dial the archive in the clear. `VirtualHosted` addressing with a custom
+endpoint stays refused (`AddressingUnsupportedByEngine` /
+`addressing_unsupported_by_engine`); its message no longer names an engine
+version. The full-drill floor stays 0.21.0.
+**Do:** nothing with the chart: the controller stamps the new version into
+every runner Job, so roll the controller **and** runner image together (the
+existing upgrade order). A standalone CLI install replaces its engine binary
+with 0.23.3 (the digest in `third_party/kafka-backup-binary.digest`) and its
+`LOGWEIR_ENGINE_VERSION` / `LOGWEIR_ENGINE_DIGEST` with the new pair
+([quickstart.md](quickstart.md), step 4; `examples/cronjob-drill.yaml`). A spec
+that names an `http://` endpoint must say `allow_http: true`; a saved
+destination already cannot combine the two (rule R3).
+**Scope:** source evaluation of every change from 0.21.0 to 0.23.3
+([decision record](to-do/decisions/PROD-00-engine-route.md) §12: no capability gap
+it lists is fixed, and nothing Logweir reads or renders changed shape). On a
+compose stack (slot 4, Kafka 3.7.1, the engine under `linux/amd64` emulation)
+CI's e2e command passed 177 tests, PROD-01.1's record-semantics contract
+asserted on 0.23.3 included; the demo drill passed with both readers VALID; an
+archive 0.21.0 wrote drilled with 0.23.3, and an archive 0.23.3 wrote drilled
+with 0.21.0, both `pass`. On Kafka 4.3.1 the record-semantics, G-PITR, FX-1,
+FX-7 and full-drill rows passed with the pin as well (34 tests). Unit rows refuse the `http://` combination in each
+of the three engine documents and at phase 0 for drill and backup specs, with
+mutants on those guards and on `doctor`'s pin, and `crates/logweir/tests/engine_pin.rs`
+(CI's workspace run) holds every place that names the pin to one version.
+`engine-matrix` run 37728540932 recorded `pass` for both 0.23.3 rows (Kafka
+3.7.1 and 4.3.1) with PROD-01.1's rows asserted. Its 0.21.0 and 0.22.0 rows
+recorded `fail(e2e suite)` because the pin guard then ran in the package the
+matrix runs with each row's own engine, and stopped those rows before their
+drill suites; it is not an engine finding, and the guard has moved. The
+re-dispatch at the fix tip, run 37736333362, recorded every one of the seven
+declared rows as declared: 0.21.0, 0.22.0 and both 0.23.3 rows `pass`, the
+three below-floor rows `unsupported(lever-absent)`. The controller's
+`LOGWEIR_ENGINE_VERSION` reaches a live runner Job only at the next PoC
+upgrade.
+**Rollback:** an older runner and controller run 0.21.0 again; `doctor` from
+that build refuses 0.23.3. Measured: an archive 0.23.3 wrote restores and
+verifies `pass` when this build drives the 0.21.0 engine. Not run, and reasoned
+from source only: an OLDER Logweir build reading a 0.23.3 archive or receipt.
+The manifest has the keys a 0.21.0 manifest has (`missing_topics` is omitted
+when empty), the segment container is unchanged since 0.18.0, and the vendored
+structs ignore unknown keys.
+
 ### Verification scope: what "verified" means in this release
 
 - **A green badge** means the signed document's signature verified under a key
@@ -1343,7 +1401,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26 and 27, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26, 27 and 28, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.

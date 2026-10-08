@@ -23,7 +23,8 @@
 //! # What the assertions are
 //!
 //! The expected divergence sets below are PROD-01.1's capability contract for
-//! engine 0.21.0 (`docs/to-do/decisions/PROD-01.1-record-semantics.md`): the
+//! the pinned engine, `CONTRACT_ENGINE` (`docs/to-do/decisions/PROD-01.1-record-semantics.md`;
+//! stated on 0.21.0, re-measured unchanged on 0.23.3 by PROD-00.3f): the
 //! known counterexamples, stated exactly. They are not desired behaviour.
 //! When the engine changes — READ_COMMITTED capture through PROD-00.3, say —
 //! the row goes red and the contract and this file change together.
@@ -437,7 +438,16 @@ fn kill_own_restores() {
 /// On any other release — `engine-matrix` runs this suite for others — a row
 /// records its outcome and asserts nothing, so a different engine is a
 /// finding in the outcome file, not a red matrix cell.
-const CONTRACT_ENGINE: &str = "0.21.0";
+///
+/// It is a LITERAL on purpose, and it moves with the pin only after the rows
+/// have been re-run on the new engine (A-3f-1): PROD-00.3f moved it from
+/// `0.21.0` to `0.23.3` with that run. `crates/logweir/tests/engine_pin.rs`
+/// fails when it differs from the pin `doctor` accepts, so a bump cannot leave
+/// every contract row recording outcomes on the new engine while asserting
+/// nothing. That guard runs in CI's workspace job and never in this package:
+/// `engine-matrix` runs this package with each row's own engine, so nothing
+/// here may compare the engine with the pin.
+const CONTRACT_ENGINE: &str = "0.23.3";
 
 fn contract_applies(row: &str) -> bool {
     let v = engine_version();
@@ -900,8 +910,8 @@ fn detection_signals(
 /// Transactions: a transactional producer that commits and aborts, and one
 /// transaction held OPEN across the backup and aborted after it.
 ///
-/// Contract (engine 0.21.0 captures `READ_UNCOMMITTED`, keeps control
-/// records, and replays without a transactional producer):
+/// Contract (the engine, 0.21.0 through 0.23.3, captures `READ_UNCOMMITTED`,
+/// keeps control records, and replays without a transactional producer):
 /// * capture: the archive holds every data record the log held, committed,
 ///   aborted and open alike, plus every transaction marker below the captured
 ///   high watermark as an ordinary record;
