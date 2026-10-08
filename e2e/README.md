@@ -220,8 +220,9 @@ group of AP-04.1-1.
 `kafka-broker-1`, each bounded by `timeout` (`GROUPS_MEMBER_SECONDS`, default
 7200). `stop` sends SIGTERM through a bracketed, anchored pattern
 (`[g]roup NAME$`), so the consumer closes and LEAVES its group, which is
-Empty without waiting out a session timeout (the smoke requires `stop` to
-return in under 40 s; `session.timeout.ms` is 45 s); the pattern never matches the shell that carries it (PROD-04.0
+Empty at the first check after its process exits (`stop` says so, and the
+smoke requires it; a member killed without leaving would hold the group for
+`session.timeout.ms`, 45 s); the pattern never matches the shell that carries it (PROD-04.0
 §3.3's first control killed its own `sh -c`) or a neighbouring member. The
 streams member is stopped and started with `docker compose`. While a member
 lives, a reset of its group is refused (the group is active); once `stop`

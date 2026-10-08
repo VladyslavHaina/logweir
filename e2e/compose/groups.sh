@@ -54,7 +54,8 @@
 # (`docker compose exec -d`), each bounded by `timeout` (GROUPS_MEMBER_SECONDS,
 # default 7200) and gone with the container at `just e2e-down`. `stop` sends
 # SIGTERM: the console consumer's shutdown hook closes it, so it LEAVES its
-# group, which is Empty without waiting out a session timeout. Every
+# group, which is Empty at the first check after the process exits (`stop`
+# says so) rather than after a session timeout. Every
 # pkill/pgrep pattern is BRACKETED, `[g]roup NAME$`: PROD-04.0's first control
 # step ran `pkill -f "group pa-classic-live"` inside `sh -c`, which matched
 # its own shell and killed it before the other two pkills ran (§3.3). The
@@ -233,7 +234,19 @@ stop_member() {
     for _ in $(seq 1 20); do running "$g" || break; sleep 2; done
     running "$g" && die "$g's member is still running 40 s after SIGTERM"
   fi
-  wait_state "$g" "$kind" Empty 90 || die "$g did not become Empty"
+  # Did the member LEAVE? Then the group is Empty at the first look after its
+  # process is gone. A member that died without leaving (SIGKILL) holds the
+  # group Stable until session.timeout.ms (45 s by default), far longer than
+  # one look takes, so this line tells the two apart whatever the host's load
+  # (`profile-smoke.sh groups` requires it).
+  local first
+  first=$(state_of "$g" "$kind")
+  if [ "$first" = Empty ]; then
+    say "$g: Empty at the first check after its member exited (it left the group)"
+  else
+    say "$g: still '${first:-absent}' after its member exited (it did not leave); waiting for Empty"
+    wait_state "$g" "$kind" Empty 90 || die "$g did not become Empty"
+  fi
 }
 
 # ---------------------------------------------------------------- setup

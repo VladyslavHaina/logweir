@@ -358,11 +358,14 @@ smoke_groups() {
   [ "$(lvl group.version)" -ge 1 ] 2>/dev/null && has_c=1
   [ "$(lvl share.version)" -ge 1 ] 2>/dev/null && has_s=1
   [ "$(lvl streams.version)" -ge 1 ] 2>/dev/null && has_t=1
-  # The classic rows' TYPE must be the BROKER's answer: a line whose tools
-  # cannot report one (3.7.1's kafka-consumer-groups.sh has no --type) must
-  # show '-', never a type the helper made up.
-  local ct=Classic
-  innet "$T/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --list --type" | grep -q '^GROUP  *TYPE' || ct=-
+  # The classic rows' TYPE must be the BROKER's answer, read here on its own:
+  # kafka-groups.sh (4.x) or kafka-consumer-groups.sh --list --type (3.9);
+  # a line whose tools cannot report one (3.7.1 has neither) must show '-',
+  # never a type the helper made up.
+  local tprobe ct=-
+  tprobe=$(innet "if [ -x $T/kafka-groups.sh ]; then $T/kafka-groups.sh --bootstrap-server kafka-broker-1:9094 --list; else $T/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --list --type; fi")
+  if printf '%s' "$tprobe" | grep -q '^GROUP  *TYPE'; then ct=Classic; fi
+  echo "#   the broker's own group listing: $(printf '%s' "$tprobe" | grep -m1 '^GROUP' | tr -s ' '); $(printf '%s' "$tprobe" | grep -c '^pa-classic-') classic fixture row(s)"
   rows="pa-classic-empty $ct Empty
 pa-classic-live $ct Stable"
   [ $has_c = 1 ] && rows="$rows
@@ -411,9 +414,10 @@ EOF
     dt=$((SECONDS - t0))
     others=$(bounded 600 bash e2e/compose/groups.sh list 2>/dev/null | awk -v g="$mg" '$1 != g && $3 == "Stable" { print $1 }' | sort | tr '\n' ' ')
     want_others=$(printf '%s\n' "$live" | grep -vx "$mg" | tr '\n' ' ')
-    # Under 40 s: a member that did not LEAVE (killed, not closed) would hold
-    # its group until session.timeout.ms, 45 s by default.
-    if [ $s = 0 ] && [ "$dt" -lt 40 ] && [ "$others" = "$want_others" ]; then pass "groups.$m.stop" "$mg Empty, stop returned in $dt s; every other live group still Stable: $others"; else fail "groups.$m.stop" "rc $s in $dt s; Stable: '$others', want '$want_others'; $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+    # The member LEFT: its group was Empty at the first check after the
+    # process exited. One that died without leaving (SIGKILL) holds the group
+    # Stable until session.timeout.ms, 45 s, and `stop` says "did not leave".
+    if [ $s = 0 ] && printf '%s' "$out" | grep -q 'Empty at the first check' && [ "$others" = "$want_others" ]; then pass "groups.$m.stop" "$mg left its group (Empty at the first check; stop took $dt s); every other live group still Stable: $others"; else fail "groups.$m.stop" "rc $s in $dt s; Stable: '$others', want '$want_others'; $(printf '%s' "$out" | grep -v '^ Container' | tail -2 | tr '\n' ' ')"; fi
     out=$(innet "$reset")
     rb=$(innet "$T/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group $mg --offsets" | awk -v g="$mg" '$1 == g && $2 == "pa-orders" && $3 == 0 { print $4 }')
     # One stream of words: 3.9.2's reset prints its row on the header's line.
@@ -428,7 +432,7 @@ EOF
     out=$(bounded 300 bash e2e/compose/groups.sh stop "$m" 2>&1)
     s=$?
     dt=$((SECONDS - t0))
-    if [ $s = 0 ] && [ "$dt" -lt 40 ]; then pass "groups.$m.stop" "its group is Empty, stop returned in $dt s"; else fail "groups.$m.stop" "rc $s in $dt s: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+    if [ $s = 0 ] && printf '%s' "$out" | grep -q 'Empty at the first check'; then pass "groups.$m.stop" "its member left: Empty at the first check (stop took $dt s)"; else fail "groups.$m.stop" "rc $s in $dt s: $(printf '%s' "$out" | grep -v '^ Container' | tail -2 | tr '\n' ' ')"; fi
     out=$(bounded 400 bash e2e/compose/groups.sh start "$m" 2>&1)
     if [ $? = 0 ]; then pass "groups.$m.start" "Stable again"; else fail "groups.$m.start" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   done
