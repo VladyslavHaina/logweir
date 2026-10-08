@@ -741,11 +741,14 @@ echo "check-verifier-parity: both readers accept 1.0.0 and 1.1.0 scorecards and 
 #   scratch-1.0.0      the frozen 1.0.0 drill, intended labels and no field:
 #                      no line, because a drill's deviations ARE intended
 #
-# and one both readers REFUSE with the same full text: the "dropped instead of
-# moved" document, a `not_reconstructed` entry with no twin in
+# and three both readers REFUSE with the same full text: the "dropped instead
+# of moved" document, a `not_reconstructed` entry with no twin in
 # `unexpected_divergence` (arm NR-2), which a reader older than 1.2.0 would
-# read as silence. Generated and signed here with the throwaway fixture key,
-# like the fourth loop's documents.
+# read as silence; the "mode lost" document, a newTopic restore signed with
+# the scratch labels beside `not_reconstructed: []` (arm NR-4, FX-3 review
+# F1); and a decided setting's divergence the block omits (arm NR-5).
+# Generated and signed here with the throwaway fixture key, like the fourth
+# loop's documents.
 #
 # The scorecard format that carries `topic_parity.not_reconstructed` —
 # `logweir_core::FORMAT_VERSION` at FX-3; a renumber moves both.
@@ -792,6 +795,14 @@ d = new_topic(current)
 d["topic_parity"].update(intentionally_deviated=[], unexpected_divergence=moved[:1],
                          not_reconstructed=moved)
 cases["dropped-not-moved-1.2.0"] = d
+d = new_topic(current)
+d["topic_parity"].update(intentionally_deviated=moved, unexpected_divergence=[],
+                         not_reconstructed=[])
+cases["mode-lost-1.2.0"] = d
+d = new_topic(current)
+d["topic_parity"].update(intentionally_deviated=[], unexpected_divergence=moved,
+                         not_reconstructed=[])
+cases["decided-setting-omitted-1.2.0"] = d
 for name, doc in cases.items():
     payload = (json.dumps(doc, indent=2) + "\n").encode()
     t = pt.encode()
@@ -838,32 +849,42 @@ for name in new-topic-1.2.0 new-topic-1.1.0 scratch-1.2.0 scratch-1.0.0; do
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (reconstruction)"
 done
 
-# The refusal, on FULL text once each reader's own prefix is stripped: the
+# The refusals, on FULL text once each reader's own prefix is stripped: the
 # script's `INVALID: `, and on the Rust side the second loop's prefix plus the
 # scorecard's `scorecard invariant violated: ` (an `InvariantError`'s Display).
-doc="$tmp/scorecard12/dropped-not-moved-1.2.0.json"
-sig="$tmp/scorecard12/dropped-not-moved-1.2.0.sig"
-set +e
-"$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
-    >"$tmp/rust.out" 2>"$tmp/rust.err"
-rust_rc=$?
-set -e
-set +e
-"$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
-py_rc=$?
-set -e
-[ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/dropped-not-moved-1.2.0: drill verify exited $rust_rc, expected 4"; }
-[ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/dropped-not-moved-1.2.0: verify_scorecard.py exited $py_rc, expected 1"; }
-cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
-cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
-rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
-py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
-want_msg="topic_parity.not_reconstructed names a deviation that unexpected_divergence does not; a source setting the restore did not reconstruct is also an unexpected divergence, so a reader that predates not_reconstructed never reads it as parity"
-if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
-    fail "scorecard/dropped-not-moved-1.2.0: the refusal differs between the two readers or from arm NR-2.
+NR2_MSG="topic_parity.not_reconstructed names a deviation that unexpected_divergence does not; a source setting the restore did not reconstruct is also an unexpected divergence, so a reader that predates not_reconstructed never reads it as parity"
+NR4_MSG="topic_parity.intentionally_deviated is not empty in a newTopic document that carries not_reconstructed; a newTopic restore's deviations are source settings it did not reconstruct, never intended ones"
+NR5_MSG="topic_parity.unexpected_divergence names a setting the restore decides (cleanup.policy, retention.ms, partition_count or replication_factor) that not_reconstructed does not, in a newTopic document; such a deviation is a source setting the restore did not reconstruct"
+for refusal in "dropped-not-moved-1.2.0|NR-2|$NR2_MSG" \
+               "mode-lost-1.2.0|NR-4|$NR4_MSG" \
+               "decided-setting-omitted-1.2.0|NR-5|$NR5_MSG"; do
+    name="${refusal%%|*}"
+    rest="${refusal#*|}"
+    arm="${rest%%|*}"
+    want_msg="${rest#*|}"
+    doc="$tmp/scorecard12/$name.json"
+    sig="$tmp/scorecard12/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 4"; }
+    [ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 1"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
+    py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
+        fail "scorecard/$name: the refusal differs between the two readers or from arm $arm.
   rust:   $rust_msg
   python: $py_msg
   want:   $want_msg"
-fi
-echo "check-verifier-parity: scorecard/dropped-not-moved-1.2.0  rust=$rust_rc python=$py_rc  ok  (arm NR-2)"
-echo "check-verifier-parity: both readers accept 1.2.0 scorecards, say the same about reconstruction, and refuse a not-reconstructed setting an older reader could not see"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (arm $arm)"
+done
+echo "check-verifier-parity: both readers accept 1.2.0 scorecards, say the same about reconstruction, and refuse a not-reconstructed setting an older reader could not see, a newTopic document with the scratch labels, and a decided setting the block omits"

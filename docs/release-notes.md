@@ -960,7 +960,11 @@ intended, and `logweir drill verify`, `docs/verify_scorecard.py` 1.17.0 and
 `logweir drill show` say so in words; for a `newTopic` scorecard signed before
 1.2.0 they say its intended entries were not reconstructed. A scratch drill's
 scorecard is unchanged apart from `format_version` and `not_reconstructed: []`.
-No exit code or `outcome` changes: `topic_parity` decides neither.
+No exit code or `outcome` of a scorecard this build signs changes: `topic_parity`
+decides neither. A 1.2.0 scorecard whose lists contradict `not_reconstructed`,
+such as a `newTopic` one that labels these settings intended beside
+`not_reconstructed: []`, is refused by both readers (`drill verify` exit 4, the
+script exit 1), and phase 8 never signs one.
 **Do:** nothing on the upgrade. After a `newTopic` restore, read
 `not_reconstructed` and apply the source's settings once the restore is
 verified ([stability.md](stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings));
@@ -971,7 +975,7 @@ in the second list for `newTopic` runs; how the format change is classified is
 in [stability.md](stability.md#format-120-fx-3-what-a-newtopic-restore-did-not-reconstruct).
 **Scope:** unit rows for each of the four settings in both modes and through
 the whole phase sequence (`crates/logweir/tests/verify_phase.rs`,
-`orchestrator.rs`), the three arms in both readers with the invariant corpus
+`orchestrator.rs`), the five arms in both readers with the invariant corpus
 and the verifier-parity gate, and a live row on compose
 (`e2e/tests/new_topic_parity.rs`: a compacted, replication-factor-3 source on
 the `cluster3` profile restored as `newTopic` and as a drill, the broker's own

@@ -481,7 +481,7 @@ joins on them exactly as it does for every other case here.
 
 ## FX-3: `topic_parity.not_reconstructed` (scorecard format 1.2.0)
 
-Seven `index.json` cases for the field and its three arms, NR-1 to NR-3, which
+Ten `index.json` cases for the field and its five arms, NR-1 to NR-5, which
 both readers state in the same position (after `target.auth`, before
 `redactions`) and words. Each is `unmodified_example.json` with exactly the
 overrides that make its case; a `newTopic` one also drops `marker_topic`, sets
@@ -496,10 +496,15 @@ overrides that make its case; a `newTopic` one also drops `marker_topic`, sets
 | `not_reconstructed_without_its_unexpected_twin` | NR-2: two settings dropped from `unexpected_divergence` instead of moved, which a reader older than 1.2.0 would read as silence |
 | `not_reconstructed_also_intended` | NR-3: one setting also intended |
 | `not_reconstructed_copied_into_intended` | ORDER: copied into `intentionally_deviated` and missing its twins, so NR-2 and NR-3 both fire; both readers report NR-2 |
+| `new_topic_1_2_with_scratch_labels_beside_empty_not_reconstructed` | NR-4: the three settings intended beside `not_reconstructed: []`, what a writer that lost the mode would sign (FX-3 review F1) |
+| `new_topic_1_2_decided_divergence_missing_from_not_reconstructed` | NR-5: the three settings unexpected beside `not_reconstructed: []` |
+| `new_topic_1_2_other_divergence_beside_empty_not_reconstructed` | ACCEPT: a key the restore does not decide (`min.insync.replicas`) beside `not_reconstructed: []`; NR-5 reads only the four settings |
 
 NR-1's message interpolates the document's `format_version`, so its `arm` is the
-literal text before the placeholder, as the redactions arm's is. Neither NR-2 nor
-NR-3 interpolates an entry: an entry names a topic.
+literal text before the placeholder, as the redactions arm's is. None of NR-2 to
+NR-5 interpolates an entry: an entry names a topic. NR-4 and NR-5 fire only on a
+`newTopic` document; `scratch_1_2_with_empty_not_reconstructed` (intended
+deviations beside `[]`) is NR-4's scratch control.
 
 Five `shape-index.json` cases (`check: message:`), because `drill verify`
 refuses them at deserialisation and script 1.15.0 printed `VALID` for all five

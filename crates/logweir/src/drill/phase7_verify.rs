@@ -1748,6 +1748,44 @@ mod tests {
     use super::*;
     use logweir_core::engine::{BackupSetRef, PartitionFacts, TopicFacts};
 
+    /// FX-3 review F1: arm NR-5 reads `logweir_core::scorecard::
+    /// RESTORE_DECIDED_SETTINGS` as "the keys phase 7 can label intended or
+    /// not reconstructed". Driven with EVERY key different, a `newTopic`
+    /// classification names exactly that set, and a scratch one labels
+    /// exactly that set intended, so the core list and this function cannot
+    /// drift apart without one of these failing.
+    #[test]
+    fn classify_parity_decides_exactly_the_core_settings() {
+        let source: BTreeMap<String, String> = [
+            ("cleanup.policy", "compact"),
+            ("retention.ms", "604800000"),
+            ("min.insync.replicas", "2"),
+            ("max.message.bytes", "2097152"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let core: Vec<String> = logweir_core::scorecard::RESTORE_DECIDED_SETTINGS
+            .iter()
+            .map(|k| k.to_string())
+            .collect();
+        let nt = classify_parity(TargetMode::NewTopic, &source, &BTreeMap::new(), 6, 3, 3, 1);
+        assert_eq!(nt.not_reconstructed, core);
+        assert!(nt.intended.is_empty());
+        let sc = classify_parity(TargetMode::Scratch, &source, &BTreeMap::new(), 6, 3, 3, 1);
+        assert_eq!(sc.intended, core);
+        assert!(sc.not_reconstructed.is_empty());
+        // The other keys stay unexpected in both modes, never decided.
+        for classes in [&nt, &sc] {
+            assert!(classes
+                .unexpected
+                .contains(&"min.insync.replicas".to_string()));
+            assert!(classes
+                .unexpected
+                .contains(&"max.message.bytes".to_string()));
+        }
+    }
+
     fn facts_one_segment() -> BackupSetFacts {
         BackupSetFacts {
             backup_id: "b".into(),

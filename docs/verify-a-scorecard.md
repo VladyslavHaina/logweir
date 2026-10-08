@@ -163,7 +163,10 @@ The current scorecard checks include:
 - `topic_parity`'s lists are arrays of strings. A `topic_parity.not_reconstructed`
   (format 1.2.0) appears only under a `format_version` of at least `1.2.0`, and
   each of its entries is also in `unexpected_divergence` and never in
-  `intentionally_deviated`; see [the format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120).
+  `intentionally_deviated`. In a `newTopic` document that carries it,
+  `intentionally_deviated` is empty and every divergence on a setting the
+  restore decides (`cleanup.policy`, `retention.ms`, `partition_count`,
+  `replication_factor`) is in it; see [the format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120).
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
 
@@ -606,7 +609,7 @@ history is:
 | `1.14.0` | Adds `--payload-type catalog-point`, a signature-only check of a recovery catalog point record. |
 | `1.15.0` | Knows scorecard and backup-receipt format `1.1.0`. Adds the backup receipt's six `config_coverage` arms (6–11) and prints its per-topic coverage; checks that a scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed` are arrays of strings, and prints the configuration-parity line. Every document without the new fields is decided exactly as before. |
 | `1.16.0` | Knows backup-receipt and catalog-point format `1.2.0` (FX-7). Refuses a receipt's `archive.manifest_version_id` that is not a string — a shape check, where Rust refuses the same document at deserialisation — and prints the pinned manifest version of a receipt or a catalog point. No arm is added; every document without the field is decided exactly as before. |
-| `1.17.0` | Knows scorecard format `1.2.0` (FX-3). Adds the three `topic_parity.not_reconstructed` arms (NR-1 to NR-3) and prints the reconstruction line. Refuses `topic_parity.intentionally_deviated` and `unexpected_divergence` that are not arrays of strings, and a `format_version` whose major Rust's integer parse refuses (`" 1.0.0"`, `"0_1.0.0"`): `drill verify` refused all of these while earlier versions printed `VALID`. Every other document without the new field is decided exactly as before. |
+| `1.17.0` | Knows scorecard format `1.2.0` (FX-3). Adds the five `topic_parity.not_reconstructed` arms (NR-1 to NR-5; NR-4 and NR-5 refuse a `newTopic` document carrying the field whose `intentionally_deviated` is not empty, or whose block omits a divergence on a setting the restore decides) and prints the reconstruction line. Refuses `topic_parity.intentionally_deviated` and `unexpected_divergence` that are not arrays of strings, and a `format_version` whose major Rust's integer parse refuses (`" 1.0.0"`, `"0_1.0.0"`): `drill verify` refused all of these while earlier versions printed `VALID`. Every other document without the new field is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
@@ -627,7 +630,7 @@ row.
 
 A verifier older than `1.17.0`, and a `logweir` built before FX-3, accept a
 1.2.0 scorecard the same way (measured with the readers at main `b8b9263f`, with
-FX-7's script `1.16.0`, and at `v0.1.5`): they check none of NR-1 to NR-3 and
+FX-7's script `1.16.0`, and at `v0.1.5`): they check none of NR-1 to NR-5 and
 print no reconstruction line.
 A setting a `newTopic` restore did not reconstruct still reaches them, as its
 entry in `unexpected_divergence`, which `logweir drill show` prints under

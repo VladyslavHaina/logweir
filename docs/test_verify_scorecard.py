@@ -917,10 +917,11 @@ def test_the_version_line_names_the_current_invariant_set():
         assert (
             "target.mode absent or one of the two values the format defines"
         ) in r.stdout, r.stdout
-        # 1.17.0's addition (FX-3): arms NR-1..NR-3 on the 1.2.0 field.
+        # 1.17.0's addition (FX-3): arms NR-1..NR-5 on the 1.2.0 field.
         assert (
             "topic_parity.not_reconstructed only from 1.2.0, each entry also an unexpected "
-            "divergence and never an intended one"
+            "divergence and never an intended one, and in a newTopic document nothing intended "
+            "and every decided setting's divergence named in it"
         ) in r.stdout, r.stdout
 
 
@@ -2195,7 +2196,7 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # — and prints the pin (receipt and catalog point format 1.2.0). A change to
     # what is checked, so a minor bump; no arm, map five.
     #
-    # 1.17.0 (FX-3, merged after FX-7) adds the scorecard's arms NR-1..NR-3 on
+    # 1.17.0 (FX-3, merged after FX-7) adds the scorecard's arms NR-1..NR-5 on
     # format 1.2.0's `topic_parity.not_reconstructed`, the shape of the two
     # existing `topic_parity` lists, Rust's `u64` parse for the format major and
     # minor, and the `reconstruction:` line. Map still five.
@@ -2540,7 +2541,7 @@ def test_a_target_diff_not_assessed_value_serde_would_refuse_is_refused_here_too
 
 
 # ------------------------------------------------- FX-3: format 1.2.0's
-# `topic_parity.not_reconstructed`, arms NR-1..NR-3, the topic_parity shape,
+# `topic_parity.not_reconstructed`, arms NR-1..NR-5, the topic_parity shape,
 # the `reconstruction:` line, and Rust's u64 parse for the version.
 
 _NR_MOVED = ["restore-x-orders: cleanup.policy", "restore-x-orders: replication_factor"]
@@ -2639,6 +2640,86 @@ def test_the_not_reconstructed_arms_refuse_with_their_exact_messages():
     doc["topic_parity"]["unexpected_divergence"] = []
     doc["redactions"] = [{"path": "/topic_parity", "reason": "order", "present": False}]
     assert mod.check_invariants(doc) == _NR2
+
+
+_NR4 = (
+    "topic_parity.intentionally_deviated is not empty in a newTopic document that carries "
+    "not_reconstructed; a newTopic restore's deviations are source settings it did not "
+    "reconstruct, never intended ones"
+)
+_NR5 = (
+    "topic_parity.unexpected_divergence names a setting the restore decides (cleanup.policy, "
+    "retention.ms, partition_count or replication_factor) that not_reconstructed does not, in "
+    "a newTopic document; such a deviation is a source setting the restore did not reconstruct"
+)
+
+
+def test_the_restore_decided_settings_are_the_rust_readers():
+    # NR-5's settings are ONE list in each reader, and phase 7's
+    # `classify_parity_decides_exactly_the_core_settings` pins the Rust one to
+    # what phase 7 can label.
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const RESTORE_DECIDED_SETTINGS: \[&str; 4\] = \[([^\]]*)\];", rust)
+    assert m, "scorecard.rs no longer declares RESTORE_DECIDED_SETTINGS"
+    assert mod.RESTORE_DECIDED_SETTINGS == tuple(re.findall(r'"([^"]+)"', m.group(1)))
+    # `_parity_key` is `parity_key`: the text after the LAST ": ".
+    assert mod._parity_key("restore-x-orders: cleanup.policy") == "cleanup.policy"
+    assert mod._parity_key("cleanup.policy") == "cleanup.policy"
+    assert mod._parity_key("a: b: retention.ms") == "retention.ms"
+    assert (
+        mod._parity_key("t: configuration not assessed (unknown)")
+        == "configuration not assessed (unknown)"
+    )
+
+
+def test_a_new_topic_document_with_the_block_labels_nothing_intended_and_omits_no_decided_setting():
+    # FX-3 review F1. The document a writer signs when the mode is lost on its
+    # way to phase 7 -- the scratch labels beside `not_reconstructed: []` --
+    # was VALID here and printed no reconstruction line.
+    mod = _verifier_module()
+    doc = _new_topic_doc()
+    doc["topic_parity"]["intentionally_deviated"] = list(_NR_MOVED)
+    doc["topic_parity"]["unexpected_divergence"] = []
+    doc["topic_parity"]["not_reconstructed"] = []
+    assert mod.check_invariants(doc) == _NR4
+    # Scoped to newTopic documents that carry the block.
+    scratch = json.loads(json.dumps(doc))
+    scratch["target"]["mode"] = "scratch"
+    scratch["target"]["marker_topic"] = "logweir.scratch"
+    assert mod.check_invariants(scratch) == ""
+    absent = json.loads(json.dumps(doc))
+    del absent["topic_parity"]["not_reconstructed"]
+    assert mod.check_invariants(absent) == ""
+    # NR-5: `[]`, or a list missing one, beside a decided setting's divergence.
+    doc = _new_topic_doc()
+    doc["topic_parity"]["not_reconstructed"] = []
+    assert mod.check_invariants(doc) == _NR5
+    for omitted in mod.RESTORE_DECIDED_SETTINGS:
+        doc = _new_topic_doc()
+        entry = f"restore-x-orders: {omitted}"
+        if entry not in doc["topic_parity"]["unexpected_divergence"]:
+            doc["topic_parity"]["unexpected_divergence"].append(entry)
+        doc["topic_parity"]["not_reconstructed"] = [
+            e for e in doc["topic_parity"]["not_reconstructed"] if e != entry
+        ]
+        assert mod.check_invariants(doc) == _NR5, omitted
+    # Any other key, and FX-4's marker, stay plain unexpected divergences.
+    doc = _new_topic_doc()
+    doc["topic_parity"]["unexpected_divergence"] = [
+        "restore-x-orders: min.insync.replicas",
+        "restore-x-orders: configuration not assessed (unknown)",
+    ]
+    doc["topic_parity"]["not_reconstructed"] = []
+    assert mod.check_invariants(doc) == ""
+    # ORDER: NR-3 before NR-4 before NR-5, as in Rust.
+    doc = _new_topic_doc()
+    doc["topic_parity"]["intentionally_deviated"] = _NR_MOVED[:1]
+    assert mod.check_invariants(doc) == _NR3
+    doc = _new_topic_doc()
+    doc["topic_parity"]["intentionally_deviated"] = ["restore-x-orders: retention.ms"]
+    doc["topic_parity"]["not_reconstructed"] = []
+    assert mod.check_invariants(doc) == _NR4
 
 
 def test_the_topic_parity_lists_are_refused_where_rust_refuses_them_at_deserialisation():

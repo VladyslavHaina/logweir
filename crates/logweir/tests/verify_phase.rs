@@ -3680,7 +3680,7 @@ fn a_new_topic_restore_signs_lost_compaction_retention_and_rf_as_not_reconstruct
     assert_eq!(out.topic_parity.not_assessed, Some(vec![]));
 
     // What phase 8 does with it: a 1.2.0 `newTopic` document carrying this
-    // parity is one `validate_invariants` lets it sign (NR-1..NR-3 hold).
+    // parity is one `validate_invariants` lets it sign (NR-1..NR-5 hold).
     let mut sc = fixtures::scorecard_pass();
     sc.format_version = logweir_core::FORMAT_VERSION.to_string();
     sc.target.mode = TargetMode::NewTopic;
@@ -3727,6 +3727,25 @@ fn a_new_topic_restore_signs_lost_compaction_retention_and_rf_as_not_reconstruct
     assert_eq!(out.topic_parity.intentionally_deviated, moved);
     assert!(out.topic_parity.unexpected_divergence.is_empty());
     assert_eq!(out.topic_parity.not_reconstructed, Some(vec![]));
+
+    // FX-3 review F1: THE MODE LOST ON ITS WAY TO PHASE 7. These scratch
+    // labels, signed in a document whose `target.mode` is newTopic, are what
+    // the defect's return would produce; phase 8's `validate_invariants`
+    // refuses to sign them (NR-4), and both readers refuse them.
+    let mut sc = fixtures::scorecard_pass();
+    sc.format_version = logweir_core::FORMAT_VERSION.to_string();
+    sc.target.mode = TargetMode::NewTopic;
+    sc.target.marker_topic = None;
+    sc.topic_parity = out.topic_parity.clone();
+    let err = sc
+        .validate_invariants()
+        .expect_err("a newTopic document with the scratch labels is never signed");
+    assert!(
+        err.0
+            .starts_with("topic_parity.intentionally_deviated is not empty in a newTopic document"),
+        "{}",
+        err.0
+    );
 }
 
 /// A refused TARGET configuration read (FX-4's `targetReadDenied`) compares no
@@ -3796,7 +3815,7 @@ fn fx3_stale_wording(flat_lowercase: &str) -> Vec<&'static str> {
 }
 
 /// **FX-3's classification is RULED, and no document calls it pending.** The
-/// new field and arms NR-1..NR-3 are MINOR under OD-7 (a). Moving a
+/// new field and arms NR-1..NR-5 are MINOR under OD-7 (a). Moving a
 /// `newTopic` restore's deviations out of `intentionally_deviated` and into
 /// the existing `unexpected_divergence` is new content in two existing
 /// fields; the owner ruled it MINOR on 2026-10-07 as OD-7's third, general
@@ -3809,8 +3828,9 @@ fn fx3_stale_wording(flat_lowercase: &str) -> Vec<&'static str> {
 /// Negative controls: [`FX3_PENDING_BULLET_OF_2026_10_05`] must trip
 /// [`fx3_stale_wording`] (asserted first, so the check cannot go blind), and
 /// restoring that bullet in `docs/stability.md`, a rule without the third
-/// case's FX-3 sentence, or a "pending" sentence in any listed file, fails
-/// here.
+/// case's FX-3 sentence, a "pending" sentence in any listed file, a section
+/// that drops NR-4 and NR-5's classification, or one that says again that no
+/// reader has a `topic_parity` arm (review F3), fails here.
 #[test]
 fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pending() {
     assert_eq!(
@@ -3857,13 +3877,20 @@ fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pend
         "**The content of the two existing lists is MINOR: the owner ruled it on 2026-10-07, \
          OD-7's third case** (the rule above).",
         "It makes no verdict stronger",
-        "**The field and its three arms are MINOR** under the owner's OD-7 (a)",
+        "**The field and its five arms are MINOR** under the owner's OD-7 (a)",
+        "**NR-4 and NR-5 are MINOR under OD-7 too**",
+        "no reader built before FX-3 has a `topic_parity` arm",
     ] {
         assert!(
             section.contains(said),
             "docs/stability.md's FX-3 section no longer says: {said}"
         );
     }
+    // FX-3 review F3: this build's readers DO have `topic_parity` arms.
+    assert!(
+        !section.contains("because no reader has a `topic_parity` arm"),
+        "docs/stability.md's FX-3 section says no reader has a topic_parity arm; NR-1 to NR-5 are"
+    );
     for doc in [
         "docs/stability.md",
         "docs/formats/drill-scorecard.md",

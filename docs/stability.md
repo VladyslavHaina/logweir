@@ -123,11 +123,21 @@ their own `1.2.0`
   print that a `newTopic` document from before 1.2.0 labelled the settings it
   did not reconstruct `intended`: old evidence read as a weaker claim than its
   label, never a stronger one, and no verdict changes.
-- **The field and its three arms are MINOR** under the owner's OD-7 (a), the
+- **The field and its five arms are MINOR** under the owner's OD-7 (a), the
   rule above. Each arm fires only on a document carrying the field, and judges
   it against `format_version` (NR-1) or against the two lists every reader
-  already has (NR-2, NR-3), as FX-4's receipt arms 6 and 7 judge
+  already has (NR-2 to NR-5), as FX-4's receipt arms 6 and 7 judge
   `config_coverage` against `format_version` and `source.topics`.
+- **NR-4 and NR-5 are MINOR under OD-7 too** (added after FX-3's review, F1).
+  They fire only on a 1.2.0 or later document that carries the field and whose
+  `target.mode` is `newTopic`, and they can only refuse. NR-4 refuses such a
+  document whose `intentionally_deviated` is not empty. NR-5 refuses one whose
+  `unexpected_divergence` names a setting the restore decides that
+  `not_reconstructed` omits. That is the document a writer would sign if the
+  mode were lost on its way to phase 7: the scratch labels beside
+  `not_reconstructed: []`, which claims that nothing was left unreconstructed.
+  Phase 8 refuses to sign it, and both readers refuse it. No document an
+  earlier writer produced carries the field, so none changes verdict.
 - **The content of the two existing lists is MINOR: the owner ruled it on
   2026-10-07, OD-7's third case** (the rule above). In a `newTopic` document,
   entries of the existing shape `"<target topic>: <key>"` leave
@@ -135,16 +145,17 @@ their own `1.2.0`
   instead. That is new content in two existing fields, and it can only move a
   reader's verdict to the safer side, from intended to not intended: what an
   older reader showed as intended it now shows as unexpected. It makes no
-  verdict stronger, and no verdict moves at all, because no reader has a
-  `topic_parity` arm and `outcome` does not depend on it (measured, the next
-  bullet). A scratch drill's lists are unchanged.
+  verdict stronger, and no verdict moves at all: no reader built before FX-3
+  has a `topic_parity` arm (NR-1 to NR-5 judge only documents that carry the
+  new field), and `outcome` does not depend on it (measured, the next bullet).
+  A scratch drill's lists are unchanged.
 - **Readers built before FX-3 accept every 1.2.0 document** (measured on FX-3's
   live and synthetic 1.2.0 scorecards with `logweir` and `verify_scorecard.py`
   1.15.0 at main `b8b9263f`, and with the released `v0.1.5` runner image and
   script 1.13.0; FX-7's script 1.16.0, over the live ones, the same way): every
   one exits 0, prints no reconstruction line, and its `logweir drill show` lists
   each not-reconstructed setting under `unexpected [...]`, never under
-  `intended [...]`. They do not run NR-1 to NR-3, so they also accept a 1.2.0
+  `intended [...]`. They do not run NR-1 to NR-5, so they also accept a 1.2.0
   document only this build refuses.
 - **Rollback** is safe in both directions. An older `logweir` writes 1.1.0
   documents again, with the old labels; the 1.2.0 documents already written

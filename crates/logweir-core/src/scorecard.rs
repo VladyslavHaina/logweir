@@ -489,7 +489,11 @@ pub struct TopicParity {
     /// `intentionally_deviated`** (arms NR-2 and NR-3 of `validate_invariants`,
     /// in both readers): a reader that predates this field sees each one as an
     /// unexpected divergence — a weaker conclusion than the label it replaces,
-    /// never a stronger one, and never silence that reads as parity.
+    /// never a stronger one, and never silence that reads as parity. In a
+    /// `newTopic` document carrying the field, `intentionally_deviated` is
+    /// empty (NR-4) and every `unexpected_divergence` entry on one of the
+    /// [`RESTORE_DECIDED_SETTINGS`] is also here (NR-5), so a writer that lost
+    /// the mode cannot sign `[]` beside the scratch labels.
     ///
     /// ABSENT means NOT RECORDED: every document before 1.2.0, and one whose
     /// phase 7 never ran. In a `newTopic` document before 1.2.0 the writer
@@ -512,6 +516,30 @@ pub struct TopicParity {
 /// test_the_not_reconstructed_minor_is_the_rust_readers`), and
 /// `the_written_version_defines_not_reconstructed` keeps the pair coherent.
 pub const NOT_RECONSTRUCTED_SINCE_MINOR: u64 = 2;
+
+/// The four settings a restore's own topic creation DECIDES instead of copying
+/// from the source (FX-3): `cleanup.policy` (left to the target broker),
+/// `retention.ms` (`-1`), and the partition count and replication factor (the
+/// manifest's and the plan's). They are the only `<key>`s phase 7 can write
+/// into `intentionally_deviated` (a scratch drill) or `not_reconstructed` (a
+/// `newTopic` restore). Arm NR-5 reads it; phase 7's
+/// `classify_parity_decides_exactly_the_core_settings` test and
+/// `docs/verify_scorecard.py`'s `RESTORE_DECIDED_SETTINGS` (pinned by
+/// `test_the_restore_decided_settings_are_the_rust_readers`) must equal it.
+pub const RESTORE_DECIDED_SETTINGS: [&str; 4] = [
+    "cleanup.policy",
+    "partition_count",
+    "replication_factor",
+    "retention.ms",
+];
+
+/// The `<key>` of a `topic_parity` entry `"<target topic>: <key>"`: the text
+/// after the LAST `": "`, or the whole entry when it has none (a Kafka topic
+/// name cannot contain `": "`). Read by arm NR-5 only;
+/// `docs/verify_scorecard.py::_parity_key` is its mirror.
+fn parity_key(entry: &str) -> &str {
+    entry.rsplit_once(": ").map_or(entry, |(_, key)| key)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EngineSubreport {
@@ -1123,16 +1151,17 @@ impl Scorecard {
                 ));
             }
         }
-        // `topic_parity.not_reconstructed` (format 1.2.0, FX-3): arms NR-1,
-        // NR-2 and NR-3. They fire ONLY on a document that CARRIES the block,
+        // `topic_parity.not_reconstructed` (format 1.2.0, FX-3): arms NR-1
+        // to NR-5. They fire ONLY on a document that CARRIES the block,
         // so every document without it — every 1.0.0 and 1.1.0 scorecard, and
         // a 1.2.0 one whose phase 7 never ran — is decided exactly as before.
         // Each judges the new block, against `format_version` (NR-1) or the
-        // two lists every reader already shows (NR-2, NR-3), the way the
-        // receipt's FX-4 arms 6 and 7 judge `config_coverage` against
-        // `format_version` and `source.topics`: MINOR under the owner's OD-7
-        // (a) (`docs/stability.md`, "The v0.1.0 tag is the compatibility
-        // boundary").
+        // two lists every reader already shows (NR-2 to NR-5; NR-4 and NR-5
+        // only in a `newTopic` document), the way the receipt's FX-4 arms 6
+        // and 7 judge `config_coverage` against `format_version` and
+        // `source.topics`: MINOR under the owner's OD-7 (a)
+        // (`docs/stability.md`, "The v0.1.0 tag is the compatibility
+        // boundary"). Each can only refuse.
         //
         // NOT INTERPOLATED, except NR-1's version: an entry names a topic, an
         // adopter-influenced string, and the messages are joined to
@@ -1179,6 +1208,36 @@ impl Scorecard {
                     "topic_parity.not_reconstructed names a deviation that intentionally_deviated also names; a source setting the restore did not reconstruct is never an intended deviation"
                         .into(),
                 ));
+            }
+            // NR-4 and NR-5 (FX-3 review F1). In a `newTopic` document the
+            // block is the claim, so the two existing lists must agree with
+            // it, or a writer that regressed to the scratch labels (the mode
+            // lost on its way to phase 7) would sign `not_reconstructed: []`
+            // beside intended deviations: "nothing was left unreconstructed",
+            // a stronger claim than the pre-1.2.0 defect's, which both readers
+            // at least re-read as not reconstructed. Each fires only on a
+            // document that carries the block (so at 1.2.0 or later, NR-1) and
+            // whose `target.mode` is `newTopic`, and each can only refuse.
+            if self.target.mode == TargetMode::NewTopic {
+                // NR-4. A `newTopic` restore labels nothing intended.
+                if !self.topic_parity.intentionally_deviated.is_empty() {
+                    return Err(InvariantError(
+                        "topic_parity.intentionally_deviated is not empty in a newTopic document that carries not_reconstructed; a newTopic restore's deviations are source settings it did not reconstruct, never intended ones"
+                            .into(),
+                    ));
+                }
+                // NR-5. The converse of NR-2 over the settings the restore
+                // decides: such a deviation in `unexpected_divergence` is one
+                // the restore did not reconstruct, so the block names it.
+                if self.topic_parity.unexpected_divergence.iter().any(|e| {
+                    RESTORE_DECIDED_SETTINGS.contains(&parity_key(e))
+                        && !not_reconstructed.contains(e)
+                }) {
+                    return Err(InvariantError(
+                        "topic_parity.unexpected_divergence names a setting the restore decides (cleanup.policy, retention.ms, partition_count or replication_factor) that not_reconstructed does not, in a newTopic document; such a deviation is a source setting the restore did not reconstruct"
+                            .into(),
+                    ));
+                }
             }
         }
         // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
@@ -2483,6 +2542,121 @@ mod tests {
              names; a source setting the restore did not reconstruct is never an intended \
              deviation"
         );
+    }
+
+    /// NR-4 (FX-3 review F1): the document a writer signs when the mode is
+    /// lost on its way to phase 7: the scratch labels beside the claim `[]`.
+    /// Without NR-4 it was VALID under both readers and printed no
+    /// reconstruction line, a stronger claim than the pre-1.2.0 defect.
+    #[test]
+    fn invariants_refuse_a_new_topic_document_that_labels_its_deviations_intended() {
+        let mut sc = new_topic_not_reconstructed();
+        sc.topic_parity.intentionally_deviated = vec![
+            "restore-x-orders: cleanup.policy".into(),
+            "restore-x-orders: replication_factor".into(),
+        ];
+        sc.topic_parity.unexpected_divergence.clear();
+        sc.topic_parity.not_reconstructed = Some(vec![]);
+        let err = sc
+            .validate_invariants()
+            .expect_err("a newTopic restore labels nothing intended");
+        assert_eq!(
+            err.0,
+            "topic_parity.intentionally_deviated is not empty in a newTopic document that carries \
+             not_reconstructed; a newTopic restore's deviations are source settings it did not \
+             reconstruct, never intended ones"
+        );
+        // Scoped: the same lists in a SCRATCH drill are what phase 7 writes,
+        // and a newTopic document WITHOUT the block predates the claim.
+        let mut scratch = sc.clone();
+        scratch.target.mode = TargetMode::Scratch;
+        scratch.target.marker_topic = Some("logweir.scratch".into());
+        scratch
+            .validate_invariants()
+            .expect("a scratch drill's deviations are intended");
+        let mut absent = sc.clone();
+        absent.topic_parity.not_reconstructed = None;
+        absent
+            .validate_invariants()
+            .expect("absent is not recorded: decided as before");
+    }
+
+    /// NR-5 (FX-3 review F1, the converse of NR-2): a `newTopic` document's
+    /// deviation on a setting the restore decides is one it did not
+    /// reconstruct, so `not_reconstructed: []`, or a list missing it, beside
+    /// it is refused. Any other key, and FX-4's fail-safe marker, stays a
+    /// plain unexpected divergence.
+    #[test]
+    fn invariants_refuse_a_decided_setting_in_unexpected_divergence_that_not_reconstructed_omits() {
+        let message = "topic_parity.unexpected_divergence names a setting the restore decides \
+                       (cleanup.policy, retention.ms, partition_count or replication_factor) \
+                       that not_reconstructed does not, in a newTopic document; such a \
+                       deviation is a source setting the restore did not reconstruct";
+        let mut empty = new_topic_not_reconstructed();
+        empty.topic_parity.not_reconstructed = Some(vec![]);
+        assert_eq!(
+            empty.validate_invariants().expect_err("[] beside it").0,
+            message
+        );
+        for omitted in RESTORE_DECIDED_SETTINGS {
+            let mut sc = new_topic_not_reconstructed();
+            let entry = format!("restore-x-orders: {omitted}");
+            if !sc.topic_parity.unexpected_divergence.contains(&entry) {
+                sc.topic_parity.unexpected_divergence.push(entry.clone());
+            }
+            sc.topic_parity
+                .not_reconstructed
+                .as_mut()
+                .expect("the block")
+                .retain(|e| *e != entry);
+            assert_eq!(
+                sc.validate_invariants().expect_err(omitted).0,
+                message,
+                "{omitted}"
+            );
+        }
+        let mut other = new_topic_not_reconstructed();
+        other.topic_parity.unexpected_divergence = vec![
+            "restore-x-orders: min.insync.replicas".into(),
+            "restore-x-orders: configuration not assessed (unknown)".into(),
+        ];
+        other.topic_parity.not_reconstructed = Some(vec![]);
+        other
+            .validate_invariants()
+            .expect("a key the restore does not decide is not 'not reconstructed'");
+        let mut scratch = empty.clone();
+        scratch.target.mode = TargetMode::Scratch;
+        scratch.target.marker_topic = Some("logweir.scratch".into());
+        scratch
+            .validate_invariants()
+            .expect("NR-5 judges newTopic documents only");
+    }
+
+    /// ORDER: NR-4 reports before NR-5, and both after NR-3.
+    #[test]
+    fn the_new_topic_label_arms_report_in_order() {
+        let mut both = new_topic_not_reconstructed();
+        both.topic_parity.intentionally_deviated = vec!["restore-x-orders: retention.ms".into()];
+        both.topic_parity.not_reconstructed = Some(vec![]);
+        assert!(both
+            .validate_invariants()
+            .expect_err("NR-4 and NR-5 fire")
+            .0
+            .starts_with("topic_parity.intentionally_deviated is not empty"));
+    }
+
+    #[test]
+    fn parity_key_is_the_text_after_the_last_separator() {
+        assert_eq!(
+            parity_key("restore-x-orders: cleanup.policy"),
+            "cleanup.policy"
+        );
+        assert_eq!(parity_key("cleanup.policy"), "cleanup.policy");
+        assert_eq!(
+            parity_key("t: configuration not assessed (unknown)"),
+            "configuration not assessed (unknown)"
+        );
+        assert_eq!(parity_key("a: b: retention.ms"), "retention.ms");
     }
 
     /// ORDER: a deviation COPIED into the new field and left intended violates

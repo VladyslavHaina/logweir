@@ -388,7 +388,7 @@ fields.
 | `topic_parity.intentionally_deviated` | string[] | A SCRATCH drill's deviations on the four settings the restore's own topic creation decides (`cleanup.policy`, `retention.ms`, `partition_count`, `replication_factor`), as `"<target topic>: <key>"`. Since 1.2.0 always `[]` in a `newTopic` restore; in a `newTopic` document before 1.2.0 its entries were NOT reconstructed, whatever the label ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
 | `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have, as `"<target topic>: <key>"`. Since 1.1.0 also one fail-safe entry `"<target topic>: configuration not assessed (<why>)"` per topic `not_assessed` names ([below](#topic_parity-and-what-its-silence-means)). Since 1.2.0, in a `newTopic` restore, also every entry of `not_reconstructed` ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
 | `topic_parity.not_assessed` | string[], **optional** (1.1.0) | The mapped target topics whose CONFIGURATION parity was not assessed, as `"<target topic>: configuration (<why>)"`. See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
-| `topic_parity.not_reconstructed` | string[], **optional** (1.2.0) | The source settings a `newTopic` restore did NOT reconstruct, as `"<target topic>: <key>"`; each is also in `unexpected_divergence` and never in `intentionally_deviated`. `[]` in a scratch drill. See [below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120). ABSENT means not recorded. |
+| `topic_parity.not_reconstructed` | string[], **optional** (1.2.0) | The source settings a `newTopic` restore did NOT reconstruct, as `"<target topic>: <key>"`; each is also in `unexpected_divergence` and never in `intentionally_deviated`. `[]` in a scratch drill. In a `newTopic` document carrying it, `intentionally_deviated` is `[]` and every divergence on the four settings is listed here (arms NR-4, NR-5). See [below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120). ABSENT means not recorded. |
 
 ### `topic_parity`, and what its silence means
 
@@ -459,7 +459,7 @@ appears between phase 0 and phase 3.
 Neither reader adds an invariant for either field — they are informational —
 but both refuse a value serde cannot read as an array of strings
 (`drill verify` exit 1, the script exit 1; `shape-index.json` records both
-fields). FX-3's `not_reconstructed`, below, has three arms.
+fields). FX-3's `not_reconstructed`, below, has five arms.
 
 ### `topic_parity` in a `newTopic` restore: not reconstructed (1.2.0)
 
@@ -504,18 +504,22 @@ that claim, and only phase 7 writes it. A `newTopic` document without the
 field predates the distinction, and both readers say what its `intended`
 entries are (below).
 
-**Three arms**, in both readers and in this order, fire only on a document
+**Five arms**, in both readers and in this order, fire only on a document
 that carries the field, so every document without it is decided exactly as
-before:
+before. NR-4 and NR-5 also fire only when `target.mode` is `newTopic`:
 
 | Arm | Refuses |
 |---|---|
 | NR-1 | the field under a `format_version` before 1.2.0: `topic_parity.not_reconstructed is present but format_version "<v>" predates it: the field is defined from 1.2.0` |
 | NR-2 | an entry missing from `unexpected_divergence` — the "dropped instead of moved" document an older reader would read as silence |
 | NR-3 | an entry also in `intentionally_deviated` |
+| NR-4 | a `newTopic` document whose `intentionally_deviated` is not empty: the scratch labels a writer would sign if the mode were lost on its way to phase 7 |
+| NR-5 | a `newTopic` document whose `unexpected_divergence` names one of the four settings (`"<target topic>: <key>"`, `<key>` the text after the last `": "`) that `not_reconstructed` omits, for instance `not_reconstructed: []` beside a lost `cleanup.policy` |
 
 Phase 8 runs them before it signs, so no writer of this build can sign a
-document that breaks them. Both readers also refuse a `not_reconstructed`, an
+document that breaks them, and in particular cannot sign `not_reconstructed:
+[]`, "nothing left unreconstructed", beside a `newTopic` restore's lost
+settings. Both readers also refuse a `not_reconstructed`, an
 `intentionally_deviated` or an `unexpected_divergence` that is not an array of
 strings (`shape-index.json`).
 

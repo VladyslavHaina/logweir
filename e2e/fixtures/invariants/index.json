@@ -278,5 +278,28 @@
   "python_exit": 1,
   "reason": "topic_parity.not_reconstructed names a deviation that unexpected_divergence does not; a source setting the restore did not reconstruct is also an unexpected divergence, so a reader that predates not_reconstructed never reads it as parity",
   "arm": "topic_parity.not_reconstructed names a deviation that unexpected_divergence does not"
+ },
+ {
+  "id": "new_topic_1_2_with_scratch_labels_beside_empty_not_reconstructed",
+  "file": "new_topic_1_2_with_scratch_labels_beside_empty_not_reconstructed.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "topic_parity.intentionally_deviated is not empty in a newTopic document that carries not_reconstructed; a newTopic restore's deviations are source settings it did not reconstruct, never intended ones",
+  "arm": "topic_parity.intentionally_deviated is not empty in a newTopic document that carries not_reconstructed"
+ },
+ {
+  "id": "new_topic_1_2_decided_divergence_missing_from_not_reconstructed",
+  "file": "new_topic_1_2_decided_divergence_missing_from_not_reconstructed.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "topic_parity.unexpected_divergence names a setting the restore decides (cleanup.policy, retention.ms, partition_count or replication_factor) that not_reconstructed does not, in a newTopic document; such a deviation is a source setting the restore did not reconstruct",
+  "arm": "topic_parity.unexpected_divergence names a setting the restore decides"
+ },
+ {
+  "id": "new_topic_1_2_other_divergence_beside_empty_not_reconstructed",
+  "file": "new_topic_1_2_other_divergence_beside_empty_not_reconstructed.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
  }
 ]
