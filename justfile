@@ -18,6 +18,7 @@ lint:
     ./scripts/check-ui-offline.sh
     ./scripts/check-ui-behaviour.sh
     ./scripts/check-unverified-labels.sh
+    ./scripts/check-unsafe-scope.sh
 
 # Dependency-graph guard for the signing API's allowed consumers.
 check-one-signer:

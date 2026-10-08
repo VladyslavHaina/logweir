@@ -12,6 +12,7 @@
 //! `e2e/fixtures/signed/README.md` — and the private half is NEVER printed to
 //! stdout/stderr.
 
+#![forbid(unsafe_code)]
 use logweir_core::det_json::to_deterministic_json;
 use logweir_core::scorecard::Scorecard;
 use logweir_evidence::keys::{KeyOrigin, SigningKey};

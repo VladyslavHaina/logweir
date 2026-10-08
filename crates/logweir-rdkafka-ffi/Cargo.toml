@@ -1,0 +1,28 @@
+[package]
+name = "logweir-rdkafka-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The one crate where Logweir calls librdkafka directly (OD-6 (a2)); every other crate forbids unsafe code"
+
+# THE `unsafe` PERIMETER (OD-6, decided 2026-10-05 as (a2); ADR 0004's
+# amendment in docs/architecture.md). This crate is the ONLY place in the
+# workspace where `unsafe` may appear; `scripts/check-unsafe-scope.sh` (run by
+# `just lint`) enforces that, that nothing but `logweir-kafka` depends on it,
+# and that it depends on nothing but `rdkafka`.
+#
+# ADDS NO THIRD-PARTY PACKAGE (Global Constraint 38): `rdkafka` 0.36.2 and its
+# `rdkafka-sys` 4.10.0+2.12.1 are already in the resolved graph through
+# `logweir-kafka`. `rdkafka::bindings` IS `rdkafka_sys::bindings`, and
+# librdkafka 2.12.1 is already linked and attributed in NOTICE. The package
+# count grows by this workspace member only.
+#
+# The FEATURE SET is copied from `crates/logweir-kafka/Cargo.toml` verbatim,
+# as `e2e/Cargo.toml` does and for its reason: `cargo test -p
+# logweir-rdkafka-ffi` resolves a narrower graph than the workspace build, and
+# a different feature set would build a second librdkafka, so the calls this
+# crate makes would be tested against a library the product does not link.
+[dependencies]
+rdkafka = { version = "0.36", default-features = false, features = ["cmake-build", "libz", "zstd", "ssl", "sasl", "tokio"] }

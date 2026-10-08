@@ -34,6 +34,7 @@
 //! make it one — that layer has no key and cannot derive the finding. The
 //! refusal lives in `crates/logweir/src/verify.rs` and its Python mirror.
 
+#![forbid(unsafe_code)]
 use logweir_core::det_json::to_deterministic_json;
 use logweir_core::scorecard::Scorecard;
 use logweir_evidence::keys::SigningKey;

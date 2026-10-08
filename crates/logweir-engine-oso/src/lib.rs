@@ -6,6 +6,7 @@
 //! struct that mirrors a pinned upstream shape, so an upstream release can
 //! break parsing but never the build. See `scripts/check-no-oso.sh`.
 
+#![forbid(unsafe_code)]
 pub mod engine;
 pub mod kbak;
 // The object-store half of this crate now lives in `logweir-store`, so a
