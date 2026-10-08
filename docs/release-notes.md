@@ -970,8 +970,14 @@ D0's amendment of 2026-10-07).
 What an operator sees after the console image is upgraded:
 
 - **Through the ingress, with a trusted proxy configured** (the PoC profile:
-  `trustedProxyService: {namespace: traefik, name: traefik}`): one person's
-  failed or repeated sign-ins no longer refuse anyone else's.
+  `trustedProxyService: {namespace: traefik, name: traefik}`), **and the
+  client's own address reaching the ingress**: one person's failed or repeated
+  sign-ins no longer refuse anyone else's. If kube-proxy or a load balancer
+  replaces client addresses before Traefik (the Traefik chart's default
+  `externalTrafficPolicy: Cluster` on a multi-node cluster, a load balancer in
+  instance mode), clients through one node still share its budget: keep the
+  address with `externalTrafficPolicy: Local`, the PROXY protocol, or an L7 hop
+  trusted at both Traefik and the console.
 - **New audit notes** on sign-in requests: `loginRateKey` (`forwardedClient`
   or `peer`, which counter the request spent) and, only when the table is
   full, `loginRateUntracked: tableFull`, with at most one warning a minute in
@@ -985,15 +991,26 @@ ingress controller's Service) — the audit's `loginRateKey: peer` on a request
 that came through it says it is not. Keep the ingress from passing a client's
 own `X-Forwarded-For` through: Traefik's `forwardedHeaders.trustedIPs: []`
 with `insecure: false` (its default, and `deploy/poc/traefik.values.yaml`)
-deletes it.
-**Scope:** `crates/logweir-api/src/http.rs` (`login_rate_key`, five unit rows),
-`crates/logweir-api/src/auth/ratelimit.rs` (the `/64` fold, no global budget,
-the 65,536-key bound with its memory, the sweep rate and the once-a-window
-warning), and eight rows through the real router in
+deletes it. Check `trustedProxyCidrs`: without `requireTrustedProxy` a range
+has no width floor, and a range wider than the ingress's pods now lets a
+client in it choose its sign-in budget, including another client's. And plan
+for the residual this design leaves at the identity provider: sign-in
+requests reach it authenticated as this console, so a many-address attack can
+spend the provider's per-client quota for it. Set that quota generously,
+alert on `loginRateUntracked` and on the warning `a sign-in was refused` that
+names `the provider answered HTTP 429`, and keep the in-cluster administrator
+mode (`kubectl port-forward`) as the break-glass path ([api.md](api.md),
+*Rate limits*).
+**Scope:** `crates/logweir-api/src/http.rs` (`login_rate_key`, six unit rows),
+`crates/logweir-api/src/auth/ratelimit.rs` (the `/64` fold and the NAT64
+prefix, no global budget, the 65,536-key bound with its memory, the sweep rate
+and the once-a-window warning), and ten rows through the real router in
 `crates/logweir-api/tests/entry_point.rs` (two clients, one client through two
 proxies, a forged header from an untrusted peer, an unread and a stale proxy
-Service, a chain with no client hop, an IPv6 `/64`, a spray past the table,
-and 40 clients × 20 requests all served), with twelve mutants killed. Not
+Service, a chain with no client hop, an IPv6 `/64`, NAT64 clients, a spray
+past the table, 40 clients × 20 requests all served, and a refused exchange
+naming the provider's status), with the mutants of the FX-13 report and its
+review killed. Not
 yet proven live: the PoC upgrade that carries FX-13 runs two clients through
 Traefik. **Rollback:** an older console image keys the limit on the socket
 peer again — one budget behind the ingress — and writes neither audit note.

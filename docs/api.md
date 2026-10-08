@@ -1778,36 +1778,79 @@ The client is:
   — the rightmost `X-Forwarded-For` hop that is not itself a trusted proxy:
   the address the ingress received the request from;
 * **otherwise** the socket peer, and also when that header is absent, ends in a
-  hop that is not an IP address, or names only trusted proxies.
+  hop that is not an address, or names only trusted proxies. A hop may be a
+  bare address or `address:port` / `[address]:port` (the port is dropped).
 
 Only `X-Forwarded-For` is read. Traefik deletes a client's `X-Forwarded-*` and
 appends the client's socket address, but copies an RFC 7239 `Forwarded` header
-through as the client wrote it, so `Forwarded` is never read; an ingress that
-passes a client's `X-Forwarded-For` through unchanged must not be a trusted
-proxy. An IPv6 client is counted by its `/64` (a host may use any address in
-it), an IPv4 one (IPv4-mapped included) by its address, so hosts behind one
-NAT address or one `/64` share a budget. The audit line notes which key was
-used, `loginRateKey: forwardedClient` or `peer`, never as an actor.
+through as the client wrote it, so `Forwarded` is never read. An IPv6 client is
+counted by its `/64` (a host may use any address in it); an IPv4 one by its
+address, including an IPv4-mapped address and one in the well-known NAT64
+prefix `64:ff9b::/96`. Hosts behind one NAT address or one `/64` share a
+budget. The audit line notes which key was used, `loginRateKey:
+forwardedClient` or `peer`, never as an actor.
+
+**Per client needs the client's address at the ingress, and trust only in the
+ingress.** Two conditions, both the operator's:
+
+* If kube-proxy or a cloud load balancer replaces the client's address before
+  the ingress sees it (the Traefik chart's default Service with
+  `externalTrafficPolicy: Cluster` on a multi-node cluster, or a load balancer
+  in instance mode), the ingress appends a node address and every client
+  through that node shares one budget. Keep the address with
+  `externalTrafficPolicy: Local`, the PROXY protocol, or an L7 hop in front
+  that both Traefik (`forwardedHeaders.trustedIPs`) and the console trust.
+* A `trustedProxyCidrs` range wider than the ingress's own pods, or an ingress
+  that passes a client's `X-Forwarded-For` through unchanged, lets a client
+  choose its budget — **including another client's**, which lets it spend
+  that client's sign-ins. Without `requireTrustedProxy` the ranges have no
+  width floor, so a range set wide "for logging" took on this meaning with
+  FX-13. Keep the ranges as tight as the gate needs them.
 
 Before FX-13 the key was always the socket peer, which behind an ingress made
 the limit one global budget: about ten sign-ins a minute for everyone, and one
 client could block every sign-in for a minute.
 
-There is **no budget over all clients**, deliberately: a global budget, however
-high, lets whoever holds enough addresses lock every operator out, and being
-able to sign in during an incident outranks a tighter bound. The limit bounds
-load, not credentials (there is no password here, and authorization codes are
-single-use and bound to the login's PKCE verifier), and each sign-in request
-costs the identity provider at most one request, so a client with many
-addresses gets many bounded budgets and nothing beyond what those addresses
-could send the provider directly. The counters are **per console process**
-(two replicas: up to twice the allowance) and track at most 65,536 clients
-per process (about 6 MiB, briefly 9 MiB as the table grows). Past that,
-while every tracked window is still live, a new client is served **without** a window rather than refused:
-its audit line notes `loginRateUntracked: tableFull`, and the console logs at
-most one warning a minute while it lasts. Only expired windows are ever dropped, so no
-amount of traffic resets another client's count. The threat model is written
-out in `crates/logweir-api/src/auth/ratelimit.rs`.
+**What the limit bounds, and what it leaves.** It bounds load, not
+credentials: there is no password here, and authorization codes are
+single-use at the provider and bound to the login's PKCE verifier. Each
+sign-in request costs the identity provider at most one request, so nothing
+is amplified. But those requests reach the provider **authenticated as this
+console's client and from its address**, not as the unauthenticated requests
+from many addresses an attacker could send the provider directly. The login
+cookie is not single-use here either: it opens for 600 s, so one
+`/auth/login` arms many callbacks, each a token request within its key's
+budget. So an attacker with many addresses can spend whatever per-client or
+per-source quota the provider gives this console, and the provider then
+refuses everyone's sign-ins for as long as the attack lasts.
+
+A distributed attacker can cause a sign-in outage either way. There is **no
+budget over all clients**, deliberately: a global cap here would guarantee
+the outage at a far lower volume than the provider's quota (the old peer key
+was one client; a 600-a-minute ceiling is 30 addresses, or one IPv6 `/56`).
+Being able to sign in during an incident outranks a tighter bound. What an
+operator does about the residual:
+
+* **Set the provider's per-client limits** for this console's client
+  generously, and know what they are.
+* **Alert** on the audit note `loginRateUntracked` (below), and on refused
+  exchanges: the callback's audit failure is `code_exchange_failed`, and the
+  console's warning `a sign-in was refused` carries the provider's status,
+  e.g. `the provider answered HTTP 429`. Watch the provider's own throttling
+  metrics for this client too.
+* **Keep a break-glass path** that does not sign in through the provider: the
+  in-cluster administrator mode (`api.console.mode: localAdmin`, reached only
+  by `kubectl port-forward deploy/<release>-api`; *What ships today, and what
+  does not* above, and the chart README).
+
+The counters are **per console process** (two replicas: up to twice the
+allowance) and track at most 65,536 clients per process (about 6 MiB, briefly
+9 MiB as the table grows). Past that, while every tracked window is still
+live, a new client is served **without** a window rather than refused: its
+audit line notes `loginRateUntracked: tableFull`, and the console logs at most
+one warning a minute while it lasts. Only expired windows are ever dropped, so
+no amount of traffic resets another client's count. The threat model is
+written out in `crates/logweir-api/src/auth/ratelimit.rs`.
 
 Starting a transient check is bounded per actor and namespace: six discoveries
 and twenty preflights a minute, `429` with `Retry-After`. The window is **per
