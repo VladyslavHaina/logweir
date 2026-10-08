@@ -1947,7 +1947,10 @@ fn release_entry<'a>(notes: &'a str, heading: &str) -> &'a str {
 /// NEGATIVE CONTROLS: the notes at `2c277dc1` (PROD-08.1 listed under the rc.1
 /// record, no entry of its own) fail the heading lookup; deleting its item's
 /// section fails the numbering; dropping `coverage: complete` from it fails
-/// the token.
+/// the token. Item 31 is FX-17's (the scheduled points the catalog withheld);
+/// its token is `spec.syncRequest`, the re-sync an operator owes after the
+/// runner rolls, and the notes at `563ed8e2` (three items here) fail the
+/// token-count assertion.
 #[test]
 fn the_entry_after_the_rc1_record_carries_its_own_items() {
     let notes = read("docs/release-notes.md");
@@ -1981,6 +1984,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         // PROD-08.1 (2026-10-07): complete coverage, and what every 1.4.0
         // scorecard says its verdict covered.
         ("complete coverage", "coverage: complete"),
+        // FX-17 (2026-10-08): every scheduled point is offered once the
+        // catalog is synced by the new runner; the operator re-syncs it.
+        (
+            "scheduled points offered after a re-sync",
+            "spec.syncRequest",
+        ),
     ];
     assert_eq!(
         items.len(),

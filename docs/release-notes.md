@@ -21,7 +21,8 @@ The last tag is `v0.2.0-rc.1` (candidate `56a60ebe`, publication `2c277dc1`);
 its record is in the next entry, whose twenty-seven items are what that
 candidate shipped. This entry collects what lands on `main` after that
 publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
-key by default) and 30 (PROD-08.1) so far. Items continue the next entry's
+key by default), 30 (PROD-08.1) and 31 (FX-17, scheduled points in the catalog)
+so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -36,7 +37,10 @@ by unit, mock-cluster and chart rows and a host console journey; its controller
 and hook rows run at the PoC refresh that carries it. Item 30 is row PROD-08.1, proven
 on the compose stack; it changes the runner's signed scorecard and adds a plan
 value no controller renders yet, so the PoC upgrade that carries it runs the
-sampled rows unchanged.
+sampled rows unchanged. Item 31 is fix-now row FX-17, proven on the compose
+stack with the console on the host; it changes the runner (the catalog sync)
+and the console's text, and the PoC upgrade that carries it re-syncs the PoC's
+catalog and checks its first page and the nightly schedule's page.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -240,9 +244,115 @@ restores added to
 and signs format 1.3.0 again with no block; the 1.4.0 scorecards already written
 stay valid under both readers.
 
+#### 31. Every scheduled run's recovery point is offered from the Catalog view (FX-17)
+
+**Changed.** The catalog sync publishes each point's backup set id, receipt key
+and manifest key through the product's redactor, which read a manual run's
+set id (a UUID) as an identity but not a scheduled run's
+`<schedule uid>-<yyyymmdd>-<hhmmss>`, or `…-r<k>` for a retry: 52 to 55
+lower-case characters, over the length at which the redactor treats an
+unrecognised run as material. A catalog synced by a runner up to
+`v0.2.0-rc.1` therefore published every SCHEDULED point as
+`backupId: "[redacted]"`, `receiptKey: "[redacted].receipt.json"` and
+`manifestKey: "[redacted].json"`, and the console's Catalog view offered none of
+them ("not offered: … `[redacted].receipt.json` …"): on the PoC, 84 of 370
+points, the whole first page. The redactor now reads exactly the shape the
+controller mints — a lower-case UID, a slot that is a real instant, at most a
+one-digit retry suffix — as an identity, as it does a UUID, so those three
+fields are published whole and the points are offered. Nothing else is
+exempted: a near miss (an impossible date, an upper-case UID, a two-digit
+retry, anything after the slot) is still withheld. The same set id now also
+survives in check details and remedies, where a scheduled set's segment key
+used to read `[redacted]`. When a set id or receipt key does come back
+redacted, the console says so in ONE reason naming the field and its cause
+(an older runner, or a set id chosen for `logweir backup run` that is not a
+public form), instead of the old "keeps a ULID run id" advice or "no usable
+backup set id".
+
+What changes on the upgrade:
+
+- **A catalog's published view does not change until its next sync** with the
+  new runner image. Until then its scheduled points stay "not offered", now
+  with the reason above.
+- **The schedule page shows the catalog's verdict for scheduled runs.** It
+  joins a run to its catalog row on the set id, so every scheduled run there
+  read `not in the catalog` in both verdict columns while the catalog held it,
+  and a scheduled set the catalog marks not selectable kept its restore link.
+  After the re-sync the columns carry the catalog's own words, and such a set
+  reads "not restorable: the catalog marks this set not selectable" instead of
+  a link. A `ProtectionPolicy` that judges a scheduled run with no receipt
+  digest joins its catalog row the same way, on the set id.
+- **A set id chosen for `logweir backup run`** (`--backup-id-override`, or a
+  plan's `backup_id`) still has its receipt key withheld unless it is a public
+  form — for example a UUID, or lower-case letters, digits, `.`, `-`, `_` and
+  `=` under 40 characters: the run id already spends the key's one free
+  component. Its points are listed and not offered, and the row says why; a
+  retention pass keeps such a point as `protected: Unknown`, and a rehearsal
+  never selects one.
+- **A `RetentionPolicy` starts weighing scheduled sets one by one.** Every
+  scheduled point used to share the set id `[redacted]` and the manifest key
+  `[redacted].json`, so retention treated them as ONE set and no scheduled set
+  was ever expired: while any one was retained, every scheduled candidate was
+  `protected: SharedSegment`; when all were due, the group was held back over
+  `maxDeletionsPerRun` (`truncatedByCap`) or, when it fit, its manifest key
+  under no set bound refused the WHOLE plan, UUID sets included. An active
+  `Restore` of a scheduled set did not protect its point either, because the
+  join never matched; the shared group hid that. After the re-sync each
+  scheduled set is its own set: those outside `keepLast` / `keepDays` become
+  candidates, an active `Restore` protects its own, and an `Enforce` policy
+  with `requireApprovedPlan: false` deletes the due ones at its next run. A
+  scheduled set and its retry (`…-r1`) are separate sets, and deleting one
+  never touches the other.
+- **A catalog-point readiness check (`Preflight`)** compared a plan's set id
+  and receipt key against the redacted row and refused it; it now compares
+  against the whole values. A rehearsal that drew a scheduled point bound
+  nothing redacted: a candidate whose only receipt key is the redactor's output
+  is not selected.
+
+**Do:** before the runner image rolls, read the plan preview of every
+`Enforce` `RetentionPolicy` with `requireApprovedPlan: false`, or set it to
+`true` until you have read the first plan after the re-sync. After the runner
+image rolls, sync each `RecoveryCatalog` once — set `spec.syncRequest` to a new
+value — rather than wait for its interval.
+**Scope:** `crates/logweir-core/tests/check_contract.rs` (the PoC's set ids
+kept bare and in receipt, manifest and segment keys; thirteen near misses
+withheld; F1's credential probes with the scheduled id as the anchor; the
+fixture `ui/tests/fixtures/set-ids.json`, edges included, that the console's
+rows read too), `crates/logweir/tests/check_cli.rs` (a real catalog sync
+publishes a scheduled point whole and withholds a forged one; the resume
+cursor survives), `crates/weirkeeper/tests/cadence.rs` (every set id the
+schedule controller mints survives), `retention_policy_controller.rs` (a
+redacted set is `Unknown` and refuses no plan; a scheduled set and its retry
+are weighed one by one), `rehearsal_controller.rs` (a redacted binding never
+qualifies), `crates/logweir-reaper/tests/reaper.rs` (deleting a scheduled set
+leaves its retry), the console rows in `ui/tests/restore-catalog.spec.js`,
+`ui/tests/schedules-detail.spec.js` and `ui/tests/d3.spec.js`, and planted
+mutants, each killed but one equivalent (FX-17). Live, on compose slot 3 with
+the console on the host: seven real backups (four scheduled set ids, one a
+retry) synced by this build's runner were all offered and each opened the
+restore wizard on its point; the same archive synced by the `v0.2.0-rc.1`
+runner image reproduced the PoC's "not offered" rows. And a second archive of
+five real backups (scheduled `X`, `Y`, `X-r1`, `Z` and a manual run): the
+controller's retention evaluation over this build's view planned `X` and `Y`
+as two separate lines, over the rc.1 view kept every scheduled point
+`Unknown`, and the `logweir-retention` worker deleted `X` and `Y` and left every
+key of `X-r1`. Not yet proven on the PoC: the upgrade that carries FX-17
+re-syncs its catalog and checks the Catalog view and the nightly schedule's
+page.
+**Rollback:** an older runner withholds the scheduled set ids again at the
+catalog's next sync, the views return to "not offered" and `not in the catalog`
+for those points, and retention treats every scheduled set as one shared set
+again. Nothing in the archive changes on the rollback itself; sets an
+`Enforce` policy deleted in between stay deleted.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
+
+- **Before the runner image rolls, read the plan preview of every `Enforce`
+  `RetentionPolicy` with `requireApprovedPlan: false`**, or set it to `true`
+  until you have read its first plan after the re-sync below: scheduled sets
+  it never expired become candidates (item 31).
 
 - **Back up the console key too, once it exists** (item 29):
   `logweir-console-confirmation` and `logweir-console-trust`, beside the
@@ -253,6 +363,9 @@ In addition to the next entry's six, in its order:
   replaces its engine binary and its `LOGWEIR_ENGINE_VERSION` /
   `LOGWEIR_ENGINE_DIGEST`, and every spec that names an `http://` archive
   endpoint says `allow_http: true` (item 28).
+- **After the runner image rolls, set each `RecoveryCatalog`'s
+  `spec.syncRequest` to a new value** so its view is published again by the
+  new runner (item 31).
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -264,11 +377,12 @@ In addition to the next entry's six, in its order:
 
 ### Migration and rollback after `v0.2.0-rc.1`
 
-An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29 and
-30, in the order of the next entry's upgrade path. Item 28 moves the engine in
+An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30
+and 31, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
-change nothing until set; item 30 changes the runner only. To roll back to
+change nothing until set; items 30 and 31 change the runner (item 31 also the
+console's text), and item 31 takes effect at each catalog's next sync. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

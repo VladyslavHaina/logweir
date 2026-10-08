@@ -1830,6 +1830,77 @@ fn retry_name_and_execution_id_carry_the_attempt() {
     assert_eq!(ids.len(), (MAX_RETRIES + 1) as usize);
 }
 
+/// **FX-17: every set id this minter writes is an identity to the redactor.**
+///
+/// REGRESSION REASON. The catalog sync publishes a point's `backupId`,
+/// `receiptKey` and `manifestKey` through `logweir_core::check_contract`'s
+/// redactor, and the console builds a restore's plan binding from them. The
+/// redactor knew a UUID set id (a manual run's) but not this function's
+/// `<schedule uid>-<slot>[-r<k>]`, so every SCHEDULED point reached the
+/// console as `[redacted]` and was never offered — the PoC's whole first
+/// Catalog page. The two sides are in two crates and nothing tied them
+/// together; this row is the tie. It walks the minter's real output — every
+/// attempt up to [`MAX_RETRIES`], slots from real instants including the year,
+/// month and leap-day edges — so a retry range or a slot format the redactor
+/// does not know fails HERE, in the crate that changed.
+#[test]
+fn every_set_id_the_minter_writes_survives_the_redactor() {
+    use logweir_core::check_contract::{is_object_key_shaped, redact, REDACTED};
+    const RUN: &str = "01M4CKTADX268PREVHJAAYXEMZ";
+    // Kubernetes UIDs as the API server writes them: lower-case v4 UUIDs.
+    let uids = [
+        "89b585c5-5498-48dc-ae32-090809457ec8",
+        "00000000-0000-4000-8000-000000000000",
+        "ffffffff-ffff-4fff-bfff-ffffffffffff",
+    ];
+    let instants = [
+        Utc.with_ymd_and_hms(2026, 10, 8, 2, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2026, 12, 31, 23, 59, 59).unwrap(),
+        Utc.with_ymd_and_hms(2028, 2, 29, 12, 30, 5).unwrap(),
+        Utc.with_ymd_and_hms(2099, 9, 9, 9, 9, 9).unwrap(),
+    ];
+    let mut lost: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for uid in uids {
+        for at in instants {
+            let slot = slot_name(at);
+            assert_eq!(slot.len(), SLOT_NAME_LEN);
+            for k in 0..=MAX_RETRIES {
+                let id = backup_id_for_attempt(uid, &slot, k);
+                checked += 1;
+                // The `backupId` itself, through the WHOLE `redact`.
+                if redact(&id) != id {
+                    lost.push(format!("backupId {id} -> {}", redact(&id)));
+                }
+                // The receipt key `backup run` writes, and its manifest key.
+                for key in [
+                    format!("logweir/backups/{id}/{RUN}.receipt.json"),
+                    format!("poc/{id}/manifest.json"),
+                ] {
+                    if redact(&key) != key {
+                        lost.push(format!("{key} -> {}", redact(&key)));
+                    }
+                }
+                if !is_object_key_shaped(&format!("logweir/backups/{id}/{RUN}")) {
+                    lost.push(format!("logweir/backups/{id}/{RUN} is not key-shaped"));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        checked,
+        uids.len() * instants.len() * (MAX_RETRIES as usize + 1)
+    );
+    assert!(
+        lost.is_empty(),
+        "the redactor withheld {} value(s) this minter writes; the catalog would publish \
+         them as `{REDACTED}` and the console would offer none of those points:\n  {}",
+        lost.len(),
+        lost.join("\n  ")
+    );
+}
+
 /// **A retry suffix never silently produces an unusable name** — D1 §3.1
 /// rule 6, and the 63-character pod-label limit `slot.rs` refuses past.
 #[test]

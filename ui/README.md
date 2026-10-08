@@ -938,9 +938,18 @@ catalog table, the schedule detail and the wizard's own mount share): the API
 row is `selectable` -- the controller's conjunction, joined server side with the
 namespace's `Backup` verdicts; no `backupVerdict`; no `backupVerdictsIncomplete`
 on the page (a join nobody finished cannot say that no `Backup` refused this
-receipt); a current view; a point id, an unredacted receipt key and both
-digests; and a covered window. Anything else is a refusal naming the reason,
-with no plan, no hash and no submit, and never a substituted point.
+receipt); a current view; a point id, an unredacted backup set id and receipt
+key, and both digests; and a covered window. Anything else is a refusal naming
+the reason, with no plan, no hash and no submit, and never a substituted point.
+A set id or receipt key that came back as the catalog sync's `[redacted]` is ONE
+refusal naming the field and the cause (`redactedBindingReason`): runners up to
+v0.2.0-rc.1 withheld every scheduled run's set id (`<schedule uid>-<slot>`) and
+the keys built from it, so a catalog synced by one offered none of its scheduled
+points (FX-17) -- upgrade the runner image and sync the catalog again. A set id
+chosen for `logweir backup run` survives when it is a public form -- for
+example a UUID, or lower-case letters, digits, `.`, `-`, `_` and `=` under 40
+characters. The schedule page joins a run to its catalog row on the same set
+id, so until the re-sync a scheduled run there reads `not in the catalog`.
 
 **What the six steps do with it.** Step 1 reads the archive the catalog reads
 (its saved destination, frozen at mount by UID and location digest and checked

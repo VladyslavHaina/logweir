@@ -4971,3 +4971,66 @@ async fn a_slot_refused_point_in_time_by_producer_time_is_named_on_the_schedule(
         .expect("RehearsalHealthy is published");
     assert_eq!(health["status"], "False", "{health}");
 }
+
+/// **FX-17 review L-2: a redacted plan binding never becomes a qualifying
+/// rehearsal point.** A `Backup` that reported no receipt key takes the
+/// catalog row's, and a catalog synced by a runner up to v0.2.0-rc.1 published
+/// a scheduled run's key as `[redacted].receipt.json`. Rendered into
+/// `source.point.receipt_key`, the runner refuses it as `PointBindingMismatch`;
+/// the candidate is not selectable instead, and a catalog-only row whose set id
+/// or key is the redactor's output is not either.
+///
+/// CONTROLS: the same merges with the key whole make the point selectable and
+/// carry the key, so the rows above are about the marker and nothing else.
+#[test]
+fn a_redacted_catalog_binding_never_qualifies_a_rehearsal_point() {
+    let redacted_row = || {
+        let mut row = matching_catalog_row(1_758_240_000_000);
+        row.receipt_key = "[redacted].receipt.json".to_string();
+        row
+    };
+    // A Backup candidate with no receipt key of its own.
+    let keyless = || {
+        let mut c = capture_less_candidate("b-keyless", "NotAttempted");
+        c.receipt_key = String::new();
+        c
+    };
+    let merged = |candidate: Option<rehearsal::PointCandidate>,
+                  row: weirkeeper::catalog_view::ViewEntry| {
+        let mut by_id = std::collections::BTreeMap::new();
+        if let Some(c) = candidate {
+            by_id.insert(c.point_id.clone(), c);
+        }
+        rs::merge_catalog_entry(
+            &mut by_id,
+            row,
+            Some(DESTINATION.to_string()),
+            &Default::default(),
+        );
+        by_id.remove(POINT_ID).expect("the point is a candidate")
+    };
+
+    let c = merged(Some(keyless()), redacted_row());
+    assert!(
+        !c.selectable,
+        "a key nobody can name is not a qualifying point"
+    );
+    assert!(
+        c.receipt_key.is_empty(),
+        "the redactor's output is never adopted as the binding: {}",
+        c.receipt_key
+    );
+    // CONTROL: the whole key is adopted and the point qualifies.
+    let c = merged(Some(keyless()), matching_catalog_row(1_758_240_000_000));
+    assert!(c.selectable);
+    assert_eq!(c.receipt_key, "logweir/backups/b-20260919.json");
+
+    // A catalog-only row: a redacted key, or a redacted set id, is not selectable.
+    assert!(!merged(None, redacted_row()).selectable);
+    let mut set_gone = matching_catalog_row(1_758_240_000_000);
+    set_gone.backup_id = "[redacted]".to_string();
+    assert!(!merged(None, set_gone).selectable);
+    // CONTROL: the same catalog-only row whole is selectable (and is then
+    // refused by `select_point` only for its missing topic list, as before).
+    assert!(merged(None, matching_catalog_row(1_758_240_000_000)).selectable);
+}

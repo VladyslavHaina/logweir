@@ -1559,7 +1559,10 @@ no configuration is reconstructed by hand.**
    `VerifiedHistorical`, joined server side with the namespace's `Backup`
    verdicts (`backupVerdict`) — the verdict join is complete
    (`backupVerdictsIncomplete` absent), and the row carries an unredacted
-   receipt key and both digests. The operator names the topics to restore: the
+   backup set id and receipt key and both digests. (A catalog synced by a
+   runner up to v0.2.0-rc.1 published every SCHEDULED run's set id and receipt
+   key as `[redacted]`, so none of its scheduled points was offered; upgrade the
+   runner image and sync the catalog again — FX-17.) The operator names the topics to restore: the
    view does not publish a point's topic list, and the readiness check reads the
    manifest for exactly those names.
 5. **The plan is bound to the point.** It carries `source.backup: <backupId>`
@@ -2292,6 +2295,16 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
   worded covers it, so the value stays `NotEnforced` and the `Evaluated`
   message says which half is in force. It becomes `LogweirEnforced` on its
   own, with no code change, the day a view entry carries its keys.
+  A point whose set id names no single directory is never a candidate: an
+  empty id, one carrying `/`, and — since FX-17 — one the catalog published
+  as the redactor's output (`backupId` or `manifestKey` carrying
+  `[redacted]`; a long set id someone chose for `logweir backup run`) is
+  protected `Unknown`, so it neither shares a group with every other such
+  point nor makes the plan writer refuse the whole plan. A scheduled run's
+  set id (`<schedule uid>-<slot>[-r<k>]`) is published whole by a runner after
+  v0.2.0-rc.1, and a set and its retry are two directories: the bound
+  `<scope>/<backupId>/` ends in `/`, so removing one never enumerates the
+  other.
 * `legalHold` is `ProviderEnforcedUnverified` even in `Enforce`, because
   `object_store` 0.14 exposes no WORM readback. "Legal hold respected" means
   exactly *a provider refusal is authoritative, recorded, not retried, and
@@ -8264,8 +8277,9 @@ in `status.binding.planHash`, which is a field and not prose.
 token".** A remedy has to name the thing it asks you to go and fix, so the
 public identifiers survive whole: a `signerKeyId` (the SHA-256 of a
 SubjectPublicKeyInfo DER — it is on the `TrustRoster`, which is how you roster
-it), a content digest, `runner.image`'s `imageID`, a backup set's UUID, an
-object key, a segment path, and the NAME of a Secret and of the data key inside
+it), a content digest, `runner.image`'s `imageID`, a backup set's id (a manual
+run's UUID, or a scheduled run's `<schedule uid>-<yyyymmdd>-<hhmmss>[-r<k>]`,
+exactly as the controller mints it), an object key, a segment path, and the NAME of a Secret and of the data key inside
 it. So does the kubelet's own `couldn't find key password in Secret
 <namespace>/<name>`: D2 §6.5 says a Secret name is a public reference, and a
 message that named neither the Secret nor the key was the one row an operator

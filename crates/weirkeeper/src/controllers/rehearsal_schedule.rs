@@ -1945,6 +1945,12 @@ pub fn point_id_from_receipt_digest(digest: &str) -> Option<String> {
     Some(format!("lwp1-{}", &hex[..32]))
 }
 
+/// Whether a catalog value is the redactor's output rather than the value in
+/// the bucket (FX-17): the marker `check_contract::redact` leaves behind.
+fn is_redacted(value: &str) -> bool {
+    value.contains(logweir_core::check_contract::REDACTED)
+}
+
 /// Fold one catalog view entry into the candidate set.
 ///
 /// `refusals` are the reached refusals among the `Backup`s this pass listed.
@@ -1990,6 +1996,18 @@ pub fn merge_catalog_entry(
                 existing.selectable = false;
                 return;
             };
+            // A BINDING NOBODY CAN NAME (FX-17 review L-2). A `Backup` that
+            // reported no receipt key takes the catalog's, and a catalog synced
+            // by a runner up to v0.2.0-rc.1 published a scheduled run's key as
+            // the redactor's output. A plan built from it names
+            // `[redacted].receipt.json` as `source.point.receipt_key`, which
+            // the runner refuses as `PointBindingMismatch` — a misleading
+            // failure for a point that was never usable. Such a candidate is
+            // not a qualifying point.
+            if existing.receipt_key.is_empty() && is_redacted(&entry.receipt_key) {
+                existing.selectable = false;
+                return;
+            }
             existing.selectable = entry.selectable;
             existing.recovery_point_at = at;
             existing.covered = Some(Window {
@@ -2008,6 +2026,7 @@ pub fn merge_catalog_entry(
         }
         None => {
             let Some(at) = recovery_point_at else { return };
+            let binding_redacted = is_redacted(&entry.backup_id) || is_redacted(&entry.receipt_key);
             by_id.insert(
                 entry.point_id.clone(),
                 PointCandidate {
@@ -2033,7 +2052,13 @@ pub fn merge_catalog_entry(
                     // when a `Backup` for the same receipt was refused.
                     // Nor when the refusal set is incomplete: "no listed
                     // Backup refused it" is then not "no Backup refused it".
-                    selectable: entry.selectable && !refused_elsewhere && refusals.is_complete(),
+                    // Nor when its plan binding is the redactor's output
+                    // (FX-17 review L-2): `source.backup` and
+                    // `source.point.receipt_key` come from this row alone.
+                    selectable: entry.selectable
+                        && !refused_elsewhere
+                        && refusals.is_complete()
+                        && !binding_redacted,
                     verdict_refused: refused_elsewhere,
                     retention_lease: false,
                 },
