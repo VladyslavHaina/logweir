@@ -37,7 +37,15 @@ if args[:3] == ["buildx", "imagetools", "inspect"]:
     if os.environ.get("MOCK_DOCKER_ENV_LOG"):
         with open(os.environ["MOCK_DOCKER_ENV_LOG"], "a") as out:
             out.write(json.dumps({"ref": ref, "docker_config": os.environ.get("DOCKER_CONFIG")}) + "\n")
+    if ref == os.environ.get("MOCK_UNREACHABLE_REF"):
+        # No answer about the reference: a refused connection (as measured), or
+        # the text MOCK_UNREACHABLE_ERROR names.
+        print(os.environ.get("MOCK_UNREACHABLE_ERROR")
+              or f"ERROR: failed to do request: Head \"https://registry-1.docker.io/v2/{ref}\": dial tcp: connection refused",
+              file=sys.stderr)
+        sys.exit(1)
     if ref == os.environ.get("MOCK_FAIL_INSPECT_REF") or ref not in state:
+        print(f"ERROR: {ref}: not found", file=sys.stderr)
         sys.exit(1)
     record = state[ref]
     digest = record["digest"]
@@ -45,24 +53,37 @@ if args[:3] == ["buildx", "imagetools", "inspect"]:
         digest = "sha256:" + "f" * 64
     if "--format" in args:
         template = args[args.index("--format") + 1]
+        if template == "{{json .Image}}":
+            # One platform's configuration, or a map of them for a list.
+            print(json.dumps(record.get("image", {})))
+            sys.exit(0)
         if template != "{{json .Manifest}}":
             print("Name: " + ref + "\nDigest: " + digest)
             sys.exit(0)
-    print(json.dumps({**record, "digest": digest}))
+    print(json.dumps({k: v for k, v in {**record, "digest": digest}.items() if k != "image"}))
 elif args[:3] == ["buildx", "imagetools", "create"]:
     tags, refs = [], []
+    prefer_index = True
     i = 3
     while i < len(args):
         if args[i] == "--tag":
             tags.append(args[i + 1]); i += 2
         elif args[i] == "--prefer-index=false":
-            i += 1
+            prefer_index = False; i += 1
         else:
             refs.append(args[i]); i += 1
     if not tags or not refs or any(ref not in state for ref in refs):
         sys.exit(2)
-    if len(refs) == 1:
+    if len(refs) == 1 and not prefer_index and not os.environ.get("MOCK_REWRAP"):
+        # One source and no index: a carbon copy, the source's own digest.
         record = state[refs[0]]
+    elif len(refs) == 1:
+        # RE-WRAPPED: buildx's default (--prefer-index=true) wraps a single
+        # manifest in a NEW index, and MOCK_REWRAP does so whatever the flag
+        # says (review L-4). Either way the tag names a digest the source
+        # never had.
+        source = state[refs[0]]
+        record = {**source, "digest": "sha256:" + hashlib.sha256(("index:" + refs[0]).encode()).hexdigest()}
     else:
         record = {
             "digest": "sha256:" + hashlib.sha256(json.dumps(refs).encode()).hexdigest(),
@@ -120,8 +141,9 @@ class PromotionTests(unittest.TestCase):
             "MOCK_GIT_LOG": str(self.git_log),
             "MOCK_MAIN_SHA": SHA,
         }
-        self.env.pop("MOCK_FAIL_INSPECT_REF", None)
-        self.env.pop("MOCK_WRONG_ROLLING", None)
+        for knob in ("MOCK_FAIL_INSPECT_REF", "MOCK_WRONG_ROLLING", "MOCK_UNREACHABLE_REF", "MOCK_UNREACHABLE_ERROR",
+                     "MOCK_REWRAP", "MOCK_HELM_UNREACHABLE", "MOCK_CORRUPT_PULL"):
+            self.env.pop(knob, None)
         # Hermetic: a caller's registry configuration (a local gate run with
         # DOCKER_CONFIG set) must not reach the script, or the recorded
         # per-call configurations stop meaning what the assertions read.
@@ -288,6 +310,20 @@ state_path = pathlib.Path(os.environ["MOCK_CHARTS"])
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
 if args[:1] in (["lint"], ["template"]):
     sys.exit(0)
+if args[:2] in (["show", "values"], ["show", "chart"]):
+    with tarfile.open(args[2]) as tar:
+        top = tar.getnames()[0].split("/")[0]
+        if args[1] == "values":
+            sys.stdout.write(tar.extractfile(f"{top}/values.yaml").read().decode())
+        else:
+            meta = json.loads(tar.extractfile(f"{top}/__mock_package.json").read())
+            for line in tar.extractfile(f"{top}/Chart.yaml").read().decode().splitlines():
+                if line.startswith("version:"):
+                    line = "version: " + meta["version"]
+                elif line.startswith("appVersion:"):
+                    line = "appVersion: " + meta["appVersion"]
+                print(line)
+    sys.exit(0)
 if args[:2] == ["registry", "login"]:
     secret = sys.stdin.read() if "--password-stdin" in args else ""
     pathlib.Path(os.environ["MOCK_HELM_LOGIN"]).write_text(json.dumps(
@@ -321,9 +357,21 @@ if args[:1] == ["pull"]:
         "docker_config": docker_config,
         "docker_config_entries": sorted(os.listdir(docker_config))
             if docker_config and os.path.isdir(docker_config) else None}))
+    reference = ref[len("oci://"):] if ref.startswith("oci://") else ref
+    unreachable = os.environ.get("MOCK_HELM_UNREACHABLE")
+    if unreachable:
+        # The registry gave no answer: "1" is the refusal measured for an
+        # unresolvable host; any other value is printed as Helm's error.
+        host, path = reference.split("/", 1)
+        print(f'Error: failed to perform "FetchReference" on source: Get "https://{host}/v2/{path}/manifests/{version}": '
+              f'dial tcp: lookup {host}: no such host' if unreachable == "1" else unreachable, file=sys.stderr)
+        sys.exit(1)
     name = ref.rsplit("/", 1)[1]
     key = ref.rsplit("/", 1)[0] + "/" + f"{name}-{version}"
     if key not in state:
+        # Helm v4.0.1's answer for a version the registry does not have,
+        # measured anonymously against Docker Hub on 2026-10-05.
+        print(f'Error: failed to perform "FetchReference" on source: {reference}:{version}: not found', file=sys.stderr)
         sys.exit(1)
     data = bytes.fromhex(state[key])
     if os.environ.get("MOCK_CORRUPT_PULL"):
@@ -439,7 +487,149 @@ class ChartPublicationTests(unittest.TestCase):
         self.run_chart()
         meta, values, _ = self.packaged(f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3")
         self.assertEqual(meta, {"version": "1.2.3", "appVersion": "v1.2.3"})
-        self.assertIn(f"docker.io/{NS}/weirkeeper:v1.2.3", values)
+        # PROD-14.0: a release chart pins each image by the digest `promote`
+        # just published under the tag, not by the tag alone.
+        state = json.loads(self.registry.read_text())
+        for image in PLATFORMS:
+            digest = state[f"docker.io/{NS}/{image}:v1.2.3"]["digest"]
+            self.assertIn(f"docker.io/{NS}/{image}:v1.2.3@{digest}", values)
+
+    def package(self, tag, digests):
+        """`chart-package` for TAG with IMAGE_DIGESTS = digests (None: unset)."""
+        env = {**self.env, "TAG": tag}
+        env.pop("IMAGE_DIGESTS", None)
+        if digests is not None:
+            path = self.root / "digests.json"
+            path.write_text(json.dumps(digests))
+            env["IMAGE_DIGESTS"] = str(path)
+        return subprocess.run(
+            ["bash", str(self.root / "scripts/ci-images.sh"), "chart-package", str(self.root / "pkg")],
+            env=env, cwd=self.root, capture_output=True, text=True, timeout=60,
+        )
+
+    RELEASE_DIGESTS = {image: "sha256:" + hashlib.sha256(image.encode()).hexdigest() for image in PLATFORMS}
+
+    def test_a_release_chart_without_digests_is_refused(self):
+        result = self.package("v1.2.3", None)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("pins its four images by digest", result.stderr)
+        self.assertFalse((self.root / "pkg/logweir-chart-1.2.3.tgz").exists())
+        # A digest missing for ONE image refuses the whole package too.
+        partial = dict(self.RELEASE_DIGESTS)
+        partial.pop("logweir-ui")
+        result = self.package("v1.2.3", partial)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no sha256 digest for logweir-ui", result.stderr)
+        # A main chart keeps its tag: no digests asked for, none written.
+        result = self.package("sha-" + SHA, None)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def push(self, package, success=True):
+        result = subprocess.run(
+            ["bash", str(self.root / "scripts/ci-images.sh"), "chart-push", str(package)],
+            env=self.env, cwd=self.root, capture_output=True, text=True, timeout=60,
+        )
+        if success:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        else:
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def release_package(self):
+        self.env.update(TAG="v1.2.3", GITHUB_REF="refs/tags/v1.2.3", PROMOTE_LATEST="false")
+        self.run_promotion()
+        result = self.package("v1.2.3", self.RELEASE_DIGESTS)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        package = Path(result.stdout.strip())
+        self.assertEqual(package.name, "logweir-chart-1.2.3.tgz")
+        return package
+
+    def test_chart_push_publishes_exactly_the_package_it_is_given(self):
+        package = self.release_package()
+        result = self.push(package)
+        # Pushed because the registry SAID the version is absent (review M-1).
+        self.assertIn("logweir-chart 1.2.3 is not published yet (the registry says not found)", result.stderr)
+        key = f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3"
+        self.assertEqual(bytes.fromhex(self.pushed()[key]), package.read_bytes(),
+                         "the release's chart asset and the pushed chart are the same bytes")
+        _, values, _ = self.packaged(key)
+        for image, digest in self.RELEASE_DIGESTS.items():
+            self.assertIn(f"docker.io/{NS}/{image}:v1.2.3@{digest}", values)
+        self.assertIn("chart_version=1.2.3\n", Path(self.env["GITHUB_OUTPUT"]).read_text())
+        self.assertEqual(json.loads(self.login.read_text())["stdin"], self.TOKEN)
+
+    def test_chart_push_never_replaces_a_published_version(self):
+        package = self.release_package()
+        key = f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3"
+        self.charts.write_text(json.dumps({key: b"other bytes".hex()}))
+        result = self.push(package, success=False)
+        self.assertIn("never replaced", result.stderr)
+        self.assertEqual(self.pushed()[key], b"other bytes".hex())
+        self.assertFalse(any(c[:1] == ["push"] for c in self.helm_calls()))
+        self.assertFalse(self.login.exists(), "no credential is used for a refused publication")
+
+    # Existence reads that end in no answer about THIS version. The first is
+    # the knob's default, the refusal measured for an unresolvable host; the
+    # connection refusal was measured too (2026-10-05, Helm v4.0.1); the 429
+    # and 401 lines are Helm's form for those statuses. The last two are a
+    # registry's "not found" for ANOTHER version and ANOTHER chart.
+    COULD_NOT_TELL = (
+        "1",
+        'Error: failed to perform "FetchReference" on source: Get "https://registry-1.docker.io/v2/{ns}/logweir-chart/'
+        'manifests/1.2.3": dial tcp 127.0.0.1:443: connect: connection refused',
+        'Error: failed to perform "FetchReference" on source: GET "https://registry-1.docker.io/v2/{ns}/logweir-chart/'
+        'manifests/1.2.3": response status code 429: toomanyrequests: You have reached your unauthenticated pull rate limit',
+        'Error: failed to perform "FetchReference" on source: GET "https://registry-1.docker.io/v2/{ns}/logweir-chart/'
+        'manifests/1.2.3": response status code 401: unauthorized: authentication required',
+        "Error: context deadline exceeded",
+        'Error: failed to perform "FetchReference" on source: registry-1.docker.io/{ns}/logweir-chart:1.2.4: not found',
+        'Error: failed to perform "FetchReference" on source: registry-1.docker.io/{ns}/logweir-chart-old:1.2.3: not found',
+    )
+
+    def test_chart_push_that_cannot_tell_whether_the_version_exists_pushes_nothing(self):
+        """Review M-1: a FAILED existence read is not "unpublished". With other
+        bytes already published under the version (the reviewer's probe) a push
+        would replace a release; with none it would still be a guess. Either
+        way: refused before any login, nothing pushed, the registry as it was."""
+        package = self.release_package()
+        key = f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3"
+        for published in (b"other bytes", None):
+            for error in self.COULD_NOT_TELL:
+                with self.subTest(published=published, error=error):
+                    state = {key: published.hex()} if published else {}
+                    self.charts.write_text(json.dumps(state))
+                    for record in (self.login, self.helm_log):
+                        record.unlink(missing_ok=True)
+                    self.env["MOCK_HELM_UNREACHABLE"] = error.format(ns=NS)
+                    result = self.push(package, success=False)
+                    self.assertIn("could not tell whether logweir-chart 1.2.3 exists; nothing pushed", result.stderr)
+                    self.assertEqual([c[0] for c in self.helm_calls()], ["pull"],
+                                     "one existence read, then nothing: no login, no push, no pull-back")
+                    self.assertFalse(self.login.exists(), "no credential is used when the read cannot tell")
+                    self.assertEqual(self.pushed(), state, "the registry is left as it was")
+        self.env.pop("MOCK_HELM_UNREACHABLE")
+
+    def test_chart_push_of_the_same_bytes_again_is_a_verified_no_op(self):
+        package = self.release_package()
+        key = f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3"
+        self.charts.write_text(json.dumps({key: package.read_bytes().hex()}))
+        result = self.push(package)
+        self.assertIn("not pushed again", result.stderr)
+        self.assertFalse(any(c[:1] == ["push"] for c in self.helm_calls()))
+        self.assertIn("chart_sha256=", Path(self.env["GITHUB_OUTPUT"]).read_text())
+
+    def test_chart_push_refuses_what_is_not_a_release_package(self):
+        package = self.release_package()
+        for tag in ("sha-" + SHA, "main"):
+            with self.subTest(tag=tag):
+                self.env["TAG"] = tag
+                self.push(package, success=False)
+        self.env["TAG"] = "v1.2.3"
+        renamed = package.with_name("logweir-chart-9.9.9.tgz")
+        renamed.write_bytes(package.read_bytes())
+        result = self.push(renamed, success=False)
+        self.assertIn("is not logweir-chart-1.2.3.tgz", result.stderr)
+        self.assertEqual(self.pushed(), {})
 
     def test_no_chart_before_its_images_are_public(self):
         # Promotion did not run: no image carries TAG yet.

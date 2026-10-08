@@ -45,7 +45,7 @@ concept; the steps below are the same path for any installation.
 | Install, upgrade, CRDs, controller scope | cluster administrator | Helm values ([install.md](install.md)) |
 | Whose keys may approve and attest, per namespace | `logweir-trust-admin` (a `TrustPolicy`), or a cluster administrator (the legacy `TrustRoster/default`) | [keys.md](keys.md); never a namespace operator |
 | How a namespace's restores are approved: `legacy-governed-v1`, `Ordinary` or `Governed` | installation administrator | `approvalPolicy.*` values, one rollout ([install.md](install.md) §5f); never a namespace object |
-| Approving one restore | an approver who is not the requester | `logweir drill approve` / `logweir drill countersign`, on their own machine |
+| Approving one restore | an approver who is not the requester | `logweir drill approve` / `logweir drill countersign`, on their own machine, with the CLI from the release archive for that machine ([README](../README.md#install)) |
 | Connections, destinations, schedules, backups, restore requests | `logweir-operator` (console role Operator) | the console |
 | Whether archive objects are ever deleted | `logweir-retention-admin`, plus an administrator's approval of each plan digest | a `RetentionPolicy` ([kubernetes.md](kubernetes.md) §7f); the default deletes nothing |
 

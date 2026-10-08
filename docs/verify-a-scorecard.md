@@ -2,6 +2,9 @@
 
 This guide explains how to authenticate a scorecard, check its consistency,
 and interpret its limits using either Logweir or an independent Python verifier.
+For what the evidence supports, and what it does not show, against the backup
+and restore-testing clauses of DORA, ISO/IEC 27001, SOC 2, NIS2 and HIPAA, read
+the [control-evidence mapping](control-evidence.md).
 
 ## What the artifact is
 
@@ -379,7 +382,9 @@ itself cannot be verified.
 ## What the scorecard does **not** claim
 
 A signature authenticates the publisher's bytes. Assess the scope and strength
-of the signed claims separately.
+of the signed claims separately. The
+[control-evidence mapping](control-evidence.md#what-the-evidence-does-not-show)
+states these limits against each control clause it maps.
 
 ### A pass compares the restored topic with the archive, not with the source
 
@@ -544,7 +549,7 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.15.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.16.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, or `1.1.0` for a scorecard signed since FX-4). It
 changes when the reader's accepted-document set changes. The compatibility
@@ -567,10 +572,16 @@ history is:
 | `1.13.0` | Rejects present target modes other than `scratch` or `newTopic`, including null; retains acceptance of failed integrity results with or without a partial reason. |
 | `1.14.0` | Adds `--payload-type catalog-point`, a signature-only check of a recovery catalog point record. |
 | `1.15.0` | Knows scorecard and backup-receipt format `1.1.0`. Adds the backup receipt's six `config_coverage` arms (6–11) and prints its per-topic coverage; checks that a scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed` are arrays of strings, and prints the configuration-parity line. Every document without the new fields is decided exactly as before. |
+| `1.16.0` | Knows backup-receipt and catalog-point format `1.2.0` (FX-7). Refuses a receipt's `archive.manifest_version_id` that is not a string — a shape check, where Rust refuses the same document at deserialisation — and prints the pinned manifest version of a receipt or a catalog point. No arm is added; every document without the field is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
 reports `run_id`. Both refuse; this is not an acceptance disagreement.
+
+A `1.15.0` verifier, and a `logweir` built before FX-7, still accept a 1.2.0
+receipt or catalog point: they ignore `archive.manifest_version_id` and print
+no manifest version
+([backup-receipt.md](formats/backup-receipt.md#upgrade-rollback-and-old-receipts-format-120)).
 
 A verifier older than `1.15.0`, and a `logweir` built before FX-4, still
 accept a 1.1.0 receipt or scorecard, since they compare majors only; they ignore

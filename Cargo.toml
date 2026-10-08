@@ -164,9 +164,32 @@ targets = [
 ]
 pr-run-mode = "plan"
 # release.yml is written by hand: it reuses ci.yml as its test gate, drills the
-# packaged binary and builds the images before it publishes. `dist` must
-# tolerate a workflow that is not byte-identical to the one it would generate.
+# packaged binary and promotes the images main CI already published before it
+# publishes. `dist` must tolerate a workflow that is not byte-identical to the
+# one it would generate.
 allow-dirty = ["ci"]
+# ONLY THE CLI SHIPS AS AN ARCHIVE (PROD-14.0). With the default, every binary
+# crate not marked `publish = false` is an app: `dist plan --tag v0.2.0-rc.1`
+# announced `logweir`, `weirkeeper` AND `logweir-retention` archives on all
+# three targets (measured 2026-10-05). The controller and the enforcement binary
+# ship in images only, so every package here is opted OUT and
+# `crates/logweir/Cargo.toml` opts the CLI back in; a new binary crate stays out
+# of the release until someone decides otherwise.
+dist = false
+# `cargo build -p logweir`, not `--workspace`. dist builds the whole workspace
+# when it is not told otherwise ("using cargo profile dist --workspace" in
+# every v0.1.5 build log), which unifies features across xtask, e2e and the
+# controller and compiles all of them; the runner image builds by package.
+precise-builds = true
+# GitHub attaches the tag's source to every release. dist's own `source.tar.gz`
+# and its `sha256.sum` were written by EACH of the three archive jobs, so the
+# merged upload carried three copies under one name.
+source-tarball = false
+# LICENSE and README.md are included by default. NOTICE and the generated
+# inventory are owed too: the binary statically links librdkafka and 400-odd
+# crates whose licences require their notices to travel with it, and NOTICE
+# says the release tarballs carry them.
+include = ["NOTICE", "THIRD_PARTY_NOTICES.md"]
 
 # THE PROFILE `dist build` COMPILES WITH, AND IT LIVES AT THE END OF THIS FILE.
 #

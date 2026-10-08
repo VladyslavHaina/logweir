@@ -243,6 +243,24 @@ pub fn cross_check(
     }
     let mut disagreements =
         ReceiptFacts::of_record(point).disagreements(&ReceiptFacts::of_receipt(receipt));
+    // **FX-7 — the pin, one way round.** A record that carries
+    // `archive.manifest_version_id` must carry the RECEIPT's: a different pin,
+    // or one the receipt does not have, would send a reader to the wrong
+    // object version. A record WITHOUT one says "unknown" (rule 2) — an older
+    // writer, or an unversioned bucket — and is not a contradiction: readers
+    // take the pin from the verified receipt, never from the record. That is
+    // why this is not a field of `ReceiptFacts`, whose comparison `reconcile`
+    // also uses between two RECORDS, where one written by an older build
+    // legitimately lacks the field.
+    if let Some(recorded) = point.archive.manifest_version_id.as_deref() {
+        let attested = receipt.archive.manifest_version_id.as_deref();
+        if attested != Some(recorded) {
+            disagreements.push(format!(
+                "archive.manifest_version_id: {recorded:?} vs {:?}",
+                attested.unwrap_or("")
+            ));
+        }
+    }
     disagreements.extend(unbacked_coverage(point, receipt));
     if disagreements.is_empty() {
         CrossCheck::Agrees

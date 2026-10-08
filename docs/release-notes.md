@@ -21,27 +21,43 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5) and 23 (FX-11), from the
-product-expansion tracker's fix-now rows, land after `fdb48cd8`. No tag is cut at `fdb48cd8`, so the candidate
+product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do FX-7's additions to
+item 11 (the execution-claim set check, receipt and catalog format 1.2.0, the
+pin's read by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
 
 ### Candidate record
 
-Fill every row for the exact candidate before the tag; a row left as `—` is an
-unrecorded fact, not a pass. A previous run does not validate new bytes.
+Fill every row for the exact candidate; a row left as `—` is an unrecorded
+fact, not a pass. A previous run does not validate new bytes. A tag does not
+rebuild the images — it gives the `sha-<commit>` publication `main` CI already
+made the version tag, unchanged — so the release dry run's `release.json`
+(workflow artifact `release-assets`) gives the publication commit and the four
+image digests **before** the tag. Nothing else carries over: the tag run
+packages the chart and builds the three CLI archives again. The chart package
+is not byte-reproducible (`helm package` records each file's modification
+time, which is its checkout time), and nothing shows the archives to be. The
+chart and archive rows therefore come from the **tag run's** `release.json`,
+the GitHub Release asset, after the tag, together with the run rows
+([the release checklist](tag1-checklist.md), *Cutting a release candidate*).
 
 | What | Value |
 |---|---|
-| Candidate commit | — |
+| Candidate commit (the tagged commit) | — |
 | Version tag | — |
-| CI run (`ci.yml`) for that commit | — |
-| Release run (`release.yml`) and release drill | — |
+| Publication commit (`release.json` `.images.publication`: the `sha-<commit>` images and chart the tag promotes) | — |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | — |
+| Release dry run (`release.yml` dispatched on the candidate) | — |
+| Release run (`release.yml` on the tag) and release drill | — |
 | Runner image digest (`linux/amd64`) | — |
 | Controller image digest (manifest list; amd64 and arm64) | — |
 | Console image digest (`logweir-console`) | — |
 | UI image digest (`logweir-ui`) | — |
-| `ui/` bundle, file by file | the output of the command below |
+| Chart (`logweir-chart` version and package sha256 from the tag run's `release.json` `.chart`; OCI digest from the release's notes, as an anonymous `helm pull` reports it) | — |
+| CLI archives (three; the tag run's `release.json` `.archives`, each with its sha256 and run-time needs) | — |
+| `ui/` bundle, file by file | the output of the command below, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate (context, auth mode, storage, limits) | — |
 | Checks deliberately deferred, each with its reason | — |
 
@@ -349,24 +365,58 @@ ExecutionAlreadyClaimed` and writes nothing; a schedule retries it under a new
 execution id only when it has `spec.retry`. An evidence store that does not
 enforce `If-None-Match: *` makes every backup exit 4 `ExecutionClaimUnproven`
 before any data is written, and a destination with `writeProbe` on reports it
-`notReady / ConditionalCreateUnsupported` first. No permission is added, and no
-signed format changes. **Do:** confirm the evidence store honours conditional
-create — turn on `writeProbe: CreateOnlyMarker` for one run of the destination
+`notReady / ConditionalCreateUnsupported` first. The claim adds no permission and
+changes no signed format; FX-7 below adds receipt and catalog format `1.2.0`, the MINOR after FX-4's `1.1.0` ([stability.md](stability.md#the-first-post-tag-addition-format-110-fx-4)).
+**Do:** confirm the evidence store honours conditional create — turn on `writeProbe: CreateOnlyMarker` for one run of the destination
 check, and never set `AWS_CONDITIONAL_PUT=disabled` — see the store table in
 [support-matrix.md](support-matrix.md). A standalone `logweir backup run` that
 reused a fixed `backup_id` must pass a fresh `--backup-id-override` per run.
-**Let in-flight Backups finish before upgrading:** an execution whose first run
-was made by the older runner has no claim, so if its Job is lost and re-created
-after the upgrade the new runner runs the engine again and can still invalidate
-that first receipt — the one window the claim cannot close.
+**The upgrade window is closed since FX-7:** an execution whose first run was
+made by the older runner has no claim, so if its Job is lost and re-created
+after the upgrade the new runner wins a claim — and then finds the older run's
+manifest or segments under `<prefix>/<backup_id>/` and stops, exit 1
+`ExecutionAlreadyClaimed`, before the engine. Only an older runner that is still RUNNING when its Job is
+re-created, and has written nothing yet, escapes both checks; let such a Job
+finish before upgrading. A read of the archive that fails while proving the set
+new is exit 1 when it is transient (a transport error, a timeout, a 5xx), so a
+schedule with `spec.retry` retries it under a new execution id, and exit 4
+`ExecutionClaimUnproven` otherwise (a 403, a wrong bucket). On a versioned bucket a receipt also pins its
+manifest's version (`archive.manifest_version_id`, receipt format `1.2.0`), so a
+set written again in that bucket after the point was signed — by an older
+runner after a rollback, say — is refused by a point-bound restore
+(`PointBindingMismatch`) and reported `Conflict` by the catalog even when the
+manifest bytes came out identical. That detection covers the points this build
+signed; the older runner's own receipt over the rewritten set pins nothing and
+stays selectable. A version id belongs to one bucket, so a byte-for-byte COPY
+of the archive (`aws s3 sync`, `mc mirror`, an unversioned destination) is the
+same point, checked by its manifest digest: the restore runs and logs
+`PointPinUnchecked`, and the catalog entry's remedy says the pin could not be
+checked in that bucket. **The pin is checked only where the bucket still holds
+the pinned version and serves it by id:** a rewrite whose pinned version was
+since expired or DELETED, a copy synced after the set was written again, or a
+store that cannot read by version reads the same way, and there the digest
+cannot see segments rewritten under an identical manifest. Object Lock
+retention covering a point's lifetime keeps its pinned version; when the
+signing bucket's catalog says `Conflict` and a copy's says `Available`, believe
+the `Conflict`. The pin's read by id needs
+`s3:GetObjectVersion` on the archive prefix
+([backup-receipt.md](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
 **Scope:** in-process rows, a private MinIO `RELEASE.2025-09-07T16-13-09Z`
 container, and four planted mutants plus the review's two. Live on
 lab-refresh-10 (2026-09-24): PLAT-06.1's case e (a lost Job re-created), both
-arms, and the receipt-dup rows 2–5 (RECEIPT-DUP). The upgrade window above
-stays open (RECEIPT-DUP-UPGRADE-WINDOW).
-**Rollback:** an older runner ignores the claims and returns to re-running the
-engine over a re-created Job; the claims stay in the bucket, harmless, and are
-honoured again after a re-upgrade.
+arms, and the receipt-dup rows 2–5 (RECEIPT-DUP). FX-7 (2026-09-29): compose
+slot 3, MinIO unversioned and SeaweedFS versioned buckets, a `v0.1.5` runner
+for the older build's run; its fix round (2026-10-05): slot 2, the same matrix
+plus byte-for-byte copies of a pinned point into both stores and a point-bound
+`restore run` against each bucket.
+**Rollback:** an older runner ignores the claims, the set check and the pin,
+and returns to re-running the engine over a re-created Job; the claims stay in
+the bucket, harmless, and are honoured again after a re-upgrade. **Before
+rolling the runner back to a build without the execution claim, let in-flight
+`Backup`s finish:** on an unversioned bucket a re-created Job's older runner
+rewrites the set's segments under an unchanged manifest, and no check reports
+it — the first, signed point keeps verifying. On a versioned bucket that
+point is reported `Conflict`.
 
 #### 12. A failed restore's signed scorecard: roll the controller out before the runner
 
@@ -967,7 +1017,11 @@ is converted and no stored object is rewritten
    §12, *The one widening that is NOT rollback-safe*).
 4. Let destination-backed and `v2`-frozen `Backup`s finish; an older controller
    refuses them terminally rather than running them ([kubernetes.md](kubernetes.md)
-   §10, *Backups created under the previous execution contract*).
+   §10, *Backups created under the previous execution contract*). Rolling the
+   runner back to a build without the execution claim, let EVERY in-flight
+   `Backup` finish first (item 11): on an unversioned bucket a re-created Job's
+   older runner rewrites the set's segments under an unchanged manifest, and no
+   check reports it.
 5. Let point-bound `Restore`s that have no Job yet reach one, or recreate them
    after the rollback: an older controller re-renders their approval bundle
    without the evidence keyring and ends them `ApprovalBundleConflict` (item 5;
@@ -1006,7 +1060,10 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21 and 22.
+from `fdb48cd8` crosses items 21, 22 and 23 and item 11's FX-7 additions: grant
+`s3:GetObjectVersion` before the upgrade, or a pinned point whose current version
+differs fails closed at the binding, and let in-flight Backups finish before
+rolling the runner back.
 
 **The chart and the images move together.** This chart's controller probes run
 `weirkeeper --probe`, and its console configuration can carry
@@ -1083,9 +1140,42 @@ policy or roster ([keys.md](keys.md)).
   source's** (item 22). The source's factor is recorded only in the archive
   manifest; the default is the target's broker count, at most 3, until
   PROD-05.1 projects the source's factor to the console.
-- **The product API's OpenAPI document is still `1.0.0-alpha.1`**, although the
-  console image and the chart now consume it; ship and upgrade the console and
-  the API together until the owner freezes it ([stability.md](stability.md)).
+- **The `v0.1.1`–`v0.1.5` image tags on Docker Hub are leftovers of failed
+  runs, not releases.** Those tag runs pushed version-tagged images before
+  they failed — `logweir:v0.1.1`–`v0.1.5`, `weirkeeper:v0.1.2`–`v0.1.5` and
+  `logweir-ui:v0.1.3`–`v0.1.5`; no console image and no chart — and none of
+  them published a chart, a GitHub Release or a release drill. Every run
+  failed in the CLI build matrix; `v0.1.1`'s image job also failed its own
+  repository-digest check after pushing, and the pull-back jobs of `v0.1.2`
+  and `v0.1.3` failed with "cannot overwrite digest". Do not install or pin
+  them. The owner decided on 2026-10-07 to delete them all once v0.2.0 ships. The repaired pipeline
+  never builds an image under a version tag: it tags main CI's `sha-<commit>`
+  images.
+- **The CLI archives' run-time needs.** The Linux archives are built in the
+  runner image's builder base (`rust:1.89-bookworm`), so they need what the
+  runner image installs: a glibc at least as new as the version measured on
+  each binary — 2.34 on the Linux arm64 archive built locally on 2026-10-05;
+  each release's notes give its own — which is never above the Debian 12
+  glibc (2.36) they are built against, so Debian 12's glibc or newer always
+  suffices; and `libssl.so.3`, `libcrypto.so.3`, `libsasl2.so.2` and
+  `libz.so.1` (Debian and Ubuntu: `libssl3`, `libsasl2-2`, `zlib1g`). A
+  distribution whose SASL library has another soname
+  (`libsasl2.so.3` on RHEL and Fedora) builds from the checkout. The macOS
+  archive needs Homebrew's `openssl@3`. `logweir --version` prints the
+  workspace version (`0.1.0`), not the tag; `release.json` ties each archive
+  to its tag and commit.
+- **The product API's OpenAPI document is `1.0.0-alpha.2`, still a
+  pre-release**, although the console image and the chart consume it; ship and
+  upgrade the console and the API together until PROD-14.2 freezes it at
+  `1.0.0` ([stability.md](stability.md)). Since `1.0.0-alpha.1` (2026-09-16,
+  never published) it gained 38 operations and removed none: destinations
+  (list, create, read, usage, test, update access, adopt from legacy), catalogs
+  with their points and signers, topic discoveries, preflights, the operation
+  event stream, schedule updates, manual backups, the restore approval
+  submission, read-only protection, rehearsal, retention and trust policies,
+  the namespace's approval policy, cadence previews, and the shared console's
+  sign-in routes (`/auth/login`, `/auth/callback`, session logout). Its
+  component schemas grew from 66 to 257; none was removed.
 - **No in-place runner signing-key cutover** ([keys.md](keys.md), step 2 of
   *The supported procedure*).
 - **Restore admission does not hold on a retention lease** (above).

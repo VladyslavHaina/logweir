@@ -587,6 +587,18 @@ listing was refused relays no body and lands `ResultUnreadable`. **If you
 separate the two, give the destination a `archiveRead` grant wide enough for
 the catalog, or accept that `RecoveryCatalog` will not sync.**
 
+**A pinned point's read BY VERSION (FX-7) is one action the rows above do not
+name.** A point whose receipt pins its manifest's version is checked, wherever
+the manifest's current version is not the pin — on every copy of the archive,
+and after a set was written again — by reading the pinned version by id
+(`GET ?versionId=`). AWS S3 authorises that read as `s3:GetObjectVersion` on
+`<bucket>/<prefix>/*`, for the `catalogSync` reader and for a point-bound
+restore's runner alike
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source]; the rows
+above were measured before FX-7. Without it such a point is `Unreadable` in the
+catalog and its point-bound restore exits 1 ("could not tell"), never a silent
+pass ([the pin](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+
 **SUPERSEDED — the retention enforcer now needs `s3:GetObject`.** When this
 row was measured the worker listed a set's objects and deleted them by the key
 list its approved plan carries, never reading one, and removing
@@ -1192,13 +1204,26 @@ list` still reads the durable catalog.
 
 | `availability` | meaning |
 |---|---|
-| `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's |
+| `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's, and — for a point whose receipt pins a manifest version (FX-7, versioned buckets) — the manifest's current version is the pinned one, or this bucket does not hold the pinned version at all (a copy of the archive, an unversioned bucket, a version that was expired or deleted): then the digest decided — which an identical manifest over rewritten segments passes — and the entry's `remedy` says the pin could not be checked in this bucket |
 | `Missing` | a definite `NotFound` |
-| `Unreadable` | any other storage error — 403, timeout, truncated. **"Could not tell", never "is not there".** |
+| `Unreadable` | any other storage error — 403, timeout, truncated, or a failed read of a pinned manifest version (FX-7; a 403 there is a principal without `s3:GetObjectVersion`, and the entry's remedy names it). **"Could not tell", never "is not there".** |
 | `Deleted` | a completed retention tombstone exists |
-| `Conflict` | two records disagree for one identity, or a record's facts contradict the receipt |
+| `Conflict` | two records disagree for one identity, a record's facts contradict the receipt, or this bucket holds the manifest version the receipt pins and it is no longer the current one — the set was written again in this bucket after the point was signed (FX-7; the entry's remedy says so) |
 | `UnsupportedFormat` | the record's major version is above this build's |
 | `Partial` | a sampled segment the manifest lists is missing |
+
+**What the pin cannot see (FX-7).** The pin is checked only where the bucket
+still holds the pinned version and serves it by id. A version that was expired
+or DELETED, a copy synced after the set was written again, or a store that
+cannot read by version leaves the digest alone, which an identical manifest
+over rewritten segments passes
+([the three routes](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+Object Lock retention covering a point's lifetime keeps its pinned version, and
+when the signing bucket's catalog says `Conflict` while a copy's says
+`Available`, believe the `Conflict`: it is evidence about the set, not about
+the place. Where ONE catalog lists a point at two locations, the locations merge
+best-of, so there the copy's `Available` is the entry's and the signing
+bucket's verdict survives only as "<location> is Conflict" in its `remedy`.
 
 | `verification` | meaning |
 |---|---|
@@ -1557,7 +1582,17 @@ no configuration is reconstructed by hand.**
    verifies the receipt's signature against the evidence keyring the
    controller mounts in the approval bundle (`evidence-keys.json`, every key
    of the namespace's resolved trust with its lifecycle, digest-pinned) and
-   reads the manifest back. A digest mismatch is exit 3 `PointBindingMismatch`;
+   reads the manifest back — and, when the receipt pins the manifest's version
+   (FX-7, a versioned bucket), compares it with the current one, since the
+   engine restores only the current one. When they differ it reads the pinned
+   version by id: a version this bucket still holds is a rewrite here; one it
+   does not hold — every copy of the archive, an unversioned bucket, a version
+   that was expired or deleted — leaves the decision to the digest (which an
+   identical manifest over rewritten segments passes), and the runner logs
+   `PointPinUnchecked` and goes on. A digest mismatch, or a pinned version
+   the bucket holds that is no longer current, is exit 3 `PointBindingMismatch`;
+   a pinned version that cannot be read at all (a 403 without
+   `s3:GetObjectVersion`, an outage) is exit 1;
    an unsigned receipt, a signature no trusted key verifies, or a signer the
    trust refuses (revoked for compromise, retired before the receipt was
    written, not an `EvidenceSigning` key) is exit 3 `PointUntrusted`. Either
@@ -4356,10 +4391,10 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | Exit | `status.phase` | `status.exitReason` | Condition | What it means |
 |---|---|---|---|---|
 | **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
-| **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine, so this one did not start it (RECEIPT-DUP). |
+| **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine — it holds the claim (RECEIPT-DUP), or, with no claim, its backup set already exists in the archive (FX-7) — so this one did not start it. With no reason: among others, a backup runner whose read of the archive to prove its set is new failed TRANSIENTLY (a transport error, a timeout, a 5xx the client had already retried; FX-7) — retryable, and a retry is a new execution id. |
 | **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
 | **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. |
-| **4** | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. `ExecutionClaimUnproven`: the evidence store refused the execution claim or does not enforce conditional create; the engine never started. |
+| **4** | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. `ExecutionClaimUnproven`: the evidence store refused the execution claim or does not enforce conditional create, or (FX-7) the archive could not be read to prove the backup set is new for a reason no retry changes (a 401/403, a wrong bucket, region or CA); the engine never started. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` | The Job finished and no container named `runner` reported a terminated state. See "the crashed Job" below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `NameTooLong` | The `Backup`'s own name is longer than 63 characters, so **nothing was created**. See below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `ExecutionSpecInvalid` | The typed spec states no runnable run identity (see "Manual backups" below), so **nothing was created**. |
@@ -4972,7 +5007,13 @@ the engine starts ([the execution claim](formats/backup-receipt.md#the-execution
 If the lost Job's pod got that far, the re-created Job finds the claim and exits
 **1** naming `ExecutionAlreadyClaimed`, with no engine run and no receipt: a
 second engine run would have overwritten the manifest the first run's signed
-receipt attests. The `Backup` ends `Failed` with `status.exitReason:
+receipt attests. **The same holds for a Job whose lost pod was an OLDER runner
+without the claim** (FX-7): the re-created Job wins a fresh claim, reads
+`<prefix>/<backupId>/`, finds the older run's manifest or segments there and
+stops with the same exit and reason — the engine would otherwise rewrite that
+run's segments in place
+([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
+The `Backup` ends `Failed` with `status.exitReason:
 ExecutionAlreadyClaimed` (the runner's final `failure-reason=` line, lifted by
 the controller; `kubectl describe backup` shows it on `status.exitReason` and
 the `Failed` condition's message, and the console in the run's exit reason and
@@ -4987,6 +5028,18 @@ and runs normally. An evidence store that does not honour conditional create
 ExecutionClaimUnproven` before the engine starts — and a destination whose
 `writeProbe` is on reports that store `notReady / ConditionalCreateUnsupported`
 before the first backup (§21.5).
+
+**Rolling the runner back re-opens this window, and on an unversioned bucket
+nothing reports it** (FX-7). A runner from before the claim (`v0.1.5` is the
+measured one) ignores the claim and the set check: if a `Backup`'s Job is
+re-created with it, it re-runs the engine over the set, exits 0 and signs a
+second receipt. On a versioned bucket the first point is then reported
+`Conflict` (its pinned manifest version was superseded), though the older
+runner's own, unpinned point over the same set stays selectable. On an
+unversioned bucket the first point keeps verifying — the manifest bytes can
+come out identical — while the segments under it were rewritten, and no check
+this build runs sees it. **Let in-flight `Backup`s finish before rolling the
+runner back** ([release notes](release-notes.md), *Before a rollback*).
 
 The source connection is configured once on `KafkaCluster`, and one resolver
 (§20) turns it into every Job: the probe and each backup reuse that object's
