@@ -548,6 +548,10 @@ mod tests {
             Ok(())
         );
         assert!(check_credential_binding(env, Some("v1:a"), Some("v1:x v1:ab")).is_err());
+        // A token that is a PREFIX of the expectation (a truncated binding) is
+        // not the binding either.
+        assert!(check_credential_binding(env, Some("v1:abc"), Some("v1:ab")).is_err());
+        assert!(check_credential_binding(env, Some("v1:abc"), Some("v1:x,v1:ab")).is_err());
         assert!(check_credential_binding(env, Some("v1:a"), Some("v1:x\nv1:b")).is_err());
         // FX-20: the fail-closed expectation is refused even when a Secret
         // carries the very same string.
