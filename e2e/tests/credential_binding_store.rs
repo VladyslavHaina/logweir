@@ -164,7 +164,7 @@ fn a_foreign_archive_binding_writes_nothing_and_a_bound_one_backs_up() {
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert_eq!(
-        stdout.lines().filter(|l| !l.trim().is_empty()).last(),
+        stdout.lines().filter(|l| !l.trim().is_empty()).next_back(),
         Some("refusal-reason=CredentialBindingMismatch"),
         "{stdout}"
     );
