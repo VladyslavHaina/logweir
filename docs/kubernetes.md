@@ -1562,9 +1562,14 @@ no configuration is reconstructed by hand.**
    backup set id and receipt key and both digests. (A catalog synced by a
    runner up to v0.2.0-rc.1 published every SCHEDULED run's set id and receipt
    key as `[redacted]`, so none of its scheduled points was offered; upgrade the
-   runner image and sync the catalog again — FX-17.) The operator names the topics to restore: the
-   view does not publish a point's topic list, and the readiness check reads the
-   manifest for exactly those names.
+   runner image and sync the catalog again — FX-17.) The operator names the
+   topics to restore, and the readiness check reads the manifest for exactly
+   those names. Since PROD-05.1 the view lists an `Available` point's topics
+   with their recorded partition count and replication factor
+   (`PointView.topics[]`, for points whose receipt is format 1.3.0 or later); the wizard
+   defaults the plan's replication factor from them, capped at the target's
+   broker count, and says so. The operator still types the list: a listed topic
+   set is not yet offered as a choice.
 5. **The plan is bound to the point.** It carries `source.backup: <backupId>`
    and `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`;
    the restore point in time defaults to `coveredTo − 1 ms` (the catalog's end
@@ -8124,7 +8129,7 @@ Secret read) cannot know, so its `principal` is reported as
 the principal. Any TLS mode takes `auth.tlsCa` (§20.2).
 
 The signed documents name the mode: a backup receipt and a catalog point
-record that name `scramSha256`, `plain` or `mtls` are format **1.3.0**, a
+record that name `scramSha256`, `plain` or `mtls` are format **1.4.0**, a
 scorecard **1.5.0**; every `plaintext`/`scramSha512` run writes exactly the
 document it always did ([stability.md](stability.md)).
 
@@ -8745,9 +8750,15 @@ exits 1 instead of assuming the broker is on `CreateTime`.
 
 A `Backup`'s source credential needs DescribeConfigs on every backed-up topic
 for the receipt to record the topic's configuration as `captured`. Without it
-the backup still succeeds, the topic reads `captureDenied`, and a later
-restore's configuration parity names that topic as not assessed
+the backup still succeeds, the topic reads `captureDenied`, its configuration
+model records no settings (only its partition count and replication factor,
+[`topic_configuration`](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130)),
+and a later restore's configuration parity names that topic as not assessed
 ([the receipt field](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
+A `Backup` does not look for declarative owners yet (no `KafkaTopic` listing,
+no declared owners: PROD-05.1a), so its receipt records `owner_detection: []`,
+both readers say each topic's owner was not checked, and the product API
+publishes `applyRoute: unknown` for it, never the admin-API route.
 
 ### 21.7 Skipping a check is not answering it
 

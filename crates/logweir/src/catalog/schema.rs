@@ -16,16 +16,18 @@ use crate::catalog::record::CatalogPoint;
 /// **The newest MINOR** (FX-7 fix round, review M-2): the `$id` and the file
 /// name come from ONE constant,
 /// [`FORMAT_VERSION_WITH_AUTH_MODES`](crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES)
-/// (`1.3.0`, PROD-01.3's three new `source.auth_mode` values). The older files
-/// are FROZEN beside it: FX-7's `-1.2.0.json` (`archive.manifest_version_id`)
-/// for a pinned record of a `plaintext`/`scramSha512` source, `schemas/logweir-catalog-point-1.0.0.json` for the records
-/// written before FX-4, and FX-4's `-1.1.0.json` (`topics[].config_coverage`)
-/// for the records written without a pin.
+/// (`1.4.0`, PROD-01.3's three new `source.auth_mode` values). The older files
+/// are FROZEN beside it: `schemas/logweir-catalog-point-1.0.0.json` for the
+/// records written before FX-4, FX-4's `-1.1.0.json` (`topics[].config_coverage`)
+/// for the records written without a pin before PROD-05.1, FX-7's `-1.2.0.json`
+/// (`archive.manifest_version_id`) for the pinned ones, and PROD-05.1's
+/// `-1.3.0.json` (`topics[].configuration`) for every record of a
+/// `plaintext`/`scramSha512` source this build writes.
 ///
 /// The `format_version` pattern (`^1\.[0-9]+\.[0-9]+$`) is on the type, not
 /// added here: a schema-only validator — the one route that does not go
 /// through [`crate::catalog::reader::read_record`] — must refuse a `9.9.9`
-/// document against a file called `logweir-catalog-point-1.2.0.json` for the
+/// document against a file called `logweir-catalog-point-1.3.0.json` for the
 /// same reason the scorecard and the receipt pin theirs.
 #[must_use]
 pub fn catalog_point_schema() -> String {

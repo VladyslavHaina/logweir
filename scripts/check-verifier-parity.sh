@@ -259,6 +259,9 @@ PYEOF
 
 receipt_count=0
 receipt_tb_cases=0
+receipt_model_cases=0
+receipt_unchecked_cases=0
+receipt_admin_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
     receipt_count=$((receipt_count + 1))
@@ -350,6 +353,67 @@ $want_tb
 $rust_tb"
         fi
         [ -z "$want_tb" ] || receipt_tb_cases=$((receipt_tb_cases + 1))
+        # PROD-05.1: both readers print the topic configuration model, one line
+        # per topic or the one line saying it was not recorded, and the SAME
+        # lines — an exit 0 is never read as "no configuration" by one reader
+        # while the other lists overrides. The topics are read from the
+        # DOCUMENT, so a reader that dropped or invented a topic's line fails
+        # here, and at least one accepted case must carry the block (below).
+        rust_tc="$(grep -oE 'topic_configuration(\[|:).*' "$tmp/rust.all" || true)"
+        py_tc="$(grep -oE 'topic_configuration(\[|:).*' "$tmp/py.all" || true)"
+        [ -n "$rust_tc" ] || fail "$name: drill verify printed no topic_configuration line for an accepted receipt"
+        if [ "$rust_tc" != "$py_tc" ]; then
+            fail "$name: the two readers print DIFFERENT topic configuration lines.
+  rust:
+$rust_tc
+  python:
+$py_tc"
+        fi
+        want_tc="$("$PY" -c 'import json, sys
+model = json.load(open(sys.argv[1])).get("topic_configuration")
+if model is None:
+    print("topic_configuration: not recorded")
+for t in sorted(model or {}):
+    print("topic_configuration[" + json.dumps(t) + "]")' "$doc")"
+        got_tc="$(printf '%s\n' "$rust_tc" | sed -n -e 's/^\(topic_configuration\[".*"\]\):.*/\1/p' -e 's/^\(topic_configuration: not recorded\),.*/\1/p')"
+        if [ "$got_tc" != "$want_tc" ]; then
+            fail "$name: the topic configuration lines do not name exactly the receipt's modelled topics.
+  want:
+$want_tc
+  got:
+$rust_tc"
+        fi
+        [ "$want_tc" = "topic_configuration: not recorded" ] || receipt_model_cases=$((receipt_model_cases + 1))
+        # PROD-05.1 fix round (M2): HOW each topic is applied, derived from the
+        # DOCUMENT — an owned topic by desired-state export, an un-owned one
+        # through the admin API ONLY where `owner_detection` says the run
+        # looked, and otherwise "owner not checked". A reader that printed the
+        # admin-API route for an owner nobody looked for fails here, not only
+        # when the two readers happen to disagree.
+        want_route="$("$PY" -c 'import json, sys
+doc = json.load(open(sys.argv[1]))
+model = doc.get("topic_configuration")
+looked = doc.get("owner_detection") or []
+for t in sorted(model or {}):
+    if (model[t] or {}).get("owner") is not None:
+        print(json.dumps(t) + " desired-state export")
+    elif looked:
+        print(json.dumps(t) + " no declarative owner found (" + ", ".join(looked) + "), so applied through the admin API")
+    else:
+        print(json.dumps(t) + " owner not checked, so how it is applied is not known")' "$doc")"
+        got_route="$(printf '%s\n' "$rust_tc" | sed -n \
+            -e 's/^topic_configuration\[\(".*"\)\]:.*, so restored by \(desired-state export\)$/\1 \2/p' \
+            -e 's/^topic_configuration\[\(".*"\)\]:.*, \(no declarative owner found (.*), so applied through the admin API\)$/\1 \2/p' \
+            -e 's/^topic_configuration\[\(".*"\)\]:.*, \(owner not checked, so how it is applied is not known\)$/\1 \2/p')"
+        if [ "$got_route" != "$want_route" ]; then
+            fail "$name: the topic configuration lines do not say how each topic is applied as its owner and owner_detection decide.
+  want:
+$want_route
+  got:
+$rust_tc"
+        fi
+        case "$want_route" in *"owner not checked"*) receipt_unchecked_cases=$((receipt_unchecked_cases + 1)) ;; esac
+        case "$want_route" in *"applied through the admin API"*) receipt_admin_cases=$((receipt_admin_cases + 1)) ;; esac
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -360,6 +424,12 @@ if [ "$receipt_count" -eq 0 ]; then
 fi
 if [ "$receipt_tb_cases" -eq 0 ]; then
     fail "no accepted backup-receipt case records a LogAppendTime topic, so the time-basis lines (FX-8) were never compared"
+fi
+if [ "$receipt_model_cases" -eq 0 ]; then
+    fail "no accepted backup-receipt case carries topic_configuration, so the model lines (PROD-05.1) were never compared"
+fi
+if [ "$receipt_unchecked_cases" -eq 0 ] || [ "$receipt_admin_cases" -eq 0 ]; then
+    fail "the accepted backup-receipt cases do not include both an owner NOT CHECKED ($receipt_unchecked_cases) and one looked for and not found ($receipt_admin_cases), so the route words (PROD-05.1 M2) were never told apart"
 fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
 
@@ -487,14 +557,19 @@ CATALOG_COVERAGE_VERSION="1.1.0"
 # FX-7 (merged after FX-4): the catalog point format that ALSO carries
 # `archive.manifest_version_id` — record.rs's FORMAT_VERSION_WITH_MANIFEST_VERSION.
 CATALOG_PIN_VERSION="1.2.0"
-# PROD-01.3: the catalog point format whose `source.auth_mode` may name one of
-# the three modes PROD-01.3 added (`scramSha256`, `plain`, `mtls`) —
-# record.rs's FORMAT_VERSION_WITH_AUTH_MODES, the newest MINOR. A renumber
-# moves that constant, the justfile's `catalog_schema_version` and this line
-# together.
-CATALOG_AUTH_VERSION="1.3.0"
+# PROD-05.1 (merged after FX-7): the catalog point format whose topics carry
+# the receipt's configuration model and partition count — record.rs's
+# FORMAT_VERSION_WITH_TOPIC_CONFIGURATION. A renumber moves that constant and
+# this line together.
+CATALOG_MODEL_VERSION="1.3.0"
+# PROD-01.3 (merged after PROD-05.1): the catalog point format whose
+# `source.auth_mode` may name one of the three modes PROD-01.3 added
+# (`scramSha256`, `plain`, `mtls`) — record.rs's FORMAT_VERSION_WITH_AUTH_MODES,
+# the newest MINOR. A renumber moves that constant, the justfile's
+# `catalog_schema_version` and this line together.
+CATALOG_AUTH_VERSION="1.4.0"
 mkdir -p "$tmp/catalog"
-"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" "$CATALOG_AUTH_VERSION" <<'PYEOF'
+"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" "$CATALOG_MODEL_VERSION" "$CATALOG_AUTH_VERSION" <<'PYEOF'
 import base64, hashlib, json, pathlib, sys
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -502,7 +577,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 fix, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 coverage_version = sys.argv[4]
 pin_version = sys.argv[5]
-auth_version = sys.argv[6]
+model_version = sys.argv[6]
+auth_version = sys.argv[7]
 key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
 der = key.public_key().public_bytes(
     serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -582,17 +658,39 @@ pinned["archive"]["manifest_version_id"] = "fx7-manifest-version-0001"
 pinned_payload = json.dumps(pinned, indent=2).encode() + b"\n"
 (out / "pinned.json").write_bytes(pinned_payload)
 (out / "pinned.sig").write_text(sign(pinned_payload))
-# PROD-01.3: the record of a point taken over mTLS — format 1.3.0, the MINOR
-# whose `source.auth_mode` may name `scramSha256`, `plain` or `mtls`. An mTLS
-# source has no SASL username, so the record names none. Signature-only like
-# the rest: both readers must ACCEPT it, and neither may start refusing a
+# PROD-05.1: the record this build writes — format 1.3.0, its topic rows
+# carrying the receipt's configuration model and partition count. Both readers
+# must accept it (signature-only); its facts are the Rust catalog reader's
+# rule-3 cross-check, not this gate's.
+modelled = json.loads(json.dumps(pinned))
+modelled["format_version"] = model_version
+modelled["topics"][0]["partitions"] = 6
+modelled["topics"][0]["configuration"] = {
+    "partitions": 6,
+    "replication_factor": 3,
+    "entries": {
+        "cleanup.policy": {"value": "compact", "source": "dynamicTopicConfig",
+                           "portability": "portable"},
+    },
+    "owner": {"kind": "strimzi", "basis": "kafkaTopicResource", "reference": "kafka/orders"},
+}
+modelled["topics"][0]["config_coverage"] = {"coverage": "captured"}
+modelled["owner_detection"] = ["kafkaTopicResources"]
+modelled_payload = json.dumps(modelled, indent=2).encode() + b"\n"
+(out / "modelled.json").write_bytes(modelled_payload)
+(out / "modelled.sig").write_text(sign(modelled_payload))
+# PROD-01.3: the record of a point taken over mTLS — format 1.4.0, the MINOR
+# whose `source.auth_mode` may name `scramSha256`, `plain` or `mtls`, built on
+# PROD-05.1's modelled record (1.4.0 carries every earlier minor's fields). An
+# mTLS source has no SASL username, so the record names none. Signature-only
+# like the rest: both readers must ACCEPT it, and neither may start refusing a
 # point because its auth mode is one an older build did not know.
-modes = json.loads(json.dumps(pinned))
+modes = json.loads(json.dumps(modelled))
 modes["format_version"] = auth_version
 modes["source"]["auth_mode"] = "mtls"
 modes_payload = json.dumps(modes, indent=2).encode() + b"\n"
-(out / "auth13.json").write_bytes(modes_payload)
-(out / "auth13.sig").write_text(sign(modes_payload))
+(out / "auth14.json").write_bytes(modes_payload)
+(out / "auth14.sig").write_text(sign(modes_payload))
 PYEOF
 
 catalog_case() {
@@ -632,8 +730,9 @@ catalog_case good11 catalog-point 0 0
 catalog_case pinned catalog-point 0 0
 grep -q "manifest_version_id=fx7-manifest-version-0001" "$tmp/py.out" \
     || fail "verify_scorecard.py does not print the pinned manifest version a $CATALOG_PIN_VERSION catalog point carries (FX-7)"
-catalog_case auth13 catalog-point 0 0
-grep -q '"auth_mode": "mtls"' "$tmp/catalog/auth13.json" \
+catalog_case modelled catalog-point 0 0
+catalog_case auth14 catalog-point 0 0
+grep -q '"auth_mode": "mtls"' "$tmp/catalog/auth14.json" \
     || fail "the $CATALOG_AUTH_VERSION catalog point case no longer names an mTLS source, so it proves nothing about PROD-01.3's modes"
 
 # Claim 2 and claim 3, on the accepted case, one reader at a time.
@@ -682,7 +781,7 @@ grep -q "sha256:aaaaaaaa" "$tmp/py.all" \
     || fail "verify_scorecard.py no longer prints the receipt digest that BINDS a catalog
 point; the short point_id is a display key and the digest is the binding (D3 §5.1)"
 
-echo "check-verifier-parity: both readers agree on all six catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION, $CATALOG_PIN_VERSION and $CATALOG_AUTH_VERSION), and both report SIGNATURE-ONLY"
+echo "check-verifier-parity: both readers agree on all six catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION, $CATALOG_PIN_VERSION, $CATALOG_MODEL_VERSION and $CATALOG_AUTH_VERSION), and both report SIGNATURE-ONLY"
 
 # ---------------------------------------------------------------------------
 # FOURTH LOOP (FX-4): the scorecard at format 1.1.0, and what its exit 0 says

@@ -31,8 +31,9 @@ fn justfile_schema_version(name: &str) -> String {
 /// the `$id` and the `format_version` it writes. They must be one number, or a
 /// renumber would regenerate one file and sign documents naming another. The
 /// CURRENT file is each document's newest MINOR's — since PROD-01.3 the one a
-/// document naming a new auth mode carries (scorecard 1.5.0, receipt 1.3.0);
-/// the older files are frozen beside it.
+/// document naming a new auth mode carries (scorecard 1.5.0, receipt 1.4.0, on
+/// top of PROD-05.1's receipt 1.3.0, which every other receipt this build
+/// signs carries); the older files are frozen beside it.
 #[test]
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
@@ -443,6 +444,15 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
             logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
         )
     );
+    assert!(
+        !v["required"]
+            .as_array()
+            .expect("the receipt schema has a required array")
+            .iter()
+            .any(|r| r == "topic_configuration"),
+        "topic_configuration is OPTIONAL: every receipt before 1.3.0 lacks it and must still validate"
+    );
+    assert!(v["definitions"]["TopicConfiguration"]["properties"]["entries"].is_object());
     let archive = &v["definitions"]["ReceiptArchive"];
     assert!(archive["properties"]["manifest_version_id"].is_object());
     assert!(
@@ -591,9 +601,11 @@ fn the_frozen_1_4_0_scorecard_schema_is_still_prod_08_1s() {
     );
 }
 
-/// **PROD-01.3: FX-7's 1.2.0 receipt schema is FROZEN** beside the 1.3.0
-/// one: it names itself 1.2.0, carries `manifest_version_id`, and its
-/// `source.auth.mode` is the closed two.
+/// **FX-7's 1.2.0 receipt schema is FROZEN** beside PROD-05.1's 1.3.0 one. It
+/// still describes every PINNED receipt written before PROD-05.1: it names
+/// itself 1.2.0, carries `config_coverage` and `archive.manifest_version_id`,
+/// and does NOT describe `topic_configuration`. `just schema` no longer
+/// regenerates it, so this is the gate that it stays the file FX-7 published.
 #[test]
 fn the_frozen_1_2_0_receipt_schema_is_still_fx7s() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -604,20 +616,63 @@ fn the_frozen_1_2_0_receipt_schema_is_still_fx7s() {
         frozen["$id"],
         "https://logweir.dev/schemas/logweir-backup-receipt-1.2.0.json"
     );
+    assert!(frozen["properties"]["config_coverage"].is_object());
     assert!(
         frozen["definitions"]["ReceiptArchive"]["properties"]["manifest_version_id"].is_object()
     );
+    assert!(
+        frozen["properties"].get("topic_configuration").is_none(),
+        "the frozen 1.2.0 schema must not describe the 1.3.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    assert_ne!(
+        current["$id"], frozen["$id"],
+        "the current schema is a NEW file beside the frozen one, never the 1.2.0 file regenerated"
+    );
+    assert!(current["properties"]["topic_configuration"].is_object());
+}
+
+/// **PROD-01.3: PROD-05.1's 1.3.0 receipt schema is FROZEN** beside the 1.4.0
+/// one, and still describes every receipt of a `plaintext` or `scramSha512`
+/// backup, which this build writes as 1.3.0: it names itself 1.3.0, carries
+/// `topic_configuration`, and its `source.auth.mode` description is the closed
+/// set of two. The current file names the five, from 1.4.0.
+#[test]
+fn the_frozen_1_3_0_receipt_schema_is_still_prod_05_1s() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.3.0.json"
+    ))
+    .expect("the frozen 1.3.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.3.0.json"
+    );
+    assert!(frozen["properties"]["topic_configuration"].is_object());
     let mode = frozen["definitions"]["ReceiptAuth"]["properties"]["mode"]["description"]
         .as_str()
         .expect("ReceiptAuth.mode has a description");
     assert!(mode.contains("A CLOSED SET OF TWO"), "{mode}");
     let current: serde_json::Value =
         serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
+    assert!(
+        current["properties"]["topic_configuration"].is_object(),
+        "the current file keeps PROD-05.1's field"
+    );
     let mode = current["definitions"]["ReceiptAuth"]["properties"]["mode"]["description"]
         .as_str()
         .expect("ReceiptAuth.mode has a description");
     assert!(
-        mode.contains("from 1.3.0") && mode.contains("mtls"),
+        mode.contains("from 1.4.0") && mode.contains("mtls"),
         "{mode}"
+    );
+    assert_eq!(
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION,
+        "1.3.0"
+    );
+    assert_eq!(
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES,
+        "1.4.0"
     );
 }

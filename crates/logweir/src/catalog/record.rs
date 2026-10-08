@@ -31,14 +31,24 @@ pub const LOG_ENTRY_FORMAT_VERSION: &str = "1.0.0";
 /// unversioned bucket is exactly the [`FORMAT_VERSION`] document.
 pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 
+/// **PROD-05.1.** The format of a record whose topics carry the receipt's
+/// `topic_configuration` (`topics[].configuration`, and `topics[].partitions`
+/// from it) — the MINOR after FX-7's 1.2.0. Written exactly when the receipt
+/// is a 1.3.0 one that carries the block, which every receipt this build
+/// signs is; a record backfilled from an older receipt keeps the format it
+/// would have had (reading rule 2: an older reader ignores the fields).
+pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
+
 /// **PROD-01.3.** The format of a record whose `source.auth_mode` is one of the
 /// modes PROD-01.3 added (`scramSha256`, `plain`, `mtls`) — copied from a
-/// receipt that is itself 1.3.0 (`logweir_core::backup_receipt::
-/// FORMAT_VERSION_WITH_AUTH_MODES`). A MINOR bump: the field's set of values
-/// grows and nothing else changes, and a record that pins a manifest version
-/// may be 1.3.0 too (1.3.0 includes 1.2.0's field). Written only for those
-/// modes, so every other record is the document it was.
-pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.3.0";
+/// receipt that is itself 1.4.0 (`logweir_core::backup_receipt::
+/// FORMAT_VERSION_WITH_AUTH_MODES`). A MINOR bump over
+/// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`]: the field's set of values
+/// grows and nothing else changes, and a 1.4.0 record carries PROD-05.1's
+/// topic configuration and may pin a manifest version (1.4.0 includes every
+/// earlier minor). Written only for those modes, so every other record is the
+/// document it was.
+pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
@@ -146,9 +156,13 @@ pub fn log_key(recovery_point_at: DateTime<Utc>, point_id: &str) -> String {
 /// bulk, and a principal name is not a fact a recovery point needs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CatalogPoint {
-    /// Semver of THIS format: [`FORMAT_VERSION`] (`1.1.0` since FX-4), or
+    /// Semver of THIS format: [`FORMAT_VERSION`] (`1.1.0` since FX-4),
     /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] (`1.2.0`) for a record that
-    /// carries `archive.manifest_version_id` (FX-7). Major `1`; a higher major is
+    /// carries `archive.manifest_version_id` (FX-7), or
+    /// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] (`1.3.0`) for one whose
+    /// topics carry the receipt's configuration model (PROD-05.1), or
+    /// [`FORMAT_VERSION_WITH_AUTH_MODES`] (`1.4.0`) for one whose
+    /// `source.auth_mode` is a mode PROD-01.3 added. Major `1`; a higher major is
     /// [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry,
     /// never fatal for the sync (D3 §5.2 rule 1).
     #[schemars(regex(pattern = r"^1\.[0-9]+\.[0-9]+$"))]
@@ -176,6 +190,18 @@ pub struct CatalogPoint {
     pub capture: RecordCapture,
     /// One entry per topic the receipt names, in the receipt's own order.
     pub topics: Vec<RecordTopic>,
+    /// **Format 1.3.0 (PROD-05.1).** The receipt's `owner_detection`, copied
+    /// and never recomputed: where the run looked for declarative owners
+    /// (`declared`, `kafkaTopicResources`). It is what lets a reader tell a
+    /// topic with no owner found from one whose owner was never looked for:
+    /// a topic without an owner beside an EMPTY list reads "owner not
+    /// checked", never "applied through the admin API".
+    ///
+    /// Receipt-derived under rule 3 — `reader::cross_check` refuses a record
+    /// whose copy the receipt does not back. ABSENT means NOT RECORDED (rule
+    /// 2): every record before 1.3.0. Never read as "looked everywhere".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_detection: Option<Vec<String>>,
     pub source: RecordSource,
     /// ABSENT means the provenance is UNKNOWN — an archive imported from
     /// another installation, or a run this build could not identify. Never
@@ -258,11 +284,14 @@ pub struct RecordCapture {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecordTopic {
     pub name: String,
-    /// ABSENT means the partition count is UNKNOWN (rule 2), which is the
-    /// truthful state for every record this build writes: a backup receipt
-    /// records per-topic RECORD counts and the named topic set, and no
-    /// partition count at all. A `0` here would read as "this topic has no
-    /// partitions" and would let D3 §4.2's `maxPartitions` filter accept a
+    /// The source's partition count, receipt-derived (rule 3) from the
+    /// receipt's `topic_configuration[<name>].partitions` (format 1.3.0,
+    /// PROD-05.1) — the count the archive's manifest records.
+    ///
+    /// ABSENT means UNKNOWN (rule 2): every record derived from a receipt
+    /// before 1.3.0, which records no partition count at all, and a 1.3.0 one
+    /// whose manifest recorded none. A `0` here would read as "this topic has
+    /// no partitions" and would let D3 §4.2's `maxPartitions` filter accept a
     /// point it has no size information about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partitions: Option<u32>,
@@ -279,6 +308,18 @@ pub struct RecordTopic {
     /// predates 1.1.0. Never read as `captured`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_coverage: Option<logweir_core::backup_receipt::TopicConfigCoverage>,
+    /// **Format 1.3.0 (PROD-05.1).** The receipt's `topic_configuration`
+    /// entry for this topic, copied and never recomputed: the source's
+    /// partition count and replication factor, the recorded configuration
+    /// entries with their portability classes, and the declarative owner —
+    /// the portable desired-state model a restore rebuilds the topic from.
+    ///
+    /// Receipt-derived under rule 3 — `reader::cross_check` refuses a record
+    /// whose copy the receipt does not back. ABSENT means NOT RECORDED (rule
+    /// 2): every record before 1.3.0, and every record derived from a receipt
+    /// that predates 1.3.0. Never read as "no configuration".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<logweir_core::backup_receipt::TopicConfiguration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -288,7 +329,7 @@ pub struct RecordSource {
     pub cluster_id: String,
     pub bootstrap_servers: Vec<String>,
     /// The receipt's `source.auth.mode`, copied: `plaintext` or `scramSha512`
-    /// in every format, and from 1.3.0 also `scramSha256`, `plain` or `mtls`
+    /// in every format, and from 1.4.0 also `scramSha256`, `plain` or `mtls`
     /// (PROD-01.3) — the receipt's versioned closed set, one spelling in this
     /// product.
     pub auth_mode: String,

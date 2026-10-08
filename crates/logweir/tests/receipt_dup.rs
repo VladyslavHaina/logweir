@@ -105,6 +105,8 @@ impl Fixture {
                 out: None,
                 receipt_out: None,
                 backup_id_override: Some(EXECUTION_ID.into()),
+                kafka_topic_resources: None,
+                strimzi_cluster: None,
             },
             key,
             dir,

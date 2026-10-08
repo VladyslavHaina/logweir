@@ -434,7 +434,7 @@ messages in FULL and which such an edit does not touch — plus
 which reads the function's own source text, so an arm deleted from both readers
 and from this corpus still fails a named test.
 
-The two-reader walk over these eighteen documents (FX-4 added nine `config_coverage` cases, FX-7 the pinned one) is
+The two-reader walk over these twenty-nine documents (FX-4 added nine `config_coverage` cases, FX-7 the pinned one, PROD-05.1 eleven `topic_configuration` cases: two accepts — the pinned one with an un-owned topic, so the parity gate compares the admin-API route line too — and one refusal per arm 12–19, two for arm 17) is
 `crates/logweir/tests/two_reader_parity_receipt.rs` — its **own test binary**,
 because Global Constraint 22's 15 s bound is per `#[test]` and
 `two_reader_parity.rs` already measures 5–12 s.
@@ -479,19 +479,20 @@ Neither message interpolates, so both `arm` fields are verbatim fragments of
 `Scorecard::validate_invariants` and `every_invariant_arm_has_a_corpus_case`
 joins on them exactly as it does for every other case here.
 
-## PROD-01.3: the versioned auth-mode cases (receipt 1.3.0, scorecard 1.5.0)
+## PROD-01.3: the versioned auth-mode cases (receipt 1.4.0, scorecard 1.5.0)
 
 PROD-01.3 adds `scramSha256`, `plain` and `mtls` to both auth-mode fields, as
-values of a NEW minor only: receipt format 1.3.0 for `source.auth.mode`,
+values of a NEW minor only: receipt format 1.4.0 (after PROD-05.1's 1.3.0) for `source.auth.mode`,
 scorecard format 1.5.0 for `target.auth.mode`. Each field's one closed-set arm
 becomes three statements in both readers, and each statement has a case. Every
 case is its file's unmodified document with exactly the overrides named.
 
 | case | index | override | pins |
 |---|---|---|---|
-| `source_auth_mode_mtls_under_1_3_0` | receipt | `format_version` → `1.3.0`, mode `mtls`, no username | ACCEPT: the document an mTLS backup writes |
+| `source_auth_mode_mtls_under_1_4_0` | receipt | `format_version` → `1.4.0`, mode `mtls`, no username | ACCEPT: the document an mTLS backup writes |
+| `source_auth_mode_mtls_under_1_3_0` | receipt | the same under `1.3.0` | the BOUNDARY: PROD-05.1's 1.3.0 predates the new values (5b) |
 | `source_auth_mode_plain_under_1_0_0` | receipt | mode `plain` under `1.0.0` | 5b: a new mode under a version that predates it, named by version |
-| `source_auth_mode_outside_the_five` | receipt | `1.3.0`, mode `oauthbearer` | 5c: the closed five from 1.3.0 (OAUTHBEARER is deferred, OD-3) |
+| `source_auth_mode_outside_the_five` | receipt | `1.4.0`, mode `oauthbearer` | 5c: the closed five from 1.4.0 (OAUTHBEARER is deferred, OD-3) |
 | `target_auth_mode_plain_under_1_5_0` | scorecard | `1.5.0`, mode `plain` | ACCEPT: the document a restore into a PLAIN target writes |
 | `target_auth_mode_mtls_under_1_4_0` | scorecard | `1.4.0`, mode `mtls` | the BOUNDARY: PROD-08.1's 1.4.0 predates the new values |
 | `target_auth_mode_scram_sha_256_under_1_0_0` | scorecard | mode `scramSha256` under `1.0.0` | a new mode under an old version; the message names the version, never the mode |

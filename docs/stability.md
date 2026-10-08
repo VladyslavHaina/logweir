@@ -273,7 +273,69 @@ it). The block says what a verdict COVERED — a sample, or every selected recor
   documents again, sampled, with no block; the 1.4.0 documents already written
   stay valid under both readers.
 
-### Three new auth modes: receipt and catalog point 1.3.0, scorecard 1.5.0 (PROD-01.3)
+### Receipt and catalog-point format 1.3.0: `topic_configuration` (PROD-05.1)
+
+PROD-05.1 adds one optional block to the backup receipt, `topic_configuration`,
+and its per-topic copy to the catalog point record, `topics[].configuration`,
+and moves both documents to **1.3.0**
+(`schemas/logweir-backup-receipt-1.3.0.json` and
+`schemas/logweir-catalog-point-1.3.0.json`, FX-7's 1.2.0 files frozen beside
+them). Per named topic it records the source's partition count and replication
+factor, the configuration entries Logweir's own read returned with their
+source and portability class, and the topic's declarative owner, with a
+top-level `owner_detection` saying where the run looked for owners
+([the receipt format](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130);
+[the model and the portability table](to-do/decisions/PROD-05.1-configuration-model.md)).
+
+- **Absent means not recorded.** A receipt without the block — every receipt
+  before 1.3.0 — records no topic's configuration model, and a reader that
+  needs one has none; never "no configuration". Within the block, a topic whose
+  configuration read was denied or failed records NO entries (arm 15), never an
+  empty set.
+- **Every receipt this build signs carries the block**, pinned or not, so every
+  one is 1.3.0. FX-7's statement that an unpinned receipt is FX-4's 1.1.0
+  document byte for byte holds for builds before PROD-05.1; a 1.3.0 receipt
+  without a pin still has no `manifest_version_id` key.
+- **Ten arms, 12 to 21, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block (arm 20 also on one carrying `owner_detection`
+  without it, which no writer produces), and judges it against
+  `config_coverage` and `source.topics` the way FX-4's arm 7 judges
+  `config_coverage` against `source.topics`. No document without the block
+  changes verdict; the corpus (`e2e/fixtures/invariants/`, a case for each
+  refusing half of every arm) and the parity gate re-prove that on every
+  `just lint`.
+- **An owner nobody looked for is not "no owner".** `owner_detection` empty —
+  every `Backup` and `BackupSchedule` the controller runs today, which passes
+  neither a declaration nor `KafkaTopic` resources (PROD-05.1a) — makes both
+  readers print `owner not checked` for an un-owned topic and the product API
+  publish `applyRoute: unknown`, never the admin-API route a later restore
+  would act on.
+- **The class is the writer's.** The arms judge a class against its source and
+  value, never against the key, so a later table refinement cannot make an
+  older receipt refuse itself; a restore re-derives the class from its own
+  table and fails closed on a disagreement (PROD-05.2).
+- **The catalog record's existing `topics[].partitions` is now filled** from
+  the receipt (it was always absent: no receipt recorded a count). Its meaning
+  is unchanged — the source's partition count — and `reader::cross_check`
+  refuses a record whose count the receipt does not back. Its one reader,
+  rehearsal selection's `maxPartitions` filter, can only refuse more points
+  with a count than without one.
+- **The plan grammar gains `source.topic_owners`**, omitted from the serialised
+  plan when absent (an empty list is kept: it says no topic has a declared
+  owner, and the receipt records `declared` among the places the run looked); a
+  runner built before PROD-05.1 ignores it and records no owner. Phase −1
+  refuses, exit 3, a declaration it cannot record or a topic declared twice.
+- **Readers built before PROD-05.1** (`verify_scorecard.py` 1.19.0 and earlier,
+  and an older `logweir`) accept every 1.3.0 document — the major is unchanged
+  and the block is an optional field they ignore — print no model line, and do
+  not run arms 12 to 21.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.1.0 or
+  1.2.0 receipts and records again; the 1.3.0 documents already written stay
+  valid under both readers. A catalog synced by an older runner lists no
+  topics for a point (the console then says the source's layout is not
+  published, and defaults as FX-5 did).
+
+### Three new auth modes: receipt and catalog point 1.4.0, scorecard 1.5.0 (PROD-01.3)
 
 PROD-01.3 adds `scramSha256`, `plain` (SASL/PLAIN, over TLS only) and `mtls`
 to the closed set of auth modes. Two existing fields carry the mode in signed
@@ -281,7 +343,7 @@ documents — the backup receipt's `source.auth.mode` and the scorecard's
 `target.auth.mode` — and the catalog point record copies the receipt's.
 
 - **The value set is versioned, and only a document that names a new value
-  moves.** A receipt or catalog point naming one of the three is **1.3.0**, a
+  moves.** A receipt or catalog point naming one of the three is **1.4.0**, a
   scorecard **1.5.0**; every document of a `plaintext` or `scramSha512` run is
   written at the version it always was, byte for byte. Each new schema file
   differs from the frozen one beside it in that field's description only.
@@ -294,7 +356,7 @@ documents — the backup receipt's `source.auth.mode` and the scorecard's
   version (unchanged), a new value under a version that predates it (refused),
   and the closed five from the new version. The corpus
   (`e2e/fixtures/invariants/`, three cases per document) and the parity gate
-  re-prove it on every `just lint`; `verify_scorecard.py` is 1.20.0.
+  re-prove it on every `just lint`; `verify_scorecard.py` is 1.21.0.
 - **Two runner terminal states are added**, each a refusal that names its
   cause: `PlainWithoutTls` (SASL/PLAIN without TLS) and
   `CredentialBindingMismatch` (a projected credential whose Secret's
@@ -320,7 +382,7 @@ documents — the backup receipt's `source.auth.mode` and the scorecard's
   a retry spanning the upgrade of a create that carried a value answers `409`
   (retry with a new key).
 - **Rollback.** An older `logweir` cannot parse a spec naming a new mode, so it
-  writes no 1.3.0/1.5.0 document; those already written stay valid for every
+  writes no 1.4.0/1.5.0 document; those already written stay valid for every
   reader from PROD-01.3 on, and older readers refuse them (the safe direction).
   An older controller and runner ignore the binding pair; a bound Secret keeps
   working with them.
@@ -1388,7 +1450,7 @@ What changes for an operator:
   Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
   bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
   merges the two views for you yet (PROD-09.2 owns that merge).
-- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key).
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), and an unpinned one still has no `manifest_version_id` key.
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and

@@ -2615,6 +2615,14 @@ const D3_LOCATION = shapeOf("PointLocationView", { locationId: str, availability
  *  `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`, and
  *  a link that could not name them would be an offer to build a plan out of
  *  nothing. */
+/** PROD-05.1: one topic of a point, as the catalog's view lists it -- the
+ *  recorded layout and how its configuration is held, never a value. */
+const D3_POINT_TOPIC = shapeOf(
+  "PointTopicView",
+  { name: str, applyRoute: str },
+  { partitions: int, replicationFactor: int, configCoverage: str, owner: str },
+);
+
 const D3_POINT = shapeOf(
   "PointView",
   {
@@ -2631,6 +2639,15 @@ const D3_POINT = shapeOf(
     // server side (`claude/verdict-precedence`). Present only for a refusal;
     // a row that carries it is `selectable: false` whatever its two axes say.
     backupVerdict: str,
+    // PROD-05.1: the point's topics with their recorded layout. ABSENT is not
+    // published (an older runner, a record before 1.3.0, a point that is not
+    // Available), never "no topics"; `topicsOmitted` counts a list left out.
+    topics: listOf(objectOf(D3_POINT_TOPIC)),
+    topicsOmitted: int,
+    // Where the backup run looked for declarative owners, beside `topics`.
+    // EMPTY says it looked nowhere, so an un-owned topic's `applyRoute` is
+    // `unknown` -- never read as `adminApi`.
+    ownerDetection: listOf(str),
   },
 );
 

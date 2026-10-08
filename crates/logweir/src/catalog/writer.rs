@@ -68,36 +68,49 @@ pub fn from_receipt(
     let topics = receipt
         .records
         .iter()
-        .map(|(name, records)| RecordTopic {
-            name: name.clone(),
-            // UNKNOWN, and that is the honest value: a backup receipt records
-            // no partition count at all. See `RecordTopic::partitions`.
-            partitions: None,
-            records: *records,
-            // FX-4: the receipt's own entry, copied — absent (UNKNOWN) for a
-            // receipt that predates format 1.1.0. Arm 7 has established the
-            // block names exactly the topics `records` does.
-            config_coverage: receipt
-                .config_coverage
+        .map(|(name, records)| {
+            // PROD-05.1: the receipt's own model entry, copied — absent (NOT
+            // RECORDED) for a receipt that predates format 1.3.0. Arm 14 has
+            // established the block names exactly the topics `records` does.
+            let configuration = receipt
+                .topic_configuration
                 .as_ref()
                 .and_then(|block| block.get(name))
-                .cloned(),
+                .cloned();
+            RecordTopic {
+                name: name.clone(),
+                // The archive's own count, from the receipt's 1.3.0 model, and
+                // UNKNOWN for an older receipt, which records none. See
+                // `RecordTopic::partitions`.
+                partitions: configuration.as_ref().and_then(|c| c.partitions),
+                records: *records,
+                // FX-4: the receipt's own entry, copied — absent (UNKNOWN) for a
+                // receipt that predates format 1.1.0. Arm 7 has established the
+                // block names exactly the topics `records` does.
+                config_coverage: receipt
+                    .config_coverage
+                    .as_ref()
+                    .and_then(|block| block.get(name))
+                    .cloned(),
+                configuration,
+            }
         })
         .collect();
-    // FX-7: the pin travels from the receipt, and the record's minor version
-    // says whether it carries one — `FORMAT_VERSION_WITH_MANIFEST_VERSION`
-    // (1.2.0) with it, FX-4's `FORMAT_VERSION` (1.1.0, which every record this
-    // build writes would otherwise carry) without it.
-    //
-    // PROD-01.3: a record copying a receipt whose `source.auth.mode` is one of
-    // the modes PROD-01.3 added is `FORMAT_VERSION_WITH_AUTH_MODES` (1.3.0),
-    // whatever it pins, because its `source.auth_mode` carries a value the
-    // older schemas do not list. Every other record is written exactly as
-    // before.
+    // The record's minor says what it carries: PROD-01.3's
+    // `FORMAT_VERSION_WITH_AUTH_MODES` (1.4.0) when it copies a receipt whose
+    // `source.auth.mode` is one of the modes PROD-01.3 added — its
+    // `source.auth_mode` carries a value the older schemas do not list, and
+    // 1.4.0 defines every earlier minor's fields — else PROD-05.1's
+    // `FORMAT_VERSION_WITH_TOPIC_CONFIGURATION` (1.3.0) when the receipt's
+    // configuration model travels into the topics — every receipt this build
+    // signs — else FX-7's `FORMAT_VERSION_WITH_MANIFEST_VERSION` (1.2.0) when
+    // the pin does, else FX-4's `FORMAT_VERSION` (1.1.0).
     let manifest_version_id = receipt.archive.manifest_version_id.clone();
     let format_version =
         if logweir_core::connection::is_prod_01_3_auth_mode(&receipt.source.auth.mode) {
             crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES
+        } else if receipt.topic_configuration.is_some() {
+            FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
         } else if manifest_version_id.is_some() {
             FORMAT_VERSION_WITH_MANIFEST_VERSION
         } else {
@@ -131,6 +144,9 @@ pub fn from_receipt(
             finished_at: receipt.finished_at,
         },
         topics,
+        // PROD-05.1: where the run looked for owners, copied — absent (NOT
+        // RECORDED) for a receipt that predates format 1.3.0.
+        owner_detection: receipt.owner_detection.clone(),
         source: RecordSource {
             cluster_id: receipt.source.cluster_id.clone(),
             bootstrap_servers: receipt.source.bootstrap_servers.clone(),

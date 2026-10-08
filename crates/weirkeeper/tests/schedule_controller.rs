@@ -2307,6 +2307,7 @@ fn the_backup_runner_argv_is_one_the_cli_accepts() {
                 tls: true,
             },
             topics: vec!["orders".to_string()],
+            topic_owners: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "kafka-backups".to_string(),
@@ -7204,6 +7205,7 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
                 tls: true,
             },
             topics: vec!["orders".to_string()],
+            topic_owners: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "lw-a".to_string(),
@@ -7444,6 +7446,7 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
                 tls: true,
             },
             topics: vec!["orders".to_string()],
+            topic_owners: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "lw-a".to_string(),

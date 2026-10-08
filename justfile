@@ -99,6 +99,11 @@ golden:
 # PROD-08.1 moved the scorecard to 1.4.0 (`integrity.verification`), and FX-8's
 # `-1.3.0.json` is frozen beside the new file the same way
 # (`the_frozen_1_3_0_scorecard_schema_does_not_describe_the_verification`).
+# PROD-05.1 moved the receipt and the catalog point to 1.3.0
+# (`topic_configuration`, `topics[].configuration`), and FX-7's `-1.2.0.json`
+# files are frozen beside the new ones the same way
+# (`the_frozen_1_2_0_receipt_schema_is_still_fx7s`,
+# `the_frozen_1_2_0_catalog_point_schema_is_still_fx7s`).
 #
 # PROD-01.3 moved all three to their next minor (scorecard 1.4.0, receipt and
 # catalog point 1.3.0): the closed set of auth-mode values grows by three
@@ -115,8 +120,8 @@ golden:
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
 scorecard_schema_version := "1.5.0"
-receipt_schema_version := "1.3.0"
-catalog_schema_version := "1.3.0"
+receipt_schema_version := "1.4.0"
+catalog_schema_version := "1.4.0"
 
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json

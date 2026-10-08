@@ -8,14 +8,15 @@
 // any cluster, and nothing on screen said that was a choice.
 //
 // WHAT THE PAGE CAN READ, AND WHAT IT CANNOT. The source's factor is recorded
-// only in the archive manifest, which only the restore Job reads: no record
-// this console reads carries it (`sourceReplicationFactorsOf` says so, and a
-// row below holds it to that). The target's broker count is
+// in the archive manifest; since PROD-05.1 the receipt projects it, the
+// catalog point copies it and a recovery catalog's view lists it per topic
+// (`PointView.topics[]`), which `sourceReplicationFactorsOf` reads -- the
+// PROD-05.1 rows at the end of this file. The target's broker count is
 // `TopicDiscovery.status.result.brokerCount`, which the product API now
 // publishes as `brokerCount`, and the wizard reads it from the target
 // connection's newest successful discovery when that discovery is fresh. So
 // the default is the source's factor capped at the broker count when both are
-// known (reached by the rule's own rows only, in this build), the broker count
+// known, the broker count
 // at most 3 when only that is known, and the grammar's 1 -- said, never
 // silent -- when nothing is.
 //
@@ -25,6 +26,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -183,11 +185,11 @@ test("fx5_the_basis_is_said_in_the_words_the_review_step_prints", () => {
   assert.equal(text([3], null),
     "3 (the source's; the target's broker count is not known to this console, so it is not capped)");
   assert.equal(text(null, 2),
-    "2 (the target's 2 brokers; the source's replication factor is not published to this console)");
+    "2 (the target's 2 brokers; the source's replication factor is not known for this point)");
   assert.equal(text(null, 1),
-    "1 (the target's 1 broker; the source's replication factor is not published to this console)");
+    "1 (the target's 1 broker; the source's replication factor is not known for this point)");
   assert.equal(text(null, 5), "3 (at most 3 by default, of the target's 5 brokers; the source's " +
-    "replication factor is not published to this console)");
+    "replication factor is not known for this point)");
   assert.equal(text(null, null), "1 (the plan grammar's default: neither the source's replication " +
     "factor nor the target's broker count is known to this console)",
     "NEGATIVE CONTROL: a bare \"1\" -- the silent default -- fails this");
@@ -196,21 +198,21 @@ test("fx5_the_basis_is_said_in_the_words_the_review_step_prints", () => {
   assert.equal(replicationText(state), text(null, BROKERS));
 });
 
-test("fx5_this_build_reads_no_source_factor_and_says_why", () => {
-  // THE SOURCE ARM IS NOT LIVE, and this row is what says so. The archive
-  // manifest is the one record of the source's factor and only the restore Job
-  // reads it; when a projection lands (the receipt, the catalog, the product
-  // API), `sourceReplicationFactorsOf` is the one function that changes, and
-  // this row is meant to fail and be rewritten with it.
+test("fx5_a_backup_with_no_catalog_row_reads_no_source_factor_and_says_why", () => {
+  // PROD-05.1 REWROTE THIS ROW, as FX-5 said it would: the source's factor is
+  // now read from a recovery catalog's view of the point. A state whose source
+  // facts were never read -- or a Backup no catalog lists -- still knows none,
+  // and step 4 says where it would come from AND why it is not known here.
   const state = wizardState();
   assert.equal(sourceReplicationFactorsOf(state), null,
-    "NEGATIVE CONTROL: any factor read from the point fails this row by design");
+    "NEGATIVE CONTROL: any factor read without a catalog row fails this row");
   withBrokers(state, BROKERS);
   assert.equal(replicationChoice(state).source, null);
   assert.ok(!replicationText(state).includes("the source's)"), replicationText(state));
   const step4 = renderTargetStep(state);
-  assert.equal(visible(byId(step4, "replication-source") || ""), SOURCE_FACTOR_NOTE,
-    "step 4 says where the source's factor is and why it is not read");
+  assert.equal(visible(byId(step4, "replication-source") || ""),
+    SOURCE_FACTOR_NOTE + " For this point: the recovery catalogs of this namespace have not " +
+    "been read.", "step 4 says where the source's factor is and why it is not read");
 });
 
 // ---------------------------------------------------- the broker-count fact
@@ -325,7 +327,7 @@ test("fx5_a_count_past_its_freshness_sets_the_default_with_its_age_and_refuses_n
       "NEGATIVE CONTROL: 1 -- the grammar's default because the count was 16 minutes old -- " +
         "fails this");
     const said = "2 (the target's 2 brokers" + asOf + "; the source's replication factor is not " +
-      "published to this console)";
+      "known for this point)";
     assert.equal(replicationText(state), said,
       "NEGATIVE CONTROL: the fresh wording (no \"as of\") for an old count fails this");
     const step4 = renderTargetStep(state);
@@ -358,7 +360,7 @@ test("fx5_a_count_past_its_freshness_sets_the_default_with_its_age_and_refuses_n
     const big = expired();
     big.lastSuccessful.brokerCount = 5;
     assert.equal(replicationText(withAnswer(big)), "3 (at most 3 by default, of the target's 5 " +
-      "brokers" + asOf + "; the source's replication factor is not published to this console)");
+      "brokers" + asOf + "; the source's replication factor is not known for this point)");
   });
 
 // ------------------------------------------------- the state and the steps
@@ -394,8 +396,8 @@ test("fx5_a_fresh_discovery_of_the_target_sets_the_default_and_the_review_says_w
     const prepared = await preparePlan(state);
     assert.ok(prepared.bytes.includes("\n  default_replication_factor: 2\n"),
       "the plan an approver signs asks for it: " + prepared.bytes);
-    const said = "2 (the target's 2 brokers; the source's replication factor is not published " +
-      "to this console)";
+    const said = "2 (the target's 2 brokers; the source's replication factor is not known " +
+      "for this point)";
 
     const step4 = renderTargetStep(state);
     assert.equal(visible(byId(step4, "replication-basis")), "This plan asks for " + said + ".");
@@ -422,7 +424,7 @@ test("fx5_a_larger_target_is_capped_at_three_and_a_single_broker_at_one", async 
   assert.equal(replicationFactorOf(big), 3, "NEGATIVE CONTROL: 5 fails this");
   assert.equal(visible(byId(renderPlanStep(await preparePlan(big), big), "review-replication")),
     "3 (at most 3 by default, of the target's 5 brokers; the source's replication factor is " +
-    "not published to this console)");
+    "not known for this point)");
   // THE BOUNDARY, through a state and the plan (review L1): four brokers is
   // the first count the ceiling caps.
   const four = withBrokers(wizardState(), 4);
@@ -894,4 +896,248 @@ test("fx5_class_the_subset_and_a_catalog_points_topics_survive_the_draft", () =>
   applyWizardDraft(byHand, Object.assign({}, readDraft("fx5-catalog-probe"),
     { catalogTopics: ["orders"], topics: ["orders"] }));
   assert.deepEqual(selectedTopics(byHand), ["orders"]);
+});
+
+// ------------------------------------------- PROD-05.1: the source's factor
+
+import {
+  MAX_SOURCE_CATALOGS,
+  SOURCE_FACTS_NOT_READ,
+  partitionCountsText,
+  pointIdOfReceiptDigest,
+  refreshSourceFacts,
+  sourceFactorNote,
+  sourceFactsOfEntry,
+} from "../pages/restore-wizard.js";
+
+/** The catalog row, as the product API publishes it, with the point's topics:
+ *  `orders` kept on 3 replicas and owned by a Strimzi KafkaTopic, `payments`
+ *  on 1. */
+function catalogPointEntryWithTopics() {
+  return Object.assign(catalogPointEntry(), {
+    topics: [
+      { name: "orders", partitions: 6, replicationFactor: 3, configCoverage: "captured",
+        owner: "strimzi", applyRoute: "desiredStateExport" },
+      { name: "payments", partitions: 2, replicationFactor: 1, configCoverage: "captured",
+        applyRoute: "adminApi" },
+    ],
+  });
+}
+
+/** A catalog-point state whose row lists its topics, `orders` and `payments`
+ *  typed, the source facts read the way the mount reads them. */
+async function catalogStateWithTopics(ns, entry) {
+  const destination = fixture("console/destination.json").item;
+  const point = catalogRecoveryPoint(catalogObject(ns), entry || catalogPointEntryWithTopics(),
+    destination, null);
+  const state = initialState(ns, clusters(), { items: [] },
+    { catalog: "archive", point: catalogPointId() }, destination, undefined, { point: point });
+  setCatalogTopics(state, ["orders", "payments"]);
+  assert.equal(await refreshSourceFacts(state, {}), true);
+  return state;
+}
+
+test("prod051_the_point_id_of_a_backup_is_its_receipts_digest_prefix", () => {
+  assert.equal(pointIdOfReceiptDigest("sha256:" + "ab".repeat(32)), "lwp1-" + "ab".repeat(16),
+    "the catalog's identity (D3 section 5.1): lwp1- and the first 32 hex digits");
+  for (const bad of [undefined, null, "", "sha256:ABC", "sha256:" + "ab".repeat(31), "ab".repeat(32),
+    "sha256:" + "AB".repeat(32)]) {
+    assert.equal(pointIdOfReceiptDigest(bad), "", String(bad));
+  }
+});
+
+// L6 (fix round): ONE fixture, read by this row AND by the catalog's own
+// (`crates/logweir/tests/catalog.rs::the_point_id_fixture_is_the_catalogs`):
+// the checked-in signed receipt, its digest and the point id the catalog
+// writes for it. A drift on either side fails the side that drifted.
+test("prod051_the_point_id_fixture_is_the_one_the_catalog_writes", () => {
+  const f = fixture("point-id.json");
+  const bytes = readFileSync(fileURLToPath(new URL("../../" + f.receiptFile, import.meta.url)));
+  assert.equal("sha256:" + createHash("sha256").update(bytes).digest("hex"), f.receiptSha256,
+    "the fixture's digest is the receipt's");
+  assert.equal(pointIdOfReceiptDigest(f.receiptSha256), f.pointId,
+    "the console looks a Backup's point up by the id the catalog writes");
+});
+
+test("prod051_the_source_factor_from_the_catalog_capped_by_the_brokers_with_its_source_said",
+  async () => {
+    const state = withBrokers(await catalogStateWithTopics("team-p051"), BROKERS);
+    assert.deepEqual(sourceReplicationFactorsOf(state), [3, 1],
+      "one factor per SELECTED topic, from the catalog row");
+    const choice = replicationChoice(state);
+    assert.deepEqual([choice.value, choice.basis, choice.source], [2, "capped", 3],
+      "NEGATIVE CONTROL: 2 with basis brokers -- the factor never read -- fails this");
+    assert.equal(replicationText(state),
+      "2 (capped at the target's 2 brokers; the source's is 3, as recovery catalog `archive` " +
+      "records point `" + catalogPointId() + "`, the largest of the selected topics')");
+    assert.equal(replicationFactorOf(state), 2, "the plan carries the capped default");
+    // FX-5's refusal above the broker count STAYS: 3 typed over a fresh 2.
+    setReplicationFactor(state, "3");
+    assert.match(replicationProblems(state).replicationFactor || "",
+      /^`ReplicationFactorExceedsBrokers`: the target's topic discovery/,
+      "NEGATIVE CONTROL: no complaint -- the source's 3 lifting the cap -- fails this");
+  });
+
+test("prod051_a_target_with_room_takes_the_sources_factor_and_the_differs_note_goes", async () => {
+  const state = withBrokers(await catalogStateWithTopics("team-p051-room"), 5);
+  const choice = replicationChoice(state);
+  assert.deepEqual([choice.value, choice.basis], [3, "source"],
+    "NEGATIVE CONTROL: 3 by the ceiling (basis ceiling) fails this -- the source's 3, not the cap's");
+  assert.equal(replicationText(state), "3 (the source's, as recovery catalog `archive` records " +
+    "point `" + catalogPointId() + "`, the largest of the selected topics')");
+  assert.equal(replicationMayDiffer(choice), false,
+    "the plan asks for exactly the source's factor, so the storage note has nothing to warn of");
+  const step4 = renderTargetStep(state);
+  assert.equal(byId(step4, "replication-differs"), null);
+  assert.equal(byId(step4, "replication-source"), null,
+    "the not-known note is not shown when the factor IS known");
+  // The catalog and the point are code spans on the page, like every other
+  // name the console shows.
+  const reviewHtml = renderRecoveryLimits(state);
+  assert.ok(reviewHtml.includes("as recovery catalog <code>archive</code> records point <code>" +
+    catalogPointId() + "</code>"), reviewHtml);
+  const review = visible(reviewHtml);
+  assert.ok(review.includes("3 (the source's, as recovery catalog archive records point"), review);
+});
+
+test("prod051_the_default_follows_the_selected_subset", async () => {
+  const state = withBrokers(await catalogStateWithTopics("team-p051-subset"), 5);
+  setCatalogTopics(state, ["payments"]);
+  syncReplicationDefault(state);
+  assert.deepEqual(sourceReplicationFactorsOf(state), [1]);
+  assert.equal(replicationText(state),
+    "1 (the source's, as recovery catalog `archive` records point `" + catalogPointId() + "`)",
+    "NEGATIVE CONTROL: 3 -- the whole point's largest -- fails this: the SELECTED topics' factor");
+  // A selected topic the row records no factor for: the largest of the rest, and said.
+  const entry = catalogPointEntryWithTopics();
+  delete entry.topics[0].replicationFactor;
+  const partial = withBrokers(await catalogStateWithTopics("team-p051-partial", entry), 5);
+  assert.equal(replicationText(partial), "1 (the source's, as recovery catalog `archive` records " +
+    "point `" + catalogPointId() + "`; not recorded for 1 of the 2 selected topics)");
+});
+
+test("prod051_a_row_without_topics_says_why_and_falls_back_to_the_brokers", async () => {
+  const state = withBrokers(await catalogStateWithTopics("team-p051-none", catalogPointEntry()),
+    BROKERS);
+  assert.equal(sourceReplicationFactorsOf(state), null);
+  assert.equal(replicationChoice(state).basis, "brokers");
+  assert.equal(sourceFactorNote(state), SOURCE_FACTOR_NOTE + " For this point: recovery catalog " +
+    "`archive` publishes no topic layout for this point: its backup receipt predates format " +
+    "1.3.0, the catalog was synced by an older runner, or the point is not Available.");
+  const omitted = Object.assign(catalogPointEntry(), { topicsOmitted: 70 });
+  const facts = sourceFactsOfEntry(omitted, "archive");
+  assert.equal(facts.topics, null);
+  assert.match(facts.why, /lists this point without its 70 topics/);
+});
+
+test("prod051_a_backups_point_is_found_in_the_namespaces_catalogs_by_its_receipt_digest",
+  async () => {
+    const digest = "sha256:" + "5c".repeat(32);
+    const pointId = pointIdOfReceiptDigest(digest);
+    const state = wizardState("team-p051-backup");
+    state.point.status.evidence = Object.assign({}, state.point.status.evidence || {},
+      { receiptSha256: digest });
+    const asked = [];
+    const row = Object.assign(catalogPointEntryWithTopics(), { pointId: pointId });
+    const readers = (rows) => ({
+      catalogReaders: {
+        listCatalogs: async () => ({ items: [{ metadata: { name: "empty" } },
+          { metadata: { name: "primary" } }] }),
+        readPoints: async (name, query) => {
+          asked.push(name + "?" + (query.cursor || ""));
+          return { items: name === "primary" ? rows : [], page: { nextCursor: null } };
+        },
+      },
+    });
+    assert.equal(await refreshSourceFacts(state, readers([row])), true);
+    assert.deepEqual(asked, ["empty?", "primary?"], "each catalog's view, until the point is found");
+    withBrokers(state, 5);
+    assert.deepEqual(sourceReplicationFactorsOf(state), [3, 1],
+      "NEGATIVE CONTROL: null -- the Backup's point never looked up -- fails this");
+    assert.equal(replicationText(state), "3 (the source's, as recovery catalog `primary` records " +
+      "point `" + pointId + "`, the largest of the selected topics')");
+    assert.equal(partitionCountsText(state), "orders 6, payments 2 (the source's, which the " +
+      "restore creates each topic with, as recovery catalog `primary` records them)");
+    const review = visible(renderRecoveryLimits(state));
+    assert.ok(review.includes("orders 6, payments 2"), review);
+    assert.ok(!review.includes("Partition counts are shown before the run only"), review);
+
+    // A ROW THE CATALOG DOES NOT STAND BEHIND sets nothing: not selectable.
+    const unsure = wizardState("team-p051-backup-unsure");
+    unsure.point.status.evidence = { receiptSha256: digest };
+    await refreshSourceFacts(unsure, readers([Object.assign({}, row,
+      { selectable: false, verification: "UntrustedSigner" })]));
+    assert.equal(sourceReplicationFactorsOf(unsure), null,
+      "NEGATIVE CONTROL: [3, 1] -- an untrusted row's layout setting the default -- fails this");
+    assert.match(unsure.sourceFacts.why, /as not selectable \(Available, UntrustedSigner\)/);
+    // NOT LISTED: a row for another point only. The why names the point.
+    const other = wizardState("team-p051-backup-other");
+    other.point.status.evidence = { receiptSha256: digest };
+    await refreshSourceFacts(other, readers([catalogPointEntryWithTopics()]));
+    assert.equal(sourceReplicationFactorsOf(other), null);
+    assert.equal(other.sourceFacts.why,
+      "no recovery catalog in this namespace lists point `" + pointId + "`");
+    // UNREADABLE: the why carries the read's own refusal, never a throw.
+    const failing = wizardState("team-p051-backup-fail");
+    failing.point.status.evidence = { receiptSha256: digest };
+    await refreshSourceFacts(failing, { catalogReaders: {
+      listCatalogs: async () => { throw new Error("served by the Logweir product API only"); },
+    } });
+    assert.match(failing.sourceFacts.why,
+      /recovery catalogs could not be read: served by the Logweir product API only/);
+    // NO DIGEST ON THE LIST (the product API's list projection carries none):
+    // the run's own operation is read for it, once, and the point is found.
+    const listed = wizardState("team-p051-backup-listed");
+    const owned = [];
+    const viaOperation = readers([row]);
+    viaOperation.catalogReaders.ownVerdict = async (name) => {
+      owned.push(name);
+      return { verdict: null, receiptSha256: digest };
+    };
+    await refreshSourceFacts(listed, viaOperation);
+    assert.deepEqual(owned, [listed.point.metadata.name]);
+    assert.deepEqual(sourceReplicationFactorsOf(listed), [3, 1],
+      "NEGATIVE CONTROL: null -- the operation never read for the digest -- fails this");
+    // NO DIGEST ANYWHERE: nothing to look up, and said.
+    const bare = wizardState("team-p051-backup-bare");
+    const none = readers([row]);
+    none.catalogReaders.ownVerdict = async () => ({ verdict: null, receiptSha256: null });
+    await refreshSourceFacts(bare, none);
+    assert.match(bare.sourceFacts.why, /records no receipt digest/);
+    const unreadState = wizardState("team-p051-backup-unread");
+    const refused = readers([row]);
+    refused.catalogReaders.ownVerdict = async () => { throw new Error("403 operationsRead"); };
+    await refreshSourceFacts(unreadState, refused);
+    assert.match(unreadState.sourceFacts.why,
+      /receipt digest could not be read \(403 operationsRead\)/);
+    assert.ok(MAX_SOURCE_CATALOGS >= 1);
+    assert.equal(SOURCE_FACTS_NOT_READ.topics, null);
+  });
+
+test("prod051_the_mount_reads_the_backups_catalog_row_before_the_first_paint", async () => {
+  const digest = "sha256:" + "7e".repeat(32);
+  const backups = fixture("wizard-backups.json");
+  for (const b of backups.items) {
+    b.status.evidence = Object.assign({}, b.status.evidence || {}, { receiptSha256: digest });
+  }
+  const asked = [];
+  const view = fakeView();
+  const api = Object.assign(mountApi({ "orders-scratch": DISCOVERY() }, asked), {
+    list: async (_ns, plural) => (plural === "kafkaclusters" ? clusters() : backups),
+    catalogReaders: {
+      listCatalogs: async () => ({ items: [{ metadata: { name: "primary" } }] }),
+      readPoints: async () => ({
+        items: [Object.assign(catalogPointEntryWithTopics(), {
+          pointId: pointIdOfReceiptDigest(digest) })],
+        page: { nextCursor: null },
+      }),
+    },
+  });
+  await mountRestoreWizard(view.root, "team-p051-mount", pointParams(), viewParse, api);
+  assert.equal(view.find("#replication-factor").getAttribute("value"), "2",
+    "the source's 3, capped at the target's 2 brokers, on the FIRST paint");
+  assert.match(visible(view.html()),
+    /This plan asks for 2 \(capped at the target's 2 brokers; the source's is 3, as recovery catalog primary records point lwp1-7e7e/,
+    "NEGATIVE CONTROL: \"(the target's 2 brokers; the source's replication factor is not " +
+    "published\" -- the mount never reading the catalog -- fails this");
 });

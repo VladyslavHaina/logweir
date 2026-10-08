@@ -529,9 +529,19 @@ fn the_signed_receipt_fixture_verifies() {
     // below keeps the weaker sentence honest for the two document types that
     // still get it.
     assert!(
-        stdout.contains("the signature AND all eleven backup-receipt invariants"),
-        "an exit 0 that checked the invariants must say so on stdout (eleven since FX-4's \
-         six config_coverage arms), got: {stdout}"
+        stdout.contains("the signature AND all twenty-one backup-receipt invariants"),
+        "an exit 0 that checked the invariants must say so on stdout (twenty-one since \
+         PROD-05.1's eight topic_configuration arms and two owner_detection arms), got: \
+         {stdout}"
+    );
+    // PROD-05.1: the checked-in receipt is a 1.0.0 document, so its topics'
+    // configuration model is NOT RECORDED — said, never left to read as "none".
+    assert!(
+        stdout.contains(
+            "topic_configuration: not recorded, so no topic's partition count, replication \
+             factor or settings are known to a restore from this receipt"
+        ),
+        "{stdout}"
     );
     // FX-4: the checked-in signed receipt is a 1.0.0 document, so its
     // configuration capture coverage is UNKNOWN — and the verdict says so
