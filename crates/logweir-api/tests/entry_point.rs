@@ -661,15 +661,25 @@ fn limited_app(
     proxies: Arc<logweir_api::trusted_proxy::TrustedProxies>,
     per_window: u32,
 ) -> SharedApp {
+    app_with_limiter(
+        proxies,
+        logweir_api::auth::ratelimit::RateLimiter::new(
+            std::time::Duration::from_secs(60),
+            per_window,
+        ),
+    )
+}
+
+fn app_with_limiter(
+    proxies: Arc<logweir_api::trusted_proxy::TrustedProxies>,
+    limiter: logweir_api::auth::ratelimit::RateLimiter,
+) -> SharedApp {
     SharedApp::new(
         FakeKube::new(),
         support::idp::MockIdp::new(ISSUER, &[]),
         SharedOptions {
             trusted_proxies: Some(proxies),
-            login_limiter: Some(logweir_api::auth::ratelimit::RateLimiter::new(
-                std::time::Duration::from_secs(60),
-                per_window,
-            )),
+            login_limiter: Some(limiter),
             ..SharedOptions::default()
         },
     )
@@ -876,32 +886,109 @@ async fn a_chain_with_no_client_hop_falls_back_to_the_peer() {
     assert_eq!(client.status, 303, "{}", client.text());
 }
 
-/// **The bound on tracked keys holds under a spray of forwarded addresses.**
-/// A trusted proxy forwards more distinct clients than the table holds, inside
-/// one window: the table stops at `MAX_TRACKED_PEERS` and the next new client
-/// is refused rather than tracked. NEGATIVE CONTROL: the table is FULL, not
-/// merely small — every sprayed address took its own key, so a limiter that
-/// keyed this spray on the peer (one key) fails the equality.
+/// **The bound on tracked keys holds under a spray of forwarded addresses**,
+/// on a limiter with no ceiling (the table's own bound). A trusted proxy
+/// forwards more distinct clients than the table holds, inside one window:
+/// the table stops at `MAX_TRACKED_PEERS` and the next new client is refused
+/// rather than tracked, with the audit naming that limit. NEGATIVE CONTROL:
+/// the table is FULL, not merely small — every sprayed address took its own
+/// key, so a limiter that keyed this spray on the peer (one key) fails the
+/// equality.
 #[tokio::test]
 async fn the_bound_on_tracked_keys_holds_under_a_spray_of_forwarded_addresses() {
     use logweir_api::auth::ratelimit::MAX_TRACKED_PEERS;
     let app = limited_app(ingress_range(), 20);
     let limiter = || &app.app.state.shared().expect("shared mode").login_limiter;
-    let client = |i: usize| {
-        let [_, _, hi, lo] = (i as u32).to_be_bytes();
-        format!("198.18.{hi}.{lo}")
-    };
     for i in 0..MAX_TRACKED_PEERS {
-        let served = sign_in(&app, INGRESS, Some(&client(i))).await;
+        let served = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
         assert_eq!(served.status, 303, "client {i}: {}", served.text());
     }
     assert_eq!(limiter().tracked(), MAX_TRACKED_PEERS);
+    let (log, _guard) = capture();
     for i in MAX_TRACKED_PEERS..(MAX_TRACKED_PEERS + 64) {
-        assert_limited(&sign_in(&app, INGRESS, Some(&client(i))).await);
+        let refused = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
+        assert_limited(&refused);
+        if i == MAX_TRACKED_PEERS {
+            let (_, notes) = log.record(&refused.header("x-request-id").unwrap());
+            assert_eq!(notes["loginRateLimit"], "trackedKeys");
+        }
     }
     assert!(
         limiter().tracked() <= MAX_TRACKED_PEERS,
         "the limiter tracked {} keys",
         limiter().tracked()
     );
+}
+
+fn sprayed(i: usize) -> String {
+    let [_, _, hi, lo] = (i as u32).to_be_bytes();
+    format!("198.18.{hi}.{lo}")
+}
+
+/// **The shipped limiter stops the same spray at its ceiling** (the FX-13
+/// security review: per-client keys must not unbound the provider's load).
+/// Of more distinct forwarded clients than the table holds, exactly
+/// `LOGIN_CEILING_PER_WINDOW` are served; every later one is refused `429`
+/// with `Retry-After`, the audit naming the CEILING, and the table holds only
+/// the served keys. NEGATIVE CONTROL: the previous row's limiter, identical
+/// but for the ceiling, serves all `MAX_TRACKED_PEERS` of them.
+#[tokio::test]
+async fn the_ceiling_bounds_a_spray_of_forwarded_clients() {
+    use logweir_api::auth::ratelimit::{RateLimiter, LOGIN_CEILING_PER_WINDOW, MAX_TRACKED_PEERS};
+    let app = app_with_limiter(ingress_range(), RateLimiter::for_login());
+    let mut served = 0;
+    for i in 0..(MAX_TRACKED_PEERS + 64) {
+        let response = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
+        if response.status == 303 {
+            served += 1;
+        } else {
+            assert_limited(&response);
+        }
+    }
+    assert_eq!(served, LOGIN_CEILING_PER_WINDOW);
+    let limiter = &app.app.state.shared().expect("shared mode").login_limiter;
+    assert_eq!(limiter.tracked(), LOGIN_CEILING_PER_WINDOW as usize);
+
+    let (log, _guard) = capture();
+    let refused = sign_in(&app, INGRESS, Some("203.0.113.90")).await;
+    assert_limited(&refused);
+    assert!(
+        refused.text().contains("to this console"),
+        "the ceiling's detail does not blame the address: {}",
+        refused.text()
+    );
+    let (record, notes) = log.record(&refused.header("x-request-id").unwrap());
+    assert_eq!(notes["loginRateLimit"], "ceiling");
+    assert_eq!(notes["loginRateKey"], "forwardedClient");
+    assert_eq!(record["failureCode"], "rate_limited");
+}
+
+/// **A client rotating IPv6 addresses inside its `/64` spends one budget**
+/// (the FX-13 security review). Three sign-ins from three addresses of one
+/// `/64`, through the trusted ingress, spend it; a fourth, fresh address of
+/// the same `/64` is refused by the KEY. NEGATIVE CONTROL: a client in the
+/// next `/64` over is served, so the refusal is the `/64`'s and not a global
+/// one.
+#[tokio::test]
+async fn a_client_rotating_ipv6_addresses_in_its_64_spends_one_budget() {
+    let (log, _guard) = capture();
+    let app = limited_app(ingress_range(), PER_WINDOW);
+    spend(
+        &app,
+        INGRESS,
+        &[
+            Some("2001:db8:aa:1::1"),
+            Some("2001:db8:aa:1:8a2e:370:7334:1"),
+            Some("2001:db8:aa:1:ffff:ffff:ffff:fffe"),
+        ],
+    )
+    .await;
+    let rotated = sign_in(&app, INGRESS, Some("2001:db8:aa:1:dead:beef:0:4")).await;
+    assert_limited(&rotated);
+    let (_, notes) = log.record(&rotated.header("x-request-id").unwrap());
+    assert_eq!(notes["loginRateLimit"], "key");
+    assert_eq!(notes["loginRateKey"], "forwardedClient");
+
+    let neighbour = sign_in(&app, INGRESS, Some("2001:db8:aa:2::1")).await;
+    assert_eq!(neighbour.status, 303, "{}", neighbour.text());
 }

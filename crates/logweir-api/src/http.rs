@@ -158,12 +158,13 @@ pub enum LoginRateKey {
 }
 
 impl LoginRateKey {
-    /// The address the limiter counts against, IPv4-mapped IPv6 folded to
-    /// IPv4 so one client is one bucket however a hop spells it.
+    /// The address the limiter counts against. The limiter folds it into its
+    /// bucket ([`crate::auth::ratelimit::bucket_of`]): an IPv4-mapped address
+    /// to IPv4, any other IPv6 address to its `/64`.
     #[must_use]
     pub fn address(self) -> IpAddr {
         match self {
-            Self::ForwardedClient(ip) | Self::Peer(ip) => ip.to_canonical(),
+            Self::ForwardedClient(ip) | Self::Peer(ip) => ip,
         }
     }
 
@@ -234,18 +235,33 @@ pub fn check_login_rate(state: &AppState, parts: &Parts) -> Result<(), ApiError>
         return Ok(());
     };
     let key = login_rate_key(&shared.trusted_proxies, &parts.headers, peer);
-    if let Some(audit) = parts.extensions.get::<Arc<AuditContext>>() {
+    let audit = parts.extensions.get::<Arc<AuditContext>>();
+    if let Some(audit) = audit {
         audit.note("loginRateKey", key.basis());
     }
     match shared.login_limiter.check(key.address()) {
         crate::auth::ratelimit::Decision::Allowed => Ok(()),
         crate::auth::ratelimit::Decision::Limited {
             retry_after_seconds,
+            limit,
         } => {
-            let mut error = ApiError::new(
-                ProblemCode::RateLimited,
-                "Too many sign-in attempts from this address. Try again shortly.",
-            );
+            // WHICH LIMIT REFUSED is the operator's first question: one
+            // client's budget (`key`), or the console's ceiling over every
+            // client (`ceiling`), which means many addresses are signing in
+            // at once.
+            if let Some(audit) = audit {
+                audit.note("loginRateLimit", limit.as_str());
+            }
+            let detail = match limit {
+                crate::auth::ratelimit::Limit::Key => {
+                    "Too many sign-in attempts from this address. Try again shortly."
+                }
+                crate::auth::ratelimit::Limit::Ceiling
+                | crate::auth::ratelimit::Limit::TrackedKeys => {
+                    "Too many sign-in attempts to this console right now. Try again shortly."
+                }
+            };
+            let mut error = ApiError::new(ProblemCode::RateLimited, detail);
             error.retry_after_seconds = Some(retry_after_seconds);
             Err(error)
         }
@@ -867,8 +883,10 @@ mod tests {
         assert_eq!(via_chain.address(), a.address());
         // An IPv4-mapped spelling of the same client is the same bucket.
         assert_eq!(
-            key(&t, &["::ffff:203.0.113.50"], "10.42.0.17").address(),
-            a.address()
+            crate::auth::ratelimit::bucket_of(
+                key(&t, &["::ffff:203.0.113.50"], "10.42.0.17").address()
+            ),
+            crate::auth::ratelimit::bucket_of(a.address())
         );
         assert_eq!(a.basis(), "forwardedClient");
     }
