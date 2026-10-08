@@ -6550,3 +6550,216 @@ async fn the_enforcement_jobs_per_run_ceilings_are_the_policys_own() {
         "the worker's object ceiling is the policy's own: {env:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FX-11 — a retention pod the namespace refuses at creation
+// ---------------------------------------------------------------------------
+
+/// The admission's words for a quota-refused retention pod.
+const QUOTA_REFUSAL: &str = "Error creating: pods \"retention-x2b9c\" is forbidden: exceeded \
+     quota: compute, requested: limits.cpu=250m, used: limits.cpu=2, limited: limits.cpu=2";
+
+/// The Job controller's words when the run's ServiceAccount is missing — the
+/// fail-closed state this controller's own header names for an install without
+/// `retention.enabled`.
+const SERVICE_ACCOUNT_REFUSAL: &str = "Error creating: pods \"retention-x2b9c\" is forbidden: \
+     error looking up service account logweir-d3w9/logweir-retention: serviceaccount \
+     \"logweir-retention\" not found";
+
+const FX11_RUN: &str = "r00000000fx11a001";
+
+/// The run's Job with NO pod, created 45 s before [`now`]: running (its status
+/// counts nothing) or failed on its deadline.
+fn podless_run_job(name: &str, failed: bool) -> String {
+    let mut job: Value = serde_json::from_str(&job_body(name, false)).expect("a Job");
+    job["metadata"]["creationTimestamp"] = json!((now() - chrono::Duration::seconds(45))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string());
+    job["metadata"]["uid"] = json!("j1-fx11");
+    job["status"] = if failed {
+        json!({"conditions": [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded"}]})
+    } else {
+        json!({})
+    };
+    job.to_string()
+}
+
+fn run_events(job_name: &str, message: Option<&str>) -> String {
+    let items: Vec<Value> = message
+        .map(|m| {
+            json!({
+                "apiVersion": "v1", "kind": "Event",
+                "metadata": {"name": format!("{job_name}.1"), "namespace": NS},
+                "involvedObject": {"apiVersion": "batch/v1", "kind": "Job", "name": job_name,
+                                   "namespace": NS, "uid": "j1-fx11"},
+                "reason": "FailedCreate", "type": "Warning", "message": m
+            })
+        })
+        .into_iter()
+        .collect();
+    json!({"apiVersion": "v1", "kind": "EventList", "metadata": {}, "items": items}).to_string()
+}
+
+/// A pass over an enforcing policy whose run `FX11_RUN` is in flight as a
+/// podless Job, after `failures` consecutive failed runs.
+async fn podless_run_pass(failed: bool, message: Option<&str>, failures: i64) -> Fixture {
+    let job_name = format!("{}-{FX11_RUN}", stem());
+    let leaked: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
+    let routes = vec![
+        route("GET", "/retentionpolicies", policy_list(vec![])),
+        route("GET", leaked, podless_run_job(&job_name, failed)),
+        route(
+            "GET",
+            "/pods",
+            json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}).to_string(),
+        ),
+        route("GET", "/events", run_events(&job_name, message)),
+        route(
+            "PATCH",
+            "/retentionpolicies/primary/status",
+            policy_value(json!({}), json!({})).to_string(),
+        ),
+        route("PATCH", leaked, "{}".to_string()),
+    ];
+    let f = fixture(routes);
+    let policy: RetentionPolicy = serde_json::from_value(policy_value(
+        enforcing(None),
+        json!({
+            "observedGeneration": 4,
+            "lastEnforcement": {"runId": FX11_RUN, "startedAt": "2026-09-17T04:16:00Z"},
+            "consecutiveRunFailures": failures
+        }),
+    ))
+    .expect("a policy");
+    run(&f, &policy).await;
+    f
+}
+
+fn run_job_patches(f: &Fixture) -> Vec<Value> {
+    f.bodies
+        .lock()
+        .expect("the body recorder")
+        .iter()
+        .filter(|b| b.method == "PATCH" && b.uri.contains("/jobs/"))
+        .map(|b| serde_json::from_str(&b.body).expect("JSON"))
+        .collect()
+}
+
+/// **FX-11: A RETENTION RUN WHOSE POD IS REFUSED IS HARVESTED AT ONCE AS
+/// `PodCreationForbidden`, NAMING THE REFUSAL, AND COUNTED.** The quota and the
+/// missing-ServiceAccount forms both. Before FX-11 the run read
+/// `RunInProgress` until `enforcement.deadlineSeconds` and then `RunFailed`,
+/// "produced no exit code".
+///
+/// KILLS: the Events read dropped; the message not propagated; the early
+/// cancel dropped; the failure not counted.
+#[tokio::test]
+async fn fx11_a_retention_pod_the_namespace_refuses_is_harvested_naming_it() {
+    for (message, words) in [
+        (QUOTA_REFUSAL, "exceeded quota: compute"),
+        (
+            SERVICE_ACCOUNT_REFUSAL,
+            "serviceaccount \"logweir-retention\" not found",
+        ),
+    ] {
+        let f = podless_run_pass(false, Some(message), 0).await;
+        let enforced = f.condition("Enforced");
+        assert_eq!(enforced["status"], "False", "{:?}", f.seen());
+        assert_eq!(enforced["reason"], ctrl::REASON_POD_CREATION_FORBIDDEN);
+        let said = enforced["message"].as_str().unwrap_or_default();
+        assert!(
+            said.contains(words) && said.contains("nothing was deleted"),
+            "the refusal's own words: {said}"
+        );
+        assert!(!said.contains("no exit code"), "{said}");
+        let status = f.status();
+        assert_eq!(
+            status["consecutiveRunFailures"],
+            json!(1),
+            "counted: {status}"
+        );
+        assert!(
+            status["lastEnforcement"]["finishedAt"].is_string(),
+            "harvested"
+        );
+        assert_eq!(status["lastEnforcement"]["exitCode"], Value::Null);
+        assert_eq!(status["lease"], Value::Null, "the lease is released");
+
+        let patches = run_job_patches(&f);
+        assert_eq!(patches.len(), 2, "the cancel, then the TTL: {:?}", f.seen());
+        assert_eq!(patches[0]["spec"]["activeDeadlineSeconds"], json!(1));
+        assert!(patches[1]["spec"]["ttlSecondsAfterFinished"].is_i64());
+        let seen = f.seen();
+        let status_at = seen
+            .iter()
+            .position(|(m, u)| m == "PATCH" && u.contains("/retentionpolicies/"))
+            .expect("a status write");
+        let ttl_at = seen
+            .iter()
+            .rposition(|(m, u)| m == "PATCH" && u.contains("/jobs/"))
+            .expect("a TTL patch");
+        assert!(
+            status_at < ttl_at,
+            "the status lands before the TTL: {seen:?}"
+        );
+        let lists: Vec<String> = seen
+            .iter()
+            .filter(|(_, u)| u.split('?').next().unwrap_or("").ends_with("/events"))
+            .map(|(_, u)| u.replace("%3D", "="))
+            .collect();
+        assert_eq!(lists.len(), 1, "{lists:?}");
+        assert!(lists[0].contains("involvedObject.uid=j1-fx11"), "{lists:?}");
+    }
+}
+
+/// **FX-11: THE THIRD REFUSED RUN IN A ROW IS `EnforcementDegraded`, AND SAYS
+/// WHY** — the retry budget bounds a refusal that never clears. The run here
+/// died on its own deadline without ever having a pod; the harvest still
+/// names the refusal, not "produced no exit code".
+#[tokio::test]
+async fn fx11_the_third_refused_run_is_degraded_and_names_the_refusal() {
+    let f = podless_run_pass(true, Some(QUOTA_REFUSAL), 2).await;
+    assert_eq!(
+        f.condition("Enforced")["reason"],
+        ctrl::REASON_POD_CREATION_FORBIDDEN,
+        "{:?}",
+        f.seen()
+    );
+    let degraded = f.condition(ctrl::CONDITION_DEGRADED);
+    assert_eq!(degraded["status"], "True");
+    let said = degraded["message"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("refused at creation") && said.contains("exceeded quota: compute"),
+        "{said}"
+    );
+    assert_eq!(f.status()["consecutiveRunFailures"], json!(3));
+    let patches = run_job_patches(&f);
+    assert_eq!(
+        patches.len(),
+        1,
+        "a finished Job is never cancelled; only the TTL"
+    );
+}
+
+/// **FX-11 NEGATIVE CONTROL.** With no `FailedCreate` Event a podless run keeps
+/// the pre-FX-11 path: `RunInProgress` and nothing cancelled while it runs;
+/// `RunFailed`, "produced no exit code", once its Job has died.
+#[tokio::test]
+async fn fx11_control_a_podless_run_with_no_event_keeps_the_old_path() {
+    let f = podless_run_pass(false, None, 0).await;
+    assert_eq!(
+        f.condition("Enforced")["reason"],
+        ctrl::REASON_RUN_IN_PROGRESS,
+        "{:?}",
+        f.seen()
+    );
+    assert!(run_job_patches(&f).is_empty(), "{:?}", f.seen());
+
+    let f = podless_run_pass(true, None, 0).await;
+    let enforced = f.condition("Enforced");
+    assert_eq!(enforced["reason"], ctrl::REASON_RUN_FAILED);
+    assert!(enforced["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("produced no exit code"));
+}

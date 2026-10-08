@@ -2583,3 +2583,140 @@ fn fail_closed_clears_the_two_collections_whatever_the_defaults_hold() {
     );
     assert_eq!(closed.discovery.hard_max_topics, 50_000);
 }
+
+// ---------------------------------------------------------------------------
+// FX-11 — the read every Job-owning controller shares, and its bound
+// ---------------------------------------------------------------------------
+
+fn quota_refusal() -> EventFact {
+    EventFact {
+        reason: "FailedCreate".to_string(),
+        message: "Error creating: pods \"lwc-td-x\" is forbidden: exceeded quota: compute, \
+                  requested: limits.cpu=1, used: limits.cpu=4, limited: limits.cpu=4"
+            .to_string(),
+        involved_kind: "Job".to_string(),
+        involved_name: job_name(),
+    }
+}
+
+/// **The events list is made only when the classifier could read one** —
+/// FX-11's cost bound, at both grace boundaries. The Job was created at
+/// 11:58:00; the pod at 11:58:10.
+///
+/// KILLS: `reads_events` returning `true` unconditionally (a list per pass of
+/// every healthy run); the grace period dropped from either row.
+#[test]
+fn fx11_the_events_read_is_bounded_by_what_the_classifier_can_use() {
+    let job = job_object(None, None);
+    assert!(
+        !waiting::reads_events(&job, None, utc(11, 58, 29)),
+        "no pod, inside the 30 s grace: the FailedCreate row cannot fire"
+    );
+    assert!(
+        waiting::reads_events(&job, None, utc(11, 58, 30)),
+        "no pod, at the grace boundary: it can"
+    );
+    let running = pod_object(
+        Some(("Job", JOB_UID, true)),
+        json!({"phase":"Running","containerStatuses":[{"name":"runner","image":"x",
+            "imageID":"x","ready":true,"restartCount":0,
+            "state":{"running":{"startedAt":"2026-09-16T11:58:20Z"}}}]}),
+    );
+    assert!(
+        !waiting::reads_events(&job, Some(&running), now()),
+        "a running pod — every healthy run — never pays for a list"
+    );
+    assert!(!waiting::reads_events(
+        &job,
+        Some(&pod_object(Some(("Job", JOB_UID, true)), terminated(0))),
+        now()
+    ));
+    let creating = pod_object(
+        Some(("Job", JOB_UID, true)),
+        waiting_container("ContainerCreating", ""),
+    );
+    assert!(
+        !waiting::reads_events(&job, Some(&creating), utc(11, 59, 9)),
+        "a mount pending 59 s: the FailedMount row cannot fire yet"
+    );
+    assert!(
+        waiting::reads_events(&job, Some(&creating), utc(11, 59, 10)),
+        "a mount pending 60 s: it can"
+    );
+}
+
+/// **`no_pod_counted` reads the Job's own counts, so a running runner Job
+/// costs no pod list.** Any of `active`, `succeeded` or `failed` above zero
+/// means the Job controller made a pod, and nothing a `FailedCreate` says can
+/// be this Job's answer.
+#[test]
+fn fx11_a_job_that_counts_a_pod_is_never_looked_at() {
+    let mut job = job_object(None, None);
+    assert!(
+        !waiting::no_pod_counted(&job, utc(11, 58, 29)),
+        "inside the grace"
+    );
+    assert!(waiting::no_pod_counted(&job, utc(11, 58, 30)));
+    for counts in [
+        json!({"active": 1}),
+        json!({"succeeded": 1}),
+        json!({"failed": 1}),
+    ] {
+        job.status = Some(serde_json::from_value(counts.clone()).expect("a JobStatus"));
+        assert!(
+            !waiting::no_pod_counted(&job, now()),
+            "{counts} counts a pod"
+        );
+    }
+    job.status = Some(serde_json::from_value(json!({"active": 0})).expect("a JobStatus"));
+    assert!(waiting::no_pod_counted(&job, now()), "zero is no pod");
+}
+
+/// **`pod_create_refusal` is the classifier's `FailedCreate` row and nothing
+/// else** — the one matcher the probe, the delivery and the retention run
+/// share with `Preflight`.
+///
+/// KILLS: the grace period ignored; a pod present still judged; another Job's
+/// Event taken; the admission's message dropped.
+#[test]
+fn fx11_pod_create_refusal_is_the_failed_create_row_alone() {
+    let job = job_object(None, None);
+    let w = waiting::pod_create_refusal(&job, None, &[quota_refusal()], now())
+        .expect("the quota refusal is this Job's");
+    assert_eq!(w.code, CheckCode::PodCreateRejected);
+    assert!(w.is_terminal(), "a refusal is cancelled early");
+    assert!(
+        w.message.contains("exceeded quota: compute") && w.message.contains("limits.cpu=1"),
+        "the admission's own words: {}",
+        w.message
+    );
+    let sa = EventFact {
+        message: r#"Error creating: pods "lwc-td-x" is forbidden: error looking up service account logweir-d2-w5/logweir-runner: serviceaccount "logweir-runner" not found"#.to_string(),
+        ..quota_refusal()
+    };
+    assert_eq!(
+        waiting::pod_create_refusal(&job, None, &[sa], now()).map(|w| w.code),
+        Some(CheckCode::RunnerServiceAccountMissing)
+    );
+    assert_eq!(
+        waiting::pod_create_refusal(&job, None, &[quota_refusal()], utc(11, 58, 29)),
+        None,
+        "inside the 30 s grace"
+    );
+    let pod = pod_object(Some(("Job", JOB_UID, true)), terminated(1));
+    assert_eq!(
+        waiting::pod_create_refusal(&job, Some(&pod), &[quota_refusal()], now()),
+        None,
+        "a Job that has a pod was not refused one"
+    );
+    let theirs = EventFact {
+        involved_name: "someone-elses-job".to_string(),
+        ..quota_refusal()
+    };
+    assert_eq!(
+        waiting::pod_create_refusal(&job, None, &[theirs], now()),
+        None,
+        "another Job's refusal is not this one's"
+    );
+    assert_eq!(waiting::pod_create_refusal(&job, None, &[], now()), None);
+}
