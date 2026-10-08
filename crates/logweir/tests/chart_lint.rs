@@ -1261,10 +1261,11 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
         .iter()
         .map(|v| v.as_str().expect("string arg"))
         .collect();
-    // PROD-16.1 fix round: the default render passes the hook only what the
-    // pinned bootstrap image has always run — no console key, no trust step,
-    // no marker, no revocation (`identity.bootstrapFeatures.consoleKey` is off
-    // until the re-pin; `chart_lint_the_hook_passes_only_flags_its_pinned_image_runs`).
+    // PROD-16.1: the default render (the bootstrap feature on since the re-pin,
+    // no console) passes the hook only the revocation of the install-time trust
+    // grant, which is a no-op where no grant was rendered: no console key, no
+    // trust step and no marker without a console (review M2;
+    // `chart_lint_the_hook_passes_only_flags_its_pinned_image_runs`).
     assert_eq!(
         vec![
             "identity",
@@ -1273,6 +1274,8 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
             "logweir-system",
             "--public-configmap-name",
             "logweir-signing-trust",
+            "--revoke-trust-binding",
+            "logweir-identity-trust",
         ],
         args
     );
@@ -2956,7 +2959,7 @@ fn fresh_install_confirm(values: &Value) -> bool {
         .as_str()
         .unwrap_or_default();
     values["identity"]["enabled"].as_bool() != Some(false)
-        && values["identity"]["bootstrapFeatures"]["consoleKey"].as_bool() == Some(true)
+        && values["identity"]["bootstrapFeatures"]["consoleKey"].as_bool() != Some(false)
         && values["api"]["enabled"].as_bool() == Some(true)
         && values["api"]["console"]["enabled"].as_bool() == Some(true)
         && (named.is_empty() || named == "logweir-console-confirmation")
@@ -6779,9 +6782,10 @@ fn chart_lint_a_console_render_generates_the_console_key_and_marks_the_fresh_ins
     assert_eq!(config["confirmationKeyManaged"].as_bool(), Some(true));
 
     // NEGATIVE CONTROL (the fix round): the same console with the bootstrap
-    // feature OFF — the chart's default until the re-pin — passes no PROD-16.1
+    // feature OFF — an operator pinning a bootstrap image older than PROD-16.1
+    // (`examples/console-older-bootstrap.values.yaml`) — passes no PROD-16.1
     // flag and renders none of its objects or readers.
-    let off = rendered("console");
+    let off = rendered("console-older-bootstrap");
     let off_args = bootstrap_args(&off);
     assert!(
         !off_args.iter().any(|a| a.starts_with("--console")
