@@ -1291,9 +1291,9 @@ timestamps are at or before the point, not the ones the broker had appended by
 then, and the page cannot see which topics are `LogAppendTime`.
 
 **After the run, the Restore detail shows what was SIGNED** (FX-8 review M-2).
-The *time basis (signed)* row reads `status.timeBasis` — the scorecard's
+The *time basis (signed)* row reads `status.timeBasis` -- the scorecard's
 `source.time_basis`, copied by the controller and served by the product API as
-`timeBasis` — and names the topics selected by producer time and the ones
+`timeBasis` -- and names the topics selected by producer time and the ones
 selected with the timestamp type NOT RECORDED. Like every scorecard fact on the
 page it is labelled a claim until the evidence verifies. A topic whose type was
 not recorded also gets a warning paragraph (`#restore-time-basis-unrecorded`):
