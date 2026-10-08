@@ -3512,18 +3512,21 @@ fn a_refused_target_configuration_read_is_not_assessed_never_compared_as_empty()
 
 use logweir_core::spec::TargetMode;
 
-/// One deviation kind, alone: the configs and counts that differ on `kind`
-/// and on nothing else.
-fn only(
-    kind: &str,
-) -> (
+/// `classify_parity`'s inputs after the mode: source and target configs, the
+/// source's partition count (as recorded) and the target's, the source's
+/// replication factor (as recorded) and the target's.
+type ParityInputs = (
     BTreeMap<String, String>,
     BTreeMap<String, String>,
     Option<i32>,
     i32,
     Option<i16>,
     i16,
-) {
+);
+
+/// One deviation kind, alone: the configs and counts that differ on `kind`
+/// and on nothing else.
+fn only(kind: &str) -> ParityInputs {
     let mut src = BTreeMap::new();
     let mut tgt = BTreeMap::new();
     let (mut src_partitions, mut src_rf) = (3, 3);
