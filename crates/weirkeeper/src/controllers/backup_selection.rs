@@ -1462,17 +1462,10 @@ async fn observe(
             write_status(&api, backup, resolving_status_patch(backup, job_name, now)).await?;
             return Ok(Inner::Pending);
         }
+        // NO CANCEL HERE: this function only ever sees a FINISHED Job (the
+        // unfinished one is failed fast, and cancelled, in `resolve_inner`), and
+        // a finished Job is not cancellable (`check::is_cancellable`).
         check::CheckPhase::Failed => {
-            // EARLY CANCEL, as every other check does (FX-11). A terminal
-            // waiting state — a refused pod, a missing Secret — cannot
-            // succeed, and this refusal ends the `Backup`; leaving the Job to
-            // its own `activeDeadlineSeconds` would keep the Job controller
-            // retrying a pod nobody will read.
-            if observation.cancel_now {
-                check::cancel(client, namespace, job, uid)
-                    .await
-                    .map_err(BackupError::Api)?;
-            }
             return Err(discovery_refused(
                 job_name,
                 &name,
