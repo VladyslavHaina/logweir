@@ -310,27 +310,60 @@ for line in rust.splitlines():
     if m:
         u64_of[current].append((m.group(1), m.group(2) == "Option<u64>"))
 
-rust_u64, reached = [], set()
-for name, ty in [(n, t) for n, t in
-                 re.findall(r"^    pub ([a-z0-9_]+): (.+),$", body, re.M)]:
-    inner = re.fullmatch(r"(?:Vec|Option)<([A-Za-z0-9_]+)>", ty)
-    if ty in declared:
-        owner, prefix = ty, name
-    elif inner and inner.group(1) in declared:
-        owner = inner.group(1)
-        prefix = f"{name}[]" if ty.startswith("Vec<") else name
-    else:
+# PROD-08.1: DEPTH-FIRST, at every depth, the twin of
+# crates/logweir/tests/two_reader_parity.rs::rust_u64_fields. A struct field, a
+# Vec<T> or an Option<T> of a declared struct is walked into wherever it sits
+# (`integrity.verification.complete.partitions[].replay.expected` is four levels
+# below Scorecard), and each struct's own u64 fields are emitted at their
+# declaration position, so the order is still serde's.
+fields_of, current = {}, None
+for line in rust.splitlines():
+    m = re.match(r"^pub struct ([A-Za-z0-9_]+)", line)
+    if m:
+        current = m.group(1)
+        fields_of.setdefault(current, [])
         continue
-    reached.add(owner)
-    for field, optional in u64_of.get(owner, []):
-        rust_u64.append([f"{prefix}.{field}", optional])
+    if line == "}":
+        current = None
+        continue
+    if current is None:
+        continue
+    m = re.match(r"^    pub ([a-z0-9_]+): (.+),$", line)
+    if m:
+        fields_of[current].append((m.group(1), m.group(2)))
 
+rust_u64, reached = [], set()
+
+
+def walk(owner, prefix):
+    for name, ty in fields_of.get(owner, []):
+        dotted = f"{prefix}.{name}" if prefix else name
+        if ty in ("u64", "Option<u64>"):
+            rust_u64.append([dotted, ty == "Option<u64>"])
+            continue
+        inner = re.fullmatch(r"(?:Vec|Option)<([A-Za-z0-9_]+)>", ty)
+        if ty in declared:
+            child, path = ty, dotted
+        elif inner and inner.group(1) in declared:
+            child = inner.group(1)
+            path = f"{dotted}[]" if ty.startswith("Vec<") else dotted
+        else:
+            continue
+        reached.add(child)
+        walk(child, path)
+
+
+walk("Scorecard", "")
+
+# Counted over DECLARATIONS reached, not dotted names: since PROD-08.1 one
+# struct (ReplayComparison) is reached at two paths.
 flat = len(re.findall(r"^    pub [a-z0-9_]+: (?:u64|Option<u64>),$", rust, re.M))
-if len(rust_u64) != flat:
+reachable = sum(len(f) for s, f in u64_of.items() if s == "Scorecard" or s in reached)
+if reachable != flat:
     unreached = sorted(s for s, f in u64_of.items() if f and s not in reached)
     raise SystemExit(
         f"crates/logweir-core/src/scorecard.rs declares {flat} u64 document field(s) "
-        f"but only {len(rust_u64)} are reachable from Scorecard by a struct field, a "
+        f"but only {reachable} are reachable from Scorecard by a struct field, a "
         f"Vec<T> or an Option<T>. Unreached struct(s): {unreached}.")
 
 u64_tuple = re.search(r"^U64_FIELDS = \(\n(.*?)^\)$", py, re.M | re.S)

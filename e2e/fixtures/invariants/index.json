@@ -347,5 +347,89 @@
   "python_exit": 1,
   "reason": "source.time_basis names a topic in both producer_time and not_recorded; a topic's timestamp type was either recorded as LogAppendTime or not recorded",
   "arm": "source.time_basis names a topic in both producer_time and not_recorded; a topic's timestamp type was either recorded as LogAppendTime or not recorded"
+ },
+ {
+  "id": "verification_1_4_sampled",
+  "file": "verification_1_4_sampled.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "verification_1_4_complete_pass",
+  "file": "verification_1_4_complete_pass.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "verification_1_4_complete_incomplete_partial",
+  "file": "verification_1_4_complete_incomplete_partial.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "verification_1_4_complete_duplicate_fail",
+  "file": "verification_1_4_complete_duplicate_fail.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "verification_under_format_1_3_0",
+  "file": "verification_under_format_1_3_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification is present but format_version \"1.3.0\" predates it: the field is defined from 1.4.0",
+  "arm": "integrity.verification is present but format_version "
+ },
+ {
+  "id": "verification_coverage_outside_its_set",
+  "file": "verification_coverage_outside_its_set.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.coverage is neither \"sampled\" nor \"complete\"",
+  "arm": "integrity.verification.coverage is neither "
+ },
+ {
+  "id": "verification_sampled_claims_header_order",
+  "file": "verification_sampled_claims_header_order.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.header_order is not \"verified\" or \"notVerified\", or claims \"verified\" for a coverage that is not complete; a sampled verification compares a fingerprint that sorts headers",
+  "arm": "; a sampled verification compares a fingerprint that sorts headers"
+ },
+ {
+  "id": "verification_complete_coverage_without_its_block",
+  "file": "verification_complete_coverage_without_its_block.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete is present exactly when integrity.verification.coverage is \"complete\"",
+  "arm": "integrity.verification.complete is present exactly when integrity.verification.coverage is "
+ },
+ {
+  "id": "verification_incomplete_without_a_reason",
+  "file": "verification_incomplete_without_a_reason.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete.incomplete_reason is required exactly when complete.covered is false",
+  "arm": "integrity.verification.complete.incomplete_reason is required exactly when complete.covered is false"
+ },
+ {
+  "id": "verification_pass_over_a_missing_record",
+  "file": "verification_pass_over_a_missing_record.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is pass but integrity.verification.complete is not covered, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record",
+  "arm": "integrity.result is pass but integrity.verification.complete is not covered, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record"
+ },
+ {
+  "id": "verification_totals_not_the_partitions_sums",
+  "file": "verification_totals_not_the_partitions_sums.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified",
+  "arm": "integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified"
  }
 ]

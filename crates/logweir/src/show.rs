@@ -227,6 +227,38 @@ fn time_basis_qualifier(label: Option<&logweir_core::scorecard::TimeBasisLabel>)
     }
 }
 
+/// The `integrity.verification` footer value (PROD-08.1). ABSENT — a document
+/// before 1.4.0 — is NOT RECORDED and read as a sample, never as complete; a
+/// complete verification shows whether it covered every partition and its
+/// exact counts, an incomplete one why it stopped.
+fn verification_qualifier(v: Option<&logweir_core::scorecard::Verification>) -> String {
+    let Some(v) = v else {
+        return "not recorded: read as a sampled verdict, never a complete one".into();
+    };
+    match &v.complete {
+        None => format!("{} (header order {})", v.coverage, v.header_order),
+        Some(c) if c.covered => format!(
+            "{}: every selected record compared ({} expected, {} restored, {} missing, {} \
+             unexpected, {} duplicates, {} out of order, {} different)",
+            v.coverage,
+            c.replay.expected,
+            c.replay.restored,
+            c.replay.missing,
+            c.replay.unexpected,
+            c.replay.duplicates,
+            c.replay.out_of_order,
+            c.replay.mismatched
+        ),
+        Some(c) => format!(
+            "{}, INCOMPLETE: {}",
+            v.coverage,
+            c.incomplete_reason
+                .as_deref()
+                .unwrap_or("no reason recorded")
+        ),
+    }
+}
+
 /// The `redactions` footer value: an em dash for the whole document every v0.1
 /// run writes, and otherwise the count followed by every removed path.
 ///
@@ -328,6 +360,13 @@ fn qualifiers(sc: &Scorecard) -> String {
     o.push_str(&format!(
         "    source.time_basis         {}\n",
         time_basis_qualifier(sc.source.time_basis.as_ref())
+    ));
+    // PROD-08.1: whether the `integrity` row above is a sample's verdict or
+    // every record's. A qualifier in this footer's sense: the row reads
+    // `byte-fingerprint/pass` either way.
+    o.push_str(&format!(
+        "    integrity.verification    {}\n",
+        verification_qualifier(sc.integrity.verification.as_ref())
     ));
     o.push_str(&format!(
         "    redactions                {}\n",

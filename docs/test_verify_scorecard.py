@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.18.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.19.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -928,6 +928,14 @@ def test_the_version_line_names_the_current_invariant_set():
             "source.time_basis only from 1.3.0, its plan only producerTime, producer time "
             "only under it, and no topic in both of its lists"
         ) in r.stdout, r.stdout
+        # 1.19.0's addition (PROD-08.1): `integrity.verification`'s seven arms.
+        assert (
+            "integrity.verification only from 1.4.0, its coverage sampled or complete, "
+            "header order verified only for complete coverage, its complete block exactly "
+            "with complete coverage, an incomplete reason exactly when not covered, a pass "
+            "only over a covered and clean complete block, and totals that are its "
+            "partitions' sums"
+        ) in r.stdout, r.stdout
 
 
 def test_the_script_version_is_not_the_format_version():
@@ -938,8 +946,8 @@ def test_the_script_version_is_not_the_format_version():
     assert mod.SCRIPT_VERSION != mod.FORMAT_VERSION
     # 1.1.0 since FX-4 (`topic_parity.not_assessed`, a MINOR bump), 1.2.0
     # since FX-3 (`topic_parity.not_reconstructed`), 1.3.0 since FX-8
-    # (`source.time_basis`).
-    assert mod.FORMAT_VERSION == "1.3.0"
+    # (`source.time_basis`), 1.4.0 since PROD-08.1 (`integrity.verification`).
+    assert mod.FORMAT_VERSION == "1.4.0"
 
 
 def test_a_negative_rpo_is_refused():
@@ -1737,8 +1745,10 @@ def test_the_u64_field_list_matches_the_rust_struct():
     # collapse is also why the dotted name, and not the bare key, is what the
     # anchor in `crates/logweir/tests/two_reader_parity.rs` compares.
     entries = list(_verifier_module().U64_FIELDS)
-    assert sum(1 for _, optional in entries if optional) == 5, entries
-    assert sum(1 for _, optional in entries if not optional) == 6, entries
+    # PROD-08.1 adds 25 nested counts of `integrity.verification.complete`:
+    # one `Option<u64>` (`max_records`) and 24 plain.
+    assert sum(1 for _, optional in entries if optional) == 6, entries
+    assert sum(1 for _, optional in entries if not optional) == 30, entries
 
 
 def test_null_is_refused_on_every_non_option_u64_field():
@@ -2209,9 +2219,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     #
     # 1.18.0 (FX-8) adds the scorecard's four `source.time_basis` arms and its
     # shape check (1.16.0 is FX-7's, 1.17.0 FX-3's). Map still five.
+    #
+    # 1.19.0 (PROD-08.1) adds the scorecard's seven `integrity.verification`
+    # arms, its shape check, the nested u64 counts and the `integrity
+    # coverage:` lines. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.18.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.19.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -2940,3 +2954,165 @@ def test_a_scorecard_with_a_time_basis_block_verifies_and_prints_its_lines():
         assert r.returncode == 0, r.stderr
         assert "time basis: SELECTED BY PRODUCER TIME for lat" in r.stdout, r.stdout
         assert "time basis: timestamp type NOT RECORDED for old" in r.stdout, r.stdout
+
+
+# ---------------------------------------------------------------------------
+# PROD-08.1: the scorecard's format 1.4.0 `integrity.verification`, arms IV-1
+# to IV-7, its shape and its nested counts.
+# ---------------------------------------------------------------------------
+
+def _replay(n, **over):
+    r = {k: 0 for k in ("expected", "restored", "matching", "missing", "unexpected",
+                        "duplicates", "out_of_order", "mismatched")}
+    r.update(expected=n, restored=n, matching=n)
+    r.update(over)
+    return r
+
+
+def _complete_block():
+    parts = [
+        {"topic": "orders", "partition": p, "target_topic": "drill-orders", "compared": True,
+         "segments": 2, "segments_verified": 2, "records_decoded": n + 1, "offset_holes": 0,
+         "replay": _replay(n), "findings": []}
+        for p, n in ((0, 5), (1, 7))
+    ]
+    return {
+        "coverage": "complete", "comparison_basis": "archive", "header_order": "verified",
+        "application": "notAttempted", "gaps": [], "pruned": [],
+        "complete": {
+            "covered": True, "incomplete_reason": None, "max_records": None,
+            "window": {"start_ms": None, "end_ms": 1760000005000},
+            "archive": {"segments": 4, "segments_verified": 4, "segments_failed": [],
+                        "segments_unverified": [], "records_decoded": 14, "offset_holes": 0},
+            "replay": _replay(12),
+            "partitions": parts,
+        },
+    }
+
+
+def _sampled_block():
+    return {"coverage": "sampled", "comparison_basis": "archive", "header_order": "notVerified",
+            "application": "notAttempted",
+            "gaps": [{"topic": "orders", "partition": 0, "from_offset": 10, "to_offset": 19}],
+            "pruned": []}
+
+
+def _scorecard_1_4(block, version="1.4.0"):
+    doc = json.loads((ROOT / "e2e/fixtures/scorecard-pass.json").read_text())
+    doc["format_version"] = version
+    if block is not None:
+        doc["integrity"]["verification"] = block
+    return doc
+
+
+def _not_a_pass(doc, result="fail"):
+    doc["outcome"] = "fail-integrity"
+    doc["integrity"]["result"] = result
+    doc["integrity"]["partial_reason"] = "not a pass"
+    doc["engine"]["matrix_verdict"] = "pass-degraded"
+    return doc
+
+
+def test_the_verification_minor_is_the_rust_readers():
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const VERIFICATION_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares VERIFICATION_SINCE_MINOR"
+    assert mod.SCORECARD_VERIFICATION_SINCE_MINOR == int(m.group(1))
+    assert mod._minor(mod.FORMAT_VERSION) >= mod.SCORECARD_VERIFICATION_SINCE_MINOR
+
+
+def test_a_verification_block_is_accepted_in_every_shape_the_writer_produces():
+    mod = _verifier_module()
+    for block in (None, _sampled_block(), _complete_block()):
+        assert mod.check_invariants(_scorecard_1_4(block)) == "", block
+    incomplete = _complete_block()
+    incomplete["complete"]["covered"] = False
+    incomplete["complete"]["incomplete_reason"] = "stopped at the bound"
+    incomplete["complete"]["partitions"][1]["compared"] = False
+    assert mod.check_invariants(_not_a_pass(_scorecard_1_4(incomplete), "partial")) == ""
+
+
+def test_iv1_to_iv7_refuse_with_the_rust_readers_words():
+    mod = _verifier_module()
+    cases = []
+    cases.append((_scorecard_1_4(_sampled_block(), "1.3.0"),
+                  'integrity.verification is present but format_version "1.3.0" predates it: '
+                  "the field is defined from 1.4.0"))
+    b = _sampled_block(); b["coverage"] = "full"
+    cases.append((_scorecard_1_4(b),
+                  'integrity.verification.coverage is neither "sampled" nor "complete"'))
+    b = _sampled_block(); b["header_order"] = "verified"
+    cases.append((_scorecard_1_4(b),
+                  'integrity.verification.header_order is not "verified" or "notVerified", or '
+                  'claims "verified" for a coverage that is not complete; a sampled '
+                  "verification compares a fingerprint that sorts headers"))
+    b = _complete_block(); del b["complete"]
+    cases.append((_scorecard_1_4(b),
+                  "integrity.verification.complete is present exactly when "
+                  'integrity.verification.coverage is "complete"'))
+    b = _complete_block(); b["complete"]["covered"] = False; b["complete"]["incomplete_reason"] = "  "
+    cases.append((_not_a_pass(_scorecard_1_4(b), "partial"),
+                  "integrity.verification.complete.incomplete_reason is required exactly when "
+                  "complete.covered is false"))
+    b = _complete_block()
+    b["complete"]["replay"]["duplicates"] = 1
+    b["complete"]["partitions"][0]["replay"]["duplicates"] = 1
+    cases.append((_scorecard_1_4(b),
+                  "integrity.result is pass but integrity.verification.complete is not covered, "
+                  "names a failed or unverified segment, or records a missing, unexpected, "
+                  "duplicate, out-of-order or mismatched record"))
+    b = _complete_block(); b["complete"]["partitions"][1]["offset_holes"] = 3
+    cases.append((_not_a_pass(_scorecard_1_4(b)),
+                  "integrity.verification.complete's totals are not the sums of its partitions, "
+                  "or its segments are not each verified, failed or unverified"))
+    for doc, want in cases:
+        assert mod.check_invariants(doc) == want, (want, mod.check_invariants(doc))
+
+
+def test_the_verification_block_shape_is_refused_before_its_arms():
+    mod = _verifier_module()
+    msg = ("integrity.verification is not an object of the shape the writer gives it: four "
+           "strings, two arrays of offset ranges and an optional complete block")
+    bad = []
+    bad.append("x")
+    b = _sampled_block(); b["coverage"] = 1; bad.append(b)
+    b = _sampled_block(); b["gaps"] = [{"topic": "t", "partition": 0, "from_offset": "1",
+                                        "to_offset": 2}]; bad.append(b)
+    b = _complete_block(); b["complete"]["partitions"] = {}; bad.append(b)
+    b = _complete_block(); del b["complete"]["window"]; bad.append(b)
+    b = _complete_block(); b["complete"]["covered"] = "yes"; bad.append(b)
+    for block in bad:
+        assert mod.check_invariants(_scorecard_1_4(block)) == msg, block
+
+
+def test_the_nested_counts_have_the_u64_domain_and_refuse_null():
+    mod = _verifier_module()
+    doc = _scorecard_1_4(_complete_block())
+    doc["integrity"]["verification"]["complete"]["partitions"][1]["replay"]["missing"] = None
+    assert (mod.check_invariants(doc)
+            == "integrity.verification.complete.partitions[1].replay.missing is not an integer")
+    doc = _scorecard_1_4(_complete_block())
+    doc["integrity"]["verification"]["complete"]["archive"]["segments"] = 2**64
+    assert mod.check_invariants(doc).startswith(
+        "integrity.verification.complete.archive.segments is outside the u64 domain")
+    # `max_records` is the one Option<u64>: null is absent.
+    doc = _scorecard_1_4(_complete_block())
+    doc["integrity"]["verification"]["complete"]["max_records"] = None
+    assert mod.check_invariants(doc) == ""
+
+
+def test_the_coverage_lines_say_what_the_verdict_covered():
+    mod = _verifier_module()
+    assert mod._verification_lines(None) == [
+        "integrity coverage: not recorded, so this verdict covered a sample, never every record"]
+    lines = mod._verification_lines(_sampled_block())
+    assert lines[0] == ("integrity coverage: sampled (compared with the archive; header order "
+                        "notVerified; application validation notAttempted)")
+    assert lines[-1] == ("integrity coverage: the verified partitions record 1 capture gaps "
+                         "and 0 pruned ranges")
+    b = _complete_block(); b["complete"]["covered"] = False
+    b["complete"]["incomplete_reason"] = "the bound"
+    lines = mod._verification_lines(b)
+    assert lines[1].startswith("integrity coverage: INCOMPLETE: 12 expected"), lines
+    assert lines[2] == "integrity coverage: incomplete because the bound"

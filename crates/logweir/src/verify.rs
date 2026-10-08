@@ -147,6 +147,72 @@ pub struct VerifyReport {
     /// is NOT RECORDED (a document before 1.3.0), never "every selection used
     /// the topic's own clock".
     pub time_basis: Option<logweir_core::scorecard::TimeBasisLabel>,
+    /// `integrity.verification` (scorecard 1.4.0, PROD-08.1), carried as
+    /// read: `None` is NOT RECORDED (a document before 1.4.0), read as a
+    /// SAMPLED verdict and never as a complete one.
+    pub verification: Option<logweir_core::scorecard::Verification>,
+}
+
+/// The verification-coverage lines both readers print for a scorecard
+/// (PROD-08.1): what the verdict covered, a complete verification's counts and
+/// why it was incomplete, and how many capture gaps and pruned ranges the
+/// verified partitions record — or the one line that says the coverage is not
+/// recorded. `docs/verify_scorecard.py::_verification_lines` prints the same
+/// lines from the same cases, and `scripts/check-verifier-parity.sh` compares
+/// every line starting `integrity coverage:` between the two readers.
+#[must_use]
+pub fn verification_lines(v: Option<&logweir_core::scorecard::Verification>) -> Vec<String> {
+    let Some(v) = v else {
+        return vec![
+            "integrity coverage: not recorded, so this verdict covered a sample, never every \
+             record"
+                .to_string(),
+        ];
+    };
+    let mut lines = vec![format!(
+        "integrity coverage: {} (compared with the {}; header order {}; application validation \
+         {})",
+        v.coverage, v.comparison_basis, v.header_order, v.application
+    )];
+    if let Some(c) = &v.complete {
+        let r = &c.replay;
+        let a = &c.archive;
+        lines.push(format!(
+            "integrity coverage: {}: {} expected, {} restored, {} matching, {} missing, {} \
+             unexpected, {} duplicates, {} out of order, {} different; {} of {} segments \
+             verified, {} failed, {} unverified; {} offset holes",
+            if c.covered {
+                "every selected record compared"
+            } else {
+                "INCOMPLETE"
+            },
+            r.expected,
+            r.restored,
+            r.matching,
+            r.missing,
+            r.unexpected,
+            r.duplicates,
+            r.out_of_order,
+            r.mismatched,
+            a.segments_verified,
+            a.segments,
+            a.segments_failed.len(),
+            a.segments_unverified.len(),
+            a.offset_holes
+        ));
+        if let Some(reason) = &c.incomplete_reason {
+            lines.push(format!("integrity coverage: incomplete because {reason}"));
+        }
+    }
+    if !v.gaps.is_empty() || !v.pruned.is_empty() {
+        lines.push(format!(
+            "integrity coverage: the verified partitions record {} capture gaps and {} pruned \
+             ranges",
+            v.gaps.len(),
+            v.pruned.len()
+        ));
+    }
+    lines
 }
 
 /// The configuration-parity line both readers print for a scorecard (FX-4),
@@ -580,6 +646,7 @@ pub fn verify_scorecard(
         intentionally_deviated: sc.topic_parity.intentionally_deviated.clone(),
         not_reconstructed: sc.topic_parity.not_reconstructed.clone(),
         time_basis: sc.source.time_basis.clone(),
+        verification: sc.integrity.verification.clone(),
     }))
 }
 
@@ -625,6 +692,10 @@ fn print_report(r: &VerifyReport) {
     // FX-8: nor a selection by the source topics' own clocks it does not claim.
     for line in time_basis_lines(r.time_basis.as_ref()) {
         println!("time:      {line}");
+    }
+    // PROD-08.1: nor a verdict over every record when it covered a sample.
+    for line in verification_lines(r.verification.as_ref()) {
+        println!("coverage:  {line}");
     }
 }
 
