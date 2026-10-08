@@ -182,11 +182,22 @@ pub struct DiscoveryPolicy {
     ///   value) for an image-only rollback and for the old pod during a rolling
     ///   upgrade.
     ///
-    /// Keeping it in the struct also keeps [`Policy::digest`] byte-identical
-    /// across the upgrade, so no retained `Preflight` is downgraded to
-    /// `unknown` with `PolicyChanged` by an upgrade that changed no behaviour.
+    /// Keeping it in the struct, at its old wire name and position, also keeps
+    /// [`Policy::digest`] of an UNCHANGED document byte-identical across the
+    /// upgrade, so a default install's retained `Preflight`s are not
+    /// downgraded to `unknown` with `PolicyChanged`. An install that had set
+    /// the old value to anything other than what the chart now renders gets
+    /// the fixed value instead: its document, and so its digest, changes once,
+    /// and its still-valid `ready` `Preflight`s read `unknown`
+    /// (`policyChanged`) until they are run again.
+    ///
     /// No range rule applies: a value nothing reads must not be able to fail
-    /// the document closed.
+    /// the document closed. The TYPE still applies: any whole number from 0 to
+    /// 4 294 967 295 is accepted, and `null`, a negative, a fraction, a quoted
+    /// number or a larger number is refused like any malformed field (the
+    /// whole document fails closed, as it did before FX-10). The chart never
+    /// renders a configured value here, so only a hand-written document can
+    /// meet that refusal.
     #[serde(rename = "defaultMaxTopics", default = "withdrawn_default_max_topics")]
     pub withdrawn_default_max_topics: u32,
     /// The ceiling a request's `maxTopics` is clamped to.

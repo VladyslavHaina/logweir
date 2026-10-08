@@ -172,8 +172,8 @@ publication (`86a554e6`); each was proven on the running install by the
 in-place upgrade that carried it. Items 21 and 22 are the product-expansion
 tracker's fix-now rows FX-2 and FX-5 and are not proven live yet: the PoC
 upgrade that carries each runs its rows. Item 23 is fix-now row FX-10, proven
-offline; the PoC upgrade that carries it checks that the installation's policy
-document and its digest are unchanged.
+offline; the PoC upgrade that carries it checks that the PoC's policy
+document and its digest are unchanged (the PoC sets neither withdrawn key).
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -836,8 +836,11 @@ the request field at admission (`maxTopics` 20 000, `timeoutSeconds` 120) and
 the console writes both, so an operator who set either changed nothing.
 
 - They are gone from `values.yaml` and the chart README.
-- The controller's policy parser accepts both keys, reads neither, and applies
-  no rule to them.
+- The controller's policy parser accepts both keys, or neither, and reads
+  neither. It applies no range rule, only the type: any whole number from 0
+  to 4 294 967 295 is accepted. A hand-written document that puts `null`, a
+  negative, a fraction, a quoted number or a larger number there is refused
+  whole, as before.
 - The chart renders both at fixed values: 20 000 (or `hardMaxTopics`, if that
   is lower) and 120. A controller older than this one requires both keys, and
   this keeps the document readable to it.
@@ -870,12 +873,22 @@ refusal.
 - `crates/logweir/tests/chart_lint.rs`;
 - `scripts/check-chart.sh`, its withdrawn-values arm;
 - `scripts/check-chart-values.sh`, one render per chart value;
-- `crates/logweir-retention/tests/worker.rs`, the caps at 7 and 1234 and the
-  refusals;
+- `crates/logweir-retention/tests/worker.rs`, the caps below the old
+  defaults (7 and 1234), above them (75 and 30 000, through execution), and
+  the refusals;
+- `crates/weirkeeper/tests/retention_policy_controller.rs`, raised ceilings
+  (55 and 30 000) reaching the plan and the Job;
 - the mutants in the FX-10 report.
 
-The policy digest is unchanged for an unchanged document, so no retained
-`Preflight` reads `policyChanged` because of the upgrade.
+**What an operator sees after the upgrade.** An install that never set either
+key keeps a byte-identical policy document, so its policy digest does not move
+and no retained `Preflight` reads `policyChanged`. An install that had set
+either key to a value other than the one the chart now renders (20 000, or
+`hardMaxTopics` if lower, and 120) gets a changed document once: the chart
+renders the fixed value in place of its own. Its policy digest changes, and
+every retained `Preflight` whose `ready` verdict has not expired yet reads
+`unknown`, its message naming `policyChanged`. Run the check again. Nothing
+else changes, because the controller never read either value.
 
 **Rollback:** `helm rollback` restores the previous chart's values and
 document. Rolling back only the controller image is also safe, because the

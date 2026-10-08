@@ -1103,8 +1103,10 @@ against `charts/logweir/values.schema.json`'s `checks`/`engine`/`evidence`
 blocks *and* check that pair yourself — or render one with `helm template` and
 copy the result, which is the shortest safe path. A hand-written file should
 keep `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` (see
-[kubernetes.md](kubernetes.md) §22.2): this controller ignores both, and a
-controller older than FX-10 refuses a document without them.
+[kubernetes.md](kubernetes.md) §22.2): this controller ignores both (at any
+whole number from 0 to 4 294 967 295; anything else there is refused like any
+malformed field), and a controller older than FX-10 refuses a document without
+them.
 
 ### 5b. Fencing the console's `create secrets` (Kubernetes 1.30+)
 

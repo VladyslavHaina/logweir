@@ -1331,12 +1331,21 @@ fn a_malformed_policy_is_refused_by_name_and_fails_closed() {
 /// `Preflight` would read `policyChanged` after an upgrade that changed no
 /// behaviour.
 ///
+/// **"ANY VALUE" IS ANY `u32`, AND NO MORE** (FX-10 review L3). The fields keep
+/// their type, so a whole number from 0 to 4 294 967 295 is accepted, and
+/// `null`, a negative, a fraction, a quoted number or 4 294 967 296 is refused
+/// like any malformed field: the WHOLE document fails closed, as it did for a
+/// controller before FX-10. The chart never renders a configured value there
+/// (it renders the fixed compatibility values), so only a hand-written
+/// document can meet the refusal; the docs say so, and the table below pins
+/// both edges.
+///
 /// MUTANTS: restoring either range rule refuses the first document (it fails
 /// CLOSED: attestations and the allowlist gone); dropping
 /// `#[serde(default = …)]` from either field refuses the second; dropping a
 /// field altogether refuses the first and third (`deny_unknown_fields`).
 #[test]
-fn the_withdrawn_fields_are_accepted_with_any_value_or_none_and_read_by_nothing() {
+fn the_withdrawn_fields_are_accepted_at_any_u32_or_absent_and_read_by_nothing() {
     let parse = |doc: serde_json::Value| -> policy::Policy {
         let mut data = BTreeMap::new();
         data.insert(policy::POLICY_KEY.to_string(), doc.to_string());
@@ -1392,6 +1401,48 @@ fn the_withdrawn_fields_are_accepted_with_any_value_or_none_and_read_by_nothing(
     assert_eq!(wire["discovery"]["defaultMaxTopics"], json!(20_000));
     assert_eq!(wire["preflight"]["defaultTimeoutSeconds"], json!(120));
     assert!(wire["discovery"].get("withdrawnDefaultMaxTopics").is_none());
+
+    // THE TYPE'S EDGES, for both fields: every u32 is accepted …
+    let with = |block: &str, key: &str, value: serde_json::Value| {
+        let mut doc: serde_json::Value =
+            serde_json::from_str(GOOD_POLICY).expect("GOOD_POLICY is JSON");
+        doc[block][key] = value;
+        let mut data = BTreeMap::new();
+        data.insert(policy::POLICY_KEY.to_string(), doc.to_string());
+        policy::from_data(Some(&data))
+    };
+    for (block, key) in [
+        ("discovery", "defaultMaxTopics"),
+        ("preflight", "defaultTimeoutSeconds"),
+    ] {
+        for accepted in [json!(0), json!(u32::MAX)] {
+            assert!(
+                matches!(
+                    with(block, key, accepted.clone()),
+                    policy::PolicyLoad::Loaded(_)
+                ),
+                "{block}.{key} = {accepted} is a u32 and must be accepted"
+            );
+        }
+        // … and nothing else: these fail the whole document closed.
+        for refused in [
+            json!(null),
+            json!(-1),
+            json!(120.5),
+            json!(u64::from(u32::MAX) + 1),
+            json!("120"),
+        ] {
+            let load = with(block, key, refused.clone());
+            assert!(
+                matches!(&load, policy::PolicyLoad::Unreadable { .. }),
+                "{block}.{key} = {refused} is not a u32; the docs say it is refused: {load:?}"
+            );
+            assert!(
+                load.policy().discovery.visibility_attestations.is_empty(),
+                "a refused document fails closed"
+            );
+        }
+    }
 }
 
 /// **FX-10: the digest of the default policy is the one every controller

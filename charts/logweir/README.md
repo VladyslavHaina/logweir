@@ -143,6 +143,14 @@ before.
 - The rendered objects are byte-identical to an install that does not set
   them.
 - `NOTES.txt` prints `WITHDRAWN VALUES ARE SET AND IGNORED`, naming each one.
+- **The policy document changes once if you had set either key to another
+  value.** The chart now renders a fixed value in its place (below), so an
+  install that had set, say, `defaultTimeoutSeconds: 300` gets a different
+  document and a different policy digest. Every retained `Preflight` whose
+  `ready` verdict has not expired yet then reads `unknown`, its message naming
+  `policyChanged`: run the check again. An install that never set either key,
+  or set exactly the value now rendered, keeps a byte-identical document and
+  digest.
 
 **If you never set them**, an upgrade with `--reuse-values` may still carry
 them forward. That flag reuses the previous release's computed values, which
@@ -158,7 +166,11 @@ and `preflight.defaultTimeoutSeconds` is 120.
   controller read a default install's document, which covers an image-only
   rollback and the old pod during a rolling upgrade.
 - The current controller accepts the keys, with or without them present, and
-  never reads them.
+  never reads them. It applies no range rule, only the type: any whole number
+  from 0 to 4 294 967 295. A hand-written document that puts `null`, a
+  negative, a fraction, a quoted number or a larger number there is refused
+  whole and fails closed, as it was before FX-10. The chart never renders a
+  configured value there, so a chart install cannot meet that refusal.
 
 **Rollback.** `helm rollback` to a chart from before FX-10 restores that
 revision's own values and document, so nothing changes. Rolling back only the
