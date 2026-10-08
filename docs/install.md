@@ -101,18 +101,25 @@ including a local `registry:2` fallback: it does not prove public pullability.
 ### (c) The Helm chart
 
 **The published chart.** Every publication of the images publishes the chart
-beside them, as an OCI artifact on Docker Hub, from the same run and after the
-images are public (`scripts/ci-images.sh chart`, in `images.yml`'s promote job):
+beside them, as an OCI artifact on Docker Hub, after the images are public:
+`main`'s from the same run (`scripts/ci-images.sh chart`, in `images.yml`'s
+promote job), a release's from the release run, which gives the tagged
+commit's `sha-<commit>` images the version tag without rebuilding them
+(`scripts/release.sh promote`, then `scripts/ci-images.sh chart-push`;
+[gates.md](gates.md#versioned-releases)):
 
 | images published as | chart | `appVersion` |
 |---|---|---|
 | `sha-<commit>` (every push to `main`) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version 0.1.0-sha-<commit>` | `sha-<commit>` |
-| `v<X.Y.Z>` (a release tag) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version <X.Y.Z>` | `v<X.Y.Z>` |
+| `v<X.Y.Z>` or a pre-release such as `v0.2.0-rc.1` (a release tag; the same digests as the tagged commit's `sha-` images) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version <X.Y.Z>` (`0.2.0-rc.1`) | `v<X.Y.Z>` |
 
 The packaged chart's four Logweir image defaults (`controllerImage`,
-`runnerImage`, `api.console.image`, `ui.image`) are that same tag, so installing
-it installs exactly the images of that commit — no `--set` for images and no
-checkout of the repository:
+`runnerImage`, `api.console.image`, `ui.image`) are that same tag — in a
+release's chart, that tag pinned by digest
+(`docker.io/vladyslavhaina/weirkeeper:v<X.Y.Z>@sha256:…`), so moving the tag
+later changes nothing an installation pulls — and installing it installs
+exactly the images of that commit, with no `--set` for images and no checkout
+of the repository:
 
 ```bash
 helm upgrade --install logweir oci://registry-1.docker.io/vladyslavhaina/logweir-chart \
@@ -124,7 +131,10 @@ A `main` version is a SemVer pre-release, so always pass `--version`. The
 package's name is `logweir-chart` (Docker Hub names a chart's repository after
 the chart, and `vladyslavhaina/logweir` is the runner image); everything it
 installs is named exactly as from the source chart. The publication step
-compares the bytes the registry serves back with the bytes it pushed. [UNVERIFIED — no chart has been pushed yet: the first publication is the first main push after this change merges.]
+compares the bytes the registry serves back with the bytes it pushed; every
+`main` publication since `86a554e6` has, and the PoC installs and upgrades
+from them ([release-handoff.md](release-handoff.md)). A release's chart
+package is also a GitHub Release asset, the same bytes.
 
 **On first publication, `vladyslavhaina/logweir-chart` must be Public in Docker Hub.** The publication step pulls the chart back anonymously; if Docker Hub creates the repository private (the namespace's default visibility decides), `main` CI's chart step fails closed until the repository is made Public (Repository → Settings → Visibility) and the job is re-run — the re-push overwrites the same version and is compared again.
 
@@ -1082,7 +1092,7 @@ ConfigMap in the release namespace is a chart or cluster administrator;
 an attestation an administrator statement rather than a self-assessment.
 
 **A document the controller refuses fails closed.** It is parsed with unknown
-fields rejected and twelve range rules applied (two of them P10's `runs` floors); a refusal yields empty attestations
+fields rejected and ten range rules applied (two of them P10's `runs` floors; FX-10 removed the two withdrawn fields' rules); a refusal yields empty attestations
 and an empty evidence allowlist plus one advisory
 `configuration.policy notReady PolicyUnreadable` row on a `Preflight`. Nothing
 else goes red — but it **does** log, once per 30-second cache miss:
@@ -1096,13 +1106,17 @@ configured and the discovery still says `unknown`".
 
 **A Helm install cannot produce a document the controller then refuses.**
 `values.schema.json` carries every per-field bound, pinned to the same
-constants the parser uses; `templates/policy.yaml` refuses the two cross-field
-rules JSON Schema cannot express (`maxActiveTotal >= maxActivePerNamespace`,
-`defaultMaxTopics <= hardMaxTopics`) with a named `fail` at render time. If you
-**hand-write** the file, validate it against
-`charts/logweir/values.schema.json`'s `checks`/`engine`/`evidence` blocks *and*
-check those two pairs yourself — or render one with `helm template` and copy
-the result, which is the shortest safe path.
+constants the parser uses; `templates/policy.yaml` refuses the one cross-field
+rule JSON Schema cannot express (`maxActiveTotal >= maxActivePerNamespace`)
+with a named `fail` at render time. If you **hand-write** the file, validate it
+against `charts/logweir/values.schema.json`'s `checks`/`engine`/`evidence`
+blocks *and* check that pair yourself — or render one with `helm template` and
+copy the result, which is the shortest safe path. A hand-written file should
+keep `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` (see
+[kubernetes.md](kubernetes.md) §22.2): this controller ignores both (at any
+whole number from 0 to 4 294 967 295; anything else there is refused like any
+malformed field), and a controller older than FX-10 refuses a document without
+them.
 
 ### 5b. Fencing the console's `create secrets` (Kubernetes 1.30+)
 

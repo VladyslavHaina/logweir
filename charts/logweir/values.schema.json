@@ -87,7 +87,7 @@
     "checks": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The check-pool ceilings and the two per-kind retention blocks of the installation policy (D2 \u00a74.4), rendered into the `weirkeeper-policy` ConfigMap. Every field is REQUIRED here because `weirkeeper::check::policy` parses the document with `deny_unknown_fields` and no per-field default inside `checks`, `discovery` or `preflight`: a half-written block is a policy the controller refuses at load, and it refuses it fail-closed (no attestations, no allowlist). TWO OF `Policy::validate`'s RULES CANNOT BE WRITTEN HERE, because JSON Schema draft-07 cannot compare two sibling values: `maxActiveTotal >= maxActivePerNamespace` and `discovery.defaultMaxTopics <= discovery.hardMaxTopics`. `templates/policy.yaml` refuses both with a named `fail` at render time, which is the same moment and the same audience.",
+      "description": "The check-pool ceilings and the two per-kind retention blocks of the installation policy (D2 \u00a74.4), rendered into the `weirkeeper-policy` ConfigMap. Every field the template reads is REQUIRED here because `weirkeeper::check::policy` parses the document with `deny_unknown_fields` and no per-field default inside `checks`, `discovery` or `preflight`: a half-written block is a policy the controller refuses at load, and it refuses it fail-closed (no attestations, no allowlist). ONE OF `Policy::validate`'s RULES CANNOT BE WRITTEN HERE, because JSON Schema draft-07 cannot compare two sibling values: `maxActiveTotal >= maxActivePerNamespace`. `templates/policy.yaml` refuses it with a named `fail` at render time, which is the same moment and the same audience. `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` are WITHDRAWN (FX-10): accepted so an older values file still installs, read by nothing.",
       "required": ["maxActivePerNamespace", "maxActiveTotal", "maxActiveDiscoveriesPerConnection", "maxEvidenceFetchActivePerNamespace", "discovery", "preflight"],
       "properties": {
         "maxActivePerNamespace": { "type": "integer", "minimum": 1 },
@@ -97,12 +97,12 @@
         "discovery": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["freshSeconds", "retentionSeconds", "keepPerConnection", "defaultMaxTopics", "hardMaxTopics", "visibilityAttestations"],
+          "required": ["freshSeconds", "retentionSeconds", "keepPerConnection", "hardMaxTopics", "visibilityAttestations"],
           "properties": {
             "freshSeconds": { "type": "integer", "minimum": 1 },
             "retentionSeconds": { "type": "integer", "minimum": 1 },
             "keepPerConnection": { "type": "integer", "minimum": 1 },
-            "defaultMaxTopics": { "type": "integer", "minimum": 1 },
+            "defaultMaxTopics": { "type": "integer", "description": "WITHDRAWN (FX-10, 2026-10-05): accepted and IGNORED. It never changed a discovery: the TopicDiscovery CRD defaults spec.request.maxTopics at admission and the console writes it. Still allowed here so a values file, or a --reuse-values upgrade, that carries it does not fail this closed schema; NOTES.txt says it is ignored. Bound a discovery with its own maxTopics and with hardMaxTopics. charts/logweir/README.md, Withdrawn values." },
             "hardMaxTopics": { "type": "integer", "minimum": 1, "maximum": 50000, "description": "PINNED TO `logweir_core::check_contract::MAX_TOPICS_CEILING`. `Policy::validate` refuses anything above it, and a refused policy fails CLOSED — every attestation and every evidence location is discarded while the install looks healthy — so this bound must equal the constant, never merely resemble it. `weirkeeper::tests::chart_policy::the_schema_bounds_are_the_parsers_own_rules` reads both and fails if they drift." },
             "visibilityAttestations": {
               "type": "array",
@@ -113,9 +113,9 @@
         "preflight": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["defaultTimeoutSeconds", "retentionSeconds"],
+          "required": ["retentionSeconds"],
           "properties": {
-            "defaultTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 600 },
+            "defaultTimeoutSeconds": { "type": "integer", "description": "WITHDRAWN (FX-10, 2026-10-05): accepted and IGNORED. It never changed a Preflight's budget: the Preflight CRD defaults spec.request.timeoutSeconds to 120 at admission and the console writes it. Still allowed here so a values file, or a --reuse-values upgrade, that carries it does not fail this closed schema; NOTES.txt says it is ignored. A Preflight names its own timeoutSeconds (30..600). charts/logweir/README.md, Withdrawn values." },
             "retentionSeconds": { "type": "integer", "minimum": 1 }
           }
         }

@@ -20,30 +20,45 @@ mark without one). The supported path these notes assume is
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
-published image. Items 21 (FX-2), 22 (FX-5) and 23 (FX-3), from the
-product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do FX-7's additions to
-item 11 (the execution-claim set check, receipt and catalog format 1.2.0, the
-pin's read by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
+published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10) and 24 (FX-3), from
+the product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do
+FX-7's additions to item 11 (the execution-claim set check, receipt and
+catalog format 1.2.0, the pin's read by version id) and FX-4's format 1.1.0,
+which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
 
 ### Candidate record
 
-Fill every row for the exact candidate before the tag; a row left as `—` is an
-unrecorded fact, not a pass. A previous run does not validate new bytes.
+Fill every row for the exact candidate; a row left as `—` is an unrecorded
+fact, not a pass. A previous run does not validate new bytes. A tag does not
+rebuild the images — it gives the `sha-<commit>` publication `main` CI already
+made the version tag, unchanged — so the release dry run's `release.json`
+(workflow artifact `release-assets`) gives the publication commit and the four
+image digests **before** the tag. Nothing else carries over: the tag run
+packages the chart and builds the three CLI archives again. The chart package
+is not byte-reproducible (`helm package` records each file's modification
+time, which is its checkout time), and nothing shows the archives to be. The
+chart and archive rows therefore come from the **tag run's** `release.json`,
+the GitHub Release asset, after the tag, together with the run rows
+([the release checklist](tag1-checklist.md), *Cutting a release candidate*).
 
 | What | Value |
 |---|---|
-| Candidate commit | — |
+| Candidate commit (the tagged commit) | — |
 | Version tag | — |
-| CI run (`ci.yml`) for that commit | — |
-| Release run (`release.yml`) and release drill | — |
+| Publication commit (`release.json` `.images.publication`: the `sha-<commit>` images and chart the tag promotes) | — |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | — |
+| Release dry run (`release.yml` dispatched on the candidate) | — |
+| Release run (`release.yml` on the tag) and release drill | — |
 | Runner image digest (`linux/amd64`) | — |
 | Controller image digest (manifest list; amd64 and arm64) | — |
 | Console image digest (`logweir-console`) | — |
 | UI image digest (`logweir-ui`) | — |
-| `ui/` bundle, file by file | the output of the command below |
+| Chart (`logweir-chart` version and package sha256 from the tag run's `release.json` `.chart`; OCI digest from the release's notes, as an anonymous `helm pull` reports it) | — |
+| CLI archives (three; the tag run's `release.json` `.archives`, each with its sha256 and run-time needs) | — |
+| `ui/` bundle, file by file | the output of the command below, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate (context, auth mode, storage, limits) | — |
 | Checks deliberately deferred, each with its reason | — |
 
@@ -164,7 +179,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-three operator-facing changes
+### The twenty-four operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -173,8 +188,11 @@ Items 17–20 were found by the PoC rounds and landed after its first
 publication (`86a554e6`); each was proven on the running install by the
 in-place upgrade that carried it. Items 21 and 22 are the product-expansion
 tracker's fix-now rows FX-2 and FX-5 and are not proven live yet: the PoC
-upgrade that carries each runs its rows. Item 23 is fix-now row FX-3, proven on
-a compose stack (it changes the runner's signed scorecard, not the controller).
+upgrade that carries each runs its rows. Item 23 is fix-now row FX-10, proven
+offline; the PoC upgrade that carries it checks that the PoC's policy
+document and its digest are unchanged (the PoC sets neither withdrawn key).
+Item 24 is fix-now row FX-3, proven on a compose stack (it changes the
+runner's signed scorecard, not the controller).
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -862,7 +880,74 @@ the fixed, read-only 1 and the draft that drops the subset, and an older
 product API omits `brokerCount`. Nothing stored changes: a `Restore` created
 with a factor above 1 keeps it.
 
-#### 23. A `newTopic` restore's scorecard names the source settings it did not reconstruct (FX-3)
+#### 23. Two policy values that changed nothing are withdrawn (FX-10)
+
+**Changed.** `checks.discovery.defaultMaxTopics` and
+`checks.preflight.defaultTimeoutSeconds` were documented as the default a
+request that names none gets. They never reached anything. Both CRDs default
+the request field at admission (`maxTopics` 20 000, `timeoutSeconds` 120) and
+the console writes both, so an operator who set either changed nothing.
+
+- They are gone from `values.yaml` and the chart README.
+- The controller's policy parser accepts both keys, or neither, and reads
+  neither. It applies no range rule, only the type: any whole number from 0
+  to 4 294 967 295 is accepted. A hand-written document that puts `null`, a
+  negative, a fraction, a quoted number or a larger number there is refused
+  whole, as before.
+- The chart renders both at fixed values: 20 000 (or `hardMaxTopics`, if that
+  is lower) and 120. A controller older than this one requires both keys, and
+  this keeps the document readable to it.
+- Nothing that runs changes: every install has always used the request's own
+  values.
+
+**Also changed: the retention worker refuses a cap it cannot read.**
+`logweir-retention` now refuses a run whose `LOGWEIR_RETENTION_MAX_DELETIONS`
+or `LOGWEIR_RETENTION_MAX_OBJECTS` is absent, or is not a whole number of at
+least 1. It exits 3 and deletes nothing. Before, it silently used 50 and
+20 000. Every controller that creates an enforcement Job sets both from
+`spec.enforcement`, so a supported controller and runner never hit the
+refusal.
+
+**Do:**
+
+- Remove either key from your values file.
+- A `helm upgrade` that still carries one succeeds, because the schema still
+  accepts both. It renders exactly what it would render without them, and its
+  notes print `WITHDRAWN VALUES ARE SET AND IGNORED`.
+- An upgrade with `--reuse-values` carries an older chart's defaults forward
+  and prints the same warning. Upgrade once with `--reset-then-reuse-values`.
+- To bound a discovery, name `maxTopics` on it; `checks.discovery.hardMaxTopics`
+  still caps it. To give a slow cluster longer, name `timeoutSeconds` (30–600)
+  on the `Preflight`.
+
+**Scope:**
+
+- `crates/weirkeeper/tests/chart_policy.rs`;
+- `crates/logweir/tests/chart_lint.rs`;
+- `scripts/check-chart.sh`, its withdrawn-values arm;
+- `scripts/check-chart-values.sh`, one render per chart value;
+- `crates/logweir-retention/tests/worker.rs`, the caps below the old
+  defaults (7 and 1234), above them (75 and 30 000, through execution), and
+  the refusals;
+- `crates/weirkeeper/tests/retention_policy_controller.rs`, raised ceilings
+  (55 and 30 000) reaching the plan and the Job;
+- the mutants in the FX-10 report.
+
+**What an operator sees after the upgrade.** An install that never set either
+key keeps a byte-identical policy document, so its policy digest does not move
+and no retained `Preflight` reads `policyChanged`. An install that had set
+either key to a value other than the one the chart now renders (20 000, or
+`hardMaxTopics` if lower, and 120) gets a changed document once: the chart
+renders the fixed value in place of its own. Its policy digest changes, and
+every retained `Preflight` whose `ready` verdict has not expired yet reads
+`unknown`, its message naming `policyChanged`. Run the check again. Nothing
+else changes, because the controller never read either value.
+
+**Rollback:** `helm rollback` restores the previous chart's values and
+document. Rolling back only the controller image is also safe, because the
+document still carries both keys at values an older controller accepts.
+
+#### 24. A `newTopic` restore's scorecard names the source settings it did not reconstruct (FX-3)
 
 **Changed.** A restore creates its target topics at the plan's replication
 factor, with `retention.ms=-1` and the target broker's `cleanup.policy`. The
@@ -1005,10 +1090,10 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22 and 23 and item 11's FX-7 additions: grant
-`s3:GetObjectVersion` before the upgrade, or a pinned point whose current version
-differs fails closed at the binding, and let in-flight Backups finish before
-rolling the runner back.
+from `fdb48cd8` crosses items 21, 22, 23 and 24, and item 11's FX-7 additions:
+grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
+version differs fails closed at the binding, and let in-flight Backups finish
+before rolling the runner back.
 
 **The chart and the images move together.** This chart's controller probes run
 `weirkeeper --probe`, and its console configuration can carry
@@ -1085,9 +1170,42 @@ policy or roster ([keys.md](keys.md)).
   source's** (item 22). The source's factor is recorded only in the archive
   manifest; the default is the target's broker count, at most 3, until
   PROD-05.1 projects the source's factor to the console.
-- **The product API's OpenAPI document is still `1.0.0-alpha.1`**, although the
-  console image and the chart now consume it; ship and upgrade the console and
-  the API together until the owner freezes it ([stability.md](stability.md)).
+- **The `v0.1.1`–`v0.1.5` image tags on Docker Hub are leftovers of failed
+  runs, not releases.** Those tag runs pushed version-tagged images before
+  they failed — `logweir:v0.1.1`–`v0.1.5`, `weirkeeper:v0.1.2`–`v0.1.5` and
+  `logweir-ui:v0.1.3`–`v0.1.5`; no console image and no chart — and none of
+  them published a chart, a GitHub Release or a release drill. Every run
+  failed in the CLI build matrix; `v0.1.1`'s image job also failed its own
+  repository-digest check after pushing, and the pull-back jobs of `v0.1.2`
+  and `v0.1.3` failed with "cannot overwrite digest". Do not install or pin
+  them. The owner decided on 2026-10-07 to delete them all once v0.2.0 ships. The repaired pipeline
+  never builds an image under a version tag: it tags main CI's `sha-<commit>`
+  images.
+- **The CLI archives' run-time needs.** The Linux archives are built in the
+  runner image's builder base (`rust:1.89-bookworm`), so they need what the
+  runner image installs: a glibc at least as new as the version measured on
+  each binary — 2.34 on the Linux arm64 archive built locally on 2026-10-05;
+  each release's notes give its own — which is never above the Debian 12
+  glibc (2.36) they are built against, so Debian 12's glibc or newer always
+  suffices; and `libssl.so.3`, `libcrypto.so.3`, `libsasl2.so.2` and
+  `libz.so.1` (Debian and Ubuntu: `libssl3`, `libsasl2-2`, `zlib1g`). A
+  distribution whose SASL library has another soname
+  (`libsasl2.so.3` on RHEL and Fedora) builds from the checkout. The macOS
+  archive needs Homebrew's `openssl@3`. `logweir --version` prints the
+  workspace version (`0.1.0`), not the tag; `release.json` ties each archive
+  to its tag and commit.
+- **The product API's OpenAPI document is `1.0.0-alpha.2`, still a
+  pre-release**, although the console image and the chart consume it; ship and
+  upgrade the console and the API together until PROD-14.2 freezes it at
+  `1.0.0` ([stability.md](stability.md)). Since `1.0.0-alpha.1` (2026-09-16,
+  never published) it gained 38 operations and removed none: destinations
+  (list, create, read, usage, test, update access, adopt from legacy), catalogs
+  with their points and signers, topic discoveries, preflights, the operation
+  event stream, schedule updates, manual backups, the restore approval
+  submission, read-only protection, rehearsal, retention and trust policies,
+  the namespace's approval policy, cadence previews, and the shared console's
+  sign-in routes (`/auth/login`, `/auth/callback`, session logout). Its
+  component schemas grew from 66 to 257; none was removed.
 - **No in-place runner signing-key cutover** ([keys.md](keys.md), step 2 of
   *The supported procedure*).
 - **Restore admission does not hold on a retention lease** (above).

@@ -40,6 +40,16 @@ check_image() {
 # chart is renamed `logweir-chart` in the package only: Docker Hub names a
 # chart's repository after the chart, and `$NS/logweir` is the runner image.
 # The bootstrap image stays the chart's reviewed digest pin (identity.*).
+#
+# A RELEASE CHART PINS ITS IMAGES BY DIGEST (PROD-14.0). With IMAGE_DIGESTS
+# naming a JSON object {"weirkeeper": "sha256:…", "logweir": "sha256:…",
+# "logweir-console": "sha256:…", "logweir-ui": "sha256:…"}, each rewritten
+# default reads `docker.io/$NS/<image>:$TAG@sha256:…`: the tag says which
+# release, the digest decides which bytes, and moving the tag later changes
+# nothing an installed release pulls. A `v<semver>` TAG without IMAGE_DIGESTS is
+# REFUSED, so no release chart can install whatever a tag points at later.
+# `release.yml` passes the digests of the `sha-<commit>` publication it
+# promotes (`scripts/release.sh resolve`); a `sha-` chart keeps its tag.
 CHART_SRC=charts/logweir
 CHART_NAME=logweir-chart
 CHART_REPOSITORY="oci://registry-1.docker.io/$NS"
@@ -59,8 +69,12 @@ chart_version() {
 }
 
 chart_package() {
-  local out="$1" version work line from rewritten=0
+  local out="$1" version work line from to digest rewritten=0
   version=$(chart_version) || return 1
+  if [[ "$TAG" == v* && -z "${IMAGE_DIGESTS:-}" ]]; then
+    echo "a release chart ($TAG) pins its four images by digest: set IMAGE_DIGESTS" >&2
+    return 1
+  fi
   work=$(mktemp -d "${TMPDIR:-/tmp}/logweir-chart.XXXXXX")
   cp -R "$CHART_SRC" "$work/$CHART_NAME"
   # Chart.yaml: the package's name. Version and appVersion are set by
@@ -72,9 +86,16 @@ chart_package() {
     for image in weirkeeper logweir logweir-console logweir-ui; do
       from="docker.io/vladyslavhaina/$image:latest"
       if [[ "$line" == *"$from"* ]]; then
+        to="docker.io/$NS/$image:$TAG"
+        if [[ -n "${IMAGE_DIGESTS:-}" ]]; then
+          digest=$(jq -er --arg image "$image" \
+            '.[$image] // empty | select(test("^sha256:[0-9a-f]{64}$"))' "$IMAGE_DIGESTS") \
+            || { echo "IMAGE_DIGESTS ($IMAGE_DIGESTS) has no sha256 digest for $image" >&2; rm -rf "$work"; return 1; }
+          to="$to@$digest"
+        fi
         # Prefix + replacement + suffix: literal on every bash, with no
         # pattern or escape rules in the replacement.
-        line="${line%%"$from"*}docker.io/$NS/$image:$TAG${line#*"$from"}"
+        line="${line%%"$from"*}$to${line#*"$from"}"
         rewritten=$((rewritten + 1))
       fi
     done
@@ -98,6 +119,92 @@ chart_package() {
   echo "$out/$CHART_NAME-$version.tgz"
 }
 
+# Publish ONE chart package beside the images it names, and prove an anonymous
+# reader gets exactly its bytes. $1 the package, $2 its version, $3 `replace`
+# (a main publication: a re-run re-pushes its own version and is compared
+# again) or `immutable` (a release: a version already published must already be
+# these bytes, and is otherwise REFUSED rather than replaced).
+#
+# "NOT PUBLISHED" IS ONLY WHAT THE REGISTRY SAYS (PROD-14.0 review M-1). An
+# immutable push goes ahead only when the anonymous existence read ends in the
+# answer Helm prints for a version the registry does not have -- measured on
+# 2026-10-05 with Helm v4.0.1, the version release.yml installs, against
+# Docker Hub:
+#   Error: failed to perform "FetchReference" on source: registry-1.docker.io/<ns>/logweir-chart:<version>: not found
+# Any other failure -- a rate limit, a timeout, a refused connection, a
+# private repository -- leaves the question open, and an open question is
+# refused before any credential is used: pushing then could replace a
+# published release version with other bytes.
+chart_publish() {
+  local package="$1" version="$2" mode="$3" dir anonymous_docker product pushed served existing pulled_log
+  local push=true
+  # The images this chart names must already be PUBLIC under TAG: the chart
+  # is published AFTER the promote step, never before, so no published
+  # chart can point at a tag that does not exist. Asked ANONYMOUSLY -- an
+  # empty Docker config, not the credentials the login step left behind --
+  # so "exists for the publisher" cannot pass for "pullable by anyone".
+  anonymous_docker="$(mktemp -d)"
+  for product in logweir weirkeeper logweir-ui logweir-console; do
+    DOCKER_CONFIG="$anonymous_docker" docker buildx imagetools inspect "docker.io/$NS/$product:$TAG" >/dev/null
+  done
+  dir=$(mktemp -d)
+  mkdir -p "$dir/login" "$dir/pulled" "$dir/anonymous" "$dir/existing"
+  pushed=$(sha256sum "$package" | awk '{print $1}')
+  if [[ "$mode" == immutable ]]; then
+    if DOCKER_CONFIG="$anonymous_docker" HELM_REGISTRY_CONFIG="$dir/anonymous/config.json" \
+      helm pull "$CHART_REPOSITORY/$CHART_NAME" --version "$version" -d "$dir/existing" > "$dir/existing.log" 2>&1; then
+      existing=$(sha256sum "$dir/existing/$CHART_NAME-$version.tgz" | awk '{print $1}')
+      if [[ "$existing" != "$pushed" ]]; then
+        echo "$CHART_NAME $version is already published as other bytes ($existing, not $pushed);" \
+          "a release version is never replaced" >&2
+        return 1
+      fi
+      echo "$CHART_NAME $version is already published as exactly these bytes; not pushed again" >&2
+      push=false
+    elif grep -qxF "Error: failed to perform \"FetchReference\" on source: ${CHART_REPOSITORY#oci://}/$CHART_NAME:$version: not found" \
+      "$dir/existing.log"; then
+      echo "$CHART_NAME $version is not published yet (the registry says not found); pushing it" >&2
+    else
+      cat "$dir/existing.log" >&2
+      echo "could not tell whether $CHART_NAME $version exists; nothing pushed" >&2
+      rm -rf "$anonymous_docker"
+      return 1
+    fi
+  fi
+  if [[ "$push" == true ]]; then
+    # The SAME credentials the image steps use, handed to Helm's own registry
+    # client on stdin; nothing is written to the job log. The login is scoped
+    # to its OWN registry configuration file, used for the push alone.
+    printf '%s' "$DOCKERHUB_TOKEN" | HELM_REGISTRY_CONFIG="$dir/login/config.json" \
+      helm registry login registry-1.docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+    HELM_REGISTRY_CONFIG="$dir/login/config.json" helm push "$package" "$CHART_REPOSITORY"
+  fi
+  # Verify by content, not by exit code, and TRULY ANONYMOUSLY: Helm falls
+  # back to Docker's stored credentials (the ones docker/login-action left)
+  # when its own registry configuration has none, so the pull-back runs with
+  # BOTH an empty Docker configuration directory and a Helm registry
+  # configuration that does not exist, then compares the bytes with what was
+  # pushed. A chart repository Docker Hub created private on its first push
+  # fails here, loudly: make `$NS/logweir-chart` Public and re-run the job
+  # (docs/install.md, *(c) The Helm chart*).
+  pulled_log="$dir/pull.log"
+  DOCKER_CONFIG="$anonymous_docker" HELM_REGISTRY_CONFIG="$dir/anonymous/config.json" \
+    helm pull "$CHART_REPOSITORY/$CHART_NAME" --version "$version" -d "$dir/pulled" > "$pulled_log" 2>&1 \
+    || { cat "$pulled_log" >&2; rm -rf "$anonymous_docker"; return 1; }
+  rm -rf "$anonymous_docker"
+  served=$(sha256sum "$dir/pulled/$CHART_NAME-$version.tgz" | awk '{print $1}')
+  [[ "$pushed" == "$served" ]] || { echo "the registry serves different chart bytes" >&2; return 1; }
+  echo "chart_version=$version" >> "$GITHUB_OUTPUT"
+  echo "chart_sha256=$pushed" >> "$GITHUB_OUTPUT"
+  # The OCI manifest digest an anonymous `helm pull` reports, when it reports one.
+  existing=$(grep -E -o 'sha256:[0-9a-f]{64}' "$pulled_log" || true)
+  existing="${existing%%$'\n'*}"
+  if [[ -n "$existing" ]]; then
+    echo "chart_digest=$existing" >> "$GITHUB_OUTPUT"
+  fi
+  echo "- $CHART_REPOSITORY/$CHART_NAME --version $version (appVersion $TAG) — package sha256 \`$pushed\`" >> "$GITHUB_STEP_SUMMARY"
+}
+
 case "${1:-}" in
   chart-package)
     : "${TAG:?}" "${2:?usage: ci-images.sh chart-package <dir>}"
@@ -107,42 +214,37 @@ case "${1:-}" in
     : "${TAG:?}" "${GITHUB_OUTPUT:?}" "${GITHUB_STEP_SUMMARY:?}"
     : "${DOCKERHUB_USERNAME:?}" "${DOCKERHUB_TOKEN:?}"
     [[ "$TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] || exit 1
-    # The images this chart names must already be PUBLIC under TAG: the chart
-    # is published AFTER the promote step, never before, so no published
-    # chart can point at a tag that does not exist. Asked ANONYMOUSLY -- an
-    # empty Docker config, not the credentials the login step left behind --
-    # so "exists for the publisher" cannot pass for "pullable by anyone".
-    anonymous_docker="$(mktemp -d)"
-    for product in logweir weirkeeper logweir-ui logweir-console; do
-      DOCKER_CONFIG="$anonymous_docker" docker buildx imagetools inspect "docker.io/$NS/$product:$TAG" >/dev/null
-    done
-    dir=$(mktemp -d)
-    package=$(chart_package "$dir")
+    # A RELEASE TAG'S CHART PINS THE DIGESTS `promote` JUST PUBLISHED under TAG
+    # (image-digests/<product>.published, written by the promote arm in this
+    # same job), unless the caller named them already.
+    if [[ "$TAG" == v* && -z "${IMAGE_DIGESTS:-}" ]]; then
+      digests='{}'
+      for product in weirkeeper logweir logweir-console logweir-ui; do
+        digest=$(cat "image-digests/$product.published")
+        digests=$(jq -c --arg product "$product" --arg digest "$digest" '. + {($product): $digest}' <<< "$digests")
+      done
+      IMAGE_DIGESTS="$(mktemp)"
+      printf '%s\n' "$digests" > "$IMAGE_DIGESTS"
+      export IMAGE_DIGESTS
+    fi
+    package=$(chart_package "$(mktemp -d)")
     version=$(chart_version)
-    # The SAME credentials the image steps use, handed to Helm's own registry
-    # client on stdin; nothing is written to the job log. The login is scoped
-    # to its OWN registry configuration file, used for the push alone.
-    mkdir -p "$dir/login" "$dir/pulled" "$dir/anonymous"
-    printf '%s' "$DOCKERHUB_TOKEN" | HELM_REGISTRY_CONFIG="$dir/login/config.json" \
-      helm registry login registry-1.docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
-    HELM_REGISTRY_CONFIG="$dir/login/config.json" helm push "$package" "$CHART_REPOSITORY"
-    # Verify by content, not by exit code, and TRULY ANONYMOUSLY: Helm falls
-    # back to Docker's stored credentials (the ones docker/login-action left)
-    # when its own registry configuration has none, so the pull-back runs with
-    # BOTH an empty Docker configuration directory and a Helm registry
-    # configuration that does not exist, then compares the bytes with what was
-    # pushed. A chart repository Docker Hub created private on its first push
-    # fails here, loudly: make `$NS/logweir-chart` Public and re-run the job
-    # (docs/install.md, *(c) The Helm chart*).
-    DOCKER_CONFIG="$anonymous_docker" HELM_REGISTRY_CONFIG="$dir/anonymous/config.json" \
-      helm pull "$CHART_REPOSITORY/$CHART_NAME" --version "$version" -d "$dir/pulled"
-    rm -rf "$anonymous_docker"
-    pushed=$(sha256sum "$package" | awk '{print $1}')
-    served=$(sha256sum "$dir/pulled/$CHART_NAME-$version.tgz" | awk '{print $1}')
-    [[ "$pushed" == "$served" ]] || { echo "the registry serves different chart bytes" >&2; exit 1; }
-    echo "chart_version=$version" >> "$GITHUB_OUTPUT"
-    echo "chart_sha256=$pushed" >> "$GITHUB_OUTPUT"
-    echo "- $CHART_REPOSITORY/$CHART_NAME --version $version (appVersion $TAG) — package sha256 \`$pushed\`" >> "$GITHUB_STEP_SUMMARY"
+    chart_publish "$package" "$version" replace
+    ;;
+  chart-push)
+    # A RELEASE's chart: the package `scripts/release.sh assemble` built once,
+    # pinned by digest and listed in the GitHub Release, pushed AS THOSE BYTES.
+    # Re-packaging here would not reproduce them: `helm package` writes each
+    # file's mtime, and a checkout's mtimes are its checkout time.
+    : "${TAG:?}" "${GITHUB_OUTPUT:?}" "${GITHUB_STEP_SUMMARY:?}"
+    : "${DOCKERHUB_USERNAME:?}" "${DOCKERHUB_TOKEN:?}"
+    package="${2:?usage: ci-images.sh chart-push <logweir-chart-<version>.tgz>}"
+    [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+      || { echo "chart-push publishes a release (v<semver>) chart only, not '$TAG'" >&2; exit 1; }
+    version=$(chart_version)
+    [[ -f "$package" && "$(basename "$package")" == "$CHART_NAME-$version.tgz" ]] \
+      || { echo "chart-push: $package is not $CHART_NAME-$version.tgz" >&2; exit 1; }
+    chart_publish "$package" "$version" immutable
     ;;
   check|candidates)
     [[ "${ARCH:-}" == amd64 || "${ARCH:-}" == arm64 ]] || exit 1
@@ -225,5 +327,5 @@ case "${1:-}" in
       echo 'Verified main and latest tags for all four images.' >> "$GITHUB_STEP_SUMMARY"
     fi
     ;;
-  *) echo 'usage: ci-images.sh check|candidates|promote|chart|chart-package <dir>' >&2; exit 2 ;;
+  *) echo 'usage: ci-images.sh check|candidates|promote|chart|chart-package <dir>|chart-push <package>' >&2; exit 2 ;;
 esac

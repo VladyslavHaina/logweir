@@ -24,7 +24,6 @@ checks:
     freshSeconds: 900
     retentionSeconds: 86400
     keepPerConnection: 5
-    defaultMaxTopics: 20000
     hardMaxTopics: 50000
     visibilityAttestations:
       - id: att-orders-prod
@@ -39,7 +38,6 @@ checks:
           User:backup has DESCRIBE on literal Topic:* with no DENY;
           reviewed ACL export 2026-09-14
   preflight:
-    defaultTimeoutSeconds: 120
     retentionSeconds: 3600
 evidence:
   controllerIdentityLocations:
