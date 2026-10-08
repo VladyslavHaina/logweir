@@ -293,16 +293,15 @@ impl WriteOnlyCredential {
     /// type, the data base64-encoded for the wire. The Secret is consumed, so
     /// the bytes exist in one place only.
     #[must_use]
-    pub fn from_secret(secret: k8s_openapi::api::core::v1::Secret) -> Self {
+    pub fn from_parts(parts: weirkeeper::connection::credential::CredentialParts) -> Self {
         use base64::Engine as _;
         Self {
-            metadata: secret.metadata,
-            type_: secret.type_,
-            data: secret
+            metadata: parts.metadata,
+            type_: parts.type_,
+            data: parts
                 .data
-                .unwrap_or_default()
                 .into_iter()
-                .map(|(k, v)| (k, base64::engine::general_purpose::STANDARD.encode(v.0)))
+                .map(|(k, v)| (k, base64::engine::general_purpose::STANDARD.encode(v)))
                 .collect(),
         }
     }

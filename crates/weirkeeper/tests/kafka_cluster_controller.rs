@@ -1607,11 +1607,33 @@ fn the_password_is_projected_as_a_secret_key_ref_and_never_read() {
         "a probe signs nothing and reads no approval, so it mounts no Secret at all unless the \
          connection names a private CA (PLAT-07.1)"
     );
-    assert_eq!(spec.env_from_secret.len(), 1);
+    // The password, and (PROD-01.3 security follow-up) the same Secret's
+    // `logweir-binding` key, OPTIONAL, which the runner compares with the
+    // expected binding the controller writes as a literal.
+    assert_eq!(spec.env_from_secret.len(), 2);
     let e = &spec.env_from_secret[0];
     assert_eq!(e.name, SOURCE_PASSWORD_ENV);
     assert_eq!(e.secret_name, "orders-sasl");
     assert_eq!(e.key, SOURCE_PASSWORD_SECRET_KEY);
+    assert!(
+        !e.optional,
+        "the password is required: a missing key is a pod that cannot start"
+    );
+    let b = &spec.env_from_secret[1];
+    assert_eq!(b.name, "LOGWEIR_SOURCE_CREDENTIAL_BINDING");
+    assert_eq!(b.secret_name, "orders-sasl");
+    assert_eq!(b.key, "logweir-binding");
+    assert!(
+        b.optional,
+        "an unbound Secret must reach the runner, which refuses it by name"
+    );
+    let expected = spec
+        .env_literal
+        .iter()
+        .find(|(n, _)| n == "LOGWEIR_SOURCE_CREDENTIAL_BINDING_EXPECTED")
+        .map(|(_, v)| v.clone())
+        .expect("the expected binding is a literal");
+    assert!(expected.starts_with("v1:"), "{expected}");
     assert_eq!(spec.deadline_seconds, PROBE_DEADLINE_SECONDS);
     assert!(
         spec.plan_config_map.is_none(),
@@ -1830,11 +1852,13 @@ fn every_probe_condition_reason_is_a_valid_metav1_reason() {
     );
     assert_eq!(
         PROBE_CONDITION_REASONS.len(),
-        9,
+        11,
         "the four probe verdicts — Reachable, ProbeReportedUnreachable, ProbeOutputUnreadable, \
          ProbeRunning — plus the four PLAT-07.1 saved-connection refusals this loop writes \
-         before any Job exists, plus FX-11's PodCreationForbidden for a probe pod refused at \
-         creation; the last five are the shared terminal states and not a second vocabulary"
+         before any Job exists, plus PROD-01.3's PlainWithoutTls (a resolver refusal) and \
+         CredentialBindingMismatch (the probe's own refusal of an unbound credential), plus \
+         FX-11's PodCreationForbidden for a probe pod refused at creation; the last seven are \
+         the shared terminal states and not a second vocabulary"
     );
     for r in PROBE_CONDITION_REASONS.iter().skip(4) {
         assert!(

@@ -564,7 +564,7 @@ fn credential_secret(
         _ => return Err(internal("the request carries no single credential")),
     }
     .map_err(|e| internal(&e.to_string()))?;
-    Ok(WriteOnlyCredential::from_secret(built.into_secret()))
+    Ok(WriteOnlyCredential::from_parts(built.into_parts()))
 }
 
 /// The name-only dry-run probe for the credential Secret.

@@ -15,7 +15,9 @@ fn schema_scorecard_prints_the_schema() {
     assert!(
         s.contains(&format!(
             r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json""#,
-            logweir_core::FORMAT_VERSION
+            // The newest minor (PROD-01.3's 1.4.0); the writer still writes
+            // `FORMAT_VERSION` (1.3.0) for every original auth mode.
+            logweir_core::scorecard::FORMAT_VERSION_WITH_AUTH_MODES
         )),
         "{s}"
     );

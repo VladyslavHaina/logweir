@@ -892,10 +892,16 @@ fn legacy_objects_build_the_jobs_they_always_did() {
             continue;
         }
 
+        // PROD-01.3 security follow-up: a connection with a credential gains
+        // EXACTLY the binding pair, on every Job — asserted here and removed,
+        // so everything else is still compared byte for byte.
+        let credentialed =
+            cluster.spec.auth.mode != weirkeeper::crds::kafka_cluster::AuthMode::Plaintext;
         let probe = serde_json::to_value(job::build(
             &kafka_cluster::runner_job_spec(&cluster).expect("probe spec"),
         ))
         .expect("serialises");
+        let probe = without_binding(probe, &file, credentialed);
         assert_eq!(
             redact_image(probe),
             golden["probe"]["job"],
@@ -904,8 +910,11 @@ fn legacy_objects_build_the_jobs_they_always_did() {
 
         let backup_spec =
             backup::runner_job_spec(&backup_for_legacy(&cluster), &cluster).expect("backup spec");
-        let mut built_job =
-            redact_image(serde_json::to_value(job::build(&backup_spec)).expect("serialises"));
+        let mut built_job = redact_image(without_binding(
+            serde_json::to_value(job::build(&backup_spec)).expect("serialises"),
+            &file,
+            credentialed,
+        ));
         assert_eq!(
             built_job["spec"]["template"]["spec"]["containers"][0]["args"],
             json!(backup_execution::runner_argv(
@@ -1002,7 +1011,11 @@ fn legacy_objects_build_the_jobs_they_always_did() {
         )
         .expect("restore spec");
         assert_eq!(
-            redact_image(serde_json::to_value(job::build(&restore_spec)).expect("serialises")),
+            redact_image(without_binding(
+                serde_json::to_value(job::build(&restore_spec)).expect("serialises"),
+                &file,
+                credentialed,
+            )),
             golden["restore"]["job"]["job"],
             "{file}: the restore Job differs"
         );
@@ -1011,8 +1024,54 @@ fn legacy_objects_build_the_jobs_they_always_did() {
     assert_eq!(
         (checked, refused),
         (5, 2),
-        "five legacy shapes must be byte-identical and two are the documented refusals"
+        "five legacy shapes must be byte-identical (but for PROD-01.3's binding pair on a \
+         credentialed connection) and two are the documented refusals"
     );
+}
+
+/// PROD-01.3 security follow-up: remove the credential-binding pair from a
+/// built Job's runner env, asserting first that a credentialed connection
+/// carries EXACTLY the two entries (the expected binding as a literal and the
+/// Secret's `logweir-binding` as an OPTIONAL `secretKeyRef`) and a plaintext
+/// one none — the one deliberate change to a legacy object's Jobs.
+fn without_binding(mut job: Value, file: &str, credentialed: bool) -> Value {
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array_mut()
+        .expect("the runner has an env list");
+    let before = env.len();
+    let binding: Vec<Value> = env
+        .iter()
+        .filter(|e| {
+            e["name"]
+                .as_str()
+                .is_some_and(|n| n.contains("_CREDENTIAL_BINDING"))
+        })
+        .cloned()
+        .collect();
+    env.retain(|e| {
+        !e["name"]
+            .as_str()
+            .is_some_and(|n| n.contains("_CREDENTIAL_BINDING"))
+    });
+    if credentialed {
+        assert_eq!(before - env.len(), 2, "{file}: the binding pair, exactly");
+        assert!(
+            binding.iter().any(
+                |e| e["name"].as_str().is_some_and(|n| n.ends_with("_EXPECTED"))
+                    && e["value"].as_str().is_some_and(|v| v.starts_with("v1:"))
+            ),
+            "{file}: the expected binding is a literal: {binding:?}"
+        );
+        assert!(
+            binding.iter().any(|e| e["valueFrom"]["secretKeyRef"]["key"]
+                == json!("logweir-binding")
+                && e["valueFrom"]["secretKeyRef"]["optional"] == json!(true)),
+            "{file}: the projected binding is an optional secretKeyRef: {binding:?}"
+        );
+    } else {
+        assert_eq!(before, env.len(), "{file}: no credential, no binding");
+    }
+    job
 }
 
 /// The legacy goldens were captured with a `Backup` of this exact shape.
@@ -1566,4 +1625,300 @@ fn a_refusal_displays_as_its_terminal_state_and_message() {
     let text = refusal.to_string();
     assert!(text.starts_with(TERMINAL_STATE_CONNECTION_CONFIG_INVALID));
     assert!(text.contains(&refusal.message));
+}
+
+// ---------------------------------------------------------------------------
+// PROD-01.3: the three new modes, and the security follow-up's binding
+// ---------------------------------------------------------------------------
+
+fn mtls(ca: bool) -> KafkaCluster {
+    let mut auth = json!({
+        "mode": "mtls",
+        "tls": true,
+        "clientCertificate": { "name": "orders-client" }
+    });
+    if ca {
+        auth["tlsCa"] = json!({ "configMapKeyRef": { "name": "orders-ca", "key": "ca.crt" } });
+    }
+    cluster_with(auth)
+}
+
+/// The three new modes resolve to the plan grammar's own arms; PLAIN without
+/// TLS is refused with its NAMED reason and mTLS without TLS or without a
+/// certificate reference is refused too — each beside its accepted control.
+#[test]
+fn the_prod_01_3_modes_resolve_and_their_transport_rules_refuse() {
+    let scram256 = cluster_with(json!({
+        "mode": "scramSha256", "username": "u", "secretRef": { "name": "s" }, "tls": false
+    }));
+    let r = resolve(&scram256, ConnectionUse::Probe).expect("scram-256 resolves");
+    assert_eq!(
+        r.auth,
+        logweir_core::spec::AuthSpec::ScramSha256 {
+            username: "u".into(),
+            tls: false
+        }
+    );
+    assert_eq!(r.principal, "User:u");
+
+    let plain_tls = cluster_with(json!({
+        "mode": "plain", "username": "u", "secretRef": { "name": "s" }, "tls": true
+    }));
+    assert!(matches!(
+        resolve(&plain_tls, ConnectionUse::Probe)
+            .expect("PLAIN over TLS")
+            .auth,
+        logweir_core::spec::AuthSpec::Plain { tls: true, .. }
+    ));
+    // KILLS: drop the PLAIN-without-TLS arm in `resolve`.
+    let plain_clear = cluster_with(json!({
+        "mode": "plain", "username": "u", "secretRef": { "name": "s" }, "tls": false
+    }));
+    let refusal = resolve(&plain_clear, ConnectionUse::Probe).expect_err("PLAIN in the clear");
+    assert_eq!(refusal.reason, "PlainWithoutTls");
+    assert_eq!(refusal.field, "spec.auth.tls");
+    assert!(TERMINAL_STATES.contains(&refusal.reason));
+
+    let ok = resolve(&mtls(true), ConnectionUse::RestoreTarget).expect("mtls resolves");
+    assert_eq!(ok.auth, logweir_core::spec::AuthSpec::Mtls { tls: true });
+    assert!(ok.password.is_none());
+    assert_eq!(ok.principal, "mtls:secret/orders-client");
+    let cert = ok
+        .client_certificate
+        .as_ref()
+        .expect("the certificate reference");
+    assert_eq!(
+        (cert.certificate_key.as_str(), cert.private_key_key.as_str()),
+        ("tls.crt", "tls.key"),
+        "the kubernetes.io/tls defaults"
+    );
+    let mut clear = mtls(false);
+    clear.spec.auth.tls = false;
+    assert_eq!(
+        resolve(&clear, ConnectionUse::Probe).unwrap_err().reason,
+        TERMINAL_STATE_CONNECTION_CONFIG_INVALID
+    );
+    let mut no_cert = mtls(false);
+    no_cert.spec.auth.client_certificate = None;
+    assert_eq!(
+        resolve(&no_cert, ConnectionUse::Probe).unwrap_err().reason,
+        TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE
+    );
+    // A certificate on a SASL connection would be silently not presented.
+    let mut extra = scram_tls();
+    extra.spec.auth.client_certificate = mtls(false).spec.auth.client_certificate.clone();
+    assert_eq!(
+        resolve(&extra, ConnectionUse::Probe).unwrap_err().field,
+        "spec.auth.clientCertificate"
+    );
+}
+
+/// An `mtls` Job mounts ONE Secret as two files at the runner's Secret mode
+/// and names their PATHS — never PEM — plus the binding pair; the probe argv
+/// says `--auth-mode mtls --tls` and carries no username.
+#[test]
+fn an_mtls_connection_projects_paths_and_the_binding_pair() {
+    let resolved = resolve(&mtls(true), ConnectionUse::RestoreTarget).expect("resolves");
+    let projection = resolved.project();
+    let literal: std::collections::BTreeMap<_, _> =
+        projection.env_literal.iter().cloned().collect();
+    assert_eq!(
+        literal
+            .get("LOGWEIR_TARGET_TLS_CERT_FILE")
+            .map(String::as_str),
+        Some("/connection/target-client-cert/tls.crt")
+    );
+    assert_eq!(
+        literal
+            .get("LOGWEIR_TARGET_TLS_KEY_FILE")
+            .map(String::as_str),
+        Some("/connection/target-client-cert/tls.key")
+    );
+    assert_eq!(
+        literal
+            .get("LOGWEIR_TARGET_CREDENTIAL_BINDING_EXPECTED")
+            .cloned(),
+        resolved.credential_binding()
+    );
+    let mount = projection
+        .secret_mounts
+        .iter()
+        .find(|m| m.volume == Side::Target.client_cert_volume())
+        .expect("the client-certificate volume");
+    assert_eq!(mount.secret_name, "orders-client");
+    assert_eq!(
+        mount.items,
+        vec![
+            ("tls.crt".to_string(), "tls.crt".to_string()),
+            ("tls.key".to_string(), "tls.key".to_string())
+        ]
+    );
+    let binding = projection
+        .env_from_secret
+        .iter()
+        .find(|e| e.name == "LOGWEIR_TARGET_CREDENTIAL_BINDING")
+        .expect("the projected binding");
+    assert_eq!(binding.secret_name, "orders-client");
+    assert_eq!(binding.key, "logweir-binding");
+    assert!(binding.optional);
+    // No password variable for mTLS.
+    assert!(projection
+        .env_from_secret
+        .iter()
+        .all(|e| e.name != "LOGWEIR_TARGET_PASSWORD"));
+
+    let probe = resolve(&mtls(false), ConnectionUse::Probe).expect("resolves");
+    assert_eq!(
+        probe.probe_args(),
+        vec![
+            "--bootstrap",
+            "b0.orders:9093,b1.orders:9093",
+            "--auth-mode",
+            "mtls",
+            "--tls"
+        ]
+    );
+}
+
+/// **The binding names THIS connection and its endpoint.** Two connections
+/// naming one Secret have different bindings (the UID), so the Secret one of
+/// them was entered for is refused by the other's runner; the same UID with a
+/// different endpoint has a different binding; a resolution with no UID
+/// projects a value no Secret can carry. KILLS: drop the UID or the endpoint
+/// from `credential_binding`, or the expected literal from `project`.
+#[test]
+fn the_credential_binding_names_this_connection_and_its_endpoint() {
+    let a = resolve(&scram_tls(), ConnectionUse::Probe).expect("resolves");
+    let mut other = scram_tls();
+    other.metadata.uid = Some("another-connection-uid".into());
+    other.metadata.name = Some("attackers-connection".into());
+    other.spec.bootstrap_servers = vec!["evil.example:9093".into()];
+    let b = resolve(&other, ConnectionUse::Probe).expect("resolves");
+    assert_eq!(a.password, b.password, "both name the same Secret");
+    assert_ne!(a.credential_binding(), b.credential_binding());
+
+    // The same UID, a different endpoint (only reachable if `spec` changed
+    // past the immutability rule): still a different binding.
+    let mut moved = scram_tls();
+    moved.spec.bootstrap_servers = vec!["evil.example:9093".into()];
+    let c = resolve(&moved, ConnectionUse::Probe).expect("resolves");
+    assert_ne!(a.credential_binding(), c.credential_binding());
+
+    // Every credentialed Job carries the expected value; a plaintext one
+    // carries no binding at all.
+    let expected = |r: &ResolvedConnection| {
+        r.project()
+            .env_literal
+            .into_iter()
+            .find(|(n, _)| n.ends_with("_CREDENTIAL_BINDING_EXPECTED"))
+            .map(|(_, v)| v)
+    };
+    assert_eq!(expected(&a), a.credential_binding());
+    assert_eq!(
+        expected(&resolve(&plaintext(), ConnectionUse::Probe).unwrap()),
+        None
+    );
+    // No UID: fail closed with a value no Secret is written with.
+    let mut no_uid = scram_tls();
+    no_uid.metadata.uid = None;
+    let d = resolve(&no_uid, ConnectionUse::Probe).expect("resolves");
+    assert_eq!(d.credential_binding(), None);
+    assert_eq!(expected(&d).as_deref(), Some("unbound:no-uid"));
+}
+
+/// The probe's stderr refusal line becomes the `Reachable` condition's NAMED
+/// reason; without it an unreachable probe is still `ProbeReportedUnreachable`
+/// (the control); and the line can never make a probe read as reachable.
+#[test]
+fn a_probe_binding_refusal_is_the_named_reachable_reason() {
+    let refused = kafka_cluster::probe_report(
+        "cluster-probe: no cluster id was read: kafka: CredentialBindingMismatch: …\n\
+         refusal-reason=CredentialBindingMismatch\ncluster-id=\nreachable=false\n",
+    );
+    let v = kafka_cluster::verdict(&refused);
+    assert_eq!(v.reason, "CredentialBindingMismatch");
+    assert_eq!(v.reachable, Some(false));
+    let control = kafka_cluster::probe_report("cluster-id=\nreachable=false\n");
+    assert_eq!(
+        kafka_cluster::verdict(&control).reason,
+        kafka_cluster::REASON_PROBE_REPORTED_UNREACHABLE
+    );
+    let reachable = kafka_cluster::probe_report(
+        "refusal-reason=CredentialBindingMismatch\ncluster-id=abc\nreachable=true\n",
+    );
+    assert_eq!(kafka_cluster::verdict(&reachable).reachable, Some(true));
+}
+
+/// The status publishes the binding a hand-made Secret must carry, for a
+/// credentialed connection only.
+#[test]
+fn the_probe_pass_publishes_the_expected_binding() {
+    let now = chrono::Utc::now();
+    let patch = kafka_cluster::probe_started_patch(&scram_tls(), "job", now);
+    assert_eq!(
+        patch["status"]["credentialBinding"].as_str(),
+        resolve(&scram_tls(), ConnectionUse::Probe)
+            .unwrap()
+            .credential_binding()
+            .as_deref()
+    );
+    let patch = kafka_cluster::probe_started_patch(&plaintext(), "job", now);
+    assert!(patch["status"].get("credentialBinding").is_none());
+}
+
+/// The write-only builders put the binding, the owner reference and nothing
+/// readable back into the Secret; `Debug` never prints a value.
+#[test]
+fn the_write_only_builders_bind_and_own_the_secret() {
+    let built = credential::build_kafka_credential_secret(credential::NewKafkaCredential {
+        namespace: NS,
+        secret_name: "orders-prod-credential",
+        connection_name: CLUSTER,
+        password: credential::WriteOnlyPassword::new(SEEDED_PASSWORD.to_string()),
+        request_id: Some("req-1"),
+        binding: Some("v1:uid:sha256:00"),
+        owner_uid: Some(CLUSTER_UID),
+    })
+    .expect("builds");
+    assert!(!format!("{built:?}").contains(SEEDED_PASSWORD));
+    let parts = built.into_parts();
+    assert!(!format!("{parts:?}").contains(SEEDED_PASSWORD));
+    assert_eq!(parts.data["logweir-binding"], b"v1:uid:sha256:00".to_vec());
+    let owner = &parts.metadata.owner_references.as_ref().unwrap()[0];
+    assert_eq!(
+        (owner.kind.as_str(), owner.uid.as_str()),
+        ("KafkaCluster", CLUSTER_UID)
+    );
+
+    let pem = |label: &str| format!("-----BEGIN {label}-----\nAAAA\n-----END {label}-----\n");
+    let cert =
+        credential::build_kafka_client_certificate_secret(credential::NewKafkaClientCertificate {
+            namespace: NS,
+            secret_name: "orders-prod-credential",
+            connection_name: CLUSTER,
+            certificate: credential::WriteOnlyClientCertificate::new(
+                pem("CERTIFICATE"),
+                pem(concat!("PRIVATE", " KEY")),
+            ),
+            request_id: None,
+            binding: Some("v1:uid:sha256:00"),
+            owner_uid: Some(CLUSTER_UID),
+        })
+        .expect("builds")
+        .into_parts();
+    assert_eq!(
+        cert.type_.as_deref(),
+        Some(credential::CLIENT_CERTIFICATE_SECRET_TYPE)
+    );
+    assert_eq!(
+        cert.data.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["logweir-binding", "tls.crt", "tls.key"]
+    );
+    // An encrypted key is refused by SHAPE, never echoed.
+    let err = credential::check_client_certificate(
+        &pem("CERTIFICATE"),
+        &pem(concat!("ENCRYPTED PRIVATE", " KEY")),
+    )
+    .unwrap_err();
+    assert_eq!(err, credential::CredentialInputError::PrivateKeyEncrypted);
 }

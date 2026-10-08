@@ -158,7 +158,7 @@ pub struct AuthBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_ca: Option<TlsCaSource>,
     /// The TLS client certificate and private key an `mtls` connection
-    /// presents (PROD-01.3): two keys of ONE Secret in this namespace —
+    /// presents: two keys of ONE Secret in this namespace —
     /// `kubectl create secret tls` writes exactly the default keys. Required
     /// when `mode` is `mtls` and refused for every other mode. Logweir never
     /// reads the Secret: the kubelet projects it read-only into the runner
@@ -414,8 +414,8 @@ pub struct KafkaClusterStatus {
     // `-o jsonpath={.status.reason}` and through `custom-columns` meanwhile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// **PROD-01.3 security follow-up.** The binding this connection's
-    /// credential Secret must carry under its `logweir-binding` key —
+    /// The binding this connection's credential Secret must carry under its
+    /// `logweir-binding` key —
     /// `v1:<uid>:sha256:<digest of the endpoint>` — for the runner to present
     /// the credential at all. Public (a UID and a digest, never a credential).
     /// The console writes it into the Secret it creates; an operator who

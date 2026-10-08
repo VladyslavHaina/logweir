@@ -1560,10 +1560,11 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // shape `crates/logweir-api/tests/contract.rs` uses for the OpenAPI
     // document. `just schema` is the only sanctioned way to change the file.
     // The CURRENT file is the newest MINOR's, named by the writer's constant
-    // (FX-7 fix round, review M-2; 1.2.0 since FX-7 merged after FX-4), so a
-    // renumber moves the constant and the justfile, not this test; the 1.0.0
-    // and 1.1.0 files are frozen beside it.
-    let version = logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION;
+    // (FX-7 fix round, review M-2; 1.2.0 since FX-7 merged after FX-4, 1.3.0
+    // since PROD-01.3's auth modes), so a renumber moves the constant and the
+    // justfile, not this test; the 1.0.0, 1.1.0 and 1.2.0 files are frozen
+    // beside it.
+    let version = logweir::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES;
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../schemas/logweir-catalog-point-{version}.json"
     ));

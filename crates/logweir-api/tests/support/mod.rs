@@ -1376,7 +1376,10 @@ pub fn connection_body() -> Value {
         "auth": {
             "mode": "scramSha512",
             "username": "scram-user",
-            "credentialRef": {"name": "source-scram"},
+            // PROD-01.3 security follow-up: the password is ENTERED once and
+            // becomes a Secret the API creates; an existing Secret is never
+            // named. A fixture value, and not a credential anywhere.
+            "credential": {"password": "fixture-not-a-secret"},
             "tls": false
         }
     })

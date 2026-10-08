@@ -286,11 +286,54 @@ impl std::fmt::Debug for CredentialSecret {
     }
 }
 
+/// A built credential Secret taken apart for a caller that may not name the
+/// `Secret` type itself (the product API's sealed adapter): its metadata, its
+/// `type` and its data, consumed. `Debug` prints the key names only.
+pub struct CredentialParts {
+    /// Name, namespace, labels, annotations, owner references.
+    pub metadata: ObjectMeta,
+    /// The Secret `type`.
+    pub type_: Option<String>,
+    /// The data, raw bytes per key.
+    pub data: BTreeMap<String, Vec<u8>>,
+}
+
+impl std::fmt::Debug for CredentialParts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialParts")
+            .field("metadata", &self.metadata)
+            .field("type", &self.type_)
+            .field("data_keys", &self.data.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 impl CredentialSecret {
     /// The Secret to hand to a create call. The only path to the bytes.
     #[must_use]
     pub fn into_secret(self) -> Secret {
         self.0
+    }
+
+    /// [`CredentialSecret::into_secret`] for a caller that may not name the
+    /// `Secret` type (PROD-01.3): the same metadata, type and bytes.
+    #[must_use]
+    pub fn into_parts(self) -> CredentialParts {
+        let Secret {
+            metadata,
+            type_,
+            data,
+            ..
+        } = self.0;
+        CredentialParts {
+            metadata,
+            type_,
+            data: data
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(k, v)| (k, v.0))
+                .collect(),
+        }
     }
 
     /// The `auth.secretRef` a `KafkaCluster` names this credential by — the
