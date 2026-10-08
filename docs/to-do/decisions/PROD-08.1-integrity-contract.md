@@ -93,12 +93,21 @@ a backup set whose manifest lists segments `S(t, p)` for source topic `t` and pa
   mismatched = 0`, `matching = expected = restored`, and every one of its segments verified
   (`ReplayComparison::is_exact`). A partition the manifest does not list but the target holds has
   `E = ∅`; anything restored there is unexpected.
-- **The run passes** exactly when every partition passes and was compared (arm IV-6), through the
-  same `roll_up` as the sampled lane.
-- **Offset holes** (`complete.archive.offset_holes`): source offsets inside the decoded span that no
-  archived record holds and no recorded gap or pruned range explains — a compacted source's holes.
-  Disclosed, never a fault: the archive holds the log as it was fetched (PROD-01.1 C7), and the
-  replay reproduces exactly that.
+- **The run passes** exactly when every partition passes and was compared, over at least one
+  partition (arm IV-6, which holds the signed totals AND every partition to it), through the same
+  `roll_up` as the sampled lane.
+- **A short read is refused, never compared.** When the reader stops answering below a target
+  partition's high watermark (librdkafka's end-of-partition can arrive early, e.g. over a tail of
+  control records), the lane refuses with `Operational` (exit 1, nothing signed), naming the offset:
+  comparing what was read would undercount `restored` and could pass a target whose unread tail is
+  unexpected records (review M-2; `complete_verify.rs::a_short_target_read_is_refused_and_never_a_smaller_comparison`).
+- **Offset holes** (`complete.archive.offset_holes`): source offsets inside the decoded span — from
+  the first decoded offset to the last — that no archived record holds and no recorded gap or
+  pruned range explains: a compacted source's holes. Disclosed, never a fault: the archive holds the
+  log as it was fetched (PROD-01.1 C7), and the replay reproduces exactly that. **A leading
+  compacted range is NOT counted** — the common case, where the cleaner removed the oldest values —
+  because the manifest records no partition start offset to measure it from; only a hole between
+  two archived records is (measured live, `complete_coverage_discloses_a_compaction_hole_inside_the_span`).
 
 ### 2.1 What the model means for each dependent transformation
 
@@ -108,10 +117,10 @@ a backup set whose manifest lists segments `S(t, p)` for source topic `t` and pa
 | **Partition subsets** | `E` is computed only for the plan's selected partitions; every other partition of the restored topic must be EMPTY on the target (its records are `unexpected`). The block must name the selection: a proposed additive field `complete.partitions_selected` (per topic), under a MINOR bump, with an arm that a partition listed in `partitions` and not selected has `expected = 0`. | PROD-11.1 |
 | **Record filters** (erasure, offset ranges, YAML filter rules) | `E = selected ∧ keep(r)`, where `keep` is Logweir's OWN evaluation of the plan's filter over each decoded record, never the engine's report of what it dropped. Excluded records are counted in a proposed additive `complete.replay.excluded` and named by rule identity in `complete.filter {id, digest}`. A filter Logweir cannot evaluate makes the partition not compared. | PROD-00.3i, PROD-11.1 |
 | **Compaction** | `E` is the archived (already compacted) log; `offset_holes` discloses the holes. A target that compacts BEFORE verification loses records and fails (`missing`), which is right: PROD-05.2's post-verification transition to `cleanup.policy=compact` happens after the signed verdict, never before. | PROD-05.2 |
-| **Transformations** (schema ID rewrite, masking) | The expected record is `T(r)` for the plan's transformation `T`, deterministic and versioned: the comparison is `digest(T(r)) = digest(restored)`. Unchanged fields must stay byte-identical, so `T` is applied by field, not by re-encoding the record. `T`'s identity goes into a proposed `complete.transformation {id, version, digest}`. A record `T` cannot be computed for (a registry lookup that failed, a malformed payload) is not compared, never passed. The lineage headers are never transformed. | PROD-03.2, PROD-11.2 |
+| **Transformations** (schema ID rewrite, masking) | The expected record is `T(r)` for the plan's transformation `T`, deterministic and versioned: the comparison is `digest(T(r)) = digest(restored)`. Unchanged fields must stay byte-identical, so `T` is applied by field, not by re-encoding the record. `T`'s identity goes into a proposed `complete.transformation {id, version, digest}`. A record `T` cannot be computed for (a registry lookup that failed, a malformed payload) makes its WHOLE PARTITION `compared: false`, with a finding naming the record's source offset — so the block reads `covered: false` and the verdict is never `pass` (IV-5, IV-6); no per-record "uncomputed" count is defined. The lineage headers are never transformed. | PROD-03.2, PROD-11.2 |
 | **Transactions** | Control records and aborted records are archived records: they are in `E` and must be restored (the comparison basis is the archive, PROD-01.1 V3). A committed-only archive (PROD-00.3a) changes `E` by changing the archive, not the model. | PROD-01.1a, PROD-00.3a |
-| **Consumer positions** | A committed position `P` maps to the FIRST target record whose lineage offset is `>= P` (PROD-01.1 04-1, 04-4) — defined only over a complete verification with `covered: true`; a run with `duplicates > 0` maps to the first copy and the mapping report says so. | PROD-04.2 |
-| **Replicated targets** | A target written by a replicator carries no `x-original-offset`; where the replicator preserves offsets, the key is the target offset itself. Proposed additive `comparison_key: lineage | offset` beside `comparison_basis`; with `offset`, a target offset absent from `E` is unexpected and order is the target's own. | PROD-12.1 |
+| **Consumer positions** | **Translation is allowed only over a complete verification that PASSED for every partition it names**: the restore's signed scorecard reads `integrity.result: pass`, `integrity.verification.coverage: complete` and `complete.covered: true`, and `complete.partitions[]` lists each named partition with `compared: true` and an exact replay (every count 0 but `expected = restored = matching`). Anything else is REFUSED, for every position of the restore, naming the field that blocked it: a sampled or unrecorded coverage; `covered: false`; any `missing` (a record at or above `P` the consumer never read would be silently skipped), `unexpected`, `duplicates`, `out_of_order` (the first record with lineage `>= P` would re-deliver every later record below `P`) or `mismatched` record in a named partition. This contract defines no labelled partial translation. Over a passing partition the rule is PROD-01.1's 04-1: `P` maps to the first target record whose lineage offset is `>= P`; 04-4's "first copy of a duplicate" is the mapping function's definition for a target that holds one, which a passing verification excludes, so it is reachable only in PROD-04.2's own unit rows, never in a `Switchover`. | PROD-04.2 |
+| **Replicated targets** | A target written by a replicator carries no `x-original-offset`. Where the replicator PRESERVES offsets (Cluster Linking, MSK Replicator in its offset-preserving mode), the key is the target offset itself: a proposed additive `comparison_key: lineage | offset` beside `comparison_basis`; with `offset`, a target offset absent from `E` is unexpected and order is the target's own. MirrorMaker 2 does NOT preserve offsets, so `offset` would mis-key every record of an MM2 target and is refused for one; its key — MM2's offset-sync mapping, or a content-and-order key — is PROD-12.1's to define and to version, and this contract defines neither. | PROD-12.1 |
 | **Streaming and bounded memory** | The same contract, computed in a bounded window rather than one digest per expected record. An interrupted run is `covered: false`. | PROD-08.3 |
 | **Exercises** | A rehearsal that asks for complete coverage carries it in `spec.bounds` (a CRD field, inside `templateDigest`) and its result in the status; complete coverage's cost bounds how often. | PROD-08.2, child row PROD-08.1a |
 
@@ -128,7 +137,9 @@ segments_failed[], segments_unverified[], records_decoded, offset_holes}`, `repl
 restored, matching, missing, unexpected, duplicates, out_of_order, mismatched}` and
 `partitions[]`. Under complete coverage the legacy counters carry the complete comparison:
 `integrity.records_sampled` = the expected records of the compared partitions, matching their
-matching records, `sample.records_expected` = the whole expected output.
+matching records, `sample.records_expected` = the expected output of the COMPARED partitions — the
+whole expected output only when `covered: true` (an uncompared partition is never decoded, so it
+contributes 0; review L-3).
 
 **Absent means not recorded, read as sampled.** Every document before 1.4.0, and every reader
 built before this row, reads a sample; nothing re-reads old evidence as complete (rule 3).
@@ -254,8 +265,11 @@ real archive pays more for it; one broker on the same host; one run per size. Th
   its cost.
 - **PROD-01.1b** still owns the floor and the engine's selection: complete coverage DETECTS the
   dropped and skipped records; it does not restore them.
-- **Memory** is one 32-byte digest per expected record and one offset per restored record of the
-  partition being compared; bounded memory is PROD-08.3's.
+- **Memory is ESTIMATED, not measured** (review L-8): one `BTreeMap<i64, [u8; 32]>` entry per
+  expected record and one `HashSet<i64>` entry per restored record of the partition being compared
+  — 40 B and 8 B of payload, roughly 80–100 B per record with node and table overhead, so about
+  15 MB for a 150,000-record partition. No peak RSS was recorded; PROD-10.1 and PROD-08.3 must
+  measure it. Bounded memory is PROD-08.3's.
 - **A time bound** (stop after N seconds, sign incomplete) is not implemented; the record bound is.
 - **Archives without lineage headers** (written with `include_offset_headers: false`) are not
   compared under complete coverage; Logweir's own backups always carry them.
@@ -270,10 +284,10 @@ real archive pays more for it; one broker on the same host; one run per size. Th
 | 08.1-A1 | PROD-11.1 | A sub-window restore's complete block carries `window.start_ms` = the plan's start, and records below it are neither expected nor restored. | With the start ignored (`start_ms` absent), the records below it are reported missing. | ts rows with a stated start |
 | 08.1-A2 | PROD-11.1 | A partition-subset restore's complete block names the selection and passes with every unselected target partition empty. | A record produced into an unselected partition is `unexpected` and fails. | `complete_coverage_over_faulted_targets…`, `stray` |
 | 08.1-A3 | PROD-03.2 | A schema-ID rewrite passes complete coverage with `T(r)` as the expected record and every other field byte-identical. | Comparing against the untransformed `r` reports every rewritten record `mismatched`. | registry profile |
-| 08.1-A4 | PROD-04.2 | Position translation runs only over a `covered: true` complete block and maps a position to the first copy of a duplicated offset. | A block with `covered: false` refuses translation; a mapper taking the second copy replays a batch twice. | synthetic duplicate (`complete_verify.rs`) |
+| 08.1-A4 | PROD-04.2 | Position translation runs only beside a scorecard whose complete verification PASSED for every partition it names (`integrity.result: pass`, covered, each named partition compared and exact), and maps `P` to the first target record whose lineage offset is `>= P`. | Each refuses translation, naming the field: a covered block with one record missing at or above `P` (`fail-integrity`); an `out_of_order` partition; a `duplicates` partition; a `covered: false` block; a sampled scorecard. | `complete_coverage_over_faulted_targets…` (omit, reorder, dup) and the bound row |
 | 08.1-A5 | PROD-05.2 | A compacted restore passes complete coverage BEFORE the compaction transition, with `offset_holes` disclosed. | Compaction started before verification reports `missing` and fails. | compaction row |
 | 08.1-A6 | PROD-08.3 | The streamed comparison yields the same block as the in-memory lane on the 450,000-record fixture. | An interrupted stream signs `covered: false`. | cost row |
-| 08.1-A7 | PROD-12.1 | A replicated target compared with `comparison_key: offset` detects a missing partition and an offset shift. | With `lineage`, a target without lineage headers is unexpected throughout. | MirrorMaker 2 between the two clusters |
+| 08.1-A7 | PROD-12.1 | An OFFSET-PRESERVING replicated target compared with `comparison_key: offset` detects a missing partition and an offset shift. | With `lineage`, a target without lineage headers is unexpected throughout; with `offset`, an MM2 target is refused as mis-keyed. | an offset-preserving copy between the two PROD-01.5 clusters; MM2 only for the refusal |
 | 08.1-A8 | PROD-08.2 | An exercise's result records its coverage, and a complete exercise's failure names the partition. | A sampled exercise is never shown as complete. | RehearsalSchedule over the compose topic |
 
 ---

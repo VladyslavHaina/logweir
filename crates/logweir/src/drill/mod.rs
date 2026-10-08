@@ -3856,10 +3856,12 @@ fn sample_info(
 
 /// **PROD-08.1.** A COMPLETE verification set out to reconcile every
 /// expected record of every restored partition, so `sample` says so: its
-/// canary is the whole expected output (`records_expected`, which
-/// `integrity.records_sampled` is held to), over every partition and topic the
-/// complete block lists. A sampled verification's `sample` is phase 4's,
-/// untouched.
+/// canary is the expected output of every COMPARED partition
+/// (`records_expected`, which `integrity.records_sampled` is held to) — the
+/// whole expected output only when the block is `covered`, since a partition
+/// the bound stopped is never decoded and contributes 0 (review L-3) — over
+/// every partition and topic the complete block lists. A sampled
+/// verification's `sample` is phase 4's, untouched.
 fn complete_sample_info(sample: &mut SampleInfo, integrity: &logweir_core::scorecard::Integrity) {
     let Some(c) = integrity
         .verification

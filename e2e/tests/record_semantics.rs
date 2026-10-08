@@ -3355,3 +3355,94 @@ fn complete_coverage_cost_per_gigabyte_and_partition() {
     assert_verdict("cost complete", &rc, 0, "pass");
     assert_eq!(complete_block(&rc)["replay"]["matching"], json!(total));
 }
+
+/// **PROD-08.1 review L-7 — a compaction hole INSIDE the decoded span, live.**
+/// Each partition is written `k1, k2, k3, k2, k4` (offsets 0–4) and rolled; the
+/// log cleaner removes offset 1 (`k2`'s first value), so the source and the
+/// archive hold offsets 0, 2, 3, 4 and the roller at 5. A complete restore
+/// reproduces exactly that, passes, and DISCLOSES one offset hole per partition
+/// (`complete.archive.offset_holes`, 3 in total) — a hole is never a fault. The
+/// compaction row above cannot show one: its cleaner removes offsets 0–2, below
+/// the decoded span, which `offset_holes` does not count (the manifest records
+/// no partition start offset).
+#[test]
+fn complete_coverage_discloses_a_compaction_hole_inside_the_span() {
+    let mut row = Row::new("cv-holes");
+    let topic = row.source_topic(
+        "cv-holes",
+        &[
+            ("message.timestamp.type", "CreateTime"),
+            ("cleanup.policy", "compact"),
+            ("segment.ms", "100"),
+            ("min.cleanable.dirty.ratio", "0.01"),
+            ("min.compaction.lag.ms", "0"),
+            ("delete.retention.ms", "86400000"),
+        ],
+    );
+    let mut fixture = Vec::new();
+    for p in 0..PARTS {
+        for (i, k) in ["k1", "k2", "k3", "k2", "k4"].iter().enumerate() {
+            fixture.push(Out::kv(p, Some(T + i as i64 * 10), k, &format!("v{i}")));
+        }
+    }
+    kafka::produce_plain(&topic, &fixture).expect("produce");
+    let rollers: Vec<Out> = (0..PARTS)
+        .map(|p| Out::kv(p, Some(T + 3_600_000), "k9", "roll"))
+        .collect();
+    kafka::produce_plain(&topic, &rollers).expect("roll");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let source = loop {
+        let s = kafka::read_topic(&topic, PARTS, Isolation::Committed).expect("source");
+        let compacted = (0..PARTS).all(|p| {
+            let offs: Vec<i64> = s
+                .iter()
+                .filter(|r| r.partition == p)
+                .map(|r| r.offset)
+                .collect();
+            offs == vec![0, 2, 3, 4, 5]
+        });
+        if compacted {
+            break s;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the log cleaner did not remove offset 1 of {topic} within 180 s; last reading: {:?}",
+            s.iter()
+                .map(|r| (r.partition, r.offset))
+                .collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_secs(3));
+    };
+    let backup_id = row.backup_id("cv-holes");
+    backup_ok(&backup_id, &[&topic], 1000);
+    let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
+    let rc = restore_complete(
+        &mut row,
+        "cfull",
+        &backup_id,
+        &topic,
+        None,
+        archive_span(&archive),
+    );
+    let rep_c = replay(&archive, |_| true, &rc.observed);
+    record_outcome(
+        "cv-holes",
+        &source,
+        &source,
+        &archive,
+        &[("complete full", &rc, &rep_c[..], &[][..])],
+        &capture(&source, &archive),
+        json!({"source_offsets": source.iter().map(|x| (x.partition, x.offset)).collect::<Vec<_>>()}),
+    );
+    if !contract_applies("cv-holes") {
+        return;
+    }
+    assert_verdict("cv-holes complete", &rc, 0, "pass");
+    let b = complete_block(&rc);
+    assert_eq!(b["covered"], true, "{b}");
+    assert_eq!(b["archive"]["offset_holes"], json!(PARTS), "{b}");
+    for p in b["partitions"].as_array().expect("partitions") {
+        assert_eq!(p["offset_holes"], 1, "{p}");
+    }
+    assert_eq!(b["replay"]["expected"], json!(source.len()), "{b}");
+}

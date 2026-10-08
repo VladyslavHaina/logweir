@@ -1784,7 +1784,10 @@ way: the sink URL reaches the pod as a `secretKeyRef` and the hatch is a literal
 installation that turns it on logs one `WARN` at startup saying so.
 
 **`verificationScope` is `sampled`, `degraded` or `none` — never `complete`.**
-Logweir compares a sample of records. The value reaches a PagerDuty incident
+A `Restore` and a rehearsal compare a sample of records: neither can ask for
+the complete coverage a command-line plan can (`sample.coverage: complete`,
+[release notes](release-notes.md) item 28), and a complete run's scorecard is
+not reported through this field yet (proposed row PROD-08.1a). The value reaches a PagerDuty incident
 title and a Slack channel where someone decides, during an incident, whether an
 archive can be trusted, so the type has three variants and `logweir notify
 deliver` refuses a fourth at parse time. See

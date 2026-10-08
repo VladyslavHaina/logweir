@@ -241,7 +241,8 @@ it). The block says what a verdict COVERED — a sample, or every selected recor
   re-prove that on every `just lint`.
 - **A complete verification fills the existing counters with the complete
   comparison**: `integrity.records_sampled` is the expected records of the
-  compared partitions, `sample.records_expected` the whole expected output,
+  compared partitions, `sample.records_expected` the same (the whole expected
+  output only when `complete.covered` is `true`),
   `sample.partitions` and `sample.topics` every partition and topic it
   verified. Each field keeps its meaning — how many records the drill set out
   to reconcile, and how many it did — and a reader that predates the block

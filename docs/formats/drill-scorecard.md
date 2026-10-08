@@ -326,7 +326,7 @@ Copied verbatim from your spec, plus the verdict.
 |---|---|---|
 | `window_start`, `window_end` | RFC 3339 | The point-in-time window drilled. |
 | `topics`, `partitions` | integer | How many of each were selected. Under complete coverage (1.4.0), every topic and partition the complete block lists. |
-| `records_expected` | integer | **The canary size**: how many records this drill set out to reconcile — `records_per_partition` summed over the partitions actually selected. It is **not** how many records the manifest says the window holds; those differ by orders of magnitude on a real archive. Under complete coverage (1.4.0) the canary is the whole expected output, so this is `integrity.verification.complete.replay.expected`. |
+| `records_expected` | integer | **The canary size**: how many records this drill set out to reconcile — `records_per_partition` summed over the partitions actually selected. It is **not** how many records the manifest says the window holds; those differ by orders of magnitude on a real archive. Under complete coverage (1.4.0) the canary is the expected output of every compared partition, so this is `integrity.verification.complete.replay.expected` — the whole expected output only when `complete.covered` is `true` (an uncompared partition is never decoded and contributes 0). |
 | `records_restored` | integer | How many were restored. |
 | `anchor` | string | The vocabulary is `head`, `tail`, `random`; **v0.1 implements only `head`** and REFUSES the other two at phase 0 with exit 3 rather than silently substituting. The scorecard field is a plain string (the closed enum lives on the input spec, `logweir_core::spec::Anchor`, which is where a bad value has to be caught); a v0.1.0 scorecard therefore always reads `head`. See [stability.md](../stability.md). |
 | `coverage_note` | string | What the drill itself says about how representative the window is. Read it. |
@@ -688,7 +688,9 @@ phase 7 never ran — is read as a SAMPLED verdict, never a complete one. Every
 1.4.0 run that reaches phase 7 writes the block. The legacy counters carry the
 complete comparison under complete coverage: `integrity.records_sampled` is the
 expected records of the compared partitions, `records_sampled_matching` their
-matching records, and `sample.records_expected` the whole expected output.
+matching records, and `sample.records_expected` the expected records of the
+compared partitions too — the whole expected output only when
+`complete.covered` is `true`.
 
 Seven arms, enforced by both readers in the same position (after
 `source.time_basis`, before `redactions`) and words, fire only on a document
