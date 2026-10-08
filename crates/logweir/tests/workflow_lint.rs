@@ -744,7 +744,9 @@ fn release_archives_are_built_and_checked_by_one_script_before_upload() {
     // PROD-00.2: the runner's compiling stages derive from one `cross` stage
     // (the toolchain for either platform), and the builder is one of them.
     assert!(
-        dockerfile.contains("FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS cross")
+        dockerfile.lines().any(|l| l
+            .starts_with("FROM --platform=$BUILDPLATFORM rust:1.89-bookworm@sha256:")
+            && l.ends_with(" AS cross"))
             && dockerfile.contains("FROM cross AS builder"),
         "the Linux archives' builder base is the runner image's; change both together"
     );

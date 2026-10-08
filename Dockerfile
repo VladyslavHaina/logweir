@@ -60,6 +60,13 @@ ARG ENGINE_SOURCE=logweir
 # drifted below the workspace's. Update the two together, always. The engine
 # compiles with the same toolchain.
 #
+# EVERY BASE IS PINNED BY DIGEST (PROD-00.2 review L5): the toolchain image now
+# compiles the engine as well as Logweir, so its bytes are part of what ships.
+# The digests are the multi-platform INDEX digests of `rust:1.89-bookworm` and
+# `debian:bookworm-slim` resolved on 2026-10-08, so each platform resolves its
+# own variant. `crates/logweir/tests/engine_pin.rs` refuses an unpinned `FROM`
+# here; moving a pin is a refresh (`docker buildx imagetools inspect <tag>`).
+#
 # `--platform=$BUILDPLATFORM` IS THE WHOLE POINT OF TASK 8b and must not be
 # removed. `$BUILDPLATFORM` is BuildKit's predeclared platform of the machine
 # doing the building, so this stage is native everywhere.
@@ -67,7 +74,7 @@ ARG ENGINE_SOURCE=logweir
 # THE RUNTIME STAGE DELIBERATELY CARRIES NO `--platform` and must not gain one:
 # it follows the platform of the build, so the binaries the compiling stages
 # produce for `$TARGETARCH` land in a runtime of the same architecture.
-FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS cross
+FROM --platform=$BUILDPLATFORM rust:1.89-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff AS cross
 ARG TARGETARCH
 WORKDIR /src
 # ONE apt LAYER. What it installs, by role:
@@ -215,7 +222,7 @@ FROM osodevops/kafka-backup@sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee689
 # OSO's identity, derived from the same two files the pin is kept in: the
 # release named by `ENGINE_VERSION` (the part before `+logweir.`) and the
 # image digest. `engine-pin` in the tests holds both to the pin.
-FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS engine-oso
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS engine-oso
 COPY --from=oso-release /usr/local/bin/kafka-backup /out/kafka-backup
 COPY third_party/kafka-backup-build.env third_party/kafka-backup-binary.digest /tmp/pin/
 RUN set -eu; \
@@ -258,11 +265,11 @@ COPY . .
 # a second invocation would pay the link twice and cache as a separate layer.
 RUN set -eu; \
     . /etc/logweir-cross.env; \
-    cargo auditable build --release --target "$TRIPLE" -p logweir -p logweir-retention; \
+    cargo auditable build --locked --release --target "$TRIPLE" -p logweir -p logweir-retention; \
     mkdir -p /out; \
     cp "target/$TRIPLE/release/logweir" "target/$TRIPLE/release/logweir-retention" /out/
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 # `libsasl2-2` is REQUIRED BY LOGWEIR'S OWN BINARY, not by the engine. rdkafka
 # links librdkafka with SASL support, so `logweir` has a dynamic dependency on
 # `libsasl2.so.2`. Without it the image builds, `docker images` looks healthy,

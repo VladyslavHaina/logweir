@@ -196,6 +196,24 @@ fn check_dockerfile(src: &str, oso_digest: &str) -> Result<(), String> {
     if !src.contains("COPY third_party/kafka-backup-build.env") {
         return Err("the Dockerfile's engine stage does not build from the build env".into());
     }
+    // Review L5: every external base is pinned by digest; a `FROM` of one of
+    // this file's own stages is the only unpinned form.
+    let stages: Vec<&str> = lines
+        .iter()
+        .filter_map(|l| l.strip_prefix("FROM "))
+        .filter_map(|rest| rest.rsplit_once(" AS ").map(|(_, stage)| stage.trim()))
+        .collect();
+    for line in lines.iter().filter(|l| l.starts_with("FROM ")) {
+        let image = line
+            .trim_start_matches("FROM ")
+            .split_whitespace()
+            .find(|w| !w.starts_with("--platform="))
+            .unwrap_or("");
+        let own_stage = stages.contains(&image) || image.starts_with("engine-${");
+        if !own_stage && !image.contains("@sha256:") {
+            return Err(format!("the Dockerfile's `{line}` is not pinned by digest"));
+        }
+    }
     Ok(())
 }
 
@@ -528,6 +546,21 @@ fn every_check_refuses_a_copy_that_lags() {
                 "RUN tar -xzf third_party/kafka-backup-v0.23.3.tar.gz",
             ),
             "a build that skips the recipe's checks",
+        ),
+        (
+            dockerfile.replace(
+                "rust:1.89-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff",
+                "rust:1.89-bookworm",
+            ),
+            "the toolchain by tag (review L5)",
+        ),
+        (
+            dockerfile.replacen(
+                "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime",
+                "debian:bookworm-slim AS runtime",
+                1,
+            ),
+            "the runtime base by tag (review L5)",
         ),
     ] {
         assert!(check_dockerfile(&lagging, &oso).is_err(), "{why}");
