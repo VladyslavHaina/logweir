@@ -837,3 +837,48 @@ fn countersign_judges_the_callers_now_and_reads_no_clock() {
     let (result, _) = countersign_at("inside-2999", &closed_2999, at("2999-01-01T00:04:00Z"));
     result.expect("one minute before expiresAt the request is countersigned");
 }
+
+/// PROD-16.1: a fresh install's one-click confirmation reaches the runner as
+/// an ordinary bundle under `default-confirm-v1`, attested to the local
+/// administrator, and verifies exactly as an explicit Ordinary binding's — no
+/// approver key file anywhere. NEGATIVE CONTROL: the same document beside the
+/// snapshot of another policy is refused before any client exists.
+#[test]
+fn a_fresh_install_default_confirm_bundle_verifies_at_the_runner() {
+    let k = keys();
+    let policy = logweir_core::approval_policy::default_confirm_policy();
+    let mut doc = document(ApprovalMode::Ordinary);
+    doc.policy = PolicyRef {
+        name: policy.name.clone(),
+        digest: policy.digest(),
+    };
+    doc.ticket = None;
+    let bytes = doc.to_bytes();
+    let approved = verify(
+        PLAN,
+        &bytes,
+        &sidecar(&bytes, &k, false),
+        &pem(&k.console),
+        &pem(&k.console),
+        &policy.snapshot_bytes(),
+        &subject(),
+        &k,
+    )
+    .expect("a default-confirm bundle verifies");
+    assert_eq!(approved.approval.approver, "urn:logweir:local-admin#admin");
+    let other = verify(
+        PLAN,
+        &bytes,
+        &sidecar(&bytes, &k, false),
+        &pem(&k.console),
+        &pem(&k.console),
+        &policy_of(ApprovalMode::Ordinary).snapshot_bytes(),
+        &subject(),
+        &k,
+    );
+    assert!(is_guard(&other), "{}", message(&other));
+}
+
+fn policy_of(mode: ApprovalMode) -> logweir_core::approval_policy::ApprovalPolicy {
+    policy(mode)
+}

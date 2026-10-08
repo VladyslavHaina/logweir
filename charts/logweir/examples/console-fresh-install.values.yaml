@@ -1,0 +1,45 @@
+# console-fresh-install.values.yaml — A FRESH INSTALL WHOSE FIRST RESTORE NEEDS
+# NO KEY (PROD-16.1, owner decision OD-8).
+#
+# The in-cluster administrator console of `console.values.yaml`, plus the one
+# value that lets the identity hook manage the console's key:
+# `identity.bootstrapFeatures.consoleKey: true`. On a FIRST `helm install`
+# (Helm 3.19+ or 4.x) into a namespace with no installation identity, the hook
+#
+#   * generates the installation signer and the console's ConsoleConfirmation
+#     key, once, into retained Secrets, and publishes both public halves;
+#   * when the cluster has NO trust yet (no TrustPolicy at all, no
+#     TrustRoster/default), creates one default TrustPolicy,
+#     `logweir-installation`, trusting exactly those two keys, and marks the
+#     install, so every namespace without its own approval policy is `confirm`:
+#     one click on *Create the Restore*, no key file;
+#   * deletes its install-only `create trustpolicies` grant before it exits.
+#
+# An UPGRADE gets none of the trust: no policy, no marker, every namespace keeps
+# the approval it had (docs/install.md §5f says how an older install opts in).
+#
+# WHY THIS IS AN EXAMPLE AND NOT YET THE DEFAULT. `identity.bootstrapImage` is a
+# pinned runner digest, published by CI after the commit that carries the hook's
+# new flags; a chart that passed them to an older pinned image would fail its
+# hook. The release coordinator flips the default in the same commit that
+# re-pins the image (docs/install.md, *Release coordinator: re-pin bootstrap
+# bytes*). Until then, use this file only with a bootstrap image that runs
+# `identity bootstrap --console-secret-name` (check with
+# `docker run --rm <image> identity bootstrap --help`).
+#
+# The cursor key Secret is still yours to create first, exactly as in
+# `console.values.yaml`:
+#
+#     head -c 32 /dev/urandom > cursor.key
+#     kubectl --context docker-desktop -n logweir-system \
+#       create secret generic logweir-console-keys --from-file=cursor.key
+#     rm cursor.key
+identity:
+  bootstrapFeatures:
+    consoleKey: true
+api:
+  enabled: true
+  console:
+    enabled: true
+    mode: localAdmin
+    keySecret: logweir-console-keys

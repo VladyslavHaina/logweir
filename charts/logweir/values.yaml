@@ -36,12 +36,18 @@ identity:
   bootstrapImage: docker.io/vladyslavhaina/logweir@sha256:2d20f4bdb2bd8b9f2fb9fa298371740eb9a368d42cf031a7ebe1272542477e19 # rev 4956785, amd64
   bootstrapImagePullPolicy: IfNotPresent
   allowMutableBootstrapImageForDevelopment: false
+  bootstrapFeatures:            # what bootstrapImage can run; flipped only WITH its re-pin
+    consoleKey: false           # PROD-16.1: console key, fresh-install trust and marker, revocation
   publicConfigMapName: logweir-signing-trust
   authorizedRunnerNamespaces: [] # release namespace implicit; same signer copied to each
   kubernetesApiCIDRs: []          # exact API /32 or /128 endpoints; TCP 443/6443 only
   externalSecret:
     name: ""                    # explicit adoption: pre-existing Secret in the release namespace
     key: signing.pem            # P-256 or Ed25519 PKCS#8 PEM; never copied to chart output/logs
+  installationTrust:            # fresh console install only (Helm >= 3.19): signer + console key
+    enabled: true
+    policyName: logweir-installation
+    allowedTargetClusterIds: []   # restore targets, written once; demoKafka adds its own
   resources:
     requests: { cpu: 10m, memory: 32Mi }
     limits: { memory: 128Mi }
@@ -168,12 +174,13 @@ demoKafka:
 retention:
   enabled: false
 
-# ------------- approvalPolicy (PLAT-19.2) — empty = legacy-governed-v1 everywhere
+# ------ approvalPolicy — confirm (one click) | two-person (PROD-16.2) | strict (personal key)
 approvalPolicy:
-  allowOrdinaryConfirmation: false  # D0's floor: an Ordinary policy is refused without it
-  policies: []                      # [{name, mode: Governed|Ordinary, maxAgeSeconds, requireDistinctPrincipal}]
-  namespaces: {}                    # {<namespace>: <policy name>}; unbound = legacy-governed-v1
-  confirmationKeySecret: ""         # console: Secret with `confirmation.key` (PKCS#8, ConsoleConfirmation)
+  default: ""                       # unbound: "" = confirm if fresh with a console, else strict | confirm | strict
+  allowOrdinaryConfirmation: false  # D0's floor: confirm (Ordinary) policies and default: confirm need it
+  policies: []                      # [{name, mode: confirm|strict (Ordinary|Governed), maxAgeSeconds, requireDistinctPrincipal}]
+  namespaces: {}                    # {<namespace>: <policy name>}; an explicit binding always wins
+  confirmationKeySecret: ""         # "" = the hook's key with identity.bootstrapFeatures.consoleKey, else none
 
 # ------------------------- api.enabled — the console/API principal's RBAC (D3)
 # ServiceAccount + roles only. api.console.enabled additionally runs the pod.

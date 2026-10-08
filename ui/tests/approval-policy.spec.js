@@ -105,7 +105,8 @@ const RESTORE_BODY = Object.freeze({
 });
 
 const ORDINARY = Object.freeze({
-  mode: "ordinary", policy: "team-ordinary", legacy: false, state: "confirmed",
+  mode: "ordinary", operatorMode: "confirm", policy: "team-ordinary", legacy: false,
+  state: "confirmed",
   approvalName: "approval-x", policyDigest: "sha256:" + "a".repeat(64),
   requester: "urn:logweir:local-admin#admin", expiresAt: "2026-09-22T12:15:00Z",
 });
@@ -121,6 +122,7 @@ test("a_console_restore_create_carries_the_frozen_policy_decision_on_the_object"
     const made = await apiClient().create("team-a", "restores", await restoreBody());
     assert.equal(made.__contract.authorization.state, "confirmed");
     assert.equal(made.__contract.authorization.mode, "ordinary");
+    assert.equal(made.__contract.authorization.operatorMode, "confirm");
     assert.equal(frozenDecision(made).requester, "urn:logweir:local-admin#admin");
   } finally {
     wire.restore();
@@ -143,6 +145,7 @@ test("the_policy_read_and_the_countersign_submission_are_the_two_published_route
     requestId: "r1",
     item: {
       namespace: "team-a", name: "prod-governed", mode: "governed", legacy: false,
+      operatorMode: "strict", basis: "binding",
       requireDistinctPrincipal: true, installationDigest: "sha256:" + "b".repeat(64),
       ordinaryConfirmationAvailable: false, ticketRequired: true,
       maxAgeSeconds: 86400, digest: "sha256:" + "c".repeat(64),
@@ -163,6 +166,7 @@ test("the_policy_read_and_the_countersign_submission_are_the_two_published_route
     const api = apiClient();
     const read = await api.approvalPolicy("team-a");
     assert.equal(read.mode, "governed");
+    assert.equal(read.operatorMode, "strict");
     assert.equal(read.legacy, false);
     const made = await api.submitGovernedApproval("team-a", "restore-x", "{\"payloadType\":\"x\"}");
     assert.equal(made.kind, "Approval");

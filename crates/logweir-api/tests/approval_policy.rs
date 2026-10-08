@@ -49,6 +49,7 @@ fn console(binding: &str) -> Console {
         settings: Arc::new(ApprovalSettings {
             policies,
             confirmation: Some(ConfirmationKey::from_key(key).expect("key")),
+            ..ApprovalSettings::default()
         }),
         public,
     }
@@ -427,45 +428,47 @@ async fn a_governed_approval_name_must_leave_room_for_its_confirmation() {
     );
 }
 
-/// **localAdmin never signs an ordinary confirmation** (review H1; D0: that
-/// mode "does not expose Ordinary"). The submission is refused
-/// `policy_mismatch` BEFORE anything exists: no Restore, no Approval. The
-/// policy read says so. The controls: the same namespace in a SHARED console
-/// confirms (`an_ordinary_namespace_confirms_and_routes_to_execution`), and a
-/// Governed namespace in localAdmin still accepts the request, because there
-/// the console only attests and an independent approver key decides.
+/// **localAdmin confirms, as the local administrator** (PROD-16.1, amending
+/// review H1 and D0's "does not expose Ordinary"): an Ordinary (`confirm`)
+/// binding served by the in-cluster administrator console is confirmed in one
+/// click, and the signed document names the one principal that console has,
+/// `urn:logweir:local-admin#admin` — whoever can reach the console can
+/// confirm, the residual SECURITY.md states. NEGATIVE CONTROL for the
+/// re-added refusal: this row fails on a 409. The Governed control: a strict
+/// namespace in localAdmin still awaits an independent approver.
 #[tokio::test]
-async fn a_local_admin_console_never_signs_an_ordinary_confirmation() {
+async fn a_local_admin_console_confirms_as_the_local_administrator() {
     let console = console("team-ordinary");
     let app = app(&console);
-    let refused = create(&app, NS_A, "local-ordinary-01").await;
+    let created = create(&app, NS_A, "local-ordinary-01").await;
     assert_eq!(
-        refused.status,
-        409,
+        created.status,
+        201,
         "{}",
-        String::from_utf8_lossy(&refused.body)
+        String::from_utf8_lossy(&created.body)
     );
-    assert_eq!(refused.code(), "policy_mismatch");
-    assert!(String::from_utf8_lossy(&refused.body).contains("localAdmin"));
-    assert!(
-        app.fake.requests().iter().all(|r| r.method != "POST"),
-        "nothing was created: no Restore, no Approval"
+    let authorization = &created.json()["authorization"];
+    assert_eq!(authorization["state"], "confirmed");
+    assert_eq!(authorization["operatorMode"], "confirm");
+    assert_eq!(authorization["requester"], LOCAL_ADMIN_ACTOR);
+    let stored = approvals_posted(&app.fake)
+        .pop()
+        .expect("the console stored its confirmation");
+    let document = stored["spec"]["approvalBytes"].as_str().expect("bytes");
+    let sidecar = stored["spec"]["sidecarBytes"].as_str().expect("sidecar");
+    assert!(verify(document, sidecar, &console.public));
+    let doc = RestoreAuthorization::from_bytes(document.as_bytes()).expect("a v2 document");
+    assert_eq!(
+        doc.requester.principal_id(),
+        "urn:logweir:local-admin#admin"
     );
     let policy = app
         .get(&format!("/api/v1/namespaces/{NS_A}/approval-policy"))
         .await
         .json();
-    assert_eq!(policy["item"]["ordinaryConfirmationAvailable"], false);
-
-    let (shared, _) = ordinary_app();
-    assert_eq!(
-        oget(
-            &shared,
-            &format!("/api/v1/namespaces/{NS_A}/approval-policy")
-        )
-        .await["item"]["ordinaryConfirmationAvailable"],
-        true
-    );
+    assert_eq!(policy["item"]["ordinaryConfirmationAvailable"], true);
+    assert_eq!(policy["item"]["operatorMode"], "confirm");
+    assert_eq!(policy["item"]["basis"], "binding");
 
     let governed = console_governed_app();
     let accepted = gcreate(&governed, NS_A, "local-governed-01").await;
@@ -479,6 +482,7 @@ async fn a_local_admin_console_never_signs_an_ordinary_confirmation() {
         accepted.json()["authorization"]["state"],
         "awaitingApproval"
     );
+    assert_eq!(accepted.json()["authorization"]["operatorMode"], "strict");
 }
 
 /// **The change ticket** (D0: "required in Governed, optional in Ordinary").
@@ -1173,9 +1177,10 @@ fn a_bound_namespace_without_a_console_key_refuses_to_start() {
         format!("{POLICIES}namespaces:\n  {NS_A}: team-ordinary\n"),
     )
     .expect("write");
-    let err = ApprovalSettings::load(Some(&path), None, &[NS_A.to_string()]).expect_err("refused");
+    let err =
+        ApprovalSettings::load(Some(&path), None, false, &[NS_A.to_string()]).expect_err("refused");
     assert!(err.contains("confirmationKeyFile"), "{err}");
-    assert!(ApprovalSettings::load(Some(&path), None, &[NS_B.to_string()]).is_ok());
+    assert!(ApprovalSettings::load(Some(&path), None, false, &[NS_B.to_string()]).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1214,6 +1219,7 @@ async fn a_confirmation_from_before_a_policy_change_cannot_be_approved() {
                 confirmation: Some(
                     ConfirmationKey::from_key(SigningKey::generate_ed25519()).expect("key"),
                 ),
+                ..ApprovalSettings::default()
             }),
             ..SharedOptions::default()
         },
