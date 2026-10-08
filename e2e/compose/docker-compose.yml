@@ -348,6 +348,12 @@ services:
     image: ${KAFKA_CLI_IMAGE:-confluentinc/cp-kafka:7.6.0}
     profiles: [auth]
     networks: [kafka-net]
+    # As root: on a Linux host the bind-mounted directory belongs to the host
+    # user (`just e2e-up` creates it) or to root (the daemon creates it), and
+    # the image's own `appuser` can write to neither. Docker Desktop's file
+    # sharing hides this, so only CI saw it. The script hands the files back
+    # to the directory's owner.
+    user: "0:0"
     entrypoint: ["bash", "/gen-certs.sh"]
     volumes:
       - ./profiles/auth/gen-certs.sh:/gen-certs.sh:ro
