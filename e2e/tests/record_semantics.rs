@@ -2698,3 +2698,465 @@ fn a_killed_restore_leaves_its_engine_writing() {
         "engine containers survived cleanup: {left:?}"
     );
 }
+
+// =================================================== PROD-08.1, LIVE FAULTS
+
+/// Three partitions of eight records, `+1000 … +1700` (100 ms apart), backed
+/// up in four-record segments: two segments per partition, the second of each
+/// entirely after `+1350`.
+fn eight_per_partition(tag: &str) -> Vec<Out> {
+    let layout: &Layout = &[
+        (0, &[1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700]),
+        (1, &[1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700]),
+        (2, &[1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700]),
+    ];
+    ts_fixture(tag, layout)
+}
+
+/// The bucket path of a manifest segment `key` of `backup_id`'s archive.
+fn segment_object(backup_id: &str, key: &str) -> String {
+    let store =
+        logweir_engine_oso::storage::Store::read_only_from_url(&kafka::archive_location(backup_id))
+            .expect("the archive store");
+    format!("local/{ARCHIVE_BUCKET}/{}", store.qualify(key))
+}
+
+/// `mc args`, required to succeed.
+fn mc_ok(args: &[&str], what: &str) {
+    let o = mc(args);
+    assert!(
+        o.status.success(),
+        "{what}: mc {args:?}: {}",
+        o.stderr_utf8()
+    );
+}
+
+/// Moves an archive object aside and back, on every exit path.
+struct Aside {
+    object: String,
+    parked: String,
+}
+
+impl Aside {
+    fn park(object: String, tag: &str) -> Aside {
+        let parked = format!("local/{ARCHIVE_BUCKET}/{ID_PREFIX}parked-{tag}.bin");
+        mc_ok(&["mv", &object, &parked], "park a segment");
+        Aside { object, parked }
+    }
+}
+
+impl Drop for Aside {
+    fn drop(&mut self) {
+        let o = mc(&["mv", &self.parked, &self.object]);
+        if !o.status.success() {
+            eprintln!(
+                "[recsem] could not put {} back: {}",
+                self.object,
+                o.stderr_utf8()
+            );
+        }
+    }
+}
+
+/// **PROD-08.1 — "corrupt an unsampled segment" and "omit a segment", live.**
+/// A point-in-time restore at `+1350` reads only each partition's first
+/// segment; the second segment of each partition is outside the window, so
+/// neither the engine nor the sampled drill ever reads it.
+///
+/// - **Corrupt:** p1's second segment is replaced by p0's second segment (a
+///   well-formed KBAK object whose bytes are not the ones the manifest's
+///   sha256 names). The sampled restore PASSES; the complete restore FAILS,
+///   exit 2 with a signed scorecard whose archive integrity names exactly that
+///   segment.
+/// - **Omit:** p2's second segment is removed from the store. Again the
+///   sampled restore passes and the complete restore fails, naming it ("the
+///   store does not hold it") — a signed fail, never exit 1.
+///
+/// The control is the same archive before either fault: both coverages pass.
+#[test]
+fn complete_coverage_hashes_every_segment_outside_the_window() {
+    let mut row = Row::new("cv-segments");
+    let topic = row.source_topic("cv-segments", &[("message.timestamp.type", "CreateTime")]);
+    let fixture = eight_per_partition("cv-segments");
+    kafka::produce_plain(&topic, &fixture).expect("produce");
+    let source = kafka::read_topic(&topic, PARTS, Isolation::Committed).expect("source");
+    assert_fixture_landed("cv-segments", &fixture, &source);
+    let backup_id = row.backup_id("cv-segments");
+    backup_ok(&backup_id, &[&topic], 4);
+    let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
+    let second = |p: i32| -> String {
+        let mut segs: Vec<_> = archive
+            .segments
+            .iter()
+            .filter(|s| s.partition == p)
+            .collect();
+        segs.sort_by_key(|s| s.start_offset);
+        assert_eq!(segs.len(), 2, "two segments on p{p}: {segs:?}");
+        segs[1].key.clone()
+    };
+    let pit = T + 1350;
+    let sample = (T + 1000, pit);
+
+    // The control: an unfaulted archive passes both ways.
+    let s0 = restore(&mut row, "s0", &backup_id, &topic, Some(pit), sample);
+    let c0 = restore_complete(&mut row, "c0", &backup_id, &topic, Some(pit), sample);
+
+    // Corrupt p1's out-of-window segment with p0's bytes.
+    let p1_key = second(1);
+    let (s1, c1) = {
+        let p1 = segment_object(&backup_id, &p1_key);
+        let _aside = Aside::park(p1.clone(), "cv-p1");
+        mc_ok(
+            &["cp", &segment_object(&backup_id, &second(0)), &p1],
+            "overwrite p1's second segment",
+        );
+        let s1 = restore(&mut row, "s1", &backup_id, &topic, Some(pit), sample);
+        let c1 = restore_complete(&mut row, "c1", &backup_id, &topic, Some(pit), sample);
+        (s1, c1)
+    };
+
+    // Omit p2's out-of-window segment.
+    let p2_key = second(2);
+    let (s2, c2) = {
+        let _aside = Aside::park(segment_object(&backup_id, &p2_key), "cv-p2");
+        let s2 = restore(&mut row, "s2", &backup_id, &topic, Some(pit), sample);
+        let c2 = restore_complete(&mut row, "c2", &backup_id, &topic, Some(pit), sample);
+        (s2, c2)
+    };
+
+    let none: [Divergence; 0] = [];
+    record_outcome(
+        "cv-segments",
+        &source,
+        &source,
+        &archive,
+        &[
+            ("sampled control", &s0, &none[..], &none[..]),
+            ("complete control", &c0, &none[..], &none[..]),
+            ("sampled corrupt p1", &s1, &none[..], &none[..]),
+            ("complete corrupt p1", &c1, &none[..], &none[..]),
+            ("sampled omitted p2", &s2, &none[..], &none[..]),
+            ("complete omitted p2", &c2, &none[..], &none[..]),
+        ],
+        &[],
+        json!({"point_in_time": pit, "corrupted": p1_key, "omitted": p2_key}),
+    );
+    if !contract_applies("cv-segments") {
+        return;
+    }
+    assert_verdict("control sampled", &s0, 0, "pass");
+    assert_verdict("control complete", &c0, 0, "pass");
+    assert_eq!(complete_block(&c0)["archive"]["segments_verified"], 6);
+    // The sampled lane never reads an out-of-window segment: both faults pass.
+    assert_verdict("corrupt sampled", &s1, 0, "pass");
+    assert_verdict("omitted sampled", &s2, 0, "pass");
+    for (what, c, key, words) in [
+        (
+            "corrupt complete",
+            &c1,
+            &p1_key,
+            "does not match the manifest's sha256",
+        ),
+        (
+            "omitted complete",
+            &c2,
+            &p2_key,
+            "the store does not hold it",
+        ),
+    ] {
+        assert_verdict(what, c, 2, "fail-integrity");
+        let failed = &complete_block(c)["archive"]["segments_failed"];
+        let failed: Vec<&str> = failed
+            .as_array()
+            .unwrap_or_else(|| panic!("{what}: {failed}"))
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(failed.len(), 1, "{what}: {failed:?}");
+        assert!(
+            failed[0].ends_with(key.as_str()),
+            "{what}: {failed:?} vs {key}"
+        );
+        assert!(
+            complete_findings(c).contains(words),
+            "{what}: {}",
+            complete_findings(c)
+        );
+    }
+}
+
+/// A stub engine for phase 7's complete lane, which never asks the engine for
+/// sampled fingerprints: its `validation_run` is evidence only and is logged.
+struct NoEngine;
+
+impl logweir_core::engine::DataEngine for NoEngine {
+    fn id(&self) -> logweir_core::engine::EngineId {
+        logweir_core::engine::EngineId {
+            id: "none".into(),
+            version: "none".into(),
+            digest: "none".into(),
+        }
+    }
+    fn list_backup_sets(
+        &self,
+        _: &logweir_core::engine::StorageUrl,
+    ) -> Result<Vec<logweir_core::engine::BackupSetRef>, logweir_core::engine::EngineError> {
+        Err(logweir_core::engine::EngineError::Operational(
+            "unused".into(),
+        ))
+    }
+    fn describe(
+        &self,
+        _: &logweir_core::engine::BackupSetRef,
+    ) -> Result<logweir_core::engine::BackupSetFacts, logweir_core::engine::EngineError> {
+        Err(logweir_core::engine::EngineError::Operational(
+            "unused".into(),
+        ))
+    }
+    fn preflight(
+        &self,
+        _: &logweir_core::engine::RestorePlan,
+    ) -> Result<logweir_core::engine::PreflightReport, logweir_core::engine::EngineError> {
+        Err(logweir_core::engine::EngineError::Operational(
+            "unused".into(),
+        ))
+    }
+    fn restore(
+        &self,
+        _: &logweir_core::engine::RestorePlan,
+        _: &mut dyn logweir_core::engine::PhaseObserver,
+    ) -> Result<logweir_core::engine::RestoreFacts, logweir_core::engine::EngineError> {
+        Err(logweir_core::engine::EngineError::Operational(
+            "unused".into(),
+        ))
+    }
+    fn fingerprints(
+        &self,
+        _: &logweir_core::engine::SampleSelection,
+    ) -> Result<Vec<logweir_core::engine::RecordFingerprint>, logweir_core::engine::EngineError>
+    {
+        Err(logweir_core::engine::EngineError::Operational(
+            "the complete lane never asks for sampled fingerprints".into(),
+        ))
+    }
+}
+
+/// The archive's manifest as phase 7's facts, read the way
+/// `OsoCliEngine::describe` reads it: segment keys QUALIFIED by the store's
+/// prefix, first/last timestamps, counts and sha256 as the engine wrote them.
+fn facts_of(backup_id: &str, archive: &Archive) -> logweir_core::engine::BackupSetFacts {
+    use logweir_core::engine::*;
+    let store =
+        logweir_engine_oso::storage::Store::read_only_from_url(&kafka::archive_location(backup_id))
+            .expect("the archive store");
+    let m = &archive.manifest;
+    let topics = m["topics"]
+        .as_array()
+        .expect("topics")
+        .iter()
+        .map(|t| TopicFacts {
+            name: t["name"].as_str().expect("name").to_string(),
+            original_partition_count: Some(PARTS),
+            source_replication_factor: Some(1),
+            configurations: Default::default(),
+            partitions: t["partitions"]
+                .as_array()
+                .expect("partitions")
+                .iter()
+                .map(|p| PartitionFacts {
+                    partition_id: p["partition_id"].as_i64().expect("id") as i32,
+                    segments: p["segments"]
+                        .as_array()
+                        .expect("segments")
+                        .iter()
+                        .map(|s| SegmentFacts {
+                            key: store.qualify(s["key"].as_str().expect("key")),
+                            start_offset: s["start_offset"].as_i64().expect("start"),
+                            end_offset: s["end_offset"].as_i64().expect("end"),
+                            start_timestamp: s["start_timestamp"].as_i64().expect("ts"),
+                            end_timestamp: s["end_timestamp"].as_i64().expect("ts"),
+                            record_count: s["record_count"].as_i64().expect("count"),
+                            sha256: s["sha256"].as_str().unwrap_or_default().to_string(),
+                            uploaded_at: s["uploaded_at"].as_i64().unwrap_or_default(),
+                        })
+                        .collect(),
+                    gaps: vec![],
+                    pruned: vec![],
+                })
+                .collect(),
+        })
+        .collect();
+    BackupSetFacts {
+        backup_id: backup_id.to_string(),
+        created_at: chrono::Utc::now(),
+        source_cluster_id: None,
+        manifest_sha256: String::new(),
+        manifest_version_id: None,
+        consumer_group_snapshot_sha256: None,
+        topics,
+    }
+}
+
+/// **PROD-08.1 — duplicate output, reordered records, an omitted segment,
+/// reordered headers and a stray record, over the REAL broker and the REAL
+/// archive.** A target topic is written per fault by producing the archived
+/// records themselves (key, value, headers in order, CreateTime), with the
+/// fault applied; then phase 7's complete lane runs against the slot's broker
+/// (`RdKafkaReader`) and the archive in MinIO (`Store`). Faults cannot be
+/// injected between the engine's restore and phase 7 inside one
+/// `logweir restore run`, so this row drives phase 7 itself — the code under
+/// test — over a target whose content the row controls. The `exact` target
+/// is the control: the same machinery passes it.
+#[test]
+fn complete_coverage_over_faulted_targets_on_the_real_broker_and_archive() {
+    use logweir::drill::phase7_verify::run_with_coverage;
+    use logweir_core::engine::{BackupSetRef, RestorePlan, SampleSelection, WindowFloorSource};
+    let mut row = Row::new("cv-targets");
+    let topic = row.source_topic("cv-targets", &[("message.timestamp.type", "CreateTime")]);
+    let fixture = eight_per_partition("cv-targets");
+    kafka::produce_plain(&topic, &fixture).expect("produce");
+    let backup_id = row.backup_id("cv-targets");
+    backup_ok(&backup_id, &[&topic], 4);
+    let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
+    let facts = facts_of(&backup_id, &archive);
+    let store = logweir_engine_oso::storage::Store::read_only_from_url(&kafka::archive_location(
+        &backup_id,
+    ))
+    .expect("the archive store");
+    let as_out = |r: &Rec| Out {
+        partition: r.partition,
+        key: r.key.clone(),
+        value: r.value.clone(),
+        headers: r.headers.clone(),
+        timestamp: Some(r.timestamp),
+    };
+    let archived: Vec<Out> = archive.records.iter().map(as_out).collect();
+    let floor = archive
+        .segments
+        .iter()
+        .map(|s| s.start_timestamp)
+        .min()
+        .expect("segments");
+    let end = T + 10_000;
+
+    type Fault = fn(&mut Vec<Out>);
+    let faults: [(&str, Fault); 6] = [
+        ("exact", |_| {}),
+        ("duplicate", |v| {
+            let i = v.iter().position(|o| o.partition == 0).unwrap() + 2;
+            let copy = v[i].clone();
+            v.insert(i + 1, copy);
+        }),
+        ("reorder", |v| {
+            let i = v.iter().position(|o| o.partition == 1).unwrap() + 1;
+            v.swap(i, i + 1);
+        }),
+        ("omit", |v| {
+            let at: Vec<usize> = v
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| o.partition == 2)
+                .map(|(i, _)| i)
+                .collect();
+            for i in at[4..].iter().rev() {
+                v.remove(*i);
+            }
+        }),
+        ("headers", |v| {
+            let i = v.iter().position(|o| o.partition == 0).unwrap() + 3;
+            let h = &mut v[i].headers;
+            let last = h.len() - 1;
+            h.swap(last - 1, last);
+        }),
+        ("stray", |v| {
+            let mut o = v[0].clone();
+            o.headers = vec![(
+                "x-original-offset".into(),
+                Some(999i64.to_le_bytes().to_vec()),
+            )];
+            v.push(o);
+        }),
+    ];
+    let mut results = serde_json::Map::new();
+    for (name, fault) in faults {
+        let (_, target) = row.target(&format!("ft-{name}-"), &topic);
+        create_topic_for_fixed_timestamps(&target, PARTS, &[]);
+        let mut out = archived.clone();
+        fault(&mut out);
+        kafka::produce_plain(&target, &out).expect("produce the target");
+        let mapping: std::collections::BTreeMap<String, String> =
+            [(topic.clone(), target.clone())].into_iter().collect();
+        let set = BackupSetRef {
+            backup_id: backup_id.clone(),
+            manifest_key: kafka::manifest_key(&backup_id),
+        };
+        let sel: Vec<SampleSelection> = (0..PARTS)
+            .map(|p| SampleSelection {
+                set: set.clone(),
+                topic: topic.clone(),
+                partition: p,
+                anchor: logweir_core::spec::Anchor::Head,
+                count: 25,
+                window: (floor, end),
+            })
+            .collect();
+        let plan = RestorePlan {
+            set,
+            storage: kafka::archive_location(&backup_id),
+            target_bootstrap: vec![kafka::bootstrap()],
+            target_auth: logweir_core::engine::AuthRender::Plaintext,
+            topic_mapping: mapping.clone(),
+            time_window: (
+                chrono::DateTime::from_timestamp_millis(floor).unwrap(),
+                chrono::DateTime::from_timestamp_millis(end).unwrap(),
+            ),
+            window_floor_source: WindowFloorSource::ArchiveManifest,
+            default_replication_factor: 1,
+            checkpoint_state: demo_dir().join("cv-checkpoint.json"),
+            checkpoint_interval_secs: 30,
+            offset_report: demo_dir().join("cv-offsets.json"),
+        };
+        let started = Instant::now();
+        let v = run_with_coverage(
+            &NoEngine,
+            &reader(),
+            &store,
+            &facts,
+            &sel,
+            &mapping,
+            &plan,
+            &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+            logweir_core::spec::TargetMode::NewTopic,
+            logweir_core::spec::Coverage::Complete,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{name}: phase 7 did not run: {e:?}"));
+        let block = serde_json::to_value(&v.integrity).expect("integrity serialises");
+        eprintln!(
+            "[recsem] cv-targets {name}: result={:?} replay={} in {:?}",
+            v.integrity.result,
+            block["verification"]["complete"]["replay"],
+            started.elapsed()
+        );
+        results.insert(name.to_string(), block);
+    }
+    let path = demo_dir().join("record-semantics/cv-targets.json");
+    kafka::write_json(&path, &Value::Object(results.clone()));
+    if !contract_applies("cv-targets") {
+        return;
+    }
+    let replay = |name: &str| results[name]["verification"]["complete"]["replay"].clone();
+    let result = |name: &str| results[name]["result"].clone();
+    assert_eq!(result("exact"), "pass", "the control: {}", results["exact"]);
+    assert_eq!(replay("exact")["expected"], 24);
+    for (name, field, n) in [
+        ("duplicate", "duplicates", 1),
+        ("reorder", "out_of_order", 1),
+        ("omit", "missing", 4),
+        ("headers", "mismatched", 1),
+        ("stray", "unexpected", 1),
+    ] {
+        assert_eq!(result(name), "fail", "{name}: {}", results[name]);
+        assert_eq!(replay(name)[field], n, "{name}: {}", replay(name));
+    }
+}
