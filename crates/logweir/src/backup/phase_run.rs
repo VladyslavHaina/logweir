@@ -597,6 +597,8 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// `format_version` is `FORMAT_VERSION_WITH_TOPIC_CONFIGURATION` (`1.3.0`,
 /// PROD-05.1) of THIS document type (independent of the scorecard's), because
 /// this build writes `topic_configuration` on every receipt, pinned or not —
+/// or `FORMAT_VERSION_WITH_AUTH_MODES` (`1.4.0`, PROD-01.3) when the source's
+/// auth mode is one PROD-01.3 added — by
 /// `logweir_core::backup_receipt::format_version_for`, the one place that
 /// decides it. `source.auth` is `BackupOutcome::source_auth` rendered as the
 /// two strings `ReceiptAuth` holds — **never a password, and no field that
@@ -612,8 +614,12 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         manifest_version_id: outcome.manifest_version_id.clone(),
         prefix: outcome.archive_prefix.clone(),
     };
+    let auth = receipt_auth(&outcome.source_auth);
     BackupReceipt {
-        format_version: logweir_core::backup_receipt::format_version_for(&archive, true)
+        // PROD-01.3: the version follows the auth mode too — 1.4.0 for
+        // `scramSha256`, `plain` and `mtls` (it defines PROD-05.1's block as
+        // well), PROD-05.1's 1.3.0 document otherwise.
+        format_version: logweir_core::backup_receipt::format_version_for(&archive, true, &auth)
             .to_string(),
         run_id: outcome.run_id.clone(),
         backup_id: outcome.backup_id.clone(),
@@ -628,7 +634,7 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         source: ReceiptSource {
             cluster_id: outcome.source_cluster_id.clone(),
             bootstrap_servers: outcome.bootstrap_servers.clone(),
-            auth: receipt_auth(&outcome.source_auth),
+            auth,
             topics: outcome.topics.clone(),
         },
         engine: ReceiptEngine {
@@ -683,18 +689,20 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
 /// check_backup_receipt_invariants`'s mirror refuse any third value, so this
 /// literal cannot drift back without `logweir backup run` refusing its own
 /// receipt before it signs it.
+///
+/// **PROD-01.3** adds three values, and they are still chosen here and nowhere
+/// else: `AuthRender::mode_str` is `AuthSpec::mode_str`'s twin, so the receipt
+/// carries `scramSha256`, `plain` or `mtls` byte for byte as the spec, the CRD
+/// and the scorecard spell them, and `format_version_for` writes such a
+/// receipt as 1.3.0 — the version whose arm 5 defines them.
 fn receipt_auth(render: &logweir_core::engine::AuthRender) -> ReceiptAuth {
-    match render {
-        logweir_core::engine::AuthRender::Plaintext => ReceiptAuth {
-            mode: "plaintext".to_string(),
-            // `None`, never `Some("")`: no username is not an empty username,
-            // and `ReceiptAuth::username`'s own doc comment says so.
-            username: None,
-        },
-        logweir_core::engine::AuthRender::ScramSha512 { username, .. } => ReceiptAuth {
-            mode: "scramSha512".to_string(),
-            username: Some(username.clone()),
-        },
+    ReceiptAuth {
+        mode: render.mode_str().to_string(),
+        // `None`, never `Some("")`: no username is not an empty username, and
+        // `ReceiptAuth::username`'s own doc comment says so. `None` under
+        // `plaintext` and `mtls`; the SASL principal under the three SASL
+        // modes. Never a password: `AuthRender` has no field that holds one.
+        username: render.username().map(str::to_string),
     }
 }
 

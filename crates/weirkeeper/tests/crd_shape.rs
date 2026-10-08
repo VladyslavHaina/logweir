@@ -2573,9 +2573,10 @@ fn restore_target_mode_accepts_only_scratch_or_new_topic() {
 }
 
 /// The auth mode enum, byte for byte. Task 6's late-binding test compares the
-/// Rust `AuthSpec` against exactly this.
+/// Rust `AuthSpec` against exactly this. PROD-01.3 APPENDED three modes, so
+/// every value an earlier object could carry keeps its position.
 #[test]
-fn kafka_cluster_auth_mode_accepts_only_plaintext_or_scram_sha512() {
+fn kafka_cluster_auth_mode_accepts_only_the_five_modes() {
     let doc = crd("kafkaclusters.yaml");
     let node = at(
         spec_schema(&doc),
@@ -2583,8 +2584,9 @@ fn kafka_cluster_auth_mode_accepts_only_plaintext_or_scram_sha512() {
     );
     assert_eq!(
         enum_values(node),
-        vec!["plaintext", "scramSha512"],
-        "`auth.mode` is exactly [\"plaintext\",\"scramSha512\"], in that order (interface I1)"
+        vec!["plaintext", "scramSha512", "scramSha256", "plain", "mtls"],
+        "`auth.mode` is exactly [\"plaintext\",\"scramSha512\",\"scramSha256\",\"plain\",\"mtls\"], \
+         in that order: tag 1's two, then PROD-01.3's three appended (interface I1)"
     );
     let auth = at(spec_schema(&doc), &["properties", "auth"]);
     let mut names: Vec<&str> = auth
@@ -2597,9 +2599,17 @@ fn kafka_cluster_auth_mode_accepts_only_plaintext_or_scram_sha512() {
     names.sort();
     assert_eq!(
         names,
-        vec!["mode", "secretRef", "tls", "tlsCa", "username"],
-        "the auth block is {{mode, username, secretRef, tls, tlsCa}} and carries NO password field: \
-         PLAT-07.1 added the CA REFERENCE and the credential key NAME, never a value"
+        vec![
+            "clientCertificate",
+            "mode",
+            "secretRef",
+            "tls",
+            "tlsCa",
+            "username"
+        ],
+        "the auth block is {{mode, username, secretRef, tls, tlsCa, clientCertificate}} and \
+         carries NO password or key field: PLAT-07.1 added the CA REFERENCE and the credential \
+         key NAME, PROD-01.3 the client-certificate Secret REFERENCE — never a value"
     );
     let secret_ref = at(auth, &["properties", "secretRef", "properties"]);
     let mut secret_ref_names: Vec<&str> = secret_ref
@@ -4724,6 +4734,15 @@ fn the_crd_auth_mode_enum_and_auth_spec_agree() {
             username: "logweir".into(),
             tls: false,
         },
+        logweir_core::spec::AuthSpec::ScramSha256 {
+            username: "logweir".into(),
+            tls: false,
+        },
+        logweir_core::spec::AuthSpec::Plain {
+            username: "logweir".into(),
+            tls: true,
+        },
+        logweir_core::spec::AuthSpec::Mtls { tls: true },
     ]
     .iter()
     .map(|a| {
@@ -4738,10 +4757,18 @@ fn the_crd_auth_mode_enum_and_auth_spec_agree() {
 
     assert_eq!(
         rust_tags, crd_enum,
-        "`AuthSpec`'s serde tags and the CRD's `auth.mode` enum must be the same two strings in \
+        "`AuthSpec`'s serde tags and the CRD's `auth.mode` enum must be the same strings in \
          the same order (interface I33)"
     );
-    assert_eq!(crd_enum, vec!["plaintext", "scramSha512"]);
+    assert_eq!(
+        crd_enum,
+        vec!["plaintext", "scramSha512", "scramSha256", "plain", "mtls"]
+    );
+    assert_eq!(
+        crd_enum,
+        logweir_core::connection::AUTH_MODES.to_vec(),
+        "the CRD enum is the core's one mode list"
+    );
 
     // And `mode_str()` — the accessor the two documents are filled from — is
     // the same string again, so a document cannot carry a third spelling.
@@ -4758,10 +4785,26 @@ fn the_crd_auth_mode_enum_and_auth_spec_agree() {
         crd_enum[1]
     );
 
-    // NO THIRD MODE. The CRD's own doc comment says `mtls`, `gssapi`,
-    // `oauthbearer` and `scramSha256` are not in tag 1; the Rust enum must not
-    // have quietly grown one either.
-    assert_eq!(rust_tags.len(), 2, "{rust_tags:?}");
+    // NO SIXTH MODE. PROD-01.3 added `scramSha256`, `plain` and `mtls`;
+    // `gssapi`, `oauthbearer` and MSK IAM are deferred (OD-3), and the Rust
+    // enum must not have quietly grown one either.
+    assert_eq!(rust_tags.len(), 5, "{rust_tags:?}");
+    for (i, spec) in [
+        logweir_core::spec::AuthSpec::ScramSha256 {
+            username: "logweir".into(),
+            tls: true,
+        },
+        logweir_core::spec::AuthSpec::Plain {
+            username: "logweir".into(),
+            tls: true,
+        },
+        logweir_core::spec::AuthSpec::Mtls { tls: true },
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(spec.mode_str(), crd_enum[2 + i]);
+    }
 }
 
 /// **I33, Task 9b's half.** `TargetMode`'s serde names are exactly the

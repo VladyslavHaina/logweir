@@ -443,13 +443,51 @@ fn the_auth_mode_flag_maps_onto_the_spec_spellings() {
         "and it is still an answer, printed at once: a refusal is not a hang"
     );
 
-    // An unknown mode: the same shape, naming the mode and the two it knows.
-    let err = auth_spec("mtls", None, false).expect_err("mtls is not a tag-1 mode");
+    // An unknown mode: the same shape, naming the mode and the five it knows.
+    // (`mtls` was this row's example of an unknown mode until PROD-01.3 made
+    // it one of the five; OAUTHBEARER is deferred by OD-3.)
+    let err = auth_spec("oauthbearer", None, false).expect_err("oauthbearer is deferred");
     let text = err.to_string();
     assert!(
-        text.contains("mtls") && text.contains(AUTH_MODE_SCRAM_SHA_512),
+        text.contains("oauthbearer")
+            && text.contains(AUTH_MODE_SCRAM_SHA_512)
+            && text.contains("mtls"),
         "the diagnostic names what it got and what it accepts; got {text}"
     );
+
+    // PROD-01.3: the three new modes map onto the spec's own spellings…
+    assert_eq!(
+        auth_spec("scramSha256", Some("u"), false).expect("scram-256"),
+        logweir_core::spec::AuthSpec::ScramSha256 {
+            username: "u".to_string(),
+            tls: false,
+        }
+    );
+    assert_eq!(
+        auth_spec("plain", Some("u"), true).expect("plain over TLS"),
+        logweir_core::spec::AuthSpec::Plain {
+            username: "u".to_string(),
+            tls: true,
+        }
+    );
+    assert_eq!(
+        auth_spec("mtls", None, true).expect("mtls over TLS"),
+        logweir_core::spec::AuthSpec::Mtls { tls: true }
+    );
+    // …and PLAIN without `--tls` is refused with its named reason, before any
+    // client exists. KILLS: drop the `transport_refusal` check in `auth_spec`.
+    let err = auth_spec("plain", Some("u"), false).expect_err("PLAIN without TLS");
+    assert!(
+        err.to_string().contains("PlainWithoutTls"),
+        "the named reason; got {err}"
+    );
+    let err = auth_spec("mtls", None, false).expect_err("mtls without TLS");
+    assert!(err.to_string().contains("tls: true"), "got {err}");
+    // A SASL mode without a username names the flag, whichever mechanism.
+    for mode in ["scramSha256", "plain"] {
+        let err = auth_spec(mode, None, true).expect_err("no username");
+        assert!(err.to_string().contains("--username"), "{mode}: {err}");
+    }
 }
 
 /// The projected private CA reaches the probe through ONE variable and no

@@ -479,6 +479,30 @@ Neither message interpolates, so both `arm` fields are verbatim fragments of
 `Scorecard::validate_invariants` and `every_invariant_arm_has_a_corpus_case`
 joins on them exactly as it does for every other case here.
 
+## PROD-01.3: the versioned auth-mode cases (receipt 1.4.0, scorecard 1.5.0)
+
+PROD-01.3 adds `scramSha256`, `plain` and `mtls` to both auth-mode fields, as
+values of a NEW minor only: receipt format 1.4.0 (after PROD-05.1's 1.3.0) for `source.auth.mode`,
+scorecard format 1.5.0 for `target.auth.mode`. Each field's one closed-set arm
+becomes three statements in both readers, and each statement has a case. Every
+case is its file's unmodified document with exactly the overrides named.
+
+| case | index | override | pins |
+|---|---|---|---|
+| `source_auth_mode_mtls_under_1_4_0` | receipt | `format_version` → `1.4.0`, mode `mtls`, no username | ACCEPT: the document an mTLS backup writes |
+| `source_auth_mode_mtls_under_1_3_0` | receipt | the same under `1.3.0` | the BOUNDARY: PROD-05.1's 1.3.0 predates the new values (5b) |
+| `source_auth_mode_plain_under_1_0_0` | receipt | mode `plain` under `1.0.0` | 5b: a new mode under a version that predates it, named by version |
+| `source_auth_mode_outside_the_five` | receipt | `1.4.0`, mode `oauthbearer` | 5c: the closed five from 1.4.0 (OAUTHBEARER is deferred, OD-3) |
+| `target_auth_mode_plain_under_1_5_0` | scorecard | `1.5.0`, mode `plain` | ACCEPT: the document a restore into a PLAIN target writes |
+| `target_auth_mode_mtls_under_1_4_0` | scorecard | `1.4.0`, mode `mtls` | the BOUNDARY: PROD-08.1's 1.4.0 predates the new values |
+| `target_auth_mode_scram_sha_256_under_1_0_0` | scorecard | mode `scramSha256` under `1.0.0` | a new mode under an old version; the message names the version, never the mode |
+| `target_auth_mode_outside_the_five` | scorecard | `1.5.0`, mode `oauthbearer` | the closed five from 1.5.0 |
+
+The unchanged closed-two statement keeps its Task 5b cases
+(`…_is_the_legacy_spelling`), which are 1.0.0 documents and so still answer it.
+An older reader refuses every new-mode document through that statement, the
+safer verdict (OD-7, third case).
+
 ## FX-3: `topic_parity.not_reconstructed` (scorecard format 1.2.0)
 
 Ten `index.json` cases for the field and its five arms, NR-1 to NR-5, which

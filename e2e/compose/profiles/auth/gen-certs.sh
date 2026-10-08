@@ -18,11 +18,15 @@
 #                              client's PEM keystore)
 #   wrong-ca.pem               a CA that signed NOTHING here — the trust anchor
 #                              a wrong-CA refusal row presents
+#   wrong-client.pem / .key    a SELF-SIGNED client certificate (PROD-01.3) —
+#                              the identity a wrong-certificate refusal row
+#                              presents to the mTLS listener, which trusts
+#                              only ca.pem
 #
 # Runs in the stack's CLI image (confluentinc/cp-kafka, which carries openssl).
 set -euo pipefail
 cd /certs
-want="ca.pem ca.key broker.keystore.pem client.pem client.key client.keystore.pem wrong-ca.pem"
+want="ca.pem ca.key broker.keystore.pem client.pem client.key client.keystore.pem wrong-ca.pem wrong-client.pem wrong-client.key"
 missing=0
 for f in $want; do [ -s "$f" ] || missing=1; done
 if [ "$missing" = 0 ]; then
@@ -56,8 +60,14 @@ cat client.key client.pem ca.pem > client.keystore.pem
 openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days "$DAYS" \
   -subj "/CN=logweir-e2e WRONG CA" -keyout /dev/null -out wrong-ca.pem 2>/dev/null
 
+# PROD-01.3: a client identity the broker must refuse (signed by nobody it
+# trusts), in the same PEM shapes as client.pem / client.key.
+openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days "$DAYS" \
+  -subj "/CN=logweir-wrong-client" -keyout wrong-client.orig -out wrong-client.pem 2>/dev/null
+openssl pkcs8 -topk8 -nocrypt -in wrong-client.orig -out wrong-client.key
+
 rm -f ./*.csr ./*.srl ./*.ext ./*.orig broker.key broker.pem
-chmod 0644 ./*.pem client.key
+chmod 0644 ./*.pem client.key wrong-client.key
 chmod 0600 ca.key
 for f in $want; do [ -s "$f" ] || { echo "auth certs: $f was not written" >&2; exit 1; }; done
 openssl verify -CAfile ca.pem client.pem

@@ -11,11 +11,14 @@ use crate::scorecard::Scorecard;
 /// "with a new schema file beside the old one").
 ///
 /// **1.2.0 since FX-3** (`topic_parity.not_reconstructed`), and **1.3.0 since
-/// FX-8** (`source.time_basis`), and **1.4.0 since PROD-08.1**
-/// (`integrity.verification`); the 1.1.0, 1.2.0 and 1.3.0 files are frozen
-/// beside the current one the same way. The `$id` is built from
-/// [`crate::FORMAT_VERSION`], so the file this writes is always the one the
-/// writer's documents name.
+/// FX-8** (`source.time_basis`), **1.4.0 since PROD-08.1**
+/// (`integrity.verification`), and **1.5.0 since PROD-01.3**: the closed set of
+/// `target.auth.mode` grows by three values, which a scorecard declares by
+/// being 1.5.0; the 1.1.0 to 1.4.0 files are frozen beside the current one the
+/// same way, and the 1.4.0 file still describes every scorecard of a
+/// `plaintext` or `scramSha512` target, which this build writes as 1.4.0. The
+/// `$id` is built from [`crate::scorecard::FORMAT_VERSION_WITH_AUTH_MODES`],
+/// the newest minor.
 pub fn scorecard_schema() -> String {
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
         s.option_nullable = true;
@@ -26,7 +29,7 @@ pub fn scorecard_schema() -> String {
         .into_root_schema_for::<Scorecard>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-        crate::FORMAT_VERSION
+        crate::scorecard::FORMAT_VERSION_WITH_AUTH_MODES
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');
@@ -43,9 +46,11 @@ pub fn scorecard_schema() -> String {
 /// stop describing the type.
 ///
 /// **The current file is the newest MINOR** (FX-7 fix round, review M-2):
-/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_TOPIC_CONFIGURATION>.json`
-/// (`1.3.0`, PROD-05.1's `topic_configuration`), its `$id` built from that
-/// ONE constant, so a renumber is the constant and a file name
+/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_AUTH_MODES>.json`
+/// (`1.4.0`, PROD-01.3's three new `source.auth.mode` values; PROD-05.1's
+/// 1.3.0 `topic_configuration` file and FX-7's 1.2.0
+/// `archive.manifest_version_id` file are frozen beside it), its `$id` built
+/// from that ONE constant, so a renumber is the constant and a file name
 /// (`docs/stability.md`: a MINOR bump is "a new schema file beside the old
 /// one"). The older files are FROZEN beside it and never regenerated:
 /// `schemas/logweir-backup-receipt-1.0.0.json` describes every receipt written
@@ -64,7 +69,7 @@ pub fn backup_receipt_schema() -> String {
         .into_root_schema_for::<BackupReceipt>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-        crate::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
+        crate::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

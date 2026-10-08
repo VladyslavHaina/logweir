@@ -15,12 +15,14 @@ use crate::catalog::record::CatalogPoint;
 ///
 /// **The newest MINOR** (FX-7 fix round, review M-2): the `$id` and the file
 /// name come from ONE constant,
-/// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`](crate::catalog::record::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION)
-/// (`1.3.0`, PROD-05.1's `topics[].configuration`). The older files are FROZEN
-/// beside it: `schemas/logweir-catalog-point-1.0.0.json` for the records
-/// written before FX-4, FX-4's `-1.1.0.json` (`topics[].config_coverage`) for
-/// the records written without a pin before PROD-05.1, and FX-7's
-/// `-1.2.0.json` (`archive.manifest_version_id`) for the pinned ones.
+/// [`FORMAT_VERSION_WITH_AUTH_MODES`](crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES)
+/// (`1.4.0`, PROD-01.3's three new `source.auth_mode` values). The older files
+/// are FROZEN beside it: `schemas/logweir-catalog-point-1.0.0.json` for the
+/// records written before FX-4, FX-4's `-1.1.0.json` (`topics[].config_coverage`)
+/// for the records written without a pin before PROD-05.1, FX-7's `-1.2.0.json`
+/// (`archive.manifest_version_id`) for the pinned ones, and PROD-05.1's
+/// `-1.3.0.json` (`topics[].configuration`) for every record of a
+/// `plaintext`/`scramSha512` source this build writes.
 ///
 /// The `format_version` pattern (`^1\.[0-9]+\.[0-9]+$`) is on the type, not
 /// added here: a schema-only validator — the one route that does not go
@@ -38,7 +40,7 @@ pub fn catalog_point_schema() -> String {
         .into_root_schema_for::<CatalogPoint>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-catalog-point-{}.json",
-        crate::catalog::record::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
+        crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

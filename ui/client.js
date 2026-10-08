@@ -748,19 +748,15 @@ function operationStatus(summary) {
  *  reader can see what is missing instead of reading an empty cell and
  *  guessing why. */
 const ABSENT_IN_CONSOLE = Object.freeze({
-  // CONNECTION CONTRACT v1's TWO REFERENCES ARE NOT IN THE PRODUCT API YET.
-  // `schemas/logweir-api-v1.openapi.json`'s `ConnectionAuthView` carries the
-  // mode, the username, `credentialRef` and `tls` and nothing else, so a
-  // console-mode projection cannot say which data key of the Secret the
-  // controller projects, nor which private CA this connection trusts. They are
-  // NAMED here rather than left as empty cells, and `requestBody` refuses a
-  // create that carries either instead of dropping it: a form that silently
-  // sent a connection without its CA would produce an object that dials
-  // without one.
+  // CONNECTION CONTRACT v1's DATA-KEY REFERENCE IS NOT IN THE PRODUCT API.
+  // `ConnectionAuthView` carries the mode, the username, the credential and
+  // client-certificate Secret NAMES, `tls` and (since PROD-01.3) the CA
+  // reference, so a console-mode projection cannot say which data key of a
+  // hand-made Secret the controller projects. It is NAMED here rather than left
+  // as an empty cell, and `requestBody` refuses a create that carries one.
   kafkaclusters: Object.freeze([
     "status.conditions",
     "spec.auth.secretRef.passwordKey",
-    "spec.auth.tlsCa",
   ]),
   // D1 W7. THE CONTROLLER RECORDS THESE AND THE PRODUCT API DOES NOT PUBLISH
   // THEM. `ScheduleStatusView` carries `policy`, `nextRuns` and `activeRuns`
@@ -844,6 +840,19 @@ function projectConnection(item) {
   const credential = nameRef(item.auth.credentialRef);
   if (credential !== null) {
     auth.secretRef = credential;
+  }
+  // PROD-01.3: the mTLS Secret's NAME and the CA reference, in the custom
+  // resource's own spelling, so both modes render one shape.
+  const certificate = nameRef(item.auth.clientCertificateRef);
+  if (certificate !== null) {
+    auth.clientCertificate = certificate;
+  }
+  const ca = item.auth.tlsCa;
+  if (ca !== null && ca !== undefined && typeof ca.name === "string") {
+    const reference = { name: ca.name, key: ca.key };
+    auth.tlsCa = ca.kind === "secret"
+      ? { secretKeyRef: reference }
+      : { configMapKeyRef: reference };
   }
   object.spec = { bootstrapServers: item.bootstrapServers.slice(), auth: auth, role: item.role };
   if (item.markerTopic !== null) {
@@ -2656,20 +2665,43 @@ function requestBody(plural, object) {
           "cluster to create this connection.",
       );
     }
-    if (spec.auth.tlsCa !== undefined && spec.auth.tlsCa !== null) {
+    // PROD-01.3: a CA from a ConfigMap travels; one held in a Secret does not
+    // -- the product API takes the CA from a ConfigMap only, so every Secret a
+    // console-made connection uses is one the API created itself.
+    const ca = spec.auth.tlsCa;
+    if (ca !== undefined && ca !== null && ca.secretKeyRef) {
       throw noRoute(
-        "the product API's connection create has no field for spec.auth.tlsCa " +
-          "(saved-connection contract v1), so this connection cannot be created through it " +
-          "without dropping the private CA it named. Ask an administrator with access to the " +
-          "cluster to create this connection.",
+        "the product API takes a connection's private CA from a ConfigMap only (a CA " +
+          "certificate is public), so this connection cannot be created through it with a " +
+          "Secret-held CA. Put the CA certificate in a ConfigMap, or ask an administrator with " +
+          "access to the cluster to create this connection.",
+      );
+    }
+    // PROD-01.3 security follow-up: THE CONSOLE NEVER NAMES AN EXISTING SECRET.
+    // A connection that could name any Secret could make Logweir present
+    // another team's credential to brokers of its author's choosing; the
+    // product API refuses `credentialRef`, and this module never sends one.
+    if (((spec.auth.secretRef) || {}).name || ((spec.auth.clientCertificate) || {}).name) {
+      throw noRoute(
+        "the product API never names an existing Secret for a connection's credential: enter " +
+          "the password or the client certificate and key in the form, and the API stores it in " +
+          "a Secret owned by and bound to this connection.",
       );
     }
     const auth = { mode: spec.auth.mode, tls: spec.auth.tls === true };
     if (typeof spec.auth.username === "string" && spec.auth.username.length > 0) {
       auth.username = spec.auth.username;
     }
-    if (((spec.auth.secretRef) || {}).name) {
-      auth.credentialRef = { name: spec.auth.secretRef.name };
+    // THE WRITE-ONLY VALUE, off the object's own (non-enumerable) field: this
+    // is the one place it is read, and it goes straight into the request.
+    const entered = (object || {}).__credential;
+    if (entered !== undefined && entered !== null) {
+      auth.credential = Object.assign({}, entered);
+    }
+    if (ca !== undefined && ca !== null && ca.configMapKeyRef) {
+      auth.tlsCa = {
+        configMapKeyRef: { name: ca.configMapKeyRef.name, key: ca.configMapKeyRef.key },
+      };
     }
     const body = { role: spec.role, bootstrapServers: spec.bootstrapServers.slice(), auth: auth };
     if (typeof spec.markerTopic === "string" && spec.markerTopic.length > 0) {

@@ -72,6 +72,38 @@
     "arm": "source.auth.mode \"scram-sha-512\" is not one of the two values this format defines: \"plaintext\" or \"scramSha512\""
   },
   {
+    "id": "source_auth_mode_plain_under_1_0_0",
+    "file": "source_auth_mode_plain_under_1_0_0.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source.auth.mode \"plain\" is defined from 1.4.0 and format_version \"1.0.0\" predates it",
+    "arm": "source.auth.mode \"plain\" is defined from 1.4.0 and format_version \"1.0.0\" predates it"
+  },
+  {
+    "id": "source_auth_mode_outside_the_five",
+    "file": "source_auth_mode_outside_the_five.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source.auth.mode \"oauthbearer\" is not one of the five values this format defines: \"plaintext\", \"scramSha512\", \"scramSha256\", \"plain\" or \"mtls\"",
+    "arm": "source.auth.mode \"oauthbearer\" is not one of the five values this format defines: \"plaintext\", \"scramSha512\", \"scramSha256\", \"plain\" or \"mtls\""
+  },
+  {
+    "id": "source_auth_mode_mtls_under_1_3_0",
+    "file": "source_auth_mode_mtls_under_1_3_0.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source.auth.mode \"mtls\" is defined from 1.4.0 and format_version \"1.3.0\" predates it",
+    "arm": "source.auth.mode \"mtls\" is defined from 1.4.0 and format_version \"1.3.0\" predates it"
+  },
+  {
+    "id": "source_auth_mode_mtls_under_1_4_0",
+    "file": "source_auth_mode_mtls_under_1_4_0.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
     "id": "receipt_1_1_with_config_coverage",
     "file": "receipt_1_1_with_config_coverage.json",
     "rust_exit": 0,

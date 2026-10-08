@@ -4795,11 +4795,13 @@ impl Inputs {
                     crate::job::EnvFromSecret {
                         name: vars.access_key_id.to_string(),
                         secret_name: secret.clone(),
+                        optional: false,
                         key: access_key_id_key.clone(),
                     },
                     crate::job::EnvFromSecret {
                         name: vars.secret_access_key.to_string(),
                         secret_name: secret.clone(),
+                        optional: false,
                         key: secret_access_key_key.clone(),
                     },
                 ];
@@ -4807,6 +4809,7 @@ impl Inputs {
                     from_secret.push(crate::job::EnvFromSecret {
                         name: vars.session_token.to_string(),
                         secret_name: secret.clone(),
+                        optional: false,
                         key: token.clone(),
                     });
                 }
@@ -5137,6 +5140,16 @@ fn connection_plan(c: &ResolvedConnection) -> ConnectionPlan {
         // pod gets, and the runner passes the path to librdkafka without
         // opening it.
         ca_file: c.tls_ca.as_ref().map(|_| side.ca_file_path()),
+        // PROD-01.3: the `mtls` pair's IN-POD PATHS, exactly where the
+        // resolver's own projection mounts them — never key material.
+        client_cert_file: c
+            .client_certificate
+            .as_ref()
+            .map(|_| side.client_cert_file_path()),
+        client_key_file: c
+            .client_certificate
+            .as_ref()
+            .map(|_| side.client_key_file_path()),
         principal: c.principal.clone(),
     }
 }

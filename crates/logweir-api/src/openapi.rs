@@ -406,7 +406,7 @@ fn paths() -> Value {
                 list("listConnections", "KafkaCluster projections. Secret reference names only.", "ConnectionList"),
                 create(
                     "createConnection",
-                    "Create a KafkaCluster that references an existing credential Secret by name.",
+                    "Create a KafkaCluster. A SASL password or an mTLS client certificate and key may be entered ONCE in auth.credential; it becomes a Secret owned by and bound to the connection and is never read back or echoed. An existing Secret is never named.",
                     "CreateConnectionRequest",
                     "ConnectionResponse",
                 ),

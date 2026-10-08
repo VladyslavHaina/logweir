@@ -188,6 +188,34 @@ pub struct TimeBasisLabel {
 /// `the_written_version_defines_time_basis` keeps the pair coherent.
 pub const TIME_BASIS_SINCE_MINOR: u64 = 3;
 
+/// **PROD-01.3.** The first minor of scorecard format 1 whose
+/// `target.auth.mode` may be one of `crate::connection::PROD_01_3_AUTH_MODES`
+/// (`scramSha256`, `plain`, `mtls`). **A renumber changes this and
+/// [`FORMAT_VERSION_WITH_AUTH_MODES`] together**, and
+/// `docs/verify_scorecard.py`'s `SCORECARD_AUTH_MODES_SINCE_MINOR` follows it.
+pub const AUTH_MODES_SINCE_MINOR: u64 = 5;
+
+/// **PROD-01.3.** The `format_version` of a scorecard whose `target.auth.mode`
+/// is one of the modes PROD-01.3 added — a MINOR bump over
+/// [`crate::FORMAT_VERSION`] (1.4.0) for new content in an existing field that
+/// an older reader can only refuse (OD-7, third case). Written only for those
+/// modes ([`format_version_for_target`]), so every scorecard of a restore into
+/// a `plaintext` or `scramSha512` target is the 1.4.0 document it was.
+pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.5.0";
+
+/// The `format_version` a scorecard is written with, given its
+/// `target.auth` block: [`FORMAT_VERSION_WITH_AUTH_MODES`] for a PROD-01.3
+/// mode, else [`crate::FORMAT_VERSION`].
+#[must_use]
+pub fn format_version_for_target(auth: Option<&AuthSummary>) -> &'static str {
+    match auth {
+        Some(a) if crate::connection::is_prod_01_3_auth_mode(&a.mode) => {
+            FORMAT_VERSION_WITH_AUTH_MODES
+        }
+        _ => crate::FORMAT_VERSION,
+    }
+}
+
 /// `source.time_basis.plan`'s one value (arm TB-2):
 /// `crate::spec::TimeBasis::ProducerTime`'s wire spelling.
 pub const TIME_BASIS_PRODUCER_TIME: &str = "producerTime";
@@ -281,11 +309,12 @@ pub struct TargetInfo {
 /// read the wrong way round. The way to say plaintext is to write no block.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct AuthSummary {
-    /// **A CLOSED SET OF TWO: `"plaintext"` or `"scramSha512"`** — the same
-    /// two values `crate::backup_receipt::ReceiptAuth::mode` carries, and for
-    /// the same reason: they are `crate::spec::AuthSpec`'s serde tag values,
-    /// the `KafkaCluster` CRD's `auth.mode` enum byte for byte, and the only
-    /// two strings `AuthSpec::mode_str()` — which is what
+    /// **A CLOSED SET, VERSIONED: `"plaintext"` or `"scramSha512"` in every
+    /// format, and from 1.5.0 also `"scramSha256"`, `"plain"` or `"mtls"`
+    /// (PROD-01.3)** — the values `crate::backup_receipt::ReceiptAuth::mode`
+    /// carries, and for the same reason: they are `crate::spec::AuthSpec`'s
+    /// serde tag values, the `KafkaCluster` CRD's `auth.mode` enum byte for
+    /// byte, and the only strings `AuthSpec::mode_str()` — which is what
     /// `logweir::drill::target_info` fills this field from — can return.
     ///
     /// Task 5b shipped this field with NO documented value set at all, and
@@ -1474,7 +1503,34 @@ impl Scorecard {
             // in this tree produces. Both documents use the same rule —
             // `ReceiptAuth::mode`'s arm 5 does not trim either — so one
             // spelling means one comparison as well as one string.
-            if !matches!(auth.mode.as_str(), "plaintext" | "scramSha512") {
+            //
+            // PROD-01.3 (format 1.5.0) SPLITS THIS ARM BY VERSION and leaves
+            // every document below 1.5.0 judged exactly as before: the three
+            // modes PROD-01.3 adds are values of 1.5.0 and later, so under an
+            // older minor they are refused as a value no writer of that
+            // version produced (the second statement below, which names the
+            // version and never the mode), and from 1.5.0 the closed set is
+            // five (the third). An older reader refuses a 1.5.0 scorecard
+            // naming a new mode through the first statement — the SAFER
+            // verdict, OD-7's third case — so the change is MINOR.
+            let five_defined = major_version(&self.format_version) == Some(1)
+                && minor_version(&self.format_version)
+                    .is_some_and(|minor| minor >= AUTH_MODES_SINCE_MINOR);
+            if crate::connection::is_prod_01_3_auth_mode(&auth.mode) {
+                if !five_defined {
+                    return Err(InvariantError(format!(
+                        "target.auth.mode is a value defined from 1.{AUTH_MODES_SINCE_MINOR}.0 \
+                         and format_version {:?} predates it",
+                        self.format_version
+                    )));
+                }
+            } else if !crate::connection::ORIGINAL_AUTH_MODES.contains(&auth.mode.as_str()) {
+                if five_defined {
+                    return Err(InvariantError(
+                        "target.auth.mode is not one of the five values this format defines; it is \"plaintext\", \"scramSha512\", \"scramSha256\", \"plain\" or \"mtls\" and nothing else"
+                            .into(),
+                    ));
+                }
                 return Err(InvariantError(
                     "target.auth.mode is not one of the two values this format defines; it is \"plaintext\" or \"scramSha512\" and nothing else"
                         .into(),

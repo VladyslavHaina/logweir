@@ -1566,7 +1566,7 @@ no configuration is reconstructed by hand.**
    topics to restore, and the readiness check reads the manifest for exactly
    those names. Since PROD-05.1 the view lists an `Available` point's topics
    with their recorded partition count and replication factor
-   (`PointView.topics[]`, for points whose receipt is format 1.3.0); the wizard
+   (`PointView.topics[]`, for points whose receipt is format 1.3.0 or later); the wizard
    defaults the plan's replication factor from them, capped at the target's
    broker count, and says so. The operator still types the list: a listed topic
    set is not yet offered as a choice.
@@ -7865,12 +7865,14 @@ preflight check refuses exactly what a run refuses.
 | Field | Absent means | Reference or value |
 |---|---|---|
 | `bootstrapServers` | required, at least one entry | value (public address) |
-| `auth.mode` | required: `plaintext` or `scramSha512` | value |
-| `auth.username` | required for `scramSha512` | value (public identity) |
-| `auth.secretRef.name` | required for `scramSha512` | **reference** to a Secret in this namespace |
+| `auth.mode` | required: `plaintext`, `scramSha512`, `scramSha256`, `plain` or `mtls` (§20.8) | value |
+| `auth.username` | required for the SASL modes (`scramSha512`, `scramSha256`, `plain`) | value (public identity) |
+| `auth.secretRef.name` | required for the SASL modes | **reference** to a Secret in this namespace |
 | `auth.secretRef.passwordKey` | `password` | key name, not a value |
-| `auth.tls` | `false` | value (the only switch that turns TLS on) |
+| `auth.tls` | `false` | value (the only switch that turns TLS on; **required** `true` for `plain` and `mtls`) |
 | `auth.tlsCa` | the runner image's `ca-certificates` and the engine's bundled roots | **reference** to a Secret or ConfigMap key in this namespace |
+| `auth.clientCertificate` | required for `mtls`, refused for every other mode | **reference** to ONE Secret in this namespace: `name`, `certificateKey` (absent: `tls.crt`), `privateKeyKey` (absent: `tls.key`) |
+| `status.credentialBinding` | written by the controller for a connection with a credential | the value the credential Secret's `logweir-binding` key must hold (§20.9) |
 | `role` | required: `source` or `target` | value |
 | `markerTopic` | no marker topic; a `mode: scratch` restore against this cluster is refused | value |
 
@@ -7963,6 +7965,11 @@ field. None of them is ever dialled.
 | no `bootstrapServers`, or an entry that is empty or carries a comma or whitespace | `ConnectionConfigInvalid` |
 | `auth.mode: scramSha512` with no `auth.username` | `CredentialNotRenderable` |
 | `auth.mode: scramSha512` with no `auth.secretRef.name` | `CredentialNotRenderable` |
+| `auth.mode: scramSha256` or `plain` with no `auth.username` or `auth.secretRef.name` | `CredentialNotRenderable` |
+| `auth.mode: plain` with `auth.tls: false` (SASL/PLAIN in the clear) | **`PlainWithoutTls`** (also rejected at admission by CEL) |
+| `auth.mode: mtls` with `auth.tls: false` | `ConnectionConfigInvalid` (also CEL) |
+| `auth.mode: mtls` with no `auth.clientCertificate`, or `auth.clientCertificate` on any other mode | `CredentialNotRenderable` / `ConnectionConfigInvalid` (both also CEL) |
+| a projected credential whose Secret carries no `logweir-binding`, or another connection's | **`CredentialBindingMismatch`** — refused by the RUNNER before any client exists (§20.9) |
 | a Secret/ConfigMap name that is not a DNS-1123 subdomain, or a key that is not a legal `data` key | `ConnectionReferenceInvalid` |
 | a Job in a namespace other than the `KafkaCluster`'s | `ConnectionReferenceInvalid` |
 | a field the running controller does not implement | `ConnectionFieldUnsupported` |
@@ -8085,9 +8092,14 @@ recognisable values and grepping every rendered output
   and the CA is a projected volume, both resolved by the kubelet.
 - **No download or evidence artifact** carries one. A receipt records the
   username, which is identity.
-- **No readback path exists.** `connection::credential` can build a
-  credential Secret for a write-only entry flow and can never read one; the
-  caller keeps `metadata` from the create response and nothing else.
+- **No readback path exists.** `connection::credential` builds a credential
+  Secret for the console's write-only entry flow (the password, or since
+  PROD-01.3 an mTLS certificate and key) and can never read one; the caller
+  keeps `metadata` from the create response and nothing else.
+- **No client key is held by any Logweir process.** An `mtls` key reaches both
+  clients as a projected FILE whose path is all the runner sees (§20.8); the
+  e2e rows scan every output, receipt and scorecard for a line of the key's
+  body (`e2e/tests/auth_modes.rs`).
 
 The CA **certificate** is public by nature and may be held in a ConfigMap. A
 CA **private key** has no place in this contract, in any object Logweir reads,
@@ -8100,6 +8112,188 @@ but a Secret-backed CA is the one case where a Secret's name and key appear in
 a plan ConfigMap (§20.6), and an adopter whose policy is "no Secret name in a
 ConfigMap" gets that for free by putting the certificate where public material
 belongs.
+
+### 20.8 Client authentication modes (PROD-01.3)
+
+| `auth.mode` | `auth.tls` | Credential | Logweir's client (librdkafka) | The engine |
+|---|---|---|---|---|
+| `plaintext` | `false` only | none | `PLAINTEXT` | no `security:` block |
+| `scramSha512` | either | password (`secretRef`) | `SASL_PLAINTEXT`/`SASL_SSL`, `SCRAM-SHA-512` | `SCRAM-SHA512` |
+| `scramSha256` | either | password (`secretRef`) | `SASL_PLAINTEXT`/`SASL_SSL`, `SCRAM-SHA-256` | `SCRAM-SHA256` |
+| `plain` | **`true` only** | password (`secretRef`) | `SASL_SSL`, `PLAIN` | `SASL_SSL`, `PLAIN` |
+| `mtls` | **`true` only** | client certificate and key (`clientCertificate`) | `SSL`, `ssl.certificate.location` / `ssl.key.location` | `SSL`, `ssl_certificate_location` / `ssl_key_location` |
+
+**SASL/PLAIN only over TLS.** PLAIN sends the password itself, so `plain`
+without `tls: true` is refused — never dialled — with the named reason
+**`PlainWithoutTls`**: by the CRD's admission rule, by the resolver before any
+Job exists, by every runner entry point (`refusal-reason=PlainWithoutTls`,
+exit 3) before any client exists, and by both clients' builders as a backstop.
+Confluent Cloud API keys and Azure Event Hubs connection strings
+(`username: $ConnectionString`) use this mode.
+
+**mTLS** presents the client certificate in the TLS handshake. Create the
+Secret with `kubectl create secret tls <name> --cert=client.pem --key=client.key`
+(the key **unencrypted**: PKCS#8, PKCS#1 or SEC1; neither client takes a
+passphrase) and name it in `auth.clientCertificate`. The controller projects it
+read-only (mode `0440`) as `tls.crt` and `tls.key` under
+`/connection/source-client-cert` or `/connection/target-client-cert`, and names
+the two **paths** in `LOGWEIR_{SOURCE,TARGET}_TLS_CERT_FILE` /
+`..._TLS_KEY_FILE`; both clients load the files themselves, so no Logweir
+process holds the key's bytes. An `mtls` connection has no username: the Kafka
+principal is the certificate's subject, which the controller (holding no
+Secret read) cannot know, so its `principal` is reported as
+`mtls:secret/<name>` and a restore plan binds the mode and the transport, not
+the principal. Any TLS mode takes `auth.tlsCa` (§20.2).
+
+The signed documents name the mode: a backup receipt and a catalog point
+record that name `scramSha256`, `plain` or `mtls` are format **1.4.0**, a
+scorecard **1.5.0**; every `plaintext`/`scramSha512` run writes exactly the
+document it always did ([stability.md](stability.md)).
+
+Example (SASL/PLAIN to Confluent Cloud, public CA):
+
+```yaml
+apiVersion: logweir.dev/v1alpha1
+kind: KafkaCluster
+metadata: {name: confluent-prod, namespace: team-a}
+spec:
+  bootstrapServers: ["pkc-xxxxx.us-east-1.aws.confluent.cloud:9092"]
+  role: source
+  auth:
+    mode: plain
+    tls: true
+    username: <API key>
+    secretRef: {name: confluent-prod-credential}   # holds `password` and `logweir-binding`
+```
+
+### 20.9 The credential binding: a connection presents only its own credential
+
+**The threat.** A connection names the Secret its credential is in. Without
+more, anyone who may write a `KafkaCluster` — or ask the console to — could
+name **another** connection's credential Secret, one they cannot read, point
+`bootstrapServers` at a host they control, and have Logweir's probe and runner
+present that credential there: Logweir would be the deputy that exfiltrates it
+(SASL/PLAIN sends the password itself; SCRAM hands the host an exchange it can
+guess against offline; a client certificate is presented to a server the
+author chose).
+
+**The binding.** A credential Secret is used only when its data key
+`logweir-binding` equals the binding of the connection that projected it:
+
+```
+v1:<KafkaCluster UID>:sha256:<digest of the bootstrap set, mode, username, tls and CA reference>
+```
+
+Every Job built from a connection with a credential carries the EXPECTED value
+as a literal (`LOGWEIR_{SOURCE,TARGET}_CREDENTIAL_BINDING_EXPECTED`) and the
+Secret's own `logweir-binding` key as an **optional** `secretKeyRef`
+(`LOGWEIR_{SOURCE,TARGET}_CREDENTIAL_BINDING`). Every runner — `backup run`,
+`restore run`/`drill run`, `cluster-probe`, the discovery and preflight check
+runner, `doctor` — compares the two **before any client exists and before the
+credential is used**, and refuses an absent or different binding with
+**`CredentialBindingMismatch`** (exit 3, `refusal-reason=CredentialBindingMismatch`;
+on a `KafkaCluster`, the `Reachable` condition's reason; on a `Preflight`, an
+`AuthenticationFailed` row whose message opens with it). No Secret is read by
+the controller: the kubelet projects, the runner compares.
+
+**Why a UID and an endpoint, and why that covers "edit the endpoint, keep the
+password".** A UID exists only once the object does, so no Secret written for
+one connection can name another. `spec` is CEL-immutable, so a connection's
+endpoint cannot change under its UID: a new bootstrap address, CA or transport
+is a **new** `KafkaCluster` with a new UID, which no stored credential names —
+the credential must be entered again. The endpoint digest holds the same rule a
+second time, for an object whose `spec` changed by a route that bypassed the
+immutability rule. Tested: `crates/weirkeeper/tests/connection.rs::
+the_credential_binding_names_this_connection_and_its_endpoint`.
+
+**Where the binding comes from.** The **console** never names a Secret: the
+product API takes the password, or the client certificate and key, ONCE
+(write-only), creates the Secret itself — type
+`logweir.dev/kafka-sasl-password` or `logweir.dev/kafka-client-certificate`,
+labelled `app.kubernetes.io/managed-by: logweir` and `logweir.dev/connection`,
+**owned by the `KafkaCluster`** (deleting the connection collects it) and
+carrying the binding — and never reads it back ([api.md](api.md)). With
+**`kubectl`**, create the `KafkaCluster`, read its binding, and write it into
+the Secret:
+
+```
+kubectl --context <ctx> -n <ns> get kafkacluster <name> -o jsonpath='{.status.credentialBinding}'
+kubectl --context <ctx> -n <ns> create secret generic <name>-credential \
+  --from-literal=password='<password>' --from-literal=logweir-binding='<that value>'
+```
+
+**Upgrade: existing credentialed connections must be bound — one at a time,
+by name, after an inventory.** A `scramSha512` connection created before this
+release has a Secret with no `logweir-binding`, and every run of it is refused
+(`CredentialBindingMismatch`) until the key is added — fail closed, never a
+credential presented unbound. **The binding step can itself perform the theft
+the binding prevents**, so it is done carefully: before this release nothing
+stopped a `KafkaCluster` from naming another connection's Secret, so a "thief"
+connection — someone else's Secret, an endpoint its author controls — may
+already exist. Binding "each connection's Secret" in a loop would bind the
+victim's Secret to whichever connection came last; "splitting" a shared Secret
+would copy the victim's credential into a Secret bound to the thief.
+
+1. **Before the roll, suspend the credentialed schedules** (`spec.suspend:
+   true` on each `BackupSchedule` and `RehearsalSchedule` that uses such a
+   connection). `status.credentialBinding` exists only once the new controller
+   has probed the connection, and until the Secret is bound every run of it is
+   refused; suspending turns those refusals into skipped slots.
+2. **Inventory, per namespace, and stop on any Secret named twice:**
+
+   ```
+   kubectl --context <ctx> -n <ns> get kafkaclusters \
+     -o custom-columns=CONNECTION:.metadata.name,SECRET:.spec.auth.secretRef.name,SERVERS:.spec.bootstrapServers
+   ```
+
+   A Secret that appears in more than one row is **an incident, not a split**:
+   ask the credential's owner which connection is theirs, check the other's
+   `bootstrapServers` and its creator (`api.logweir.dev/actor` when the console
+   made it), delete the connection they do not recognise, and treat the
+   credential as exposed if that connection ever ran. A second legitimate
+   connection gets its own credential, entered again by its owner (the console
+   creates the Secret) — never a copy of a Secret another connection names.
+3. **Bind one connection at a time, by an explicit command that names both the
+   connection and the Secret**, and only when the connection already named that
+   Secret before the upgrade and its owner confirms the endpoint:
+
+   ```
+   c=<connection>; s=<secret>
+   # the connection must name exactly this Secret ...
+   test "$(kubectl --context <ctx> -n <ns> get kafkacluster "$c" -o jsonpath='{.spec.auth.secretRef.name}')" = "$s"
+   # ... and this must be the endpoint the credential's owner expects
+   kubectl --context <ctx> -n <ns> get kafkacluster "$c" -o jsonpath='{.spec.bootstrapServers}{"\n"}'
+   b=$(kubectl --context <ctx> -n <ns> get kafkacluster "$c" -o jsonpath='{.status.credentialBinding}')
+   kubectl --context <ctx> -n <ns> patch secret "$s" --type merge \
+     -p "{\"stringData\":{\"logweir-binding\":\"$b\"}}"
+   ```
+
+   Never iterate over every connection, and never bind a Secret a connection
+   started naming after the inventory.
+4. **Resume the schedules.** A console-mode adopter needs a kubectl user with
+   Secret `patch` for step 3: the console has no re-bind action, by design
+   (it never names an existing Secret).
+
+Rollback: an older controller and runner ignore the binding pair, so a bound
+Secret keeps working with them; the extra key is inert. Connections created
+through this release's console are bound when they are made and need none of
+this.
+
+**What it does not close.** Anyone who can **write** a Secret can bind a
+credential they put there — that is their own credential. A namespace
+administrator with Secret read can read every credential anyway. **For a
+connection credential, Secret `patch` is equivalent to Secret `get`:** a
+principal who may patch Secrets but not read them can set a victim Secret's
+`logweir-binding` to a thief connection's `status.credentialBinding` (public)
+and so re-bind a credential they never saw to an endpoint they chose. Grant
+Secret `patch` in a namespace only to principals you would let read its
+credentials. The kubelet
+projects a foreign Secret's value into the refused pod's environment before
+the runner refuses; it never leaves the pod (`automountServiceAccountToken:
+false`, no network use before the check), and the pod exits at once
+([SECURITY.md](../SECURITY.md)). A CA reference is not bound: a CA is public
+and is only ever a local trust anchor, never sent anywhere — and the console
+takes a CA from a ConfigMap only.
 
 ## 21. `Preflight`: what a readiness check proves, and what it cannot
 

@@ -588,7 +588,13 @@ async fn connections_project_secret_names_only_and_create_typed_objects() {
     assert_eq!(created.status, 201);
     let sent = post_bodies(&app, "/kafkaclusters").pop().unwrap();
     assert_eq!(sent["kind"], "KafkaCluster");
-    assert_eq!(sent["spec"]["auth"]["secretRef"]["name"], "source-scram");
+    // PROD-01.3 security follow-up: the connection names the Secret THIS
+    // request created from the entered password, never one the request chose.
+    let name = created.json()["item"]["name"].as_str().unwrap().to_string();
+    assert_eq!(
+        sent["spec"]["auth"]["secretRef"]["name"],
+        format!("{name}-credential")
+    );
     assert_eq!(sent["spec"]["role"], "source");
     assert!(sent["status"].is_null());
     // The field manager is recorded on the write.
@@ -604,7 +610,7 @@ async fn connections_project_secret_names_only_and_create_typed_objects() {
         post.query
     );
 
-    // Validation: scram needs a username and a credential name, plaintext takes neither.
+    // Validation: scram needs a username and a password, plaintext takes neither.
     for body in [
         json!({"role": "source", "bootstrapServers": ["kafka:9092"], "auth": {"mode": "scramSha512", "tls": false}}),
         json!({"role": "source", "bootstrapServers": ["kafka:9092"], "auth": {"mode": "plaintext", "username": "u", "tls": false}}),
