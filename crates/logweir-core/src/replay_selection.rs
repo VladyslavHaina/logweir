@@ -345,7 +345,38 @@ impl ReplaySelection {
     /// start there is no lower bound (module doc).
     #[must_use]
     pub fn selects_timestamp(&self, ts: i64) -> bool {
-        ts <= self.window_end_ms && self.window_start_ms.is_none_or(|s| ts >= s)
+        Self::window_selects(self.window_start_ms, self.window_end_ms, ts)
+    }
+
+    /// THE record predicate, over a window given as values: `ts <= end_ms`,
+    /// and `ts >= start_ms` when there is one. The complete verification's
+    /// expected output is selected by it (`complete::window_of` gives the
+    /// window from the plan), as [`ReplaySelection::selects_timestamp`] is.
+    #[must_use]
+    pub fn window_selects(start_ms: Option<i64>, end_ms: i64, ts: i64) -> bool {
+        ts <= end_ms && start_ms.is_none_or(|s| ts >= s)
+    }
+
+    /// The selection a built plan carries: its mapped topics, its start when
+    /// it states one of its own (`InheritedFromSpec`; `None` for the archive's
+    /// floor), its end and its per-topic subsets. Phase 7 judges a restore by
+    /// this — the plan phase 5 checked against the approved spec — so it needs
+    /// no second reading of the spec.
+    #[must_use]
+    pub fn from_plan(plan: &crate::engine::RestorePlan) -> Self {
+        Self {
+            topics: plan.topic_mapping.keys().cloned().collect(),
+            window_start_ms: (plan.window_floor_source == WindowFloorSource::InheritedFromSpec)
+                .then(|| plan.time_window.0.timestamp_millis()),
+            window_end_ms: plan.time_window.1.timestamp_millis(),
+            window_end_field: "the plan's time_window end",
+            partitions: plan
+                .source_partitions
+                .iter()
+                .filter(|(t, _)| plan.topic_mapping.contains_key(*t))
+                .map(|(t, ps)| (t.clone(), ps.iter().copied().collect()))
+                .collect(),
+        }
     }
 
     /// The engine's segment rule over the window `[start, end]`: the segment's

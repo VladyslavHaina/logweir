@@ -65,6 +65,7 @@
 use super::{Evidence, SelectionVerdict};
 use crate::drill::DrillError;
 use logweir_core::engine::{BackupSetFacts, PartitionFacts, RestorePlan, WindowFloorSource};
+use logweir_core::replay_selection::ReplaySelection;
 use logweir_core::scorecard::{
     ArchiveIntegrity, CompleteVerification, CompleteWindow, OffsetRange, PartitionVerification,
     ReplayComparison, PARTITION_FINDINGS_CAP,
@@ -116,8 +117,10 @@ pub fn window_of(plan: &RestorePlan) -> CompleteWindow {
     }
 }
 
+/// PROD-11.1: the shared record predicate (`ReplaySelection::window_selects`),
+/// the one the selection's preview and the plan are judged by.
 fn selected(window: &CompleteWindow, ts: i64) -> bool {
-    ts <= window.end_ms && window.start_ms.is_none_or(|s| ts >= s)
+    ReplaySelection::window_selects(window.start_ms, window.end_ms, ts)
 }
 
 /// A partition's findings in words, capped: the counts are complete, the
@@ -472,13 +475,23 @@ pub(super) fn run(
     max_records: Option<u64>,
 ) -> Result<CompleteOutcome, DrillError> {
     let window = window_of(plan);
-    // Every (source topic, partition) to verify: the manifest's and the
-    // target's, unioned.
+    // PROD-11.1: the plan's partition selection. A plan with no subset
+    // selects every partition, and this loop is what it was.
+    let selection = ReplaySelection::from_plan(plan);
+    // Every (source topic, partition) to verify: the manifest's SELECTED
+    // partitions and the target's, unioned. A partition the plan did not
+    // select is compared only when the target holds a record there — with
+    // nothing expected, so every such record is unexpected and fails it —
+    // and otherwise is not listed: `complete.partitions[]` names the
+    // selection, never the archive's every partition (PROD-11.1 §5).
     let mut parts: BTreeMap<(String, i32), (String, i64)> = BTreeMap::new();
     for (src, tgt) in mapping {
         let ends: BTreeMap<i32, i64> = reader.end_offsets(tgt)?.into_iter().collect();
         if let Some(t) = facts.topics.iter().find(|t| &t.name == src) {
             for p in &t.partitions {
+                if !selection.selects_partition(src, p.partition_id) {
+                    continue;
+                }
                 parts.insert(
                     (src.clone(), p.partition_id),
                     (tgt.clone(), ends.get(&p.partition_id).copied().unwrap_or(0)),
@@ -486,7 +499,9 @@ pub(super) fn run(
             }
         }
         for (pid, hi) in ends {
-            parts.insert((src.clone(), pid), (tgt.clone(), hi));
+            if selection.selects_partition(src, pid) || hi > 0 {
+                parts.insert((src.clone(), pid), (tgt.clone(), hi));
+            }
         }
     }
     for (t, p) in listed {
@@ -516,11 +531,15 @@ pub(super) fn run(
 
     for ((src, pid), (tgt, hi)) in &parts {
         let id = format!("{src}/{pid}");
+        // An unselected partition expects NOTHING, whatever the archive holds
+        // for it (PROD-08.1 §2.1, "Partition subsets").
+        let chosen = selection.selects_partition(src, *pid);
         let pf = facts
             .topics
             .iter()
             .find(|t| &t.name == src)
-            .and_then(|t| t.partitions.iter().find(|p| p.partition_id == *pid));
+            .and_then(|t| t.partitions.iter().find(|p| p.partition_id == *pid))
+            .filter(|_| chosen);
         if let Some(pf) = pf {
             for &(a, b) in &pf.gaps {
                 gaps.push(range(src, *pid, a, b));
@@ -530,6 +549,13 @@ pub(super) fn run(
             }
         }
         let mut findings = Findings::default();
+        if !chosen {
+            findings.push(format!(
+                "not selected by the plan's restore.partitions, so nothing is expected here, \
+                 and the target holds {} record(s) in it",
+                (*hi).max(0)
+            ));
+        }
         // THE BOUND, decided before any byte of the partition is read, from
         // the manifest's own counts: a cost bound, never a verification claim.
         let estimate: u64 = pf.map_or(0, |p| {

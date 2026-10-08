@@ -1180,3 +1180,171 @@ fn a_short_target_read_is_refused_and_never_a_smaller_comparison() {
     assert_eq!(v.integrity.result, IntegrityResult::Fail);
     assert_eq!(block(&v).partitions[0].replay.unexpected, 1);
 }
+
+// ============================================== PROD-11.1: replay selection
+
+impl Case {
+    /// `verify_with`, under a given plan (PROD-11.1: its start and subsets).
+    fn verify_plan(&self, plan: &RestorePlan, coverage: Coverage) -> VerifyOutcome {
+        let b = self.archive.build();
+        let engine = SampledEngine {
+            archive: self.archive.parts.clone(),
+        };
+        let reader = Target::of(self.target.clone());
+        let (w0, w1) = (
+            plan.time_window.0.timestamp_millis(),
+            plan.time_window.1.timestamp_millis(),
+        );
+        let sel: Vec<SampleSelection> = selections(&b.facts, w0, w1, 25)
+            .into_iter()
+            .filter(|s| {
+                plan.source_partitions
+                    .get(&s.topic)
+                    .is_none_or(|ps| ps.contains(&s.partition))
+            })
+            .collect();
+        run_with_coverage(
+            &engine,
+            &reader,
+            &b.store,
+            &b.facts,
+            &sel,
+            &fixtures::mapping(SOURCE, TARGET),
+            plan,
+            &SourceConfigCoverage::unknown(),
+            TargetMode::NewTopic,
+            coverage,
+            None,
+        )
+        .expect("a verification is a drill result")
+    }
+}
+
+fn subset_plan(floor: i64, end: i64, partitions: &[i32]) -> RestorePlan {
+    RestorePlan {
+        source_partitions: [(SOURCE.to_string(), partitions.to_vec())]
+            .into_iter()
+            .collect(),
+        ..plan(floor, end)
+    }
+}
+
+/// **08.1-A2: a partition subset.** The plan selects partition 0 of two; the
+/// target's partition 1 is empty. Complete coverage passes, and its block
+/// lists the SELECTION (partition 0), never the archive's every partition.
+/// Controls: a stray record in the unselected partition is unexpected and
+/// fails, listed with its finding; and the same empty partition judged by a
+/// plan WITHOUT the subset is missing every record and fails — so the subset
+/// is what makes the empty partition correct, not a lane that ignores it.
+#[test]
+fn a_partition_subset_passes_complete_with_every_unselected_partition_empty() {
+    let mut case = healthy();
+    case.target.insert(1, Vec::new());
+    let floor = case.archive.floor();
+    let v = case.verify_plan(&subset_plan(floor, case.end, &[0]), Coverage::Complete);
+    assert_eq!(
+        v.integrity.result,
+        IntegrityResult::Pass,
+        "{:?}",
+        v.integrity
+    );
+    let b = block(&v);
+    assert!(b.covered);
+    assert_eq!(
+        b.partitions.iter().map(|p| p.partition).collect::<Vec<_>>(),
+        vec![0],
+        "the block names the selection"
+    );
+    assert_eq!(b.replay.expected, 5, "partition 0's five records only");
+
+    let mut stray = healthy();
+    stray.target.insert(1, vec![archived(0, T + 1000)]);
+    let v = stray.verify_plan(&subset_plan(floor, stray.end, &[0]), Coverage::Complete);
+    assert_eq!(
+        v.integrity.result,
+        IntegrityResult::Fail,
+        "{:?}",
+        v.integrity
+    );
+    let b = block(&v);
+    let p1 = b
+        .partitions
+        .iter()
+        .find(|p| p.partition == 1)
+        .expect("a partition holding a stray record is listed");
+    assert_eq!((p1.replay.expected, p1.replay.unexpected), (0, 1));
+    assert!(
+        p1.findings
+            .iter()
+            .any(|f| f.starts_with("not selected by the plan's restore.partitions")),
+        "{:?}",
+        p1.findings
+    );
+
+    let v = case.verify_plan(&plan(floor, case.end), Coverage::Complete);
+    assert_eq!(
+        v.integrity.result,
+        IntegrityResult::Fail,
+        "without the subset the empty partition is a loss"
+    );
+    assert_eq!(block(&v).replay.missing, 5);
+}
+
+/// **08.1-A1: a sub-window.** The plan states a start (`InheritedFromSpec`)
+/// between partition 0's records; the target holds exactly the records at
+/// or after it. Complete coverage passes and signs the start in
+/// `window.start_ms`. Controls: with the start ignored (an archive-floor
+/// plan) the records below it are missing and the run fails; a target that
+/// also holds a record below the start has it unexpected and fails.
+#[test]
+fn a_sub_window_passes_complete_and_signs_its_start() {
+    let base = healthy();
+    let start = T + 1250;
+    let keep =
+        |recs: &Vec<Rec>| -> Vec<Rec> { recs.iter().filter(|r| r.ts >= start).cloned().collect() };
+    let narrowed: BTreeMap<i32, Vec<Rec>> = base
+        .target
+        .iter()
+        .map(|(p, recs)| (*p, keep(recs)))
+        .collect();
+    let case = Case {
+        archive: base.archive,
+        end: base.end,
+        target: narrowed.clone(),
+    };
+    let sub = RestorePlan {
+        window_floor_source: WindowFloorSource::InheritedFromSpec,
+        ..plan(start, case.end)
+    };
+    let v = case.verify_plan(&sub, Coverage::Complete);
+    assert_eq!(
+        v.integrity.result,
+        IntegrityResult::Pass,
+        "{:?}",
+        v.integrity
+    );
+    let b = block(&v);
+    assert_eq!(b.window.start_ms, Some(start));
+    // p0: 1300, 1400; p1: 1500, 2000, 2500, 3000.
+    assert_eq!(b.replay.expected, 6);
+
+    let floor = case.archive.floor();
+    let ignored = case.verify_plan(&plan(floor, case.end), Coverage::Complete);
+    assert_eq!(ignored.integrity.result, IntegrityResult::Fail);
+    assert_eq!(
+        block(&ignored).replay.missing,
+        4,
+        "1000, 1100, 1200 and p1's 1000"
+    );
+
+    let mut below = narrowed;
+    below.get_mut(&0).unwrap().insert(0, archived(2, T + 1200));
+    let leaked = Case {
+        archive: healthy().archive,
+        end: case.end,
+        target: below,
+    };
+    let v = leaked.verify_plan(&sub, Coverage::Complete);
+    assert_eq!(v.integrity.result, IntegrityResult::Fail);
+    assert_eq!(block(&v).replay.unexpected, 1);
+}
