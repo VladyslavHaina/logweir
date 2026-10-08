@@ -162,15 +162,15 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-two operator-facing changes
+### The twenty-three operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
 PLAT-20.2 from merged changes; the defect names are the platform tracker's.
 Items 17–20 were found by the PoC rounds and landed after its first
 publication (`86a554e6`); each was proven on the running install by the
-in-place upgrade that carried it. Items 21 and 22 are the product-expansion
-tracker's fix-now rows FX-2 and FX-5 and are not proven live yet: the PoC
+in-place upgrade that carried it. Items 21–23 are the product-expansion
+tracker's fix-now rows FX-2, FX-5 and FX-8 and are not proven live yet: the PoC
 upgrade that carries each runs its rows.
 
 #### 1. Retention needs `s3:GetObject` — required action
@@ -824,6 +824,69 @@ stopping before Create. **Rollback:** rolling the console image back restores
 the fixed, read-only 1 and the draft that drops the subset, and an older
 product API omits `brokerCount`. Nothing stored changes: a `Restore` created
 with a factor above 1 keeps it.
+
+#### 23. A point-in-time restore of a `LogAppendTime` topic is refused unless its plan selects by producer time (FX-8)
+
+**Changed.** The archive holds each record's PRODUCER timestamp, so a
+point-in-time restore of a topic on `message.timestamp.type=LogAppendTime`
+selected records by the producers' clocks and was signed `pass`: PROD-01.1
+restored, at a recovery point in 2001, six records the broker had appended in
+2026. The runner now refuses a plan that selects such a topic by time — it
+states `restore.point_in_time`, or its `sample.window_end` cuts the archive —
+with exit 3 and `refusal-reason=PointInTimeByProducerTime`, after the archive
+is described and before any target topic is created. The topic counts as
+`LogAppendTime` when the archive manifest records that topic override, or when
+the bound, verified backup receipt recorded it as the topic's effective value
+(a broker-wide default; receipts since FX-4). A plan that states
+`restore.time_basis: producerTime`, approved with it, runs, and its signed
+scorecard — format **1.3.0** — lists the topic under
+`source.time_basis.producer_time`. A topic selected by time whose type nothing
+recorded runs and is listed under `source.time_basis.not_recorded`. Full
+restores still run. `logweir drill verify`, `verify_scorecard.py` 1.17.0 and
+`logweir drill show` print the label; both verifiers also say, for a backup
+receipt, which topics it records as `LogAppendTime`. The console's restore
+wizard offers the opt-in and shows it on the review step
+([stability.md](stability.md#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time),
+[drill-spec.md](formats/drill-spec.md#restoretime_basis-fx-8),
+[the scorecard format](formats/drill-scorecard.md#sourcetime_basis-format-130)).
+
+What changes on the upgrade:
+
+- **A point-in-time `Restore` of a `LogAppendTime` topic** that ran before is
+  refused after the runner image is upgraded: `Failed`, exit 3, `exitReason:
+  PointInTimeByProducerTime`, nothing created. The remedy is a new plan with
+  `restore.time_basis: producerTime` and a new approval, when restoring by the
+  producers' clocks is what you want.
+- **A `RehearsalSchedule` over such a topic** has no field that states the
+  opt-in, so every rehearsal it creates is refused the same way.
+- **A scorecard written by the new runner is format 1.3.0.** Readers built
+  before FX-8 accept it and ignore the block.
+
+**Do:** before the runner image rolls, find the source topics your
+point-in-time restores and rehearsals name that are `LogAppendTime`, by topic
+override or by the broker's default:
+
+```bash
+kafka-configs.sh --bootstrap-server <source> --describe --entity-type topics --all \
+  | grep -B1 'message.timestamp.type=LogAppendTime'
+kafka-configs.sh --bootstrap-server <source> --describe --entity-type brokers --entity-default
+```
+
+For each, decide whether a restore by the producers' clocks is acceptable; if
+it is, add `restore.time_basis: producerTime` to the plan and re-approve it.
+Suspend a `RehearsalSchedule` over such a topic. **Scope:**
+`crates/logweir-core/src/time_basis.rs` (both arms, the opt-in, the unknown
+case and the `CreateTime` control), `crates/logweir/tests/orchestrator.rs`
+(refused before any target topic, the label, the opt-in inside the approved
+bytes, the broker-default arm), the four scorecard arms in both readers with
+the invariant corpus and the parity gate, the console rows, and planted
+mutants, each killed (FX-8). Live, on the compose stack:
+`e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output`
+and `e2e/tests/config_coverage.rs::fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt`.
+Not yet proven on the PoC: the upgrade that carries FX-8 runs those rows.
+**Rollback:** an older runner ignores `restore.time_basis` and runs the
+selections this build refuses, unlabelled, signing format 1.1.0 again. The 1.3.0
+scorecards already written stay valid under both readers.
 
 ### Verification scope: what "verified" means in this release
 

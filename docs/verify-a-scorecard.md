@@ -157,6 +157,10 @@ The current scorecard checks include:
   `byte-fingerprint` level.
 - An auth block names a nonblank supported mode (`plaintext` or `scramSha512`);
   a username without a mode is refused. `redactions` is empty.
+- A `source.time_basis` block (format 1.3.0) appears only under a version that
+  defines it; its `plan` is `producerTime` or absent; a topic selected by
+  producer time appears only when `plan` is `producerTime`; and no topic is in
+  both of its lists ([the arms](formats/drill-scorecard.md#sourcetime_basis-format-130)).
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
 
@@ -174,6 +178,23 @@ whose drill stopped before phase 7. Neither is a refusal and neither changes the
 exit code. No line is printed when every topic was assessed (`not_assessed: []`).
 See [what an empty divergence list does not prove](#an-empty-unexpected_divergence-is-not-configuration-parity).
 
+And both print the clock a restore's time selection read (`source.time_basis`,
+format 1.3.0), where it was not the topics' own:
+
+```
+time basis: SELECTED BY PRODUCER TIME for orders (recorded as LogAppendTime; the approved plan states restore.time_basis: producerTime)
+time basis: timestamp type NOT RECORDED for payments, so its time selection may have read producer timestamps
+time basis: not recorded, so whether a time selection read a LogAppendTime topic's producer timestamps is unknown
+```
+
+The first names the topics whose recorded timestamp type is `LogAppendTime` and
+which the restore selected by time — by the producers' clocks, as its approved
+plan accepted; the second the topics it selected by time with no recorded type;
+the third is every document without the block, including every one before
+1.3.0. None is a refusal and none changes the exit code. No line is printed for
+a 1.3.0 document whose two lists are empty. See
+[point-in-time selection over `LogAppendTime` topics](#a-point-in-time-restore-of-a-logappendtime-topic-is-refused-or-labelled).
+
 Backup receipts have their own shape and invariants — eleven arms since format
 1.1.0 ([the list](formats/backup-receipt.md#the-eleven-arms)). For an accepted
 receipt both readers print its configuration capture coverage in the same words:
@@ -185,8 +206,16 @@ config_coverage: not recorded, so every topic's configuration capture is UNKNOWN
 ```
 
 The last line is printed instead of per-topic lines for every receipt without
-the block, including every receipt written before format 1.1.0. Receipt and
-teardown verification do not apply scorecard-specific integrity rules.
+the block, including every receipt written before format 1.1.0. For each topic
+the receipt records as `LogAppendTime`, both readers also say that its covered
+window is producer time:
+
+```
+time basis: "orders" is LogAppendTime, so the archive holds its producers' timestamps and the covered window reads them; a restore that selects it by time is refused unless its plan states restore.time_basis: producerTime
+```
+
+The receipt's format does not change for it (FX-8). Receipt and teardown
+verification do not apply scorecard-specific integrity rules.
 
 `logweir drill show` renders a document without verifying its signature. It
 refuses an unsupported newer major with exit `1`, but it does not perform the
@@ -396,8 +425,9 @@ is in both, so the comparison cannot see it. With engine 0.21.0:
 - **`LogAppendTime` topics.** The archive keeps the timestamp each producer set,
   not the time the broker appended the record, and the restore writes it as
   `CreateTime`. Restored timestamps therefore differ from what the source topic
-  reported, and a point-in-time restore selects records by the producers'
-  clocks. The drill passes.
+  reported, and the drill passes. A point-in-time restore would select records
+  by the producers' clocks; since FX-8 it is refused unless the plan accepts
+  that, and then the scorecard says so ([below](#a-point-in-time-restore-of-a-logappendtime-topic-is-refused-or-labelled)).
 - **Repeated header keys.** When a record carries the same header key more than
   once, only one copy is archived and restored: at the first copy's position,
   with the last copy's value. The drill does not detect it. A record that
@@ -424,6 +454,21 @@ completes would catch the duplicates was not measured. See
 
 [`docs/to-do/decisions/PROD-01.1-record-semantics.md`](to-do/decisions/PROD-01.1-record-semantics.md)
 records how each statement was measured.
+
+### A point-in-time restore of a `LogAppendTime` topic is refused, or labelled
+
+A scorecard signed before format 1.3.0 says nothing about which clock a
+point-in-time restore read; PROD-01.1 measured one that restored, at a point in
+2001, records the broker had appended in 2026, signed `pass`. Since FX-8 the
+runner refuses a selection by time over a topic whose timestamp type is
+recorded as `LogAppendTime` (exit 3, `PointInTimeByProducerTime`, no scorecard),
+unless the approved plan states `restore.time_basis: producerTime`. A scorecard
+of such a run lists the topic in `source.time_basis.producer_time`: its records
+were selected by the PRODUCERS' clocks, not the broker's. A topic in
+`source.time_basis.not_recorded` was selected by time while nothing recorded its
+type (a plan bound to no receipt, or a receipt from before format 1.1.0), so the
+clock it was selected by is unknown. A document without the block makes no
+claim either way ([the format](formats/drill-scorecard.md#sourcetime_basis-format-130)).
 
 ### The sample window is not a claim about the whole archive
 
@@ -465,8 +510,10 @@ topic inherited from a broker default is not in the archive's record and is
 never compared: a source whose `message.timestamp.type` is `LogAppendTime`
 from the broker's default restored as `CreateTime` shows no divergence even
 when every topic was assessed (measured live by FX-4). The backup receipt's
-`config_coverage` records that effective value and its source; comparing it is
-FX-8's, and the other effective values are PROD-05.1's.
+`config_coverage` records that effective value and its source; since FX-8 a
+restore that selects such a topic by time is refused or labelled
+([above](#a-point-in-time-restore-of-a-logappendtime-topic-is-refused-or-labelled)),
+and comparing the other effective values is PROD-05.1's.
 
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 
@@ -544,9 +591,10 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.15.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.17.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
-`format_version` (`1.0.0`, or `1.1.0` for a scorecard signed since FX-4). It
+`format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, or
+`1.3.0` since FX-8). It
 changes when the reader's accepted-document set changes. The compatibility
 history is:
 
@@ -567,10 +615,15 @@ history is:
 | `1.13.0` | Rejects present target modes other than `scratch` or `newTopic`, including null; retains acceptance of failed integrity results with or without a partial reason. |
 | `1.14.0` | Adds `--payload-type catalog-point`, a signature-only check of a recovery catalog point record. |
 | `1.15.0` | Knows scorecard and backup-receipt format `1.1.0`. Adds the backup receipt's six `config_coverage` arms (6–11) and prints its per-topic coverage; checks that a scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed` are arrays of strings, and prints the configuration-parity line. Every document without the new fields is decided exactly as before. |
+| `1.17.0` | Knows scorecard format `1.3.0` (FX-8). Adds `source.time_basis`'s four arms (TB-1 to TB-4) and its shape check, and prints the `time basis:` lines for a scorecard and, for a backup receipt, one per topic it records as `LogAppendTime`. Every document without the block is decided exactly as before. (`1.16.0` is FX-3's; the two numbers are assigned at integration.) |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
 reports `run_id`. Both refuse; this is not an acceptance disagreement.
+
+A verifier older than `1.17.0`, and a `logweir` built before FX-8, accept a
+1.3.0 scorecard — the major is unchanged — ignore `source.time_basis`, check
+none of its four arms and print no time-basis line.
 
 A verifier older than `1.15.0`, and a `logweir` built before FX-4, still
 accept a 1.1.0 receipt or scorecard, since they compare majors only; they ignore

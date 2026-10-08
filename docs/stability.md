@@ -84,6 +84,52 @@ frozen `1.0.0` one:
   documents again, and their coverage then reads unknown. The 1.1.0 documents
   already written stay valid under both readers.
 
+### Scorecard format 1.3.0: `source.time_basis` (FX-8)
+
+FX-8 adds one nested optional block to the drill scorecard,
+`source.time_basis`, and moves the scorecard to **1.3.0**
+(`schemas/logweir-drill-scorecard-1.3.0.json`, with 1.1.0 frozen beside it).
+1.3.0 and not 1.2.0 because FX-3 holds 1.2.0 on its branch; the number is
+assigned at integration and a renumber moves the files listed in
+[the scorecard format](formats/drill-scorecard.md#sourcetime_basis-format-130). The block says which
+source topics a restore's time selection read by **producer time** (recorded as
+`LogAppendTime`, accepted by the plan's `restore.time_basis: producerTime`) and
+which it selected by time with **no recorded timestamp type**
+([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)).
+
+- **Absent means not recorded.** A document without the block — every
+  scorecard before 1.3.0 — never reads as "every selection used the topics' own
+  clocks", and both readers print a `time basis: not recorded` line for it.
+  Every 1.3.0 run that reaches the decision writes the block, so its two empty
+  lists are a claim.
+- **The block is additive and optional: MINOR.** The owner's 2026-10-07
+  ruling on OD-7's third case names this field: a field that labels a result is
+  additive and optional.
+- **Four arms, TB-1 to TB-4, read only the new block: MINOR** under OD-7 (a).
+  No document without the block changes verdict; the corpus
+  (`e2e/fixtures/invariants/`) and the parity gate re-prove that on every
+  `just lint`.
+- **The new refusal, `PointInTimeByProducerTime` (exit 3), is a new cause for
+  an existing value, and it can only move a verdict to the safer side** — a
+  plan that ran and was signed `pass` is now refused before any target is
+  created — so it is MINOR under OD-7's third case. It changes what an
+  installation does: a point-in-time restore or a scheduled rehearsal over a
+  topic recorded as `LogAppendTime` that ran before FX-8 is refused after it
+  ([the limitation](#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time)).
+- **The backup receipt's format does not change.** FX-4 already records each
+  topic's effective `message.timestamp.type`; both readers now print one
+  `time basis:` line per topic it records as `LogAppendTime`, saying that the
+  receipt's covered window is that topic's producer time.
+- **The plan grammar gains `restore.time_basis`**, optional, one value. A
+  runner built before FX-8 ignores it (the grammar ignores unknown keys).
+- **Readers built before FX-8** accept every 1.3.0 document — the major is
+  unchanged and the block is a nested optional field they ignore — and print no
+  time-basis line.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.1.0
+  documents again with no block, runs the selections FX-8 refuses, and signs
+  them without a label — the pre-FX-8 behaviour. The 1.3.0 documents already
+  written stay valid under both readers.
+
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
@@ -457,11 +503,46 @@ and last records are inside the window holds a later record. Measured by three r
 
 For a topic on `message.timestamp.type=LogAppendTime`, the archive holds the timestamp each
 producer set, not the broker's append time, and the restored topic reports it as `CreateTime`.
-Restored timestamps differ from what the source reported, and a point-in-time restore selects by
-the producers' clocks: in the measured case, a recovery point in 2001 restored records the broker
-appended in 2026. The drill passes in both cases. Measured by
+Restored timestamps differ from what the source reported, and a point-in-time restore would select
+by the producers' clocks: in the measured case, a recovery point in 2001 restored records the broker
+appended in 2026, and the drill passed. Since FX-8 that point-in-time restore is refused unless the
+plan accepts it (the next section); a full restore still runs, and its drill passes. Measured by
 `e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output`
 ([decision record §2.3](to-do/decisions/PROD-01.1-record-semantics.md#23-a-logappendtime-source)).
+
+### A point-in-time over a `LogAppendTime` source is refused unless the plan selects by producer time
+
+Since FX-8, a restore whose plan selects records **by time** — it states `restore.point_in_time`,
+or its `sample.window_end` is earlier than the newest timestamp the archive manifest records for
+the topic — over a source topic whose timestamp type is **recorded** as `LogAppendTime` is refused,
+exit 3, `refusal-reason=PointInTimeByProducerTime`, after the archive is described and before any
+target topic is created. The message names each refused topic and the record that made it
+`LogAppendTime`: the archive manifest's topic override `message.timestamp.type=LogAppendTime`, or
+the effective value the bound, verified backup receipt recorded at backup time (FX-4's
+`config_coverage`; the only record of a broker-wide default). Phase 0 has run by then, so on a
+target broker whose own default is `LogAppendTime` its override probe has created and deleted one
+probe topic first ([the exit-3 exception](#exit-3-has-one-documented-exception-phase-0s-logappendtime-override-probe)).
+
+A plan that states `restore.time_basis: producerTime`, approved with it (the field is inside
+`plan_hash`), runs, and its signed scorecard lists the topic under
+`source.time_basis.producer_time` ([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)).
+That is a restore **by the producers' clocks**, said in the signed document; it is not a restore by
+the broker's append time, which needs an archive that keeps it (PROD-00.3c).
+
+**Where nothing records the type, the restore runs and says so.** A plan bound to no receipt, a
+receipt from before format 1.1.0, or a backup whose configuration read failed records no
+effective type, and a topic without a manifest override then has none. Such a selection runs, and
+the scorecard lists the topic under `source.time_basis.not_recorded`: the clock it selected by is
+unknown. It is never read as `CreateTime` (rule 3: old evidence is never read as a stronger
+guarantee), and it is not refused, because that would stop every point-in-time restore of every
+archive written before FX-4, where a `CreateTime` topic's selection is right.
+
+A `RehearsalSchedule` has no field that states a time basis, so a scheduled rehearsal over a topic
+recorded as `LogAppendTime` is refused every slot. Measured by
+`e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output` (the topic-override
+arm: refused with no target topic, then run and labelled with the opt-in) and
+`e2e/tests/config_coverage.rs::fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt`
+(the broker-default arm, and the same archive unbound reading `not_recorded`).
 
 ### A repeated header key keeps one copy
 
