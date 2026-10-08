@@ -482,3 +482,19 @@ fn a_write_only_credential_debug_names_keys_and_no_value() {
         "{shown}"
     );
 }
+
+/// The request's credential block prints as `<redacted>` under `{:?}`, so a
+/// stray debug line, a tracing field or a panic message on the request path
+/// cannot carry the value. CONTROL: the username — not a secret — is shown.
+#[test]
+fn the_request_credential_debug_is_redacted() {
+    let request: logweir_api::contract::ConnectionAuthRequest =
+        serde_json::from_value(sasl_body("scramSha256", true)["auth"].clone()).unwrap();
+    let shown = format!("{request:?}");
+    assert!(shown.contains("logweir"), "the username is shown: {shown}");
+    assert!(shown.contains("<redacted>"), "{shown}");
+    assert!(!shown.contains(SEEDED_PASSWORD), "{shown}");
+    let mtls: logweir_api::contract::ConnectionAuthRequest =
+        serde_json::from_value(mtls_body(true)["auth"].clone()).unwrap();
+    assert!(!format!("{mtls:?}").contains(SEEDED_PASSWORD));
+}
