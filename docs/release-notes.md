@@ -22,7 +22,7 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10), 24 (FX-3), 25
 (FX-13), 26 (FX-11) and 27 (FX-8), from the product-expansion tracker's fix-now
-rows, and items 28 (PROD-00.3f, the engine pin) and 29 (PROD-16.1, no approver key by default), land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
+rows, and items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver key by default) and 30 (PROD-00.2, the engine built from the vendored source), land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
 execution-claim set check, receipt and catalog format 1.2.0, the pin's read
 by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
@@ -205,6 +205,10 @@ upgrade that carries it runs its controller and runner rows.
 Item 29 is PROD-16.1 (owner decision OD-8), proven by unit, mock-cluster and
 chart rows and a host console journey; its controller and hook rows run at
 the PoC refresh that carries it.
+Item 30 is PROD-00.2 (owner decision OD-3), proven on a compose stack and by
+image checks on both platforms; the PoC refresh that carries it runs the
+runner's signed engine identity, and the first `main` publication after it
+runs the keyless signing.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -1540,7 +1544,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26, 27, 28 and 29, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26, 27, 28, 29 and 30, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.
