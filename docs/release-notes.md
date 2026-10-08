@@ -29,8 +29,9 @@ early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
 one crate that may hold `unsafe` code, and the consumer-group and ACL reads
 behind it), 38 (FX-20, the binding for every other credential reference)
 39 (FX-18, a topic phase 0 creates is used only once the cluster serves
-it) and 40 (FX-24, a silent connection meets the console's header deadline)
-so far. Items continue the next entry's
+it), 40 (FX-24, a silent connection meets the console's header deadline)
+and 41 (FX-24b, a client that stops reading or sending meets a stall
+deadline) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -84,6 +85,9 @@ Item 40 is fix-now row FX-24, proven by rows on the built console binary and
 live on the host in localAdmin mode; it changes the console only, and the PoC
 upgrade that carries it repeats the silent-socket probe against the shared-mode
 console.
+Item 41 is fix-now row FX-24b, proven the same way; it changes the console
+only, and the PoC upgrade that carries it repeats the slow-reader probe and
+the event-stream row against the shared-mode console.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -892,10 +896,8 @@ knowledge, `h2c`) is closed at its first line instead of being served HTTP/2,
 which had no header deadline either. Browsers, an ingress controller dialling
 an HTTP backend and kubelet probes all speak HTTP/1.1 to the console, and
 nothing Logweir ships spoke HTTP/2 to it. The deadline covers the request head
-only: a body a handler is reading and an answer a client has stopped reading
-have none, and **that case is still open (FX-24b)**: until it lands, clients
-that send requests and stop reading the answers can hold all 256 connections
-and the console answers nobody ([api.md](api.md#conventions)).
+only; a body a handler is reading and an answer a client has stopped reading
+are bounded by item 41 (FX-24b) ([api.md](api.md#conventions)).
 **Do:** nothing, unless an ingress controller was configured to dial the
 console's Service with HTTP/2 (an `h2c` or gRPC backend, never the chart's
 setting): return it to HTTP/1.1, or the console is unreachable through it
@@ -919,6 +921,58 @@ two-second deadline; a row now pins that. The shared-mode console's probe runs
 at the PoC upgrade that carries this item.
 **Rollback:** an older console serves HTTP/2 prior knowledge again and leaves a
 silent connection open; nothing is stored, so nothing needs converting.
+
+#### 41. A client that stops reading an answer, or stops sending a body, meets the console's stall deadline (FX-24b)
+
+**Changed.** After FX-24 the console (`logweir-api`) timed out a connection
+that never finished its request head, and nothing after the head: a client
+that sent requests and stopped reading the answers left the console waiting
+on a write the kernel would not take, and a signed-in client that sent a head
+and stopped sending its body left a handler waiting on the body, each with no
+deadline. 256 such clients, the console's connection ceiling, held every slot,
+and the console answered nobody: measured on the built binary, a real request
+behind them was unanswered at 30 s. Now a connection may wait on its client
+for **thirty seconds with no progress** (`IO_STALL_TIMEOUT`): an answer's
+pending write, or a request body's pending read, that moves no byte for that
+long fails, and the connection and its slot are released. It is a stall
+deadline, not a total: it restarts on every byte, so a slow but steady reader
+keeps its connection, and an operation event stream that is being read is
+never cut by it (between heartbeats it has nothing to write). A JSON
+mutation body must also arrive whole within **sixty seconds**
+(`JSON_BODY_DEADLINE`), so one that trickles a byte at a time is ended too.
+A body that stops, or misses the total, is answered `400 malformed_request`
+("The request body stopped arriving before it was complete." or "The request
+body was not received within 60 seconds.") and the connection is closed after
+the answer. A client that keeps reading or sending, however slowly, keeps its
+connection; these bounds end abandoned and stalled clients, not a deliberate
+slow-rate one ([api.md](api.md#conventions)).
+**Do:** nothing. A client that pauses mid-transfer for more than thirty
+seconds, or sends a mutation body over more than sixty, sees its connection
+closed and retries; the console's own browser client does neither.
+**Scope:** rows on the built binary (`crates/logweir-api/tests/local_admin.rs`):
+256 clients that pipeline requests for a 156 KiB asset and read nothing hold
+every connection slot, then a request queued behind them is answered no
+sooner than thirty seconds after the first and within forty-five of the last,
+every one of them ended by the server before its answers were all sent; a
+reader taking 8 KiB every 150 ms receives fourteen answers over more than
+thirty-five seconds, uncut; the operation event stream of a running backup,
+served by a fake API server, is still open with a heartbeat after the
+deadline; a signed-in body that stops is answered and closed at thirty seconds
+(not at the sixty-second total) while one sent three seconds late is read
+normally; one that trickles a byte every five seconds is answered and closed at
+sixty; the deadlines are pinned to their documented values at their call
+sites. Unit rows over the two guards in `src/transport.rs` on loopback
+sockets and stub IO. The connection's own reads are deliberately not timed:
+the server keeps one pending for the whole of every answer to notice a client
+leaving, and a timer there would cut every event stream at thirty seconds (a
+mutant shows it). Live, the built binary on the host in localAdmin mode: a
+request behind 256 non-reading clients answered at 32.5 s (unanswered at 45 s
+before), a stopped body answered at 30.0 s (open at 75 s before), a trickling
+one at 60.0 s. The controller's in-pod health listener already bounds the
+whole exchange, its write included, at two seconds. The shared-mode console's
+probe runs at the PoC upgrade that carries this item.
+**Rollback:** an older console leaves a connection whose client stopped
+reading or sending open again; nothing is stored, so nothing needs converting.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -981,7 +1035,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39 and 40, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40 and 41, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -999,7 +1053,7 @@ console and the status of three CRDs, and needs each destination,
 retention, notification and inline-archive credential Secret bound; item 39
 changes the runner's phase 0 only and needs nothing; item 40 changes the
 console only and needs nothing unless an ingress dials the console with
-HTTP/2. To roll back to
+HTTP/2; item 41 changes the console only and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

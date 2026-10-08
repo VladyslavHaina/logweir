@@ -1395,21 +1395,43 @@ validated names.
 
 Mutation bodies are strict: an unknown field is `422 validation_failed` naming
 the field, not a silently ignored key. So is an unknown or repeated query
-parameter (`400 malformed_request`). Bodies are capped at 1 MiB.
+parameter (`400 malformed_request`). Bodies are capped at 1 MiB, and must
+arrive in time (below).
 
-**The listener speaks HTTP/1.1 only, and the request head is on a clock.**
-A connection has ten seconds from the moment it is accepted to send a complete
-request head, and ten seconds again after each answer on a keep-alive
-connection; past that the server closes it, whether it sent part of a head or
-nothing at all (R4; FX-24 extended it to a connection that sends no byte). A
-head larger than 32 KiB is refused. At most 256 connections are served at
-once, and further ones wait in the kernel's listen queue until one closes, so
-idle sockets cannot hold that ceiling for longer than the ten-second deadline.
-The clock covers the head only: a request body a handler is still reading, and
-an answer the client has stopped reading, have no deadline of their own. **That
-case is open (FX-24b):** until it lands, clients that send requests and stop
-reading the answers can hold all 256 connections, and the console then answers
-nobody, exactly as silent sockets could before FX-24.
+**The listener speaks HTTP/1.1 only, and a connection is on a clock from its
+accept to its close.**
+
+- **The head.** A connection has ten seconds from the moment it is accepted to
+  send a complete request head, and ten seconds again after each answer on a
+  keep-alive connection; past that the server closes it, whether it sent part
+  of a head or nothing at all (R4; FX-24 extended it to a connection that
+  sends no byte). A head larger than 32 KiB is refused.
+- **A stall, after the head (FX-24b).** A connection may wait on its client
+  for thirty seconds with no progress at all: an answer the client has stopped
+  reading, or a request body it has stopped sending. Past that the write or
+  the read fails and the connection ends. The clock runs only while the
+  server is waiting on the client and restarts on every byte, so a slow but
+  steady reader keeps its connection for as long as its answer takes, and an
+  operation event stream that is being read is never cut by it: between
+  heartbeats it has nothing to write. A body that stops is answered `400 malformed_request`
+  ("stopped arriving") before the connection closes.
+- **A JSON body's total (FX-24b).** A mutation body must also arrive whole
+  within sixty seconds of the server starting to read it, so one that trickles
+  a byte at a time cannot hold a connection either: it is answered
+  `400 malformed_request` ("not received within 60 seconds") and the
+  connection is closed after the answer.
+- **The ceiling.** At most 256 connections are served at once, and further
+  ones wait in the kernel's listen queue until one closes. Silent sockets
+  cannot hold that ceiling for longer than the ten-second head deadline, nor
+  clients that stop reading for much longer than the thirty-second stall: the
+  kernel still accepts a stopped reader's bytes for a few seconds, so a
+  connection is held until the stall clock, which starts at the last byte the
+  kernel took, runs out (about 35 s measured on macOS).
+
+These bounds end abandoned and stalled clients. A client that goes on reading
+or sending, however slowly, keeps its connection, so they do not stop a
+deliberate slow-rate client: in shared mode that is what the ingress and
+`api.console.networkPolicy.enabled` (off by default) are for.
 HTTP/2 is not served: a client that opens with the HTTP/2 preface (prior
 knowledge, `h2c`) is closed at its first line. A shutdown signal gives open
 connections ten seconds to finish, then drops them and exits 0.
