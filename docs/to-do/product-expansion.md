@@ -440,6 +440,14 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Tests/evidence:** Both architectures on the compose drill; signature and provenance verification; a negative control where modified engine source fails the comparison.
 - **Dependencies:** PROD-00.1 and OD-3. **Handoff:** build recipe, parity evidence and rollback to the upstream image.
 
+**Signing proven (2026-10-08).** Merged as `c37024ed`. Main was red from PROD-01.3 until `daef606b`, so the first publication is main run 37838249072 at `daef606b`, with check, e2e, both platform builds, promote and sign green. Its `sign` job uploaded four SLSA provenance attestations and verified the four indexes and a platform manifest with the pinned identity. The orchestrator's own check (`claude/artifacts/prod-00-2/signing/`, cosign v2.5.2 in a container, gh 2.88.1) covered the runner index `sha256:e17aad07…` and its platform manifests (arm64 `sha256:eea0e769…`, amd64 `sha256:b706568d…`):
+- `cosign verify` passed on the index and on arm64;
+- `cosign verify-attestation --type spdxjson` passed on both platforms;
+- `gh attestation verify` passed on the index;
+- the three negative controls each failed as required: `refs/heads/other`, `attacker/logweir`, and a gh identity at `@refs/heads/other`.
+
+Provenance is attested per index by design (`images.yml`), so a platform digest has none. The engine matrix was re-dispatched on `038124d7` (run 37847365755). **Still owed for Done:** the PoC refresh that runs the built engine, with the controller and runner images rolled together (watch-list item 8).
+
 ### PROD-00.3 — Deliver engine capabilities by the recorded route
 
 - **Issue:** Several spikes need behaviour the engine lacks (PROD-00.1's table).
