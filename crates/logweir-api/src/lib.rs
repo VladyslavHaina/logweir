@@ -150,11 +150,12 @@ pub fn preflight(config: &config::Config) -> Result<Preflight, String> {
             })
         }
     };
-    let approval = approval::ApprovalSettings::load(
+    let mut approval = approval::ApprovalSettings::load(
         config.approval_policy_file.as_deref(),
         config.confirmation_key_file.as_deref(),
         &config.namespaces,
     )?;
+    approval.installation = config.installation_identity.clone();
     Ok(Preflight {
         cursor_key,
         assets: assets::StaticAssets::load(&config.ui_directory)?,

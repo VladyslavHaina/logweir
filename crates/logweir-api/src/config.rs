@@ -83,6 +83,10 @@ struct ConfigFile {
     /// PEM, from a mounted Secret.
     #[serde(default)]
     confirmation_key_file: Option<PathBuf>,
+    /// PROD-16.1: where the installation's fresh-install marker is read — the
+    /// public identity ConfigMap the chart's identity hook writes.
+    #[serde(default)]
+    installation_identity: Option<InstallationIdentityFile>,
     /// P10: the manual-run create ceilings. Absent is the documented
     /// defaults; either key may be omitted and takes its own default.
     #[serde(default)]
@@ -103,6 +107,42 @@ struct RateLimitsFile {
 struct ServiceRefFile {
     namespace: String,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct InstallationIdentityFile {
+    namespace: String,
+    public_config_map: String,
+}
+
+/// `installationIdentity`, validated: a namespace (DNS label) and a ConfigMap
+/// name (DNS subdomain), or absent.
+fn installation_identity(
+    file: Option<InstallationIdentityFile>,
+) -> Result<Option<crate::approval::InstallationIdentityRef>, ConfigError> {
+    let Some(file) = file else {
+        return Ok(None);
+    };
+    if !validate::is_dns_label(&file.namespace) {
+        return Err(field(
+            "installationIdentity",
+            format!("the namespace `{}` is not a DNS-1123 label", file.namespace),
+        ));
+    }
+    if !validate::is_dns_subdomain(&file.public_config_map) {
+        return Err(field(
+            "installationIdentity",
+            format!(
+                "the publicConfigMap `{}` is not a DNS-1123 subdomain",
+                file.public_config_map
+            ),
+        ));
+    }
+    Ok(Some(crate::approval::InstallationIdentityRef {
+        namespace: file.namespace,
+        config_map: file.public_config_map,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -360,6 +400,8 @@ pub struct Config {
     pub approval_policy_file: Option<PathBuf>,
     /// PLAT-19.2: the console confirmation key file, when one is configured.
     pub confirmation_key_file: Option<PathBuf>,
+    /// PROD-16.1: where the fresh-install marker is read, when configured.
+    pub installation_identity: Option<crate::approval::InstallationIdentityRef>,
     /// P10: the manual-run create ceilings, per actor, per namespace, per
     /// minute. `rateLimits` in the file; absent is
     /// [`crate::routes::RunRateLimits::default`].
@@ -620,6 +662,7 @@ impl Config {
             kubernetes_principal: String::new(),
             approval_policy_file: file.approval_policy_file.map(|p| resolve(base, &p)),
             confirmation_key_file: file.confirmation_key_file.map(|p| resolve(base, &p)),
+            installation_identity: installation_identity(file.installation_identity)?,
             run_rate_limits: crate::routes::RunRateLimits::default(),
         })
     }
@@ -839,6 +882,7 @@ impl Config {
             kubernetes_principal: String::new(),
             approval_policy_file: file.approval_policy_file.map(|p| resolve(base, &p)),
             confirmation_key_file: file.confirmation_key_file.map(|p| resolve(base, &p)),
+            installation_identity: installation_identity(file.installation_identity)?,
             run_rate_limits: crate::routes::RunRateLimits::default(),
         })
     }

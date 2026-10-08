@@ -16,11 +16,12 @@ use crate::auth::Actor;
 use crate::authz::Action;
 use crate::contract::{
     ApprovalList, ApprovalPacketResponse, ApprovalPolicyResponse, ApprovalPolicyView,
-    ApprovalResponse,
+    ApprovalResponse, PolicyBasisView,
 };
 use crate::http::RequestId;
 use crate::problem::ApiError;
 use crate::projection;
+use logweir_core::approval_policy::{ApprovalMode, OperatorMode};
 
 /// The list route identifier.
 pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/approvals";
@@ -107,8 +108,18 @@ pub async fn policy(
     authorize(&state, &actor, &ns, Action::ReadApprovals)?;
     crate::http::parse_query(uri.query(), &[])?;
     let settings = state.approval();
-    let effective = settings.policies.resolve(&ns);
+    // PROD-16.1: the policies as a create here would see them, the
+    // fresh-install marker applied.
+    let policies = crate::approval::effective_policies(settings, state.kube())
+        .await
+        .map_err(crate::kube::KubeFailure::into_api_error)?;
+    let effective = policies.resolve(&ns);
     let bound = effective.bound();
+    let key = settings
+        .confirmation_key()
+        .map_err(|reason| ApiError::new(crate::problem::ProblemCode::InternalError, reason))?;
+    let ordinary = bound.is_some_and(|p| p.mode == ApprovalMode::Ordinary);
+    let operator_mode = OperatorMode::of(&effective);
     Ok(json(
         StatusCode::OK,
         &ApprovalPolicyResponse {
@@ -117,21 +128,18 @@ pub async fn policy(
                 namespace: ns.clone(),
                 name: effective.name().to_string(),
                 mode: effective.mode().into(),
+                operator_mode: operator_mode.into(),
+                basis: PolicyBasisView::of(&policies, &ns),
                 legacy: effective.is_legacy(),
                 max_age_seconds: bound.map(|p| p.max_age_seconds),
                 require_distinct_principal: bound.is_some_and(|p| p.require_distinct_principal),
                 digest: effective.digest(),
-                installation_digest: settings.policies.digest(),
-                confirmation_key_id: settings
-                    .confirmation
-                    .as_ref()
-                    .map(|k| k.key_id().to_string()),
-                ordinary_confirmation_available: bound.is_some_and(|p| {
-                    p.mode == logweir_core::approval_policy::ApprovalMode::Ordinary
-                }) && state.shared().is_some(),
-                ticket_required: bound.is_some_and(|p| {
-                    p.mode == logweir_core::approval_policy::ApprovalMode::Governed
-                }),
+                installation_digest: policies.digest(),
+                confirmation_key_id: key.map(|k| k.key_id().to_string()),
+                ordinary_confirmation_available: ordinary
+                    && key.is_some()
+                    && (state.shared().is_some() || operator_mode.allowed_in_local_admin()),
+                ticket_required: bound.is_some_and(|p| p.mode == ApprovalMode::Governed),
             },
         },
     ))

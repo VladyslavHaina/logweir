@@ -3477,6 +3477,65 @@ impl From<logweir_core::approval_policy::ApprovalMode> for ApprovalModeView {
     }
 }
 
+/// PROD-16.1: the approval mode in the operator's words — the one mapping is
+/// `logweir_core::approval_policy::OperatorMode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub enum OperatorModeView {
+    /// One-person confirmation in the console (internal `Ordinary`).
+    #[serde(rename = "confirm")]
+    Confirm,
+    /// Two-person approval in the console (PROD-16.2; never served by this
+    /// build).
+    #[serde(rename = "two-person")]
+    TwoPerson,
+    /// A personal-key approval (internal `Governed`, or `legacy-governed-v1`).
+    #[serde(rename = "strict")]
+    Strict,
+}
+
+impl From<logweir_core::approval_policy::OperatorMode> for OperatorModeView {
+    fn from(mode: logweir_core::approval_policy::OperatorMode) -> Self {
+        match mode {
+            logweir_core::approval_policy::OperatorMode::Confirm => Self::Confirm,
+            logweir_core::approval_policy::OperatorMode::TwoPerson => Self::TwoPerson,
+            logweir_core::approval_policy::OperatorMode::Strict => Self::Strict,
+        }
+    }
+}
+
+/// PROD-16.1: why a namespace resolves to its policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum PolicyBasisView {
+    /// An explicit namespace binding in the installation document.
+    Binding,
+    /// Unbound, and the installation document's `defaultMode`.
+    Configured,
+    /// Unbound, and the fresh-install marker: `confirm`.
+    FreshInstall,
+    /// Unbound, no `defaultMode`, no marker: `legacy-governed-v1`.
+    Legacy,
+}
+
+impl PolicyBasisView {
+    /// The basis of `namespace` under `policies`.
+    #[must_use]
+    pub fn of(
+        policies: &logweir_core::approval_policy::ApprovalPolicySet,
+        namespace: &str,
+    ) -> Self {
+        use logweir_core::approval_policy::UnboundBasis;
+        if policies.is_bound(namespace) {
+            return Self::Binding;
+        }
+        match policies.unbound_basis() {
+            UnboundBasis::Configured(_) => Self::Configured,
+            UnboundBasis::FreshInstall => Self::FreshInstall,
+            UnboundBasis::Legacy => Self::Legacy,
+        }
+    }
+}
+
 /// Where a submitted Restore goes next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -3494,6 +3553,8 @@ pub enum AuthorizationState {
 pub struct RestoreRoutingView {
     /// The mode the namespace's binding requires.
     pub mode: ApprovalModeView,
+    /// PROD-16.1: the same mode in the operator's words.
+    pub operator_mode: OperatorModeView,
     /// The policy name — `legacy-governed-v1` for an unbound namespace.
     pub policy: String,
     /// The policy snapshot digest the console signed; absent for the legacy
@@ -3525,11 +3586,18 @@ pub struct RestoreRoutingView {
 pub struct ApprovalPolicyView {
     /// The namespace asked about.
     pub namespace: String,
-    /// The policy name — `legacy-governed-v1` when the namespace is unbound.
+    /// The policy name — `legacy-governed-v1` for an unbound namespace on an
+    /// unmarked install, `default-confirm-v1` for one under a `confirm`
+    /// unbound default (PROD-16.1).
     pub name: String,
     /// Its mode.
     pub mode: ApprovalModeView,
-    /// `true` when the namespace is unbound.
+    /// PROD-16.1: the same mode in the operator's words: `confirm`,
+    /// `two-person` or `strict`.
+    pub operator_mode: OperatorModeView,
+    /// PROD-16.1: why the namespace resolves to this policy.
+    pub basis: PolicyBasisView,
+    /// `true` when the namespace resolves to `legacy-governed-v1`.
     pub legacy: bool,
     /// The policy's `maxAgeSeconds`; absent for the legacy synthesis.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3547,9 +3615,11 @@ pub struct ApprovalPolicyView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation_key_id: Option<String>,
     /// Whether THIS console will sign an ordinary confirmation here: `true`
-    /// only for an Ordinary binding served by a `shared` console. D0: the
-    /// `localAdmin` mode "does not expose Ordinary", so there a submission in
-    /// an Ordinary namespace is refused `policy_mismatch` and nothing is
+    /// for an Ordinary policy (`confirm`) when the console holds its
+    /// confirmation key. PROD-16.1: in either console mode — `localAdmin`
+    /// confirms as `urn:logweir:local-admin#admin`. `false` under `confirm`
+    /// means the key is not there yet (the identity hook writes it once, at
+    /// install), and a submission is refused `policy_mismatch` with nothing
     /// created.
     pub ordinary_confirmation_available: bool,
     /// Whether a submission here must carry a change ticket (an explicit
