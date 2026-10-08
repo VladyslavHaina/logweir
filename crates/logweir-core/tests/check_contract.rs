@@ -2037,6 +2037,57 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
     }
 }
 
+/// **FX-17, the fixture both sides read.** `ui/tests/fixtures/set-ids.json`
+/// lists the set ids the controller mints and near misses it never mints; the
+/// console's `isMintedSetId` (`ui/tests/restore-catalog.spec.js`) reads the
+/// same file. Here: every minted id survives the redactor bare and as the
+/// receipt key `backup run` writes, and every near miss is withheld from both.
+#[test]
+fn the_shared_set_id_fixture_is_what_the_redactor_keeps_and_withholds() {
+    const RUN: &str = "01M3BNHJFZCV0D4BRZ0EM0RESH";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../ui/tests/fixtures/set-ids.json"
+    );
+    let text = std::fs::read_to_string(path).expect("the shared fixture is readable");
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("the fixture is JSON");
+    let list = |name: &str| -> Vec<String> {
+        doc[name]
+            .as_array()
+            .unwrap_or_else(|| panic!("`{name}` is a list"))
+            .iter()
+            .map(|v| v.as_str().expect("a set id is a string").to_string())
+            .collect()
+    };
+    let (minted, not_minted) = (list("minted"), list("notMinted"));
+    assert!(
+        minted.len() >= 4 && not_minted.len() >= 9,
+        "the fixture lost rows"
+    );
+    for id in &minted {
+        let key = format!("logweir/backups/{id}/{RUN}.receipt.json");
+        assert_eq!(redact(id), *id, "a minted set id was withheld");
+        assert_eq!(
+            redact(&key),
+            key,
+            "a minted set id's receipt key was withheld"
+        );
+    }
+    for id in &not_minted {
+        assert!(
+            id.len() >= 40,
+            "a near miss under 40 characters proves nothing: {id}"
+        );
+        let key = format!("logweir/backups/{id}/{RUN}.receipt.json");
+        assert!(redact(id).contains(REDACTED), "a near miss survived: {id}");
+        assert!(
+            !redact(&key).contains(id.as_str()),
+            "a near miss survived in its receipt key: {}",
+            redact(&key)
+        );
+    }
+}
+
 // --------------------------------------------------------------- visibility
 
 fn signals() -> VisibilitySignals {

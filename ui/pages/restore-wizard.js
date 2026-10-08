@@ -728,7 +728,7 @@ function receiptVerified(status) {
 //     API could not finish cannot say that no `Backup` refused this receipt,
 //     and this page does not guess;
 //   * the row carries everything the plan binding needs, unredacted: the
-//     point id, the receipt key, and both digests;
+//     point id, the backup set id, the receipt key, and both digests;
 //   * and, when the offer came from a `Backup` (a destination-backed run the
 //     controller could not verify itself, so it wrote no window), that
 //     Backup's OWN verdict is absent or `NotAttempted` -- never a reached
@@ -757,6 +757,92 @@ export const REDACTION_MARKER = "[redacted]";
 /** Whether a published archive key is the redactor's output rather than a key. */
 export function isRedacted(value) {
   return typeof value === "string" && value.indexOf(REDACTION_MARKER) !== -1;
+}
+
+const MINTED_SET_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-([0-9]{8})-([0-9]{6})(?:-r[1-9])?)?$/;
+
+/** Whether `id` is a backup set id the controller mints, in the two shapes
+ *  the catalog sync's redactor reads as identities (`check_contract.rs`
+ *  `is_set_id`): a manual run's UUID (the `Backup`'s own UID, lower case), or
+ *  a scheduled run's `<schedule uid>-<yyyymmdd>-<hhmmss>`, `-r<k>` for a
+ *  retry, whose slot is an instant that exists. `ui/tests/fixtures/set-ids.json`
+ *  is read by this side's test and by the redactor's, so the two agree.
+ *
+ *  Used only to say WHY a binding came back redacted -- never to decide an
+ *  offer: the offer is refused on the marker itself. */
+export function isMintedSetId(id) {
+  const m = MINTED_SET_ID.exec(typeof id === "string" ? id : "");
+  if (m === null) {
+    return false;
+  }
+  if (m[1] === undefined) {
+    return true;
+  }
+  const n = (s, from, to) => Number(s.slice(from, to));
+  const [y, mo, d] = [n(m[1], 0, 4), n(m[1], 4, 6), n(m[1], 6, 8)];
+  const [h, mi, se] = [n(m[2], 0, 2), n(m[2], 2, 4), n(m[2], 4, 6)];
+  const t = new Date(Date.UTC(y, mo - 1, d, h, mi, se));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d &&
+    t.getUTCHours() === h && t.getUTCMinutes() === mi && t.getUTCSeconds() === se;
+}
+
+/** The rule a set id chosen for `logweir backup run` must meet for its
+ *  points to be restorable from the console: the key `backup run` writes is
+ *  `logweir/backups/<set id>/<run id>.receipt.json`, the run id already
+ *  spends the key's ONE free component, so the set id must be a public form. */
+const CHOSEN_SET_ID_RULE =
+  "a set id chosen for `logweir backup run` survives only as a UUID, or as lower-case " +
+  "letters, digits, `.`, `-`, `_` and `=` under 40 characters";
+
+/** WHY A POINT'S PLAN BINDING CAME BACK REDACTED -- one sentence, or `null`
+ *  when neither binding field carries the marker (FX-17).
+ *
+ *  The binding is `source.backup` (the set id) and `source.point.receipt_key`;
+ *  the catalog sync passes both through the product's redactor, and a field
+ *  that comes back as its output cannot be put into a plan. The sentence says
+ *  which field, and the cause the published values still let this page tell
+ *  apart:
+ *    * the SET ID went: the redactor did not read it as an identity. Runners up
+ *      to v0.2.0-rc.1 did that to every scheduled run's set id, which is the
+ *      PoC's whole first Catalog page (FX-17); a chosen set id outside the
+ *      public forms does it too;
+ *    * only the KEY went, beside a set id this product mints: the run id in
+ *      it was withheld, which runners older than v0.2.0-rc.1 did
+ *      (CATALOG-RECEIPTKEY-REDACTED, the ULID exemption);
+ *    * only the KEY went, beside a set id someone chose: that id and the run
+ *      id are two free components, one more than an archive key may carry. */
+export function redactedBindingReason(entry) {
+  const e = entry || {};
+  const setGone = isRedacted(e.backupId);
+  const keyGone = isRedacted(e.receiptKey);
+  if (!setGone && !keyGone) {
+    return null;
+  }
+  const what = [];
+  if (setGone) {
+    what.push("backup set id as `" + e.backupId + "`");
+  }
+  if (keyGone) {
+    what.push("receipt key as `" + e.receiptKey + "`");
+  }
+  const head = "the catalog published this point's " + what.join(" and its ") +
+    ", the redactor's output rather than the value in the bucket, so no plan binding can name " +
+    "the objects the runner must re-read: ";
+  if (setGone) {
+    return head +
+      "the catalog sync did not read the set id as an identity. Runners up to v0.2.0-rc.1 " +
+      "withhold every scheduled run's set id (its schedule's UID, then the slot) this way; " +
+      "upgrade the runner image and sync the catalog again. And " + CHOSEN_SET_ID_RULE;
+  }
+  if (isMintedSetId(e.backupId)) {
+    return head +
+      "the redactor withheld the run id in the key, which runners older than v0.2.0-rc.1 " +
+      "did; sync the catalog again with a current runner image";
+  }
+  return head +
+    "its set id `" + String(e.backupId || "") + "` and the run id are two chosen components, " +
+    "and an archive key may carry only one past the redactor; " + CHOSEN_SET_ID_RULE;
 }
 
 /** The two verdicts that let a catalog row answer for a `Backup`: none at all,
@@ -962,12 +1048,12 @@ export function catalogPointOffer(entry, page) {
   if (typeof e.receiptKey !== "string" || e.receiptKey.trim().length === 0) {
     return no("the catalog published no receipt key for this point");
   }
-  if (isRedacted(e.receiptKey)) {
-    return no(
-      "the catalog published this point's receipt key as `" + e.receiptKey + "`: the " +
-        "archive-key redactor rewrote it, so the plan binding cannot name the object the " +
-        "runner must re-read; re-sync the catalog with a runner that keeps a ULID run id",
-    );
+  // ONE REASON FOR A REDACTED BINDING, whichever of its two fields carries
+  // the marker (FX-17). The set id used to fall through to "no usable backup
+  // set id" below -- true of `[redacted]`, and no help to anyone.
+  const redacted = redactedBindingReason(e);
+  if (redacted !== null) {
+    return no(redacted);
   }
   if (typeof e.receiptSha256 !== "string" || !DIGEST_SHAPE.test(e.receiptSha256)) {
     return no("the catalog published no well-formed receipt digest for this point");

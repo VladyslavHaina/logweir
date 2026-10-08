@@ -38,6 +38,8 @@ import {
   preparePlan,
   readCatalogOffers,
   recoveryPoints,
+  redactedBindingReason,
+  isMintedSetId,
   renderCatalogOffers,
   renderNoCompletedBackup,
   renderPreparedWizard,
@@ -253,6 +255,110 @@ test("a_selectable_complete_unredacted_row_is_offered_and_each_missing_fact_refu
     const verdict = catalogPointOffer(entry, onPage);
     assert.equal(verdict.offer, false, why);
     assert.match(verdict.reason, reason, why);
+  }
+});
+
+// ------------------------------- FX-17: a redacted binding, and the PoC's page
+
+/** A nightly point exactly as the PoC's v0.2.0-rc.1 runner published it
+ *  (`logweir-poc`, view page `lwc-cs-adb8df2b8f9038a9face-s797d6-p0`, the
+ *  first row of the Catalog view in `poc-batch-1/post/catalog.txt`): the set
+ *  id and both keys built from it are the redactor's output. */
+const POC_SET = "89b585c5-5498-48dc-ae32-090809457ec8-20261008-020000";
+const POC_RUN = "01M4CKTADX268PREVHJAAYXEMZ";
+function pocRow(redacted) {
+  return row({
+    pointId: "lwp1-324e405be6e21da94338e90966d61884",
+    runId: POC_RUN,
+    backupId: redacted ? "[redacted]" : POC_SET,
+    receiptKey: redacted
+      ? "[redacted].receipt.json"
+      : "logweir/backups/" + POC_SET + "/" + POC_RUN + ".receipt.json",
+    manifestKey: redacted ? "[redacted].json" : "poc/" + POC_SET + "/manifest.json",
+  });
+}
+
+test("fx17_a_redacted_binding_is_one_reason_naming_the_field_and_its_cause", () => {
+  // THE PoC'S ROW: not offered, and the ONE reason names both fields, the
+  // redactor, and the repair -- not "no usable backup set id", which is what a
+  // redacted set id fell through to before.
+  const poc = catalogPointOffer(pocRow(true), page([]));
+  assert.equal(poc.offer, false);
+  assert.match(poc.reason,
+    /backup set id as `\[redacted\]` and its receipt key as `\[redacted\]\.receipt\.json`/);
+  assert.match(poc.reason, /Runners up to v0\.2\.0-rc\.1 withhold every scheduled run's set id/);
+  assert.match(poc.reason, /upgrade the runner image and sync the catalog again/);
+  assert.doesNotMatch(poc.reason, /no usable backup set id/);
+  assert.equal(redactedBindingReason(pocRow(true)), poc.reason, "one rule, one sentence");
+
+  // CONTROL: the SAME point as a current runner publishes it is offered.
+  assert.deepEqual(catalogPointOffer(pocRow(false), page([])), { offer: true, reason: null });
+  assert.equal(redactedBindingReason(pocRow(false)), null);
+
+  // The set id alone, the key whole: still refused, naming only the set id.
+  const setOnly = catalogPointOffer(row({ backupId: "[redacted]" }), page([]));
+  assert.equal(setOnly.offer, false);
+  assert.match(setOnly.reason, /backup set id as `\[redacted\]`, the redactor's output/);
+  assert.doesNotMatch(setOnly.reason, /receipt key as/);
+
+  // Only the KEY, beside a set id this product mints: the old ULID defect.
+  const ulid = catalogPointOffer(row({
+    backupId: "3f1c9d2e-8a7b-4c6d-9e0f-1a2b3c4d5e6f", receiptKey: "[redacted].receipt.json",
+  }), page([]));
+  assert.equal(ulid.offer, false);
+  assert.match(ulid.reason, /withheld the run id in the key, which runners older than v0\.2\.0-rc\.1/);
+  // …and beside a set id someone CHOSE: that id is named, with the rule.
+  const chosen = catalogPointOffer(row({
+    backupId: "MyBackupSet01", receiptKey: "[redacted].receipt.json",
+  }), page([]));
+  assert.equal(chosen.offer, false);
+  assert.match(chosen.reason, /its set id `MyBackupSet01` and the run id are two chosen components/);
+  assert.match(chosen.reason, /survives only as a UUID, or as lower-case letters/);
+
+  // NEGATIVE CONTROLS: a point that is not offered for a REAL reason keeps it,
+  // redacted binding or not -- the order is the order of repair.
+  const untrusted = catalogPointOffer(
+    Object.assign(pocRow(true), { selectable: false, verification: "UntrustedSigner" }), page([]));
+  assert.equal(untrusted.offer, false);
+  assert.match(untrusted.reason, /does not list this point as restorable: availability Available, verification UntrustedSigner/);
+  const refused = catalogPointOffer(Object.assign(pocRow(false), { backupVerdict: "Invalid" }),
+    page([]));
+  assert.equal(refused.offer, false);
+  assert.match(refused.reason, /refused this point's own Backup evidence \(Invalid\)/);
+  const expired = catalogPointOffer(pocRow(false), page([], { viewExpired: true }));
+  assert.match(expired.reason, /aged out/);
+});
+
+test("fx17_the_first_page_of_scheduled_points_is_offered_and_says_why_when_it_is_not", () => {
+  // The PoC's first page: twenty nightly points. As v0.2.0-rc.1 published them,
+  // every row says "not offered" with the redaction reason and the table
+  // carries the page's complaint; as a current runner publishes them, every
+  // row links the wizard and the complaint is gone.
+  const many = (redacted) => Array.from({ length: 20 }, (_, i) => Object.assign(pocRow(redacted), {
+    pointId: "lwp1-" + (i.toString(16).padStart(2, "0")).repeat(16),
+  }));
+  const before = renderPoints({ items: many(true), page: {} }, NS, "archive", "primary");
+  assert.equal((before.match(/data-restore-refused="wizard"/g) || []).length, 20);
+  assert.equal((before.match(/data-restore-point=/g) || []).length, 0);
+  assert.match(before, /data-redacted-binding="true"/);
+  const after = renderPoints({ items: many(false), page: {} }, NS, "archive", "primary");
+  assert.equal((after.match(/data-restore-point=/g) || []).length, 20,
+    "every scheduled point on the page is offered");
+  assert.equal((after.match(/data-restore-refused/g) || []).length, 0);
+  assert.equal(after.indexOf("data-redacted-binding"), -1);
+});
+
+test("fx17_the_set_ids_the_controller_mints_are_the_redactors_identities", () => {
+  // `ui/tests/fixtures/set-ids.json` is read here AND by
+  // `crates/logweir-core/tests/check_contract.rs`, which asserts the redactor
+  // keeps every `minted` id and withholds every `notMinted` one.
+  const ids = fixture("set-ids.json");
+  assert.ok(ids.minted.length >= 4 && ids.notMinted.length >= 9);
+  for (const id of ids.minted) {
+    assert.equal(isMintedSetId(id), true, id);
+  }
+  for (const id of ids.notMinted) {
+    assert.equal(isMintedSetId(id), false, id);
   }
 });
 

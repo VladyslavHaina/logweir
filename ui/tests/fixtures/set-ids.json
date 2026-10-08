@@ -1,0 +1,24 @@
+{
+  "comment": "FX-17. Backup set ids the controller mints (a manual run's UUID; a scheduled run's <schedule uid>-<yyyymmdd>-<hhmmss>, -r<k> for a retry) and near misses it never mints. Read by crates/logweir-core/tests/check_contract.rs (the redactor keeps every minted id whole and withholds every near miss) and by ui/tests/restore-catalog.spec.js (isMintedSetId agrees). The scheduled values are the PoC's own (logweir-poc).",
+  "minted": [
+    "89b585c5-5498-48dc-ae32-090809457ec8",
+    "89b585c5-5498-48dc-ae32-090809457ec8-20260925-065500",
+    "89b585c5-5498-48dc-ae32-090809457ec8-20261008-020000-r1",
+    "89b585c5-5498-48dc-ae32-090809457ec8-20261231-235959-r3",
+    "b6c06251-5860-4e8d-ac85-860220701881-20280229-123005"
+  ],
+  "notMinted": [
+    "89b585c5-5498-48dc-ae32-090809457ec8-20261309-031700",
+    "89b585c5-5498-48dc-ae32-090809457ec8-20260915-256100",
+    "89b585c5-5498-48dc-ae32-090809457ec8-20260230-000000",
+    "89b585c5-5498-48dc-ae32-090809457ec8-20260925-065500-r0",
+    "89b585c5-5498-48dc-ae32-090809457ec8-20260925-065500-r12",
+    "89b585c5-5498-48dc-ae32-090809457ec8-20260925-065500-x",
+    "89B585C5-5498-48DC-AE32-090809457EC8-20260925-065500",
+    "89b585c5-5498-48dc-ae32-090809457ec8_20260925-065500",
+    "89b585c5-5498-48dc-ae32-090809457ec8-20260925-065500-q1",
+    "nightly-backups-of-the-prod-cluster1-20260925-065500",
+    "nightly-backups-schedule-prod-20260925-065500",
+    "89b585c5-5498-48dc-ae32-090809457ec8-abcdefgh-ijklmn"
+  ]
+}
