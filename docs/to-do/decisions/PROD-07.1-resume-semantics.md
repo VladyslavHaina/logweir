@@ -6,7 +6,31 @@
 - Status: **proposed**. The default contract (§5.2) and the recommended resume route (§5.3) are recommendations for the orchestrator's review; the ledger changes in §8 are the orchestrator's to record.
 - Inputs: [PROD-00 engine route](PROD-00-engine-route.md) §3.4 (C4), §3.5 (C5), §9 (00.3g, 00.3i), §12 (0.23.3); [PROD-01.1](PROD-01.1-record-semantics.md) §5 and §7 (rows 07-1 to 07-4); [PROD-01.4](PROD-01.4-topic-identity.md) §7 and §8 (rows TI-07.1-1 to -3); [PROD-08.1](PROD-08.1-integrity-contract.md) §2 (the oracle). OD-3 as decided on 2026-10-07: Logweir builds the engine with its own patch folder, patch first.
 
-TODO-SUMMARY
+## 0. Decision summary
+
+1. **The engine's restore checkpoint (0.23.3) is not a durable record, and it does not describe the target.** From source (§2):
+   - it is a pod-local JSON list of segment keys whose every produce request was acknowledged, plus one hash;
+   - it is saved once per topic, and `checkpoint_interval_secs` is read by nothing;
+   - the save truncates and then writes, so it is not atomic;
+   - the hash covers every `restore:` key, Logweir's per-run paths included, and nothing about the target cluster, the target topics or the archive;
+   - shutdown is seen only between topics, and a stopped restore exits 0;
+   - skipped segments add nothing to the offset report;
+   - restore produces without idempotence and re-sends a request whose response was lost.
+2. **Measured on slot 1** (§4), the checkpoint, carried with a stable path, behaves as the source predicts. ⟪SUMMARY-MEASURED⟫
+3. **Logweir today never resumes, and that is what keeps it safe** (§3). Per-run paths, a pod-local file and phase 0's existing-target refusal each prevent a resume; the first and third also prevent F13 and F16 of §6.
+4. **Default contract, now (PROD-07.2): resume means reconcile, or a fresh target** (§5.2).
+   - An interrupted restore is a state, never a generic failure.
+   - Its partial targets are listed with PROD-08.1's complete-verification counts.
+   - A retry is a new execution into fresh targets.
+   - Logweir stops rendering `checkpoint_state` and `checkpoint_interval_secs`, so the engine keeps no file to be stale, corrupt or carried.
+   - An engine exit 0 after a cancel is never completion.
+   - A cancel is SIGTERM, then SIGKILL, and the attempt ends only when the writer is proved gone.
+5. **Resume, for PROD-07.3: the target is the checkpoint** (§5.3).
+   - Under six preconditions (same execution; the old writer gone and the target quiet; target identity unchanged per PROD-01.4; a clean prefix under PROD-08.1's model; one writer; selection by offset), a resume continues each partition after its last `x-original-offset`, through PROD-00.3i's per-partition offset floor (C11).
+   - The interruption adds no duplicate, because the target shows every appended batch, acknowledged or not. The prototype measured this after a kill with requests in flight.
+   - Complete verification after the resume decides the verdict, and the mapping is rebuilt from the target's lineage.
+6. **Not recommended: the engine's checkpoint as the resume mechanism** (§5.6). Per-segment saves, path-free hashing, an atomic save, identity in the hash and a persisted file would cost about 6 days of engine and runner work. They would still leave up to a segment of duplicates per partition, and they still need the target scan to be safe. **PROD-00.3g leaves PROD-07.3's path**; PROD-07.3 depends on 00.3i and PROD-01.4's target identity instead.
+7. **Rows** (§7): 07.1-I1 to I7 for PROD-07.2, 07.1-R1 to R10 for PROD-07.3, 07.1-G1 to G3 if 00.3g is kept, and 07.1-F1 for 00.3i. **Ledger proposals** (§8): PROD-07.3's dependencies, PROD-00.3g's priority, A-C4-1 to A-C4-3 re-homed, and a child row for the produce-response fault proxy (PROD-01.5d).
 
 ## 1. Evidence base
 
