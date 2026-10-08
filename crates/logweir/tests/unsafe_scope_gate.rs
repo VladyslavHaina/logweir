@@ -365,3 +365,50 @@ fn just_lint_runs_the_unsafe_scope_gate() {
         "`just lint` must run the unsafe perimeter gate (OD-6, ADR 0004); the recipe was:\n{body}"
     );
 }
+
+/// **AP-04.1-4's gate (T1).** rust-rdkafka 0.36.2's `GroupInfo::members` is
+/// undefined behaviour on a group without members; the workspace `clippy.toml`
+/// lists it under `disallowed-methods`, so `cargo clippy -D warnings` refuses
+/// any call. This fails when the entry is missing while `Cargo.lock` carries
+/// rdkafka below 0.37 (where the defect is fixed). The mutant that deletes the
+/// entry makes it red; a call to the method makes clippy red (recorded in
+/// the PROD-04.0b report).
+#[test]
+fn the_unsound_group_member_accessor_is_fenced_while_rdkafka_is_below_0_37() {
+    let lock = std::fs::read_to_string(repo_root().join("Cargo.lock")).expect("Cargo.lock");
+    let mut versions = Vec::new();
+    let mut in_rdkafka = false;
+    for line in lock.lines() {
+        if line == "[[package]]" {
+            in_rdkafka = false;
+        } else if line == "name = \"rdkafka\"" {
+            in_rdkafka = true;
+        } else if in_rdkafka {
+            if let Some(v) = line.strip_prefix("version = \"") {
+                versions.push(v.trim_end_matches('"').to_string());
+                in_rdkafka = false;
+            }
+        }
+    }
+    assert!(
+        !versions.is_empty(),
+        "Cargo.lock locks no rdkafka: this gate reads the wrong file"
+    );
+    let below_0_37 = versions.iter().any(|v| {
+        let mut parts = v.split('.').map(|p| p.parse::<u64>().unwrap_or(u64::MAX));
+        matches!((parts.next(), parts.next()), (Some(0), Some(minor)) if minor < 37)
+    });
+    if !below_0_37 {
+        return;
+    }
+    let clippy = std::fs::read_to_string(repo_root().join("clippy.toml")).unwrap_or_default();
+    let fenced = clippy
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .any(|l| l.contains("path = \"rdkafka::groups::GroupInfo::members\""));
+    assert!(
+        fenced,
+        "Cargo.lock carries rdkafka {versions:?} (below 0.37, T1), and clippy.toml no longer \
+         lists rdkafka::groups::GroupInfo::members under disallowed-methods"
+    );
+}

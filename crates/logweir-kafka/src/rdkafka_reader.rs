@@ -34,6 +34,9 @@ pub struct RdKafkaReader {
     base: ClientConfig,
     /// The bound of one positions fetch or commit wait (PROD-04.0a).
     position_bound: Duration,
+    /// The bound of one admin call through `logweir-rdkafka-ffi`
+    /// (PROD-04.0b; `crate::rdkafka_admin`).
+    admin_bound: Duration,
     /// The drill's own scratch-topic namespace. `TopicDeleter::delete_topics`
     /// refuses any name that does not start with this prefix, and refuses
     /// EVERYTHING until it is set via `with_scratch_prefix` — `connect`
@@ -177,8 +180,25 @@ impl RdKafkaReader {
             admin,
             base,
             position_bound: DEFAULT_POSITION_BOUND,
+            admin_bound: crate::groups::DEFAULT_ADMIN_BOUND,
             scratch_prefix: None,
         })
+    }
+
+    /// The admin client, for `crate::rdkafka_admin`'s calls through
+    /// `logweir-rdkafka-ffi`, which borrow its `Client` for each call.
+    pub(crate) fn admin_client(&self) -> &AdminClient<DefaultClientContext> {
+        &self.admin
+    }
+
+    /// The bound of one admin call (PROD-04.0b).
+    pub(crate) fn admin_bound(&self) -> Duration {
+        self.admin_bound
+    }
+
+    /// Sets it; `crate::rdkafka_admin`'s `with_admin_bound` validates first.
+    pub(crate) fn set_admin_bound(&mut self, bound: Duration) {
+        self.admin_bound = bound;
     }
 
     /// Sets the bound of every later [`RdKafkaReader::committed_positions`]

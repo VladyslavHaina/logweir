@@ -1927,6 +1927,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "logweir-core",
+ "logweir-rdkafka-ffi",
  "rdkafka",
  "sha2",
  "thiserror 1.0.69",
