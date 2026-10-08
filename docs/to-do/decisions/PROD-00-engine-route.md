@@ -1158,6 +1158,26 @@ What the negative control also shows: the identity is a declaration. The scratch
 - **Signing runs only on main.** Keyless signing, the SBOM attestation and the provenance run in `images.yml`'s `sign` job after a push to main; nothing here ran them. What the first run must show is in the report.
 - Proposed row **PROD-00.3p**: replace `rustls-pemfile` (unmaintained) in the engine. It is a source change, an upstream PR candidate under OD-3 rule 3.
 
+### 13.8 Fix round (2026-10-08): the review's MEDIUMs and LOWs
+
+The Tier-A supply-chain review (`claude/prod-00-2.review.md`) accepted the row with fixes. Each fix, and the control that holds it:
+
+| Finding | Fix | Held by |
+|---|---|---|
+| **M1** two engines could print one `+logweir.<n>` | `third_party/kafka-backup-builds.txt` is an append-only ledger, one `<version> <digest>` line per build. `engine-source.sh`, in every mode including the Dockerfile's `prepare`, refuses: a last line that is not the build env's pair; a version or a digest recorded twice; an `n` that does not rise within a release. `engine_pin.rs::SHIPPED_BUILDS` pins every build that landed as the ledger's prefix, which also catches the one edit a file cannot show, a line rewritten in place | seven ledger controls held by both the Rust check and the script; prefix rewrite and drop refused; mutants on the repeated-version, last-line and falling-`n` checks and on the prefix check, all killed |
+| **M2** the engine gate skipped `sources` | `[sources]` denies unknown registries and git, allows crates.io only and records no exception, in the engine policy and in `deny.toml` (swept); `ci-check.sh` runs `licenses advisories sources bans` for both graphs | live: a planted `git+file://` source for `spin` exits 8 (`source-not-allowed`), and 0 under `unknown-git = "warn"`; `engine_build.rs::both_graphs_admit_crates_io_only_and_the_gate_checks_it`, with four loosenings and a gate without `sources` refused (mutant killed) |
+| **L1** the cosign guard kept the first of a repeated flag, and admitted the `--insecure-*` switches | any flag given twice is refused (cosign and gh keep the last value); `--insecure-ignore-tlog`, `--insecure-ignore-sct`, `--allow-insecure-registry`, `--key`, `--certificate` and `--certificate-chain` are refused | the reviewer's probe G1, and each switch, refused; mutants killed |
+| **L2** `gh attestation verify` pinned the workflow without its ref | `--cert-identity` with the exact SAN, plus `--deny-self-hosted-runners`; `--signer-workflow` and `--cert-identity-regex` are refused | guard tests; mutant killed |
+| **L3** a newer controller with an older runner image signed the wrong engine | the controller states no engine identity: `job::build` sets neither variable, drops them from `env_literal`, and the constants are gone. A runner image without its own declaration refuses its run instead of mislabelling it | `no_job_states_the_engine_identity` (mutant killed); the legacy goldens assert the absence; `engine_pin.rs` holds `job.rs` free of any engine version or digest |
+| **L4** the identity was never compared with the binary that runs | drill (after phase 0) and backup (before the execution claim) run `--version` once, with a 60 s bound, and refuse unless the binary prints the `engine.version` they would sign | unit rows; e2e rows `a_drill_…`/`a_backup_whose_engine_prints_another_version_is_refused…` (exit 1, no engine command, no scorecard or receipt), with the two call-site mutants (see the report) |
+| **L5** base images by tag; Logweir's builder without `--locked` | `rust:1.89-bookworm` and `debian:bookworm-slim` pinned by their index digests; `cargo auditable build --locked` for Logweir | `engine_pin.rs` refuses an unpinned external `FROM` in the runner Dockerfile (two controls, mutant killed) |
+| **L6** (mutant R3) the identity-file read was untested | a testable `read_identity_file`; a directory at the path is an error, never "no file" | R3 killed |
+| **L8** (mutant R4) `prepare`'s digest check was untested | `prepare_refuses_a_stale_digest_before_it_extracts` | R4 killed |
+| **L9** the stamp covers only `--version` | stated in the patch README: `CARGO_PKG_VERSION`, and so the SBOM's crate versions, read 0.23.3 | — |
+| **L7** doc nits | the patch README's spin line, "never the filter-rule or SASL-plugin patches" in the ADR amendment, the mutant count and the two lock holds above, the shim comment, and "a change to a patch or the tarball" | — |
+
+Not changed: `Dockerfile.weirkeeper` and `Dockerfile.console` still name `rust:1.89-bookworm`/`debian:bookworm-slim` by tag, and `release.yml` runs the CLI build in `rust:1.89-bookworm` by tag. Both are outside this row and owed as a class sweep. `cargo-auditable` is pinned by version (crates.io versions are immutable) and installed `--locked`.
+
 ---
 
 Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).

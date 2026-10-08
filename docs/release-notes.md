@@ -615,7 +615,12 @@ identity and `doctor` rows, `scripts/test-check-cosign-verify.py`) carry
 negative controls, and fourteen mutants were killed. Not run: keyless signing,
 the SBOM attestation and the provenance, which happen only in `images.yml` on
 `main` (the first publication is their first run). The runner's identity file
-reaches a live Job at the next PoC refresh.
+reaches a live Job at the next PoC refresh. Fix round (the row's review): the
+build ledger, the `sources` gate and the version probe each carry negative
+controls (a reused version, a planted `git+file://` source, and a binary that
+prints another version, refused by a live drill and a live backup), and the
+e2e suites (`guards`, `backup_argv`, `full_drill`, G-PITR, record semantics)
+passed with Logweir's arm64 engine and the probe in place.
 **Rollback:** for one release, OSO's released binary stays buildable:
 `docker build --platform linux/amd64 --build-arg ENGINE_SOURCE=oso` produces a
 runner that carries it and declares OSO's identity, so its scorecards and
