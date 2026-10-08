@@ -4,11 +4,11 @@
 //! these are what stand in for it. See task-12-report.md's "what remains
 //! unproven" section for exactly what these tests cannot cover.
 use logweir_core::engine::{
-    BackupSetRef, CoverageState, DataEngine, EngineError, PhaseObserver, RestorePlan,
+    BackupSetRef, CoverageState, DataEngine, EngineError, EngineReport, PhaseObserver, RestorePlan,
     SampleSelection, StorageUrl, WindowFloorSource,
 };
 use logweir_core::spec::Anchor;
-use logweir_engine_oso::engine::OsoCliEngine;
+use logweir_engine_oso::engine::{read_engine_report, OsoCliEngine};
 use logweir_engine_oso::storage::Store;
 use std::path::{Path, PathBuf};
 
@@ -223,6 +223,118 @@ fn restore_points_config_at_the_file_it_just_wrote() {
     let mut obs = RecordingObserver::default();
     let facts = engine.restore(&plan(), &mut obs).unwrap();
     assert_eq!(facts.exit_code, 0);
+}
+
+// --- FX-23: the engine's offset report ---
+
+/// `plan()` with its offset report in a fresh directory this test owns.
+fn plan_reporting_to(dir: &Path) -> RestorePlan {
+    RestorePlan {
+        offset_report: dir.join("offsets.json"),
+        ..plan()
+    }
+}
+
+/// The adapter reads the report the engine wrote after exit 0: the stub
+/// writes the pinned engine's pretty-printed `OffsetMapping` with one entry,
+/// and `RestoreFacts.engine_report` names exactly that `(target topic,
+/// partition)`. KILLS: forwarding `Absent` unconditionally (phase 7 would then
+/// never see what the engine lacks).
+#[test]
+fn restore_reads_the_offset_report_the_engine_wrote() {
+    let dir = unique_dir("report");
+    let plan = plan_reporting_to(&dir);
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-offset-report.sh",
+        Store::in_memory("logweir"),
+    );
+    engine.preflight(&plan).unwrap();
+    let facts = engine
+        .restore(&plan, &mut RecordingObserver::default())
+        .unwrap();
+    assert_eq!(
+        facts.engine_report,
+        EngineReport::Read(
+            [("drill-20260903-orders".to_string(), 0)]
+                .into_iter()
+                .collect()
+        )
+    );
+}
+
+/// A report an EARLIER run left at the path is never read as this run's: the
+/// adapter removes it before the engine starts, so an engine that writes none
+/// leaves the report `Absent`. KILLS: deleting the removal (the stale report,
+/// naming a topic this run does not have, would be read and phase 7 would
+/// refuse a healthy run on it, or phase 8 upload it as this run's).
+#[test]
+fn restore_removes_a_stale_offset_report_before_the_engine_runs() {
+    let dir = unique_dir("stale-report");
+    let plan = plan_reporting_to(&dir);
+    std::fs::write(
+        &plan.offset_report,
+        r#"{"entries": {"someone-elses-topic/0": {"topic": "someone-elses-topic", "partition": 0}}}"#,
+    )
+    .unwrap();
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-clean.sh",
+        Store::in_memory("logweir"),
+    );
+    engine.preflight(&plan).unwrap();
+    let facts = engine
+        .restore(&plan, &mut RecordingObserver::default())
+        .unwrap();
+    assert_eq!(facts.engine_report, EngineReport::Absent);
+    assert!(
+        !plan.offset_report.exists(),
+        "the stale report must be gone, not merely ignored"
+    );
+}
+
+/// The three states `read_engine_report` answers, each from a real file:
+/// absent, unreadable, and the pinned engine's shape (an entry per target
+/// partition, keyed and named by the TARGET topic; unknown fields ignored).
+#[test]
+fn read_engine_report_answers_absent_unreadable_or_the_entries() {
+    let dir = unique_dir("read-report");
+    let path = dir.join("offsets.json");
+    assert_eq!(read_engine_report(&path), EngineReport::Absent);
+    std::fs::write(&path, b"not json").unwrap();
+    assert!(matches!(
+        read_engine_report(&path),
+        EngineReport::Unreadable(_)
+    ));
+    std::fs::write(
+        &path,
+        r#"{
+  "entries": {
+    "drill-a/0": {"topic": "drill-a", "partition": 0, "source_first_offset": 0,
+                  "source_last_offset": 9, "target_first_offset": null,
+                  "target_last_offset": null, "first_timestamp": 1, "last_timestamp": 2},
+    "drill-a/2": {"topic": "drill-a", "partition": 2, "source_first_offset": 0,
+                  "source_last_offset": 9, "target_first_offset": null,
+                  "target_last_offset": null, "first_timestamp": 1, "last_timestamp": 2}
+  },
+  "detailed_mappings": {}, "consumer_groups": {}, "source_cluster_id": null,
+  "target_cluster_id": null, "created_at": 3, "a_field_from_a_later_engine": true
+}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        read_engine_report(&path),
+        EngineReport::Read(
+            [("drill-a".to_string(), 0), ("drill-a".to_string(), 2)]
+                .into_iter()
+                .collect()
+        )
+    );
+    // An empty report is READ, and names nothing: an engine stopped before
+    // its first topic finished.
+    std::fs::write(&path, r#"{"entries": {}}"#).unwrap();
+    assert_eq!(
+        read_engine_report(&path),
+        EngineReport::Read(Default::default())
+    );
 }
 
 // --- list_backup_sets() / describe() / fingerprints(), against a Store built

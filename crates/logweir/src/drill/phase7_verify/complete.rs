@@ -7,7 +7,7 @@
 //!
 //! 1. **Archive integrity, every segment.** Every segment the manifest lists
 //!    for the partition — not the segments a sample window overlaps, and not
-//!    the first `max_partitions` partitions — is read back from the store,
+//!    a `max_partitions` subset of the partitions — is read back from the store,
 //!    its sha256 compared with the manifest, its records decoded with
 //!    Logweir's own `kbak` decoder, and its decoded count and offsets
 //!    compared with the manifest's.

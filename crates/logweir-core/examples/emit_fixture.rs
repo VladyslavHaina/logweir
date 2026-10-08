@@ -126,6 +126,7 @@ fn main() {
             records_restored: 75,
             anchor: "head".into(),
             coverage_note: "no capture gap overlaps the sampled window".into(),
+            unsampled_topics: None,
         },
         target_diff: TargetDiffSummary {
             collisions: vec![],

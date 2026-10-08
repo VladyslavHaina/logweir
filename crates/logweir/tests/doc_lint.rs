@@ -2011,6 +2011,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the engine is built from the vendored source",
             "ENGINE_SOURCE=oso",
         ),
+        // FX-23 (2026-10-08): an early-stopped restore is never signed pass,
+        // and a sampled scorecard names the topics its cap left unsampled.
+        (
+            "an early-stopped restore is never signed pass",
+            "sample.unsampled_topics",
+        ),
         // PROD-04.0b (2026-10-08): one crate may hold `unsafe` code, and
         // rustc forbids it everywhere else through the workspace lint table.
         ("one crate holds all unsafe code", "[workspace.lints.rust]"),
