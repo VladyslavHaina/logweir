@@ -7,7 +7,7 @@
 //! The four and the five are asserted SEPARATELY and on purpose:
 //! `arm_cases()` carries the four self-contradiction arms and
 //! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` closes over them, while
-//! `validate_invariants_has_exactly_eleven_return_err_statements` closes over
+//! `validate_invariants_has_exactly_thirteen_return_err_statements` closes over
 //! the function's TOTAL by reading its source text. So an arm added to the
 //! function without a case here fails the second test, and a case deleted
 //! from `arm_cases()` fails the first — neither number can go stale under
@@ -96,7 +96,7 @@ fn pristine() -> BackupReceipt {
 /// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
 /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` keeps saying exactly
 /// what its name says while
-/// `validate_invariants_has_exactly_eleven_return_err_statements` pins the
+/// `validate_invariants_has_exactly_thirteen_return_err_statements` pins the
 /// total.
 fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     // Arm 1: a major this reader has never seen.
@@ -253,7 +253,113 @@ fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
     }
 }
 
-/// **THE TOTAL.** `validate_invariants` has exactly eleven refusing statements.
+/// **PROD-01.3, arms 5b and 5c.** The three modes PROD-01.3 adds are values of
+/// format 1.3.0 and later: under an older minor they are refused as a value
+/// no writer of that version could have produced (5b), from 1.3.0 they are
+/// accepted, and the closed set there is five (5c). Below 1.3.0 an unknown
+/// value is still refused by arm 5a with its unchanged message — which is
+/// exactly what an older reader says about a 1.3.0 receipt naming a new mode.
+#[test]
+fn arm_5_is_versioned_by_the_prod_01_3_modes() {
+    for mode in ["scramSha256", "plain", "mtls"] {
+        for version in ["1.0.0", "1.1.0", "1.2.0"] {
+            let mut doc = pristine();
+            doc.format_version = version.to_string();
+            doc.source.auth.mode = mode.to_string();
+            assert_eq!(
+                doc.validate_invariants(),
+                Err(format!(
+                    "source.auth.mode {mode:?} is defined from 1.3.0 and format_version \
+                     {version:?} predates it"
+                )),
+                "arm 5b must refuse {mode} under {version}"
+            );
+        }
+        for version in ["1.3.0", "1.4.2", "1.12.0"] {
+            let mut doc = pristine();
+            doc.format_version = version.to_string();
+            doc.source.auth.mode = mode.to_string();
+            doc.source.auth.username = (mode != "mtls").then(|| "logweir".to_string());
+            assert_eq!(
+                doc.validate_invariants(),
+                Ok(()),
+                "{mode} under {version} is one of the five values and must be accepted"
+            );
+        }
+    }
+    // The two original values stay accepted under 1.3.0.
+    for mode in ["plaintext", "scramSha512"] {
+        let mut doc = pristine();
+        doc.format_version = "1.3.0".to_string();
+        doc.source.auth.mode = mode.to_string();
+        assert_eq!(doc.validate_invariants(), Ok(()), "{mode}");
+    }
+    // Arm 5c: the closed five, from 1.3.0.
+    for mode in ["scram-sha-256", "PLAIN", "oauthbearer", ""] {
+        let mut doc = pristine();
+        doc.format_version = "1.3.0".to_string();
+        doc.source.auth.mode = mode.to_string();
+        assert_eq!(
+            doc.validate_invariants(),
+            Err(format!(
+                "source.auth.mode {mode:?} is not one of the five values this format defines: \
+                 \"plaintext\", \"scramSha512\", \"scramSha256\", \"plain\" or \"mtls\""
+            )),
+            "arm 5c must refuse {mode:?}"
+        );
+    }
+}
+
+/// The written version follows the mode: a PROD-01.3 mode is 1.3.0 whatever
+/// the archive pins; the two original modes keep the 1.1.0/1.2.0 documents
+/// they always were, so no receipt a plaintext or SCRAM-SHA-512 backup writes
+/// changes by a byte.
+#[test]
+fn the_written_version_follows_the_auth_mode() {
+    use logweir_core::backup_receipt::{
+        format_version_for, FORMAT_VERSION_WITH_AUTH_MODES, FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        RECEIPT_FORMAT_VERSION,
+    };
+    let doc = pristine();
+    let mut pinned = doc.archive.clone();
+    pinned.manifest_version_id = Some("v1".to_string());
+    for mode in ["plaintext", "scramSha512"] {
+        let auth = ReceiptAuth {
+            mode: mode.to_string(),
+            username: None,
+        };
+        assert_eq!(
+            format_version_for(&doc.archive, &auth),
+            RECEIPT_FORMAT_VERSION
+        );
+        assert_eq!(
+            format_version_for(&pinned, &auth),
+            FORMAT_VERSION_WITH_MANIFEST_VERSION
+        );
+    }
+    for mode in ["scramSha256", "plain", "mtls"] {
+        let auth = ReceiptAuth {
+            mode: mode.to_string(),
+            username: None,
+        };
+        assert_eq!(
+            format_version_for(&doc.archive, &auth),
+            FORMAT_VERSION_WITH_AUTH_MODES
+        );
+        assert_eq!(
+            format_version_for(&pinned, &auth),
+            FORMAT_VERSION_WITH_AUTH_MODES
+        );
+    }
+    assert_eq!(FORMAT_VERSION_WITH_AUTH_MODES, "1.3.0");
+    assert_eq!(
+        logweir_core::backup_receipt::AUTH_MODES_SINCE_MINOR,
+        3,
+        "the constant and the version move together"
+    );
+}
+
+/// **THE TOTAL.** `validate_invariants` has exactly thirteen refusing statements.
 ///
 /// Read out of the SOURCE TEXT, which is the only way to make the count a
 /// claim about the function rather than about this file's case list: an arm
@@ -266,7 +372,7 @@ fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
 /// `crates/logweir/tests/two_reader_parity.rs::
 /// every_invariant_arm_has_a_corpus_case` applies to the scorecard's arms).
 #[test]
-fn validate_invariants_has_exactly_eleven_return_err_statements() {
+fn validate_invariants_has_exactly_thirteen_return_err_statements() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/backup_receipt.rs"
@@ -287,9 +393,9 @@ fn validate_invariants_has_exactly_eleven_return_err_statements() {
 
     let total = body.matches("return Err(format!(").count();
     assert_eq!(
-        total, 11,
+        total, 13,
         "BackupReceipt::validate_invariants has {total} `return Err(format!(` \
-         statement(s), not 11. Every one of them needs a per-arm test in this file with \
+         statement(s), not 13. Every one of them needs a per-arm test in this file with \
          its exact message AND a case in \
          e2e/fixtures/invariants/backup-receipt-index.json — \
          scripts/check-invariant-corpus.sh derives the list from this same slice and \
@@ -315,7 +421,7 @@ fn validate_invariants_has_exactly_eleven_return_err_statements() {
 /// exact message, and a pristine receipt accepted. Arm 5 — the closed value
 /// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
 /// function's total is
-/// `validate_invariants_has_exactly_eleven_return_err_statements`.
+/// `validate_invariants_has_exactly_thirteen_return_err_statements`.
 ///
 /// **RENAMED, Task 12 closeout carry (c).** It was
 /// `backup_receipt_invariants_have_exactly_four_arms`, which Task 5b's fix

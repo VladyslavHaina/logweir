@@ -65,20 +65,24 @@ pub const OBJECT_NAME_PATTERN: &str =
 /// unchanged by it; see this module's header for why it exists.
 pub type UnrecognizedFields = BTreeMap<String, serde_json::Value>;
 
-/// `auth.mode`'s enum, fixed byte for byte at this task.
+/// `auth.mode`'s enum.
 ///
 /// THE SPELLINGS ARE THE CONTRACT. They are exactly `["plaintext",
-/// "scramSha512"]`, in that order, and Task 6's late-binding agreement test
-/// `the_crd_auth_mode_enum_and_auth_spec_agree` (which lives in
-/// `tests/crd_shape.rs` and is owned by that task, not this one) asserts BYTE
-/// equality between this enum and `logweir_core::spec::AuthSpec`'s serde
-/// spellings. This task consumes nothing from Task 6 — the Rust `AuthSpec`
-/// lands in a later slot and must match what is here.
+/// "scramSha512", "scramSha256", "plain", "mtls"]`, in that order, and Task 6's
+/// late-binding agreement test `the_crd_auth_mode_enum_and_auth_spec_agree`
+/// (`tests/crd_shape.rs`) asserts BYTE equality between this enum and
+/// `logweir_core::spec::AuthSpec`'s serde spellings.
 ///
-/// NO THIRD MODE. `mtls`, `gssapi`, `oauthbearer` and `scramSha256` are not in
-/// tag 1; a `KafkaCluster` naming one is refused by the CRD schema rather than
-/// by a controller branch, and `RenderError::UnsupportedAuthMode` (Task 3) is
-/// the CLI half of the same refusal.
+/// # PROD-01.3: three more modes, additive
+///
+/// Tag 1 shipped the first two. PROD-01.3 appends `scramSha256` (SASL/SCRAM-
+/// SHA-256), `plain` (SASL/PLAIN, accepted only with `tls: true`) and `mtls` (a
+/// TLS client certificate, with `tls: true` and `auth.clientCertificate`).
+/// Appended, so every object written before them is unchanged and resolves as
+/// it did; a controller that predates them cannot deserialise an object that
+/// names one and refuses it rather than dialling it some other way.
+/// `gssapi`, `oauthbearer` and MSK IAM are NOT here (OD-3 deferred the last
+/// two): a `KafkaCluster` naming one is refused by the CRD schema.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase")]
@@ -86,11 +90,24 @@ pub enum AuthMode {
     /// No SASL. `security.protocol` is `PLAINTEXT`. Connection contract v1
     /// refuses this mode with `tls: true` (TLS without SASL, `SSL`): the signed
     /// restore plan grammar has no TLS field for it, and earlier releases
-    /// dialled such an object without TLS.
+    /// dialled such an object without TLS. For a TLS listener that
+    /// authenticates by client certificate, use `mtls`.
     Plaintext,
     /// SASL/SCRAM-SHA-512. `security.protocol` is `SASL_PLAINTEXT` or
     /// `SASL_SSL` depending on `tls`.
     ScramSha512,
+    /// SASL/SCRAM-SHA-256 (PROD-01.3). `SASL_PLAINTEXT` or `SASL_SSL`
+    /// depending on `tls`.
+    ScramSha256,
+    /// SASL/PLAIN (PROD-01.3): Confluent Cloud API keys, Azure Event Hubs
+    /// connection strings. **Only with `tls: true`** (`SASL_SSL`): PLAIN sends
+    /// the password itself, so `tls: false` is refused by the schema's rule and
+    /// by the controller (`PlainWithoutTls`).
+    Plain,
+    /// A TLS client certificate and no SASL (PROD-01.3), `security.protocol`
+    /// `SSL`. Needs `tls: true` and `auth.clientCertificate`; takes no
+    /// `username` or `secretRef`.
+    Mtls,
 }
 
 /// How Logweir authenticates to this cluster, and how the transport is
@@ -113,20 +130,23 @@ pub enum AuthMode {
 pub struct AuthBlock {
     /// The SASL mechanism, or `plaintext` for none.
     pub mode: AuthMode,
-    /// The SASL principal. Required when `mode` is `scramSha512`; it is what
-    /// `planBytes` binds, so changing it after an approval invalidates that
-    /// approval's plan hash. Never read from a Secret.
+    /// The SASL principal. Required when `mode` is `scramSha512`,
+    /// `scramSha256` or `plain`; it is what `planBytes` binds, so changing it
+    /// after an approval invalidates that approval's plan hash. Never read
+    /// from a Secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// A Secret in this namespace holding the SASL password, and the key it is
-    /// under. Required when `mode` is `scramSha512`. Logweir never reads its
-    /// value into a status field, a log line or a rendered document.
+    /// under. Required when `mode` is `scramSha512`, `scramSha256` or `plain`.
+    /// Logweir never reads its value into a status field, a log line or a
+    /// rendered document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_ref: Option<CredentialSecretRef>,
     /// Whether the transport is TLS — the only switch that turns TLS on.
-    /// Independent of `mode`; in connection contract v1 TLS is supported with
-    /// `scramSha512` (SASL_SSL), and `plaintext` with `tls: true` is refused
-    /// rather than dialled without TLS.
+    /// Independent of `mode`; TLS is supported with `scramSha512` and
+    /// `scramSha256` (SASL_SSL), REQUIRED with `plain` (SASL_SSL) and `mtls`
+    /// (SSL), and `plaintext` with `tls: true` is refused rather than dialled
+    /// without TLS.
     #[serde(default)]
     pub tls: bool,
     /// The certificate authority that signs the brokers' certificates, when it
@@ -136,10 +156,53 @@ pub struct AuthBlock {
     /// librdkafka's `ssl.ca.location`). Requires `tls: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_ca: Option<TlsCaSource>,
+    /// The TLS client certificate and private key an `mtls` connection
+    /// presents (PROD-01.3): two keys of ONE Secret in this namespace —
+    /// `kubectl create secret tls` writes exactly the default keys. Required
+    /// when `mode` is `mtls` and refused for every other mode. Logweir never
+    /// reads the Secret: the kubelet projects it read-only into the runner
+    /// pod, and both clients load the two files from there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_certificate: Option<ClientCertificateRef>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub unrecognized_fields: UnrecognizedFields,
 }
+
+/// The Secret an `mtls` connection's client certificate and key are in.
+///
+/// SAME NAMESPACE BY CONSTRUCTION, for [`CredentialSecretRef`]'s reason. The
+/// private key is credential material: it lives only in this Secret and in the
+/// file the kubelet projects at mode `0440` — never in this object, a status,
+/// a ConfigMap, a plan or a log.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientCertificateRef {
+    /// The Secret's `metadata.name`, in this namespace.
+    #[schemars(regex(path = "OBJECT_NAME_PATTERN"), length(min = 1, max = 253))]
+    pub name: String,
+    /// The data key holding the PEM client certificate (chain). Absent means
+    /// `tls.crt`, the `kubernetes.io/tls` Secret's key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(path = "DATA_KEY_PATTERN"), length(min = 1, max = 253))]
+    pub certificate_key: Option<String>,
+    /// The data key holding the PEM private key, UNENCRYPTED (PKCS#8, PKCS#1
+    /// or SEC1; the engine's loader takes no passphrase). Absent means
+    /// `tls.key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(path = "DATA_KEY_PATTERN"), length(min = 1, max = 253))]
+    pub private_key_key: Option<String>,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub unrecognized_fields: UnrecognizedFields,
+}
+
+/// `auth.clientCertificate.certificateKey`'s default — the
+/// `kubernetes.io/tls` Secret type's certificate key.
+pub const DEFAULT_CLIENT_CERTIFICATE_KEY: &str = "tls.crt";
+/// `auth.clientCertificate.privateKeyKey`'s default — the `kubernetes.io/tls`
+/// Secret type's key.
+pub const DEFAULT_CLIENT_PRIVATE_KEY_KEY: &str = "tls.key";
 
 /// The credential Secret a SASL connection names.
 ///
@@ -211,9 +274,33 @@ pub const TLS_CA_EXACTLY_ONE_SOURCE_RULE: &str =
 pub const TLS_CA_EXACTLY_ONE_SOURCE_MESSAGE: &str =
     "auth.tlsCa names exactly one of secretKeyRef or configMapKeyRef";
 
+/// **PROD-01.3.** The CEL rule on `spec.auth`: SASL/PLAIN only over TLS.
+/// Vacuously true for every mode but `plain`, so every object written before
+/// the mode existed satisfies it.
+pub const PLAIN_REQUIRES_TLS_RULE: &str = "self.mode != 'plain' || self.tls";
+/// The message paired with [`PLAIN_REQUIRES_TLS_RULE`]; it names the reason
+/// the controller and the runner use for the same refusal.
+pub const PLAIN_REQUIRES_TLS_MESSAGE: &str =
+    "PlainWithoutTls: auth.mode plain (SASL/PLAIN) sends the password itself, so it is accepted only with auth.tls: true";
+
+/// **PROD-01.3.** The CEL rule on `spec.auth`: `mtls` needs TLS.
+pub const MTLS_REQUIRES_TLS_RULE: &str = "self.mode != 'mtls' || self.tls";
+/// The message paired with [`MTLS_REQUIRES_TLS_RULE`].
+pub const MTLS_REQUIRES_TLS_MESSAGE: &str =
+    "auth.mode mtls presents a TLS client certificate, so it requires auth.tls: true";
+
+/// **PROD-01.3.** The CEL rule on `spec.auth`: `clientCertificate` exactly
+/// when the mode is `mtls`. Vacuously true for every object that names
+/// neither, which is every object written before the field existed.
+pub const CLIENT_CERTIFICATE_IFF_MTLS_RULE: &str =
+    "(self.mode == 'mtls') == has(self.clientCertificate)";
+/// The message paired with [`CLIENT_CERTIFICATE_IFF_MTLS_RULE`].
+pub const CLIENT_CERTIFICATE_IFF_MTLS_MESSAGE: &str =
+    "auth.clientCertificate is required when auth.mode is mtls and refused for every other mode";
+
 /// The connection contract's CEL rules, as `(schema path under .spec, rule,
 /// message)`. Injected by `crds::render_all`, the only caller.
-pub const CONNECTION_RULES: [(&[&str], &str, &str); 2] = [
+pub const CONNECTION_RULES: [(&[&str], &str, &str); 5] = [
     (
         &["auth"],
         TLS_CA_REQUIRES_TLS_RULE,
@@ -224,6 +311,17 @@ pub const CONNECTION_RULES: [(&[&str], &str, &str); 2] = [
         TLS_CA_EXACTLY_ONE_SOURCE_RULE,
         TLS_CA_EXACTLY_ONE_SOURCE_MESSAGE,
     ),
+    (
+        &["auth"],
+        PLAIN_REQUIRES_TLS_RULE,
+        PLAIN_REQUIRES_TLS_MESSAGE,
+    ),
+    (&["auth"], MTLS_REQUIRES_TLS_RULE, MTLS_REQUIRES_TLS_MESSAGE),
+    (
+        &["auth"],
+        CLIENT_CERTIFICATE_IFF_MTLS_RULE,
+        CLIENT_CERTIFICATE_IFF_MTLS_MESSAGE,
+    ),
 ];
 
 /// `KafkaCluster.spec`.
@@ -232,7 +330,7 @@ pub const CONNECTION_RULES: [(&[&str], &str, &str); 2] = [
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "KafkaCluster",
-    doc = "A Kafka cluster Logweir connects to (saved-connection contract v1): bootstrap servers, auth mode and username, the TLS switch and an optional private CA reference, role, and the marker topic that proves a scratch target. The password lives in a Secret and the CA in a Secret or ConfigMap, both in this namespace and both referenced, never copied; `status.clusterId` is read from the broker and never from this spec. `spec` is immutable.",
+    doc = "A Kafka cluster Logweir connects to (saved-connection contract v1): bootstrap servers, auth mode (plaintext, scramSha512, scramSha256, plain over TLS, or mtls) and username, the TLS switch, an optional private CA reference and an mtls client-certificate reference, role, and the marker topic that proves a scratch target. The password and the client key live in Secrets and the CA in a Secret or ConfigMap, all in this namespace and all referenced, never copied; `status.clusterId` is read from the broker and never from this spec. `spec` is immutable.",
     plural = "kafkaclusters",
     singular = "kafkacluster",
     namespaced,

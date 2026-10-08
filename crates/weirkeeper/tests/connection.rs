@@ -106,9 +106,15 @@ fn plan_for(cluster: &KafkaCluster) -> String {
     let servers = connection.bootstrap_servers.join(", ");
     let auth = match &connection.auth {
         logweir_core::spec::AuthSpec::Plaintext => String::new(),
-        logweir_core::spec::AuthSpec::ScramSha512 { username, tls } => {
-            format!("  auth:\n    mode: scramSha512\n    username: {username}\n    tls: {tls}\n")
+        logweir_core::spec::AuthSpec::Mtls { tls } => {
+            format!("  auth:\n    mode: mtls\n    tls: {tls}\n")
         }
+        other => format!(
+            "  auth:\n    mode: {}\n    username: {}\n    tls: {}\n",
+            other.mode_str(),
+            other.username().unwrap_or_default(),
+            other.tls()
+        ),
     };
     format!(
         "source:\n  storage:\n    backend: s3\n    bucket: kafka-backups\n    prefix: drill-demo\n \

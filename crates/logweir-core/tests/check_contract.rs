@@ -128,6 +128,8 @@ fn connection() -> ConnectionPlan {
         password_env: Some("LOGWEIR_SOURCE_PASSWORD".into()),
         tls: Some(true),
         ca_file: Some("/check/source-ca.pem".into()),
+        client_cert_file: None,
+        client_key_file: None,
         principal: "User:backup".into(),
     }
 }
@@ -449,6 +451,8 @@ fn an_evidence_write_grant_rides_only_on_a_plan_that_writes_the_marker() {
                 password_env: None,
                 tls: None,
                 ca_file: None,
+                client_cert_file: None,
+                client_key_file: None,
                 principal: "User:ANONYMOUS".into(),
             },
             destination: Some(destination()),

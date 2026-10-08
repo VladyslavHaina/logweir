@@ -5137,6 +5137,16 @@ fn connection_plan(c: &ResolvedConnection) -> ConnectionPlan {
         // pod gets, and the runner passes the path to librdkafka without
         // opening it.
         ca_file: c.tls_ca.as_ref().map(|_| side.ca_file_path()),
+        // PROD-01.3: the `mtls` pair's IN-POD PATHS, exactly where the
+        // resolver's own projection mounts them — never key material.
+        client_cert_file: c
+            .client_certificate
+            .as_ref()
+            .map(|_| side.client_cert_file_path()),
+        client_key_file: c
+            .client_certificate
+            .as_ref()
+            .map(|_| side.client_key_file_path()),
         principal: c.principal.clone(),
     }
 }

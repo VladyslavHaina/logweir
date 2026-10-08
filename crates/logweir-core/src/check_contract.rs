@@ -746,7 +746,8 @@ pub enum CheckOperation {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ConnectionPlan {
     pub bootstrap_servers: Vec<String>,
-    /// `plaintext` | `scramSha256` | `scramSha512`, matching
+    /// One of `crate::connection::AUTH_MODES` — `plaintext`, `scramSha512`,
+    /// `scramSha256`, `plain` or `mtls` — matching
     /// `logweir_core::spec::AuthSpec::mode_str`.
     pub auth_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -760,7 +761,21 @@ pub struct ConnectionPlan {
     /// A path inside the pod, e.g. `/check/source-ca.pem`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_file: Option<String>,
-    /// `User:<name>` or `User:ANONYMOUS` (D2 §5.4).
+    /// **PROD-01.3, `mtls` only.** The in-pod path of the projected client
+    /// certificate — a path, never PEM text. Absent for every other mode, so a
+    /// plan for any connection that predates `mtls` serialises exactly as it
+    /// did (and `deny_unknown_fields` on an older runner only ever meets it on
+    /// an `mtls` plan, which that runner could not dial anyway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_cert_file: Option<String>,
+    /// **PROD-01.3, `mtls` only.** The in-pod path of the projected client
+    /// private key. A path: no plan, ConfigMap or status ever carries key
+    /// material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key_file: Option<String>,
+    /// `User:<name>` or `User:ANONYMOUS` (D2 §5.4); for `mtls`,
+    /// `mtls:secret/<name>` — the client certificate's subject is the Kafka
+    /// principal, and the controller, which reads no Secret, cannot know it.
     pub principal: String,
 }
 

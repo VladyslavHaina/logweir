@@ -420,6 +420,10 @@ pub fn auth_mode_flag(mode: AuthMode) -> &'static str {
     match mode {
         AuthMode::Plaintext => "plaintext",
         AuthMode::ScramSha512 => "scramSha512",
+        // PROD-01.3.
+        AuthMode::ScramSha256 => "scramSha256",
+        AuthMode::Plain => "plain",
+        AuthMode::Mtls => "mtls",
     }
 }
 

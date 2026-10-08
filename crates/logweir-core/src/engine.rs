@@ -431,6 +431,17 @@ pub struct RestorePlan {
 /// deployment input that rotates, not an identity an approval binds.
 /// [`AuthRender::with_tls_ca_file`] is the one way it is attached, and it
 /// refuses a CA for a connection that is not TLS.
+///
+/// # PROD-01.3: three more mechanisms, one more file pair
+///
+/// `ScramSha256` and `Plain` render exactly like `ScramSha512` with another
+/// `sasl_mechanism`; `Plain` without TLS is refused by the renderer
+/// (`RenderError::PlainWithoutTls`), the backstop behind the runner's guard.
+/// `Mtls` renders `security_protocol: SSL` and the two client-certificate
+/// paths, which — like the CA — are POD-LOCAL PATHS attached by the runner
+/// ([`AuthRender::with_client_certificate`]) from
+/// `crate::connection::{SOURCE,TARGET}_TLS_{CERT,KEY}_FILE_ENV`, and never key
+/// material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthRender {
     Plaintext,
@@ -439,9 +450,47 @@ pub enum AuthRender {
         tls: bool,
         tls_ca_file: Option<String>,
     },
+    ScramSha256 {
+        username: String,
+        tls: bool,
+        tls_ca_file: Option<String>,
+    },
+    Plain {
+        username: String,
+        tls: bool,
+        tls_ca_file: Option<String>,
+    },
+    Mtls {
+        tls: bool,
+        tls_ca_file: Option<String>,
+        client_certificate: Option<crate::connection::ClientCertificateFiles>,
+    },
 }
 
 impl AuthRender {
+    /// The mode as the documents spell it — `crate::spec::AuthSpec::mode_str`'s
+    /// twin, so a refusal can name the mode it refused.
+    pub fn mode_str(&self) -> &'static str {
+        use crate::connection as c;
+        match self {
+            AuthRender::Plaintext => c::AUTH_MODE_PLAINTEXT,
+            AuthRender::ScramSha512 { .. } => c::AUTH_MODE_SCRAM_SHA_512,
+            AuthRender::ScramSha256 { .. } => c::AUTH_MODE_SCRAM_SHA_256,
+            AuthRender::Plain { .. } => c::AUTH_MODE_PLAIN,
+            AuthRender::Mtls { .. } => c::AUTH_MODE_MTLS,
+        }
+    }
+
+    /// The SASL username, for the arms that have one.
+    pub fn username(&self) -> Option<&str> {
+        match self {
+            AuthRender::Plaintext | AuthRender::Mtls { .. } => None,
+            AuthRender::ScramSha512 { username, .. }
+            | AuthRender::ScramSha256 { username, .. }
+            | AuthRender::Plain { username, .. } => Some(username),
+        }
+    }
+
     /// Attach the projected CA file, or refuse because the transport is not
     /// TLS. `None` returns `self` unchanged, so a connection with no private CA
     /// renders byte-identically to one built before the field existed.
@@ -449,7 +498,7 @@ impl AuthRender {
     /// # Errors
     ///
     /// [`crate::connection::TlsCaWithoutTls`] when `ca_file` is `Some` and the
-    /// auth is `Plaintext` or `ScramSha512 { tls: false, .. }`.
+    /// transport is not TLS (`Plaintext`, or any arm with `tls: false`).
     pub fn with_tls_ca_file(
         self,
         ca_file: Option<String>,
@@ -457,16 +506,68 @@ impl AuthRender {
         let Some(ca_file) = ca_file else {
             return Ok(self);
         };
+        let refuse = |mode| Err(crate::connection::TlsCaWithoutTls { mode });
         match self {
             AuthRender::ScramSha512 { username, tls, .. } if tls => Ok(AuthRender::ScramSha512 {
                 username,
                 tls,
                 tls_ca_file: Some(ca_file),
             }),
-            AuthRender::ScramSha512 { .. } => Err(crate::connection::TlsCaWithoutTls {
-                mode: "scramSha512",
+            AuthRender::ScramSha256 { username, tls, .. } if tls => Ok(AuthRender::ScramSha256 {
+                username,
+                tls,
+                tls_ca_file: Some(ca_file),
             }),
-            AuthRender::Plaintext => Err(crate::connection::TlsCaWithoutTls { mode: "plaintext" }),
+            AuthRender::Plain { username, tls, .. } if tls => Ok(AuthRender::Plain {
+                username,
+                tls,
+                tls_ca_file: Some(ca_file),
+            }),
+            AuthRender::Mtls {
+                tls,
+                client_certificate,
+                ..
+            } if tls => Ok(AuthRender::Mtls {
+                tls,
+                tls_ca_file: Some(ca_file),
+                client_certificate,
+            }),
+            other => refuse(other.mode_str()),
+        }
+    }
+
+    /// Attach the projected client-certificate pair of an `mtls` connection.
+    ///
+    /// `None` returns `self` unchanged for every mode but `Mtls`; for `Mtls` it
+    /// is [`crate::connection::ClientCertificateRefusal::Missing`], because an
+    /// mTLS dial with no certificate has no identity to present (the renderer
+    /// refuses the same shape if a plan's fields were set directly).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::connection::ClientCertificateRefusal`]: files for a mode that
+    /// presents none (`NotMtls`), or none for `mtls` (`Missing`).
+    pub fn with_client_certificate(
+        self,
+        files: Option<crate::connection::ClientCertificateFiles>,
+    ) -> Result<AuthRender, crate::connection::ClientCertificateRefusal> {
+        use crate::connection::ClientCertificateRefusal;
+        match (self, files) {
+            (
+                AuthRender::Mtls {
+                    tls, tls_ca_file, ..
+                },
+                Some(files),
+            ) => Ok(AuthRender::Mtls {
+                tls,
+                tls_ca_file,
+                client_certificate: Some(files),
+            }),
+            (AuthRender::Mtls { .. }, None) => Err(ClientCertificateRefusal::Missing),
+            (other, Some(_)) => Err(ClientCertificateRefusal::NotMtls {
+                mode: other.mode_str(),
+            }),
+            (other, None) => Ok(other),
         }
     }
 }

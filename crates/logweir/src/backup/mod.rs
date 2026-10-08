@@ -354,11 +354,31 @@ pub fn build_plan_with_tls_ca(
     backup_id: &str,
     tls_ca_file: Option<String>,
 ) -> Result<BackupPlan, BackupError> {
+    build_plan_with_tls_files(spec, backup_id, tls_ca_file, None)
+}
+
+/// [`build_plan_with_tls_ca`] plus the projected client-certificate pair of an
+/// `mtls` source (PROD-01.3), so the engine document carries
+/// `ssl_certificate_location` / `ssl_key_location`.
+///
+/// # Errors
+///
+/// `BackupError::Operational` for a CA on a transport that is not TLS, and for
+/// a certificate on a mode that presents none or none on `mtls` — exit 1:
+/// nothing was dialled, and the controller never projects either shape.
+pub fn build_plan_with_tls_files(
+    spec: &BackupSpec,
+    backup_id: &str,
+    tls_ca_file: Option<String>,
+    client_certificate: Option<logweir_core::connection::ClientCertificateFiles>,
+) -> Result<BackupPlan, BackupError> {
     let plan = build_plan(spec, backup_id);
     let source_auth = plan
         .source_auth
         .clone()
         .with_tls_ca_file(tls_ca_file)
+        .map_err(|e| BackupError::Operational(format!("source.auth: {e}")))?
+        .with_client_certificate(client_certificate)
         .map_err(|e| BackupError::Operational(format!("source.auth: {e}")))?;
     Ok(BackupPlan {
         source_auth,
@@ -528,10 +548,14 @@ fn execute_with_signer(
     // attached to the reader's `ssl.ca.location` (an environment read is stable
     // for the life of the process, so the two clients see one path). Unset, the
     // plan is exactly `build_plan`'s.
-    let plan = build_plan_with_tls_ca(
+    let plan = build_plan_with_tls_files(
         &inputs.spec,
         &backup_id,
         crate::tls_ca::projected_ca_file(crate::tls_ca::SOURCE_TLS_CA_FILE_VAR)
+            .map_err(BackupError::Operational)?,
+        // PROD-01.3: the `mtls` pair `run` handed the reader, from the same
+        // two variables.
+        crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Source)
             .map_err(BackupError::Operational)?,
     )?;
 
@@ -1094,6 +1118,13 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
             Ok(ca) => ca,
             Err(e) => return report(&run_id, Err(BackupError::Operational(e))),
         };
+    // PROD-01.3: the `mtls` certificate pair, read once and handed to both
+    // clients like the CA.
+    let source_client_certificate =
+        match crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Source) {
+            Ok(files) => files,
+            Err(e) => return report(&run_id, Err(BackupError::Operational(e))),
+        };
     let source_auth = match logweir_kafka::reader::AuthConfig::from_spec(
         &inputs.spec.source.auth,
         match crate::drill::validated_password(crate::drill::SOURCE_PASSWORD_VAR) {
@@ -1102,6 +1133,7 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
         },
     )
     .and_then(|auth| auth.with_tls_ca_file(source_tls_ca.clone()))
+    .and_then(|auth| auth.with_client_certificate(source_client_certificate.clone()))
     {
         Ok(a) => a,
         Err(e) => {

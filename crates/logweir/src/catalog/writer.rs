@@ -88,12 +88,21 @@ pub fn from_receipt(
     // says whether it carries one — `FORMAT_VERSION_WITH_MANIFEST_VERSION`
     // (1.2.0) with it, FX-4's `FORMAT_VERSION` (1.1.0, which every record this
     // build writes would otherwise carry) without it.
+    //
+    // PROD-01.3: a record copying a receipt whose `source.auth.mode` is one of
+    // the modes PROD-01.3 added is `FORMAT_VERSION_WITH_AUTH_MODES` (1.3.0),
+    // whatever it pins, because its `source.auth_mode` carries a value the
+    // older schemas do not list. Every other record is written exactly as
+    // before.
     let manifest_version_id = receipt.archive.manifest_version_id.clone();
-    let format_version = if manifest_version_id.is_some() {
-        FORMAT_VERSION_WITH_MANIFEST_VERSION
-    } else {
-        FORMAT_VERSION
-    };
+    let format_version =
+        if logweir_core::connection::is_prod_01_3_auth_mode(&receipt.source.auth.mode) {
+            crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES
+        } else if manifest_version_id.is_some() {
+            FORMAT_VERSION_WITH_MANIFEST_VERSION
+        } else {
+            FORMAT_VERSION
+        };
     Ok(CatalogPoint {
         format_version: format_version.to_string(),
         point_id: point_id(receipt_bytes),

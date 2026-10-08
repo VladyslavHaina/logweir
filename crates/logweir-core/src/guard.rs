@@ -134,6 +134,28 @@ pub fn reject_plaintext_endpoint_without_allow_http(
     Ok(())
 }
 
+/// **PROD-01.3: SASL/PLAIN only over TLS.** Refuses a spec's auth block whose
+/// mode is `plain` without `tls: true` — the message opens with
+/// `PlainWithoutTls: `, so the runner's `refusal-reason=` line names it
+/// ([`TERMINAL_STATE_PLAIN_WITHOUT_TLS`]) — and `mtls` without `tls: true`
+/// (a plain guard refusal). Called by backup phase −1 for `source.auth` and by
+/// drill/restore phase 0 for `target.auth`, both before any client exists, so
+/// a PLAIN password is never sent anywhere by a refused plan. `AuthConfig::
+/// from_spec` and the engine renderer refuse the same shapes as backstops.
+///
+/// The message names the field and the mode, never a username or a password.
+pub fn reject_auth_without_required_tls(
+    field: &str,
+    auth: &crate::spec::AuthSpec,
+) -> Result<(), GuardRefusal> {
+    match auth.transport_refusal() {
+        // The refusal text OPENS with the state for `plain`, which is what
+        // `terminal_state` matches on; the field is appended after it.
+        Some(text) => Err(GuardRefusal(format!("{text} ({field}.mode, {field}.tls)"))),
+        None => Ok(()),
+    }
+}
+
 /// The longest name a Kafka broker accepts for a topic.
 ///
 /// 249 and not 255: the broker reserves the remainder for the `-<partition>`
@@ -327,13 +349,21 @@ pub const TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED: &str = "TargetTopicConfigR
 /// Its call site is `crate::time_basis::decide`; refused after the archive is
 /// described and before any target topic is created.
 pub const TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME: &str = "PointInTimeByProducerTime";
+/// [I9] **PROD-01.3.** A connection whose auth mode is `plain` (SASL/PLAIN)
+/// without `tls: true`. PLAIN sends the password itself, so the plan is
+/// refused before any client exists rather than dialled in the clear. The
+/// message is [`crate::connection::PlainWithoutTls`]'s, which opens with this
+/// state; its call sites are the runner's guards over a spec's auth
+/// (`crate::spec::AuthSpec::transport_refusal`).
+pub const TERMINAL_STATE_PLAIN_WITHOUT_TLS: &str = crate::connection::PLAIN_WITHOUT_TLS;
 /// [I9] Every tag-1 terminal state a guard refusal can name. **Task 20**
 /// (Phase B) is the only consumer.
-pub const TERMINAL_STATES: [&str; 4] = [
+pub const TERMINAL_STATES: [&str; 5] = [
     TERMINAL_STATE_GUARD_REFUSED,
     TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
     TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
     TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME,
+    TERMINAL_STATE_PLAIN_WITHOUT_TLS,
 ];
 
 /// [I9] A refusal message MAY open with `<State>: `, naming one of

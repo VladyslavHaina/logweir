@@ -97,6 +97,8 @@ fn connection() -> ConnectionPlan {
         password_env: None,
         tls: Some(false),
         ca_file: None,
+        client_cert_file: None,
+        client_key_file: None,
         principal: "User:ANONYMOUS".to_string(),
     }
 }
@@ -4821,6 +4823,8 @@ mod live {
             password_env: Some(SCRAM_PASSWORD_VAR.to_string()),
             tls: Some(false),
             ca_file: None,
+            client_cert_file: None,
+            client_key_file: None,
             principal: format!("User:{SCRAM_USER}"),
         }
     }

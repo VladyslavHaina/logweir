@@ -29,18 +29,19 @@ fn justfile_schema_version(name: &str) -> String {
 /// **One version per document.** `just schema`/`schema-check` write and
 /// compare the file their justfile variable names; the writer's constant names
 /// the `$id` and the `format_version` it writes. They must be one number, or a
-/// renumber would regenerate one file and sign documents naming another. For
-/// the receipt the CURRENT file is the newest MINOR's, the one a pinned receipt
-/// carries (FX-7, 1.2.0); FX-4's 1.1.0 file is frozen beside it.
+/// renumber would regenerate one file and sign documents naming another. The
+/// CURRENT file is each document's newest MINOR's — since PROD-01.3 the one a
+/// document naming a new auth mode carries (scorecard 1.4.0, receipt 1.3.0);
+/// the older files are frozen beside it.
 #[test]
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
         justfile_schema_version("scorecard"),
-        logweir_core::FORMAT_VERSION
+        logweir_core::scorecard::FORMAT_VERSION_WITH_AUTH_MODES
     );
     assert_eq!(
         justfile_schema_version("receipt"),
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
     );
 }
 
@@ -49,14 +50,17 @@ fn the_justfile_schema_versions_are_the_writers_constants() {
 #[test]
 fn checked_in_schema_matches_the_types() {
     let generated = logweir_core::schema::scorecard_schema();
-    let checked_in = current_schema("drill-scorecard", logweir_core::FORMAT_VERSION);
+    let checked_in = current_schema(
+        "drill-scorecard",
+        logweir_core::scorecard::FORMAT_VERSION_WITH_AUTH_MODES,
+    );
     assert_eq!(
         generated.trim_end(),
         checked_in.trim_end(),
         "schemas/logweir-drill-scorecard-{}.json is stale. \
          Run `just schema` and review the diff — a field added is a MINOR bump, \
          a field removed or retyped is a MAJOR bump (Global Constraint 12).",
-        logweir_core::FORMAT_VERSION
+        logweir_core::scorecard::FORMAT_VERSION_WITH_AUTH_MODES
     );
 }
 
@@ -93,7 +97,7 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
         current["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-            logweir_core::FORMAT_VERSION
+            logweir_core::scorecard::FORMAT_VERSION_WITH_AUTH_MODES
         )
     );
     let parity = &current["definitions"]["TopicParity"];
@@ -288,7 +292,7 @@ fn the_scorecard_top_level_shape_is_unchanged() {
     .expect("the frozen 1.1.0 scorecard schema parses");
     let checked_in: serde_json::Value = serde_json::from_str(&current_schema(
         "drill-scorecard",
-        logweir_core::FORMAT_VERSION,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_AUTH_MODES,
     ))
     .expect("the checked-in scorecard schema parses");
     let generated: serde_json::Value =
@@ -335,7 +339,7 @@ fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
     let checked_in = current_schema(
         "backup-receipt",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES,
     );
     assert_eq!(
         generated.trim_end(),
@@ -344,7 +348,7 @@ fn backup_receipt_schema_has_no_drift() {
          review the diff — a field added is a MINOR bump, a field removed or \
          retyped is a MAJOR bump (Global Constraint 12), and the receipt's \
          format_version is its own and not the scorecard's.",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
     );
 }
 
@@ -366,7 +370,7 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         v["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-            logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
         )
     );
     let archive = &v["definitions"]["ReceiptArchive"];
@@ -475,5 +479,72 @@ fn the_frozen_1_1_0_receipt_schema_is_still_fx4s() {
         logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION,
         logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION,
         "the pin is a MINOR bump over FX-4's 1.1.0, so its schema is a NEW file"
+    );
+}
+
+/// **PROD-01.3: FX-8's 1.3.0 scorecard schema is FROZEN** beside the 1.4.0
+/// one, and still describes every scorecard of a `plaintext` or `scramSha512`
+/// target, which this build writes as 1.3.0: it names itself 1.3.0 and its
+/// `target.auth.mode` description is the closed set of two. The current file
+/// names the five.
+#[test]
+fn the_frozen_1_3_0_scorecard_schema_is_still_fx8s() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.3.0.json"
+    ))
+    .expect("the frozen 1.3.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.3.0.json"
+    );
+    let mode = frozen["definitions"]["AuthSummary"]["properties"]["mode"]["description"]
+        .as_str()
+        .expect("AuthSummary.mode has a description");
+    assert!(mode.contains("A CLOSED SET OF TWO"), "{mode}");
+    assert!(!mode.contains("mtls"), "{mode}");
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    let mode = current["definitions"]["AuthSummary"]["properties"]["mode"]["description"]
+        .as_str()
+        .expect("AuthSummary.mode has a description");
+    assert!(
+        mode.contains("from 1.4.0") && mode.contains("mtls"),
+        "{mode}"
+    );
+    assert_eq!(logweir_core::FORMAT_VERSION, "1.3.0");
+    assert_eq!(
+        logweir_core::scorecard::FORMAT_VERSION_WITH_AUTH_MODES,
+        "1.4.0"
+    );
+}
+
+/// **PROD-01.3: FX-7's 1.2.0 receipt schema is FROZEN** beside the 1.3.0
+/// one: it names itself 1.2.0, carries `manifest_version_id`, and its
+/// `source.auth.mode` is the closed two.
+#[test]
+fn the_frozen_1_2_0_receipt_schema_is_still_fx7s() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.2.0.json"
+    ))
+    .expect("the frozen 1.2.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.2.0.json"
+    );
+    assert!(
+        frozen["definitions"]["ReceiptArchive"]["properties"]["manifest_version_id"].is_object()
+    );
+    let mode = frozen["definitions"]["ReceiptAuth"]["properties"]["mode"]["description"]
+        .as_str()
+        .expect("ReceiptAuth.mode has a description");
+    assert!(mode.contains("A CLOSED SET OF TWO"), "{mode}");
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    let mode = current["definitions"]["ReceiptAuth"]["properties"]["mode"]["description"]
+        .as_str()
+        .expect("ReceiptAuth.mode has a description");
+    assert!(
+        mode.contains("from 1.3.0") && mode.contains("mtls"),
+        "{mode}"
     );
 }

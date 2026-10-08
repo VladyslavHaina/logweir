@@ -31,6 +31,15 @@ pub const LOG_ENTRY_FORMAT_VERSION: &str = "1.0.0";
 /// unversioned bucket is exactly the [`FORMAT_VERSION`] document.
 pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 
+/// **PROD-01.3.** The format of a record whose `source.auth_mode` is one of the
+/// modes PROD-01.3 added (`scramSha256`, `plain`, `mtls`) — copied from a
+/// receipt that is itself 1.3.0 (`logweir_core::backup_receipt::
+/// FORMAT_VERSION_WITH_AUTH_MODES`). A MINOR bump: the field's set of values
+/// grows and nothing else changes, and a record that pins a manifest version
+/// may be 1.3.0 too (1.3.0 includes 1.2.0's field). Written only for those
+/// modes, so every other record is the document it was.
+pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.3.0";
+
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
 /// It is part of the id and not metadata beside it, so a future scheme cannot
@@ -278,8 +287,10 @@ pub struct RecordSource {
     /// from a spec.
     pub cluster_id: String,
     pub bootstrap_servers: Vec<String>,
-    /// `plaintext` or `scramSha512` — the receipt's closed two-value set, one
-    /// spelling in this product.
+    /// The receipt's `source.auth.mode`, copied: `plaintext` or `scramSha512`
+    /// in every format, and from 1.3.0 also `scramSha256`, `plain` or `mtls`
+    /// (PROD-01.3) — the receipt's versioned closed set, one spelling in this
+    /// product.
     pub auth_mode: String,
 }
 

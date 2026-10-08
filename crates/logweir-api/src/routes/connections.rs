@@ -13,7 +13,8 @@ use http::{HeaderMap, StatusCode, Uri};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{Resource as _, ResourceExt as _};
 use weirkeeper::crds::kafka_cluster::{
-    AuthBlock, AuthMode, CredentialSecretRef, KafkaCluster, KafkaClusterSpec, UnrecognizedFields,
+    AuthBlock, AuthMode, ClientCertificateRef, CredentialSecretRef, KafkaCluster, KafkaClusterSpec,
+    ObjectKeyRef, TlsCaSource, UnrecognizedFields,
 };
 use weirkeeper::crds::preflight::Preflight as PreflightCr;
 
@@ -228,55 +229,7 @@ pub fn validate_create(request: &CreateConnectionRequest) -> Result<(), ApiError
             ));
         }
     }
-    match request.auth.mode {
-        ConnectionAuthMode::ScramSha512 => {
-            match &request.auth.username {
-                None => errors.push(FieldError::new(
-                    "auth.username",
-                    "required",
-                    "scramSha512 requires the SASL username",
-                )),
-                Some(username) => {
-                    if let Err(code) = validate::check_single_line(username, 256) {
-                        errors.push(FieldError::new(
-                            "auth.username",
-                            code,
-                            "must be one printable line",
-                        ));
-                    }
-                }
-            }
-            match &request.auth.credential_ref {
-                None => errors.push(FieldError::new(
-                    "auth.credentialRef",
-                    "required",
-                    "scramSha512 requires the name of an existing credential Secret",
-                )),
-                Some(r) if !validate::is_dns_subdomain(&r.name) => errors.push(FieldError::new(
-                    "auth.credentialRef.name",
-                    "invalid_name",
-                    "must be a Kubernetes object name",
-                )),
-                Some(_) => {}
-            }
-        }
-        ConnectionAuthMode::Plaintext => {
-            if request.auth.username.is_some() {
-                errors.push(FieldError::new(
-                    "auth.username",
-                    "not_allowed",
-                    "plaintext authentication takes no username",
-                ));
-            }
-            if request.auth.credential_ref.is_some() {
-                errors.push(FieldError::new(
-                    "auth.credentialRef",
-                    "not_allowed",
-                    "plaintext authentication takes no credential",
-                ));
-            }
-        }
-    }
+    validate_auth(&request.auth, &mut errors);
     if let Some(topic) = &request.marker_topic {
         if !validate::is_topic_name(topic) {
             errors.push(FieldError::new(
@@ -290,6 +243,154 @@ pub fn validate_create(request: &CreateConnectionRequest) -> Result<(), ApiError
         Ok(())
     } else {
         Err(ApiError::validation(errors))
+    }
+}
+
+/// The auth block's rules, every mode (PROD-01.3 added three).
+///
+/// The SAME shapes the controller's resolver and the CRD's admission rules
+/// refuse, answered here as field errors so the console can name the field
+/// before anything is created: a SASL mode needs a username and a credential
+/// Secret, `plain` and `mtls` need `tls: true` (PLAIN without TLS is the named
+/// reason `PlainWithoutTls`), `mtls` needs a client-certificate Secret and
+/// takes neither SASL field, and a CA needs TLS and exactly one source.
+fn validate_auth(auth: &crate::contract::ConnectionAuthRequest, errors: &mut Vec<FieldError>) {
+    let mode = match auth.mode {
+        ConnectionAuthMode::Plaintext => "plaintext",
+        ConnectionAuthMode::ScramSha512 => "scramSha512",
+        ConnectionAuthMode::ScramSha256 => "scramSha256",
+        ConnectionAuthMode::Plain => "plain",
+        ConnectionAuthMode::Mtls => "mtls",
+    };
+    let sasl = matches!(
+        auth.mode,
+        ConnectionAuthMode::ScramSha512
+            | ConnectionAuthMode::ScramSha256
+            | ConnectionAuthMode::Plain
+    );
+    if sasl {
+        match &auth.username {
+            None => errors.push(FieldError::new(
+                "auth.username",
+                "required",
+                format!("{mode} requires the SASL username"),
+            )),
+            Some(username) => {
+                if let Err(code) = validate::check_single_line(username, 256) {
+                    errors.push(FieldError::new(
+                        "auth.username",
+                        code,
+                        "must be one printable line",
+                    ));
+                }
+            }
+        }
+        match &auth.credential_ref {
+            None => errors.push(FieldError::new(
+                "auth.credentialRef",
+                "required",
+                format!("{mode} requires the name of an existing credential Secret"),
+            )),
+            Some(r) if !validate::is_dns_subdomain(&r.name) => errors.push(FieldError::new(
+                "auth.credentialRef.name",
+                "invalid_name",
+                "must be a Kubernetes object name",
+            )),
+            Some(_) => {}
+        }
+    } else {
+        let takes = match auth.mode {
+            ConnectionAuthMode::Mtls => "mtls authenticates with a client certificate and takes",
+            _ => "plaintext authentication takes",
+        };
+        if auth.username.is_some() {
+            errors.push(FieldError::new(
+                "auth.username",
+                "not_allowed",
+                format!("{takes} no username"),
+            ));
+        }
+        if auth.credential_ref.is_some() {
+            errors.push(FieldError::new(
+                "auth.credentialRef",
+                "not_allowed",
+                format!("{takes} no credential"),
+            ));
+        }
+    }
+    // PROD-01.3: SASL/PLAIN only over TLS — the named reason.
+    if auth.mode == ConnectionAuthMode::Plain && !auth.tls {
+        errors.push(FieldError::new(
+            "auth.tls",
+            "plain_requires_tls",
+            "PlainWithoutTls: SASL/PLAIN sends the password itself, so it is accepted only with \
+             tls: true",
+        ));
+    }
+    if auth.mode == ConnectionAuthMode::Mtls {
+        if !auth.tls {
+            errors.push(FieldError::new(
+                "auth.tls",
+                "mtls_requires_tls",
+                "mtls presents a TLS client certificate, so it requires tls: true",
+            ));
+        }
+        match &auth.client_certificate_ref {
+            None => errors.push(FieldError::new(
+                "auth.clientCertificateRef",
+                "required",
+                "mtls requires the name of an existing Secret holding tls.crt and tls.key",
+            )),
+            Some(r) if !validate::is_dns_subdomain(&r.name) => errors.push(FieldError::new(
+                "auth.clientCertificateRef.name",
+                "invalid_name",
+                "must be a Kubernetes object name",
+            )),
+            Some(_) => {}
+        }
+    } else if auth.client_certificate_ref.is_some() {
+        errors.push(FieldError::new(
+            "auth.clientCertificateRef",
+            "not_allowed",
+            "only mtls presents a client certificate",
+        ));
+    }
+    if let Some(ca) = &auth.tls_ca {
+        if !auth.tls {
+            errors.push(FieldError::new(
+                "auth.tlsCa",
+                "requires_tls",
+                "a CA verifies a TLS transport, so it requires tls: true",
+            ));
+        }
+        match (&ca.config_map_key_ref, &ca.secret_key_ref) {
+            (Some(r), None) | (None, Some(r)) => {
+                let field = if ca.config_map_key_ref.is_some() {
+                    "auth.tlsCa.configMapKeyRef"
+                } else {
+                    "auth.tlsCa.secretKeyRef"
+                };
+                if !validate::is_dns_subdomain(&r.name) {
+                    errors.push(FieldError::new(
+                        format!("{field}.name"),
+                        "invalid_name",
+                        "must be a Kubernetes object name",
+                    ));
+                }
+                if !weirkeeper::connection::is_data_key(&r.key) {
+                    errors.push(FieldError::new(
+                        format!("{field}.key"),
+                        "invalid_key",
+                        "must be a data key ([-._a-zA-Z0-9]+)",
+                    ));
+                }
+            }
+            _ => errors.push(FieldError::new(
+                "auth.tlsCa",
+                "exactly_one_source",
+                "name exactly one of configMapKeyRef or secretKeyRef",
+            )),
+        }
     }
 }
 
@@ -314,14 +415,18 @@ pub fn build(
                 mode: match request.auth.mode {
                     ConnectionAuthMode::Plaintext => AuthMode::Plaintext,
                     ConnectionAuthMode::ScramSha512 => AuthMode::ScramSha512,
+                    ConnectionAuthMode::ScramSha256 => AuthMode::ScramSha256,
+                    ConnectionAuthMode::Plain => AuthMode::Plain,
+                    ConnectionAuthMode::Mtls => AuthMode::Mtls,
                 },
                 username: request.auth.username.clone(),
                 // PLAT-07.1's contract v1 added `passwordKey` and `tlsCa`.
-                // The API does not accept either yet, and ABSENT is the
-                // contract's documented legacy behaviour — `password`, and the
-                // runner image's own trust store — so an object this route
-                // creates is exactly the object it created before the fields
-                // existed. Surfacing them is PLAT-17.2's own decision.
+                // The API does not accept `passwordKey`: ABSENT is the
+                // contract's documented legacy behaviour (`password`). PROD-01.3
+                // surfaces `tlsCa` (below) because a SASL/PLAIN or mTLS
+                // listener behind a private CA is unusable without it; a
+                // request that names none creates exactly the object this
+                // route created before.
                 secret_ref: request
                     .auth
                     .credential_ref
@@ -332,7 +437,21 @@ pub fn build(
                         unrecognized_fields: UnrecognizedFields::default(),
                     }),
                 tls: request.auth.tls,
-                tls_ca: None,
+                tls_ca: request.auth.tls_ca.as_ref().map(|ca| TlsCaSource {
+                    secret_key_ref: ca.secret_key_ref.as_ref().map(object_key_ref),
+                    config_map_key_ref: ca.config_map_key_ref.as_ref().map(object_key_ref),
+                    unrecognized_fields: UnrecognizedFields::default(),
+                }),
+                // PROD-01.3: the `mtls` Secret, at the `kubernetes.io/tls`
+                // default keys (`tls.crt`, `tls.key`).
+                client_certificate: request.auth.client_certificate_ref.as_ref().map(|r| {
+                    ClientCertificateRef {
+                        name: r.name.clone(),
+                        certificate_key: None,
+                        private_key_key: None,
+                        unrecognized_fields: UnrecognizedFields::default(),
+                    }
+                }),
                 unrecognized_fields: UnrecognizedFields::default(),
             },
             role: match request.role {
@@ -343,6 +462,14 @@ pub fn build(
             unrecognized_fields: UnrecognizedFields::default(),
         },
         status: None,
+    }
+}
+
+fn object_key_ref(r: &crate::contract::ObjectKeyRefRequest) -> ObjectKeyRef {
+    ObjectKeyRef {
+        name: r.name.clone(),
+        key: r.key.clone(),
+        unrecognized_fields: UnrecognizedFields::default(),
     }
 }
 

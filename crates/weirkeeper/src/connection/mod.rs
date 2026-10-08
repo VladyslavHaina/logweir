@@ -53,11 +53,11 @@ use serde::{Deserialize, Serialize};
 use crate::conditions::{
     TERMINAL_STATE_CONNECTION_CONFIG_INVALID, TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED,
     TERMINAL_STATE_CONNECTION_PLAN_MISMATCH, TERMINAL_STATE_CONNECTION_REFERENCE_INVALID,
-    TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+    TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE, TERMINAL_STATE_PLAIN_WITHOUT_TLS,
 };
 use crate::crds::kafka_cluster::{
-    AuthMode, KafkaCluster, KafkaClusterSpec, ObjectKeyRef, UnrecognizedFields,
-    DEFAULT_PASSWORD_KEY,
+    AuthBlock, AuthMode, KafkaCluster, KafkaClusterSpec, ObjectKeyRef, UnrecognizedFields,
+    DEFAULT_CLIENT_CERTIFICATE_KEY, DEFAULT_CLIENT_PRIVATE_KEY_KEY, DEFAULT_PASSWORD_KEY,
 };
 use crate::job::{ConfigMapMount, EnvFromSecret, SecretMount};
 use logweir_core::spec::AuthSpec;
@@ -65,13 +65,20 @@ use logweir_core::spec::AuthSpec;
 pub mod credential;
 
 pub use logweir_core::connection::{
-    CONTRACT_VERSION, SOURCE_TLS_CA_FILE_ENV, TARGET_TLS_CA_FILE_ENV,
+    CONTRACT_VERSION, SOURCE_TLS_CA_FILE_ENV, SOURCE_TLS_CERT_FILE_ENV, SOURCE_TLS_KEY_FILE_ENV,
+    TARGET_TLS_CA_FILE_ENV, TARGET_TLS_CERT_FILE_ENV, TARGET_TLS_KEY_FILE_ENV,
 };
 
 /// The file name a projected CA certificate has inside its volume, whatever
 /// data key it came from. One name, so the path the runner is handed does not
 /// depend on the adopter's key.
 pub const CA_FILE_NAME: &str = "ca.crt";
+
+/// The file names a projected `mtls` client certificate and key have inside
+/// their volume, whatever data keys they came from (PROD-01.3).
+pub const CLIENT_CERT_FILE_NAME: &str = "tls.crt";
+/// See [`CLIENT_CERT_FILE_NAME`].
+pub const CLIENT_KEY_FILE_NAME: &str = "tls.key";
 
 /// WHAT a connection is being resolved for.
 ///
@@ -238,6 +245,69 @@ impl Side {
     pub fn ca_file_path(self) -> String {
         format!("{}/{CA_FILE_NAME}", self.ca_mount_path())
     }
+
+    /// The variable naming the projected `mtls` client certificate (PROD-01.3).
+    #[must_use]
+    pub const fn tls_cert_file_env(self) -> &'static str {
+        match self {
+            Side::Source => SOURCE_TLS_CERT_FILE_ENV,
+            Side::Target => TARGET_TLS_CERT_FILE_ENV,
+        }
+    }
+
+    /// The variable naming the projected `mtls` client key (PROD-01.3).
+    #[must_use]
+    pub const fn tls_key_file_env(self) -> &'static str {
+        match self {
+            Side::Source => SOURCE_TLS_KEY_FILE_ENV,
+            Side::Target => TARGET_TLS_KEY_FILE_ENV,
+        }
+    }
+
+    /// The pod volume the client certificate Secret is projected as —
+    /// unique beside [`Side::ca_volume`] and every other runner volume.
+    #[must_use]
+    pub const fn client_cert_volume(self) -> &'static str {
+        match self {
+            Side::Source => "source-client-cert",
+            Side::Target => "target-client-cert",
+        }
+    }
+
+    /// Where [`Side::client_cert_volume`] is mounted, read-only.
+    #[must_use]
+    pub const fn client_cert_mount_path(self) -> &'static str {
+        match self {
+            Side::Source => "/connection/source-client-cert",
+            Side::Target => "/connection/target-client-cert",
+        }
+    }
+
+    /// The client certificate file's full path inside the pod.
+    #[must_use]
+    pub fn client_cert_file_path(self) -> String {
+        format!("{}/{CLIENT_CERT_FILE_NAME}", self.client_cert_mount_path())
+    }
+
+    /// The client key file's full path inside the pod.
+    #[must_use]
+    pub fn client_key_file_path(self) -> String {
+        format!("{}/{CLIENT_KEY_FILE_NAME}", self.client_cert_mount_path())
+    }
+}
+
+/// The Secret, and the two keys in it, an `mtls` connection's client
+/// certificate and private key are projected from (PROD-01.3). A reference:
+/// the controller never reads the Secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientCertificateReference {
+    /// The Secret's `metadata.name`.
+    pub name: String,
+    /// The data key of the PEM certificate.
+    pub certificate_key: String,
+    /// The data key of the PEM private key.
+    pub private_key_key: String,
 }
 
 /// A key of a Secret in the connection's namespace.
@@ -338,6 +408,11 @@ pub struct ResolvedConnection {
     /// Where the private CA is, when the connection names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_ca: Option<CaReference>,
+    /// Where the `mtls` client certificate and key are (PROD-01.3). Absent for
+    /// every other mode, so a resolution of any object that predates `mtls`
+    /// serialises exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_certificate: Option<ClientCertificateReference>,
 }
 
 /// What a resolution contributes to one runner Job.
@@ -357,6 +432,15 @@ pub struct ConnectionProjection {
     pub secret_mounts: Vec<SecretMount>,
     /// The CA volume, when it comes from a ConfigMap.
     pub config_map_mounts: Vec<ConfigMapMount>,
+}
+
+impl ConnectionProjection {
+    /// Every literal environment entry the projection adds — the CA file and,
+    /// for `mtls`, the client certificate and key files. PATHS only.
+    #[must_use]
+    pub fn literal_names(&self) -> Vec<&str> {
+        self.env_literal.iter().map(|(n, _)| n.as_str()).collect()
+    }
 }
 
 /// Why a connection cannot be resolved, or cannot be used for a run.
@@ -480,7 +564,23 @@ pub fn resolve(
     let bootstrap_servers = checked_bootstrap_servers(&namespace, &name, &spec.bootstrap_servers)?;
     let auth = &spec.auth;
 
-    let (resolved_auth, password, tls_ca) = match auth.mode {
+    // PROD-01.3: a client certificate belongs to `mtls` and to nothing else.
+    // The CRD's own rule refuses the shape at admission; this is the resolver's
+    // half, for an object admitted by a CRD that did not carry the rule.
+    if auth.client_certificate.is_some() && auth.mode != AuthMode::Mtls {
+        return Err(refusal(
+            TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
+            "spec.auth.clientCertificate",
+            format!(
+                "KafkaCluster {namespace}/{name} names auth.clientCertificate with auth.mode \
+                 {}; only mtls presents a client certificate, and one the connection would \
+                 silently not present is refused instead",
+                auth_mode_str(auth.mode)
+            ),
+        ));
+    }
+
+    let (resolved_auth, password, tls_ca, client_certificate) = match auth.mode {
         AuthMode::Plaintext => {
             if auth.tls {
                 return Err(refusal(
@@ -491,8 +591,8 @@ pub fn resolve(
                          true — TLS without SASL — which saved-connection contract \
                          {CONTRACT_VERSION} does not support. It is refused rather than dialled \
                          without TLS (releases before this one dialled it in the clear). Use \
-                         auth.mode scramSha512 over TLS, or create an object with tls: false for \
-                         a plaintext listener"
+                         auth.mode scramSha512 over TLS, mtls for a client certificate, or \
+                         create an object with tls: false for a plaintext listener"
                     ),
                 ));
             }
@@ -506,9 +606,24 @@ pub fn resolve(
                     ),
                 ));
             }
-            (AuthSpec::Plaintext, None, None)
+            (AuthSpec::Plaintext, None, None, None)
         }
-        AuthMode::ScramSha512 => {
+        AuthMode::ScramSha512 | AuthMode::ScramSha256 | AuthMode::Plain => {
+            let mode = auth_mode_str(auth.mode);
+            // PROD-01.3: SASL/PLAIN only over TLS — the named reason
+            // `PlainWithoutTls`, before anything else about the object is
+            // judged, because it is the one shape that would send a password
+            // in the clear.
+            if auth.mode == AuthMode::Plain && !auth.tls {
+                return Err(refusal(
+                    TERMINAL_STATE_PLAIN_WITHOUT_TLS,
+                    "spec.auth.tls",
+                    format!(
+                        "KafkaCluster {namespace}/{name}: {}",
+                        logweir_core::connection::PlainWithoutTls
+                    ),
+                ));
+            }
             let username = auth
                 .username
                 .clone()
@@ -518,7 +633,7 @@ pub fn resolve(
                         TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
                         "spec.auth.username",
                         format!(
-                            "KafkaCluster {namespace}/{name} names auth mode scramSha512 and no \
+                            "KafkaCluster {namespace}/{name} names auth mode {mode} and no \
                              auth.username, so no run can name the identity it presents; \
                              recreate it with the SASL principal in auth.username"
                         ),
@@ -533,7 +648,7 @@ pub fn resolve(
                         TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
                         "spec.auth.secretRef.name",
                         format!(
-                            "KafkaCluster {namespace}/{name} uses scramSha512 but has no \
+                            "KafkaCluster {namespace}/{name} uses {mode} but has no \
                              non-empty auth.secretRef.name; reference a Secret in namespace \
                              {namespace} holding the password"
                         ),
@@ -545,35 +660,105 @@ pub fn resolve(
                 .clone()
                 .unwrap_or_else(|| DEFAULT_PASSWORD_KEY.to_string());
             check_data_key(&namespace, &name, "spec.auth.secretRef.passwordKey", &key)?;
-            let tls_ca = match auth.tls_ca.as_ref() {
-                None => None,
-                Some(_) if !auth.tls => {
-                    return Err(refusal(
-                        TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
-                        "spec.auth.tlsCa",
-                        format!(
-                            "KafkaCluster {namespace}/{name} names auth.tlsCa with auth.tls: \
-                             false; a CA verifies a TLS transport, so it requires auth.tls: true"
-                        ),
-                    ))
-                }
-                Some(source) => Some(ca_reference(
-                    &namespace,
-                    &name,
-                    source.secret_key_ref.as_ref(),
-                    source.config_map_key_ref.as_ref(),
-                )?),
-            };
-            (
-                AuthSpec::ScramSha512 {
+            let tls_ca = tls_ca_of(&namespace, &name, auth)?;
+            let resolved = match auth.mode {
+                AuthMode::ScramSha512 => AuthSpec::ScramSha512 {
                     username,
                     tls: auth.tls,
                 },
+                AuthMode::ScramSha256 => AuthSpec::ScramSha256 {
+                    username,
+                    tls: auth.tls,
+                },
+                _ => AuthSpec::Plain {
+                    username,
+                    tls: auth.tls,
+                },
+            };
+            (
+                resolved,
                 Some(SecretKeyReference {
                     name: secret.name.clone(),
                     key,
                 }),
                 tls_ca,
+                None,
+            )
+        }
+        AuthMode::Mtls => {
+            if !auth.tls {
+                return Err(refusal(
+                    TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
+                    "spec.auth.tls",
+                    format!(
+                        "KafkaCluster {namespace}/{name}: {}",
+                        logweir_core::connection::MtlsWithoutTls
+                    ),
+                ));
+            }
+            let reference = auth
+                .client_certificate
+                .as_ref()
+                .filter(|c| !c.name.trim().is_empty())
+                .ok_or_else(|| {
+                    refusal(
+                        TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+                        "spec.auth.clientCertificate.name",
+                        format!(
+                            "KafkaCluster {namespace}/{name} uses mtls but names no \
+                             auth.clientCertificate Secret; reference a Secret in namespace \
+                             {namespace} holding the client certificate and its private key \
+                             (`kubectl create secret tls`)"
+                        ),
+                    )
+                })?;
+            check_object_name(
+                &namespace,
+                &name,
+                "spec.auth.clientCertificate.name",
+                &reference.name,
+            )?;
+            let certificate_key = reference
+                .certificate_key
+                .clone()
+                .unwrap_or_else(|| DEFAULT_CLIENT_CERTIFICATE_KEY.to_string());
+            check_data_key(
+                &namespace,
+                &name,
+                "spec.auth.clientCertificate.certificateKey",
+                &certificate_key,
+            )?;
+            let private_key_key = reference
+                .private_key_key
+                .clone()
+                .unwrap_or_else(|| DEFAULT_CLIENT_PRIVATE_KEY_KEY.to_string());
+            check_data_key(
+                &namespace,
+                &name,
+                "spec.auth.clientCertificate.privateKeyKey",
+                &private_key_key,
+            )?;
+            if certificate_key == private_key_key {
+                return Err(refusal(
+                    TERMINAL_STATE_CONNECTION_REFERENCE_INVALID,
+                    "spec.auth.clientCertificate",
+                    format!(
+                        "KafkaCluster {namespace}/{name} names the same data key \
+                         {certificate_key:?} for the client certificate and its private key; \
+                         they are two files, so they are two keys"
+                    ),
+                ));
+            }
+            let tls_ca = tls_ca_of(&namespace, &name, auth)?;
+            (
+                AuthSpec::Mtls { tls: true },
+                None,
+                tls_ca,
+                Some(ClientCertificateReference {
+                    name: reference.name.clone(),
+                    certificate_key,
+                    private_key_key,
+                }),
             )
         }
     };
@@ -592,7 +777,7 @@ pub fn resolve(
             // is running the same isolation the real run does.
             automount_service_account_token: false,
         },
-        principal: principal_of(&resolved_auth),
+        principal: principal_of(&resolved_auth, client_certificate.as_ref()),
         bootstrap_sha256: bootstrap_digest(&bootstrap_servers),
         namespace,
         cluster_name: name,
@@ -600,17 +785,73 @@ pub fn resolve(
         auth: resolved_auth,
         password,
         tls_ca,
+        client_certificate,
     })
+}
+
+/// The mode as the documents spell it — `AuthSpec::mode_str`'s twin for the
+/// CRD enum, for messages.
+#[must_use]
+pub fn auth_mode_str(mode: AuthMode) -> &'static str {
+    use logweir_core::connection as c;
+    match mode {
+        AuthMode::Plaintext => c::AUTH_MODE_PLAINTEXT,
+        AuthMode::ScramSha512 => c::AUTH_MODE_SCRAM_SHA_512,
+        AuthMode::ScramSha256 => c::AUTH_MODE_SCRAM_SHA_256,
+        AuthMode::Plain => c::AUTH_MODE_PLAIN,
+        AuthMode::Mtls => c::AUTH_MODE_MTLS,
+    }
+}
+
+/// `tlsCa`, when named: it needs `tls: true`, exactly one source, and a legal
+/// name and key. Shared by every TLS-capable mode.
+fn tls_ca_of(
+    namespace: &str,
+    name: &str,
+    auth: &AuthBlock,
+) -> Result<Option<CaReference>, ConnectionRefusal> {
+    match auth.tls_ca.as_ref() {
+        None => Ok(None),
+        Some(_) if !auth.tls => Err(refusal(
+            TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
+            "spec.auth.tlsCa",
+            format!(
+                "KafkaCluster {namespace}/{name} names auth.tlsCa with auth.tls: false; a CA \
+                 verifies a TLS transport, so it requires auth.tls: true"
+            ),
+        )),
+        Some(source) => Ok(Some(ca_reference(
+            namespace,
+            name,
+            source.secret_key_ref.as_ref(),
+            source.config_map_key_ref.as_ref(),
+        )?)),
+    }
 }
 
 /// The Kafka principal an [`AuthSpec`] authenticates as — see
 /// [`ResolvedConnection::principal`].
-fn principal_of(auth: &AuthSpec) -> String {
+///
+/// For `mtls` the Kafka principal is the client certificate's subject, which
+/// the controller cannot know — it reads no Secret. The principal is then
+/// `mtls:secret/<name>`: not an ACL string, but a stable name for where the
+/// identity lives, so an attestation or a check result can still say which
+/// identity it was about.
+fn principal_of(
+    auth: &AuthSpec,
+    client_certificate: Option<&ClientCertificateReference>,
+) -> String {
     match auth {
         // What a broker with no SASL records for an unauthenticated
         // connection, and what an adopter writes in an ACL for one.
         AuthSpec::Plaintext => "User:ANONYMOUS".to_string(),
-        AuthSpec::ScramSha512 { username, .. } => format!("User:{username}"),
+        AuthSpec::ScramSha512 { username, .. }
+        | AuthSpec::ScramSha256 { username, .. }
+        | AuthSpec::Plain { username, .. } => format!("User:{username}"),
+        AuthSpec::Mtls { .. } => format!(
+            "mtls:secret/{}",
+            client_certificate.map_or("<none>", |c| c.name.as_str())
+        ),
     }
 }
 
@@ -646,6 +887,13 @@ fn unrecognized_paths(spec: &KafkaClusterSpec) -> Vec<String> {
     push(&mut out, "spec.auth", &spec.auth.unrecognized_fields);
     if let Some(secret) = spec.auth.secret_ref.as_ref() {
         push(&mut out, "spec.auth.secretRef", &secret.unrecognized_fields);
+    }
+    if let Some(cert) = spec.auth.client_certificate.as_ref() {
+        push(
+            &mut out,
+            "spec.auth.clientCertificate",
+            &cert.unrecognized_fields,
+        );
     }
     if let Some(ca) = spec.auth.tls_ca.as_ref() {
         push(&mut out, "spec.auth.tlsCa", &ca.unrecognized_fields);
@@ -843,6 +1091,34 @@ impl ResolvedConnection {
                 }),
             }
         }
+        // PROD-01.3: the `mtls` pair, from ONE Secret, as two files in one
+        // read-only volume at the runner's `0440` Secret mode. The two
+        // variables carry PATHS; the kubelet resolves the Secret.
+        if let Some(cert) = self.client_certificate.as_ref() {
+            projection.env_literal.push((
+                side.tls_cert_file_env().to_string(),
+                side.client_cert_file_path(),
+            ));
+            projection.env_literal.push((
+                side.tls_key_file_env().to_string(),
+                side.client_key_file_path(),
+            ));
+            projection.secret_mounts.push(SecretMount {
+                volume: side.client_cert_volume().to_string(),
+                secret_name: cert.name.clone(),
+                mount_path: side.client_cert_mount_path().to_string(),
+                items: vec![
+                    (
+                        cert.certificate_key.clone(),
+                        CLIENT_CERT_FILE_NAME.to_string(),
+                    ),
+                    (
+                        cert.private_key_key.clone(),
+                        CLIENT_KEY_FILE_NAME.to_string(),
+                    ),
+                ],
+            });
+        }
         projection
     }
 
@@ -873,7 +1149,7 @@ impl ResolvedConnection {
     /// Whether the transport is TLS.
     #[must_use]
     pub fn tls(&self) -> bool {
-        matches!(self.auth, AuthSpec::ScramSha512 { tls: true, .. })
+        self.auth.tls()
     }
 
     /// Refuse to project this connection into a Job in another namespace.
@@ -990,11 +1266,18 @@ impl ResolvedConnection {
 
 /// Mode, username and TLS as prose — public settings only.
 fn describe_auth(auth: &AuthSpec) -> String {
+    let transport = if auth.tls() {
+        "over TLS"
+    } else {
+        "without TLS"
+    };
     match auth {
         AuthSpec::Plaintext => "plaintext (no TLS)".to_string(),
-        AuthSpec::ScramSha512 { username, tls } => format!(
-            "scramSha512 as {username:?} {}",
-            if *tls { "over TLS" } else { "without TLS" }
+        AuthSpec::Mtls { .. } => format!("mtls {transport}"),
+        _ => format!(
+            "{} as {:?} {transport}",
+            auth.mode_str(),
+            auth.username().unwrap_or_default()
         ),
     }
 }

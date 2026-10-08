@@ -166,7 +166,8 @@ pub enum ConnectionRole {
     Target,
 }
 
-/// The SASL mechanism, or `plaintext` for none.
+/// The SASL mechanism, `mtls` for a TLS client certificate, or `plaintext`
+/// for none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionAuthMode {
@@ -174,25 +175,69 @@ pub enum ConnectionAuthMode {
     Plaintext,
     /// SASL/SCRAM-SHA-512.
     ScramSha512,
+    /// SASL/SCRAM-SHA-256 (PROD-01.3).
+    ScramSha256,
+    /// SASL/PLAIN (PROD-01.3), accepted only with `tls: true`.
+    Plain,
+    /// A TLS client certificate and no SASL (PROD-01.3), with `tls: true`.
+    Mtls,
+}
+
+/// One key of a ConfigMap or Secret in this namespace.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ObjectKeyRefRequest {
+    /// The object's name, in the same namespace.
+    pub name: String,
+    /// The data key.
+    pub key: String,
+}
+
+/// The CA that signs the brokers' certificates, when the runner image does
+/// not already trust it: exactly one of a ConfigMap key or a Secret key
+/// (PROD-01.3). A CA certificate is public, so a ConfigMap is the ordinary
+/// home for it. Requires `tls: true`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TlsCaRequest {
+    /// A ConfigMap key holding the PEM CA certificate(s).
+    #[serde(default)]
+    pub config_map_key_ref: Option<ObjectKeyRefRequest>,
+    /// A Secret key holding the PEM CA certificate(s).
+    #[serde(default)]
+    pub secret_key_ref: Option<ObjectKeyRefRequest>,
 }
 
 /// Authentication for a new connection. Existing credentials only: this
-/// request names a Secret; it never carries a password.
+/// request names Secrets; it never carries a password or a private key, and no
+/// response ever returns one.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ConnectionAuthRequest {
-    /// `plaintext` or `scramSha512`.
+    /// `plaintext`, `scramSha512`, `scramSha256`, `plain` (with `tls: true`
+    /// only) or `mtls` (with `tls: true`).
     pub mode: ConnectionAuthMode,
-    /// The SASL principal; required for `scramSha512`, refused for
-    /// `plaintext`.
+    /// The SASL principal; required for `scramSha512`, `scramSha256` and
+    /// `plain`, refused for `plaintext` and `mtls`.
     #[serde(default)]
     pub username: Option<String>,
-    /// An existing Secret in this namespace holding the SASL password;
-    /// required for `scramSha512`, refused for `plaintext`.
+    /// An existing Secret in this namespace holding the SASL password under
+    /// the key `password`; required for the three SASL modes, refused for
+    /// `plaintext` and `mtls`.
     #[serde(default)]
     pub credential_ref: Option<NameRef>,
     /// Whether the transport is TLS.
     pub tls: bool,
+    /// **PROD-01.3, `mtls` only.** An existing Secret in this namespace
+    /// holding the client certificate under `tls.crt` and its unencrypted
+    /// private key under `tls.key` (`kubectl create secret tls`). Required for
+    /// `mtls`, refused for every other mode.
+    #[serde(default)]
+    pub client_certificate_ref: Option<NameRef>,
+    /// **PROD-01.3.** A private CA for a TLS connection. Refused without
+    /// `tls: true`.
+    #[serde(default)]
+    pub tls_ca: Option<TlsCaRequest>,
 }
 
 /// `POST /api/v1/namespaces/{ns}/connections`.
@@ -210,11 +255,26 @@ pub struct CreateConnectionRequest {
     pub marker_topic: Option<String>,
 }
 
-/// Authentication settings of a stored connection.
+/// Where a stored connection's CA certificate is — a reference, never the
+/// certificate.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsCaView {
+    /// `configMap` or `secret`.
+    pub kind: String,
+    /// The object's name.
+    pub name: String,
+    /// The data key.
+    pub key: String,
+}
+
+/// Authentication settings of a stored connection. **Write-only credentials:**
+/// a password or a private key is never readable back through this view or any
+/// other — it carries Secret NAMES, which are public references.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionAuthView {
-    /// `plaintext` or `scramSha512`.
+    /// `plaintext`, `scramSha512`, `scramSha256`, `plain` or `mtls`.
     pub mode: ConnectionAuthMode,
     /// The SASL principal.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -224,6 +284,13 @@ pub struct ConnectionAuthView {
     pub credential_ref: Option<NameRef>,
     /// Whether the transport is TLS.
     pub tls: bool,
+    /// The `mtls` client-certificate Secret's NAME (PROD-01.3). Never its
+    /// data: neither the certificate nor the key is ever returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_certificate_ref: Option<NameRef>,
+    /// The private CA reference, when the connection names one (PROD-01.3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_ca: Option<TlsCaView>,
 }
 
 /// The controller's last reachability observation.

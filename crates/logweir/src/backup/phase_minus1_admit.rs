@@ -56,6 +56,12 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
     //     scheme; `render_storage_block`'s refusal is the backstop (exit 1).
     logweir_core::guard::reject_plaintext_endpoint_without_allow_http("storage", &spec.storage)?;
 
+    // 1c. **PROD-01.3**: SASL/PLAIN without TLS (`refusal-reason=
+    //     PlainWithoutTls`) and `mtls` without TLS are refused here, exit 3,
+    //     before any client exists — so a PLAIN password never leaves this
+    //     process for a source the plan would have dialled in the clear.
+    logweir_core::guard::reject_auth_without_required_tls("source.auth", &spec.source.auth)?;
+
     // 2. GC18(c) rail 1 / **G-GLOB**, at the SPEC layer.
     //
     //    `render_backup::render` carries the identical call, and that is NOT

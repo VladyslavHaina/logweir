@@ -217,6 +217,12 @@ pub fn run(
         &spec.source.storage,
     )?;
 
+    // **PROD-01.3**, purely local: SASL/PLAIN (and mTLS) without TLS on the
+    // target is refused, exit 3, `refusal-reason=PlainWithoutTls` for PLAIN.
+    // `execute` already refused it before the client was built; this is the
+    // same rule for every caller that reaches phase 0 another way.
+    logweir_core::guard::reject_auth_without_required_tls("target.auth", &spec.target.auth)?;
+
     // The two PURELY LOCAL checks run first, before any network round trip. A
     // local refusal should not need a reachable broker, and putting them first
     // is what lets `guard_cli.rs` distinguish "refused by the mapping guard"

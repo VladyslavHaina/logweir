@@ -286,7 +286,17 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
         refusal_reason_line("PointInTimeByProducerTime: topic `lat` is LogAppendTime"),
         "refusal-reason=PointInTimeByProducerTime"
     );
-    assert_eq!(TERMINAL_STATES.len(), 4);
+    // PROD-01.3's state, the fifth: SASL/PLAIN without TLS. The refusal's own
+    // text opens with it, so the line names it with no second spelling.
+    assert_eq!(
+        logweir_core::guard::TERMINAL_STATE_PLAIN_WITHOUT_TLS,
+        "PlainWithoutTls"
+    );
+    assert_eq!(
+        refusal_reason_line(&logweir_core::connection::PlainWithoutTls.to_string()),
+        "refusal-reason=PlainWithoutTls"
+    );
+    assert_eq!(TERMINAL_STATES.len(), 5);
     // The line carries no whitespace and no quoting: a controller reads it as
     // the final stdout line and splits on `=`.
     let line = refusal_reason_line("CredentialNotRenderable: x");

@@ -88,15 +88,28 @@ impl ConsumedRecord {
     }
 }
 
-/// v0.1 ships PLAINTEXT and SASL/SCRAM over TLS. OAUTHBEARER and MSK IAM
-/// arrive in SP4 through `crate::token::TokenProvider`; there is no AWS
-/// dependency in this crate in v0.1 (Global Constraint 1).
+/// v0.1 shipped PLAINTEXT and SASL/SCRAM-SHA-512 (optionally over TLS);
+/// PROD-01.3 adds SASL/SCRAM-SHA-256, SASL/PLAIN over TLS and TLS client
+/// certificates (`mtls`). OAUTHBEARER and MSK IAM stay deferred (OD-3) behind
+/// `crate::token::TokenProvider`; there is no AWS dependency in this crate
+/// (Global Constraint 1).
 ///
 /// `tls_ca_file` (PLAT-07.1) is the pod-local path of a projected private CA
 /// certificate: when set, librdkafka's `ssl.ca.location` points at it and the
 /// image's default trust store is not consulted for this connection. It is
 /// attached with [`AuthConfig::with_tls_ca_file`], which refuses it for a
 /// transport that is not TLS.
+///
+/// # The shapes that cannot be built
+///
+/// `Plain` has NO `tls` field: it is always `SASL_SSL`, because
+/// [`AuthConfig::from_spec`] refuses a `plain` spec without TLS
+/// ([`logweir_core::connection::PlainWithoutTls`]) and no other constructor
+/// exists — so a client that sends a PLAIN password in the clear is not a
+/// value of this type. `Mtls` is always `SSL` for the same reason
+/// ([`logweir_core::connection::MtlsWithoutTls`]); its certificate pair is
+/// attached by [`AuthConfig::with_client_certificate`], and a client config
+/// built without one is refused.
 #[derive(Clone)]
 pub enum AuthConfig {
     Plaintext,
@@ -105,6 +118,24 @@ pub enum AuthConfig {
         password: String,
         tls: bool,
         tls_ca_file: Option<String>,
+    },
+    /// PROD-01.3. SASL/SCRAM-SHA-256, over TLS or not.
+    ScramSha256 {
+        username: String,
+        password: String,
+        tls: bool,
+        tls_ca_file: Option<String>,
+    },
+    /// PROD-01.3. SASL/PLAIN, always over TLS (`SASL_SSL`).
+    Plain {
+        username: String,
+        password: String,
+        tls_ca_file: Option<String>,
+    },
+    /// PROD-01.3. A TLS client certificate, no SASL (`SSL`).
+    Mtls {
+        tls_ca_file: Option<String>,
+        client_certificate: Option<logweir_core::connection::ClientCertificateFiles>,
     },
     /// SP4. Constructing this in v0.1 returns KafkaError::Client.
     Token(std::sync::Arc<dyn crate::token::TokenProvider>),
@@ -131,15 +162,16 @@ impl AuthConfig {
     /// takes what the caller read, so it can be unit-tested with no
     /// environment at all.
     ///
-    /// `ScramSha512` with `None` is `KafkaError::Client` — **operational,
-    /// exit 1, NOT a guard refusal**. Nothing was refused: the plan is
-    /// probably fine and the fix is to project the Secret, which is exactly
-    /// what "retry" means to a reconciler. A guard refusal (exit 3) is
-    /// reserved for a plan this build will never accept, and would tell
-    /// Task 18's cron reconciler to stop retrying a condition an operator is
-    /// about to fix. The unrenderable-VALUE case is the refusal, and it is
-    /// raised by the caller before this function is reached
-    /// (`logweir_core::guard::credential_is_renderable`, interface **I11**).
+    /// A SASL mode (`scramSha512`, `scramSha256`, `plain`) with `None` is
+    /// `KafkaError::Client` — **operational, exit 1, NOT a guard refusal**.
+    /// Nothing was refused: the plan is probably fine and the fix is to
+    /// project the Secret, which is exactly what "retry" means to a
+    /// reconciler. A guard refusal (exit 3) is reserved for a plan this build
+    /// will never accept, and would tell Task 18's cron reconciler to stop
+    /// retrying a condition an operator is about to fix. The unrenderable-VALUE
+    /// case is the refusal, and it is raised by the caller before this
+    /// function is reached (`logweir_core::guard::credential_is_renderable`,
+    /// interface **I11**).
     ///
     /// The message cannot name WHICH of the two variables the caller read —
     /// this crate never saw it, and the signature above is interface I1's
@@ -147,17 +179,38 @@ impl AuthConfig {
     /// `drill::naming_the_password_var` re-states it with the variable that
     /// call site actually reads.
     ///
-    /// `Plaintext` ignores `password` rather than refusing a present one: a
-    /// Secret left projected after a spec was switched back to plaintext is a
-    /// tidiness problem, not a reason to fail a backup, and the runner's own
-    /// `check_projected_credentials` has already validated whatever is there.
+    /// `Plaintext` and `Mtls` ignore `password` rather than refusing a present
+    /// one: a Secret left projected after a spec was switched to a mode with
+    /// no SASL is a tidiness problem, not a reason to fail a backup, and the
+    /// runner's own `check_projected_credentials` has already validated
+    /// whatever is there.
+    ///
+    /// # The transport refusals (PROD-01.3)
+    ///
+    /// `plain` and `mtls` without `tls: true` are `KafkaError::Client`
+    /// carrying [`logweir_core::spec::AuthSpec::transport_refusal`]'s text.
+    /// The runner refuses the same spec at exit 3 before this function is
+    /// reached (`refusal-reason=PlainWithoutTls`); this is the backstop that
+    /// makes such a client unconstructible.
     pub fn from_spec(
         auth: &logweir_core::spec::AuthSpec,
         password: Option<String>,
     ) -> Result<AuthConfig, KafkaError> {
+        use logweir_core::spec::AuthSpec;
+        if let Some(refusal) = auth.transport_refusal() {
+            return Err(KafkaError::Client(refusal));
+        }
+        let missing = |mode: &str| {
+            KafkaError::Client(format!(
+                "auth.mode is {mode} but no SASL password was projected into this process; set \
+                 $LOGWEIR_SOURCE_PASSWORD for a source cluster or $LOGWEIR_TARGET_PASSWORD for \
+                 a target cluster. Nothing was refused: this is operational (exit 1), not a \
+                 guard refusal (exit 3)"
+            ))
+        };
         match auth {
-            logweir_core::spec::AuthSpec::Plaintext => Ok(AuthConfig::Plaintext),
-            logweir_core::spec::AuthSpec::ScramSha512 { username, tls } => match password {
+            AuthSpec::Plaintext => Ok(AuthConfig::Plaintext),
+            AuthSpec::ScramSha512 { username, tls } => match password {
                 Some(password) => Ok(AuthConfig::ScramSha512 {
                     username: username.clone(),
                     password,
@@ -165,14 +218,43 @@ impl AuthConfig {
                     // A spec names no trust anchor; see `with_tls_ca_file`.
                     tls_ca_file: None,
                 }),
-                None => Err(KafkaError::Client(
-                    "auth.mode is scramSha512 but no SASL password was projected into this \
-                     process; set $LOGWEIR_SOURCE_PASSWORD for a source cluster or \
-                     $LOGWEIR_TARGET_PASSWORD for a target cluster. Nothing was refused: this \
-                     is operational (exit 1), not a guard refusal (exit 3)"
-                        .to_string(),
-                )),
+                None => Err(missing(auth.mode_str())),
             },
+            AuthSpec::ScramSha256 { username, tls } => match password {
+                Some(password) => Ok(AuthConfig::ScramSha256 {
+                    username: username.clone(),
+                    password,
+                    tls: *tls,
+                    tls_ca_file: None,
+                }),
+                None => Err(missing(auth.mode_str())),
+            },
+            // `transport_refusal` above has already refused `tls: false`.
+            AuthSpec::Plain { username, .. } => match password {
+                Some(password) => Ok(AuthConfig::Plain {
+                    username: username.clone(),
+                    password,
+                    tls_ca_file: None,
+                }),
+                None => Err(missing(auth.mode_str())),
+            },
+            AuthSpec::Mtls { .. } => Ok(AuthConfig::Mtls {
+                tls_ca_file: None,
+                client_certificate: None,
+            }),
+        }
+    }
+
+    /// The mode as the documents spell it.
+    pub fn mode_str(&self) -> &'static str {
+        use logweir_core::connection as c;
+        match self {
+            AuthConfig::Plaintext => c::AUTH_MODE_PLAINTEXT,
+            AuthConfig::ScramSha512 { .. } => c::AUTH_MODE_SCRAM_SHA_512,
+            AuthConfig::ScramSha256 { .. } => c::AUTH_MODE_SCRAM_SHA_256,
+            AuthConfig::Plain { .. } => c::AUTH_MODE_PLAIN,
+            AuthConfig::Mtls { .. } => c::AUTH_MODE_MTLS,
+            AuthConfig::Token(_) => "token",
         }
     }
 }
@@ -190,12 +272,16 @@ impl AuthConfig {
     ///
     /// # Errors
     ///
-    /// `KafkaError::Client` when `ca_file` is `Some` and the auth is not
-    /// `ScramSha512 { tls: true, .. }` — the message is
-    /// `logweir_core::connection::TlsCaWithoutTls`'s.
+    /// `KafkaError::Client` when `ca_file` is `Some` and the transport is not
+    /// TLS — the message is `logweir_core::connection::TlsCaWithoutTls`'s.
     pub fn with_tls_ca_file(self, ca_file: Option<String>) -> Result<AuthConfig, KafkaError> {
         let Some(ca_file) = ca_file else {
             return Ok(self);
+        };
+        let refuse = |mode: &'static str| {
+            Err(KafkaError::Client(
+                logweir_core::connection::TlsCaWithoutTls { mode }.to_string(),
+            ))
         };
         match self {
             AuthConfig::ScramSha512 {
@@ -209,18 +295,65 @@ impl AuthConfig {
                 tls: true,
                 tls_ca_file: Some(ca_file),
             }),
-            AuthConfig::ScramSha512 { .. } => Err(KafkaError::Client(
-                logweir_core::connection::TlsCaWithoutTls {
-                    mode: "scramSha512",
+            AuthConfig::ScramSha256 {
+                username,
+                password,
+                tls: true,
+                ..
+            } => Ok(AuthConfig::ScramSha256 {
+                username,
+                password,
+                tls: true,
+                tls_ca_file: Some(ca_file),
+            }),
+            AuthConfig::Plain {
+                username, password, ..
+            } => Ok(AuthConfig::Plain {
+                username,
+                password,
+                tls_ca_file: Some(ca_file),
+            }),
+            AuthConfig::Mtls {
+                client_certificate, ..
+            } => Ok(AuthConfig::Mtls {
+                tls_ca_file: Some(ca_file),
+                client_certificate,
+            }),
+            AuthConfig::Token(_) => Err(KafkaError::Client(
+                "token auth (OAUTHBEARER / MSK IAM) is deferred (OD-3)".to_string(),
+            )),
+            other => refuse(other.mode_str()),
+        }
+    }
+
+    /// Attach the projected client-certificate pair of an `mtls` connection
+    /// (PROD-01.3), or refuse.
+    ///
+    /// `None` returns `self` unchanged for every mode but `Mtls`, whose client
+    /// config is then refused when it is built: an mTLS dial with no
+    /// certificate has no identity to present.
+    ///
+    /// # Errors
+    ///
+    /// `KafkaError::Client` with
+    /// [`logweir_core::connection::ClientCertificateRefusal::NotMtls`]'s text
+    /// when files are supplied for any other mode.
+    pub fn with_client_certificate(
+        self,
+        files: Option<logweir_core::connection::ClientCertificateFiles>,
+    ) -> Result<AuthConfig, KafkaError> {
+        match (self, files) {
+            (AuthConfig::Mtls { tls_ca_file, .. }, Some(files)) => Ok(AuthConfig::Mtls {
+                tls_ca_file,
+                client_certificate: Some(files),
+            }),
+            (other, Some(_)) => Err(KafkaError::Client(
+                logweir_core::connection::ClientCertificateRefusal::NotMtls {
+                    mode: other.mode_str(),
                 }
                 .to_string(),
             )),
-            AuthConfig::Plaintext => Err(KafkaError::Client(
-                logweir_core::connection::TlsCaWithoutTls { mode: "plaintext" }.to_string(),
-            )),
-            AuthConfig::Token(_) => Err(KafkaError::Client(
-                "token auth (OAUTHBEARER / MSK IAM) is introduced by SP4".to_string(),
-            )),
+            (other, None) => Ok(other),
         }
     }
 }
@@ -228,7 +361,9 @@ impl AuthConfig {
 // Manual `Debug`, not `#[derive]`: a derived impl would print `password`
 // verbatim, and `AuthConfig` reaches `{:?}` far too easily to trust — a
 // tracing field, an error context, a config dump — for a derive to be safe
-// here. Every other field is left exactly as a derive would render it.
+// here. Every other field is left exactly as a derive would render it. The
+// mTLS arm prints the two PATHS (where a volume is mounted), never key bytes,
+// which no Logweir process holds.
 impl std::fmt::Debug for AuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -245,6 +380,36 @@ impl std::fmt::Debug for AuthConfig {
                 .field("tls", tls)
                 // A path, not certificate text and not a credential.
                 .field("tls_ca_file", tls_ca_file)
+                .finish(),
+            AuthConfig::ScramSha256 {
+                username,
+                password: _,
+                tls,
+                tls_ca_file,
+            } => f
+                .debug_struct("ScramSha256")
+                .field("username", username)
+                .field("password", &"***")
+                .field("tls", tls)
+                .field("tls_ca_file", tls_ca_file)
+                .finish(),
+            AuthConfig::Plain {
+                username,
+                password: _,
+                tls_ca_file,
+            } => f
+                .debug_struct("Plain")
+                .field("username", username)
+                .field("password", &"***")
+                .field("tls_ca_file", tls_ca_file)
+                .finish(),
+            AuthConfig::Mtls {
+                tls_ca_file,
+                client_certificate,
+            } => f
+                .debug_struct("Mtls")
+                .field("tls_ca_file", tls_ca_file)
+                .field("client_certificate", client_certificate)
                 .finish(),
             AuthConfig::Token(provider) => f.debug_tuple("Token").field(provider).finish(),
         }

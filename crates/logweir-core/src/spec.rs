@@ -662,6 +662,36 @@ pub enum AuthSpec {
         #[serde(default)]
         tls: bool,
     },
+    /// **PROD-01.3.** SASL/SCRAM-SHA-256: the same exchange as `scramSha512`
+    /// with SHA-256, over TLS or not. The engine spells the mechanism
+    /// `SCRAM-SHA256` and librdkafka `SCRAM-SHA-256`.
+    ScramSha256 {
+        username: String,
+        #[serde(default)]
+        tls: bool,
+    },
+    /// **PROD-01.3.** SASL/PLAIN — Confluent Cloud's API keys and Azure Event
+    /// Hubs' connection strings use it. **Over TLS only**: PLAIN sends the
+    /// password itself, so `tls: false` (or absent) is refused with
+    /// [`crate::connection::PlainWithoutTls`] by
+    /// [`AuthSpec::transport_refusal`], which every runner entry point applies
+    /// before any client exists. `tls` stays a field rather than being implied
+    /// because it is the only switch that turns TLS on, in this grammar and in
+    /// the `KafkaCluster` CRD alike: a mode never turns it on by itself.
+    Plain {
+        username: String,
+        #[serde(default)]
+        tls: bool,
+    },
+    /// **PROD-01.3.** A TLS client certificate and no SASL (`security.protocol`
+    /// `SSL`). There is no username: the identity is the certificate, which
+    /// reaches the runner as a projected file pair
+    /// ([`crate::connection::ClientCertificateFiles`]) and never through a
+    /// spec. `tls: false` is refused ([`crate::connection::MtlsWithoutTls`]).
+    Mtls {
+        #[serde(default)]
+        tls: bool,
+    },
 }
 
 impl AuthSpec {
@@ -669,26 +699,49 @@ impl AuthSpec {
     /// `RestorePlan::target_auth`. It maps and never refuses: the mode a spec
     /// names is carried faithfully into the plan, so a plan that asked for
     /// SCRAM can never be rendered unauthenticated on the operator's behalf.
+    /// (A `plain` or `mtls` spec without TLS is carried as it is too, and
+    /// the renderer refuses it — the backstop behind
+    /// [`AuthSpec::transport_refusal`].)
     ///
     /// **It carries no password, at any variant** — see `AuthRender`'s own doc
     /// comment. The secret reaches the engine through the engine's own
     /// `${VAR}` expansion of its config text and reaches Logweir's client
     /// through `AuthConfig::from_spec`; neither path passes through a plan.
     pub fn to_render(&self) -> crate::engine::AuthRender {
+        use crate::engine::AuthRender;
         match self {
-            AuthSpec::Plaintext => crate::engine::AuthRender::Plaintext,
-            AuthSpec::ScramSha512 { username, tls } => crate::engine::AuthRender::ScramSha512 {
+            AuthSpec::Plaintext => AuthRender::Plaintext,
+            AuthSpec::ScramSha512 { username, tls } => AuthRender::ScramSha512 {
                 username: username.clone(),
                 tls: *tls,
                 // A spec names no trust anchor: the CA is a projected file the
                 // runner attaches afterwards (`AuthRender::with_tls_ca_file`).
                 tls_ca_file: None,
             },
+            AuthSpec::ScramSha256 { username, tls } => AuthRender::ScramSha256 {
+                username: username.clone(),
+                tls: *tls,
+                tls_ca_file: None,
+            },
+            AuthSpec::Plain { username, tls } => AuthRender::Plain {
+                username: username.clone(),
+                tls: *tls,
+                tls_ca_file: None,
+            },
+            // The certificate pair is attached by the runner from the
+            // projected files (`AuthRender::with_client_certificate`), like
+            // the CA: a spec names no file.
+            AuthSpec::Mtls { tls } => AuthRender::Mtls {
+                tls: *tls,
+                tls_ca_file: None,
+                client_certificate: None,
+            },
         }
     }
 
-    /// The mode as the two documents spell it: `"plaintext"` or
-    /// `"scramSha512"`.
+    /// The mode as the documents spell it: one of
+    /// [`crate::connection::AUTH_MODES`] — `"plaintext"`, `"scramSha512"`,
+    /// and since PROD-01.3 `"scramSha256"`, `"plain"` and `"mtls"`.
     ///
     /// **These are the serde tag values of this enum, and they are the
     /// `KafkaCluster` CRD's `auth.mode` enum, byte for byte and in that
@@ -700,12 +753,16 @@ impl AuthSpec {
     /// `crates/logweir/tests/auth_binding.rs::the_scorecard_auth_block_and_auth_spec_agree`
     /// rather than kept in step by three comments.
     ///
-    /// `&'static str` on purpose: a closed set of two literals cannot be
-    /// handed a value computed at run time.
+    /// `&'static str` on purpose: a closed set of literals cannot be handed a
+    /// value computed at run time.
     pub fn mode_str(&self) -> &'static str {
+        use crate::connection as c;
         match self {
-            AuthSpec::Plaintext => "plaintext",
-            AuthSpec::ScramSha512 { .. } => "scramSha512",
+            AuthSpec::Plaintext => c::AUTH_MODE_PLAINTEXT,
+            AuthSpec::ScramSha512 { .. } => c::AUTH_MODE_SCRAM_SHA_512,
+            AuthSpec::ScramSha256 { .. } => c::AUTH_MODE_SCRAM_SHA_256,
+            AuthSpec::Plain { .. } => c::AUTH_MODE_PLAIN,
+            AuthSpec::Mtls { .. } => c::AUTH_MODE_MTLS,
         }
     }
 
@@ -722,11 +779,58 @@ impl AuthSpec {
     /// is rendered from the plan and never from a cluster object read at run
     /// time.
     ///
-    /// `None` under `Plaintext`, which is not the same as an empty username.
+    /// `None` under `Plaintext`, which is not the same as an empty username,
+    /// and `None` under `Mtls`, whose identity is the client certificate — a
+    /// file the plan names nowhere, so for `mtls` G-ID binds the mode and the
+    /// transport and NOT the principal (`docs/kubernetes.md`, "Client
+    /// authentication modes").
     pub fn username(&self) -> Option<&str> {
         match self {
-            AuthSpec::Plaintext => None,
-            AuthSpec::ScramSha512 { username, .. } => Some(username),
+            AuthSpec::Plaintext | AuthSpec::Mtls { .. } => None,
+            AuthSpec::ScramSha512 { username, .. }
+            | AuthSpec::ScramSha256 { username, .. }
+            | AuthSpec::Plain { username, .. } => Some(username),
+        }
+    }
+
+    /// Whether the transport is TLS — the `tls` field of every arm that has
+    /// one, `false` for `plaintext`.
+    pub fn tls(&self) -> bool {
+        match self {
+            AuthSpec::Plaintext => false,
+            AuthSpec::ScramSha512 { tls, .. }
+            | AuthSpec::ScramSha256 { tls, .. }
+            | AuthSpec::Plain { tls, .. }
+            | AuthSpec::Mtls { tls } => *tls,
+        }
+    }
+
+    /// Whether this mode authenticates with a SASL password — the arms whose
+    /// client reads `LOGWEIR_{SOURCE,TARGET}_PASSWORD`.
+    pub fn uses_password(&self) -> bool {
+        self.username().is_some()
+    }
+
+    /// Whether this mode presents a TLS client certificate.
+    pub fn uses_client_certificate(&self) -> bool {
+        matches!(self, AuthSpec::Mtls { .. })
+    }
+
+    /// **The PLAIN-over-TLS rule, and its `mtls` twin** — the refusal every
+    /// runner entry point applies to a spec before any client exists, and the
+    /// rule the controller's resolver and the CRD's admission rule state for a
+    /// `KafkaCluster`.
+    ///
+    /// `Some` for `plain` without TLS ([`crate::connection::PlainWithoutTls`],
+    /// the named reason `PlainWithoutTls`) and for `mtls` without TLS
+    /// ([`crate::connection::MtlsWithoutTls`]); `None` for every other shape.
+    pub fn transport_refusal(&self) -> Option<String> {
+        match self {
+            AuthSpec::Plain { tls: false, .. } => {
+                Some(crate::connection::PlainWithoutTls.to_string())
+            }
+            AuthSpec::Mtls { tls: false } => Some(crate::connection::MtlsWithoutTls.to_string()),
+            _ => None,
         }
     }
 }

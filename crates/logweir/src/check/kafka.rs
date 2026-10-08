@@ -43,9 +43,9 @@
 //!
 //! # A mode this build cannot dial is an authentication answer, not a crash
 //!
-//! `logweir_core::spec::AuthSpec` has two arms — `plaintext` and
-//! `scramSha512`. D2 §4.1 lets a plan spell `scramSha256`, which this build
-//! does not implement. That is reported as
+//! `logweir_core::spec::AuthSpec` has five arms since PROD-01.3 —
+//! `plaintext`, `scramSha512`, `scramSha256`, `plain` (over TLS only) and
+//! `mtls`. Any other spelling a plan carries is reported as
 //! [`CheckCode::AuthenticationFailed`] naming the mode, because nothing was
 //! unreachable and the operator's fix is on the connection, not on the
 //! network.
@@ -61,6 +61,12 @@ use logweir_kafka::reader::AuthConfig;
 pub const AUTH_MODE_PLAINTEXT: &str = "plaintext";
 /// The spelling `AuthSpec::ScramSha512` serialises as.
 pub const AUTH_MODE_SCRAM_SHA_512: &str = "scramSha512";
+/// The spelling `AuthSpec::ScramSha256` serialises as (PROD-01.3).
+pub const AUTH_MODE_SCRAM_SHA_256: &str = logweir_core::connection::AUTH_MODE_SCRAM_SHA_256;
+/// The spelling `AuthSpec::Plain` serialises as (PROD-01.3).
+pub const AUTH_MODE_PLAIN: &str = logweir_core::connection::AUTH_MODE_PLAIN;
+/// The spelling `AuthSpec::Mtls` serialises as (PROD-01.3).
+pub const AUTH_MODE_MTLS: &str = logweir_core::connection::AUTH_MODE_MTLS;
 
 /// The plan's `authMode` as an [`AuthSpec`], or the reason this build cannot
 /// dial it.
@@ -71,7 +77,20 @@ pub const AUTH_MODE_SCRAM_SHA_512: &str = "scramSha512";
 /// # Errors
 /// [`CheckFailure`] with [`CheckCode::AuthenticationFailed`].
 pub fn auth_spec(plan: &ConnectionPlan) -> Result<AuthSpec, CheckFailure> {
-    match plan.auth_mode.as_str() {
+    let tls = plan.tls.unwrap_or(false);
+    let username = || match plan.username.as_deref().filter(|u| !u.is_empty()) {
+        Some(username) => Ok(username.to_string()),
+        None => Err(CheckFailure::new(
+            CheckCode::AuthenticationFailed,
+            format!(
+                "the connection asks for {} and names no username; SASL authenticates as a \
+                 named principal, and a check that dialled as nobody would report a \
+                 configuration mistake as an unreachable broker",
+                plan.auth_mode
+            ),
+        )),
+    };
+    let spec = match plan.auth_mode.as_str() {
         // THE DOWNGRADE ARM, CLOSED. See the module header: `AuthSpec` has no
         // plaintext-with-TLS shape, so accepting this plan would silently drop
         // the transport the controller asked for (D-SEAMS S5).
@@ -80,36 +99,47 @@ pub fn auth_spec(plan: &ConnectionPlan) -> Result<AuthSpec, CheckFailure> {
         // attempted, and a code claiming one would send an operator to the
         // broker's certificate instead of to the connection's own auth block.
         // Nothing was unreachable either, so it is not `BrokerUnreachable`.
-        AUTH_MODE_PLAINTEXT if plan.tls == Some(true) => Err(CheckFailure::new(
-            CheckCode::AuthenticationFailed,
-            format!(
-                "the connection asks for auth mode `{AUTH_MODE_PLAINTEXT}` with `tls: true` \
-                 (TLS without SASL), which this contract does not support; it is refused rather \
-                 than dialled in the clear. Use `{AUTH_MODE_SCRAM_SHA_512}` over TLS, or set \
-                 `tls: false` for a plaintext listener"
-            ),
-        )),
-        AUTH_MODE_PLAINTEXT => Ok(AuthSpec::Plaintext),
-        AUTH_MODE_SCRAM_SHA_512 => match plan.username.as_deref().filter(|u| !u.is_empty()) {
-            Some(username) => Ok(AuthSpec::ScramSha512 {
-                username: username.to_string(),
-                tls: plan.tls.unwrap_or(false),
-            }),
-            None => Err(CheckFailure::new(
+        AUTH_MODE_PLAINTEXT if plan.tls == Some(true) => {
+            return Err(CheckFailure::new(
                 CheckCode::AuthenticationFailed,
-                "the connection asks for scramSha512 and names no username; SASL/SCRAM \
-                 authenticates as a named principal, and a check that dialled as nobody would \
-                 report a configuration mistake as an unreachable broker",
-            )),
+                format!(
+                    "the connection asks for auth mode `{AUTH_MODE_PLAINTEXT}` with `tls: true` \
+                     (TLS without SASL), which this contract does not support; it is refused \
+                     rather than dialled in the clear. Use `{AUTH_MODE_SCRAM_SHA_512}` over TLS \
+                     or `{AUTH_MODE_MTLS}`, or set `tls: false` for a plaintext listener"
+                ),
+            ))
+        }
+        AUTH_MODE_PLAINTEXT => AuthSpec::Plaintext,
+        AUTH_MODE_SCRAM_SHA_512 => AuthSpec::ScramSha512 {
+            username: username()?,
+            tls,
         },
-        other => Err(CheckFailure::new(
-            CheckCode::AuthenticationFailed,
-            format!(
-                "`{other}` is not an auth mode this build can dial; it accepts \
-                 {AUTH_MODE_PLAINTEXT} and {AUTH_MODE_SCRAM_SHA_512}"
-            ),
-        )),
+        AUTH_MODE_SCRAM_SHA_256 => AuthSpec::ScramSha256 {
+            username: username()?,
+            tls,
+        },
+        AUTH_MODE_PLAIN => AuthSpec::Plain {
+            username: username()?,
+            tls,
+        },
+        AUTH_MODE_MTLS => AuthSpec::Mtls { tls },
+        other => {
+            return Err(CheckFailure::new(
+                CheckCode::AuthenticationFailed,
+                format!(
+                    "`{other}` is not an auth mode this build can dial; it accepts {}",
+                    logweir_core::connection::AUTH_MODES.join(", ")
+                ),
+            ))
+        }
+    };
+    // PROD-01.3: PLAIN without TLS (PlainWithoutTls) and mTLS without TLS are
+    // refused before a socket exists — the check runner's half of the rule.
+    if let Some(refusal) = spec.transport_refusal() {
+        return Err(CheckFailure::new(CheckCode::AuthenticationFailed, refusal));
     }
+    Ok(spec)
 }
 
 /// The projected password for this connection, or `None`.
@@ -122,8 +152,34 @@ pub fn projected_password(plan: &ConnectionPlan) -> Option<String> {
     std::env::var(var).ok().filter(|p| !p.is_empty())
 }
 
+/// The `mtls` client-certificate pair the plan names (PROD-01.3), as the two
+/// IN-POD PATHS the controller projected — never opened here, for the
+/// reason [`auth_config`] gives about `caFile`.
+///
+/// # Errors
+/// [`CheckFailure`] with [`CheckCode::AuthenticationFailed`] when only one of
+/// the two paths is named.
+pub fn client_certificate(
+    plan: &ConnectionPlan,
+) -> Result<Option<logweir_core::connection::ClientCertificateFiles>, CheckFailure> {
+    match (
+        plan.client_cert_file.as_ref(),
+        plan.client_key_file.as_ref(),
+    ) {
+        (None, None) => Ok(None),
+        (Some(cert), Some(key)) => Ok(Some(logweir_core::connection::ClientCertificateFiles {
+            cert_file: cert.clone(),
+            key_file: key.clone(),
+        })),
+        _ => Err(CheckFailure::new(
+            CheckCode::AuthenticationFailed,
+            logweir_core::connection::ClientCertificateRefusal::Incomplete.to_string(),
+        )),
+    }
+}
+
 /// Build this connection's [`AuthConfig`] — interface **I1**, plus PLAT-07.1's
-/// projected trust anchor.
+/// projected trust anchor and PROD-01.3's client certificate.
 ///
 /// `with_tls_ca_file` REFUSES a CA on a connection that is not TLS, which is
 /// D-SEAMS **S5** from the broker side: a trust anchor must never be the thing
@@ -144,7 +200,9 @@ pub fn projected_password(plan: &ConnectionPlan) -> Option<String> {
 /// So the runner must not assume either location, and it does not: the value
 /// is opaque to it. `a_connection_ca_is_an_opaque_in_pod_path` asserts the
 /// path reaches the client unchanged for both shapes, and that it still does
-/// not decide the transport.
+/// not decide the transport. The `mtls` certificate and key paths
+/// ([`ConnectionPlan::client_cert_file`] / `client_key_file`) are opaque the
+/// same way.
 ///
 /// The DESTINATION side is different and deliberately so:
 /// `DestinationPlan::ca_file` IS read
@@ -158,22 +216,33 @@ pub fn projected_password(plan: &ConnectionPlan) -> Option<String> {
 pub fn auth_config(plan: &ConnectionPlan) -> Result<AuthConfig, CheckFailure> {
     let spec = auth_spec(plan)?;
     let password = projected_password(plan);
-    if matches!(spec, AuthSpec::ScramSha512 { .. }) && password.is_none() {
+    if spec.uses_password() && password.is_none() {
+        let mode = spec.mode_str();
         return Err(CheckFailure::new(
             CheckCode::AuthenticationFailed,
             match plan.password_env.as_deref() {
                 Some(var) => format!(
-                    "the connection asks for scramSha512 and the projected environment variable \
+                    "the connection asks for {mode} and the projected environment variable \
                      `{var}` is absent or empty, so no SASL password reached this check"
                 ),
-                None => "the connection asks for scramSha512 and names no password environment \
-                         variable, so no SASL password could reach this check"
-                    .to_string(),
+                None => format!(
+                    "the connection asks for {mode} and names no password environment \
+                     variable, so no SASL password could reach this check"
+                ),
             },
+        ));
+    }
+    let certificate = client_certificate(plan)?;
+    if spec.uses_client_certificate() && certificate.is_none() {
+        return Err(CheckFailure::new(
+            CheckCode::AuthenticationFailed,
+            "the connection asks for mtls and the plan names no client certificate and key \
+             paths, so no client certificate could reach this check",
         ));
     }
     AuthConfig::from_spec(&spec, password)
         .and_then(|a| a.with_tls_ca_file(plan.ca_file.clone()))
+        .and_then(|a| a.with_client_certificate(certificate))
         // `KafkaError`'s message is this workspace's own prose — never a
         // broker string — and `CheckFailure::new` redacts and caps it anyway.
         .map_err(|e| CheckFailure::new(CheckCode::AuthenticationFailed, e.to_string()))
