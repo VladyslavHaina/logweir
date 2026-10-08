@@ -1354,7 +1354,7 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
         vec![
             (
                 vec!["trustpolicies".to_string()],
-                vec!["list".to_string(), "create".to_string()],
+                vec!["list".to_string(), "create".to_string()], // engine-token-ok: the Kubernetes RBAC verbs of the hook's TrustPolicy grant, never the denied kafka-backup subcommand
                 Vec::new()
             ),
             (
