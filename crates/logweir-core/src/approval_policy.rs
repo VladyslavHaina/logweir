@@ -856,8 +856,8 @@ impl ApprovalPolicySet {
             Some("strict") => Some(UnboundDefault::Strict),
             Some("two-person") => {
                 return Err(PolicyConfigError(
-                    "defaultMode two-person is PROD-16.2 and not in this build; use confirm or \
-                     strict"
+                    "defaultMode two-person (two-person approval in the console) is not available in this \
+                     release; use confirm or strict"
                         .to_string(),
                 ));
             }
@@ -900,8 +900,8 @@ impl ApprovalPolicySet {
             }
             let Some(mode) = entry.mode.mode() else {
                 return Err(PolicyConfigError(format!(
-                    "{field} ({}) is two-person, which is PROD-16.2 and not in this build; use \
-                     confirm (Ordinary) or strict (Governed)",
+                    "{field} ({}) is two-person (two-person approval in the console), which is not \
+                     available in this release; use confirm (Ordinary) or strict (Governed)",
                     entry.name
                 )));
             };
@@ -2150,12 +2150,12 @@ namespaces:
                 "policies:\n  - name: default-confirm-v1\n    mode: Governed\n",
                 "reserved",
             ),
-            ("defaultMode: two-person\n", "PROD-16.2"),
+            ("defaultMode: two-person\n", "not available in this release"),
             ("defaultMode: Ordinary\n", "not a mode"),
             ("defaultMode: \"\"\n", "not a mode"),
             (
                 "policies:\n  - name: p\n    mode: two-person\n",
-                "PROD-16.2",
+                "not available in this release",
             ),
             (
                 "policies:\n  - name: p\n    mode: confirm\n",

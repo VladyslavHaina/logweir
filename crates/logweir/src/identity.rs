@@ -52,6 +52,15 @@ use serde_json::{json, Value};
 use crate::exit::ExitCode;
 
 const SERVICE_ACCOUNT_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
+
+/// Where the hook reads its ServiceAccount token and the cluster CA when NOT
+/// in a pod: a directory holding `token` and `ca.crt`, with
+/// `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT_HTTPS` naming the API
+/// server. The chart never sets it; it exists so the same binary can run the
+/// same steps from a workstation under a narrowly bound account's token
+/// (PROD-16.1's host proof, a break-glass re-run). It grants nothing: the
+/// token's own RBAC is the whole authority.
+const SERVICE_ACCOUNT_DIR_ENV: &str = "LOGWEIR_SERVICE_ACCOUNT_DIR";
 const IDENTITY_STATE_ANNOTATION: &str = "logweir.dev/identity-state";
 const ESTABLISHED: &str = "established";
 const PUBLIC_KEY_ID: &str = "key-id";
@@ -1262,8 +1271,12 @@ impl KubernetesStore {
         } else {
             host
         };
-        let token_path = format!("{SERVICE_ACCOUNT_DIR}/token");
-        let ca_path = format!("{SERVICE_ACCOUNT_DIR}/ca.crt");
+        let account_dir = std::env::var(SERVICE_ACCOUNT_DIR_ENV)
+            .ok()
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| SERVICE_ACCOUNT_DIR.to_string());
+        let token_path = format!("{account_dir}/token");
+        let ca_path = format!("{account_dir}/ca.crt");
         let token = std::fs::read_to_string(&token_path)
             .map_err(|e| format!("could not read ServiceAccount token at {token_path}: {e}"))?;
         let ca = std::fs::read(&ca_path)

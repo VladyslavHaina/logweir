@@ -120,7 +120,7 @@ the run that GENERATES the identity, so an upgrade never reaches it.
 {{- $names := list -}}
 {{- if $p.default -}}
 {{- if eq $p.default "two-person" -}}
-{{- fail "approvalPolicy.default is two-person, which is PROD-16.2 and not in this chart. Use confirm or strict, or leave it empty: a fresh install with a console then starts in confirm, and an upgraded one keeps legacy-governed-v1." -}}
+{{- fail "approvalPolicy.default is two-person (two-person approval in the console), which is not available in this release. Use confirm or strict, or leave it empty: a fresh install with a console then starts in confirm, and an upgraded one keeps legacy-governed-v1." -}}
 {{- end -}}
 {{- if not (has $p.default (list "confirm" "strict")) -}}
 {{- fail (printf "approvalPolicy.default is %q; it is `confirm`, `strict`, or empty (the fresh-install marker decides)." $p.default) -}}
@@ -141,7 +141,7 @@ the run that GENERATES the identity, so an upgrade never reaches it.
 {{- end -}}
 {{- $names = append $names $policy.name -}}
 {{- if eq ($policy.mode | default "") "two-person" -}}
-{{- fail (printf "approvalPolicy.policies[%d] (%s) is two-person, which is PROD-16.2 and not in this chart; use confirm (Ordinary) or strict (Governed)." $i $policy.name) -}}
+{{- fail (printf "approvalPolicy.policies[%d] (%s) is two-person (two-person approval in the console), which is not available in this release; use confirm (Ordinary) or strict (Governed)." $i $policy.name) -}}
 {{- end -}}
 {{- if not (has $policy.mode (list "Governed" "Ordinary" "confirm" "strict")) -}}
 {{- fail (printf "approvalPolicy.policies[%d].mode is %q; it is `confirm` (Ordinary) or `strict` (Governed)." $i ($policy.mode | default "")) -}}

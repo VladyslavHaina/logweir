@@ -5,7 +5,7 @@
 //   * H1, as PROD-16.1 amends it: a console that cannot sign a `confirm`
 //     confirmation (its managed key is not there yet) says so, disables
 //     Create, and sends nothing; a localAdmin console that can, confirms like
-//     the shared one — the administrator mode now serves `confirm`.
+//     the shared one -- the administrator mode now serves `confirm`.
 //   * L1: a Governed policy requires a change ticket (D0). The page asks for
 //     one, refuses to send without it, and sends it beside the create body;
 //     an unbound namespace never sends one.
@@ -133,7 +133,7 @@ test("an_unbound_namespace_never_sends_a_ticket", async () => {
 });
 
 // PROD-16.1: a FRESH install's unbound namespace, served by the localAdmin
-// console, is `confirm` — the block says no key is needed and why, and the
+// console, is `confirm` -- the block says no key is needed and why, and the
 // submit sends with no ticket and no refusal. NEGATIVE CONTROL: the same view
 // with the key not there yet refuses, naming the key.
 const FRESH_CONFIRM = Object.freeze({

@@ -4504,7 +4504,7 @@ function ticketFor(state) {
 }
 
 /** A refusal the namespace's approval POLICY makes before anything is sent
- *  (PLAT-19.2), or `null`: a `confirm` policy this console cannot sign yet —
+ *  (PLAT-19.2), or `null`: a `confirm` policy this console cannot sign yet --
  *  PROD-16.1: its confirmation key is not there (the identity hook writes it
  *  once, at install). The product API refuses the same request; this says so
  *  first. */

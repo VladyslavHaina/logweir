@@ -810,9 +810,9 @@ block ARE gates, each also refused by the product API:
   the step says so and Create is disabled (`policyRefusal`). The administrator
   (`localAdmin`) console serves `confirm` like the shared one, as
   `urn:logweir:local-admin#admin` (amending D0's "does not expose Ordinary").
-  The step names the mode the operator sees — confirm ("no key needed", and,
+  The step names the mode the operator sees -- confirm ("no key needed", and,
   on a fresh install, why), strict (an approver's personal key) or the
-  out-of-band step — from the read's `operatorMode` and `basis`.
+  out-of-band step -- from the read's `operatorMode` and `basis`.
 
 **The approvals page under a Governed binding** shows the console's
 confirmation documents verbatim in read-only fields (never parsed here, the rule
