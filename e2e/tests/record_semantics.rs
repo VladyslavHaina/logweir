@@ -458,7 +458,7 @@ fn kill_own_restores() {
 /// nothing. That guard runs in CI's workspace job and never in this package:
 /// `engine-matrix` runs this package with each row's own engine, so nothing
 /// here may compare the engine with the pin.
-const CONTRACT_ENGINE: &str = "0.23.3+logweir.1";
+const CONTRACT_ENGINE: &str = "0.23.3+logweir.2";
 
 fn contract_applies(row: &str) -> bool {
     let v = engine_version();

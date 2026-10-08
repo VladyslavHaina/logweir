@@ -369,7 +369,11 @@ LOGWEIR_ENGINE_VERSION=${LOGWEIR_ENGINE_VERSION##* }
 # Logweir's build is named by its build-input digest (PROD-00.2), OSO's
 # release by its image digest.
 case "$LOGWEIR_ENGINE_VERSION" in
-  *+logweir.*) LOGWEIR_ENGINE_DIGEST=$(sed -n 's/^ENGINE_DIGEST=//p' third_party/kafka-backup-build.env) ;;
+  # The ledger names every build (FX-21): an earlier build run at this
+  # checkout is named by ITS digest, never by the newest build's.
+  *+logweir.*)
+    LOGWEIR_ENGINE_DIGEST=$(awk -v v="$LOGWEIR_ENGINE_VERSION" '$1 == v {print $2}' third_party/kafka-backup-builds.txt)
+    [ -n "$LOGWEIR_ENGINE_DIGEST" ] || { echo "engine $LOGWEIR_ENGINE_VERSION is not a build in third_party/kafka-backup-builds.txt" >&2; exit 1; } ;;
   *) LOGWEIR_ENGINE_DIGEST=$(tr -d '[:space:]' < third_party/kafka-backup-binary.digest) ;;
 esac
 export LOGWEIR_ENGINE_VERSION LOGWEIR_ENGINE_DIGEST

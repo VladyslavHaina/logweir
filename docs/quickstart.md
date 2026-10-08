@@ -565,8 +565,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
 # Optional engine override. Both doctor and drill run search LOGWEIR_ENGINE_BIN,
 # ./.engine/kafka-backup, /usr/local/bin/kafka-backup, then PATH.
 export LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
-export LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1
-export LOGWEIR_ENGINE_DIGEST=sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3
+export LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2
+export LOGWEIR_ENGINE_DIGEST=sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8
 
 logweir drill run \
   --spec drill.yaml \
