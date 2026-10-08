@@ -51,6 +51,7 @@ auth      kafka-auth: SASL_SSL/PLAIN :9102, SASL_PLAINTEXT/SCRAM-SHA-256 :9103, 
 cluster3  kafka-c3-1..3: a three-node KRaft cluster, RF 3 / min ISR 2 by default, :9112-:9114
 cluster2  kafka-cluster2: a second single-node cluster with its own cluster id and the marker topic, :9122
 streams   streams-wordcount: Apache Kafka's WordCountDemo on kafka-broker-1 (group logweir-e2e-wordcount)
+streams-protocol  streams-protocol-wordcount: WordCountProcessorDemo on kafka-broker-1 with group.protocol=streams (a Streams group, logweir-e2e-streams-protocol); 4.x lines only
 objectstore  objectstore: SeaweedFS 4.48 S3 :9130 with kafka-backups, logweir-evidence, kafka-backups-locked (Object Lock), kafka-backups-2
 registry  registry: Karapace 6.2.3 (Schema-Registry-compatible) :9141, schemas in _schemas on kafka-broker-1
 acl       kafka-acl: StandardAuthorizer; PLAINTEXT :9150 as ANONYMOUS (super user), SASL_PLAINTEXT/SCRAM-SHA-512 :9151 as logweir (restricted by the row's ACLs)
