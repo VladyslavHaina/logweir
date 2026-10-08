@@ -1632,6 +1632,12 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// name, so an item 24 that stops naming what an operator reads after a
 /// restore fails here, and the notes at main `19b5ecd9`, with twenty-three
 /// items, fail the twenty-four pin (FX-3 fix round, 2026-10-07).
+///
+/// Then to twenty-five: item 25 is PROD-00.3f's engine pin (0.23.3). Its token
+/// is the variable a standalone CLI install must change with the engine, so an
+/// item 25 that stops telling that operator what to change fails here, and the
+/// notes at the branch base `fcaae178`, with twenty-four items, fail the
+/// twenty-five pin (PROD-00.3f, 2026-10-08).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1657,9 +1663,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=24).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-four operator-facing changes, `#### 1.` \
-         to `#### 24.` in order; found {numbers:?}"
+        (1..=25).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-five operator-facing changes, `#### 1.` \
+         to `#### 25.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1716,6 +1722,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
             "not-reconstructed source settings",
             "topic_parity.not_reconstructed",
         ),
+        // PROD-00.3f (2026-10-08): the engine pin moved to 0.23.3; a
+        // standalone install changes its engine identity with it.
+        ("the engine pin is 0.23.3", "LOGWEIR_ENGINE_VERSION"),
     ]) {
         assert!(
             body.contains(token),

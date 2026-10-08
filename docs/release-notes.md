@@ -180,7 +180,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-four operator-facing changes
+### The twenty-five operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -193,7 +193,9 @@ upgrade that carries each runs its rows. Item 23 is fix-now row FX-10, proven
 offline; the PoC upgrade that carries it checks that the PoC's policy
 document and its digest are unchanged (the PoC sets neither withdrawn key).
 Item 24 is fix-now row FX-3, proven on a compose stack (it changes the
-runner's signed scorecard, not the controller).
+runner's signed scorecard, not the controller). Item 25 is PROD-00.3f, the
+engine pin, proven on a compose stack; the PoC upgrade that carries it runs its
+controller and runner rows.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -1141,7 +1143,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22, 23 and 24, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23, 24 and 25, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.

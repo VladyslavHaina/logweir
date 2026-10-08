@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn version_matches_accepts_only_the_exact_pin() {
-        assert_eq!(ENGINE_PIN, "0.23.3", "the pin PROD-00.3f moved to");
+        assert_eq!(ENGINE_PIN, "0.23.3", "the pin moved from 0.21.0 to 0.23.3");
         assert!(version_matches("kafka-backup 0.23.3"));
         assert!(version_matches("kafka-backup 0.23.3\n"));
         assert!(version_matches("0.23.3"));
