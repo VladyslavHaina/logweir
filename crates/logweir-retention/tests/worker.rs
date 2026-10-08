@@ -466,6 +466,165 @@ fn the_per_run_ceilings_are_the_jobs_own_at_non_default_values() {
     .expect("CONTROL: at the defaults 1235 keys admit, so the refusal above is the 1234's");
 }
 
+/// **FX-10 fix round (review M1): a RAISED ceiling reaches the worker too, at
+/// admission AND at execution.**
+///
+/// [`the_per_run_ceilings_are_the_jobs_own_at_non_default_values`] sets the
+/// ceilings BELOW the old fallbacks (7 < 50, 1234 < 20 000), so a worker that
+/// read the environment and then bounded it by the old default —
+/// `cap(…)?.min(50)`, or a narrower fallback reintroduced later — passed every
+/// row while an administrator's raised `maxDeletionsPerRun` was silently cut to
+/// 50 and the backlog never cleared (a run stopped by its own ceiling is not a
+/// failure, so the status stays healthy). Here the Job says **75** points and
+/// **30 000** object keys, both ABOVE the old 50 / 20 000 and inside the CRD's
+/// 1..500 / 1..200 000:
+///
+/// * the binding and the execution limit carry 75 and 30 000;
+/// * a plan of 75 points is admitted and one of 76 is refused `OverCap`
+///   naming 75;
+/// * one point of 30 000 object keys is admitted and one of 30 001 is refused
+///   `OverCap` naming 30 000;
+/// * the 30 000-key point RUNS: all 30 000 keys are deleted, manifest first,
+///   and the run exits 0 — so the raised number reaches `execute`'s budget
+///   too, not only admission.
+///
+/// NEGATIVE CONTROL, in the row: the SAME 75-point and 30 000-key plans are
+/// REFUSED at the old 50 / 20 000, naming those. So the admissions above are
+/// the raised values' doing.
+///
+/// MUTANTS (FX-10 fix round): `cap(…)?.min(50)` / `.min(20_000)` in `admit`
+/// (the review's M3); `max_objects: self.binding.max_objects_per_run.min(20_000)`
+/// in `Admitted::limits` (admission passes, execution stops at 20 000).
+#[test]
+fn a_raised_ceiling_reaches_admission_and_execution_above_the_old_defaults() {
+    // The binding, and the limit `execute` stops at.
+    let one = plan_bytes(lines(1));
+    let admitted = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&one), "75", "30000"),
+        one,
+    )
+    .expect("a binding with raised ceilings admits");
+    assert_eq!(admitted.binding.max_deletions_per_run, 75);
+    assert_eq!(admitted.binding.max_objects_per_run, 30_000);
+    assert_eq!(admitted.limits().max_objects, 30_000);
+
+    // POINTS: 75 admits and 76 is refused naming the Job's 75 …
+    let seventy_five = plan_bytes(lines(75));
+    admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&seventy_five), "75", "30000"),
+        seventy_five.clone(),
+    )
+    .expect("75 points, above the old 50, admit under a raised ceiling");
+    let seventy_six = plan_bytes(lines(76));
+    let err = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&seventy_six), "75", "30000"),
+        seventy_six,
+    )
+    .expect_err("one point over the raised ceiling is refused");
+    assert!(
+        matches!(
+            &err,
+            Refusal::Plan(logweir_reaper::Refusal::OverCap {
+                what: "points",
+                found: 76,
+                cap: 75
+            })
+        ),
+        "the refusal names the Job's raised ceiling: {err:?}"
+    );
+    // … and the CONTROL: the 75-point plan is refused at the old 50.
+    let err = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&seventy_five), "50", "20000"),
+        seventy_five,
+    )
+    .expect_err("CONTROL: at the old default the 75-point plan is refused");
+    assert!(
+        matches!(
+            &err,
+            Refusal::Plan(logweir_reaper::Refusal::OverCap {
+                what: "points",
+                found: 75,
+                cap: 50
+            })
+        ),
+        "CONTROL names 50: {err:?}"
+    );
+
+    // OBJECTS: one point whose set is its manifest plus 29 999 / 30 000 segments.
+    let wide = |segments: usize| {
+        let names: Vec<String> = (0..segments).map(|i| format!("seg-{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        plan_bytes(vec![line("lwp1-wide", "set-wide", &refs)])
+    };
+    let at = wide(29_999); // 30 000 keys
+    let admitted = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&at), "75", "30000"),
+        at.clone(),
+    )
+    .expect("30 000 keys, above the old 20 000, admit under a raised ceiling");
+    let over = wide(30_000); // 30 001 keys
+    let err = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&over), "75", "30000"),
+        over,
+    )
+    .expect_err("one object key over the raised ceiling is refused");
+    assert!(
+        matches!(
+            &err,
+            Refusal::Plan(logweir_reaper::Refusal::OverCap {
+                what: "object keys",
+                found: 30_001,
+                cap: 30_000
+            })
+        ),
+        "the refusal names the Job's raised object ceiling: {err:?}"
+    );
+    // CONTROL: the 30 000-key point is refused at the old 20 000.
+    let err = admit_with(&argv(), &env_with_caps(&digest_of(&at), "50", "20000"), at)
+        .expect_err("CONTROL: at the old default 30 000 keys are refused");
+    assert!(
+        matches!(
+            &err,
+            Refusal::Plan(logweir_reaper::Refusal::OverCap {
+                what: "object keys",
+                found: 30_000,
+                cap: 20_000
+            })
+        ),
+        "CONTROL names 20 000: {err:?}"
+    );
+
+    // EXECUTION: the admitted 30 000-key point is deleted whole. A budget cut
+    // back to 20 000 would stop at 20 000 with `BudgetExhausted` and exit 1.
+    let deleter = FakeDeleter::default();
+    let report = execute(
+        &admitted,
+        &deleter,
+        &NoSleep,
+        &FakeSink::default(),
+        &FakeLister(Vec::new()),
+    );
+    let seen = deleter.seen.borrow();
+    assert_eq!(
+        seen.len(),
+        30_000,
+        "every key of the admitted point is deleted under the raised budget"
+    );
+    assert_eq!(seen[0], format!("{SCOPE}/set-wide/manifest.json"));
+    assert_eq!(report.outcome.objects_deleted, 30_000);
+    assert_eq!(report.exit_code, EXIT_OK, "{:?}", report.lines);
+    assert!(report
+        .lines
+        .iter()
+        .any(|l| l.contains("retention-point=lwp1-wide state=Deleted objects=30000")));
+}
+
 /// **FX-10: a ceiling that is not a whole number of at least 1 is REFUSED —
 /// exit 3, nothing deleted — and never replaced by a default.**
 ///
