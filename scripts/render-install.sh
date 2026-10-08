@@ -569,6 +569,14 @@ check_trust_creators() {
     exit 1
   fi
   rm -f "${TMPDIR:-/tmp}/logweir-trust-creators.$$"
+  # NOT VACUOUS (PROD-16.1 fix round): at least one variant renders the
+  # install-only grant (`console-fresh-install`, and every console variant once
+  # the bootstrap feature is the default), so the rule above reads a real one.
+  if ! grep -l -E '^  name: [a-z0-9-]+-identity-trust$' charts/logweir/rendered/*.yaml > /dev/null; then
+    echo "render-install: no rendered variant carries the install-only identity trust grant; the" >&2
+    echo "  least-privilege rule above would pass over nothing (examples/console-fresh-install.values.yaml)" >&2
+    exit 1
+  fi
   echo "render-install: only logweir-trust-admin and the install-only identity hook may create a"
   echo "  TrustPolicy, and the hook's grant is a self-deleting post-install hook, in every variant."
 }

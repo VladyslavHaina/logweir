@@ -259,11 +259,11 @@ and `logweir-api` refuses to start without it. Refused here first, by name.
 {{- $consoleKeySecret := include "logweir.consoleKey.secret" . -}}
 {{- range $ns, $policy := (.Values.approvalPolicy.namespaces | default dict) -}}
 {{- if and (has $ns $served) (not $consoleKeySecret) -}}
-{{- fail (printf "approvalPolicy.namespaces binds %s, which the console serves, to policy %q and there is no console confirmation key: identity.enabled is false and approvalPolicy.confirmationKeySecret is empty. Both ordinary and governed requests carry the console's ConsoleConfirmation signature (D0): enable the managed identity (the hook then generates the key), or create a Secret with key `confirmation.key` (a PKCS#8 PEM private key whose PUBLIC half is on the namespace's TrustPolicy with usage ConsoleConfirmation) and name it, or unbind the namespace." $ns $policy) -}}
+{{- fail (printf "approvalPolicy.namespaces binds %s, which the console serves, to policy %q and there is no console confirmation key: approvalPolicy.confirmationKeySecret is empty and the identity hook does not manage one (identity.enabled with identity.bootstrapFeatures.consoleKey). Both ordinary and governed requests carry the console's ConsoleConfirmation signature (D0): create a Secret with key `confirmation.key` (a PKCS#8 PEM private key whose PUBLIC half is on the namespace's TrustPolicy with usage ConsoleConfirmation) and name it, or use a chart whose bootstrap image generates the key, or unbind the namespace." $ns $policy) -}}
 {{- end -}}
 {{- end -}}
 {{- if and (eq (.Values.approvalPolicy.default | default "") "confirm") (not $consoleKeySecret) -}}
-{{- fail "approvalPolicy.default is confirm and there is no console confirmation key: identity.enabled is false and approvalPolicy.confirmationKeySecret is empty. Every unbound namespace would be created and then never authorisable; enable the managed identity or name the key's Secret." -}}
+{{- fail "approvalPolicy.default is confirm and there is no console confirmation key: approvalPolicy.confirmationKeySecret is empty and the identity hook does not manage one (identity.enabled with identity.bootstrapFeatures.consoleKey). Every unbound namespace would be created and then never authorisable; name the key's Secret, or use a chart whose bootstrap image generates the key." -}}
 {{- end -}}
 {{- range $peer := ($c.networkPolicy.oidcPeers | default list) -}}
 {{- if or (not $peer.namespace) (not $peer.podLabels) (lt (int $peer.port) 1) -}}
@@ -417,12 +417,21 @@ approvalPolicyFile: {{ include "logweir.approvalPolicy.file" . }}
 confirmationKeyFile: {{ printf "%s/confirmation.key" (include "logweir.approvalPolicy.confirmationDir" .) }}
 {{- end }}
 {{- /*
+PROD-16.1 fix round (review L5): the key file is the identity hook's MANAGED
+key, which the kubelet projects only after the post-install hook wrote it, so
+the console may start before it exists. An operator-named key is mounted
+non-optional and its absence stays a refusal to start.
+*/ -}}
+{{- if include "logweir.consoleKey.managed" . }}
+confirmationKeyManaged: true
+{{- end }}
+{{- /*
 PROD-16.1 — where the fresh-install marker is read: the public identity
 ConfigMap, by name, in the release namespace (`<release>-api-installation`
-grants `get` on that one object). With the managed identity only: without it
-nothing ever writes a marker.
+grants `get` on that one object). Only where the hook can ever write one: the
+managed identity with the managed console key (`logweir.freshInstallConfirm`).
 */ -}}
-{{- if .Values.identity.enabled }}
+{{- if include "logweir.freshInstallConfirm" . }}
 installationIdentity:
   namespace: {{ .Release.Namespace }}
   publicConfigMap: {{ .Values.identity.publicConfigMapName }}

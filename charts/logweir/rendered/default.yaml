@@ -7514,75 +7514,6 @@ metadata:
 rules: []
 ---
 # Source: logweir/templates/identity.yaml
-# PROD-16.1: THE FRESH INSTALL'S TRUST, AND ONLY FOR THE INSTALL. In the one run
-# that GENERATES the installation identity, the hook reads which trust the
-# cluster already has (`list` TrustPolicy, `get` the one roster name) and, when
-# it has none, creates ONE default TrustPolicy trusting the installation signer
-# and the console key. `create` cannot be narrowed by resourceName in RBAC, so
-# this grant must not outlive the install (security review of 428a481a): it is
-# rendered only under `$freshTrust`, as a `post-install` hook — never upgrade
-# or rollback — weighted before the Job that spends it, and deleted by Helm
-# when the install's post-install hooks have run, succeeded or failed
-# (`hook-succeeded`, `hook-failed`; Helm v4.0.1 `pkg/action/hooks.go`
-# `execHook` deletes every earlier `hook-succeeded` hook when a later one
-# fails). The hook ALSO deletes this binding itself right after its trust step
-# (`delete` on this one binding name), so the grant is gone even before Helm's
-# cleanup. The installer already holds cluster-admin for the CRDs and
-# ClusterRoles of this chart; for those seconds, whoever can run a pod as
-# `<release>-identity-bootstrap` in the release namespace could create a
-# TrustPolicy — the residual docs/kubernetes.md §8 states.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-identity-trust
-  annotations:
-    helm.sh/hook: post-install
-    helm.sh/hook-weight: "-15"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: identity-bootstrap
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources: ["trustpolicies"]
-    verbs: ["list", "create"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["trustrosters"]
-    resourceNames: ["default"]
-    verbs: ["get"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["clusterrolebindings"]
-    resourceNames: ["logweir-identity-trust"]
-    verbs: ["delete"]
----
-# Source: logweir/templates/identity.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: logweir-identity-trust
-  annotations:
-    helm.sh/hook: post-install
-    helm.sh/hook-weight: "-15"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: identity-bootstrap
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: logweir-identity-trust
-subjects:
-  - kind: ServiceAccount
-    name: logweir-identity-bootstrap
-    namespace: logweir-system
----
-# Source: logweir/templates/identity.yaml
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -7628,10 +7559,6 @@ spec:
             - logweir-system
             - --public-configmap-name
             - logweir-signing-trust
-            - --installation-trust-policy
-            - logweir-installation
-            - --revoke-trust-binding
-            - logweir-identity-trust
           resources:
             limits:
               memory: 128Mi

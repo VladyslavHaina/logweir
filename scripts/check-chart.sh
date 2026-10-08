@@ -690,6 +690,9 @@ echo "== 8. the console's refusals, run =="
 CONSOLE_ON=(--set api.enabled=true --set api.console.enabled=true)
 CONSOLE_KEY=(--set api.console.keySecret=logweir-console-keys)
 CONSOLE_LOCAL=(--set api.console.mode=localAdmin)
+# PROD-16.1 fix round: the bootstrap image's PROD-16.1 features, which the
+# default leaves OFF until the release coordinator re-pins the image.
+FEATURE=(--set identity.bootstrapFeatures.consoleKey=true)
 # PLAT-17.2 (D0 stage 5): a shared console renders only beside a controller
 # scoped AWAY from the release namespace, so the base shared shape binds its
 # viewers in an execution namespace the controller watches and the console is
@@ -763,28 +766,46 @@ console_refuses "default: confirm with no confirmation key" \
   --set identity.enabled=false \
   --set approvalPolicy.allowOrdinaryConfirmation=true \
   --set approvalPolicy.default=confirm
+# PROD-16.1 fix round: WITH THE BOOTSTRAP FEATURE OFF (the default until the
+# re-pin) a console render passes the hook NONE of the PROD-16.1 flags and
+# renders none of their objects — the chart works with the pinned image it names.
 helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" > "$tmp/feature-off.yaml" 2> "$tmp/feature-off.err"
+rc=$?
+if [ "$rc" -ne 0 ] || grep -q -E -- "--console-secret-name|--console-public-configmap-name|--installation-trust-policy|--allowed-target-cluster-id|--mark-fresh-install-confirm|--revoke-trust-binding" "$tmp/feature-off.yaml" \
+  || grep -q "name: $RELEASE-identity-trust$" "$tmp/feature-off.yaml" \
+  || grep -q "logweir-console-confirmation" "$tmp/feature-off.yaml" \
+  || grep -q "confirmationKeyManaged" "$tmp/feature-off.yaml"; then
+  echo "FAIL: with identity.bootstrapFeatures.consoleKey off, a console render passed a PROD-16.1 hook flag or rendered its objects (or failed)" >&2
+  sed 's/^/      /' "$tmp/feature-off.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (bootstrap feature off: no PROD-16.1 hook flag, no managed key, no trust grant)"
+fi
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" "${FEATURE[@]}" \
   --set approvalPolicy.policies[0].name=prod-governed \
   --set approvalPolicy.policies[0].mode=strict \
   --set "approvalPolicy.namespaces.$NAMESPACE=prod-governed" \
   > "$tmp/managed-key.yaml" 2> "$tmp/managed-key.err"
 rc=$?
-if [ "$rc" -ne 0 ] || ! grep -q "secretName: logweir-console-confirmation" "$tmp/managed-key.yaml"; then
-  echo "FAIL: a console-served binding with the managed identity did not render the managed console key" >&2
+if [ "$rc" -ne 0 ] || ! grep -q "secretName: logweir-console-confirmation" "$tmp/managed-key.yaml" \
+  || ! grep -q "confirmationKeyManaged: true" "$tmp/managed-key.yaml"; then
+  echo "FAIL: a console-served binding with the managed identity did not render the managed console key (and confirmationKeyManaged)" >&2
   sed 's/^/      /' "$tmp/managed-key.err" >&2
   fail=1
 else
   echo "   rc=$rc  (a console-served binding with the managed identity renders the generated key)"
 fi
 # PROD-16.1 security review: THE INSTALL-ONLY TRUST GRANT. An upgrade render
-# (and a rollback, which Helm renders as an upgrade) carries neither the
-# ClusterRole/Binding that lets the hook create a TrustPolicy nor the arguments
-# that would spend it; a first-install render carries both. (An install over an
+# carries neither the ClusterRole/Binding that lets the hook create a
+# TrustPolicy nor the arguments that would spend it; a first-install render
+# carries both. (A rollback replays the stored revision's hooks, and the grant is
+# a `post-install` hook only, so a rollback never runs it. An install over an
 # EXISTING identity is the `lookup` half of the same guard, which only a
 # connected render can see; docs/kubernetes.md §8.)
 helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --is-upgrade ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" > "$tmp/upgrade.yaml" 2> "$tmp/upgrade.err"
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" "${FEATURE[@]}" > "$tmp/upgrade.yaml" 2> "$tmp/upgrade.err"
 rc=$?
 if [ "$rc" -ne 0 ] || grep -q "name: $RELEASE-identity-trust$" "$tmp/upgrade.yaml" \
   || grep -q -- "--installation-trust-policy" "$tmp/upgrade.yaml" \
@@ -797,13 +818,78 @@ else
   echo "   rc=$rc  (the install-only trust grant is absent from an upgrade render; the revocation stays)"
 fi
 helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" > "$tmp/install.yaml" 2> "$tmp/install.err"
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" "${FEATURE[@]}" > "$tmp/install.yaml" 2> "$tmp/install.err"
 if ! grep -q "name: $RELEASE-identity-trust$" "$tmp/install.yaml" \
   || ! grep -q -- "--mark-fresh-install-confirm" "$tmp/install.yaml"; then
   echo "FAIL: a first-install render with a console lost the fresh install's trust grant or marker" >&2
   fail=1
 else
   echo "   rc=0  (a first-install render with a console carries the transient grant and the marker)"
+fi
+# THE FIX ROUND (review M2): an install that never uses confirm gets no grant
+# and no automatic trust — no console, or an external identity Secret (never
+# `generated`) — while the revocation is still passed.
+for case in "no console" "an external identity Secret"; do
+  case "$case" in
+    "no console") extra=() ;;
+    *) extra=("${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" --set identity.externalSecret.name=company-signer) ;;
+  esac
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+    "${FEATURE[@]}" ${extra[@]+"${extra[@]}"} > "$tmp/no-confirm.yaml" 2> "$tmp/no-confirm.err"
+  rc=$?
+  if [ "$rc" -ne 0 ] || grep -q "name: $RELEASE-identity-trust$" "$tmp/no-confirm.yaml" \
+    || grep -q -- "--installation-trust-policy" "$tmp/no-confirm.yaml" \
+    || ! grep -q -- "--revoke-trust-binding" "$tmp/no-confirm.yaml"; then
+    echo "FAIL: a fresh install with $case rendered the trust grant or the trust step (or lost the revocation, or failed)" >&2
+    sed 's/^/      /' "$tmp/no-confirm.err" >&2
+    fail=1
+  else
+    echo "   rc=$rc  (a fresh install with $case renders no trust grant and no trust step)"
+  fi
+done
+# THE FIX ROUND (review H1): THE HELM FLOOR. `logweir.helmCleansFailedHooks` is
+# the one decision; Helm cannot be asked to report another version, so its
+# definition is lifted out of the template into a throwaway chart and called with
+# fixed versions — the versions whose `hooks.go` the review read.
+mkdir -p "$tmp/floor/templates"
+printf 'apiVersion: v2\nname: floor\nversion: 0.0.1\n' > "$tmp/floor/Chart.yaml"
+awk '/define "logweir.helmCleansFailedHooks"/,/^\{\{- end -\}\}$/' "$CHART/templates/approval-policy.yaml" > "$tmp/floor/templates/_floor.tpl"
+{
+  for v in v3.12.0 v3.18.6 v3.19.0-rc.1 v3.19.0 v4.0.1; do
+    printf '# %s=[{{ include "logweir.helmCleansFailedHooks" "%s" }}]\n' "$v" "$v"
+  done
+} > "$tmp/floor/templates/floor.yaml"
+floor="$(helm template floor "$tmp/floor" 2> "$tmp/floor.err" | grep '^# v' | tr '\n' ' ')"
+expected="# v3.12.0=[] # v3.18.6=[] # v3.19.0-rc.1=[true] # v3.19.0=[true] # v4.0.1=[true] "
+if [ "$floor" != "$expected" ] || ! grep -q -F '{{- if and $freshTrust (not (include "logweir.helmCleansFailedHooks" .Capabilities.HelmVersion.Version)) }}' "$CHART/templates/identity.yaml"; then
+  echo "FAIL: the Helm floor for the install-only trust grant: expected '$expected', got '$floor' (or identity.yaml no longer gates the grant on it)" >&2
+  sed 's/^/      /' "$tmp/floor.err" >&2
+  fail=1
+else
+  echo "   rc=0  (the trust grant's Helm floor: 3.12.0 and 3.18.6 refused, 3.19.0-rc.1, 3.19.0 and 4.0.1 allowed)"
+fi
+# And, when a pre-3.19 Helm is at hand (LOGWEIR_HELM_PRE_3_19=<binary>), the
+# real refusal: the fresh console install fails naming the floor, and the same
+# values with the trust disabled render.
+if [ -n "${LOGWEIR_HELM_PRE_3_19:-}" ]; then
+  old_version="$("$LOGWEIR_HELM_PRE_3_19" version --short 2>/dev/null)"
+  "$LOGWEIR_HELM_PRE_3_19" template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+    "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" "${FEATURE[@]}" > /dev/null 2> "$tmp/old-helm.err"
+  rc=$?
+  "$LOGWEIR_HELM_PRE_3_19" template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+    "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" "${FEATURE[@]}" \
+    --set identity.installationTrust.enabled=false > "$tmp/old-helm-strict.yaml" 2> "$tmp/old-helm-strict.err"
+  rc_strict=$?
+  if [ "$rc" -eq 0 ] || ! grep -q "needs Helm 3.19.0 or newer" "$tmp/old-helm.err" || [ "$rc_strict" -ne 0 ] \
+    || grep -q "name: $RELEASE-identity-trust$" "$tmp/old-helm-strict.yaml"; then
+    echo "FAIL: $old_version did not refuse the install-only trust grant by name, or refused the strict install too" >&2
+    sed 's/^/      /' "$tmp/old-helm.err" "$tmp/old-helm-strict.err" >&2
+    fail=1
+  else
+    echo "   rc=$rc  ($old_version refuses the fresh install's trust grant, naming the floor; with the trust off it renders)"
+  fi
+else
+  echo "   skip  (LOGWEIR_HELM_PRE_3_19 unset: the live pre-3.19 refusal is not run here; the floor self-test above is)"
 fi
 # PROD-16.1: the operator's mode names render as the internal ones, and an
 # explicit unbound default renders as defaultMode.

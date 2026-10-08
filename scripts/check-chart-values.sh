@@ -247,9 +247,10 @@ identity.authorizedRunnerNamespaces|default|-|--set-json|["team-x"]
 identity.kubernetesApiCIDRs|default|-|--set-json|["10.96.0.1/32"]
 identity.externalSecret.name|default|-|--set-string|fx10-signer
 identity.externalSecret.key|identity-external|-|--set-string|fx10.pem
-identity.installationTrust.enabled|default|-|--set|false
-identity.installationTrust.policyName|default|-|--set-string|fx10-installation
-identity.installationTrust.allowedTargetClusterIds|default|-|--set-json|["fx10-target"]
+identity.bootstrapFeatures.consoleKey|default|-|--set|true
+identity.installationTrust.enabled|console-fresh-install|-|--set|false
+identity.installationTrust.policyName|console-fresh-install|-|--set-string|fx10-installation
+identity.installationTrust.allowedTargetClusterIds|console-fresh-install|-|--set-json|["fx10-target"]
 identity.resources.requests.cpu|default|-|--set-string|12m
 identity.resources.requests.memory|default|-|--set-string|40Mi
 identity.resources.limits.memory|default|-|--set-string|150Mi

@@ -179,7 +179,7 @@
     "identity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "bootstrapImage", "bootstrapImagePullPolicy", "allowMutableBootstrapImageForDevelopment", "publicConfigMapName", "authorizedRunnerNamespaces", "kubernetesApiCIDRs", "externalSecret", "installationTrust", "resources"],
+      "required": ["enabled", "bootstrapImage", "bootstrapImagePullPolicy", "allowMutableBootstrapImageForDevelopment", "bootstrapFeatures", "publicConfigMapName", "authorizedRunnerNamespaces", "kubernetesApiCIDRs", "externalSecret", "installationTrust", "resources"],
       "allOf": [
         {
           "if": {
@@ -207,11 +207,20 @@
         },
         "allowMutableBootstrapImageForDevelopment": { "type": "boolean" },
         "publicConfigMapName": { "type": "string", "minLength": 1 },
+        "bootstrapFeatures": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["consoleKey"],
+          "description": "PROD-16.1 fix round: what the pinned identity.bootstrapImage can run. consoleKey: the PROD-16.1 identity CLI (the managed console key, the fresh-install TrustPolicy and marker, the trust-grant revocation). While false the chart passes the hook none of those flags and renders none of their objects, so a chart whose pinned bootstrap image predates them installs and upgrades exactly as before. Flipped to true in the SAME commit that re-pins identity.bootstrapImage to a runner carrying them (docs/install.md, Release coordinator: re-pin bootstrap bytes).",
+          "properties": {
+            "consoleKey": { "type": "boolean" }
+          }
+        },
         "installationTrust": {
           "type": "object",
           "additionalProperties": false,
           "required": ["enabled", "policyName", "allowedTargetClusterIds"],
-          "description": "PROD-16.1. In the ONE hook run that generates the installation identity (a fresh install), create one default TrustPolicy trusting the installation signer (EvidenceSigning) and, when a console runs, the console key (ConsoleConfirmation), so a first restore reaches a verified result with no key handled by a person. Never on an upgrade, never when the cluster already has a default TrustPolicy, one of this name, or TrustRoster/default; never edited afterwards. allowedTargetClusterIds is written once, at that creation; demoKafka.enabled adds its own target id.",
+          "description": "PROD-16.1. In the ONE hook run that generates the installation identity (a fresh install) WITH the managed console key (a console, identity.bootstrapFeatures.consoleKey, no external identity Secret), create one default TrustPolicy trusting exactly the installation signer (EvidenceSigning) and the console key this install generated (ConsoleConfirmation), so a first restore reaches a verified result with no key handled by a person. Never on an upgrade, never without a console, never when the cluster already has ANY TrustPolicy or TrustRoster/default; never edited afterwards. Rendering it needs Helm >= 3.19 (older Helm keeps the install-only grant when the hook fails; the chart refuses to render it there). allowedTargetClusterIds is written once, at that creation; demoKafka.enabled adds its own target id.",
           "properties": {
             "enabled": { "type": "boolean" },
             "policyName": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" },

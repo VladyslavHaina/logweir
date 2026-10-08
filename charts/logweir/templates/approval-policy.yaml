@@ -78,17 +78,32 @@ namespaces:
 {{- end -}}
 
 {{- /*
+PROD-16.1 fix round: THE BOOTSTRAP IMAGE'S FEATURES. `identity.bootstrapImage`
+is pinned by digest and published separately from this chart, so the chart
+passes the hook the PROD-16.1 flags (`--console-*`, `--installation-trust-policy`,
+`--allowed-target-cluster-id`, `--mark-fresh-install-confirm`,
+`--revoke-trust-binding`) — and renders every object they manage — ONLY while
+`identity.bootstrapFeatures.consoleKey` says the pinned image runs them. It is
+flipped in the SAME commit that re-pins the image (docs/install.md, *Release
+coordinator: re-pin bootstrap bytes*); until then the chart installs and
+upgrades exactly as before PROD-16.1, with the pinned image it names.
+*/ -}}
+{{- define "logweir.bootstrap.consoleKey" -}}
+{{- if and .Values.identity.enabled .Values.identity.bootstrapFeatures.consoleKey -}}true{{- end -}}
+{{- end -}}
+{{- /*
 PROD-16.1: the console's ConsoleConfirmation key the identity hook manages —
-when the identity is managed, a console runs, and the operator named no other
-Secret (`approvalPolicy.confirmationKeySecret` empty, or the managed name
-itself, which is how every PLAT-19.2 install named the Secret it made by hand:
-the hook ADOPTS that key).
+when the bootstrap image runs it (above), a console runs, and the operator
+named no other Secret (`approvalPolicy.confirmationKeySecret` empty, or the
+managed name itself, which is how every PLAT-19.2 install named the Secret it
+made by hand: the hook ADOPTS that key). With the feature off, an empty name is
+no key and the managed name is an operator-named key, as before PROD-16.1.
 */ -}}
 {{- define "logweir.consoleKey.managedName" -}}logweir-console-confirmation{{- end -}}
 {{- define "logweir.consoleKey.publicName" -}}logweir-console-trust{{- end -}}
 {{- define "logweir.consoleKey.managed" -}}
 {{- $named := .Values.approvalPolicy.confirmationKeySecret | default "" -}}
-{{- if and .Values.identity.enabled .Values.api.console.enabled (or (eq $named "") (eq $named (include "logweir.consoleKey.managedName" .))) -}}true{{- end -}}
+{{- if and (include "logweir.bootstrap.consoleKey" .) .Values.api.console.enabled (or (eq $named "") (eq $named (include "logweir.consoleKey.managedName" .))) -}}true{{- end -}}
 {{- end -}}
 {{- /* The Secret the console reads its key from, managed or named; empty: none. */ -}}
 {{- define "logweir.consoleKey.secret" -}}
@@ -98,12 +113,26 @@ the hook ADOPTS that key).
 {{- end -}}
 {{- /*
 PROD-16.1: a fresh install of THIS release starts in `confirm` only when a
-console runs (without one, nothing could confirm) and the identity is managed
-(the marker lives on it). The identity hook marks the installation only in
-the run that GENERATES the identity, so an upgrade never reaches it.
+console runs (without one, nothing could confirm) with the key the identity
+hook manages (the marker lives on the managed identity, and the trust names
+that key). The identity hook marks the installation only in the run that
+GENERATES the identity, so an upgrade never reaches it. The readers (the
+controller's env and Role, the console's `installationIdentity` and its Role)
+render under this same condition.
 */ -}}
 {{- define "logweir.freshInstallConfirm" -}}
-{{- if and .Values.identity.enabled .Values.api.enabled .Values.api.console.enabled -}}true{{- end -}}
+{{- if and .Values.api.enabled (include "logweir.consoleKey.managed" .) -}}true{{- end -}}
+{{- end -}}
+{{- /*
+PROD-16.1 fix round (review H1): whether this Helm deletes an earlier
+`hook-succeeded` hook when a LATER hook of the same event fails. Helm 3.19.0
+and 4.x do (`pkg/action/hooks.go` `execHook`, `deleteHooksByPolicy(executingHooks…)`);
+3.12–3.18 delete only the failed hook, so the install-only trust grant would
+outlive a failed identity Job. Called with `.Capabilities.HelmVersion.Version`;
+`scripts/check-chart.sh` calls it with fixed versions as its self-test.
+*/ -}}
+{{- define "logweir.helmCleansFailedHooks" -}}
+{{- if semverCompare ">=3.19.0-0" . -}}true{{- end -}}
 {{- end -}}
 
 {{- define "logweir.approvalPolicy.name" -}}

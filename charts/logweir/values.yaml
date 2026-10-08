@@ -36,13 +36,15 @@ identity:
   bootstrapImage: docker.io/vladyslavhaina/logweir@sha256:2d20f4bdb2bd8b9f2fb9fa298371740eb9a368d42cf031a7ebe1272542477e19 # rev 4956785, amd64
   bootstrapImagePullPolicy: IfNotPresent
   allowMutableBootstrapImageForDevelopment: false
+  bootstrapFeatures:            # what bootstrapImage can run; flipped only WITH its re-pin
+    consoleKey: false           # PROD-16.1: console key, fresh-install trust and marker, revocation
   publicConfigMapName: logweir-signing-trust
   authorizedRunnerNamespaces: [] # release namespace implicit; same signer copied to each
   kubernetesApiCIDRs: []          # exact API /32 or /128 endpoints; TCP 443/6443 only
   externalSecret:
     name: ""                    # explicit adoption: pre-existing Secret in the release namespace
     key: signing.pem            # P-256 or Ed25519 PKCS#8 PEM; never copied to chart output/logs
-  installationTrust:            # fresh install only: one default TrustPolicy, signer + console key
+  installationTrust:            # fresh console install only (Helm >= 3.19): signer + console key
     enabled: true
     policyName: logweir-installation
     allowedTargetClusterIds: []   # restore targets, written once; demoKafka adds its own

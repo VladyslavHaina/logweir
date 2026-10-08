@@ -311,10 +311,11 @@ subjects:
     name: {{ $name }}
     namespace: {{ $.Release.Namespace }}
 {{- end }}
-{{- if and .Values.api.console.enabled .Values.identity.enabled }}
+{{- if include "logweir.freshInstallConfirm" . }}
 ---
 {{/*
-PROD-16.1 — THE FRESH-INSTALL MARKER READ: `get` on the ONE public identity
+PROD-16.1 — THE FRESH-INSTALL MARKER READ (rendered with the managed console
+key, `logweir.freshInstallConfirm`, the only install the hook ever marks): `get` on the ONE public identity
 ConfigMap, by name, in the release namespace (`installationIdentity` in the
 console's configuration). It carries a key id, an algorithm and a public key —
 no credential — and the console reads only its annotations and `key-id`. The

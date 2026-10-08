@@ -34,10 +34,27 @@ PROD-16.1 security review: THE ONE GUARD for the fresh install's trust step. A
 first `helm install` (`.Release.IsInstall`; `helm upgrade --install` of a release
 that does not exist yet is one too) into a namespace with no established
 signing Secret — the same `lookup` that decides the identity placeholder above.
-An upgrade, a rollback, and a reinstall over a retained identity are none of
-these, so they render neither the grant nor the arguments that would spend it.
+An upgrade, a rollback (Helm replays the stored revision's hooks, and the
+`post-install`-only grant is not among the rollback's), and a reinstall over a
+retained identity are none of these, so they render neither the grant nor the
+arguments that would spend it. THE FIX ROUND (review M2): and only for the
+console's key — the managed key the hook generates (`logweir.freshInstallConfirm`,
+which needs `identity.bootstrapFeatures.consoleKey`) and no external identity
+Secret (an adopted identity is never `generated`, so the grant would be dead
+weight): an install that never uses confirm gets no grant and no automatic trust.
 */ -}}
-{{- $freshTrust := and $trust.enabled .Release.IsInstall (not $existingSecret) }}
+{{- $freshTrust := and $trust.enabled .Release.IsInstall (not $existingSecret) (not $externalName) (include "logweir.freshInstallConfirm" .) }}
+{{- /*
+THE FIX ROUND (review H1): THE GRANT IS RENDERED ONLY WHERE HELM REMOVES IT ON
+FAILURE TOO. Helm 3.12–3.18 deletes only the failed hook when the identity Job
+fails, so the `hook-succeeded` grant rendered before it would stay bound — a
+standing cluster-wide `create trustpolicies`. Refused, by name, rather than
+installed without the trust: the operator chooses (a newer Helm, or
+`identity.installationTrust.enabled=false`, which installs strict).
+*/ -}}
+{{- if and $freshTrust (not (include "logweir.helmCleansFailedHooks" .Capabilities.HelmVersion.Version)) }}
+{{- fail (printf "identity.installationTrust needs Helm 3.19.0 or newer (this is %s): the fresh install's TrustPolicy grant is an install-only hook, and Helm before 3.19 keeps it bound when the identity hook fails, leaving a standing cluster-wide `create trustpolicies`. Install with Helm 3.19+ or 4.x, or set identity.installationTrust.enabled=false (the install then starts strict, and you trust the console key yourself; docs/install.md §5f)." .Capabilities.HelmVersion.Version) }}
+{{- end }}
 {{- $trustGrant := printf "%s-identity-trust" .Release.Name }}
 {{- $allowedTargets := $trust.allowedTargetClusterIds | default list }}
 {{- if .Values.demoKafka.enabled }}
@@ -229,20 +246,24 @@ subjects:
 ---
 {{- if $freshTrust }}
 # PROD-16.1: THE FRESH INSTALL'S TRUST, AND ONLY FOR THE INSTALL. In the one run
-# that GENERATES the installation identity, the hook reads which trust the
-# cluster already has (`list` TrustPolicy, `get` the one roster name) and, when
-# it has none, creates ONE default TrustPolicy trusting the installation signer
-# and the console key. `create` cannot be narrowed by resourceName in RBAC, so
-# this grant must not outlive the install (security review of 428a481a): it is
-# rendered only under `$freshTrust`, as a `post-install` hook — never upgrade
-# or rollback — weighted before the Job that spends it, and deleted by Helm
-# when the install's post-install hooks have run, succeeded or failed
-# (`hook-succeeded`, `hook-failed`; Helm v4.0.1 `pkg/action/hooks.go`
-# `execHook` deletes every earlier `hook-succeeded` hook when a later one
-# fails). The hook ALSO deletes this binding itself right after its trust step
-# (`delete` on this one binding name), so the grant is gone even before Helm's
-# cleanup. The installer already holds cluster-admin for the CRDs and
-# ClusterRoles of this chart; for those seconds, whoever can run a pod as
+# that GENERATES the installation identity and the console key, the hook reads
+# which trust the cluster already has (`list` TrustPolicy, `get` the one roster
+# name) and, when it has none at all, creates ONE default TrustPolicy trusting
+# the installation signer and that console key. `create` cannot be narrowed by
+# resourceName in RBAC, so this grant must not outlive the install (security
+# review of 428a481a; fix round of 2026-10-08): it is rendered only under
+# `$freshTrust`, only on Helm 3.19+ (the `fail` above), as a `post-install` hook
+# — never upgrade or rollback — weighted before the Job that spends it, and
+# deleted by Helm when the install's post-install hooks have run, succeeded or
+# failed (`hook-succeeded`, `hook-failed`; Helm 3.19.0 and v4.0.1
+# `pkg/action/hooks.go` `execHook` delete every earlier `hook-succeeded` hook
+# when a later one fails; 3.12–3.18 do not, hence the floor). The hook ALSO
+# deletes this binding itself after its trust step, on every exit path the
+# binary controls (`delete` on this one binding name). What neither covers: a
+# failed `Create` of a later hook, or a Helm client killed mid-hook — the next
+# hook run, or the recovery command in docs/install.md, removes it. The
+# installer already holds cluster-admin for the CRDs and ClusterRoles of this
+# chart; for those seconds, whoever can run a pod as
 # `<release>-identity-bootstrap` in the release namespace could create a
 # TrustPolicy — the residual docs/kubernetes.md §8 states.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -358,10 +379,12 @@ spec:
             - --mark-fresh-install-confirm
             {{- end }}
             {{- end }}
-            {{- if $trust.enabled }}
-            {{- /* Every run: revoke the install's trust grant if it is still bound
-            (after the trust step; or left behind by an install whose Helm
-            client died before its hook cleanup). 403 or 404: nothing held. */}}
+            {{- if and $trust.enabled (include "logweir.bootstrap.consoleKey" .) }}
+            {{- /* Every run of an image that knows the flag: revoke the install's
+            trust grant if it is still bound (after the trust step, on every
+            exit path the binary controls; or left behind by an install whose
+            Helm client died before its hook cleanup). 403 or 404: nothing
+            held. */}}
             - --revoke-trust-binding
             - {{ $trustGrant }}
             {{- end }}

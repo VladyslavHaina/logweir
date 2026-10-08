@@ -719,17 +719,17 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
         chart_roles.remove("logweir-identity-singleton"),
         "managed Helm must carry the authority-free singleton marker"
     );
-    // PROD-16.1: the managed identity's fresh-install trust step (asserted in
+    // PROD-16.1 fix round: the default render carries NO trust grant (no
+    // console, and the bootstrap feature off until the re-pin; review M2 and
     // `chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege`).
     assert!(
-        chart_roles.remove("logweir-identity-trust"),
-        "managed Helm must carry the fresh-install trust grant of the identity hook"
+        !chart_roles.contains("logweir-identity-trust"),
+        "the default render must not carry the fresh-install trust grant"
     );
     assert_eq!(
         names_of(&install, "ClusterRole"),
         chart_roles,
-        "apart from the managed identity's singleton and trust grant, ClusterRoles must match \
-         logweir.yaml"
+        "apart from the managed identity's singleton, ClusterRoles must match logweir.yaml"
     );
 
     // The ClusterRoleBinding binds the same role to the same ServiceAccount.
@@ -1261,8 +1261,10 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
         .iter()
         .map(|v| v.as_str().expect("string arg"))
         .collect();
-    // PROD-16.1: the fresh-install trust step, and — with no console in the
-    // default render — no console key and no confirm marker.
+    // PROD-16.1 fix round: the default render passes the hook only what the
+    // pinned bootstrap image has always run — no console key, no trust step,
+    // no marker, no revocation (`identity.bootstrapFeatures.consoleKey` is off
+    // until the re-pin; `chart_lint_the_hook_passes_only_flags_its_pinned_image_runs`).
     assert_eq!(
         vec![
             "identity",
@@ -1271,12 +1273,42 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
             "logweir-system",
             "--public-configmap-name",
             "logweir-signing-trust",
+        ],
+        args
+    );
+    assert!(
+        !docs.iter().any(|d| d.name() == "logweir-identity-trust"),
+        "no trust grant without the bootstrap feature and a console (review M2)"
+    );
+    // With the feature and a console (the fresh-install example), the whole
+    // PROD-16.1 argument list.
+    let fresh = rendered("console-fresh-install");
+    let fresh_args: Vec<&str> = container(find(&fresh, "Job", "logweir-identity-bootstrap"))
+        ["args"]
+        .as_sequence()
+        .expect("bootstrap args")
+        .iter()
+        .map(|v| v.as_str().expect("string arg"))
+        .collect();
+    assert_eq!(
+        vec![
+            "identity",
+            "bootstrap",
+            "--namespace",
+            "logweir-system",
+            "--public-configmap-name",
+            "logweir-signing-trust",
+            "--console-secret-name",
+            "logweir-console-confirmation",
+            "--console-public-configmap-name",
+            "logweir-console-trust",
             "--installation-trust-policy",
             "logweir-installation",
+            "--mark-fresh-install-confirm",
             "--revoke-trust-binding",
             "logweir-identity-trust",
         ],
-        args
+        fresh_args
     );
 
     // PROD-16.1 — THE TRUST GRANT, least privilege: `list` to see what trust
@@ -1289,8 +1321,8 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
     // TRANSIENT: a `post-install` hook (never upgrade or rollback), weighted
     // before the Job that spends it, deleted by Helm when the install's
     // post-install hooks have run, succeeded or failed.
-    let trust_role = find(&docs, "ClusterRole", "logweir-identity-trust");
-    let job_weight: i64 = find(&docs, "Job", "logweir-identity-bootstrap").value["metadata"]
+    let trust_role = find(&fresh, "ClusterRole", "logweir-identity-trust");
+    let job_weight: i64 = find(&fresh, "Job", "logweir-identity-bootstrap").value["metadata"]
         ["annotations"]["helm.sh/hook-weight"]
         .as_str()
         .and_then(|w| w.parse().ok())
@@ -1299,7 +1331,7 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
         ("ClusterRole", trust_role),
         (
             "ClusterRoleBinding",
-            find(&docs, "ClusterRoleBinding", "logweir-identity-trust"),
+            find(&fresh, "ClusterRoleBinding", "logweir-identity-trust"),
         ),
     ] {
         let annotations = &object.value["metadata"]["annotations"];
@@ -1377,14 +1409,33 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
     let template = read("charts/logweir/templates/identity.yaml");
     assert!(
         template.contains(
-            "{{- $freshTrust := and $trust.enabled .Release.IsInstall (not $existingSecret) }}"
+            "{{- $freshTrust := and $trust.enabled .Release.IsInstall (not $existingSecret) \
+             (not $externalName) (include \"logweir.freshInstallConfirm\" .) }}"
         ),
-        "the trust grant is rendered only on a first install into a namespace with no identity"
+        "the trust grant is rendered only on a first install into a namespace with no identity, \
+         with the managed console key and no external identity (review M2)"
     );
-    assert!(template.contains("{{- if $freshTrust }}\n# PROD-16.1: THE FRESH INSTALL'S TRUST"));
+    // THE HELM FLOOR (review H1): refused, by name, where Helm would keep the
+    // grant after a failed hook. check-chart.sh runs the helper with fixed
+    // versions and, given a pre-3.19 Helm, the refusal itself.
+    assert!(
+        template.contains(
+            "{{- if and $freshTrust (not (include \"logweir.helmCleansFailedHooks\" \
+             .Capabilities.HelmVersion.Version)) }}\n{{- fail (printf \"identity.installationTrust \
+             needs Helm 3.19.0 or newer"
+        ),
+        "the trust grant renders only under a Helm that deletes it when the hook fails"
+    );
+    assert!(
+        read("charts/logweir/templates/approval-policy.yaml")
+            .contains("{{- if semverCompare \">=3.19.0-0\" . -}}true{{- end -}}"),
+        "the floor is 3.19.0 (the first Helm whose execHook deletes earlier hook-succeeded hooks)"
+    );
     let gate = read("scripts/check-chart.sh");
+    assert!(gate.contains("the trust grant's Helm floor"));
+    assert!(template.contains("{{- if $freshTrust }}\n# PROD-16.1: THE FRESH INSTALL'S TRUST"));
     assert!(gate.contains("the install-only trust grant is absent from an upgrade render"));
-    let trust_binding = find(&docs, "ClusterRoleBinding", "logweir-identity-trust");
+    let trust_binding = find(&fresh, "ClusterRoleBinding", "logweir-identity-trust");
     assert_eq!(
         trust_binding.value["subjects"],
         serde_yaml::from_str::<Value>(
@@ -2895,6 +2946,22 @@ fn reachable_grants(
     out
 }
 
+/// `logweir.freshInstallConfirm`, recomputed from an example's values: the
+/// managed identity, the bootstrap image's PROD-16.1 feature, a console over
+/// the API, and the managed console key (no other key Secret named) — the one
+/// install the identity hook ever marks, and so the one whose readers read
+/// the marker.
+fn fresh_install_confirm(values: &Value) -> bool {
+    let named = values["approvalPolicy"]["confirmationKeySecret"]
+        .as_str()
+        .unwrap_or_default();
+    values["identity"]["enabled"].as_bool() != Some(false)
+        && values["identity"]["bootstrapFeatures"]["consoleKey"].as_bool() == Some(true)
+        && values["api"]["enabled"].as_bool() == Some(true)
+        && values["api"]["console"]["enabled"].as_bool() == Some(true)
+        && (named.is_empty() || named == "logweir-console-confirmation")
+}
+
 /// An example's values (or the chart's defaults for `default`).
 fn variant_values(render: &str) -> Value {
     let path = format!("charts/logweir/examples/{render}.values.yaml");
@@ -3014,9 +3081,7 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
             // ConfigMap by name, which `approval::effective_policies` spends
             // (`KubeAdapter::get_installation_identity`) to read the
             // fresh-install marker.
-            if console["enabled"].as_bool() == Some(true)
-                && values["identity"]["enabled"].as_bool() != Some(false)
-            {
+            if fresh_install_confirm(&values) {
                 want.entry(RENDER_NAMESPACE.to_string())
                     .or_default()
                     .insert("get core/configmaps@logweir-signing-trust".to_string());
@@ -3060,9 +3125,7 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
             }
             // PROD-16.1: with a console over the managed identity, also the
             // public identity ConfigMap the marker poller reads.
-            let marker = values["api"]["console"]["enabled"].as_bool() == Some(true)
-                && values["api"]["enabled"].as_bool() == Some(true)
-                && values["identity"]["enabled"].as_bool() != Some(false);
+            let marker = fresh_install_confirm(&values);
             want.insert(
                 RENDER_NAMESPACE.to_string(),
                 if marker {
@@ -3861,11 +3924,18 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
     assert_eq!(policy_role.value["metadata"]["namespace"], RELEASE_NS);
     let rules = policy_role.value["rules"].as_sequence().expect("rules");
     assert_eq!(rules.len(), 1, "one rule in the release namespace");
-    // PROD-16.1: and, with the console and the managed identity, the public
-    // identity ConfigMap the fresh-install marker is read from — by name, get.
+    // PROD-16.1: the public identity ConfigMap the fresh-install marker is
+    // read from joins this rule only where the hook can write a marker
+    // (`logweir.freshInstallConfirm`: the bootstrap feature, which this shared
+    // example leaves off until the re-pin; `chart_lint_every_grant_reaching_
+    // the_api_and_controller_accounts_is_pinned` holds both shapes).
     assert_eq!(
         serde_yaml::to_string(&rules[0]).unwrap(),
-        "apiGroups:\n- ''\nresources:\n- configmaps\nresourceNames:\n- weirkeeper-policy\n- logweir-signing-trust\nverbs:\n- get\n"
+        if fresh_install_confirm(&variant_values("console-shared")) {
+            "apiGroups:\n- ''\nresources:\n- configmaps\nresourceNames:\n- weirkeeper-policy\n- logweir-signing-trust\nverbs:\n- get\n"
+        } else {
+            "apiGroups:\n- ''\nresources:\n- configmaps\nresourceNames:\n- weirkeeper-policy\nverbs:\n- get\n"
+        }
     );
     // Nothing else in the render grants the controller anything in the
     // release namespace.
@@ -5358,8 +5428,13 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // `identity.installationTrust` with its three keys (the fresh install's one
     // TrustPolicy). The approval-policy header comment was shortened to pay for
     // the operator's three mode names on one line.
+    //
+    // RAISED FROM 245 TO 247 BY THE PROD-16.1 FIX ROUND, TWO LINES AND NO
+    // PROSE: `identity.bootstrapFeatures.consoleKey` and its mapping line —
+    // what the pinned bootstrap image can run, flipped only with its re-pin,
+    // so main never passes a pinned image a flag it does not know.
     assert!(
-        lines <= 245,
+        lines <= 247,
         "charts/logweir/values.yaml is {lines} lines. The owner asked for a values file that is \
          read, not skimmed past: one short line per key, no paragraphs, and every explanation \
          in charts/logweir/README.md"
@@ -6457,6 +6532,143 @@ fn bootstrap_args(docs: &[Doc]) -> Vec<String> {
         .collect()
 }
 
+/// The flags `identity bootstrap --help` of the PINNED bootstrap image lists
+/// (`crates/logweir/tests/fixtures/bootstrap-image-help.txt`, refreshed at
+/// every re-pin), and the image that help came from.
+fn pinned_bootstrap_flags() -> (String, BTreeSet<String>) {
+    let help = read("crates/logweir/tests/fixtures/bootstrap-image-help.txt");
+    let image = help
+        .lines()
+        .find_map(|l| l.strip_prefix("# image: "))
+        .expect("the fixture names the image its help came from")
+        .trim()
+        .to_string();
+    let flags = help
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .flat_map(|l| l.split(|c: char| c.is_whitespace() || c == ','))
+        .filter(|w| w.starts_with("--") && w.len() > 2)
+        .map(|w| w.split('=').next().unwrap_or(w).to_string())
+        .collect();
+    (image, flags)
+}
+
+/// The `--flags` among a hook's arguments that `flags` does not list.
+fn flags_not_run(args: &[String], flags: &BTreeSet<String>) -> Vec<String> {
+    args.iter()
+        .filter(|a| a.starts_with("--") && !flags.contains(a.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// **The chart passes the hook only flags its pinned image runs** (PROD-16.1
+/// fix round; review L6 and the orchestrator's re-pin rule). The bootstrap
+/// image is a digest published by CI AFTER the commit that teaches it new
+/// flags, so the chart may pass them only once it is re-pinned: every render
+/// that keeps the chart's own `identity.bootstrapFeatures.consoleKey` passes
+/// only what the pinned image's `--help` lists, and the fixture names the
+/// pinned digest — a re-pin without refreshing the fixture, or a flipped
+/// feature without a re-pin, is a red gate instead of a failed install.
+#[test]
+fn chart_lint_the_hook_passes_only_flags_its_pinned_image_runs() {
+    let values: Value = serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values");
+    let pinned = values["identity"]["bootstrapImage"]
+        .as_str()
+        .expect("the pinned bootstrap image")
+        .to_string();
+    let feature = values["identity"]["bootstrapFeatures"]["consoleKey"]
+        .as_bool()
+        .expect("identity.bootstrapFeatures.consoleKey");
+    let (image, flags) = pinned_bootstrap_flags();
+    assert_eq!(
+        image, pinned,
+        "crates/logweir/tests/fixtures/bootstrap-image-help.txt is the help of another image: \
+         refresh it from `docker run --rm --platform linux/amd64 {pinned} identity bootstrap \
+         --help` when you re-pin"
+    );
+    for flag in ["--namespace", "--public-configmap-name"] {
+        assert!(flags.contains(flag), "the fixture lists {flag}: {flags:?}");
+    }
+    let mut checked = 0;
+    for path in files_under("charts/logweir/rendered") {
+        let Some(render) = path
+            .rsplit('/')
+            .next()
+            .and_then(|f| f.strip_suffix(".yaml"))
+        else {
+            continue;
+        };
+        let example = variant_values(render);
+        if example["identity"]["enabled"].as_bool() == Some(false) {
+            continue;
+        }
+        let image = example["identity"]["bootstrapImage"]
+            .as_str()
+            .unwrap_or(&pinned);
+        let its_feature = example["identity"]["bootstrapFeatures"]["consoleKey"]
+            .as_bool()
+            .unwrap_or(feature);
+        if image != pinned || its_feature != feature {
+            // Another image (author-only), or the example that documents the
+            // feature ahead of its default (console-fresh-install).
+            continue;
+        }
+        let args = bootstrap_args(&rendered(render));
+        assert_eq!(
+            flags_not_run(&args, &flags),
+            Vec::<String>::new(),
+            "rendered/{render}.yaml passes the pinned bootstrap image flags its `--help` does not \
+             list; re-pin identity.bootstrapImage (and refresh the fixture) before flipping \
+             identity.bootstrapFeatures"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 5, "the rule read {checked} renders");
+
+    // THE ORCHESTRATOR'S ROW: while the feature is off, the default render
+    // passes none of the PROD-16.1 flags — merging is inert with the pin.
+    let default_args = bootstrap_args(&rendered("default"));
+    let prod_16_1 = [
+        "--console-secret-name",
+        "--console-secret-key",
+        "--console-public-configmap-name",
+        "--installation-trust-policy",
+        "--allowed-target-cluster-id",
+        "--mark-fresh-install-confirm",
+        "--revoke-trust-binding",
+    ];
+    if !feature {
+        for flag in prod_16_1 {
+            assert!(
+                !default_args.iter().any(|a| a == flag),
+                "the default render passes {flag} while identity.bootstrapFeatures.consoleKey \
+                 is false"
+            );
+        }
+    }
+    // NEGATIVE CONTROL: the rule reports exactly the flags a help text lacks —
+    // the feature example's arguments against a help without the PROD-16.1
+    // flags (the pinned image's today).
+    let fresh = bootstrap_args(&rendered("console-fresh-install"));
+    let old_help: BTreeSet<String> = flags
+        .iter()
+        .filter(|f| !prod_16_1.contains(&f.as_str()))
+        .cloned()
+        .collect();
+    let missing = flags_not_run(&fresh, &old_help);
+    assert_eq!(
+        missing,
+        vec![
+            "--console-secret-name",
+            "--console-public-configmap-name",
+            "--installation-trust-policy",
+            "--mark-fresh-install-confirm",
+            "--revoke-trust-binding",
+        ],
+        "the subset rule must name every flag an older image refuses"
+    );
+}
+
 /// **A fresh install with a console needs no key handled by a person**
 /// (PROD-16.1). In the console render the identity hook also manages the
 /// console's ConsoleConfirmation key — empty, retained, creation-only
@@ -6472,7 +6684,9 @@ fn bootstrap_args(docs: &[Doc]) -> Vec<String> {
 /// or widen the bootstrap Role with an unnamed Secret rule — each fails here.
 #[test]
 fn chart_lint_a_console_render_generates_the_console_key_and_marks_the_fresh_install() {
-    let docs = rendered("console");
+    // The fresh-install example: a console with the bootstrap image's
+    // PROD-16.1 feature (`identity.bootstrapFeatures.consoleKey`).
+    let docs = rendered("console-fresh-install");
     for (kind, name) in [
         ("Secret", "logweir-console-confirmation"),
         ("ConfigMap", "logweir-console-trust"),
@@ -6546,7 +6760,7 @@ fn chart_lint_a_console_render_generates_the_console_key_and_marks_the_fresh_ins
         ),
         "the controller reads the marker from the public identity ConfigMap"
     );
-    let (_, config) = console_config("console");
+    let (_, config) = console_config("console-fresh-install");
     assert_eq!(
         config["installationIdentity"]["namespace"].as_str(),
         Some("logweir-system")
@@ -6558,6 +6772,29 @@ fn chart_lint_a_console_render_generates_the_console_key_and_marks_the_fresh_ins
     assert_eq!(
         config["confirmationKeyFile"].as_str(),
         Some("/var/run/logweir/confirmation/confirmation.key")
+    );
+    // Review L5: the managed key, and only it, may be missing at start.
+    assert_eq!(config["confirmationKeyManaged"].as_bool(), Some(true));
+
+    // NEGATIVE CONTROL (the fix round): the same console with the bootstrap
+    // feature OFF — the chart's default until the re-pin — passes no PROD-16.1
+    // flag and renders none of its objects or readers.
+    let off = rendered("console");
+    let off_args = bootstrap_args(&off);
+    assert!(
+        !off_args.iter().any(|a| a.starts_with("--console")
+            || a == "--installation-trust-policy"
+            || a == "--mark-fresh-install-confirm"
+            || a == "--revoke-trust-binding"),
+        "the console render without the bootstrap feature passes no PROD-16.1 flag: {off_args:?}"
+    );
+    assert!(
+        !off.iter()
+            .any(|d| d.name() == "logweir-console-confirmation"
+                || d.name() == "logweir-console-trust"
+                || d.name() == "logweir-identity-trust"
+                || d.name() == "logweir-api-installation"),
+        "no managed key, no trust grant and no marker read without the bootstrap feature"
     );
 
     // NEGATIVE CONTROL: the default render.
