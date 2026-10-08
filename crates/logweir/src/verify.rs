@@ -219,6 +219,9 @@ pub enum Verdict {
         backup_id: String,
         run_id: String,
         manifest_key: String,
+        /// **FX-7.** `archive.manifest_version_id`, when the receipt pins one:
+        /// the object version the manifest digest is over.
+        manifest_version_id: Option<String>,
         /// The 1.1.0 block (FX-4), as read; `None` is UNKNOWN coverage.
         config_coverage:
             Option<BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
@@ -382,6 +385,7 @@ pub fn verify_scorecard(
             backup_id: receipt.backup_id,
             run_id: receipt.run_id,
             manifest_key: receipt.archive.manifest_key,
+            manifest_version_id: receipt.archive.manifest_version_id,
             config_coverage: receipt.config_coverage,
         });
     }
@@ -504,6 +508,7 @@ fn print_backup_receipt(
     backup_id: &str,
     run_id: &str,
     manifest_key: &str,
+    manifest_version_id: Option<&str>,
     config_coverage: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
 ) {
     println!("signature: VALID  key {key_id}");
@@ -521,6 +526,13 @@ fn print_backup_receipt(
             manifest_key
         }
     );
+    // FX-7: on a versioned bucket, WHICH version of that key the digest is
+    // over — the second thing an auditor goes looking with
+    // (`?versionId=`). Absent means no version was pinned, and nothing is
+    // printed rather than a placeholder that could be read as one.
+    if let Some(version) = manifest_version_id {
+        println!("manifest version: {version} (the object version the manifest digest is over)");
+    }
     // FX-4: the configuration capture coverage, one line per topic — or the
     // line that says it was not recorded, which is UNKNOWN and never captured.
     for line in coverage_lines(config_coverage) {
@@ -570,6 +582,7 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             backup_id,
             run_id,
             manifest_key,
+            manifest_version_id,
             config_coverage,
         }) => {
             print_backup_receipt(
@@ -578,6 +591,7 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
                 &backup_id,
                 &run_id,
                 &manifest_key,
+                manifest_version_id.as_deref(),
                 config_coverage.as_ref(),
             );
             ExitCode::Ok

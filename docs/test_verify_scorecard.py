@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.15.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.16.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -2182,9 +2182,14 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.15.0 (FX-4) adds the backup receipt's six `config_coverage` arms and the
     # scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed`
     # shape checks. Map still five.
+    #
+    # 1.16.0 (FX-7, merged after FX-4) adds a SHAPE rule to the backup receipt
+    # — an optional `archive.manifest_version_id` must be a string when present
+    # — and prints the pin (receipt and catalog point format 1.2.0). A change to
+    # what is checked, so a minor bump; no arm, map five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.15.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.16.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -2292,6 +2297,54 @@ def test_the_receipts_auth_mode_value_set_is_closed_at_this_reader():
     assert mod._receipt_shape(doc) == "source.auth.mode is not a string"
 
 
+def test_a_pinned_manifest_version_is_read_shape_checked_and_printed():
+    # FX-7 (receipt format 1.2.0, the MINOR after FX-4's 1.1.0): a receipt
+    # taken on a versioned bucket pins `archive.manifest_version_id`, the object
+    # version its manifest digest is over. It is OPTIONAL — absent or null is
+    # the unversioned bucket's receipt, exactly the document without the pin —
+    # and a string when present: Rust's
+    # `Option<String>` refuses any other JSON type at deserialisation, so this
+    # reader refuses it at the SHAPE layer, never as an invariant arm.
+    mod = _verifier_module()
+    base = json.loads((FIX / "backup-receipt.json").read_bytes())
+    assert "manifest_version_id" not in base["archive"], (
+        "the committed fixture is the UNVERSIONED 1.0.0 receipt and must stay byte-identical"
+    )
+    pinned = json.loads(json.dumps(base))
+    pinned["format_version"] = "1.2.0"
+    pinned["archive"]["manifest_version_id"] = "fx7-manifest-version-0001"
+    assert mod._receipt_shape(pinned) == ""
+    assert mod.check_backup_receipt_invariants(pinned) == ""
+    nulled = json.loads(json.dumps(pinned))
+    nulled["archive"]["manifest_version_id"] = None
+    assert mod._receipt_shape(nulled) == "", "null is Rust's `None`: no pin, not a refusal"
+    for bad in [42, ["v1"], {"id": "v1"}, True]:
+        doc = json.loads(json.dumps(pinned))
+        doc["archive"]["manifest_version_id"] = bad
+        assert mod._receipt_shape(doc) == "archive.manifest_version_id is not a string", bad
+
+    with tempfile.TemporaryDirectory() as d:
+        pth, sig = _write_signed(d, "pinned", BACKUP_RECEIPT_TYPE, pinned)
+        r = run_typed("backup-receipt", pth, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert (
+            "manifest_version_id=fx7-manifest-version-0001 "
+            "(the object version the manifest digest is over)"
+        ) in r.stdout, r.stdout
+        # Unpinned: nothing is printed, rather than a placeholder that could be
+        # read as a version.
+        pth, sig = _write_signed(d, "unpinned", BACKUP_RECEIPT_TYPE, base)
+        r = run_typed("backup-receipt", pth, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "manifest_version_id" not in r.stdout, r.stdout
+        # A wrong-typed pin: one INVALID line, no traceback.
+        bad = json.loads(json.dumps(pinned))
+        bad["archive"]["manifest_version_id"] = 42
+        pth, sig = _write_signed(d, "bad", BACKUP_RECEIPT_TYPE, bad)
+        r = run_typed("backup-receipt", pth, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "Traceback" not in r.stderr, r.stderr
+        assert "archive.manifest_version_id is not a string" in r.stderr, r.stderr
 
 # ---------------------------------------------------------------------------
 # FX-4: the backup receipt's format 1.1.0 `config_coverage` block, and the

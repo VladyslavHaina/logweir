@@ -13,14 +13,19 @@ use crate::catalog::record::CatalogPoint;
 /// Pretty-printed JSON Schema for [`CatalogPoint`], `$id` pinned to the
 /// published URL so a downloaded record names the schema that validates it.
 ///
+/// **The newest MINOR** (FX-7 fix round, review M-2): the `$id` and the file
+/// name come from ONE constant,
+/// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`](crate::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION)
+/// (`1.2.0`, FX-7's `archive.manifest_version_id`). The older files are FROZEN
+/// beside it: `schemas/logweir-catalog-point-1.0.0.json` for the records
+/// written before FX-4, and FX-4's `-1.1.0.json` (`topics[].config_coverage`)
+/// for the records written without a pin.
+///
 /// The `format_version` pattern (`^1\.[0-9]+\.[0-9]+$`) is on the type, not
 /// added here: a schema-only validator — the one route that does not go
 /// through [`crate::catalog::reader::read_record`] — must refuse a `9.9.9`
-/// document against a file called `logweir-catalog-point-1.1.0.json` for the
+/// document against a file called `logweir-catalog-point-1.2.0.json` for the
 /// same reason the scorecard and the receipt pin theirs.
-///
-/// **1.1.0 since FX-4** (`topics[].config_coverage`); the 1.0.0 file is frozen
-/// beside it and describes every record written before the bump.
 #[must_use]
 pub fn catalog_point_schema() -> String {
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
@@ -32,7 +37,7 @@ pub fn catalog_point_schema() -> String {
         .into_root_schema_for::<CatalogPoint>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-catalog-point-{}.json",
-        super::record::FORMAT_VERSION
+        crate::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

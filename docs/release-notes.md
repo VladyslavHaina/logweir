@@ -21,7 +21,10 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5) and 23 (FX-10), from the
-product-expansion tracker's fix-now rows, land after `fdb48cd8`. No tag is cut at `fdb48cd8`, so the candidate
+product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do
+FX-7's additions to item 11 (the execution-claim set check, receipt and
+catalog format 1.2.0, the pin's read by version id) and FX-4's format 1.1.0,
+which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
@@ -351,24 +354,58 @@ ExecutionAlreadyClaimed` and writes nothing; a schedule retries it under a new
 execution id only when it has `spec.retry`. An evidence store that does not
 enforce `If-None-Match: *` makes every backup exit 4 `ExecutionClaimUnproven`
 before any data is written, and a destination with `writeProbe` on reports it
-`notReady / ConditionalCreateUnsupported` first. No permission is added, and no
-signed format changes. **Do:** confirm the evidence store honours conditional
-create — turn on `writeProbe: CreateOnlyMarker` for one run of the destination
+`notReady / ConditionalCreateUnsupported` first. The claim adds no permission and
+changes no signed format; FX-7 below adds receipt and catalog format `1.2.0`, the MINOR after FX-4's `1.1.0` ([stability.md](stability.md#the-first-post-tag-addition-format-110-fx-4)).
+**Do:** confirm the evidence store honours conditional create — turn on `writeProbe: CreateOnlyMarker` for one run of the destination
 check, and never set `AWS_CONDITIONAL_PUT=disabled` — see the store table in
 [support-matrix.md](support-matrix.md). A standalone `logweir backup run` that
 reused a fixed `backup_id` must pass a fresh `--backup-id-override` per run.
-**Let in-flight Backups finish before upgrading:** an execution whose first run
-was made by the older runner has no claim, so if its Job is lost and re-created
-after the upgrade the new runner runs the engine again and can still invalidate
-that first receipt — the one window the claim cannot close.
+**The upgrade window is closed since FX-7:** an execution whose first run was
+made by the older runner has no claim, so if its Job is lost and re-created
+after the upgrade the new runner wins a claim — and then finds the older run's
+manifest or segments under `<prefix>/<backup_id>/` and stops, exit 1
+`ExecutionAlreadyClaimed`, before the engine. Only an older runner that is still RUNNING when its Job is
+re-created, and has written nothing yet, escapes both checks; let such a Job
+finish before upgrading. A read of the archive that fails while proving the set
+new is exit 1 when it is transient (a transport error, a timeout, a 5xx), so a
+schedule with `spec.retry` retries it under a new execution id, and exit 4
+`ExecutionClaimUnproven` otherwise (a 403, a wrong bucket). On a versioned bucket a receipt also pins its
+manifest's version (`archive.manifest_version_id`, receipt format `1.2.0`), so a
+set written again in that bucket after the point was signed — by an older
+runner after a rollback, say — is refused by a point-bound restore
+(`PointBindingMismatch`) and reported `Conflict` by the catalog even when the
+manifest bytes came out identical. That detection covers the points this build
+signed; the older runner's own receipt over the rewritten set pins nothing and
+stays selectable. A version id belongs to one bucket, so a byte-for-byte COPY
+of the archive (`aws s3 sync`, `mc mirror`, an unversioned destination) is the
+same point, checked by its manifest digest: the restore runs and logs
+`PointPinUnchecked`, and the catalog entry's remedy says the pin could not be
+checked in that bucket. **The pin is checked only where the bucket still holds
+the pinned version and serves it by id:** a rewrite whose pinned version was
+since expired or DELETED, a copy synced after the set was written again, or a
+store that cannot read by version reads the same way, and there the digest
+cannot see segments rewritten under an identical manifest. Object Lock
+retention covering a point's lifetime keeps its pinned version; when the
+signing bucket's catalog says `Conflict` and a copy's says `Available`, believe
+the `Conflict`. The pin's read by id needs
+`s3:GetObjectVersion` on the archive prefix
+([backup-receipt.md](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
 **Scope:** in-process rows, a private MinIO `RELEASE.2025-09-07T16-13-09Z`
 container, and four planted mutants plus the review's two. Live on
 lab-refresh-10 (2026-09-24): PLAT-06.1's case e (a lost Job re-created), both
-arms, and the receipt-dup rows 2–5 (RECEIPT-DUP). The upgrade window above
-stays open (RECEIPT-DUP-UPGRADE-WINDOW).
-**Rollback:** an older runner ignores the claims and returns to re-running the
-engine over a re-created Job; the claims stay in the bucket, harmless, and are
-honoured again after a re-upgrade.
+arms, and the receipt-dup rows 2–5 (RECEIPT-DUP). FX-7 (2026-09-29): compose
+slot 3, MinIO unversioned and SeaweedFS versioned buckets, a `v0.1.5` runner
+for the older build's run; its fix round (2026-10-05): slot 2, the same matrix
+plus byte-for-byte copies of a pinned point into both stores and a point-bound
+`restore run` against each bucket.
+**Rollback:** an older runner ignores the claims, the set check and the pin,
+and returns to re-running the engine over a re-created Job; the claims stay in
+the bucket, harmless, and are honoured again after a re-upgrade. **Before
+rolling the runner back to a build without the execution claim, let in-flight
+`Backup`s finish:** on an unversioned bucket a re-created Job's older runner
+rewrites the set's segments under an unchanged manifest, and no check reports
+it — the first, signed point keeps verifying. On a versioned bucket that
+point is reported `Conflict`.
 
 #### 12. A failed restore's signed scorecard: roll the controller out before the runner
 
@@ -959,7 +996,11 @@ is converted and no stored object is rewritten
    §12, *The one widening that is NOT rollback-safe*).
 4. Let destination-backed and `v2`-frozen `Backup`s finish; an older controller
    refuses them terminally rather than running them ([kubernetes.md](kubernetes.md)
-   §10, *Backups created under the previous execution contract*).
+   §10, *Backups created under the previous execution contract*). Rolling the
+   runner back to a build without the execution claim, let EVERY in-flight
+   `Backup` finish first (item 11): on an unversioned bucket a re-created Job's
+   older runner rewrites the set's segments under an unchanged manifest, and no
+   check reports it.
 5. Let point-bound `Restore`s that have no Job yet reach one, or recreate them
    after the rollback: an older controller re-renders their approval bundle
    without the evidence keyring and ends them `ApprovalBundleConflict` (item 5;
@@ -998,7 +1039,10 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22 and 23.
+from `fdb48cd8` crosses items 21, 22 and 23, and item 11's FX-7 additions:
+grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
+version differs fails closed at the binding, and let in-flight Backups finish
+before rolling the runner back.
 
 **The chart and the images move together.** This chart's controller probes run
 `weirkeeper --probe`, and its console configuration can carry

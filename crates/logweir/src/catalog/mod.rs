@@ -50,6 +50,7 @@
 //! same name.
 
 pub mod cli;
+pub mod pin;
 pub mod reader;
 pub mod record;
 pub mod schema;

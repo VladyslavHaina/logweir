@@ -18,12 +18,11 @@
 //!
 //! So this is its own media type
 //! (`logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT`), its own schema
-//! (`schemas/logweir-backup-receipt-1.0.0.json`, and
-//! `schemas/logweir-backup-receipt-1.1.0.json` beside it since FX-4), its own
-//! `format_version` and its own arms — four self-contradiction invariants and
-//! one closed value set in 1.0.0, and six more (arms 6-11) that read only the
-//! 1.1.0 `config_coverage` block. Spec §7: "new payload types, not new
-//! scorecard fields."
+//! (`schemas/logweir-backup-receipt-<format_version>.json`, one file per MINOR,
+//! the older ones frozen), its own `format_version` and its own arms — four
+//! self-contradiction invariants and one closed value set in 1.0.0, and six
+//! more (arms 6-11) that read only the 1.1.0 `config_coverage` block. Spec §7:
+//! "new payload types, not new scorecard fields."
 //!
 //! # 1.1.0: topic-configuration capture coverage (FX-4)
 //!
@@ -37,6 +36,16 @@
 //! [`TopicConfigCoverage`]. ABSENT (every 1.0.0 receipt) means UNKNOWN for
 //! every topic, never `captured`; [`SourceConfigCoverage`] is the one reader
 //! of the block and cannot answer anything stronger for an absent entry.
+//!
+//! # 1.2.0: the manifest's version id, pinned (FX-7)
+//!
+//! On a bucket with versioning enabled, `archive.manifest_version_id` names
+//! WHICH VERSION of the manifest key the run read back; a receipt that carries
+//! it is written as [`FORMAT_VERSION_WITH_MANIFEST_VERSION`], every other one
+//! as [`RECEIPT_FORMAT_VERSION`] ([`format_version_for`] decides). No arm reads
+//! the pin: a reader compares it with the bucket it reads (`logweir`'s
+//! `catalog::pin`), and a 1.1.0 reader, which ignores unknown fields inside
+//! major 1, reads a 1.2.0 receipt as the 1.1.0 document under it.
 //!
 //! # A backup that produces no verifiable evidence is a backup an auditor has
 //! # to take Logweir's word for
@@ -63,12 +72,14 @@ use std::collections::BTreeMap;
 /// Field order is the document's own serialisation order (`serde_json` is
 /// built with `preserve_order`, so declaration order IS byte order through
 /// `crate::det_json::to_deterministic_json`). Do not reorder without
-/// regenerating `schemas/logweir-backup-receipt-1.1.0.json` (the 1.0.0 file is
-/// frozen) and re-minting `e2e/fixtures/signed/backup-receipt.json`.
+/// regenerating the current receipt schema (`just schema`; the 1.0.0 and 1.1.0
+/// files are frozen) and re-minting `e2e/fixtures/signed/backup-receipt.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BackupReceipt {
     /// Semver of THIS format — [`RECEIPT_FORMAT_VERSION`] (`1.1.0`) since
-    /// FX-4, `1.0.0` before it, and independent of the scorecard's.
+    /// FX-4, or [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] (`1.2.0`) for a
+    /// receipt that pins `archive.manifest_version_id` (FX-7); `1.0.0` before
+    /// FX-4. Independent of the scorecard's.
     ///
     /// The schema PINS the major with a pattern rather than leaving the field
     /// an unconstrained string, for the reason
@@ -133,14 +144,16 @@ pub struct BackupReceipt {
     pub config_coverage: Option<BTreeMap<String, TopicConfigCoverage>>,
 }
 
-/// The `format_version` this build WRITES. A reader accepts any `1.x.y`
-/// (arm 1); a document that carries `config_coverage` must declare a minor of
-/// at least [`CONFIG_COVERAGE_SINCE_MINOR`] (arm 6).
+/// The `format_version` this build WRITES for a receipt that pins no manifest
+/// version (a pinned one is [`FORMAT_VERSION_WITH_MANIFEST_VERSION`]; see
+/// [`format_version_for`]). A reader accepts any `1.x.y` (arm 1); a document
+/// that carries `config_coverage` must declare a minor of at least
+/// [`CONFIG_COVERAGE_SINCE_MINOR`] (arm 6).
 pub const RECEIPT_FORMAT_VERSION: &str = "1.1.0";
 
 /// The first minor of format 1 that defines `config_coverage`. **A renumber
-/// (for instance to 1.2.0, should another 1.1.0 field merge first) changes
-/// this and [`RECEIPT_FORMAT_VERSION`] together**; arm 6's message and
+/// changes this and [`RECEIPT_FORMAT_VERSION`] together** (FX-4 kept 1.1.0;
+/// FX-7's pin, which merged after it, took 1.2.0); arm 6's message and
 /// `docs/verify_scorecard.py`'s `RECEIPT_CONFIG_COVERAGE_SINCE_MINOR` follow
 /// it, and `tests/backup_receipt.rs::the_written_version_defines_config_coverage`
 /// keeps the pair coherent.
@@ -373,16 +386,74 @@ pub struct ReceiptEngine {
 
 /// What was written, and where. The two fields an auditor needs in order to
 /// go and look: the manifest's key, and a digest over the exact manifest
-/// bytes THIS RUN READ BACK (not over bytes Logweir remembers writing).
+/// bytes THIS RUN READ BACK (not over bytes Logweir remembers writing) — and,
+/// on a versioned bucket, WHICH VERSION of that key those bytes were.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReceiptArchive {
     /// Empty **if and only if** the backup did not exit 0 — invariant 2.
     pub manifest_key: String,
     /// `"sha256:<hex>"` over the manifest bytes read back after the run.
     pub manifest_sha256: String,
+    /// **FX-7, format `1.2.0`.** The object store's VERSION id for the
+    /// manifest bytes this run read back — present only when the store
+    /// answered that read with one, i.e. on a bucket with versioning enabled.
+    ///
+    /// **ABSENT means "no version was pinned"**: an unversioned bucket (whose
+    /// objects carry no version id, or S3's literal `null`, which names an
+    /// object an overwrite replaces in place), or a receipt written before
+    /// this field existed. Never read as "version zero" and never inferred.
+    ///
+    /// A reader that finds it compares the key's CURRENT version with it: a
+    /// different current version means the backup set was written again after
+    /// this receipt was signed, which the manifest digest alone cannot see —
+    /// engine 0.21.0 rewrites a set's segments in place and can leave the
+    /// manifest bytes identical. And it can read THIS version by id, which a
+    /// versioned bucket retains whatever the current one is.
+    ///
+    /// Absent when `None`, and that is the compatibility argument: declaration
+    /// order is byte order, and an absent field writes nothing, so a receipt
+    /// without a pin is byte-for-byte the [`RECEIPT_FORMAT_VERSION`] document
+    /// it would be without FX-7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version_id: Option<String>,
     /// The object-store prefix everything this run wrote lives under. GC6:
     /// Logweir writes only under its own `logweir/` prefix.
     pub prefix: String,
+}
+
+/// **FX-7.** The `format_version` a receipt carries when it pins
+/// `archive.manifest_version_id`: a MINOR bump over [`RECEIPT_FORMAT_VERSION`]
+/// (FX-4's 1.1.0, which merged first), because the field is optional and a
+/// 1.1.0 or 1.0.0 reader, which ignores unknown fields inside major 1, still
+/// reads it (reading rule 1). Written only when the pin is present, so every
+/// receipt on an unversioned bucket is exactly the [`RECEIPT_FORMAT_VERSION`]
+/// document.
+pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
+
+/// The version id a reader may PIN, out of what a store answered.
+///
+/// `None` for no answer, for a blank one, and for S3's literal `"null"` — the
+/// id of an object written while versioning was never enabled or suspended,
+/// which the next write REPLACES in place, so it identifies no retained bytes.
+#[must_use]
+pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
+    match answered.map(str::trim) {
+        None | Some("") | Some("null") => None,
+        Some(id) => Some(id.to_string()),
+    }
+}
+
+/// The `format_version` a receipt with this `archive` block is written with:
+/// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] when it pins the manifest's
+/// version, else [`RECEIPT_FORMAT_VERSION`] — FX-4's 1.1.0, because this build
+/// writes `config_coverage` on every receipt, pinned or not.
+#[must_use]
+pub fn format_version_for(archive: &ReceiptArchive) -> &'static str {
+    if archive.manifest_version_id.is_some() {
+        FORMAT_VERSION_WITH_MANIFEST_VERSION
+    } else {
+        RECEIPT_FORMAT_VERSION
+    }
 }
 
 /// The time range the archive covers, in **EPOCH MILLISECONDS**, as a
