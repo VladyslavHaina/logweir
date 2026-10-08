@@ -3661,3 +3661,23 @@ def test_the_unsampled_line_is_the_rust_readers():
         "record by record"]
     rust = (ROOT / "crates/logweir/src/verify.rs").read_text()
     assert "sample coverage: no partition of {} topic(s) was sampled, because \\" in rust
+
+
+def test_a_sampled_pass_says_what_it_proves_at_its_version():
+    # FX-23 review M2: only 1.6.0 and later prove an FX-23 build signed the
+    # document; an earlier sampled pass is never read as carrying its checks.
+    mod = _verifier_module()
+    new = mod._sampled_pass_lines(_scorecard_1_6(None))
+    assert len(new) == 1 and new[0].startswith(
+        "sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition "
+        "was held to its own count bound"), new
+    for version in ("1.4.0", "1.5.0"):
+        assert mod._sampled_pass_lines(_scorecard_1_6(None, version=version)) == [
+            f"sample coverage: a sampled pass at format {version}, before 1.6.0: it proves the "
+            "canary and one count bound over every topic together, not a per-partition count "
+            "bound, a sample of every topic or an engine-report check (a build from before FX-23 "
+            "may have signed it)"]
+    assert mod._sampled_pass_lines(_scorecard_1_6(None, block=_complete_block())) == []
+    assert mod._sampled_pass_lines(_not_a_pass(_scorecard_1_6(None))) == []
+    rust = (ROOT / "crates/logweir/src/verify.rs").read_text()
+    assert "sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition \\" in rust

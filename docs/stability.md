@@ -403,14 +403,24 @@ side:
 - **The count bound is held per mapped partition** as well as summed, and a
   segment the window cuts across proves one record when its first or last
   record's timestamp is inside the window. A new cause for the existing
-  `fail-integrity` (OD-7's third case). A correct restore cannot fail it: the
+  `fail-integrity` (OD-7's third case). A correct restore of an archive whose
+  record timestamps do not run backwards within a segment cannot fail it: the
   engine restores every record whose own timestamp is in the window into the
   same partition, and the manifest's segment timestamps are its first and last
-  records'. One test moved with it: a 5,900-record target against a manifest
+  records'. When they do run backwards (several producers with skewed clocks,
+  `CreateTime`), a record older than every segment's first record is dropped by
+  every restore of that archive
+  ([the limitation](#recovery-point-selection-uses-segment-first-and-last-timestamps)),
+  and the per-partition bound now fails that restore where the sum's slack
+  across sibling partitions used to absorb it; so does a duplicate from the
+  engine's non-idempotent producer. Both pre-exist for the sum, and failing is
+  the safer verdict. One test moved with it: a 5,900-record target against a manifest
   proving 5,901 (`windowed_reconciliation.rs`) was a pass and is now a fail.
-- **Phase 7 reads the engine's offset report** and fails a restore whose
-  report has no entry for a mapped partition the manifest proves holds records
-  in the window — another new cause for `fail-integrity`. The report is only
+- **Phase 7 reads the engine's offset report** — streaming, keeping only its
+  partition entries and skipping the per-record `detailed_mappings` section
+  as it passes, so memory does not grow with the restore — and fails a restore
+  whose report has no entry for a mapped partition the manifest proves holds
+  records in the window — another new cause for `fail-integrity`. The report is only
   ever a NEGATIVE signal: an entry vouches for nothing, and a missing or
   unreadable report checks nothing (logged). The engine adapter removes a
   report already at the path before the engine runs, so an earlier run's file
@@ -427,6 +437,11 @@ side:
   `integrity.result`) and can only refuse: MINOR under OD-7 (a). The corpus and
   the parity gate re-prove them on every `just lint`; `verify_scorecard.py` is
   1.22.0.
+- **Only 1.6.0 marks the build (review M2).** A 1.4.0 or 1.5.0 sampled `pass`
+  is the same bytes whichever build signed it, so only a 1.6.0-or-later one
+  proves these checks ran; both readers print a `sample coverage:` line for
+  every sampled `pass` saying which, and an earlier document says what it
+  always said.
 - **Readers built before FX-23** accept every 1.6.0 document — the major is
   unchanged and the field is nested and optional — and print nothing about
   the topics the sample left out.
@@ -435,7 +450,6 @@ side:
   the 1.6.0 documents already written stay valid under both readers. Its
   `pass` over an early-stopped restore is the defect this section closes.
 
-### The product API's OpenAPI document is pre-release, and says so
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the

@@ -575,12 +575,21 @@ not reach in the scorecard's new optional `sample.unsampled_topics` (format
 **1.6.0**, only for a scorecard that names one; MINOR,
 [stability.md](stability.md#scorecard-format-160-sampleunsampled_topics-and-a-stricter-sampled-check-fx-23));
 and (c) fails a restore whose engine offset report has no entry for such a
-partition. All three are new causes for the existing `fail-integrity`, exit 2.
+partition — read by streaming past the report's per-record section, so the
+read holds a few kilobytes however large the restore (8.5 KB of heap for a
+235 MB, 2,000,000-record report). All three are new causes for the existing `fail-integrity`, exit 2.
 The in-cluster runner was not exposed (`logweir` is PID 1 there and no
-pod signal reaches the engine), and a scheduled rehearsal never truncated (it
-drops points larger than its cap). `verify_scorecard.py` is 1.22.0.
-**Do:** nothing. A correct restore cannot fail the new checks; a sampled
-`pass` from an earlier build over a plan with `max_partitions` below the
+pod signal reaches the engine), and a scheduled rehearsal never truncated when
+the catalog knew the point's partition count (it drops points larger than its
+cap; a point of unknown size is kept, and its sample now reaches every topic
+first). `verify_scorecard.py` is 1.22.0; both readers say, for every sampled
+`pass`, whether its version proves these checks ran: only 1.6.0 or later does,
+because a 1.4.0 or 1.5.0 document is the same bytes whichever build signed it.
+**Do:** nothing. A correct restore of an archive whose timestamps do not run
+backwards within a segment cannot fail the new checks (one whose timestamps do
+can now fail the per-partition bound where the sum absorbed a record every
+restore drops — [the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps));
+a sampled `pass` from an earlier build over a plan with `max_partitions` below the
 partitions in the window is worth re-checking
 ([verify-a-scorecard.md](verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
 One fixture moved: a target holding exactly the wholly-inside count when a

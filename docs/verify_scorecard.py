@@ -470,7 +470,11 @@ FORMAT_VERSION = "1.4.0"
 # field, so every document without it is decided exactly as before (OD-7 (a)).
 # The shape layer refuses a field that is not an array of strings, and the
 # `sample coverage:` line names the unsampled topics in the Rust reader's
-# words.
+# words. A second `sample coverage:` line, for a sampled `pass` (FX-23 review
+# M2), says what that pass proves at the document's version: from 1.6.0 the
+# per-partition bound, every-topic sampling and the engine-report check;
+# before 1.6.0 only the canary and one count bound over every topic together,
+# because such a document is the same bytes whichever build signed it.
 SCRIPT_VERSION = "1.22.0"
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
@@ -2683,6 +2687,36 @@ def _verification_lines(block):
     return lines
 
 
+def _sampled_pass_lines(doc):
+    """What a SAMPLED `pass` proves at this document's version -- the twin of
+    `crates/logweir/src/verify.rs::sampled_pass_lines` (FX-23 review M2), in
+    the same words. Only a build with FX-23's checks writes 1.6.0; a 1.4.0 or
+    1.5.0 document is the same bytes whichever build signed it. Nothing for a
+    non-pass or a complete verification."""
+    block = doc["integrity"].get("verification")
+    sampled = block is None or block.get("coverage") == "sampled"
+    if doc.get("outcome") != "pass" or not sampled:
+        return []
+    version = doc.get("format_version")
+    if (
+        _major(version) == 1
+        and (_minor(version) is not None)
+        and _minor(version) >= SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR
+    ):
+        return [
+            "sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition "
+            "was held to its own count bound, max_partitions reached every topic before a "
+            "second partition of any, and a readable engine report lacking a partition with "
+            "records in the window was refused"
+        ]
+    return [
+        f"sample coverage: a sampled pass at format {version}, before 1.6.0: it proves the "
+        "canary and one count bound over every topic together, not a per-partition count "
+        "bound, a sample of every topic or an engine-report check (a build from before FX-23 "
+        "may have signed it)"
+    ]
+
+
 def _unsampled_lines(topics):
     """`sample.unsampled_topics` as lines -- the twin of `crates/logweir/src/
     verify.rs::unsampled_lines` (FX-23), in the same words. Absent or empty
@@ -3015,10 +3049,13 @@ def main(
         # (`crates/logweir/src/verify.rs::verification_lines`).
         for line in _verification_lines(doc["integrity"].get("verification")):
             print(f"       coverage: {line}")
-        # FX-23: nor a sample of every topic when the cap left some out. The
-        # same line `logweir drill verify` prints
-        # (`crates/logweir/src/verify.rs::unsampled_lines`).
-        for line in _unsampled_lines(doc["sample"].get("unsampled_topics")):
+        # FX-23: what a sampled pass proves at this document's version (review
+        # M2), and the topics the cap left out. The same lines `logweir drill
+        # verify` prints (`crates/logweir/src/verify.rs::sampled_pass_lines`,
+        # `unsampled_lines`).
+        for line in _sampled_pass_lines(doc) + _unsampled_lines(
+            doc["sample"].get("unsampled_topics")
+        ):
             print(f"       coverage: {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an

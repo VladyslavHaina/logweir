@@ -155,6 +155,44 @@ pub struct VerifyReport {
     /// `sample.unsampled_topics` (scorecard 1.6.0, FX-23), carried as read:
     /// `None` names no unsampled topic (and, before 1.6.0, says nothing).
     pub unsampled_topics: Option<Vec<String>>,
+    /// The document's own `format_version`, for [`sampled_pass_lines`].
+    pub format_version: String,
+}
+
+/// The line both readers print for a SAMPLED `pass` (FX-23 review M2): what
+/// that pass proves, which depends on the document's version, because only
+/// a build with FX-23's checks writes 1.6.0 and a 1.4.0 or 1.5.0 document is
+/// the same bytes whichever build signed it. Nothing for a non-pass or a
+/// complete verification. `docs/verify_scorecard.py::_sampled_pass_lines`
+/// prints the same line, and `scripts/check-verifier-parity.sh` compares every
+/// line starting `sample coverage:` between the two readers.
+#[must_use]
+pub fn sampled_pass_lines(
+    outcome: Outcome,
+    verification: Option<&logweir_core::scorecard::Verification>,
+    format_version: &str,
+) -> Vec<String> {
+    let sampled =
+        verification.is_none_or(|v| v.coverage == logweir_core::scorecard::COVERAGE_SAMPLED);
+    if outcome != Outcome::Pass || !sampled {
+        return Vec::new();
+    }
+    if logweir_core::scorecard::proves_fx23_sampled_checks(format_version) {
+        vec![
+            "sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition \
+             was held to its own count bound, max_partitions reached every topic before a \
+             second partition of any, and a readable engine report lacking a partition with \
+             records in the window was refused"
+                .to_string(),
+        ]
+    } else {
+        vec![format!(
+            "sample coverage: a sampled pass at format {format_version}, before 1.6.0: it \
+             proves the canary and one count bound over every topic together, not a \
+             per-partition count bound, a sample of every topic or an engine-report check (a \
+             build from before FX-23 may have signed it)"
+        )]
+    }
 }
 
 /// The line both readers print for a scorecard whose sample left topics
@@ -755,6 +793,7 @@ pub fn verify_scorecard(
         time_basis: sc.source.time_basis.clone(),
         verification: sc.integrity.verification.clone().map(Box::new),
         unsampled_topics: sc.sample.unsampled_topics.clone(),
+        format_version: sc.format_version.clone(),
     }))
 }
 
@@ -805,8 +844,12 @@ fn print_report(r: &VerifyReport) {
     for line in verification_lines(r.verification.as_deref()) {
         println!("coverage:  {line}");
     }
-    // FX-23: nor a sample of every topic when the cap left some out.
-    for line in unsampled_lines(r.unsampled_topics.as_deref()) {
+    // FX-23: what a sampled pass proves at this document's version (review
+    // M2), and the topics the cap left out.
+    for line in sampled_pass_lines(r.outcome, r.verification.as_deref(), &r.format_version)
+        .into_iter()
+        .chain(unsampled_lines(r.unsampled_topics.as_deref()))
+    {
         println!("coverage:  {line}");
     }
 }

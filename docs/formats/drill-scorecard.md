@@ -396,7 +396,17 @@ document carrying the field:
 | US-3 | the field beside `integrity.verification.coverage: complete` (a complete verification compares every restored partition; phase 0 refuses it beside `max_partitions`) |
 
 Both readers print one `sample coverage:` line naming the topics; nothing is
-printed when the field is absent. A reader that predates 1.6.0 ignores the
+printed when the field is absent.
+
+**The version is the only marker of the build (review M2).** Only a build with
+FX-23's checks — the per-partition count bound, every-topic sampling and the
+engine-report check — writes 1.6.0, and it writes 1.6.0 only for a document
+that names an unsampled topic. Every other document it signs is 1.4.0 or
+1.5.0, byte-for-byte the shape an earlier build signed, and the scorecard
+names no `logweir` build. So only a 1.6.0-or-later sampled `pass` proves those
+checks ran; an earlier one proves what it always proved. Both readers print a
+second `sample coverage:` line for every sampled `pass` saying which
+([the guide](../verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)). A reader that predates 1.6.0 ignores the
 field and applies every other check: it is a MINOR bump under
 [OD-7](../to-do/product-expansion.md#owner-decisions) (a), arms that read only
 a new optional field.

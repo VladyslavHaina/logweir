@@ -570,8 +570,24 @@ application ([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
 A sampled verification (`coverage: sampled`, and every document before 1.4.0)
 reconciles a canary — the first `records_per_partition` records of each
 SELECTED partition — and holds the restored COUNTS to the archive manifest.
-Since FX-23 (scorecard 1.6.0, `logweir` builds after it) a sampled `pass` also
-means all of this held:
+
+**Only a scorecard of format 1.6.0 or later carries the guarantees below.**
+Only a build with FX-23's checks writes 1.6.0, but such a build writes 1.6.0
+only when its sample left a topic unsampled; its other sampled documents are
+1.4.0 (1.5.0 for a PROD-01.3 auth mode), and a 1.4.0 or 1.5.0 document is the
+same bytes whichever build signed it — the scorecard names the engine, not the
+`logweir` build. So a sampled `pass` before 1.6.0 proves what it always
+proved: the canary, and one count bound over every topic together. Unless you
+know independently which build signed it, read it as a pre-FX-23 document
+(the last paragraph of this section). Both readers say which, in a
+`sample coverage:` line printed for every sampled `pass`:
+
+```
+sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition was held to its own count bound, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in the window was refused
+sample coverage: a sampled pass at format 1.4.0, before 1.6.0: it proves the canary and one count bound over every topic together, not a per-partition count bound, a sample of every topic or an engine-report check (a build from before FX-23 may have signed it)
+```
+
+A sampled `pass` of format 1.6.0 or later also means all of this held:
 
 - **Every mapped partition is inside its own count bound**, not only the sum
   over every topic. The bound comes from the partition's own segments: those
@@ -601,10 +617,17 @@ means all of this held:
 What a sampled `pass` still does not establish: that every record of a
 partition is the archive's (only the canary is compared), that header order
 was kept, or anything about a straddling segment's records beyond its one
-proved record. Ask for `sample.coverage: complete` for that.
+proved record. Ask for `sample.coverage: complete` for that. And the bounds read
+the manifest's first and last record timestamps per segment, so they assume a
+segment's timestamps do not run backwards: a record older than every segment's
+first record (several producers with skewed clocks, `CreateTime`) is dropped
+by every restore of that archive, and the per-partition bound then fails a
+restore the engine performed faithfully — the safer verdict, but a failure the
+archive caused, not the restore
+([the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
 
-A document signed by a build from before FX-23 was judged by one count bound
-over all topics together, and its `max_partitions` kept the first partitions in
+A document signed by a build from before FX-23 — which a 1.4.0 or 1.5.0
+document may be — was judged by one count bound over all topics together, and its `max_partitions` kept the first partitions in
 manifest order — the order the engine restores in. An engine stopped early
 restores a manifest-order prefix of the topics, so such a `pass` can cover a
 restore whose later topics are empty when the plan set `max_partitions` below
@@ -772,7 +795,7 @@ history is:
 | `1.19.0` | Knows scorecard format `1.4.0` (PROD-08.1). Adds `integrity.verification`'s seven arms (IV-1 to IV-7), its shape check and the domain of its 25 nested counts (24 refuse null), and prints the `integrity coverage:` lines. Every blank test (ruling R-A) now strips exactly the set Rust's `trim` strips: before, a reason, key, mode or marker made only of U+001C–U+001F was blank here and not in `logweir drill verify`, so the two readers split on it (the writer never produces one). Apart from such a value, every document without the block is decided exactly as before. |
 | `1.20.0` | Knows backup-receipt and catalog-point format `1.3.0` (PROD-05.1). Adds the backup receipt's eight `topic_configuration` arms (12–19) and two `owner_detection` arms (20–21), their shape checks (the counts are `u32`, an entry's value a string or absent, `owner_detection` a list of strings) and the `topic_configuration` lines: per topic the recorded partition count, replication factor, entry counts by portability class and the apply route — never a configuration value. The route is the admin API only where `owner_detection` says the run looked for an owner; otherwise the line says the owner was not checked. Every document without the block is decided exactly as before. |
 | `1.21.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.4.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.4.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
-| `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line. Every document without the field is decided exactly as before. |
+| `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line naming them; for every sampled `pass` it also prints a `sample coverage:` line saying whether the document's version proves FX-23's checks ran (only 1.6.0 or later does). Every document without the field is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust

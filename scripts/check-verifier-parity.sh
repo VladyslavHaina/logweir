@@ -1401,12 +1401,17 @@ echo "check-verifier-parity: both readers accept $SCORECARD_VERIFICATION_VERSION
 # what its exit 0 says about which topics the sample reached.
 # ---------------------------------------------------------------------------
 #
-# Two documents both readers ACCEPT, and the `sample coverage:` lines each must
-# print — the SAME lines from both, compared WHOLE:
+# Five documents both readers ACCEPT, and the `sample coverage:` lines each
+# must print — the SAME lines from both, compared WHOLE:
 #
-#   absent    no field: no line at all
-#   two       two topics `max_partitions` left unsampled: the one line naming
-#             them
+#   absent    1.6.0 sampled pass, no field: the line saying what a 1.6.0
+#             sampled pass proves (FX-23 review M2)
+#   two       the same with two topics `max_partitions` left unsampled: that
+#             line, then the one naming them
+#   pre       a 1.4.0 sampled pass: the line saying it proves only the canary
+#             and one count bound over every topic together
+#   complete  a 1.6.0 complete pass: no line
+#   fail      a 1.6.0 sampled fail-integrity: no line
 #
 # and three both readers REFUSE with the same full text, one per arm US-1 to
 # US-3. Generated and signed here with the throwaway fixture key, like the
@@ -1438,18 +1443,26 @@ complete = json.loads(
     .read_text())["integrity"]["verification"]
 
 
-def doc(topics, version=current, block=None):
+def doc(topics, version=current, block=None, fail=False):
     d = json.loads(json.dumps(base))
     d["format_version"] = version
     d["integrity"]["verification"] = json.loads(json.dumps(block or sampled))
     if topics is not None:
         d["sample"]["unsampled_topics"] = topics
+    if fail:
+        d["outcome"] = "fail-integrity"
+        d["integrity"]["result"] = "fail"
+        d["integrity"]["partial_reason"] = "orders/0: drill-orders/0 holds no record"
+        d["engine"]["matrix_verdict"] = "pass-degraded"
     return d
 
 
 cases = {
     "absent": doc(None),
     "two": doc(["audit", "orders"]),
+    "pre": doc(None, version="1.4.0"),
+    "complete": doc(None, block=complete),
+    "fail": doc(None, fail=True),
     "us1-under-1.5.0": doc(["orders"], version="1.5.0"),
     "us2-unordered": doc(["orders", "audit"]),
     "us3-beside-complete": doc(["orders"], block=complete),
@@ -1466,7 +1479,7 @@ for name, d in cases.items():
          "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
 PYEOF
 
-for name in absent two; do
+for name in absent two pre complete fail; do
     doc="$tmp/scorecard-us/$name.json"
     sig="$tmp/scorecard-us/$name.sig"
     set +e
@@ -1489,9 +1502,13 @@ for name in absent two; do
   rust:   $rust_lines
   python: $py_lines"
     fi
+    proves="sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition was held to its own count bound, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in the window was refused"
     case "$name" in
-        absent) want="" ;;
-        two) want="sample coverage: no partition of 2 topic(s) was sampled, because sample.max_partitions is below the number of topics with records in the window: audit, orders; their partitions were held to the count bound only, never reconciled record by record" ;;
+        absent) want="$proves" ;;
+        two) want="$proves
+sample coverage: no partition of 2 topic(s) was sampled, because sample.max_partitions is below the number of topics with records in the window: audit, orders; their partitions were held to the count bound only, never reconciled record by record" ;;
+        pre) want="sample coverage: a sampled pass at format 1.4.0, before 1.6.0: it proves the canary and one count bound over every topic together, not a per-partition count bound, a sample of every topic or an engine-report check (a build from before FX-23 may have signed it)" ;;
+        complete|fail) want="" ;;
     esac
     if [ "$rust_lines" != "$want" ]; then
         fail "scorecard/$name: expected the sample coverage lines to be
@@ -1533,4 +1550,4 @@ for name in us1-under-1.5.0 us2-unordered us3-beside-complete; do
     fi
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (unsampled topics refused)"
 done
-echo "check-verifier-parity: both readers accept $SCORECARD_UNSAMPLED_VERSION scorecards, say the same about the topics the sample left out, and refuse each of the three unsampled-topics arms with the same words"
+echo "check-verifier-parity: both readers accept $SCORECARD_UNSAMPLED_VERSION scorecards, say the same about what a sampled pass proves at each version and the topics the sample left out, and refuse each of the three unsampled-topics arms with the same words"

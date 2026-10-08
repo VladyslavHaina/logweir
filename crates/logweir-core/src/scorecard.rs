@@ -218,6 +218,20 @@ pub const UNSAMPLED_TOPICS_SINCE_MINOR: u64 = 6;
 /// current schema file is this version's.
 pub const FORMAT_VERSION_WITH_UNSAMPLED_TOPICS: &str = "1.6.0";
 
+/// **FX-23 review M2.** Whether a scorecard's `format_version` shows that a
+/// build with FX-23's sampled-lane checks signed it: major 1, minor 1.6 or
+/// later. Only such a build writes 1.6.0. A 1.4.0 or 1.5.0 document is
+/// byte-for-byte the same whichever build signed it, so its sampled `pass`
+/// proves only what such a pass always proved: the canary and one count
+/// bound over every topic together. Both readers say which
+/// (`logweir::verify::sampled_pass_lines`,
+/// `docs/verify_scorecard.py::_sampled_pass_lines`).
+#[must_use]
+pub fn proves_fx23_sampled_checks(format_version: &str) -> bool {
+    major_version(format_version) == Some(1)
+        && minor_version(format_version).is_some_and(|m| m >= UNSAMPLED_TOPICS_SINCE_MINOR)
+}
+
 /// The `format_version` a scorecard is written with once its `sample` block
 /// is known (FX-23): [`FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`] when the block
 /// names an unsampled topic, else `current` — the version
@@ -3949,6 +3963,24 @@ mod tests {
         assert!(with_unsampled(&["audit", "orders"])
             .validate_invariants()
             .is_ok());
+    }
+
+    /// FX-23 review M2: only 1.6.0 and later prove an FX-23 build signed the
+    /// document. KILLS: comparing against the wrong minor; accepting another
+    /// major.
+    #[test]
+    fn only_1_6_0_and_later_prove_the_fx23_sampled_checks() {
+        for (v, want) in [
+            ("1.0.0", false),
+            ("1.4.0", false),
+            ("1.5.0", false),
+            ("1.6.0", true),
+            ("1.7.0", true),
+            ("2.6.0", false),
+            ("1.x.0", false),
+        ] {
+            assert_eq!(proves_fx23_sampled_checks(v), want, "{v}");
+        }
     }
 
     /// US-1. KILLS: deleting the arm; comparing against the wrong minor.
