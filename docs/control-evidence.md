@@ -650,8 +650,8 @@ the same way. Partition count and replication factor come from metadata and are
 compared whatever the coverage, where the source's value is recorded: the
 replication factor from the archive's manifest, else from the bound receipt's
 `topic_configuration`. A value neither records is named in `not_assessed` as
-`replication_factor (notRecorded)` (or `partition_count`), never compared with
-the target's own (FX-21)
+`replication_factor (notRecorded)` (a partition count likewise), never
+compared with the target's own (FX-21)
 ([what the silence means](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means);
 [an empty `unexpected_divergence` is not configuration parity](verify-a-scorecard.md#an-empty-unexpected_divergence-is-not-configuration-parity)).
 What remains:
@@ -663,8 +663,8 @@ What remains:
 - In a scorecard written before FX-21, the silence about a topic's replication
   factor is not parity where the archive's manifest lacks the source's factor:
   engine 0.23.3 records it for the first topic a backup saves only, and the
-  writer compared the target's factor with itself. The manifest's
-  `topics[].source_replication_factor` says which topics.
+  writer compared the target's factor with itself. The archive's manifest
+  says which topics: those it records no source replication factor for.
 - Where configuration was compared, only the captured overrides were. A value
   the source inherited from a broker default is never compared: FX-4 measured a
   source on `LogAppendTime` by broker default, restored as `CreateTime`, with

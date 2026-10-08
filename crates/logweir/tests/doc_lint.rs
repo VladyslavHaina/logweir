@@ -2011,6 +2011,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the engine is built from the vendored source",
             "ENGINE_SOURCE=oso",
         ),
+        // FX-21 (2026-10-08): an unrecorded replication factor is not
+        // assessed, never matching; the engine's first patch, build 2.
+        (
+            "a replication factor the archive does not record",
+            "replication_factor (notRecorded)",
+        ),
     ];
     assert_eq!(
         items.len(),

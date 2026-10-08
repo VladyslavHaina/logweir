@@ -684,8 +684,15 @@ recorded one factor of three; this build named the other two `notRecorded`
 unbound and compared all three from the receipt bound, and a `logweir` built
 before FX-21 signed the same two topics with no replication-factor entry at
 all. `0.23.3+logweir.2` recorded all three, each the broker's. The engine's
-own unit rows for the patch fail without it. Parity, `+logweir.1` against
-`+logweir.2` (both native, one stack): PARITY_RESULT.
+own unit rows for the patch fail without it. Parity on one stack (Kafka 3.7.1),
+the engines run natively: `full_drill` 15/15, G-PITR and the record-semantics
+rows (contract asserted on build 2) compared SAME between builds 1 and 2, and
+the demo drill, the suites and the record-semantics files compared SAME
+between OSO's 0.23.3 (container route) and build 2; the replication factor
+the patch now records appears in none of those outputs. On a loaded host a
+natively built engine once failed a restore it started within a second of
+phase 0 creating the target topics (`Partition N not available`), so the
+native runs wait 5 s before a restore (a test shim; e2e/README.md).
 **Rollback:** an older `logweir` writes the old silence again; the documents
 this build wrote stay valid for every reader. An engine rollback (to
 `+logweir.1`, or OSO's 0.23.3 with `ENGINE_SOURCE=oso`) records one factor per
