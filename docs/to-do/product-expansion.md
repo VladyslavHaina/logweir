@@ -203,7 +203,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 3 | PROD-01.5b | Put the `crates/` e2e rows on the per-stack variables | P2 | M3 | infra | 01.5 | — | compose | B | Proposed |
 | 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Proposed |
 | 1 | PROD-04.0c | Amendment D names the engine's group subcommands | P2 | M3 | docs | 04.0 | owner's yes on Amendment D (rule 8) | none | B | Proposed |
-| 1 | PROD-04.0d | Fixtures for groups and ACLs (`acl` profile, `groups` helper, streams-protocol variant, share-state settings) | P1 | M2 | infra | 04.0, 01.5 | — | compose | B | Proposed |
+| 1 | PROD-04.0d | Fixtures for groups and ACLs (`acl` profile, `groups` helper, streams-protocol variant, share-state settings) | P1 | M2 | infra | 04.0, 01.5 | — | compose | B | Done |
 | 3 | PROD-01.4b | Upstream DescribeTopics in rust-rdkafka (the exit for 01.4a) | P3 | M3 | impl | 01.4a | — | none | B | Proposed |
 | 2 | PROD-02.2 | Capture incrementally | P1 | M2 | impl | 02.1, 00.1 | — | compose | A | Proposed |
 | 2 | PROD-03.0 | Flag schema-dependent topics | P1 | M2 | impl | — | — | compose | A | Proposed |
@@ -679,6 +679,12 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Finding recorded in the decision record (§13):** the safe route CAN name a group hidden from the principal (`NotVisibleToPrincipal` / `NotAuthorized`); AP-04.1-6 now uses the reviewer's wording.
 - **Evidence:** six e2e rows on compose (classic Empty, classic with a live member, consumer protocol, absent, unstable, invisible) pass at Kafka 4.3.1, 3.9.2 and 3.7.1 (the KIP-848 row only from 4.0); unit rows bound an unanswered fetch and commit in time. Mutants: 29 (first round) and 8 of 9 in the fix round; the survivor is a drain hardening that cannot be provoked. Not run live: a share-group refusal (it needs PROD-04.0d's fixture).
 - **Artifacts:** `claude/artifacts/prod-04-0a/`.
+
+**Completion record — Done (2026-10-08), PROD-04.0d.**
+- **Ownership:** worker `prod-04-0d` (a run and a fix round), independent Tier-B review `claude/prod-04-0d.review.md`: ACCEPT-WITH-FIXES (MEDIUM: 3.x brokers report the share-state keys as sensitive entries with no value; LOWs), fixed and read by the orchestrator. Merged into main after PROD-05.1 (branch tip `1b731c8c`). Gate: `scripts/ci-check.sh` rc 0 at `1b731c8c`.
+- **Delivered:** FX-4's `acl` profile extended (StandardAuthorizer, `super.users`, `allow.everyone.if.no.acl.found`, a non-super SCRAM principal) with §3.9's visibility setup opt-in (`groups.sh visibility apply|remove`, because a standing cluster ACL would break FX-4's rows); `e2e/compose/groups.sh` makes one group of each type on the 4.3 line and the classic groups on 3.9, with members that stop cleanly (the stop confirms the member left); a `streams-protocol` profile beside `streams` (group `logweir-e2e-streams-protocol`, owner PROD-04.0d; the rename is annotated in the decision record §9 and §10); share-state settings on the single-node brokers (3.7.1 and 3.9.2 report them as sensitive, valueless entries, which PROD-05.3's configuration capture must expect).
+- **Evidence:** smokes on compose slot 1 with a negative control each: Kafka 4.3.1 47/0, 3.9.2 21/0, 3.7.1 8/0; `stack_params` 20/20; 9 mutants killed; the SIGKILL control fails the stop check.
+- **Artifacts:** `claude/artifacts/prod-04-0d/`.
 - **Rows added:** PROD-04.0a–d. PROD-04.1 now also depends on 04.0a and 04.0d, and PROD-05.3 on 04.0b and 04.0d.
 
 ### PROD-04.1 — Archive consumer position evidence
