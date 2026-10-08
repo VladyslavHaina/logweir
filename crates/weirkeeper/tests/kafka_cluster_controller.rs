@@ -2213,7 +2213,7 @@ fn job_patches(bodies: &[SeenBody]) -> Vec<Value> {
 }
 
 /// **FX-11: A QUOTA-REFUSED PROBE IS `PodCreationForbidden` 30 SECONDS AFTER
-/// THE JOB, NAMING THE QUOTA, WITH `reachable` UNTOUCHED.** Before FX-11 the
+/// THE JOB, NAMING THE QUOTA, WITH `reachable` CLEARED (O-1).** Before FX-11 the
 /// cluster read `ProbeRunning` for the probe's whole 120-second deadline and
 /// then `NoExitCode`.
 ///
@@ -2226,7 +2226,7 @@ fn job_patches(bodies: &[SeenBody]) -> Vec<Value> {
 /// the early cancel dropped; the TTL dropped (a status that would flip to
 /// `NoExitCode` once the Event ages out, and a cluster never re-probed).
 #[tokio::test]
-async fn fx11_a_probe_pod_the_quota_refuses_names_the_quota_and_leaves_reachable_alone() {
+async fn fx11_a_probe_pod_the_quota_refuses_names_the_quota_and_clears_reachable() {
     // ---- pass 1: running, refused ---------------------------------------
     let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
         podless_probe_job("2026-09-10T11:59:15Z", false),
