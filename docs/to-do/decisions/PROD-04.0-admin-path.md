@@ -852,7 +852,11 @@ Branch `claude/prod-04-0b`. OD-6 (a2): this row is the first to land FFI, so it 
 - **L2:** the e2e soak's bound is 1 MiB. Measured growth was 0 KiB; one leaked name listing per round grows it by about 3 MiB.
 - **L3:** the glue's choice of targeted ids and its answer mapping are the pure `groups::classify_with`, unit-tested with a fake describe.
 - **ASan, from the review:** the FFI unit rows pass under AddressSanitizer on Linux (nightly, aarch64, in Docker, 4 MB quarantine), with a planted double free and a planted use-after-free each reported. LeakSanitizer gave no signal there; leak coverage rests on the RSS soaks and macOS `leaks`.
-- **L4:** `e2e/tests/group_admin.rs::on_three_brokers_an_existing_group_is_never_excluded_while_one_is_down`, on the `cluster3` profile (results in the worker's report).
+- **L4:** `e2e/tests/group_admin.rs::on_three_brokers_an_existing_group_is_never_excluded_while_one_is_down`, on the `cluster3` profile. Measured on 3.9.2 and 4.3.1:
+  - 12 groups were spread over all three coordinators, with 12 typed entries (no T6 duplicate on librdkafka 2.12.1 here).
+  - With `kafka-c3-2` stopped, every classification in the minute was not complete: DescribeCluster timed out waiting for the controller, the typed listing carried `_TIMED_OUT`, the name listing failed `_TRANSPORT` (−195), and T19's cross-check fired.
+  - All 12 groups stayed captured: the typed listing still listed them from their new coordinators, and none was ever excluded.
+  - T19's silent masking itself was not provoked. The legacy listing failed outright instead.
 
 **The rule recommended for PROD-04.1 on brokers below ListGroups v5 (3.7.x; PROD-04.1 decides).** Keep T4: an Unknown type is never captured on the listing's word alone. Add one narrow legacy rule, applied only to entries of the typed listing whose type is Unknown:
 - capture as **classic** an entry whose protocol type is empty (`is_simple`): KIP-848 groups always list protocol type `consumer`, and the typed listing keeps only `""` and `consumer` (C7);
