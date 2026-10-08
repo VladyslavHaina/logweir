@@ -67,10 +67,11 @@ cargo deny --locked --manifest-path "$engine_src/Cargo.toml" check licenses advi
 # prepared tree, so a later patch or pin move that regresses it fails before an
 # image is built (the e2e row that shows it live needs `cluster3` and is
 # ignored in CI). Patch 0002's: the manifest merge, and the backup loop's save
-# order, keep every topic's replication factor. The release profile shares
-# target/engine-build's dependencies with `scripts/engine-source.sh build`.
+# order, keep every topic's replication factor. It builds in the debug profile
+# of target/engine-build, beside `scripts/engine-source.sh build`'s release one
+# (this script never builds a release profile).
 engine_tests="target/engine-patch-oracle.log"
-CARGO_TARGET_DIR="$PWD/target/engine-build" cargo test --locked --release \
+CARGO_TARGET_DIR="$PWD/target/engine-build" cargo test --locked \
   --manifest-path "$engine_src/Cargo.toml" -p kafka-backup-core --lib \
   -- merge_manifests manifest_persistence > "$engine_tests" 2>&1 \
   || { cat "$engine_tests" >&2; echo "ci-check: an engine patch's oracle failed" >&2; exit 1; }

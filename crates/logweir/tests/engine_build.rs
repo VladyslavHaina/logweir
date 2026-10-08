@@ -842,7 +842,7 @@ fn check_sources_policy(policy: &str, gate_line: &str) -> Result<(), String> {
 /// is in the patch AND in the gate's list, so dropping a test from either, or
 /// the gate's `cargo test`, fails here. The gate's live negative control (the
 /// hunk removed from a prepared tree: two of the three FAILED, exit 1) is
-/// `claude/artifacts/fx-21/gates/ci-oracle-negative-hunk-removed.log`.
+/// `claude/artifacts/fx-21/fixround/gates/ci-oracle-negative-hunk-removed.log`.
 #[test]
 fn ci_check_runs_patch_0002s_engine_oracle() {
     const ORACLE: [&str; 3] = [
@@ -852,7 +852,8 @@ fn ci_check_runs_patch_0002s_engine_oracle() {
     ];
     let check = |ci: &str, patch: &str| -> Result<(), String> {
         let runs = ci.lines().any(|l| {
-            l.contains("cargo test --locked --release") && !l.trim_start().starts_with('#')
+            l.contains("CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo test --locked")
+                && !l.trim_start().starts_with('#')
         }) && ci
             .contains("--manifest-path \"$engine_src/Cargo.toml\" -p kafka-backup-core --lib");
         if !runs {
@@ -874,8 +875,8 @@ fn ci_check_runs_patch_0002s_engine_oracle() {
     // Negative controls: the gate's run dropped, a test dropped from the
     // gate's list, a test dropped from the patch.
     let no_run = ci.replace(
-        "cargo test --locked --release",
-        "cargo build --locked --release",
+        "CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo test --locked",
+        "CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo build --locked",
     );
     assert!(check(&no_run, &patch).is_err());
     for t in ORACLE {
