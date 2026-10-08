@@ -90,12 +90,7 @@
     },
     "payments": {
       "partitions": 1,
-      "replication_factor": 1,
-      "owner": {
-        "kind": "external",
-        "basis": "declared",
-        "reference": "terraform: kafka_topic.payments"
-      }
+      "replication_factor": 1
     }
   }
 }

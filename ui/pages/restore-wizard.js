@@ -2805,7 +2805,17 @@ async function findSourceFacts(readers, pointId, lifecycle) {
     try {
       const found = await findCatalogPoint((query) => readers.readPoints(name, query), pointId);
       if (found.entry !== null) {
-        return sourceFactsOfEntry(found.entry, name);
+        // ONLY A ROW THE CATALOG STANDS BEHIND sets a default: a row that is
+        // not selectable -- unreadable, unverified, or refused by the run's
+        // own verdict -- is a row whose layout nobody vouches for.
+        const e = found.entry;
+        if (e.selectable !== true || (typeof e.backupVerdict === "string" &&
+          e.backupVerdict.length > 0)) {
+          return none("recovery catalog `" + name + "` lists point `" + pointId + "` as not " +
+            "selectable (" + String(e.availability) + ", " + String(e.verification) + "), so " +
+            "its topic layout is not used");
+        }
+        return sourceFactsOfEntry(e, name);
       }
     } catch (unread) {
       if (cancelled(unread, lifecycle)) {

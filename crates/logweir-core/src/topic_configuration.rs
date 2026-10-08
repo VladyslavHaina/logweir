@@ -451,18 +451,7 @@ pub fn strimzi_owners(
     cluster: Option<&str>,
 ) -> BTreeMap<String, TopicOwner> {
     let mut found: BTreeMap<String, TopicOwner> = BTreeMap::new();
-    let mut flat: Vec<&serde_yaml::Value> = Vec::new();
-    for doc in resources {
-        let kind = doc.get("kind").and_then(serde_yaml::Value::as_str);
-        match (
-            kind,
-            doc.get("items").and_then(serde_yaml::Value::as_sequence),
-        ) {
-            (Some(k), Some(items)) if k.ends_with("List") => flat.extend(items.iter()),
-            _ => flat.push(doc),
-        }
-    }
-    for resource in flat {
+    for resource in flatten_lists(resources) {
         let Some((topic, reference)) = strimzi_topic_of(resource, cluster) else {
             continue;
         };
@@ -484,6 +473,41 @@ pub fn strimzi_owners(
             .or_insert(candidate);
     }
     found
+}
+
+/// The `KafkaTopic` resources that WOULD own a named topic but whose
+/// `<namespace>/<name>` the receipt cannot record (longer than
+/// [`MAX_OWNER_REFERENCE_CHARS`]: a namespace and a name can reach 317
+/// characters), as `(topic, reference)` — so the run says so instead of
+/// dropping an owner without a word.
+#[must_use]
+pub fn strimzi_unrecordable(
+    resources: &[serde_yaml::Value],
+    topics: &[String],
+    cluster: Option<&str>,
+) -> Vec<(String, String)> {
+    flatten_lists(resources)
+        .into_iter()
+        .filter_map(|r| strimzi_topic_of(r, cluster))
+        .filter(|(topic, reference)| topics.contains(topic) && !reference_fits(reference))
+        .collect()
+}
+
+/// Every resource, with a `List`'s (any kind ending in `List`) `items` read
+/// in its place.
+fn flatten_lists(resources: &[serde_yaml::Value]) -> Vec<&serde_yaml::Value> {
+    let mut flat: Vec<&serde_yaml::Value> = Vec::new();
+    for doc in resources {
+        let kind = doc.get("kind").and_then(serde_yaml::Value::as_str);
+        match (
+            kind,
+            doc.get("items").and_then(serde_yaml::Value::as_sequence),
+        ) {
+            (Some(k), Some(items)) if k.ends_with("List") => flat.extend(items.iter()),
+            _ => flat.push(doc),
+        }
+    }
+    flat
 }
 
 /// `(topic, "<namespace>/<name>")` for a `KafkaTopic` that manages its topic.
@@ -758,6 +782,23 @@ mod tests {
         );
         let owners = strimzi_owners(&docs, &["orders".to_string()], None);
         assert_eq!(owners["orders"].reference, "a/orders");
+        assert!(strimzi_unrecordable(&docs, &["orders".to_string()], None).is_empty());
+    }
+
+    /// A resource whose `namespace/name` the receipt cannot record owns
+    /// nothing, and is named so the run can say so.
+    #[test]
+    fn an_unrecordable_reference_is_named_never_dropped_silently() {
+        let name = "n".repeat(251);
+        let docs = yaml(&format!(
+            "apiVersion: kafka.strimzi.io/v1beta2\nkind: KafkaTopic\nmetadata:\n  name: {name}\n  namespace: kafka\n  labels:\n    strimzi.io/cluster: prod\nspec:\n  topicName: orders\n"
+        ));
+        let topics = vec!["orders".to_string()];
+        assert!(strimzi_owners(&docs, &topics, None).is_empty());
+        assert_eq!(
+            strimzi_unrecordable(&docs, &topics, None),
+            vec![("orders".to_string(), format!("kafka/{name}"))]
+        );
     }
 
     #[test]

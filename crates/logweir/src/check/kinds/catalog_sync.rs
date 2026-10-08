@@ -1884,6 +1884,16 @@ mod tests {
         let (kept, dropped) = allocate_entry_lines(rendered.clone(), budget);
         assert_eq!(dropped, 0);
         assert_eq!(kept, vec![line('a', 100), line('b', 10), line('c', 10)]);
+        // Room for ONE full line beside one slim, not for the full line and the
+        // later slim one after it: a greedy rule keeps the first full and DROPS
+        // the second point; this rule keeps both, slim.
+        let two = vec![rendered[0].clone(), rendered[1].clone()];
+        let (kept, dropped) = allocate_entry_lines(two, cost(100) + cost(10) - 1);
+        assert_eq!(
+            (kept, dropped),
+            (vec![line('a', 10), line('b', 10)], 0),
+            "NEGATIVE CONTROL: a full first line that costs the second point its place fails this"
+        );
         // Room for every slim line only: all slim, none dropped.
         let (kept, dropped) = allocate_entry_lines(rendered.clone(), 3 * cost(10));
         assert_eq!((kept.len(), dropped), (3, 0));

@@ -434,7 +434,7 @@ messages in FULL and which such an edit does not touch — plus
 which reads the function's own source text, so an arm deleted from both readers
 and from this corpus still fails a named test.
 
-The two-reader walk over these twenty-nine documents (FX-4 added nine `config_coverage` cases, FX-7 the pinned one, PROD-05.1 eleven `topic_configuration` cases: two accepts and one refusal per arm 12–19, two for arm 17) is
+The two-reader walk over these twenty-nine documents (FX-4 added nine `config_coverage` cases, FX-7 the pinned one, PROD-05.1 eleven `topic_configuration` cases: two accepts — the pinned one with an un-owned topic, so the parity gate compares the admin-API route line too — and one refusal per arm 12–19, two for arm 17) is
 `crates/logweir/tests/two_reader_parity_receipt.rs` — its **own test binary**,
 because Global Constraint 22's 15 s bound is per `#[test]` and
 `two_reader_parity.rs` already measures 5–12 s.

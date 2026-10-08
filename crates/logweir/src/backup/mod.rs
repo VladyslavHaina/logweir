@@ -387,10 +387,11 @@ struct Inputs {
     spec_text: String,
     allowed: AllowedClusters,
     /// **PROD-05.1.** The declarative owner of each named topic that has one:
-    /// the plan's `source.topic_owners` (phase −1 refuses an invalid one
-    /// before anything is recorded), and over them nothing — a declaration is
-    /// what the approved plan says, so a Strimzi resource for the same topic
-    /// does not replace it; otherwise the `KafkaTopic` resources' owners.
+    /// the `KafkaTopic` resources' owners, with the plan's
+    /// `source.topic_owners` laid over them (`merge_owners`: a declaration is
+    /// what the plan says, so a resource for the same topic does not replace
+    /// it). Phase −1 refuses an invalid declaration before anything is
+    /// recorded.
     owners: BTreeMap<String, logweir_core::backup_receipt::TopicOwner>,
 }
 
@@ -421,6 +422,19 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
                 if !value.is_null() {
                     docs.push(value);
                 }
+            }
+            for (topic, reference) in logweir_core::topic_configuration::strimzi_unrecordable(
+                &docs,
+                &spec.source.topics,
+                args.strimzi_cluster.as_deref(),
+            ) {
+                tracing::warn!(
+                    topic = %topic,
+                    reference = %reference,
+                    "a KafkaTopic resource manages this topic, but its namespace/name is longer \
+                     than the receipt records (256 characters): the topic is recorded with no \
+                     owner. Declare the owner in source.topic_owners with a shorter reference"
+                );
             }
             logweir_core::topic_configuration::strimzi_owners(
                 &docs,

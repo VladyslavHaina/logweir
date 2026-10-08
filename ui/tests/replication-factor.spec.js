@@ -1043,6 +1043,14 @@ test("prod051_a_backups_point_is_found_in_the_namespaces_catalogs_by_its_receipt
     assert.ok(review.includes("orders 6, payments 2"), review);
     assert.ok(!review.includes("Partition counts are shown before the run only"), review);
 
+    // A ROW THE CATALOG DOES NOT STAND BEHIND sets nothing: not selectable.
+    const unsure = wizardState("team-p051-backup-unsure");
+    unsure.point.status.evidence = { receiptSha256: digest };
+    await refreshSourceFacts(unsure, readers([Object.assign({}, row,
+      { selectable: false, verification: "UntrustedSigner" })]));
+    assert.equal(sourceReplicationFactorsOf(unsure), null,
+      "NEGATIVE CONTROL: [3, 1] -- an untrusted row's layout setting the default -- fails this");
+    assert.match(unsure.sourceFacts.why, /as not selectable \(Available, UntrustedSigner\)/);
     // NOT LISTED: a row for another point only. The why names the point.
     const other = wizardState("team-p051-backup-other");
     other.point.status.evidence = { receiptSha256: digest };
