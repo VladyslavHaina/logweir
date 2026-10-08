@@ -55,6 +55,10 @@ jobs:
     timeout-minutes: 50
     env:
       AWS_EC2_METADATA_DISABLED: "true"
+      # PROD-01.3's `auth_modes` rows need the `auth` profile's `kafka-auth`
+      # listeners (SASL_SSL/PLAIN, SCRAM-SHA-256, mTLS). `just e2e-up` starts
+      # every profile COMPOSE_PROFILES names; without it those rows fail.
+      COMPOSE_PROFILES: auth
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
