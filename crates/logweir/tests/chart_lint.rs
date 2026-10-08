@@ -4353,15 +4353,7 @@ fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points
             "discovery.keepPerConnection",
             "checks.discovery.keepPerConnection",
         ),
-        (
-            "discovery.defaultMaxTopics",
-            "checks.discovery.defaultMaxTopics",
-        ),
         ("discovery.hardMaxTopics", "checks.discovery.hardMaxTopics"),
-        (
-            "preflight.defaultTimeoutSeconds",
-            "checks.preflight.defaultTimeoutSeconds",
-        ),
         (
             "preflight.retentionSeconds",
             "checks.preflight.retentionSeconds",
@@ -4384,6 +4376,40 @@ fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points
             j.is_u64(),
             "policy.json's `{json_path}` must be a JSON INTEGER; a float or a string is a \
              `deny_unknown_fields` parse failure that fails closed"
+        );
+    }
+    // FX-10: THE TWO WITHDRAWN FIELDS ARE NOT THE VALUES FILE'S. values.yaml no
+    // longer carries them; the document still does, at the fixed values a
+    // controller older than FX-10 requires (it refuses a document without
+    // them), and `weirkeeper/tests/chart_policy.rs` pins both to the parser.
+    for (json_path, yaml_path, compat) in [
+        (
+            "discovery.defaultMaxTopics",
+            "checks.discovery.defaultMaxTopics",
+            20_000u64,
+        ),
+        (
+            "preflight.defaultTimeoutSeconds",
+            "checks.preflight.defaultTimeoutSeconds",
+            120,
+        ),
+    ] {
+        let mut j = &policy;
+        for seg in json_path.split('.') {
+            j = &j[seg];
+        }
+        let mut y = &values;
+        for seg in yaml_path.split('.') {
+            y = &y[seg];
+        }
+        assert!(
+            y.is_null(),
+            "values.yaml carries the withdrawn `{yaml_path}`"
+        );
+        assert_eq!(
+            j.as_u64(),
+            Some(compat),
+            "policy.json's `{json_path}` is the fixed compatibility value"
         );
     }
     // THE TWO COLLECTIONS ARE EMPTY BY DEFAULT — with no attestation nothing
@@ -4852,7 +4878,14 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         // `--set-string` for the empty string.
         "'checks.discovery.hardMaxTopics=100000'",
         "'checks.maxActiveTotal=2'",
+        // FX-10: the withdrawn values are accepted, ignored and named in the
+        // notes; and every chart value, changed alone, changes the render.
         "'checks.discovery.defaultMaxTopics=60000'",
+        "'checks.preflight.defaultTimeoutSeconds=900'",
+        "cmp -s \"$tmp/withdrawn-base.yaml\" \"$tmp/withdrawn-set.yaml\"",
+        "KUBECONFIG=/dev/null helm install \"$RELEASE\" \"$CHART\" -n \"$NAMESPACE\" --dry-run=client",
+        "WITHDRAWN VALUES ARE SET AND IGNORED",
+        "bash scripts/check-chart-values.sh",
         "--set 'admissionPolicy.consoleServiceAccountName=null'",
         "--set-string 'admissionPolicy.consoleServiceAccountName='",
     ] {
@@ -5249,10 +5282,8 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "checks.discovery.freshSeconds",
         "checks.discovery.retentionSeconds",
         "checks.discovery.keepPerConnection",
-        "checks.discovery.defaultMaxTopics",
         "checks.discovery.hardMaxTopics",
         "checks.discovery.visibilityAttestations",
-        "checks.preflight.defaultTimeoutSeconds",
         "checks.preflight.retentionSeconds",
         // P10 — the manual-run pool, in the same ConfigMap.
         "runs.maxManualBackupsActivePerNamespace",
@@ -5347,9 +5378,7 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         ("checks.discovery.freshSeconds", 900),
         ("checks.discovery.retentionSeconds", 86_400),
         ("checks.discovery.keepPerConnection", 5),
-        ("checks.discovery.defaultMaxTopics", 20_000),
         ("checks.discovery.hardMaxTopics", 50_000),
-        ("checks.preflight.defaultTimeoutSeconds", 120),
         ("checks.preflight.retentionSeconds", 3_600),
         // P10: `RunsPolicy::default()`'s and `RunRateLimits::default()`'s
         // numbers — the ones the templates render NOTHING for.
@@ -5376,6 +5405,36 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "EMPTY, and that is the safe direction: with no attestation nothing can ever be \
          `attestedComplete`"
     );
+    // FX-10: TWO VALUES ARE WITHDRAWN. They changed nothing (the CRDs default
+    // the request fields at admission), so values.yaml does not show them —
+    // and the schema still ACCEPTS them, optional, so a values file or a
+    // `--reuse-values` upgrade that carries one does not fail on the closed
+    // schema. scripts/check-chart.sh proves the render ignores them and the
+    // install notes name them.
+    let schema_checks: serde_json::Value =
+        serde_json::from_str(&read("charts/logweir/values.schema.json")).expect("the schema");
+    for (block, key) in [
+        ("discovery", "defaultMaxTopics"),
+        ("preflight", "defaultTimeoutSeconds"),
+    ] {
+        assert!(
+            values["checks"][block][key].is_null(),
+            "values.yaml shows the withdrawn `checks.{block}.{key}`"
+        );
+        let node = &schema_checks["properties"]["checks"]["properties"][block];
+        assert!(
+            node["properties"][key].is_object(),
+            "values.schema.json must still accept `checks.{block}.{key}`: its block is \
+             additionalProperties:false, so dropping it fails every upgrade that carries it"
+        );
+        assert!(
+            !node["required"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|f| f == key)),
+            "`checks.{block}.{key}` must not be required"
+        );
+    }
+
     assert_eq!(
         Some(0),
         values["evidence"]["controllerIdentityLocations"]
@@ -6108,5 +6167,99 @@ fn chart_lint_a_default_render_carries_neither_manual_run_block() {
     assert!(
         config.contains("(ne $rlBackups 10) (ne $rlRestores 5)"),
         "templates/ui/api-config.yaml renders `rateLimits` only away from RunRateLimits::default() (10, 5)"
+    );
+}
+
+// ============================================= FX-10 — values that reach nothing
+
+/// Every leaf path of a `values.yaml`-shaped document: a mapping that is
+/// EMPTY, and every sequence and scalar, is one leaf — the same rule
+/// `scripts/check-chart-values.sh`'s header states.
+fn value_leaves(node: &Value, prefix: &str, out: &mut BTreeSet<String>) {
+    match node.as_mapping() {
+        Some(map) if !map.is_empty() => {
+            for (k, v) in map {
+                let k = k.as_str().expect("values.yaml keys are strings");
+                let path = if prefix.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                value_leaves(v, &path, out);
+            }
+        }
+        _ => {
+            out.insert(prefix.to_string());
+        }
+    }
+}
+
+/// **FX-10: every chart value has a row in `scripts/check-chart-values.sh`,
+/// which renders it ALONE at a non-default value and fails unless the render
+/// changes.**
+///
+/// The defect: `checks.discovery.defaultMaxTopics` and
+/// `checks.preflight.defaultTimeoutSeconds` were documented, rendered and
+/// parsed for weeks and changed nothing, and no gate could see it — every
+/// committed render carries every value at its default, which is also what a
+/// template that ignores the value renders. The script is the probe (it needs
+/// `helm`, so it lives in the gate script, GC22); this row is what keeps it
+/// complete: its table must name EXACTLY the leaves `values.yaml` has, so a new
+/// value cannot be added without a row, and a row cannot outlive its value.
+///
+/// MUTANT: delete any row (or add a value to `values.yaml`) and this names it;
+/// make a template ignore a value and the script fails that row.
+#[test]
+fn chart_lint_every_chart_value_has_a_probe_row_that_must_change_the_render() {
+    let script = read("scripts/check-chart-values.sh");
+    let start = script
+        .find("<<'ROWS'\n")
+        .expect("the table opens with <<'ROWS'")
+        + "<<'ROWS'\n".len();
+    let end = start
+        + script[start..]
+            .find("\nROWS\n")
+            .expect("the table closes with ROWS");
+    let mut rows = BTreeSet::new();
+    let mut seen = 0usize;
+    for line in script[start..end].lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.splitn(5, '|').collect();
+        assert_eq!(fields.len(), 5, "a malformed row: `{line}`");
+        let (leaf, base, flag) = (fields[0], fields[1], fields[3]);
+        assert!(
+            base == "default"
+                || repo()
+                    .join(format!("charts/logweir/examples/{base}.values.yaml"))
+                    .is_file(),
+            "row `{leaf}` names base `{base}`, which is not an example"
+        );
+        assert!(
+            ["--set", "--set-string", "--set-json"].contains(&flag.trim_start_matches('!')),
+            "row `{leaf}` uses flag `{flag}`"
+        );
+        assert!(rows.insert(leaf.to_string()), "two rows for `{leaf}`");
+        seen += 1;
+    }
+    let values: Value =
+        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
+    let mut leaves = BTreeSet::new();
+    value_leaves(&values, "", &mut leaves);
+    let missing: Vec<&String> = leaves.difference(&rows).collect();
+    let stale: Vec<&String> = rows.difference(&leaves).collect();
+    assert!(
+        missing.is_empty() && stale.is_empty(),
+        "scripts/check-chart-values.sh must have exactly one row per values.yaml leaf.\n  \
+         values with no row: {missing:?}\n  rows with no value: {stale:?}"
+    );
+    assert!(seen >= 150, "only {seen} rows: the table has gone quiet");
+    // AND THE GATE RUNS IT, with the bootstrap override every other render gets.
+    assert!(
+        read("scripts/check-chart.sh").contains(
+            "bash scripts/check-chart-values.sh ${bootstrap_render_args[@]+\"${bootstrap_render_args[@]}\"}"
+        ),
+        "scripts/check-chart.sh must run scripts/check-chart-values.sh"
     );
 }

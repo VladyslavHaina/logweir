@@ -6551,6 +6551,86 @@ async fn the_enforcement_jobs_per_run_ceilings_are_the_policys_own() {
     );
 }
 
+/// **FX-10 fix round (review M1, the controller half): RAISED ceilings reach
+/// the plan and the Job too.**
+///
+/// [`the_enforcement_jobs_per_run_ceilings_are_the_policys_own`] sets both
+/// ceilings BELOW their defaults (2 < 50, 12 345 < 20 000), so a reconcile that
+/// bounded either by its default — `.min(50)` where the evaluation or the Job's
+/// env reads it — passed it, while an administrator who raised
+/// `maxDeletionsPerRun` to clear a backlog got 50 per run with a healthy status
+/// (a run stopped by its own ceiling is not a failure). Here the policy says
+/// **55** points and **30 000** object keys, both above the defaults and inside
+/// the CRD's 1..500 / 1..200 000, over SIXTY points: `keepLast: 2` and
+/// `minUsablePoints: 3` make 57 candidates.
+///
+/// * The plan holds 55 candidates, and the Job carries `55` and `30000`.
+/// * CONTROL: the same sixty points with neither field set (the defaults)
+///   make a plan of 50, so the 55 above is the raised ceiling's doing.
+///
+/// MUTANTS (FX-10 fix round): the evaluation's point ceiling, or the Job's
+/// env, bounded by the default (`.min(50)` / `.min(20_000)`).
+#[tokio::test]
+async fn raised_per_run_ceilings_reach_the_plan_and_the_job_above_the_defaults() {
+    let sixty: Vec<Value> = (1..=60).map(|d| view_entry(&format!("p{d}"), d)).collect();
+
+    // CONTROL FIRST: the defaults cap the plan at 50.
+    let c = fixture(happy_routes(&sixty));
+    run(&c, &policy(enforcing(None), json!({}))).await;
+    assert_eq!(
+        c.status()["lastEvaluation"]["candidateCount"],
+        50,
+        "CONTROL: at the default point ceiling the plan holds 50: {}",
+        c.status()
+    );
+
+    let mut policy_block = enforcing(None);
+    policy_block["enforcement"]["maxDeletionsPerRun"] = json!(55);
+    policy_block["enforcement"]["maxObjectsPerRun"] = json!(30_000);
+    let f = fixture(happy_routes(&sixty));
+    run(&f, &policy(policy_block.clone(), json!({}))).await;
+    assert_eq!(
+        f.status()["lastEvaluation"]["candidateCount"],
+        55,
+        "57 candidates, and the policy's raised ceiling of 55 caps the plan: {}",
+        f.status()
+    );
+    let digest = f.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+
+    let mut routes = happy_routes(&sixty);
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let g = fixture(routes);
+    policy_block["enforcement"]["approvedPlanSha256"] = json!(digest);
+    run(&g, &policy(policy_block, json!({}))).await;
+
+    let job = g.posted("/jobs").remove(0);
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .expect("the worker's env")
+        .clone();
+    let literal = |name: &str| {
+        env.iter()
+            .find(|e| e["name"] == name)
+            .map(|e| e["value"].clone())
+    };
+    assert_eq!(
+        literal(ctrl::env::MAX_DELETIONS),
+        Some(json!("55")),
+        "the worker's point ceiling is the policy's raised one: {env:?}"
+    );
+    assert_eq!(
+        literal(ctrl::env::MAX_OBJECTS),
+        Some(json!("30000")),
+        "the worker's object ceiling is the policy's raised one: {env:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // FX-11 — a retention pod the namespace refuses at creation
 // ---------------------------------------------------------------------------

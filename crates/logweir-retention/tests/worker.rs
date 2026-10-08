@@ -10,8 +10,8 @@
 //!
 //! Everything here drives the shipped [`logweir_retention::admit`] and
 //! [`logweir_retention::execute`]. `admit` is pure: it takes the argv, an
-//! environment map and a plan-reading closure, so **all thirteen exit-3
-//! refusals are table rows** with no socket, no bucket and no process
+//! environment map and a plan-reading closure, so **every exit-3 refusal is
+//! a table row** with no socket, no bucket and no process
 //! environment. `execute` takes the reaper's four injected ports, so the
 //! dry-run arm, the key lines and the exit code are observable without
 //! deleting anything.
@@ -258,6 +258,10 @@ fn every_refusal_is_exit_three() {
         Refusal::NoPlanPath,
         Refusal::BindingIncomplete("LOGWEIR_RETENTION_RUN_ID"),
         Refusal::GenerationNotANumber("x".to_string()),
+        Refusal::CapUnreadable {
+            name: logweir_retention::env::MAX_OBJECTS,
+            value: "x".to_string(),
+        },
         Refusal::LocationUnreadable("x".to_string()),
         Refusal::NoRecordCredential,
         Refusal::Port("x".to_string()),
@@ -304,7 +308,9 @@ fn a_complete_binding_admits() {
     assert!(admitted.evidence_keys.is_some());
 }
 
-/// Each of the five required variables, missing in turn, is named.
+/// Each of the seven required variables, missing in turn, is named. The two
+/// per-run ceilings joined the five on 2026-10-05 (FX-10): an absent ceiling
+/// used to become 50 or 20 000 without a word.
 #[test]
 fn each_missing_binding_variable_is_named() {
     let bytes = plan_bytes(vec![line("lwp1-a", "set-a", &["seg-0"])]);
@@ -315,6 +321,8 @@ fn each_missing_binding_variable_is_named() {
         "LOGWEIR_RETENTION_POLICY_GENERATION",
         "LOGWEIR_RETENTION_SCOPE_PREFIX",
         "LOGWEIR_RETENTION_RUN_ID",
+        "LOGWEIR_RETENTION_MAX_DELETIONS",
+        "LOGWEIR_RETENTION_MAX_OBJECTS",
     ] {
         let mut env = full_env(&digest);
         env.remove(missing);
@@ -337,6 +345,386 @@ fn each_missing_binding_variable_is_named() {
             "a blank {missing} is not a configured {missing}"
         );
     }
+}
+
+/// The env with both per-run ceilings set to `deletions` and `objects`.
+fn env_with_caps(digest: &str, deletions: &str, objects: &str) -> BTreeMap<String, String> {
+    let mut env = full_env(digest);
+    env.insert(
+        logweir_retention::env::MAX_DELETIONS.to_string(),
+        deletions.to_string(),
+    );
+    env.insert(
+        logweir_retention::env::MAX_OBJECTS.to_string(),
+        objects.to_string(),
+    );
+    env
+}
+
+/// `n` one-segment lines, each its own point and its own backup set.
+fn lines(n: usize) -> Vec<PlanLine> {
+    (0..n)
+        .map(|i| line(&format!("lwp1-{i}"), &format!("set-{i}"), &["seg-0"]))
+        .collect()
+}
+
+/// **FX-10: the per-run ceilings are the Job's own, at values their defaults
+/// cannot imitate.**
+///
+/// The worker's only row used to set exactly `50` and `20000`, which is what
+/// it fell back to, so a worker that never read the environment passed it.
+/// Here the Job says **7** points and **1234** object keys:
+///
+/// * the binding and the execution limit carry 7 and 1234;
+/// * a plan of 8 points is refused `OverCap` naming 7, and a plan of 7 is not;
+/// * one point of 1235 object keys is refused `OverCap` naming 1234, and one
+///   of 1234 is not.
+///
+/// NEGATIVE CONTROL, in the row: the SAME 8-point and 1235-key plans are
+/// ADMITTED under the old defaults (50 / 20 000). So a worker that ignored the
+/// environment — or read the two names crossed — admits them, and this row
+/// fails. MUTANTS (FX-10 report): `max_deletions_per_run: 50` or
+/// `max_objects_per_run: 20_000` hard-coded in `admit`; the two names swapped.
+#[test]
+fn the_per_run_ceilings_are_the_jobs_own_at_non_default_values() {
+    // The binding, and the limit `execute` stops at.
+    let one = plan_bytes(lines(1));
+    let admitted = admit_with(&argv(), &env_with_caps(&digest_of(&one), "7", "1234"), one)
+        .expect("a binding with non-default ceilings admits");
+    assert_eq!(admitted.binding.max_deletions_per_run, 7);
+    assert_eq!(admitted.binding.max_objects_per_run, 1234);
+    assert_eq!(admitted.limits().max_objects, 1234);
+
+    // POINTS: 7 admits and 8 is refused naming the Job's 7 …
+    let seven = plan_bytes(lines(7));
+    admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&seven), "7", "1234"),
+        seven,
+    )
+    .expect("exactly the ceiling admits");
+    let eight = plan_bytes(lines(8));
+    let err = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&eight), "7", "1234"),
+        eight.clone(),
+    )
+    .expect_err("one point over the Job's ceiling is refused");
+    assert!(
+        matches!(
+            &err,
+            Refusal::Plan(logweir_reaper::Refusal::OverCap {
+                what: "points",
+                found: 8,
+                cap: 7
+            })
+        ),
+        "the refusal names the Job's own ceiling: {err:?}"
+    );
+    assert_eq!(err.exit_code(), EXIT_REFUSED);
+    // … and the CONTROL: the same plan under the old defaults is admitted.
+    admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&eight), "50", "20000"),
+        eight,
+    )
+    .expect("CONTROL: at the defaults this plan admits, so the refusal above is the 7's");
+
+    // OBJECTS: one point whose set is its manifest plus 1233 / 1234 segments.
+    let segments = |n: usize| (0..n).map(|i| format!("seg-{i}")).collect::<Vec<_>>();
+    let wide = |n: usize| {
+        let names = segments(n);
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        plan_bytes(vec![line("lwp1-wide", "set-wide", &refs)])
+    };
+    let at = wide(1233); // 1234 keys
+    admit_with(&argv(), &env_with_caps(&digest_of(&at), "7", "1234"), at)
+        .expect("exactly the object ceiling admits");
+    let over = wide(1234); // 1235 keys
+    let err = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&over), "7", "1234"),
+        over.clone(),
+    )
+    .expect_err("one object key over the Job's ceiling is refused");
+    assert!(
+        matches!(
+            &err,
+            Refusal::Plan(logweir_reaper::Refusal::OverCap {
+                what: "object keys",
+                found: 1235,
+                cap: 1234
+            })
+        ),
+        "the refusal names the Job's own object ceiling: {err:?}"
+    );
+    admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&over), "50", "20000"),
+        over,
+    )
+    .expect("CONTROL: at the defaults 1235 keys admit, so the refusal above is the 1234's");
+}
+
+/// **FX-10 fix round (review M1): a RAISED ceiling reaches the worker too, at
+/// admission AND at execution.**
+///
+/// [`the_per_run_ceilings_are_the_jobs_own_at_non_default_values`] sets the
+/// ceilings BELOW the old fallbacks (7 < 50, 1234 < 20 000), so a worker that
+/// read the environment and then bounded it by the old default —
+/// `cap(…)?.min(50)`, or a narrower fallback reintroduced later — passed every
+/// row while an administrator's raised `maxDeletionsPerRun` was silently cut to
+/// 50 and the backlog never cleared (a run stopped by its own ceiling is not a
+/// failure, so the status stays healthy). Here the Job says **75** points and
+/// **30 000** object keys, both ABOVE the old 50 / 20 000 and inside the CRD's
+/// 1..500 / 1..200 000:
+///
+/// * the binding and the execution limit carry 75 and 30 000;
+/// * a plan of 75 points is admitted and one of 76 is refused `OverCap`
+///   naming 75;
+/// * one point of 30 000 object keys is admitted and one of 30 001 is refused
+///   `OverCap` naming 30 000;
+/// * the 30 000-key point RUNS: all 30 000 keys are deleted, manifest first,
+///   and the run exits 0 — so the raised number reaches `execute`'s budget
+///   too, not only admission.
+///
+/// NEGATIVE CONTROL, in the row: the SAME 75-point and 30 000-key plans are
+/// REFUSED at the old 50 / 20 000, naming those. So the admissions above are
+/// the raised values' doing.
+///
+/// MUTANTS (FX-10 fix round): `cap(…)?.min(50)` / `.min(20_000)` in `admit`
+/// (the review's M3); `max_objects: self.binding.max_objects_per_run.min(20_000)`
+/// in `Admitted::limits` (admission passes, execution stops at 20 000).
+#[test]
+fn a_raised_ceiling_reaches_admission_and_execution_above_the_old_defaults() {
+    // The binding, and the limit `execute` stops at.
+    let one = plan_bytes(lines(1));
+    let admitted = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&one), "75", "30000"),
+        one,
+    )
+    .expect("a binding with raised ceilings admits");
+    assert_eq!(admitted.binding.max_deletions_per_run, 75);
+    assert_eq!(admitted.binding.max_objects_per_run, 30_000);
+    assert_eq!(admitted.limits().max_objects, 30_000);
+
+    // POINTS: 75 admits and 76 is refused naming the Job's 75 …
+    let seventy_five = plan_bytes(lines(75));
+    admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&seventy_five), "75", "30000"),
+        seventy_five.clone(),
+    )
+    .expect("75 points, above the old 50, admit under a raised ceiling");
+    let seventy_six = plan_bytes(lines(76));
+    let err = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&seventy_six), "75", "30000"),
+        seventy_six,
+    )
+    .expect_err("one point over the raised ceiling is refused");
+    assert!(
+        matches!(
+            &err,
+            Refusal::Plan(logweir_reaper::Refusal::OverCap {
+                what: "points",
+                found: 76,
+                cap: 75
+            })
+        ),
+        "the refusal names the Job's raised ceiling: {err:?}"
+    );
+    // … and the CONTROL: the 75-point plan is refused at the old 50.
+    let err = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&seventy_five), "50", "20000"),
+        seventy_five,
+    )
+    .expect_err("CONTROL: at the old default the 75-point plan is refused");
+    assert!(
+        matches!(
+            &err,
+            Refusal::Plan(logweir_reaper::Refusal::OverCap {
+                what: "points",
+                found: 75,
+                cap: 50
+            })
+        ),
+        "CONTROL names 50: {err:?}"
+    );
+
+    // OBJECTS: one point whose set is its manifest plus 29 999 / 30 000 segments.
+    let wide = |segments: usize| {
+        let names: Vec<String> = (0..segments).map(|i| format!("seg-{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        plan_bytes(vec![line("lwp1-wide", "set-wide", &refs)])
+    };
+    let at = wide(29_999); // 30 000 keys
+    let admitted = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&at), "75", "30000"),
+        at.clone(),
+    )
+    .expect("30 000 keys, above the old 20 000, admit under a raised ceiling");
+    let over = wide(30_000); // 30 001 keys
+    let err = admit_with(
+        &argv(),
+        &env_with_caps(&digest_of(&over), "75", "30000"),
+        over,
+    )
+    .expect_err("one object key over the raised ceiling is refused");
+    assert!(
+        matches!(
+            &err,
+            Refusal::Plan(logweir_reaper::Refusal::OverCap {
+                what: "object keys",
+                found: 30_001,
+                cap: 30_000
+            })
+        ),
+        "the refusal names the Job's raised object ceiling: {err:?}"
+    );
+    // CONTROL: the 30 000-key point is refused at the old 20 000.
+    let err = admit_with(&argv(), &env_with_caps(&digest_of(&at), "50", "20000"), at)
+        .expect_err("CONTROL: at the old default 30 000 keys are refused");
+    assert!(
+        matches!(
+            &err,
+            Refusal::Plan(logweir_reaper::Refusal::OverCap {
+                what: "object keys",
+                found: 30_000,
+                cap: 20_000
+            })
+        ),
+        "CONTROL names 20 000: {err:?}"
+    );
+
+    // EXECUTION: the admitted 30 000-key point is deleted whole. A budget cut
+    // back to 20 000 would stop at 20 000 with `BudgetExhausted` and exit 1.
+    let deleter = FakeDeleter::default();
+    let report = execute(
+        &admitted,
+        &deleter,
+        &NoSleep,
+        &FakeSink::default(),
+        &FakeLister(Vec::new()),
+    );
+    let seen = deleter.seen.borrow();
+    assert_eq!(
+        seen.len(),
+        30_000,
+        "every key of the admitted point is deleted under the raised budget"
+    );
+    assert_eq!(seen[0], format!("{SCOPE}/set-wide/manifest.json"));
+    assert_eq!(report.outcome.objects_deleted, 30_000);
+    assert_eq!(report.exit_code, EXIT_OK, "{:?}", report.lines);
+    assert!(report
+        .lines
+        .iter()
+        .any(|l| l.contains("retention-point=lwp1-wide state=Deleted objects=30000")));
+}
+
+/// **FX-10: a ceiling that is not a whole number of at least 1 is REFUSED —
+/// exit 3, nothing deleted — and never replaced by a default.**
+///
+/// The parse used to be `.and_then(|v| v.parse().ok()).unwrap_or(50)`: it
+/// FAILED OPEN, so `5O` (a letter O), `7.5` or `-1` ran with 50 points and
+/// 20 000 objects. Absent and blank are `BindingIncomplete`
+/// ([`each_missing_binding_variable_is_named`]); everything else is
+/// `CapUnreadable`, naming the variable and the value.
+///
+/// MUTANT: restore the `unwrap_or` fallback and every case here admits.
+#[test]
+fn a_ceiling_the_worker_cannot_read_is_refused_never_defaulted() {
+    let bytes = plan_bytes(lines(1));
+    let digest = digest_of(&bytes);
+    for name in [
+        logweir_retention::env::MAX_DELETIONS,
+        logweir_retention::env::MAX_OBJECTS,
+    ] {
+        for bad in [
+            "5O",
+            "7.5",
+            "-1",
+            "0",
+            "1e3",
+            "seven",
+            "9223372036854775808",
+        ] {
+            let mut env = full_env(&digest);
+            env.insert(name.to_string(), bad.to_string());
+            let err = admit_with(&argv(), &env, bytes.clone())
+                .expect_err("an unreadable ceiling is refused");
+            assert_eq!(
+                err,
+                Refusal::CapUnreadable {
+                    name,
+                    value: bad.to_string()
+                },
+                "{name}={bad}"
+            );
+            assert_eq!(err.exit_code(), EXIT_REFUSED);
+            assert!(
+                format!("{err}").contains(name) && format!("{err}").contains("nothing is deleted"),
+                "the message names the variable and says nothing is deleted: {err}"
+            );
+        }
+        // Surrounding whitespace is not a different number.
+        let mut env = full_env(&digest);
+        env.insert(name.to_string(), " 12 ".to_string());
+        admit_with(&argv(), &env, bytes.clone()).expect("` 12 ` is twelve");
+    }
+    // The pure reader, at its boundary.
+    assert_eq!(
+        logweir_retention::cap(logweir_retention::env::MAX_OBJECTS, "1"),
+        Ok(1)
+    );
+    assert!(logweir_retention::cap(logweir_retention::env::MAX_OBJECTS, "0").is_err());
+}
+
+/// **The binding variable names are the ones the controller projects.**
+///
+/// `weirkeeper` writes the enforcement Job's environment from its own
+/// constants (`controllers::retention_policy::env`), this worker reads its own
+/// (`logweir_retention::env`), and the two crates share no dependency edge on
+/// purpose. Before FX-10 a rename on either side was silent: the ceilings fell
+/// back to their defaults. Now every binding variable is required, so a rename
+/// fails closed at run time — and this row fails before that, reading the
+/// controller's source. `weirkeeper/tests/configured_values.rs` is the same
+/// comparison from the other side.
+///
+/// MUTANT: rename `MAX_OBJECTS` on either side and this fails naming it.
+#[test]
+fn the_binding_names_are_the_ones_the_controller_projects() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../weirkeeper/src/controllers/retention_policy.rs");
+    let source =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let start = source
+        .find("pub mod env {")
+        .expect("the controller names its Job's environment in `pub mod env`");
+    let block = &source[start..];
+    let block = &block[..block.find("\n}").expect("the module closes")];
+    let projected: std::collections::BTreeSet<String> = block
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let rest = l.strip_prefix("pub const ")?;
+            let value = rest.split('"').nth(1)?;
+            Some(value.to_string())
+        })
+        .collect();
+    let read: std::collections::BTreeSet<String> = logweir_retention::env::BINDING
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    assert_eq!(
+        projected, read,
+        "the variables weirkeeper projects onto an enforcement Job and the ones this worker \
+         reads must be the same set; a name on one side only is a binding that never arrives"
+    );
+    assert_eq!(read.len(), 9, "nine binding variables, each spelt once");
 }
 
 /// A generation that is not a number, and a location that does not parse.

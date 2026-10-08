@@ -754,6 +754,458 @@ async fn over_the_per_connection_ceiling_the_request_is_queued_and_creates_nothi
 }
 
 // ---------------------------------------------------------------------------
+// FX-10 — the installation policy's numbers reach this controller
+// ---------------------------------------------------------------------------
+//
+// Every row below is served the chart's OWN tuned document —
+// `charts/logweir/rendered/tuned.yaml`, the render of
+// `examples/tuned.values.yaml`, every value off its default — through
+// the policy reference a running controller is given, and runs the same pass
+// against the compiled-in defaults as its control. Before these rows every
+// other row in this file read the defaults, so a reconciler that consulted
+// `Policy::defaults()` (or a constant) where it should read the loaded
+// document passed all of them. The values are followed end to end: values
+// file, template, `check::policy::parse`, this controller.
+
+const POLICY_NS: &str = "logweir-system";
+const POLICY_NAME: &str = "weirkeeper-policy";
+
+/// The chart's tuned policy document, exactly as `helm template` rendered it.
+fn tuned_policy_json() -> String {
+    use serde::Deserialize as _;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../charts/logweir/rendered/tuned.yaml");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    for doc in serde_yaml::Deserializer::from_str(&text) {
+        let value = serde_yaml::Value::deserialize(doc).expect("the render is YAML");
+        if value["kind"].as_str() == Some("ConfigMap")
+            && value["metadata"]["name"].as_str() == Some(POLICY_NAME)
+        {
+            return value["data"]["policy.json"]
+                .as_str()
+                .expect("policy.json is a string")
+                .to_string();
+        }
+    }
+    panic!("tuned.yaml renders no {POLICY_NAME}");
+}
+
+fn tuned_policy_route() -> Route {
+    Route {
+        method: "GET",
+        path_suffix: "/configmaps/weirkeeper-policy",
+        status: 200,
+        body: serde_json::to_string(&json!({
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": POLICY_NAME, "namespace": POLICY_NS},
+            "data": {"policy.json": tuned_policy_json()}
+        }))
+        .expect("a serialisable ConfigMap"),
+    }
+}
+
+/// The discovery context a controller started with the chart's policy has.
+fn tuned(client: kube::Client) -> DiscoveryContext {
+    context(
+        client,
+        Some((POLICY_NS.to_string(), POLICY_NAME.to_string())),
+    )
+}
+
+/// The routes of a pass that QUEUES: no `POST` at all, so the double panics if
+/// a plan or a Job were attempted.
+fn queued_routes(active: Vec<Value>) -> Vec<Route> {
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: JOB_PATH,
+            status: 404,
+            body: not_found("jobs not found"),
+        },
+        Route {
+            method: "GET",
+            path_suffix: CLUSTER_PATH,
+            status: 200,
+            body: cluster_body(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/jobs",
+            status: 200,
+            body: job_list(active),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: STATUS_PATH,
+            status: 200,
+            body: discovery_body(&fresh()),
+        },
+    ]
+}
+
+/// An ACTIVE run-discovery Job of a `Backup`, against this connection. It
+/// spends the per-connection pool and nothing else (`check::limits::count`).
+fn active_run_discovery() -> Value {
+    assert_eq!(cjob::LABEL_COMPONENT, "app.kubernetes.io/component");
+    assert_eq!(
+        weirkeeper::controllers::backup_selection::COMPONENT_RUN_DISCOVERY,
+        "run-discovery"
+    );
+    json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {
+            "name": "lwr-run-discovery", "namespace": NS, "uid": OTHER_JOB_UID,
+            "creationTimestamp": "2026-09-16T11:58:00Z",
+            "labels": {
+                "app.kubernetes.io/component": "run-discovery",
+                "logweir.dev/check-connection-uid": CLUSTER_UID
+            }
+        },
+        "spec": {"template": {"spec": {"containers": [], "restartPolicy": "Never"}}},
+        "status": {}
+    })
+}
+
+/// An ACTIVE interactive check in this namespace that names no connection: it
+/// spends the namespace and installation pools and nothing else.
+fn active_interactive_check() -> Value {
+    json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {
+            "name": "lwc-rd-elsewhere", "namespace": NS,
+            "uid": "abad1dea-0000-4000-8000-0000000000e5",
+            "creationTimestamp": "2026-09-16T11:58:00Z",
+            "labels": {
+                "app.kubernetes.io/component": "check",
+                "logweir.dev/check-kind": "operationReadiness"
+            }
+        },
+        "spec": {"template": {"spec": {"containers": [], "restartPolicy": "Never"}}},
+        "status": {}
+    })
+}
+
+/// The plan a pass POSTed, as its `topicInventory` request's `maxTopics`.
+fn planned_max_topics(bodies: &BodyRecorder) -> u32 {
+    let cm = body_of(bodies, "POST", "/configmaps");
+    let document: CheckPlan = serde_json::from_str(
+        cm["data"][cjob::CHECK_PLAN_KEY]
+            .as_str()
+            .expect("the plan document is a string in `data`"),
+    )
+    .expect("the plan parses strictly");
+    let CheckRequest::TopicInventory(request) = &document.request else {
+        panic!("a discovery renders a topicInventory request, got {document:?}");
+    };
+    request.max_topics
+}
+
+/// **FX-10: the installation policy's check ceilings and topic ceiling reach
+/// discovery admission and the plan — at the chart's tuned values.**
+///
+/// The chart's tuned document says `maxActiveDiscoveriesPerConnection: 3`,
+/// `maxActivePerNamespace: 1` and `hardMaxTopics: 100`.
+///
+/// * Beside ONE active discovery of this connection, a request is ADMITTED
+///   (three may run) and its plan is cut at 100 topics, although it asked for
+///   20 000. CONTROL: the same objects under the compiled-in defaults
+///   (`1` per connection) are QUEUED.
+/// * Beside ONE active interactive check in this namespace, a request is
+///   QUEUED, `ConcurrencyLimited`, with nothing created. CONTROL: under the
+///   defaults (`4` per namespace) it is admitted.
+///
+/// MUTANTS (FX-10 report): pass `&ChecksPolicy::default()` to
+/// `limits::admit` at `controllers/topic_discovery.rs`, or
+/// `Policy::defaults().discovery.hard_max_topics` to `effective_max_topics`.
+#[tokio::test]
+async fn the_installation_policys_ceilings_reach_discovery_admission_and_the_plan() {
+    // PER CONNECTION, and the TOPIC CEILING, under the chart's document.
+    let mut routes = start_routes(vec![active_run_discovery()]);
+    routes.push(tuned_policy_route());
+    let (client, _r, bodies) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&fresh(), &tuned(client))
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        outcome.created_job,
+        "three discoveries per connection may run, so the second is admitted: {outcome:?}"
+    );
+    assert_eq!(
+        planned_max_topics(&bodies),
+        100,
+        "the request asked for 20000 and the installation's hardMaxTopics is 100"
+    );
+    // CONTROL: the compiled-in ceiling is ONE per connection.
+    let (client, _r, _b) =
+        mock_client_recording_bodies(queued_routes(vec![active_run_discovery()]));
+    let outcome = td::reconcile_discovery(&fresh(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(
+        outcome.phase, PHASE_QUEUED,
+        "CONTROL: at the default ceiling it waits"
+    );
+    // CONTROL: and with no installation document the plan keeps the request's own 20000.
+    let (client, _r, bodies) = mock_client_recording_bodies(start_routes(vec![]));
+    td::reconcile_discovery(&fresh(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(planned_max_topics(&bodies), 20_000);
+
+    // PER NAMESPACE, under the chart's document: one interactive check is the ceiling.
+    let mut routes = queued_routes(vec![active_interactive_check()]);
+    routes.push(tuned_policy_route());
+    let (client, _r, _b) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&fresh(), &tuned(client))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.phase, PHASE_QUEUED);
+    assert_eq!(outcome.reason, CheckCode::ConcurrencyLimited.as_str());
+    assert!(!outcome.created_job);
+    // CONTROL: the compiled-in namespace ceiling is FOUR, so it is admitted.
+    let (client, _r, _b) =
+        mock_client_recording_bodies(start_routes(vec![active_interactive_check()]));
+    let outcome = td::reconcile_discovery(&fresh(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        outcome.created_job,
+        "CONTROL: under the defaults it runs: {outcome:?}"
+    );
+}
+
+/// **FX-10 fix round (review L1): the installation's `hardMaxTopics` reaches
+/// the HARVEST too, not only the plan.**
+///
+/// `hardMaxTopics` has two readers that decide something. The plan asks the
+/// runner for at most that many entries
+/// ([`the_installation_policys_ceilings_reach_discovery_admission_and_the_plan`]);
+/// and a runner that did not honour its plan — a bug, or a skewed runner image
+/// — has its surplus cut on harvest to the SAME ceiling, before a single chunk
+/// is written. The second reader had no row: the review's mutant M5 (the
+/// harvest's ceiling read as the compiled-in 50 000) survived all 1 719 tests.
+///
+/// The chart's tuned document says `hardMaxTopics: 100`, and the request asks
+/// for 20 000:
+///
+/// * a relay of 101 entries is STORED as 100 — one chunk, `counts.returned`
+///   100, `truncated`, `MaxTopics`, and the digest over the 100 stored — while
+///   `counts.listed` keeps the broker's 101;
+/// * CONTROL: the same relay under the compiled-in defaults (50 000, so the
+///   request's own 20 000 binds) is stored whole: 101, not truncated.
+///
+/// MUTANT (FX-10 review M5): `storable_entry_ceiling(effective_max_topics(…,
+/// 50_000))` at the harvest. The guard
+/// `chart_policy::every_installation_policy_value_reaches_its_field_and_a_reader_at_a_non_default_value`
+/// fails on it too: it counts every read of the field.
+#[tokio::test]
+async fn the_installation_policys_topic_ceiling_cuts_what_the_harvest_stores() {
+    let entries: Vec<TopicEntry> = (0..101)
+        .map(|i| TopicEntry::new(&format!("over-{i:03}"), 3))
+        .collect();
+    let inventory = inventory_of(&entries, counts_for(&entries, 0));
+    let harvest = |policy: Option<Route>| {
+        let mut extra = vec![Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 201,
+            body: "{}".to_string(),
+        }];
+        extra.extend(policy);
+        mock_client_recording_bodies(finished_routes(relay_log(&entries, &inventory), extra))
+    };
+
+    // UNDER THE CHART'S DOCUMENT: cut to 100.
+    let (client, _r, bodies) = harvest(Some(tuned_policy_route()));
+    let outcome = td::reconcile_discovery(&running(), &tuned(client))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.phase, PHASE_SUCCEEDED);
+    assert_eq!(outcome.chunks_written, 1);
+    let status = status_of(&bodies);
+    assert_eq!(
+        status["result"]["counts"]["returned"],
+        json!(100),
+        "101 relayed, and the installation's hardMaxTopics is 100: {status}"
+    );
+    assert_eq!(status["result"]["counts"]["listed"], json!(101));
+    assert_eq!(status["result"]["truncated"], json!(true));
+    assert_eq!(status["result"]["truncationReason"], json!("MaxTopics"));
+    assert_eq!(
+        status["result"]["topicsSha256"],
+        json!(topic_tsv_sha256(&entries[..100])),
+        "the digest is over the 100 entries that were stored"
+    );
+
+    // CONTROL: under the compiled-in defaults the same relay is stored whole.
+    let (client, _r, bodies) = harvest(None);
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.phase, PHASE_SUCCEEDED);
+    let status = status_of(&bodies);
+    assert_eq!(
+        status["result"]["counts"]["returned"],
+        json!(101),
+        "CONTROL: the request's 20 000 binds, so nothing is cut: {status}"
+    );
+    assert_eq!(status["result"]["truncated"], json!(false));
+    assert_eq!(
+        status["result"]["topicsSha256"],
+        json!(topic_tsv_sha256(&entries))
+    );
+}
+
+/// **FX-10: the installation policy's fresh window reaches `freshUntil`.**
+///
+/// The chart's tuned document says `freshSeconds: 60`, so an inventory the
+/// runner observed at 11:59:00 is fresh until 12:00:00. CONTROL:
+/// [`observed_at_is_the_runners_own_instant_and_not_a_clock_read`] runs the
+/// same relay under the defaults and reads 12:14:00 (900 s).
+///
+/// MUTANT: `fresh_until(observed_at, 900)` at the call site.
+#[tokio::test]
+async fn the_installation_policys_fresh_window_reaches_fresh_until() {
+    let entries = vec![TopicEntry::new("orders", 6)];
+    let inventory = inventory_of(&entries, counts_for(&entries, 0));
+    let (client, _r, bodies) = mock_client_recording_bodies(finished_routes(
+        relay_log(&entries, &inventory),
+        vec![
+            Route {
+                method: "POST",
+                path_suffix: "/configmaps",
+                status: 201,
+                body: "{}".to_string(),
+            },
+            tuned_policy_route(),
+        ],
+    ));
+    td::reconcile_discovery(&running(), &tuned(client))
+        .await
+        .expect("the reconcile answers");
+    let status = status_of(&bodies);
+    assert_eq!(status["observedAt"], json!("2026-09-16T11:59:00Z"));
+    assert_eq!(
+        status["freshUntil"],
+        json!("2026-09-16T12:00:00Z"),
+        "observedAt plus the installation's 60 s, not the default 900 s"
+    );
+}
+
+/// The DELETE route a collector pass that removes `name` needs.
+fn delete_route(name: &str) -> Route {
+    Route {
+        method: "DELETE",
+        path_suffix: Box::leak(format!("/topicdiscoveries/{name}").into_boxed_str()),
+        status: 200,
+        body: json!({"kind": "Status", "status": "Success"}).to_string(),
+    }
+}
+
+fn deleted_names(recorder: &Recorder) -> Vec<String> {
+    let mut deleted: Vec<String> = calls(recorder)
+        .into_iter()
+        .filter(|c| c.starts_with("DELETE "))
+        .map(|c| c.rsplit('/').next().unwrap_or_default().to_string())
+        .collect();
+    deleted.sort();
+    deleted
+}
+
+/// **FX-10: the installation policy's collector rules reach the collector.**
+///
+/// The chart's tuned document says `keepPerConnection: 2` and
+/// `retentionSeconds: 180`.
+///
+/// * KEEP: eight terminal discoveries of ONE connection, all younger than
+///   three minutes, so none is past the window: the newest two stay and six
+///   go. CONTROL: the defaults keep five, so three go.
+/// * RETENTION: two terminal discoveries of two DIFFERENT connections (each
+///   alone in its cohort), one a minute old and one four: the four-minute one
+///   is past 180 s and goes. CONTROL: under the default 24 h nothing goes.
+///
+/// MUTANTS: `collect_expired(…, 86_400, …)` or `(…, …, 5, …)` at the call site.
+#[tokio::test]
+async fn the_installation_policys_collector_rules_reach_the_collector() {
+    let done = terminal_subject();
+    let cohort = || -> Vec<Value> {
+        (0..8u32)
+            .map(|i| {
+                listed(
+                    &format!("td-{i}"),
+                    &format!("uid-{i}"),
+                    Some(CLUSTER_UID),
+                    chrono::Duration::seconds(i64::from(i + 1) * 10),
+                    PHASE_SUCCEEDED,
+                )
+            })
+            .collect()
+    };
+    // KEEP TWO.
+    let mut routes = vec![list_route(cohort(), None), tuned_policy_route()];
+    routes.extend((2..8u32).map(|i| delete_route(&format!("td-{i}"))));
+    let (client, recorder, _b) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&done, &tuned(client))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.collected, 6, "eight minus the newest TWO");
+    assert_eq!(
+        deleted_names(&recorder),
+        vec!["td-2", "td-3", "td-4", "td-5", "td-6", "td-7"]
+    );
+    // CONTROL: the defaults keep five.
+    let mut routes = vec![list_route(cohort(), None)];
+    routes.extend((5..8u32).map(|i| delete_route(&format!("td-{i}"))));
+    let (client, recorder, _b) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&done, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.collected, 3);
+    assert_eq!(deleted_names(&recorder), vec!["td-5", "td-6", "td-7"]);
+
+    // RETENTION 180 s, two cohorts of one.
+    let pair = || {
+        vec![
+            listed(
+                "td-young",
+                "uid-young",
+                Some(CLUSTER_UID),
+                chrono::Duration::seconds(60),
+                PHASE_SUCCEEDED,
+            ),
+            listed(
+                "td-old",
+                "uid-old",
+                Some("c0ffee00-0000-4000-8000-0000000000ff"),
+                chrono::Duration::seconds(240),
+                PHASE_SUCCEEDED,
+            ),
+        ]
+    };
+    let (client, recorder, _b) = mock_client_recording_bodies(vec![
+        list_route(pair(), None),
+        tuned_policy_route(),
+        delete_route("td-old"),
+    ]);
+    let outcome = td::reconcile_discovery(&done, &tuned(client))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(
+        outcome.collected, 1,
+        "only the four-minute-old one is past 180 s"
+    );
+    assert_eq!(deleted_names(&recorder), vec!["td-old"]);
+    // CONTROL: under the default 24 h window nothing is past it — and the
+    // route table holds no DELETE, so a deletion would panic the double.
+    let (client, recorder, _b) = mock_client_recording_bodies(vec![list_route(pair(), None)]);
+    let outcome = td::reconcile_discovery(&done, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.collected, 0);
+    assert!(deleted_names(&recorder).is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // The tracker's required cases
 // ---------------------------------------------------------------------------
 
