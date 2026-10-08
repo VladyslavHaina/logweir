@@ -38,21 +38,7 @@ const SOURCE: &str = "orders";
 const TARGET: &str = "drill-orders";
 const SET: &str = "complete-verify-set";
 
-// ===================================================== an independent encoder
-
-/// CRC-32 (IEEE, reflected, the polynomial `crc32fast` and upstream use),
-/// bitwise, so the segments here owe nothing to the decoder's crate.
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in bytes {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
+// ===================================================== the archive's records
 
 #[derive(Clone, Debug)]
 struct Rec {
@@ -82,46 +68,22 @@ fn archived(offset: i64, ts: i64) -> Rec {
     }
 }
 
-fn put_opt(out: &mut Vec<u8>, v: &Option<Vec<u8>>) {
-    match v {
-        None => out.extend_from_slice(&(-1i32).to_le_bytes()),
-        Some(b) => {
-            out.extend_from_slice(&(b.len() as i32).to_le_bytes());
-            out.extend_from_slice(b);
-        }
-    }
-}
-
+/// The segment the backup would write for `records`: the shared fixture
+/// encoder (`fixtures::kbak_segment`), which encodes the documented layout
+/// independently of the decoder phase 7 reads it with.
 fn encode_segment(records: &[Rec]) -> Vec<u8> {
-    let mut body = Vec::new();
-    for r in records {
-        let mut rec = Vec::new();
-        rec.extend_from_slice(&r.ts.to_le_bytes());
-        rec.extend_from_slice(&r.offset.to_le_bytes());
-        put_opt(&mut rec, &r.key);
-        put_opt(&mut rec, &r.value);
-        rec.extend_from_slice(&(r.headers.len() as u16).to_le_bytes());
-        for (k, v) in &r.headers {
-            rec.extend_from_slice(&(k.len() as u16).to_le_bytes());
-            rec.extend_from_slice(k.as_bytes());
-            put_opt(&mut rec, v);
-        }
-        body.extend_from_slice(&(rec.len() as u32).to_le_bytes());
-        body.extend_from_slice(&rec);
-    }
-    let mut out = Vec::new();
-    out.extend_from_slice(b"KBAK");
-    out.push(1);
-    out.push(0);
-    out.extend_from_slice(&[0, 0]);
-    out.extend_from_slice(&(records.len() as u64).to_le_bytes());
-    out.extend_from_slice(&records.first().map_or(0, |r| r.offset).to_le_bytes());
-    out.extend_from_slice(&records.last().map_or(0, |r| r.offset).to_le_bytes());
-    out.extend_from_slice(&body);
-    let crc = crc32(&out);
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(b"BKAE");
-    out
+    let as_archived: Vec<ConsumedRecord> = records
+        .iter()
+        .map(|r| ConsumedRecord {
+            partition: 0,
+            offset: r.offset,
+            timestamp_ms: r.ts,
+            key: r.key.clone(),
+            value: r.value.clone(),
+            headers: r.headers.clone(),
+        })
+        .collect();
+    fixtures::kbak_segment(&as_archived)
 }
 
 // ================================================================ a fixture
@@ -158,25 +120,29 @@ impl Archive {
         self
     }
 
+    /// Under `logweir/` only because the in-memory double writes there and
+    /// nowhere else (Global Constraint 6); phase 7 reads a segment by the key
+    /// the manifest names, whatever its prefix.
     fn key(p: i32, seg: &[Rec]) -> String {
         format!(
-            "{SET}/topics/{SOURCE}/partition={p}/segment-{:020}.bin",
+            "logweir/{SET}/topics/{SOURCE}/partition={p}/segment-{:020}.bin",
             seg[0].offset
         )
     }
 
-    /// The store holding every segment — a directory, read through the
-    /// read-only handle phase 7 reads an archive with — and the manifest facts
-    /// describing them: first/last timestamps, as the engine writes them (S6).
+    /// The store holding every segment — the in-memory double, whose second
+    /// writer can REPLACE an object, as a corrupting writer would — and the
+    /// manifest facts describing them: first/last timestamps, as the engine
+    /// writes them (S6).
     fn build(&self) -> Built {
-        let dir = tempfile::tempdir().expect("a temporary archive directory");
+        let (store, bucket) = Store::in_memory_versioned("");
         let mut partitions = Vec::new();
         for (p, segs) in &self.parts {
             let mut facts = Vec::new();
             for seg in segs {
                 let bytes = encode_segment(seg);
                 let key = Archive::key(*p, seg);
-                write_object(dir.path(), &key, &bytes);
+                bucket.overwrite(&key, &bytes);
                 facts.push(SegmentFacts {
                     key,
                     start_offset: seg[0].offset,
@@ -210,11 +176,11 @@ impl Archive {
                 partitions,
             }],
         };
-        let store = Store::read_only_from_url(&StorageUrl::Filesystem {
-            path: dir.path().to_path_buf(),
-        })
-        .expect("a filesystem store over the archive directory");
-        Built { dir, store, facts }
+        Built {
+            bucket,
+            store,
+            facts,
+        }
     }
 
     /// The window floor the plan binds (guard G-WIN): the minimum FIRST
@@ -269,18 +235,12 @@ impl Archive {
     }
 }
 
-/// A built archive: the directory (kept alive), the store over it and the
-/// manifest facts.
+/// A built archive: the second writer on its bucket, the store phase 7
+/// reads it through, and the manifest facts.
 struct Built {
-    dir: tempfile::TempDir,
+    bucket: logweir_engine_oso::storage::VersionedBucket,
     store: Store,
     facts: BackupSetFacts,
-}
-
-fn write_object(root: &std::path::Path, key: &str, bytes: &[u8]) {
-    let path = root.join(key);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, bytes).unwrap();
 }
 
 /// The restored topic: the records each target partition holds, in target
@@ -758,11 +718,15 @@ fn a_corrupt_segment_outside_the_sample_fails_complete_and_passes_sampled() {
         target: case.archive.engine_output(case.end),
         ..case
     };
-    let Built { dir, store, facts } = case.archive.build();
+    let Built {
+        bucket,
+        store,
+        facts,
+    } = case.archive.build();
     let corrupt = facts.topics[0].partitions[1].segments[1].key.clone();
     let mut bytes = store.get(&corrupt).unwrap().0;
     bytes[40] ^= 0xFF;
-    write_object(dir.path(), &corrupt, &bytes);
+    bucket.overwrite(&corrupt, &bytes);
     let v = case
         .verify_with(&store, &facts, Coverage::Complete, None)
         .unwrap();
@@ -792,7 +756,7 @@ fn a_corrupt_segment_outside_the_sample_fails_complete_and_passes_sampled() {
 fn an_omitted_segment_fails_whether_the_store_or_the_target_lacks_it() {
     let case = healthy();
     let Built {
-        dir: _dir,
+        bucket: _bucket,
         store,
         mut facts,
     } = case.archive.build();
@@ -930,7 +894,7 @@ fn compaction_holes_pass_and_are_disclosed() {
     assert_eq!(block(&v).archive.offset_holes, 3);
     // A recorded gap over offset 8 explains one of them.
     let Built {
-        dir: _dir,
+        bucket: _bucket,
         store,
         mut facts,
     } = case.archive.build();
@@ -1013,7 +977,7 @@ fn an_archive_without_lineage_headers_is_not_compared() {
 fn a_segment_without_a_sha256_leaves_its_partition_unverified() {
     let case = healthy();
     let Built {
-        dir: _dir,
+        bucket: _bucket,
         store,
         mut facts,
     } = case.archive.build();
@@ -1031,7 +995,7 @@ fn a_segment_without_a_sha256_leaves_its_partition_unverified() {
 fn a_manifest_count_that_disagrees_with_the_decoded_segment_fails() {
     let case = healthy();
     let Built {
-        dir: _dir,
+        bucket: _bucket,
         store,
         mut facts,
     } = case.archive.build();
@@ -1077,7 +1041,7 @@ fn a_record_carrying_its_own_lineage_header_is_mapped_by_the_last() {
 fn the_target_is_read_whole_in_bounded_chunks() {
     let case = healthy();
     let Built {
-        dir: _dir,
+        bucket: _bucket,
         store,
         facts,
     } = case.archive.build();

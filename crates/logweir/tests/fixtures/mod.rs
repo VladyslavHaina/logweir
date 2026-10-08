@@ -858,6 +858,77 @@ pub enum Drill {
     /// `Passes`, and the signed scorecard lists `orders` under
     /// `source.time_basis.producer_time`.
     SelectsALogAppendTimeTopicByProducerTime,
+    /// **PROD-08.1.** The plan states `sample.coverage: complete`, and the
+    /// archive's one segment is a REAL KBAK segment holding exactly the 500
+    /// records the target holds: phase 7 hashes and decodes it, computes the
+    /// expected output from each record's own timestamp, reads all 500
+    /// restored records back and signs a covered, exact complete block.
+    VerifiesCompletely,
+    /// **PROD-08.1.** `VerifiesCompletely`, with one restored record (the
+    /// 300th, far past the 25-record canary a sampled drill reads) changed on
+    /// the target: the complete lane counts it and the drill fails.
+    VerifiesCompletelyAndFindsAChangedRecord,
+}
+
+/// **PROD-08.1.** CRC-32 (IEEE, reflected), bitwise: the KBAK footer's
+/// checksum, computed here without the decoder's crate.
+pub fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// **PROD-08.1.** An uncompressed KBAK v1 segment holding `records` in
+/// order, encoded from the layout `segment/format.rs:18-46` documents
+/// (`crates/logweir-engine-oso/src/kbak.rs` reads it): a 32-byte header,
+/// length-prefixed records, a CRC-32 and the end magic. Each record is
+/// archived as it is given — its `offset` is the source offset, its headers
+/// exactly its headers.
+pub fn kbak_segment(records: &[ConsumedRecord]) -> Vec<u8> {
+    fn opt(out: &mut Vec<u8>, v: &Option<Vec<u8>>) {
+        match v {
+            None => out.extend_from_slice(&(-1i32).to_le_bytes()),
+            Some(b) => {
+                out.extend_from_slice(&(b.len() as i32).to_le_bytes());
+                out.extend_from_slice(b);
+            }
+        }
+    }
+    let mut body = Vec::new();
+    for r in records {
+        let mut rec = Vec::new();
+        rec.extend_from_slice(&r.timestamp_ms.to_le_bytes());
+        rec.extend_from_slice(&r.offset.to_le_bytes());
+        opt(&mut rec, &r.key);
+        opt(&mut rec, &r.value);
+        rec.extend_from_slice(&(r.headers.len() as u16).to_le_bytes());
+        for (k, v) in &r.headers {
+            rec.extend_from_slice(&(k.len() as u16).to_le_bytes());
+            rec.extend_from_slice(k.as_bytes());
+            opt(&mut rec, v);
+        }
+        body.extend_from_slice(&(rec.len() as u32).to_le_bytes());
+        body.extend_from_slice(&rec);
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"KBAK");
+    out.push(1);
+    out.push(0);
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&(records.len() as u64).to_le_bytes());
+    out.extend_from_slice(&records.first().map_or(0, |r| r.offset).to_le_bytes());
+    out.extend_from_slice(&records.last().map_or(0, |r| r.offset).to_le_bytes());
+    out.extend_from_slice(&body);
+    let crc = crc32_ieee(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(b"BKAE");
+    out
 }
 
 pub const FIXTURE_CLUSTER_ID: &str = "MkU3OEVBNTcwNTJENDM2Qk";
@@ -1299,6 +1370,17 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         ),
         _ => String::new(),
     };
+    // PROD-08.1: the complete shapes ask for complete coverage; every other
+    // shape's spec bytes are what they were.
+    let completely = matches!(
+        shape,
+        Drill::VerifiesCompletely | Drill::VerifiesCompletelyAndFindsAChangedRecord
+    );
+    let coverage_line = if completely {
+        "  coverage: complete\n"
+    } else {
+        ""
+    };
     let spec_text = format!(
         "source:\n  \
            storage:\n    backend: filesystem\n    path: /logweir-fixture-archive\n  \
@@ -1316,6 +1398,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
            window_end: \"{FIXTURE_WINDOW_END}\"\n  \
            records_per_partition: {FIXTURE_SAMPLE_RECORDS}\n  \
            anchor: head\n\
+         {coverage_line}\
          objectives:\n  rto_seconds: 900\n  rpo_seconds: 300\n  pass_rate: 1.0\n\
          evidence:\n  backend: filesystem\n  path: /logweir-fixture-evidence\n\
          notifications:\n  webhooks: []\n"
@@ -1461,6 +1544,24 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         );
     }
 
+    // PROD-08.1: the complete shapes' archive is a REAL segment of exactly
+    // the records the target holds, under its own key, and the manifest
+    // describes it: its sha256, its 500 records, its offsets. Phase 7's
+    // complete lane decodes it and compares every restored record with it.
+    if completely {
+        let bytes = kbak_segment(&records);
+        let key = "logweir/fixture-archive/orders/0/complete.kbak";
+        archive.put_create_only(key, &bytes).unwrap();
+        let seg = &mut facts.topics[0].partitions[0].segments[0];
+        seg.key = key.into();
+        seg.sha256 = logweir_core::ids::sha256_prefixed(&bytes);
+        seg.start_offset = 0;
+        seg.end_offset = FIXTURE_WINDOW_RECORDS - 1;
+        seg.record_count = FIXTURE_WINDOW_RECORDS;
+        if shape == Drill::VerifiesCompletelyAndFindsAChangedRecord {
+            records[300].value = Some(b"changed on the target".to_vec());
+        }
+    }
     let mut engine = FixtureEngine::new(facts, fps);
     let replacement_signing_key = if shape == Drill::RotatesSigningKey {
         let replacement = SigningKey::generate_p256();
@@ -1504,6 +1605,10 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         | Drill::SelectsAtAPoint
         | Drill::SelectsALogAppendTimeTopicAtAPoint
         | Drill::SelectsALogAppendTimeTopicByProducerTime
+        // PROD-08.1. The engine is the passing one: the variables are the
+        // plan's coverage, the real segment and the one changed record.
+        | Drill::VerifiesCompletely
+        | Drill::VerifiesCompletelyAndFindsAChangedRecord
         | Drill::LeavesATopicBehind => {}
     }
 
