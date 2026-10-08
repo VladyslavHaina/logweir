@@ -62,16 +62,21 @@ jq -r 'select(.level=="ERROR") | .fields.run_id' drill.log
 
 ## 2. Image architecture
 
-The pinned engine and runner are `linux/amd64`. The controller must be built
+All four images are built for `linux/amd64` and `linux/arm64`. The runner
+joined arm64 with PROD-00.2: its engine is Logweir's build of the vendored OSO
+source, cross-compiled for each platform, where OSO publishes its own binary
+for amd64 only. An arm64 node runs the runner natively, so a runner Job needs
+no particular node architecture (the chart's node-placement values still do
+not propagate to controller-created Jobs). The controller must be built
 natively for its target architecture; `Dockerfile.weirkeeper` refuses
 cross-architecture builds because its `aws-lc-sys` build needs native headers.
-See [install.md](install.md) for the build and registry paths.
+See [install.md](install.md) for the build and registry paths, and for the
+amd64-only engine rollback (`ENGINE_SOURCE=oso`), whose Jobs need amd64 nodes.
 
-Docker Desktop's local image store allowed the amd64 runner on the author's
-arm64 host after a host-side pull. This does not generalize to an arm64 `kind`
-node: its CRI image service did not expose the loaded amd64 image. Use amd64
-runner nodes for a deployment; the chart's node-placement values do not yet
-propagate to controller-created Jobs.
+Runner images published before PROD-00.2 are amd64-only. Docker Desktop's
+local image store allowed such a runner on the author's arm64 host after a
+host-side pull; this does not generalize to an arm64 `kind` node, whose CRI
+image service did not expose the loaded amd64 image.
 
 For local images, `imagePullPolicy: Never` requires the exact reference to be
 loaded on the node. `ErrImageNeverPull` can mean a missing reference or an

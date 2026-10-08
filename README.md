@@ -91,11 +91,11 @@ Each release's notes give the requirement measured on its own binaries. An
 approver countersigns a Governed restore with `logweir drill countersign` from
 the archive for their own machine; their key never leaves it.
 
-The standalone binary does not bundle the engine. Configure the pinned
-`kafka-backup` binary through `PATH` or `LOGWEIR_ENGINE_BIN`, together with
-`LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST`, as described in the
-[quickstart](docs/quickstart.md). The runner image bundles both binaries and
-requires `linux/amd64`; build instructions are in
+The standalone binary does not bundle the engine. Configure Logweir's build
+of the `kafka-backup` engine through `PATH` or `LOGWEIR_ENGINE_BIN`, together
+with `LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST`, as described in the
+[quickstart](docs/quickstart.md). The runner image bundles both binaries, for
+`linux/amd64` and `linux/arm64`; build instructions are in
 [the installation guide](docs/install.md).
 
 ## How it works
@@ -114,10 +114,12 @@ A successful signature does not establish who controlled the signing key or
 prove the unsampled portion of the archive. Read the
 [verification guide](docs/verify-a-scorecard.md) before relying on a result.
 
-Logweir does not link upstream's core or consume OSO operator CRDs. It
-redistributes the MIT-licensed pinned engine, with its source and attribution
-in [third_party](third_party/README.md). The pinned engine is `kafka-backup`
-0.23.3 and the full-drill engine floor is 0.21.0;
+Logweir does not link upstream's core or consume OSO operator CRDs. It builds
+the MIT-licensed engine from the vendored source with its own patch folder and
+redistributes it, with the source and attribution in
+[third_party](third_party/README.md). The engine the images ship is Logweir's
+build of `kafka-backup` 0.23.3 (`0.23.3+logweir.1`) and the full-drill engine
+floor is 0.21.0;
 [the support matrix](docs/support-matrix.md) distinguishes exercised versions
 from unsupported or untested ones. The engine's own `validation run` is not
 invoked by the current adapter, so `engine_subreport` remains null.

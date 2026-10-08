@@ -1044,15 +1044,17 @@ only to a newer reviewed runner digest whose `identity bootstrap` and
 `identity distribute` arguments match these templates, then rerun
 `just chart-check`.
 
-**The bootstrap image is amd64-only, like every runner image.** The hook Jobs
-execute the runner binary, so on an arm64 node without amd64 emulation their
-container fails with `exec format error`, `helm install --wait` reports the
-failed post-install hook, and no identity is written. Docker Desktop on Apple
-silicon emulates amd64 and runs it. On a mixed-architecture cluster schedule the
-hooks with `kubernetes.nodeSelector: {kubernetes.io/arch: amd64}` (set
+**The pinned bootstrap image is amd64-only.** It is a runner published before
+PROD-00.2, which made the runner multi-platform (linux/amd64 and linux/arm64).
+The hook Jobs execute the runner binary, so on an arm64 node without amd64
+emulation their container fails with `exec format error`, `helm install --wait`
+reports the failed post-install hook, and no identity is written. Docker
+Desktop on Apple silicon emulates amd64 and runs it. Until the pin moves to a
+runner published since PROD-00.2, schedule the hooks on a mixed-architecture
+cluster with `kubernetes.nodeSelector: {kubernetes.io/arch: amd64}` (set
 `controller.nodeSelector` explicitly if the controller should run elsewhere).
-Runner Jobs have no placement path yet (*Node placement* below), so Logweir's
-data plane needs amd64-capable nodes either way.
+Runner Jobs have no placement path yet (*Node placement* below); a runner image
+published since PROD-00.2 runs on either architecture.
 
 **What a mutable tag does not promise.** The bytes behind `:latest` can change
 under you: the same reference can resolve to different content tomorrow, on a

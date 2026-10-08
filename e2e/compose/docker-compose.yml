@@ -279,11 +279,11 @@ services:
       echo 'buckets ready';
       "
 
-  # The engine, PINNED BY DIGEST — never by tag (Global Constraint 7).
-  # Global Constraint 14 forbids Logweir from PUBLISHING its own artifacts under
-  # `osodevops/`; pulling upstream's published image to extract the pinned engine
-  # binary is required by Global Constraints 7, 8, 10 and 15 and is not a
-  # violation (controller ruling GR6).
+  # OSO's released engine, PINNED BY DIGEST — never by tag (Global Constraint
+  # 7). It seeds the drill archive. Global Constraint 14 forbids Logweir from
+  # PUBLISHING its own artifacts under `osodevops/`; pulling upstream's image is
+  # not a violation. What the images ship, and what CI's e2e job runs through
+  # `logweir`, is Logweir's build of the same source (OD-3, PROD-00.2).
   kafka-backup:
     image: osodevops/kafka-backup@${OSO_DIGEST}
     # Upstream publishes linux/amd64 ONLY — no arm64 manifest exists for any

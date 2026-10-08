@@ -55,8 +55,9 @@ them can approve their own restore, or enforce a deletion plan they wrote.
 
 ### 1. Install
 
-1. Check the floors: Kubernetes 1.29+, amd64-capable nodes for runner Jobs, and
-   engine 0.21.0, with 0.23.3 the pinned engine the images ship
+1. Check the floors: Kubernetes 1.29+, amd64 or arm64 nodes, and engine
+   0.21.0, with Logweir's build of 0.23.3 (`0.23.3+logweir.1`) the engine the
+   images ship
    ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
 2. Choose images: the published digests of the exact CI run you deploy, not
    `latest` ([install.md](install.md), *Choose an image and installation path*).

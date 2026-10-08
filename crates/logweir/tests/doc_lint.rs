@@ -1669,6 +1669,12 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// the notes at main's `a00ae659`, with twenty-eight items, fail the
 /// twenty-nine pin (PROD-16.1, item 25 when first written, renumbered
 /// after FX-13, FX-11, FX-8 and PROD-00.3f, 2026-10-08).
+///
+/// Then to thirty: item 30 is PROD-00.2, the engine built from the vendored
+/// source (`0.23.3+logweir.1`), the runner on arm64 and signed images. Its
+/// token is the one-release rollback's build argument, so an item 30 that
+/// stops telling an operator how to get OSO's binary back fails here; the
+/// notes at main's `2fe8d907`, with twenty-nine items, fail the thirty pin.
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1694,9 +1700,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=29).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-nine operator-facing changes, `#### 1.` \
-         to `#### 29.` in order; found {numbers:?}"
+        (1..=30).collect::<Vec<u32>>(),
+        "the release entry must carry exactly thirty operator-facing changes, `#### 1.` \
+         to `#### 30.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1774,6 +1780,12 @@ fn the_release_notes_carry_every_owed_operator_action() {
         // PROD-16.1 (2026-10-07): no approver key by default, and the marker
         // an upgrade never reaches.
         ("no approver key by default", "logweir.dev/approval-default"),
+        // PROD-00.2 (2026-10-08): Logweir's build of the engine, both
+        // platforms, signed; and the build argument that rolls the engine back.
+        (
+            "the engine is built from the vendored source",
+            "ENGINE_SOURCE=oso",
+        ),
     ]) {
         assert!(
             body.contains(token),

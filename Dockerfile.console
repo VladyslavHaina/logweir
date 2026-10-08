@@ -2,8 +2,8 @@
 #
 # IT IS THE FOURTH IMAGE IN THIS TREE AND IT IS NOT A VARIANT OF ANY OF THEM:
 #
-#   `Dockerfile`             the runner: two binaries, the extracted OSO engine,
-#                            an amd64-only ELF, librdkafka and its SASL/TLS libraries.
+#   `Dockerfile`             the runner: two binaries, Logweir's build of the OSO
+#                            engine, librdkafka and its SASL/TLS libraries.
 #   `Dockerfile.weirkeeper`  the controller: one binary, `ca-certificates`, nothing else.
 #   `Dockerfile.ui`          the LEGACY LOCAL ADMIN PROXY's page: a `COPY` of twenty-six
 #                            static files over a kubectl the Kubernetes project publishes.
