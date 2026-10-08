@@ -258,6 +258,7 @@ for e in entries:
 PYEOF
 
 receipt_count=0
+receipt_tb_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
     receipt_count=$((receipt_count + 1))
@@ -321,9 +322,11 @@ $py_cov"
         fi
         # FX-8: both readers name each topic whose recorded effective
         # `message.timestamp.type` is LogAppendTime — its covered window is the
-        # producers' time — in the SAME `time basis:` lines. The one accepted
-        # case with such a topic must print its line, and every other accepted
-        # case none, so a reader that dropped the lines cannot pass by silence.
+        # producers' time — in the SAME `time basis:` lines, one per such topic
+        # in name order. The expected topics are read from the DOCUMENT, not
+        # from the case's name, so a case added later is held to it too; and
+        # at least one accepted case must carry such a topic (below), so a
+        # reader that dropped the lines cannot pass by silence.
         rust_tb="$(grep -oE 'time basis: .*' "$tmp/rust.all" || true)"
         py_tb="$(grep -oE 'time basis: .*' "$tmp/py.all" || true)"
         if [ "$rust_tb" != "$py_tb" ]; then
@@ -333,14 +336,20 @@ $rust_tb
   python:
 $py_tb"
         fi
-        case "$name" in
-            receipt_1_1_with_config_coverage)
-                case "$rust_tb" in
-                    'time basis: "orders" is LogAppendTime'*) : ;;
-                    *) fail "$name: expected a time-basis line for its LogAppendTime topic \"orders\", got: $rust_tb" ;;
-                esac ;;
-            *) [ -z "$rust_tb" ] || fail "$name: a receipt with no LogAppendTime topic printed: $rust_tb" ;;
-        esac
+        want_tb="$("$PY" -c 'import json, sys
+cov = json.load(open(sys.argv[1])).get("config_coverage") or {}
+for t in sorted(cov):
+    if ((cov[t] or {}).get("timestamp_type") or {}).get("value") == "LogAppendTime":
+        print("time basis: " + json.dumps(t) + " is LogAppendTime")' "$doc")"
+        got_tb="$(printf '%s\n' "$rust_tb" | sed -n 's/^\(time basis: ".*" is LogAppendTime\).*/\1/p')"
+        if [ "$got_tb" != "$want_tb" ]; then
+            fail "$name: the time-basis lines do not name exactly the receipt's LogAppendTime topics.
+  want:
+$want_tb
+  got:
+$rust_tb"
+        fi
+        [ -z "$want_tb" ] || receipt_tb_cases=$((receipt_tb_cases + 1))
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -348,6 +357,9 @@ done <<< "$(cat "$tmp/receipt-cases.tsv")"
 
 if [ "$receipt_count" -eq 0 ]; then
     fail "walked zero backup-receipt cases; e2e/fixtures/invariants/backup-receipt-index.json is empty or unreadable"
+fi
+if [ "$receipt_tb_cases" -eq 0 ]; then
+    fail "no accepted backup-receipt case records a LogAppendTime topic, so the time-basis lines (FX-8) were never compared"
 fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
 
