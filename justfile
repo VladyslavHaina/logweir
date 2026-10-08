@@ -112,14 +112,20 @@ golden:
 # `-1.2.0.json` are frozen beside the new files; this build still writes those
 # versions for every `plaintext` and `scramSha512` run.
 #
+# FX-23 moved the scorecard to 1.6.0 (`sample.unsampled_topics`), and
+# PROD-01.3's `-1.5.0.json` is frozen beside the new file the same way
+# (`the_frozen_1_5_0_scorecard_schema_does_not_describe_unsampled_topics`);
+# this build writes 1.6.0 for every sampled-lane scorecard, and 1.4.0/1.5.0
+# for a complete verification's.
+#
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
-# (`scorecard::FORMAT_VERSION_WITH_AUTH_MODES`,
+# (`scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`,
 # `backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES`,
 # `catalog::record::FORMAT_VERSION_WITH_AUTH_MODES`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
-scorecard_schema_version := "1.5.0"
+scorecard_schema_version := "1.6.0"
 receipt_schema_version := "1.4.0"
 catalog_schema_version := "1.4.0"
 

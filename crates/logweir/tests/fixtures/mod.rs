@@ -732,6 +732,7 @@ impl DataEngine for SleepEngine {
             finished_at: Utc::now(),
             exit_code: 0,
             unknown_key_warnings: vec![],
+            engine_report: logweir_core::engine::EngineReport::Absent,
         })
     }
     fn fingerprints(&self, _s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
@@ -869,6 +870,14 @@ pub enum Drill {
     /// 300th, far past the 25-record canary a sampled drill reads) changed on
     /// the target: the complete lane counts it and the drill fails.
     VerifiesCompletelyAndFindsAChangedRecord,
+    /// **FX-23.** `Passes` in every respect, except that the engine's offset
+    /// report names NO entry: the report an engine leaves when a SIGTERM
+    /// stopped it before it finished `orders` (it exits 0, and writes the
+    /// report from its `Ok` arm). Phase 7 refuses it, `fail-integrity`, on the
+    /// report alone: the sample reconciles, the count is inside its bound and
+    /// every objective is met, so a non-pass here can only come from the
+    /// orchestrator handing phase 7 the report phase 6 read.
+    EngineReportLacksTheTopic,
     /// **PROD-11.1.** `Passes`, with the approved plan stating a replay
     /// selection the archive satisfies: `restore.partitions: {orders: [0]}`.
     StatesAPartitionSelection,
@@ -1101,6 +1110,9 @@ pub struct FixtureEngine {
     /// Optional replacement written during `restore`, after signer validation
     /// and before scorecard/receipt/teardown persistence.
     pub signing_key_rotation: Option<(PathBuf, String)>,
+    /// FX-23: what `restore` reports the engine's offset report said.
+    /// `Absent` (no report) unless a test moves it.
+    pub engine_report: logweir_core::engine::EngineReport,
 }
 
 impl FixtureEngine {
@@ -1122,6 +1134,7 @@ impl FixtureEngine {
             fingerprint_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             restored: std::sync::Arc::new(std::sync::Mutex::new(false)),
             signing_key_rotation: None,
+            engine_report: logweir_core::engine::EngineReport::Absent,
         }
     }
 }
@@ -1196,6 +1209,7 @@ impl DataEngine for FixtureEngine {
             finished_at: Utc::now(),
             exit_code: 0,
             unknown_key_warnings: self.restore_unknown_keys.clone(),
+            engine_report: self.engine_report.clone(),
         })
     }
     fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
@@ -1585,6 +1599,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             engine.digest = String::new();
         }
         Drill::IgnoresTheHeaderLever => engine.header_honoured = false,
+        Drill::EngineReportLacksTheTopic => {
+            engine.engine_report = logweir_core::engine::EngineReport::Read(Default::default());
+        }
         Drill::DropsARenderedKeyDuringRestore => {
             engine.preflight_unknown_keys = vec!["restore.header_preflight".into()];
             engine.restore_unknown_keys = vec!["restore.checkpoint_interval_secs".into()];

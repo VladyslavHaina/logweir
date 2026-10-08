@@ -261,7 +261,16 @@ Optional. **How much of the restore phase 7 verifies.**
 - **`sampled`** (the default, and every plan written before the field): the
   first `records_per_partition` records of each sampled partition, reconciled
   by a fingerprint that sorts headers; the sha256 of the segments those
-  records came from; and the archive manifest's count bound for the window.
+  records came from; the archive manifest's count bound for the window, for
+  the whole restore and (since FX-23) for every mapped partition on its own;
+  and the engine's offset report, which must name every mapped partition the
+  manifest proves holds records in the window. `sample.max_partitions`, when
+  set, caps how many partitions are sampled: since FX-23 it keeps one
+  partition of every restored topic first (round-robin, in manifest order) and
+  a second of any only after that, and the scorecard names the topics it could
+  not reach in `sample.unsampled_topics` (format 1.6.0). Before FX-23 it kept
+  the first N partitions in manifest order
+  ([what a sampled pass guarantees](../verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
 - **`complete`**: every archived segment of every partition of every restored
   topic is read, its sha256 checked against the manifest and its records
   decoded; the expected output is every archived record whose OWN timestamp
@@ -290,8 +299,7 @@ silently replaced by sampling.** Absent means no bound.
 **Refused at phase 0** (exit 3, before anything runs), because each asks for
 two verifications at once:
 
-- `coverage: complete` with `max_partitions`, which keeps the first N
-  partitions;
+- `coverage: complete` with `max_partitions`, which keeps only N partitions;
 - `complete_max_records` with `coverage: sampled` (or no `coverage`);
 - `complete_max_records: 0`.
 

@@ -422,8 +422,9 @@ pub fn run(
     // and each is refused HERE, before anything runs, rather than run as one
     // of them: a verification the approved plan did not describe would be
     // signed as if it had.
-    // - `complete` with `max_partitions`: the latter keeps the FIRST N
-    //   partitions, the sampling complete coverage exists to remove.
+    // - `complete` with `max_partitions`: the latter keeps N partitions (one
+    //   of every topic first, FX-23), the sampling complete coverage exists to
+    //   remove.
     // - `complete_max_records` with `sampled`: a bound on a verification the
     //   plan did not ask for.
     // - `complete_max_records: 0`: a complete verification that may decode
@@ -436,7 +437,7 @@ pub fn run(
         (Coverage::Complete, Some(n), _) => {
             return Err(GuardRefusal(format!(
                 "sample.coverage is `complete` and sample.max_partitions is {n}. \
-                 max_partitions keeps the first {n} partitions, and a complete verification \
+                 max_partitions keeps only {n} partitions, and a complete verification \
                  checks every partition of every restored topic; remove one of the two. \
                  Refusing rather than verifying a subset under a plan that asked for all of it."
             ))
@@ -1263,7 +1264,7 @@ mod tests {
                 &[
                     "sample.coverage",
                     "sample.max_partitions",
-                    "first 2 partitions",
+                    "keeps only 2 partitions",
                 ],
             ),
             (

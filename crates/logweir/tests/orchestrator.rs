@@ -1086,7 +1086,12 @@ fn each_phases_result_reaches_the_signed_document() {
     // FX-3: a SCRATCH drill's deviations are intended (above), and phase 7
     // makes the 1.2.0 claim that nothing was left unreconstructed.
     assert_eq!(sc.topic_parity.not_reconstructed, Some(vec![]));
-    assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
+    // FX-23: every SAMPLED document is 1.6.0, so the version marks a build
+    // with FX-23's checks; a complete one stays 1.4.0 (below).
+    assert_eq!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
+    );
     // FX-8: the fixture's plan states no point in time and its sample window
     // ends on the archive's newest timestamp, so nothing was selected by time:
     // the block is WRITTEN (1.3.0's claim) and both lists are empty.
@@ -1125,7 +1130,12 @@ fn a_new_topic_run_signs_its_lost_source_settings_as_not_reconstructed() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.target.mode, logweir_core::spec::TargetMode::NewTopic);
-    assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
+    // FX-23: every SAMPLED document is 1.6.0, so the version marks a build
+    // with FX-23's checks; a complete one stays 1.4.0 (below).
+    assert_eq!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
+    );
     assert!(
         sc.topic_parity.intentionally_deviated.is_empty(),
         "a newTopic restore signs nothing as intended: {:?}",
@@ -1794,7 +1804,12 @@ fn the_producer_time_opt_in_runs_and_the_signed_scorecard_says_so() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.outcome, Outcome::Pass);
-    assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
+    // FX-23: every SAMPLED document is 1.6.0, so the version marks a build
+    // with FX-23's checks; a complete one stays 1.4.0 (below).
+    assert_eq!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
+    );
     assert_eq!(
         sc.source.time_basis,
         Some(logweir_core::scorecard::TimeBasisLabel {
@@ -2262,6 +2277,8 @@ fn a_complete_coverage_plan_signs_a_covered_exact_complete_block() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.outcome, Outcome::Pass);
+    // FX-23: a complete verification keeps the version it always had; only a
+    // sampled one is 1.6.0.
     assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
     let v = sc
         .integrity

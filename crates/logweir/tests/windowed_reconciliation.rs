@@ -581,28 +581,45 @@ const BOUND_FAILURE: &str = "restored 5800 records but the manifest bounds the w
                              [1788220800000, 1788264000000] at [5900, 6000]";
 
 /// **Guard G-WIN, second half.** A manifest whose segments bound `[5900, 6000]`
-/// over `[floor, pit]`:
+/// over `[floor, pit]` for the whole drill, and `[5901, 6000]` for its one
+/// partition (FX-23: the straddling segment's FIRST record is inside the
+/// window, so it is restored):
 ///
 /// - a target holding **6000** passes — the UPPER edge, and the mutant
-///   "make the assertion an equality against `lower`" fails here (`6000 != 5900`),
+///   "make the assertion an equality against `lower`" fails here (`6000 != 5901`),
 ///   which is what proves the bound is not an equality in disguise;
-/// - a target holding **5900** passes — the LOWER edge;
+/// - a target holding **5901** passes — the partition's LOWER edge;
 /// - a target holding **5950** passes — strictly inside;
+/// - a target holding **5900** is inside the SUM's bound and outside the
+///   partition's: `fail-integrity`, naming the partition (FX-23);
 /// - a target holding **5800** is `fail-integrity`, exit **2**, with the exact
 ///   failure text, and the scorecard is still written and signed (GC11).
 #[test]
 fn restored_count_is_inside_the_manifest_bound() {
-    for restored in [5900i64, 5950, 6000] {
+    for restored in [5901i64, 5950, 6000] {
         let out = run_with_restored_count(restored);
         assert_eq!(
             out.integrity.result,
             IntegrityResult::Pass,
-            "{restored} is inside [5900, 6000] and the reconciliation matched 50/50; \
+            "{restored} is inside [5901, 6000] and the reconciliation matched 50/50; \
              got {:?}",
             out.integrity
         );
         assert_eq!(out.integrity.records_sampled_matching, 50);
     }
+
+    // FX-23: one short of the partition's lower edge. The sum's bound says
+    // nothing (5900 is inside [5900, 6000]); the partition's names the gap.
+    let out = run_with_restored_count(5900);
+    assert_eq!(out.integrity.result, IntegrityResult::Fail);
+    assert_eq!(
+        out.integrity.partial_reason.as_deref(),
+        Some(
+            "orders/0: drill-orders/0 holds 5900 records but the manifest bounds this \
+             partition's window [1788220800000, 1788264000000] at [5901, 6000]"
+        ),
+        "the per-partition bound, alone: the sum is inside its own"
+    );
 
     // Below the lower bound: the manifest PROVES 5900 records are in the
     // window and the target holds 5800.
