@@ -391,6 +391,68 @@ documents — the backup receipt's `source.auth.mode` and the scorecard's
   An older controller and runner ignore the binding pair; a bound Secret keeps
   working with them.
 
+### Scorecard format 1.6.0: `sample.unsampled_topics`, and a stricter sampled check (FX-23)
+
+FX-23 closes a false `pass`: an engine stopped by a SIGTERM finishes the topic
+it is on, exits 0 and never starts the rest, and the default sampled check
+signed `pass` over that restore whenever `sample.max_partitions` truncated the
+sample to the topics that finished and the one aggregate count bound had slack
+(PROD-07.1's review, H1; measured live on the compose stack). Three changes, each only to the safer
+side:
+
+- **The count bound is held per mapped partition** as well as summed, and a
+  segment the window cuts across proves one record when its first or last
+  record's timestamp is inside the window. A new cause for the existing
+  `fail-integrity` (OD-7's third case). A correct restore of an archive whose
+  record timestamps do not run backwards within a segment cannot fail it: the
+  engine restores every record whose own timestamp is in the window into the
+  same partition, and the manifest's segment timestamps are its first and last
+  records'. When they do run backwards (several producers with skewed clocks,
+  `CreateTime`), a record older than every segment's first record is dropped by
+  every restore of that archive
+  ([the limitation](#recovery-point-selection-uses-segment-first-and-last-timestamps)),
+  and the per-partition bound now fails that restore where the sum's slack
+  across sibling partitions used to absorb it; so does a duplicate from the
+  engine's non-idempotent producer. Both pre-exist for the sum, and failing is
+  the safer verdict. One test moved with it: a 5,900-record target against a manifest
+  proving 5,901 (`windowed_reconciliation.rs`) was a pass and is now a fail.
+- **Phase 7 reads the engine's offset report** — streaming, keeping only its
+  partition entries and skipping the per-record `detailed_mappings` section
+  as it passes, so memory does not grow with the restore — and fails a restore
+  whose report has no entry for a mapped partition the manifest proves holds
+  records in the window — another new cause for `fail-integrity`. The report is only
+  ever a NEGATIVE signal: an entry vouches for nothing, and a missing or
+  unreadable report checks nothing (logged). The engine adapter removes a
+  report already at the path before the engine runs, so an earlier run's file
+  (a reused `--offset-report-out`) is never read or uploaded as this run's.
+- **`sample.max_partitions` keeps one partition of every topic first**
+  (round-robin across topics in manifest order) instead of the first N in
+  manifest order, and the scorecard names the topics it could not reach in the
+  new optional **`sample.unsampled_topics`**, format **1.6.0**
+  (`schemas/logweir-drill-scorecard-1.6.0.json`, with PROD-01.3's 1.5.0 frozen
+  beside it; [the format](formats/drill-scorecard.md#sampleunsampled_topics-format-160)).
+  Every SAMPLED-lane scorecard this build signs is 1.6.0, named topics or not;
+  a complete verification's is the 1.4.0 or 1.5.0 one it was. Three arms, US-1 to US-3, read only that field (US-3
+  judges it against `integrity.verification.coverage`, as IV-6 judges
+  `integrity.result`) and can only refuse: MINOR under OD-7 (a). The corpus and
+  the parity gate re-prove them on every `just lint`; `verify_scorecard.py` is
+  1.22.0.
+- **1.6.0 marks the build (review M2; the orchestrator's decision,
+  2026-10-08).** Because every sampled scorecard this build signs is 1.6.0, a
+  1.6.0-or-later sampled `pass` proves these checks ran, and a sampled 1.4.0 or
+  1.5.0 `pass` comes from an earlier build and proves what it always proved.
+  Both readers print a `sample coverage:` line for every sampled `pass` saying
+  which. Every sampled document changes version, from 1.4.0 (or 1.5.0) to
+  1.6.0, and nothing else in it changes: a reader that predates 1.6.0 reads
+  it exactly as before (same major, an optional field it ignores).
+- **Readers built before FX-23** accept every 1.6.0 document — the major is
+  unchanged and the field is nested and optional — and print nothing about
+  the topics the sample left out.
+- **Rollback.** An older `logweir` samples the first N partitions again, judges
+  one aggregate bound, ignores the engine report and writes no 1.6.0 document;
+  the 1.6.0 documents already written stay valid under both readers. Its
+  `pass` over an early-stopped restore is the defect this section closes.
+
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
@@ -2288,10 +2350,12 @@ both readers accepting the signed result. This covers the repaired
 reconciliation bug where a segment straddling the recovery point used to
 inflate the minimum number of records the window must contain.
 
-The current lower bound counts only segments **wholly inside** the window;
+The aggregate lower bound counts only segments **wholly inside** the window;
 straddling segments contribute only to the upper bound. All three fixture
 segments straddle `T`, so the count bound is **[0, 9]** and six restored
-records fit it. Each partition reports `claimed=0`, one verified segment and
+records fit it. Since FX-23 each partition is also held to its own bound, and a
+straddling segment whose first record (`T − 1 ms`) is inside the window proves
+that one record: **[1, 3]** per partition, which two restored records fit. Each partition reports `claimed=0`, one verified segment and
 two verified records. The payload set proves the inclusive boundary; the
 manifest's segment-level counts establish a bound, not exact equality.
 

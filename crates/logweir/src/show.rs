@@ -368,6 +368,22 @@ fn qualifiers(sc: &Scorecard) -> String {
         "    integrity.verification    {}\n",
         verification_qualifier(sc.integrity.verification.as_ref())
     ));
+    // FX-23: the topics a sampled verification's `max_partitions` left without
+    // a sampled partition (scorecard 1.6.0). A qualifier in this footer's
+    // sense — the `integrity` row reads `pass` either way — and printed only
+    // when the document names one, so every other table is unchanged.
+    if let Some(topics) = sc
+        .sample
+        .unsampled_topics
+        .as_deref()
+        .filter(|t| !t.is_empty())
+    {
+        o.push_str(&format!(
+            "    sample.unsampled_topics   {} — no partition sampled (max_partitions); \
+             counted, not reconciled\n",
+            topics.join(", ")
+        ));
+    }
     o.push_str(&format!(
         "    redactions                {}\n",
         redactions_line(&sc.redactions)

@@ -2100,6 +2100,98 @@ fn a_whole_drill_outside_the_manifest_bound_signs_fail_integrity_and_both_reader
 }
 
 // ---------------------------------------------------------------------------
+// FX-23 (c): the engine's offset report, through the orchestrator and both
+// readers.
+
+/// **FX-23 (c), the wiring.** One whole drill — every phase, over the doubles —
+/// that is `Drill::Passes` in every respect except the engine's offset report,
+/// which names no entry: the report an engine leaves when a SIGTERM stopped it
+/// before it finished `orders`. The drill signs `fail-integrity`, exit **2**,
+/// with the report's finding as the WHOLE `partial_reason`, and both readers
+/// accept the signed bytes.
+///
+/// The sample reconciles 25/25, the count is inside its bound and every
+/// objective is met, so the non-pass can only come from the report reaching
+/// phase 7. KILLS: the orchestrator handing phase 7 `EngineReport::Absent` (or
+/// calling `run_with_coverage`) instead of what phase 6 read, and phase 6
+/// dropping `RestoreFacts.engine_report`.
+#[test]
+fn a_whole_drill_whose_engine_report_lacks_the_topic_signs_fail_integrity() {
+    let py = require_python();
+    let f = fixtures::orchestrator_fixture(fixtures::Drill::EngineReportLacksTheTopic);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx)
+        .expect_err("a report that lacks a mapped topic must never report success");
+    let sc = match &err {
+        DrillError::NotPass(sc, _) => sc.clone(),
+        other => {
+            panic!("a report finding is a drill RESULT, never an operational failure: {other:?}")
+        }
+    };
+    assert_eq!(sc.objectives.met, Some(true), "{:?}", sc.objectives);
+    assert_eq!(sc.integrity.mismatches, 0);
+    assert_eq!(sc.integrity.records_sampled_matching, 25);
+    assert_eq!(sc.integrity.result, IntegrityResult::Fail);
+    assert_eq!(ExitCode::from(err) as i32, 2);
+
+    let signed_bytes = std::fs::read(&f.out).expect("--out was written");
+    let on_the_wire: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&signed_bytes).expect("the signed bytes are a Scorecard");
+    assert_eq!(on_the_wire.outcome, Outcome::FailIntegrity);
+    let window = format!(
+        "[{}, {}]",
+        fixtures::ts(fixtures::FIXTURE_WINDOW_START).timestamp_millis(),
+        fixtures::ts(fixtures::FIXTURE_WINDOW_END).timestamp_millis()
+    );
+    assert_eq!(
+        on_the_wire.integrity.partial_reason.as_deref(),
+        Some(
+            format!(
+                "the engine's offset report has no entry for 1 mapped partition(s) the \
+                 manifest proves hold records in the window {window}: orders/0 -> \
+                 drill-orders/0; an engine that stopped early (it honours a SIGTERM between \
+                 topics and exits 0) reports only the topics it finished"
+            )
+            .as_str()
+        ),
+        "the report's finding, and nothing else, in the SIGNED document"
+    );
+
+    let sig_path = f.out.with_extension("sig");
+    let pub_path = f.out.with_file_name("run-signing.pub.pem");
+    fixtures::write_pub(
+        &SigningKey::from_pem_file(&f.args.signing_key).expect("the run's signing key"),
+        &pub_path,
+    );
+    let media = logweir::verify::resolve_payload_type("scorecard").expect("the short name");
+    match logweir::verify::verify_scorecard(&f.out, &sig_path, &pub_path, media) {
+        Ok(logweir::verify::Verdict::Scorecard(report)) => {
+            assert!(report.signature_valid && report.invariants_ok);
+            assert_eq!(report.outcome, Outcome::FailIntegrity);
+        }
+        Ok(other) => panic!("a scorecard must verify as a scorecard, got {other:?}"),
+        Err(code) => panic!(
+            "the Rust reader refused the drill's own scorecard (exit {})",
+            code as i32
+        ),
+    }
+    let out = Command::new(&py)
+        .current_dir(root())
+        .arg("docs/verify_scorecard.py")
+        .arg(&f.out)
+        .arg(&sig_path)
+        .arg(&pub_path)
+        .output()
+        .expect("run docs/verify_scorecard.py");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the auditor's verifier must ACCEPT the drill's own signed scorecard: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("fail-integrity"));
+}
+
+// ---------------------------------------------------------------------------
 // Task 10b: the normal point-in-time shape, through both readers.
 
 /// **Task 10b guard (vi).** One whole drill — every phase, over the doubles —

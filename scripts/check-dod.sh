@@ -12,6 +12,8 @@ for file in README.md LICENSE NOTICE TRADEMARKS.md SECURITY.md \
   schemas/logweir-drill-scorecard-1.2.0.json \
   schemas/logweir-drill-scorecard-1.3.0.json \
   schemas/logweir-drill-scorecard-1.4.0.json \
+  schemas/logweir-drill-scorecard-1.5.0.json \
+  schemas/logweir-drill-scorecard-1.6.0.json \
   schemas/logweir-backup-receipt-1.0.0.json \
   schemas/logweir-backup-receipt-1.1.0.json \
   schemas/logweir-backup-receipt-1.2.0.json \

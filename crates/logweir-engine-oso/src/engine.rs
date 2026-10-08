@@ -47,6 +47,43 @@ fn captured(s: &str) -> String {
     )
 }
 
+/// **FX-23.** The engine's offset-mapping report at `path`, as phase 7 reads
+/// it: the `(target topic, partition)` of every entry.
+///
+/// `Absent` when there is no file (the engine writes one only from a completed
+/// restore, and its own write failure is a warning upstream), `Unreadable`
+/// when there is one this build cannot parse. Neither is an error: the report
+/// is evidence of what the engine LACKS, never of what it wrote, and phase 7
+/// logs a report it could not check.
+///
+/// **Streamed, never buffered (FX-23 review M1).** The report carries one
+/// `detailed_mappings` pair per restored record — about 116 bytes of file per
+/// record — so it is read through a `BufReader` into a shape that names only
+/// `entries[].{topic, partition}`, and serde skips everything else as it
+/// streams past. Memory is bounded by the number of partition entries, not by
+/// the number of records (`tests/offset_report_memory.rs` measures it).
+pub fn read_engine_report(path: &std::path::Path) -> EngineReport {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return EngineReport::Absent,
+        Err(e) => return EngineReport::Unreadable(format!("{}: {e}", path.display())),
+    };
+    match serde_json::from_reader::<_, vendored::offset_report::OffsetMappingReport>(
+        std::io::BufReader::new(file),
+    ) {
+        Ok(r) => EngineReport::Read(
+            r.entries
+                .into_values()
+                .map(|e| (e.topic, e.partition))
+                .collect(),
+        ),
+        Err(e) => EngineReport::Unreadable(format!(
+            "{}: not the engine's offset-mapping report: {e}",
+            path.display()
+        )),
+    }
+}
+
 pub struct OsoCliEngine {
     binary: PathBuf,
     version: String,
@@ -555,6 +592,23 @@ impl DataEngine for OsoCliEngine {
             }
         }
         let cfg = self.write("restore.yaml", &doc)?;
+        // FX-23: whatever is at the report path now is NOT this restore's. The
+        // default path is per run, but `--offset-report-out` may name a fixed
+        // one, and a report an earlier run left there would be read below as
+        // this run's (and uploaded by phase 8 as its evidence) whenever this
+        // engine writes none. Removed first, so after the run the file is this
+        // engine's or it is absent.
+        match std::fs::remove_file(&plan.offset_report) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(EngineError::Operational(format!(
+                    "{}: an earlier offset report could not be removed before the restore, \
+                     and it would be read as this run's: {e}",
+                    plan.offset_report.display()
+                )))
+            }
+        }
         let started_at = chrono::Utc::now();
         let run = subprocess::run_engine(
             &self.binary,
@@ -590,13 +644,18 @@ impl DataEngine for OsoCliEngine {
             )));
         }
         self.assert_no_dropped_logweir_key(&doc, &run.unknown_key_warnings)?;
-        // `restore` has no --format and writes no report file; the exit code
-        // is its only machine-readable signal, so every timing here is OURS.
+        // `restore` has no --format; the exit code is its only machine-readable
+        // VERDICT, so every timing here is OURS. Its offset-mapping report is
+        // read for one thing only (FX-23): an engine a SIGTERM stopped between
+        // topics exits 0 and writes a report without the topics it never
+        // started, and phase 7 refuses a report that lacks a mapped partition
+        // the manifest proves holds records in the window.
         Ok(RestoreFacts {
             started_at,
             finished_at,
             exit_code: run.exit_code,
             unknown_key_warnings: run.unknown_key_warnings,
+            engine_report: read_engine_report(&plan.offset_report),
         })
     }
 

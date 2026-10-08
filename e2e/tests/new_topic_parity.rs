@@ -804,9 +804,11 @@ fn a_new_topic_restore_signs_the_source_settings_it_did_not_reconstruct() {
         format!("{nt_topic}: retention.ms"),
     ];
     let p = &nt.scorecard["topic_parity"];
+    // FX-23: a sampled restore's scorecard is 1.6.0 (the version marks a
+    // build with FX-23's checks); 1.6.0 defines every earlier field.
     assert_eq!(
         nt.scorecard["format_version"],
-        logweir_core::FORMAT_VERSION,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS,
         "{}",
         nt.scorecard
     );
