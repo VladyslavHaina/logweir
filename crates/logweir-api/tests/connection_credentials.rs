@@ -282,6 +282,21 @@ async fn an_mtls_certificate_and_key_become_a_bound_secret() {
         .map(String::as_str)
         .collect();
     assert_eq!(keys, vec!["logweir-binding", "tls.crt", "tls.key"]);
+    // OWNED AND BOUND like the SASL Secret: deleting the connection deletes
+    // the key, and the binding names this object's UID.
+    let uid = item["uid"].as_str().unwrap();
+    let owner = &secret["metadata"]["ownerReferences"][0];
+    assert_eq!(owner["kind"], "KafkaCluster");
+    assert_eq!(owner["name"], name.as_str());
+    assert_eq!(owner["uid"], uid);
+    assert_eq!(secret["metadata"]["labels"]["logweir.dev/connection"], name.as_str());
+    let binding = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(secret["data"]["logweir-binding"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(binding.starts_with(&format!("v1:{uid}:sha256:")), "{binding}");
     let text = String::from_utf8_lossy(&created.body).to_string();
     assert!(!text.contains(SEEDED_PASSWORD), "{text}");
     app.fake.assert_strict();
