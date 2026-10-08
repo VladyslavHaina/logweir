@@ -1273,9 +1273,22 @@ What changes on the upgrade:
   `.`, `-`, `_` and `=` under 40 characters still has its receipt key withheld:
   the run id already spends the key's one free component. Its points are listed
   and not offered, and the row says why.
+- **A `RetentionPolicy` starts weighing scheduled sets one by one.** Every
+  scheduled point used to share the set id `[redacted]` and the manifest key
+  `[redacted].json`, so retention treated them as ONE set: it kept them all
+  (`protected: SharedSegment`) while any one was retained, and refused its plan
+  as out of scope when all were due. No scheduled set was ever expired. After
+  the re-sync each scheduled set is its own set, so those outside `keepLast` /
+  `keepDays` become candidates, and an `Enforce` policy with
+  `requireApprovedPlan: false` deletes them at its next run. A catalog-point
+  readiness check (`Preflight`) compared a plan's set id and receipt key against
+  the redacted row and refused it; it now compares against the whole values.
 
-**Do:** after the runner image rolls, sync each `RecoveryCatalog` once — set
-`spec.syncRequest` to a new value — rather than wait for its interval.
+**Do:** before the runner image rolls, read the plan preview of every
+`Enforce` `RetentionPolicy` with `requireApprovedPlan: false`, or set it to
+`true` until you have read the first plan after the re-sync. After the runner
+image rolls, sync each `RecoveryCatalog` once — set `spec.syncRequest` to a new
+value — rather than wait for its interval.
 **Scope:** `crates/logweir-core/tests/check_contract.rs` (the PoC's set ids
 kept bare and in receipt, manifest and segment keys; thirteen near misses
 withheld; F1's credential probes with the scheduled id as the anchor; the

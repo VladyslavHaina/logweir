@@ -8518,6 +8518,36 @@ fn the_receipt_key_a_restore_binds_to_survives_a_sync_for_a_real_run_id() {
     );
 }
 
+/// **FX-17's class sweep: the resume cursor is a value the NEXT sync decides
+/// on**, and it passes `redact_path` (`catalog_sync.rs` `cursor_document`).
+/// A redacted cursor would be a listing start-after no key equals. It is a
+/// point's RECORD key, `logweir/catalog/v1/points/<pointId>/record.json`,
+/// whose every component is a public name (`lwp1-` + 32 hex is 37 characters),
+/// so it survives by construction; this row pins that construction for the
+/// id range the writer mints, so a longer point id or a new path component
+/// fails here and not as a sync that re-walks from the start for ever.
+#[test]
+fn the_catalog_resume_cursor_is_a_record_key_the_redactor_keeps() {
+    for receipt in [b"a".as_slice(), b"b", b"the receipt bytes", &[0xff; 64]] {
+        let point_id = logweir::catalog::record::point_id(receipt);
+        let key = logweir::catalog::record::record_key(&point_id);
+        assert!(key.len() >= 40, "the probe must reach the threshold: {key}");
+        assert_eq!(
+            logweir::check::redact_path(&key),
+            key,
+            "the resume cursor was redacted"
+        );
+    }
+    // CONTROL: the same position with a component the redactor withholds is
+    // withheld, so the row above is not passing on a redactor that keeps all.
+    let forged = "logweir/catalog/v1/points/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY0/record.json";
+    assert!(
+        logweir::check::redact_path(forged).contains(logweir_core::check_contract::REDACTED),
+        "{}",
+        logweir::check::redact_path(forged)
+    );
+}
+
 /// **FX-17, end to end.** A SCHEDULED run's point is published with its set
 /// id, its receipt key and its manifest key whole.
 ///
