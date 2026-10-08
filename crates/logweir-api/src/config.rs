@@ -2234,13 +2234,13 @@ mod tests {
             !named.confirmation_key_managed,
             "absent is an operator-named key"
         );
-        let alone = Config::parse(
+        let Err(alone) = Config::parse(
             &format!("{base}confirmationKeyManaged: true\n"),
             Path::new("/etc/lw"),
-        )
-        .err()
-        .expect("the flag without the file is refused")
-        .to_string();
+        ) else {
+            panic!("the flag without the file is refused");
+        };
+        let alone = alone.to_string();
         assert!(alone.contains("confirmationKeyManaged"), "{alone}");
     }
 }
