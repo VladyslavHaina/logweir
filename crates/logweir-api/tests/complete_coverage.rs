@@ -309,3 +309,106 @@ fn a_rehearsal_schedule_view_says_sampled_or_complete() {
     assert_eq!(complete["bounds"]["coverage"], "complete");
     assert_eq!(complete["bounds"]["completeMaxRecords"], 50000);
 }
+
+/// **The live chain, over scorecards a real run signed** (`#[ignore]`d: it
+/// reads the outcome files `e2e/tests/record_semantics.rs`'s
+/// `a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stack`
+/// writes on a compose slot). Each signed scorecard goes through the
+/// controller's own reader (`scorecard_observation`, `integrity_block`, the
+/// badge rule), onto a `Restore` status beside a `Valid` verdict, and through
+/// this crate's list and operation projections; the projections are written to
+/// `LOGWEIR_COVERAGE_OUT` for the console to render.
+///
+/// ```text
+/// LOGWEIR_COVERAGE_SCORECARDS=.e2e/logweir-e2e-s4/record-semantics \
+/// LOGWEIR_COVERAGE_OUT=/tmp/out \
+///   cargo test -p logweir-api --test complete_coverage -- --ignored live
+/// ```
+#[test]
+#[ignore = "reads the signed scorecards a compose-slot run left; see the doc comment"]
+fn live_signed_scorecards_flow_through_the_controller_and_the_api() {
+    let dir = std::path::PathBuf::from(
+        std::env::var("LOGWEIR_COVERAGE_SCORECARDS")
+            .expect("LOGWEIR_COVERAGE_SCORECARDS names the outcome directory"),
+    );
+    let out = std::path::PathBuf::from(
+        std::env::var("LOGWEIR_COVERAGE_OUT").expect("LOGWEIR_COVERAGE_OUT names a directory"),
+    );
+    std::fs::create_dir_all(&out).expect("the output directory");
+    for (label, exit, recorded, covered) in [
+        ("cfull", 0, "complete", Some(true)),
+        ("cbound", 2, "complete", Some(false)),
+        ("sampled", 0, "sampled", None),
+    ] {
+        let bytes = std::fs::read(dir.join(format!("cc-console-{label}.scorecard.json")))
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        let o =
+            weirkeeper::controllers::restore::scorecard_observation(&bytes).expect("a scorecard");
+        let mut doc = uncovered();
+        doc["metadata"]["name"] = json!(format!("live-{label}"));
+        if recorded == "sampled" {
+            doc["spec"].as_object_mut().unwrap().remove("coverage");
+            doc["spec"]
+                .as_object_mut()
+                .unwrap()
+                .remove("completeMaxRecords");
+        }
+        let status = doc["status"].as_object_mut().unwrap();
+        status.insert("exitCode".into(), json!(exit));
+        status.insert("outcome".into(), json!(o.outcome.clone().unwrap()));
+        status.insert(
+            "phase".into(),
+            json!(if exit == 0 { "Succeeded" } else { "Failed" }),
+        );
+        status.insert(
+            "integrity".into(),
+            Value::Object(weirkeeper::controllers::restore::integrity_block(&o)),
+        );
+        let object = cr(&doc);
+        let row = serde_json::to_value(restore(&object, false)).unwrap();
+        let detail = serde_json::to_value(restore(&object, true)).unwrap();
+        let view = serde_json::to_value(restore_view(&object, now())).unwrap();
+        assert_eq!(row["coverage"]["recorded"], recorded, "{label}: {row}");
+        assert_eq!(
+            row["coverage"].get("covered").and_then(Value::as_bool),
+            covered,
+            "{label}"
+        );
+        assert_eq!(view["verificationScope"]["coverage"], recorded, "{label}");
+        let green = row["operation"]["verifiedSuccess"] == true;
+        assert_eq!(green, covered != Some(false) && exit == 0, "{label}: {row}");
+        if covered == Some(false) {
+            assert_eq!(view["verificationScope"]["complete"]["covered"], false);
+            let rows = view["verificationScope"]["complete"]["partitions"]
+                .as_array()
+                .expect("rows");
+            assert_eq!(
+                rows.iter()
+                    .map(|p| p["compared"] == true)
+                    .collect::<Vec<_>>(),
+                vec![true, false, false]
+            );
+        }
+        for (name, doc) in [
+            (
+                format!("{label}.restore-list-row.json"),
+                json!({"requestId": "live", "items": [row], "page": {"limit": 50, "nextCursor": null, "snapshot": null}}),
+            ),
+            (
+                format!("{label}.restore.json"),
+                json!({"requestId": "live", "item": detail}),
+            ),
+            (
+                format!("{label}.operation.json"),
+                json!({"requestId": "live", "item": view}),
+            ),
+            (format!("{label}.status.json"), doc["status"].clone()),
+        ] {
+            std::fs::write(
+                out.join(name),
+                format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()),
+            )
+            .expect("written");
+        }
+    }
+}
