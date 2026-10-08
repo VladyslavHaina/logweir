@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
-# Copy the pinned kafka-backup binary out of the upstream OSO image, and record
-# what we took. Run once in CI and once by `just engine` locally.
+# Copy OSO's released kafka-backup binary out of the upstream image, pinned by
+# digest, and record what we took. Run once in CI and once by `just engine`
+# locally.
+#
+# WHAT SHIPS IS NOT THIS BINARY (OD-3, decided 2026-10-07; PROD-00.2). The
+# runner image's engine is LOGWEIR'S BUILD of the vendored OSO source in
+# third_party/, with Logweir's ordered patch folder applied
+# (third_party/kafka-backup-patches/, scripts/engine-source.sh, the
+# Dockerfile's `engine-logweir` stage), and it prints `kafka-backup
+# <release>+logweir.<n>`. This script's binary is OSO's own release of the same
+# tag. It stays because three things still need exactly that release:
+#   * the one-release ROLLBACK (`docker build --build-arg ENGINE_SOURCE=oso`),
+#     whose `FROM` line this script pins and rewrites;
+#   * the e2e compose stack's `kafka-backup` service, which seeds the drill
+#     archive, and `e2e/compose/.env`, which this script writes;
+#   * the refresh procedure that moves the pin to a newer OSO release
+#     (OSO_REFRESH=1 below), which also re-vendors the source tarball that
+#     Logweir's build compiles.
 #
 # TWO MODES, and the difference between them is the point of this script:
 #
@@ -30,9 +46,15 @@ set -euo pipefail
 # it defaults to the repository root, exactly like scripts/check-one-signer.sh.
 cd "${LOGWEIR_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
-# GC14 governs what Logweir publishes under its OWN name; pulling upstream's
-# published image is required by Global Constraints 7, 8, 10 and 15 (controller
-# ruling GR6). Logweir publishes nothing under osodevops/.
+# GC14 governs what Logweir publishes under its OWN name; Logweir publishes
+# nothing under osodevops/. Ruling GR6 ("the unmodified upstream image") is
+# SUPERSEDED by OD-3 (decided 2026-10-07): Logweir builds the engine from the
+# vendored source with its own patch folder, patch first — a fix lands as a
+# patch as soon as its oracle passes, with a one-line reason, and is dropped
+# when an OSO release contains it; upstream PRs are optional and come after
+# shipping. ADR 0002's amendment in docs/architecture.md records it, and engine
+# CVEs are in SECURITY.md's scope. Pulling this image remains permitted (GC14
+# governs publishing), and is what the rollback and the refresh need.
 TAG="${OSO_TAG:-v0.23.3}"
 IMAGE="osodevops/kafka-backup:${TAG}"
 DIGEST_FILE="third_party/kafka-backup-binary.digest"
@@ -127,13 +149,14 @@ fi
 # runs; create it so `set -e` does not abort on the redirection below.
 mkdir -p e2e/compose
 # Task 7b addendum A6 fixes this file's exact content: the KAFKA_VERSION pin the
-# compose stack reads, and the GR6 note beside the upstream image reference so a
+# compose stack reads, and the note beside the upstream image reference so a
 # reader hitting Global Constraint 14 does not re-raise it. `.env` is generated,
 # so the comment has to be emitted here — it is the only writer.
 cat > e2e/compose/.env <<ENV
 KAFKA_VERSION=3.7.1
-# Upstream image reference, permitted by GR6: GC14 governs what Logweir publishes,
-# not what it pulls. Keep in lockstep with third_party/kafka-backup-binary.digest.
+# OSO's released image, which seeds the drill archive: GC14 governs what Logweir
+# publishes, not what it pulls (OD-3). Keep in lockstep with
+# third_party/kafka-backup-binary.digest.
 OSO_DIGEST=${DIGEST}
 ENV
 # The Dockerfile pins the SAME digest, and in the refresh mode it is REWRITTEN
@@ -153,7 +176,7 @@ if [ "$REFRESH" = "1" ]; then
 fi
 if ! grep -q "FROM osodevops/kafka-backup@${DIGEST}" Dockerfile; then
   echo "FAIL: Dockerfile does not pin ${DIGEST}." >&2
-  echo "      Expected a line 'FROM osodevops/kafka-backup@<digest> AS engine'." >&2
+  echo "      Expected a line 'FROM osodevops/kafka-backup@<digest> AS oso-release'." >&2
   echo "      In the default (digest-pinned) mode this script does not rewrite the" >&2
   echo "      Dockerfile: re-run with OSO_REFRESH=1 to move the pin everywhere at once." >&2
   grep -n 'FROM osodevops/kafka-backup' Dockerfile >&2 || true

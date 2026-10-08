@@ -2005,6 +2005,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a bound restore restores its point's set",
             "PointBindingSetMismatch",
         ),
+        // PROD-00.2 (2026-10-08): Logweir's build of the engine, both
+        // platforms, signed; and the build argument that rolls the engine back.
+        (
+            "the engine is built from the vendored source",
+            "ENGINE_SOURCE=oso",
+        ),
         // FX-23 (2026-10-08): an early-stopped restore is never signed pass,
         // and a sampled scorecard names the topics its cap left unsampled.
         (

@@ -115,13 +115,15 @@ printf '{"allowed_cluster_ids":["%s"],"source_cluster_id":null}\n' "$CLUSTER_ID"
   > "$DEMO/allowed-clusters.json"
 echo "    target cluster: $CLUSTER_ID"
 
-# The engine ROUTE is probed, never assumed. Upstream publishes
-# `osodevops/kafka-backup` for linux/amd64 ONLY (pulling it is permitted by
-# global ruling GR6; Global Constraint 14 governs what Logweir PUBLISHES
-# under). On a linux/amd64 host the extracted ELF runs directly. On the
-# darwin/arm64 laptop this repository is developed on it cannot exec at all
-# (ENOEXEC — `logweir doctor` reports exit 126), so the demo falls back to the
-# same digest-pinned image under `--platform linux/amd64`.
+# The engine ROUTE is probed, never assumed. `.engine/kafka-backup` is a Linux
+# ELF: OSO's release from `just engine`, or Logweir's build from
+# `scripts/engine-source.sh build` on a Linux host. On a Linux host it runs
+# directly. On the darwin/arm64 laptop this repository is developed on it
+# cannot exec at all (ENOEXEC — `logweir doctor` reports exit 126), so the demo
+# falls back to the container shim: OSO's digest-pinned image under
+# `--platform linux/amd64`, or the image and platform named by
+# LOGWEIR_E2E_ENGINE_IMAGE/LOGWEIR_E2E_ENGINE_PLATFORM (the runner image
+# carries Logweir's build for either platform; PROD-00.2).
 #
 # The choice is PRINTED. A demo that quietly swapped its engine would be
 # showing you a result about something other than what it claims to run.
@@ -138,7 +140,12 @@ fi
 # Read off the engine that will actually run, never hardcoded, so the value in
 # the signed scorecard describes the binary that produced the restore.
 LOGWEIR_ENGINE_VERSION=$("$LOGWEIR_ENGINE_BIN" --version | awk '{print $NF}')
-LOGWEIR_ENGINE_DIGEST=$(tr -d '[:space:]' < third_party/kafka-backup-binary.digest)
+# The digest that names THAT engine: Logweir's build-input digest for
+# Logweir's build (PROD-00.2), OSO's image digest for OSO's release.
+case "$LOGWEIR_ENGINE_VERSION" in
+  *+logweir.*) LOGWEIR_ENGINE_DIGEST=$(sed -n 's/^ENGINE_DIGEST=//p' third_party/kafka-backup-build.env) ;;
+  *) LOGWEIR_ENGINE_DIGEST=$(tr -d '[:space:]' < third_party/kafka-backup-binary.digest) ;;
+esac
 export LOGWEIR_ENGINE_VERSION LOGWEIR_ENGINE_DIGEST
 export AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin AWS_REGION=us-east-1
 export TMPDIR="$LOGWEIR_E2E_ENGINE_MOUNT"

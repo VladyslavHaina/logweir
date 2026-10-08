@@ -32,6 +32,11 @@ done
 
 cargo test --locked --workspace
 python3 scripts/test-ci-images.py
+# PROD-00.2 security review: every cosign / gh attestation verification in the
+# repository pins the exact signer identity, the calling repository, ref and
+# trigger, and the issuer (images.yml is a reusable workflow).
+python3 scripts/check-cosign-verify.py
+python3 scripts/test-check-cosign-verify.py
 python3 scripts/test-release.py
 just verify-py
 
@@ -44,4 +49,16 @@ just links
 mkdir -p target
 bash scripts/gen-third-party-notices.sh > target/tpn.check
 diff -u THIRD_PARTY_NOTICES.md target/tpn.check
-cargo deny check licenses advisories
+cargo deny check licenses advisories sources bans
+
+# PROD-00.2 (OD-3): the ENGINE's graph too. Logweir builds kafka-backup from
+# the vendored source, so its lockfile — after the patch folder, exactly as
+# the image build prepares it — is Logweir's to check, under its own policy
+# (third_party/kafka-backup-deny.toml), sources included: crates.io only. A
+# finding is fixed by a patch in third_party/kafka-backup-patches/, not by an
+# ignore.
+engine_src="target/engine-deny-src"
+rm -rf "$engine_src"
+bash scripts/engine-source.sh prepare "$engine_src" >/dev/null
+cp third_party/kafka-backup-deny.toml "$engine_src/deny.toml"
+cargo deny --locked --manifest-path "$engine_src/Cargo.toml" check licenses advisories sources bans

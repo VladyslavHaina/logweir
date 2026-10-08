@@ -1,7 +1,7 @@
 # The `logweir-ui` image — Task 39. THE PAGE, AS AN IMAGE INSTEAD OF A ConfigMap.
 #
 # IT IS NOT A THIRD LOGWEIR BINARY AND IT COMPILES NOTHING. `Dockerfile` builds
-# the runner (two binaries, the extracted OSO engine, an amd64-only ELF);
+# the runner (two binaries and Logweir's build of the engine);
 # `Dockerfile.weirkeeper` builds the controller (one binary, `ca-certificates`
 # and nothing else). This file builds neither: it is a `COPY` of twenty-six
 # static files over a kubectl the Kubernetes project publishes, and its whole

@@ -158,12 +158,14 @@ fn check_engine_version() -> Result<String, String> {
         .map_err(|e| {
             format!(
                 "the engine at {} could not be executed: {e}. This usually means the wrong \
-                 architecture (the pinned kafka-backup is linux/amd64 only) or a missing \
+                 architecture (the runner image's engine is built for linux/amd64 and \
+                 linux/arm64; a Linux binary cannot run on macOS) or a missing \
                  interpreter/dynamic linker — not a version mismatch.",
                 path.display()
             )
         })?;
-    evaluate_engine_version(&path, &out)
+    let declared = crate::engine_identity::declared()?;
+    evaluate_engine_version(&path, &out, declared.as_ref())
 }
 
 /// Split out of `check_engine_version` (fix round 2) so the exec-failure /
@@ -171,18 +173,33 @@ fn check_engine_version() -> Result<String, String> {
 /// hand-built `std::process::Output` — no subprocess, no platform
 /// dependence, so the darwin-specific failure mode above is pinned on every
 /// CI runner regardless of what engine (if any) is actually installed there.
+///
+/// PROD-00.2 adds `declared`: the identity this host or image would SIGN
+/// (`crate::engine_identity`), `None` where nothing declares one. Three
+/// answers, each naming which engine it is:
+///
+/// - the engine prints [`ENGINE_PIN`], Logweir's build: ok;
+/// - it prints [`ENGINE_UPSTREAM_RELEASE`], OSO's released binary: ok ONLY when
+///   the image or the environment declares exactly that release (the
+///   documented one-release rollback), and a failure otherwise, named as OSO's
+///   release rather than as an unknown version;
+/// - anything else: a version mismatch, as before.
+///
+/// And whatever the engine prints, a declared version it does not print is a
+/// failure: every scorecard and receipt would name an engine that did not run.
 fn evaluate_engine_version(
     path: &std::path::Path,
     out: &std::process::Output,
+    declared: Option<&crate::engine_identity::EngineIdentity>,
 ) -> Result<String, String> {
     let s =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
         return Err(format!(
             "the engine at {} exited {} without producing version output: `{}`. This is an \
-             EXECUTION failure, not a version mismatch — on darwin/arm64 the pinned linux/amd64 \
-             binary cannot run natively (see check 1's glibc >= 2.36 / libssl3 / CA-bundle note); \
-             use the container image or a linux/amd64 host.",
+             EXECUTION failure, not a version mismatch — on darwin/arm64 a linux engine binary \
+             cannot run natively (see check 1's glibc >= 2.36 / CA-bundle note); use the \
+             container image or a Linux host.",
             path.display(),
             out.status
                 .code()
@@ -191,39 +208,76 @@ fn evaluate_engine_version(
             s.trim()
         ));
     }
-    if version_matches(&s) {
-        Ok(s.trim().to_string())
-    } else {
-        Err(format!(
-            "version mismatch: expected {ENGINE_PIN}, engine reports `{}`",
-            s.trim()
-        ))
+    let reported = s.trim();
+    if let Some(d) = declared {
+        if !names_exactly(&s, &d.version) {
+            return Err(format!(
+                "the engine reports `{reported}`, but {} declares engine.version `{}`: every \
+                 scorecard and receipt this run signs would name an engine that did not run",
+                d.source, d.version
+            ));
+        }
     }
+    if version_matches(&s) {
+        return Ok(format!(
+            "{reported} — Logweir's build of OSO kafka-backup {ENGINE_UPSTREAM_RELEASE}"
+        ));
+    }
+    if names_exactly(&s, ENGINE_UPSTREAM_RELEASE) {
+        return match declared {
+            Some(d) if d.version == ENGINE_UPSTREAM_RELEASE => Ok(format!(
+                "{reported} — OSO's release binary, the one-release rollback {} declares \
+                 (Logweir's build is {ENGINE_PIN})",
+                d.source
+            )),
+            _ => Err(format!(
+                "version mismatch: expected {ENGINE_PIN}, engine reports `{reported}`, which is \
+                 OSO's release binary, not Logweir's build. Running it is the documented \
+                 rollback only when its identity is declared (the rollback image does; \
+                 docs/install.md, \"Rolling the engine back\")"
+            )),
+        };
+    }
+    Err(format!(
+        "version mismatch: expected {ENGINE_PIN}, engine reports `{reported}`"
+    ))
 }
 
-/// The engine release Logweir pins: the `kafka-backup --version` token
-/// `doctor` accepts, and nothing else. PROD-00.3f moved it from `0.21.0` to
-/// `0.23.3` (`docs/to-do/decisions/PROD-00-engine-route.md` section 12).
+/// The engine build Logweir pins: the `kafka-backup --version` token `doctor`
+/// accepts. PROD-00.2 made it LOGWEIR'S BUILD of the vendored OSO source,
+/// `<OSO release>+logweir.<n>` (`third_party/kafka-backup-build.env`), which
+/// no OSO release prints; PROD-00.3f had moved the OSO release from `0.21.0`
+/// to `0.23.3` (`docs/to-do/decisions/PROD-00-engine-route.md` section 12).
 ///
-/// It moves with the pin and only with it: `scripts/extract-engine.sh`'s
-/// default `TAG`, the single vendored tarball under `third_party/`,
-/// `weirkeeper::job::ENGINE_VERSION` and PROD-01.1's `CONTRACT_ENGINE` must all
-/// name this version, and `crates/logweir/tests/engine_pin.rs` fails when any
-/// of them does not.
-pub const ENGINE_PIN: &str = "0.23.3";
+/// It moves with the build and only with it: `third_party/kafka-backup-build.env`
+/// and its ledger, PROD-01.1's `CONTRACT_ENGINE`, the fake
+/// engine `doctor`'s tests run and the documented standalone identity must all
+/// name it, and `crates/logweir/tests/engine_pin.rs` fails when any does not.
+pub const ENGINE_PIN: &str = "0.23.3+logweir.1";
 
-/// Whether the engine's `--version` output names exactly [`ENGINE_PIN`].
+/// The OSO release Logweir's build is made from, and the version OSO's own
+/// binary prints: the vendored tarball, `scripts/extract-engine.sh`'s tag and
+/// the one-release rollback image all name it. [`ENGINE_PIN`] begins with it.
+pub const ENGINE_UPSTREAM_RELEASE: &str = "0.23.3";
+
+/// Whether the engine's `--version` output names exactly `version`.
 ///
 /// Global Constraint 8 pins an EXACT version. Fix round 2, M6 replaced
 /// `s.contains("0.21.0")`, which accepted `0.21.01`, `10.21.0` and
 /// `0.21.0-rc1`, with an adjacency test. That test still accepted a build
 /// suffix (`0.21.0+anything`), a leading `v` glued to another word and any
-/// other non-digit, non-`.`, non-`-` neighbour. PROD-00.3f makes it a whole
+/// other non-digit, non-`.`, non-`-` neighbour. PROD-00.3f made it a whole
 /// token: the output is split on ASCII whitespace and one token must EQUAL the
-/// pin. `kafka-backup 0.23.3` matches; `0.23.3+build`, `0.23.3-rc1`,
-/// `10.23.3`, `0.23.31`, `v0.23.3` and `0.23.3,` do not.
+/// version. `kafka-backup 0.23.3+logweir.1` names [`ENGINE_PIN`];
+/// `0.23.3+logweir.10`, `0.23.3+logweir`, `0.23.3+build`, `v0.23.3+logweir.1`
+/// and `0.23.3+logweir.1,` do not.
+fn names_exactly(s: &str, version: &str) -> bool {
+    s.split_ascii_whitespace().any(|token| token == version)
+}
+
+/// Whether the engine's `--version` output names exactly [`ENGINE_PIN`].
 fn version_matches(s: &str) -> bool {
-    s.split_ascii_whitespace().any(|token| token == ENGINE_PIN)
+    names_exactly(s, ENGINE_PIN)
 }
 
 fn check_spec(p: &std::path::Path) -> Result<String, String> {
@@ -920,41 +974,53 @@ mod tests {
 
     #[test]
     fn version_matches_accepts_only_the_exact_pin() {
-        assert_eq!(ENGINE_PIN, "0.23.3", "the pin moved from 0.21.0 to 0.23.3");
-        assert!(version_matches("kafka-backup 0.23.3"));
-        assert!(version_matches("kafka-backup 0.23.3\n"));
-        assert!(version_matches("0.23.3"));
-        assert!(version_matches("kafka-backup\t0.23.3\r\n"));
+        assert_eq!(
+            ENGINE_PIN, "0.23.3+logweir.1",
+            "the pin is Logweir's build of OSO 0.23.3"
+        );
+        assert_eq!(ENGINE_UPSTREAM_RELEASE, "0.23.3");
+        assert!(
+            ENGINE_PIN.starts_with(&format!("{ENGINE_UPSTREAM_RELEASE}+logweir.")),
+            "Logweir's build names the OSO release it is made from"
+        );
+        assert!(version_matches("kafka-backup 0.23.3+logweir.1"));
+        assert!(version_matches("kafka-backup 0.23.3+logweir.1\n"));
+        assert!(version_matches("0.23.3+logweir.1"));
+        assert!(version_matches("kafka-backup\t0.23.3+logweir.1\r\n"));
+        // OSO's own release of the same source is NOT the pin: it is the
+        // rollback, which `evaluate_engine_version` names separately.
+        assert!(!version_matches("kafka-backup 0.23.3"));
         // The previous pins are mismatches now, never "close enough".
         assert!(!version_matches("kafka-backup 0.21.0"));
         assert!(!version_matches("kafka-backup 0.22.0"));
         assert!(!version_matches("kafka-backup 0.19.1"));
-        // So are the pin's sibling patch releases, released or not, and the
-        // same patch number on the next minor: "exactly 0.23.3" is not "any
-        // 0.23.x" (review M1: a matcher accepting any released 0.23.<digit>
-        // passed every row above).
+        // So are Logweir's other builds, and the pin's sibling releases: an
+        // engine with another patch set must not pass as this one.
         for sibling in [
+            "kafka-backup 0.23.3+logweir.0",
+            "kafka-backup 0.23.3+logweir.2",
+            "kafka-backup 0.23.3+logweir.10",
+            "kafka-backup 0.23.3+logweir.11",
+            "kafka-backup 0.23.2+logweir.1",
+            "kafka-backup 0.23.4+logweir.1",
+            "kafka-backup 0.24.3+logweir.1",
             "kafka-backup 0.23.0",
-            "kafka-backup 0.23.1",
-            "kafka-backup 0.23.2",
             "kafka-backup 0.23.4",
-            "kafka-backup 0.23.9",
-            "kafka-backup 0.24.3",
-            "kafka-backup 1.23.3",
         ] {
             assert!(!version_matches(sibling), "must reject `{sibling}`");
         }
         // Every neighbour that makes a different version string.
         for other in [
-            "kafka-backup 0.23.31",
-            "kafka-backup 10.23.3",
-            "kafka-backup 0.23.3-rc1",
+            "kafka-backup 0.23.3+logweir",
+            "kafka-backup 0.23.3+logweir.",
+            "kafka-backup 0.23.3+logweir.1.1",
+            "kafka-backup 0.23.3+logweir.1-rc1",
             "kafka-backup 0.23.3+anything",
-            "kafka-backup 0.23.3+build.7",
-            "kafka-backup v0.23.3",
-            "kafka-backup 0.23.3,",
-            "kafka-backup=0.23.3",
-            "kafka-backup 0.23",
+            "kafka-backup v0.23.3+logweir.1",
+            "kafka-backup 0.23.3+logweir.1,",
+            "kafka-backup=0.23.3+logweir.1",
+            "kafka-backup 10.23.3+logweir.1",
+            "kafka-backup 0.23.31+logweir.1",
             "",
         ] {
             assert!(!version_matches(other), "must reject `{other}`");
@@ -970,6 +1036,16 @@ mod tests {
         }
     }
 
+    fn declared(version: &str, source: IdentitySource) -> EngineIdentity {
+        EngineIdentity {
+            version: version.to_string(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            source,
+        }
+    }
+
+    use crate::engine_identity::{EngineIdentity, IdentitySource};
+
     /// Fix round 2, M1's regression test: an engine that could not execute
     /// at all must never be reported as a version mismatch. Built from a
     /// hand-crafted `std::process::Output` (exit 126, the conventional shell
@@ -979,7 +1055,7 @@ mod tests {
     #[test]
     fn evaluate_engine_version_names_an_exec_failure_distinctly_from_a_version_mismatch() {
         let out = fake_output(126, "", "kafka-backup: ...: cannot execute binary file\n");
-        let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).unwrap_err();
+        let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out, None).unwrap_err();
         assert!(
             !e.contains("version mismatch: expected"),
             "must not claim a version mismatch for a binary that never ran: {e}"
@@ -993,21 +1069,87 @@ mod tests {
     #[test]
     fn evaluate_engine_version_names_a_real_version_mismatch_when_the_engine_ran_successfully() {
         let out = fake_output(0, "kafka-backup 0.19.1\n", "");
-        let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).unwrap_err();
-        assert!(e.contains("version mismatch: expected 0.23.3"), "got: {e}");
+        let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out, None).unwrap_err();
+        assert!(
+            e.contains("version mismatch: expected 0.23.3+logweir.1"),
+            "got: {e}"
+        );
         // The old pin is a mismatch, named as one (PROD-00.3f).
         let out = fake_output(0, "kafka-backup 0.21.0\n", "");
-        let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).unwrap_err();
+        let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out, None).unwrap_err();
         assert!(
-            e.contains("version mismatch: expected 0.23.3, engine reports `kafka-backup 0.21.0`"),
+            e.contains(
+                "version mismatch: expected 0.23.3+logweir.1, engine reports `kafka-backup 0.21.0`"
+            ),
             "got: {e}"
         );
     }
 
     #[test]
-    fn evaluate_engine_version_passes_on_an_exact_pin_match() {
+    fn evaluate_engine_version_passes_on_an_exact_pin_match_and_names_logweirs_build() {
+        let out = fake_output(0, "kafka-backup 0.23.3+logweir.1\n", "");
+        for d in [
+            None,
+            Some(declared("0.23.3+logweir.1", IdentitySource::Image)),
+            Some(declared("0.23.3+logweir.1", IdentitySource::Environment)),
+        ] {
+            let ok =
+                evaluate_engine_version(Path::new("/fake/kafka-backup"), &out, d.as_ref()).unwrap();
+            assert!(
+                ok.contains("Logweir's build of OSO kafka-backup 0.23.3"),
+                "got: {ok}"
+            );
+        }
+    }
+
+    /// PROD-00.2: OSO's own binary of the same release is named as OSO's, and
+    /// passes only as the DECLARED rollback.
+    #[test]
+    fn osos_release_is_named_distinctly_and_passes_only_as_the_declared_rollback() {
         let out = fake_output(0, "kafka-backup 0.23.3\n", "");
-        assert!(evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).is_ok());
+        let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out, None).unwrap_err();
+        assert!(
+            e.contains("version mismatch: expected 0.23.3+logweir.1")
+                && e.contains("OSO's release binary, not Logweir's build"),
+            "got: {e}"
+        );
+        for source in [IdentitySource::Image, IdentitySource::Environment] {
+            let ok = evaluate_engine_version(
+                Path::new("/fake/kafka-backup"),
+                &out,
+                Some(&declared("0.23.3", source)),
+            )
+            .unwrap();
+            assert!(
+                ok.contains("OSO's release binary, the one-release rollback"),
+                "{ok}"
+            );
+        }
+    }
+
+    /// PROD-00.2: whatever the engine is, a declared identity it does not
+    /// print is refused — that is a signature over the wrong engine.
+    #[test]
+    fn a_declared_identity_the_engine_does_not_print_is_refused() {
+        for (prints, declares) in [
+            ("kafka-backup 0.23.3+logweir.1", "0.23.3"),
+            ("kafka-backup 0.23.3", "0.23.3+logweir.1"),
+            ("kafka-backup 0.23.3+logweir.1", "0.23.3+logweir.2"),
+        ] {
+            let out = fake_output(0, &format!("{prints}\n"), "");
+            let e = evaluate_engine_version(
+                Path::new("/fake/kafka-backup"),
+                &out,
+                Some(&declared(declares, IdentitySource::Image)),
+            )
+            .unwrap_err();
+            assert!(
+                e.contains("would name an engine that did not run")
+                    && e.contains(declares)
+                    && e.contains("/etc/logweir/engine-identity"),
+                "{prints} declared as {declares}: {e}"
+            );
+        }
     }
 
     // The three `find_on_path_*` tests that lived here moved to

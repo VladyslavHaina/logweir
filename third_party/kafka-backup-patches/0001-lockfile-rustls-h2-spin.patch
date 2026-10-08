@@ -1,0 +1,63 @@
+Reason: RUSTSEC-2026-0285 (rustls 0.23.45) and RUSTSEC-2026-0258 (h2 0.4.19) in the shipped graph, and the yanked spin 0.9.8 (0.9.9): a lockfile-only bump; oracle: the engine cargo-deny gate in scripts/ci-check.sh and the PROD-00.2 parity suites
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 5273137..81a3137 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1072,7 +1072,7 @@ checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+ dependencies = [
+  "futures-core",
+  "futures-sink",
+- "spin 0.9.8",
++ "spin 0.9.9",
+ ]
+ 
+ [[package]]
+@@ -1279,9 +1279,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "h2"
+-version = "0.4.15"
++version = "0.4.19"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
++checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
+ dependencies = [
+  "atomic-waker",
+  "bytes",
+@@ -2967,9 +2967,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "rustls"
+-version = "0.23.43"
++version = "0.23.45"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
++checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+ dependencies = [
+  "aws-lc-rs",
+  "log",
+@@ -3041,9 +3041,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
+ 
+ [[package]]
+ name = "rustls-webpki"
+-version = "0.103.13"
++version = "0.103.15"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
++checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+ dependencies = [
+  "aws-lc-rs",
+  "ring",
+@@ -3405,9 +3405,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "spin"
+-version = "0.9.8"
++version = "0.9.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
++checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+ dependencies = [
+  "lock_api",
+ ]

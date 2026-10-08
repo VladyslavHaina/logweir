@@ -25,7 +25,8 @@
 # extraction.
 #
 # WHAT IT PROVES about the image, in the order the checks RUN:
-#   6. BOTH shipped binaries are x86-64 ELFs (STANDING RULE 10) —
+#   6. BOTH shipped binaries are ELFs of the IMAGE'S OWN architecture
+#      (STANDING RULE 10; x86-64 or AArch64 since PROD-00.2) —
 #      `/usr/local/bin/logweir` and `/usr/local/bin/kafka-backup`;
 #   1. every dynamic dependency of `/usr/local/bin/logweir` RESOLVES (GC10);
 #   2. the engine answers `kafka-backup --version`;
@@ -36,8 +37,13 @@
 #   7. the retention enforcement binary is present, resolvable BY BARE NAME on
 #      `$PATH`, and is itself — added 2026-09-18 for defect RET-NOIMAGE, whose
 #      whole point is that checks 1-6 passed on an image that did not carry it.
-#      It is numbered 7 and runs last for the same reason 1-5 keep their
-#      numbers: `e2e/tests/check_image.rs` matches the number in stderr.
+#      It is numbered 7 for the same reason 1-5 keep their numbers:
+#      `e2e/tests/check_image.rs` matches the number in stderr;
+#   8. the engine's identity (PROD-00.2): `/etc/logweir/engine-identity` names
+#      the engine `kafka-backup --version` reports, that identity is either
+#      Logweir's build (third_party/kafka-backup-build.env) or, for the
+#      one-release rollback on linux/amd64 only, OSO's release at the pinned
+#      digest, and the engine's own dynamic dependencies resolve.
 #
 # CHECK 6 IS SIXTH BY NUMBER AND FIRST BY POSITION, and the reason is written
 # out beside it below. In short: the numbers 1-5 are matched in stderr by
@@ -140,23 +146,30 @@ if ! docker image inspect "$ref" >/dev/null 2>&1; then
        "  a reference the daemon holds."
 fi
 
-# EVERY `docker run` BELOW CARRIES `--platform linux/amd64`, and the reason is
-# not tidiness: the engine layer (Dockerfile:164) has no arm64 manifest, so the
-# image is linux/amd64 and on the arm64 development host every one of these
-# runs is emulated. Stating the platform makes the emulation intentional rather
-# than a warning nobody reads, and it makes a run against an accidentally
-# host-architecture image fail here instead of somewhere later.
-PLATFORM="linux/amd64"
+# EVERY `docker run` BELOW CARRIES `--platform "$PLATFORM"`, and the reason is
+# not tidiness: stating the platform makes any emulation intentional rather
+# than a warning nobody reads, and it makes a run against an image of another
+# architecture fail here instead of somewhere later. Since PROD-00.2 the runner
+# is built for linux/amd64 AND linux/arm64, so the platform is the IMAGE'S
+# OWN, read from the reference (`CHECK_IMAGE_PLATFORM` overrides it, for a
+# multi-platform reference whose default variant is not the one to check), and
+# check 6 expects that architecture's ELF machine. Anything else is refused.
+PLATFORM="${CHECK_IMAGE_PLATFORM:-$(docker image inspect "$ref" --format '{{.Os}}/{{.Architecture}}')}"
+case "$PLATFORM" in
+  linux/amd64) ELF_MACHINE="3e 00"; ELF_NAME="EM_X86_64, x86-64" ;;
+  linux/arm64) ELF_MACHINE="b7 00"; ELF_NAME="EM_AARCH64, AArch64" ;;
+  *) fail "check-image: \`$ref\` is for \`$PLATFORM\`; the runner image is built for" \
+          "  linux/amd64 and linux/arm64 only." ;;
+esac
 
 echo "== check-image: $ref =="
 
 # ------------------------------------------------------------------ check 6
-# THE SHIPPED BINARY IS x86-64. STANDING RULE 10 made the builder stage
-# cross-compile (`FROM --platform=$BUILDPLATFORM`, `--target
-# x86_64-unknown-linux-gnu`), which removed a 50-minute emulated compile and
-# introduced exactly one new way to be wrong: a builder that quietly produced a
-# HOST-architecture binary, or a `COPY --from=builder` pointed back at
-# `target/release/`. Task 8 verified this property BY HAND — `od` on the first
+# THE SHIPPED BINARY IS THE IMAGE'S ARCHITECTURE. STANDING RULE 10 made the
+# builder stage cross-compile (`FROM --platform=$BUILDPLATFORM`, `--target
+# <triple>`), which removed a 50-minute emulated compile and introduced exactly
+# one new way to be wrong: a builder that quietly produced a HOST-architecture
+# binary, or a `COPY --from=builder` pointed back at `target/release/`. Task 8 verified this property BY HAND — `od` on the first
 # 20 bytes of the shipped binary — and its review asked for the assertion. This
 # is the assertion.
 #
@@ -180,8 +193,9 @@ echo "== check-image: $ref =="
 # THE FIELDS, from the ELF header (little-endian, class 64):
 #   bytes 0-3    7f 45 4c 46   the magic, "\x7fELF"
 #   byte  4      02            EI_CLASS = ELFCLASS64
-#   bytes 18-19  3e 00         e_machine = 0x003e = EM_X86_64
-echo "-- check 6 (ELF): logweir and kafka-backup are x86-64 ELFs"
+#   bytes 18-19  3e 00 / b7 00 e_machine = EM_X86_64 (linux/amd64) or
+#                              EM_AARCH64 (linux/arm64)
+echo "-- check 6 (ELF): logweir and kafka-backup are $PLATFORM ELFs ($ELF_NAME)"
 if ! elf_out=$(docker run --rm --platform "$PLATFORM" --entrypoint /usr/bin/od "$ref" \
                  -An -tx1 -N20 /usr/local/bin/logweir 2>&1); then
   fail "check 6 (ELF): could not read the ELF header of /usr/local/bin/logweir in $ref:" \
@@ -200,24 +214,22 @@ if [ "$elf_magic" != "7f 45 4c 46 02" ]; then
        "  expected the first five bytes to be \`7f 45 4c 46 02\` (\\x7fELF, ELFCLASS64)" \
        "  header read: $elf_bytes"
 fi
-if [ "$elf_machine" != "3e 00" ]; then
-  fail "check 6 (ELF): /usr/local/bin/logweir in $ref is NOT an x86-64 binary." \
-       "  e_machine at offset 18 is \`$elf_machine\`, expected \`3e 00\` (0x003e," \
-       "  EM_X86_64). The builder stage cross-compiles to x86_64-unknown-linux-gnu" \
-       "  (Dockerfile:158) and the runtime stage copies from" \
-       "  target/x86_64-unknown-linux-gnu/release (Dockerfile:185); a" \
+if [ "$elf_machine" != "$ELF_MACHINE" ]; then
+  fail "check 6 (ELF): /usr/local/bin/logweir in $ref is NOT a $PLATFORM binary." \
+       "  e_machine at offset 18 is \`$elf_machine\`, expected \`$ELF_MACHINE\`" \
+       "  ($ELF_NAME). The builder stage cross-compiles to the target's triple" \
+       "  (/etc/logweir-cross.env) and copies from target/<triple>/release; a" \
        "  host-architecture binary here means one of those two was changed." \
        "  header read: $elf_bytes"
 fi
 
 # THE ENGINE'S ARCHITECTURE IS ASSERTED TOO (Task 9, carried from Task 8b's
 # review). Check 6 read the CLI's e_machine and stopped there, which left the
-# OTHER shipped ELF unread. The image is meant to be uniformly x86-64: the CLI
-# is cross-compiled to x86_64-unknown-linux-gnu and the engine is copied out of
-# an amd64-only image pinned BY DIGEST (Dockerfile:164) into
-# /usr/local/bin/kafka-backup (Dockerfile:181). Repin that line at a multi-arch
-# tag, or point the COPY at another stage, and a foreign binary can land beside
-# a correct one. Check 2 does fail on it — with "exec format error", which names
+# OTHER shipped ELF unread. The image is meant to be uniformly one
+# architecture: the CLI and Logweir's build of the engine are cross-compiled to
+# the same triple, and the rollback copies OSO's amd64-only binary. Point the
+# engine COPY at another stage, or build the rollback for arm64, and a foreign
+# binary can land beside a correct one. Check 2 does fail on it — with "exec format error", which names
 # neither the architecture nor the cause. That is exactly the argument that put
 # the CLI's header read first, and it applies to both binaries or to neither.
 #
@@ -228,19 +240,18 @@ fi
 # would move the failure up and silently re-point that test. So this arm says
 # only what it can see — it refuses a header that IS readable and IS the wrong
 # machine, and says out loud when it could not read one. It is not a check that
-# cannot fail: `check_image_rejects_an_image_whose_engine_is_not_x86_64` breaks
+# cannot fail: `check_image_rejects_an_image_whose_engine_is_another_architecture` breaks
 # an image exactly this way and watches this arm reject it.
 if engine_elf_out=$(docker run --rm --platform "$PLATFORM" --entrypoint /usr/bin/od "$ref" \
                       -An -tx1 -N20 /usr/local/bin/kafka-backup 2>&1); then
   engine_bytes="$(printf '%s' "$engine_elf_out" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')"
   engine_machine="$(printf '%s' "$engine_bytes" | cut -d' ' -f19-20)"
-  if [ "$engine_machine" != "3e 00" ]; then
-    fail "check 6 (ELF): /usr/local/bin/kafka-backup in $ref is NOT an x86-64 binary." \
-         "  e_machine at offset 18 is \`$engine_machine\`, expected \`3e 00\` (0x003e," \
-         "  EM_X86_64). The engine is copied from the amd64-only image pinned by" \
-         "  digest at Dockerfile:164 into /usr/local/bin/kafka-backup" \
-         "  (Dockerfile:181); a foreign binary here means that pin or that COPY" \
-         "  was changed." \
+  if [ "$engine_machine" != "$ELF_MACHINE" ]; then
+    fail "check 6 (ELF): /usr/local/bin/kafka-backup in $ref is NOT a $PLATFORM binary." \
+         "  e_machine at offset 18 is \`$engine_machine\`, expected \`$ELF_MACHINE\`" \
+         "  ($ELF_NAME). The engine is copied from the Dockerfile's \`engine\` stage" \
+         "  into /usr/local/bin/kafka-backup; a foreign binary here means that" \
+         "  stage or that COPY was changed." \
          "  header read: $engine_bytes"
   fi
 else
@@ -485,4 +496,72 @@ if [ "${retention_version#logweir-retention }" != "${cli_version#logweir }" ]; t
        "  layer or a different tree."
 fi
 
-echo "ok: x86-64 binaries, engine, CLI, the enforcement binary, approval minting and both licences are present in $ref"
+# ------------------------------------------------------------------ check 8
+# THE ENGINE IS THE ONE THE IMAGE SAYS IT IS (PROD-00.2, OD-3).
+#
+# The runner signs `/etc/logweir/engine-identity` as `engine.version` and
+# `engine.digest` in every scorecard and receipt, ahead of the Job's
+# environment (`crates/logweir/src/engine_identity.rs`). So the file must name
+# the engine that is actually there, and it must be one of the two engines
+# this repository builds:
+#
+#   * LOGWEIR'S BUILD — `ENGINE_VERSION` and `ENGINE_DIGEST` of
+#     third_party/kafka-backup-build.env, the default, on either platform;
+#   * OSO'S RELEASE — the one-release rollback (`ENGINE_SOURCE=oso`): the
+#     release the build is made from, at third_party/kafka-backup-binary.digest,
+#     on linux/amd64 only, because that is all OSO publishes.
+#
+# `kafka-backup --version` must print `kafka-backup <that version>` EXACTLY,
+# and the engine's own dynamic dependencies must resolve (check 1 reads only
+# Logweir's). Read with `cat` and compared on the host, never through a pipe.
+echo "-- check 8 (engine identity): the declared engine is the engine, and one this repository builds"
+if ! identity=$(docker run --rm --platform "$PLATFORM" --entrypoint /bin/cat "$ref" \
+                  /etc/logweir/engine-identity 2>&1); then
+  fail "check 8 (engine identity): $ref has no readable /etc/logweir/engine-identity:" \
+       "$identity" \
+       "  The runtime stage copies it from the engine stage beside the binary; without" \
+       "  it every Job signs whatever its environment claims."
+fi
+declared_version=$(printf '%s\n' "$identity" | sed -n '1s/^version=//p')
+declared_digest=$(printf '%s\n' "$identity" | sed -n '2s/^digest=//p')
+build_version=$(sed -n 's/^ENGINE_VERSION=//p' third_party/kafka-backup-build.env)
+build_digest=$(sed -n 's/^ENGINE_DIGEST=//p' third_party/kafka-backup-build.env)
+oso_version="${build_version%%+logweir.*}"
+oso_digest=$(tr -d '[:space:]' < third_party/kafka-backup-binary.digest)
+identity_lines=$(printf '%s\n' "$identity" | grep -c . || true)
+if [ "$identity_lines" != 2 ] || [ -z "$declared_version" ] || [ -z "$declared_digest" ]; then
+  fail "check 8 (engine identity): /etc/logweir/engine-identity in $ref is not the two lines" \
+       "  \`version=…\` and \`digest=…\`; it reads:" "$identity"
+fi
+if [ "$declared_version" = "$build_version" ] && [ "$declared_digest" = "$build_digest" ]; then
+  engine_kind="Logweir's build"
+elif [ "$declared_version" = "$oso_version" ] && [ "$declared_digest" = "$oso_digest" ]; then
+  engine_kind="OSO's release (the one-release rollback)"
+  [ "$PLATFORM" = linux/amd64 ] \
+    || fail "check 8 (engine identity): $ref declares OSO's release on $PLATFORM; OSO publishes" \
+            "  linux/amd64 only, so the rollback exists for linux/amd64 only."
+else
+  fail "check 8 (engine identity): $ref declares kafka-backup $declared_version ($declared_digest)," \
+       "  which is neither Logweir's build ($build_version, $build_digest)" \
+       "  nor OSO's release at the pin ($oso_version, $oso_digest)."
+fi
+if ! engine_version=$(docker run --rm --platform "$PLATFORM" --entrypoint /usr/local/bin/kafka-backup \
+                        "$ref" --version 2>&1); then
+  fail "check 8 (engine identity): kafka-backup --version failed inside $ref:" "$engine_version"
+fi
+if [ "$engine_version" != "kafka-backup $declared_version" ]; then
+  fail "check 8 (engine identity): $ref declares kafka-backup $declared_version, but the engine" \
+       "  prints \`$engine_version\`: every scorecard and receipt would name an engine" \
+       "  that did not run."
+fi
+if ! engine_ldd=$(docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$ref" \
+                    -c 'ldd /usr/local/bin/kafka-backup' 2>&1); then
+  fail "check 8 (engine identity): could not run ldd on the engine inside $ref:" "$engine_ldd"
+fi
+engine_missing=$(printf '%s\n' "$engine_ldd" | grep 'not found' || true)
+if [ -n "$engine_missing" ]; then
+  fail "check 8 (engine identity): the engine in $ref has unresolved libraries:" "$engine_missing"
+fi
+echo "-- check 8: $engine_kind, kafka-backup $declared_version ($declared_digest)"
+
+echo "ok: $PLATFORM binaries, engine, CLI, the enforcement binary, approval minting, both licences and the engine's identity are present in $ref"
