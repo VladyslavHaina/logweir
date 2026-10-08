@@ -404,7 +404,7 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
     })?;
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
         .map_err(|e| BackupError::Operational(format!("allowed-clusters does not parse: {e}")))?;
-    let mut owners = match &args.kafka_topic_resources {
+    let detected = match &args.kafka_topic_resources {
         None => BTreeMap::new(),
         Some(path) => {
             let text = std::fs::read_to_string(path)
@@ -429,12 +429,8 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
             )
         }
     };
-    for declared in &spec.source.topic_owners {
-        owners.insert(
-            declared.topic.clone(),
-            logweir_core::topic_configuration::declared_owner(declared),
-        );
-    }
+    let owners =
+        logweir_core::topic_configuration::merge_owners(detected, &spec.source.topic_owners);
     Ok(Inputs {
         spec,
         spec_text,

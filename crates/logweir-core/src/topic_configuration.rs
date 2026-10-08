@@ -540,6 +540,21 @@ pub fn declared_owner(owner: &DeclaredOwner) -> TopicOwner {
     }
 }
 
+/// **The run's owners**: the owners detected from `KafkaTopic` resources, with
+/// every declaration of the plan laid OVER them — a declaration is what the
+/// approved plan says, so a resource for the same topic does not replace it.
+#[must_use]
+pub fn merge_owners(
+    detected: BTreeMap<String, TopicOwner>,
+    declared: &[DeclaredOwner],
+) -> BTreeMap<String, TopicOwner> {
+    let mut owners = detected;
+    for owner in declared {
+        owners.insert(owner.topic.clone(), declared_owner(owner));
+    }
+    owners
+}
+
 /// How a topic's configuration reaches a target: through Kafka's admin API,
 /// or — for a topic a declarative owner manages, which would revert a change
 /// made around it — as desired state exported for that owner to apply.
@@ -768,10 +783,22 @@ mod tests {
             bad.reference = reference.into();
             assert!(refuse_declared(&bad, &named).is_some(), "{reference:?}");
         }
-        let mut bad = ok;
+        let mut bad = ok.clone();
         bad.reference = "x".repeat(MAX_OWNER_REFERENCE_CHARS + 1);
         assert!(refuse_declared(&bad, &named).is_some());
         assert_eq!(apply_route(true), "desiredStateExport");
+        // A declaration is laid over a detected resource for the same topic.
+        let detected = BTreeMap::from([(
+            "orders".to_string(),
+            TopicOwner {
+                kind: "strimzi".into(),
+                basis: "kafkaTopicResource".into(),
+                reference: "kafka/orders".into(),
+            },
+        )]);
+        let merged = merge_owners(detected, &[ok.clone()]);
+        assert_eq!(merged["orders"].basis, "declared");
+        assert_eq!(merged["orders"].reference, ok.reference);
         assert_eq!(apply_route(false), "adminApi");
     }
 }

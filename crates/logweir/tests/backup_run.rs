@@ -554,6 +554,105 @@ fn backup_run_refuses_a_glob_topic() {
     );
 }
 
+/// **PROD-05.1 at phase −1.** A declared owner this build cannot record — an
+/// unplanned topic, another kind, an unusable reference — is refused, exit 3,
+/// before anything is dialled; a valid one is not (the control).
+#[test]
+fn backup_run_refuses_a_declared_owner_it_cannot_record() {
+    let owners = |topic: &str, kind: &str, reference: &str| {
+        format!(
+            "  topic_owners:\n  - topic: {topic}\n    kind: {kind}\n    reference: \"{reference}\"\n"
+        )
+    };
+    for (extra, said) in [
+        (
+            owners("clicks", "external", "tf"),
+            "which is not one of source.topics",
+        ),
+        (
+            owners("orders", "terraform", "tf"),
+            "is not \"strimzi\" or \"external\"",
+        ),
+        (
+            owners("orders", "external", "  "),
+            "must be 1 to 256 characters",
+        ),
+    ] {
+        let f = fixture(
+            &spec_yaml("mvp-demo", "[orders]", &extra),
+            &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+        );
+        let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+        let engine = RecordingEngine::one_topic();
+        let store = empty_archive();
+        assert_eq!(
+            run(&f.args, &reader, &engine, &store),
+            ExitCode::GuardRefused,
+            "{said}"
+        );
+        let msg =
+            guard_message(exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err());
+        assert!(msg.contains(said), "{msg}");
+    }
+}
+
+/// **PROD-05.1: owners reach the receipt.** A Strimzi `KafkaTopic` given with
+/// `--kafka-topic-resources` owns its topic, and a declaration in the plan is
+/// laid over it; without the file and the declaration nothing is owned (the
+/// control).
+#[test]
+fn declared_and_detected_owners_reach_the_receipts_model() {
+    let declared = concat!(
+        "  topic_owners:\n  - topic: orders\n    kind: external\n",
+        "    reference: \"terraform: kafka_topic.orders\"\n",
+    );
+    for (extra, resources, want) in [
+        ("", false, None),
+        (
+            "",
+            true,
+            Some(("strimzi", "kafkaTopicResource", "kafka/orders-kt")),
+        ),
+        (
+            declared,
+            true,
+            Some(("external", "declared", "terraform: kafka_topic.orders")),
+        ),
+    ] {
+        let mut f = fixture(
+            &spec_yaml("mvp-demo", "[orders]", extra),
+            &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+        );
+        if resources {
+            let path = f._dir.path().join("kafkatopics.yaml");
+            std::fs::write(
+                &path,
+                concat!(
+                    "apiVersion: kafka.strimzi.io/v1beta2\nkind: KafkaTopic\nmetadata:\n",
+                    "  name: orders-kt\n  namespace: kafka\n  labels:\n",
+                    "    strimzi.io/cluster: prod\nspec:\n  topicName: orders\n",
+                ),
+            )
+            .unwrap();
+            f.args.kafka_topic_resources = Some(path);
+            f.args.strimzi_cluster = Some("prod".into());
+        }
+        let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+        let engine = RecordingEngine::one_topic();
+        let (store, _k, _b) = archive_for("mvp-demo");
+        let outcome = exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
+        let got = outcome.topic_configuration["orders"]
+            .owner
+            .as_ref()
+            .map(|o| (o.kind.clone(), o.basis.clone(), o.reference.clone()));
+        assert_eq!(
+            got,
+            want.map(|(k, b, r)| (k.to_string(), b.to_string(), r.to_string())),
+            "extra {extra:?}, resources {resources}"
+        );
+    }
+}
+
 /// **C15 at phase −1** (PROD-00.3f, A-C15-1). An `http://` archive endpoint
 /// with `allow_http: false` is refused before any client exists: the pinned
 /// engine (0.22.0 and later) would derive plaintext from the scheme and ignore
