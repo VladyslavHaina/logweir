@@ -10055,11 +10055,30 @@ fn restore_declaring(plan: &str, coverage: Option<&str>, bound: Option<i64>) -> 
 /// declaration — the second is how a list would show `sampled` over a run
 /// that verifies everything, or the reverse.
 ///
+/// The fifth row is a hand-written STANDING `Restore` (it carries
+/// `spec.authorization`, so the admission that follows is the standing one):
+/// its declaration is held to the plan exactly as a per-run one's, so a list
+/// can never read "sampled" over a standing run that verifies every record.
+///
 /// KILLS: removing the early `coverage_agrees(restore)?` (every row holds as
 /// `ApprovalNotVerified`); comparing coverage only (rows 3 and 4 admitted);
-/// reading absent as "whatever the plan says" (row 2 admitted).
+/// reading absent as "whatever the plan says" (row 2 admitted); skipping the
+/// check for a `Restore` carrying `spec.authorization` (review RM3: row 5
+/// reads the approval).
 #[tokio::test]
 async fn a_declared_coverage_the_plan_does_not_say_is_refused_before_anything_is_read() {
+    let standing = |restore: weirkeeper::crds::restore::Restore| {
+        let mut value = serde_json::to_value(&restore).expect("serialises");
+        value["spec"]["authorization"] = serde_json::json!({
+            "kind": "Standing",
+            "approvalRef": {"name": "weekly-standing"},
+            "rehearsalScheduleRef": {"name": "weekly"},
+        });
+        let standing: weirkeeper::crds::restore::Restore =
+            serde_json::from_value(value).expect("the fixture is a standing Restore");
+        assert!(standing.spec.authorization.is_some(), "the row is standing");
+        standing
+    };
     for (label, object, words) in [
         (
             "complete declared over a sampled plan",
@@ -10086,6 +10105,14 @@ async fn a_declared_coverage_the_plan_does_not_say_is_refused_before_anything_is
             "a plan bound with no declared bound",
             restore_declaring(&complete_plan_bytes(Some(20)), Some("complete"), None),
             ["`complete` (20)", "`complete` (no bound)"],
+        ),
+        (
+            "a standing Restore's complete plan with no declaration",
+            standing(restore_declaring(&complete_plan_bytes(None), None, None)),
+            [
+                "sample.coverage `complete`",
+                "spec declares coverage `sampled`",
+            ],
         ),
     ] {
         let (client, recorder, bodies) = mock_client_recording_bodies(admission_routes(
@@ -10498,5 +10525,58 @@ fn a_complete_verification_that_did_not_cover_is_never_a_green_badge() {
     assert!(
         badge.green,
         "the control: a covered complete pass is green: {badge:?}"
+    );
+}
+
+/// **A real run whose complete verification did not cover is named
+/// `CompleteNotCovered`, not `OutcomeNotPass`** (PROD-08.1a review M2). Such a
+/// run signs `fail-integrity`, `integrity.result: partial`, and exits 2; the
+/// badge rule judges `covered` before the outcome, so the `Verified`
+/// condition says WHY it failed and an operator can alert on that reason.
+///
+/// CONTROLS: a complete run that DID cover and still failed integrity is
+/// `OutcomeNotPass` (so the reason comes from `covered`, not from the
+/// outcome); the same `covered: false` status over a verdict that is
+/// `Invalid` is `VerificationInvalid` (the signature is judged first, so no
+/// reason is ever read off a status whose document did not verify).
+///
+/// KILLS: the `covered` arm moved back after the outcome (the case reads
+/// `OutcomeNotPass`); the `covered` arm moved ahead of the verification (the
+/// second control reads `CompleteNotCovered`).
+#[test]
+fn a_real_run_that_did_not_cover_is_named_complete_not_covered() {
+    let status = |covered: bool, verdict: &str| {
+        serde_json::json!({
+            "exitCode": 2,
+            "outcome": "fail-integrity",
+            "integrity": {"result": if covered { "fail" } else { "partial" },
+                          "coverage": "complete",
+                          "complete": {"covered": covered,
+                                       "incompleteReason": "the bound stopped it"}},
+            "evidence": {"verification": {"result": verdict,
+                                          "verifiedAt": "2026-09-07T14:10:00Z",
+                                          "matchedKeyId": KEY_ID_LIVE}}
+        })
+    };
+    let badge = weirkeeper::verification::restore_badge(&status(false, "Valid"));
+    assert!(!badge.green, "{badge:?}");
+    assert_eq!(
+        badge.reason,
+        weirkeeper::conditions::REASON_COMPLETE_NOT_COVERED,
+        "a real covered: false run names itself"
+    );
+    let badge = weirkeeper::verification::restore_badge(&status(true, "Valid"));
+    assert!(!badge.green, "{badge:?}");
+    assert_eq!(
+        badge.reason,
+        weirkeeper::conditions::REASON_OUTCOME_NOT_PASS,
+        "the control: a covered run that failed integrity is OutcomeNotPass"
+    );
+    let badge = weirkeeper::verification::restore_badge(&status(false, "Invalid"));
+    assert!(!badge.green, "{badge:?}");
+    assert_eq!(
+        badge.reason,
+        weirkeeper::conditions::REASON_VERIFICATION_INVALID,
+        "the control: the signature is judged before anything the status says"
     );
 }

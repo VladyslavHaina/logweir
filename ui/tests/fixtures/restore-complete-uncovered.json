@@ -162,8 +162,8 @@
       {
         "type": "Verified",
         "status": "False",
-        "reason": "OutcomeNotPass",
-        "message": "verified by weirkeeper at 2026-09-11T12:42:32Z against key 6ea0c47f9a1b4d2e8c5f0a3b7d6e9012",
+        "reason": "CompleteNotCovered",
+        "message": "unverified",
         "lastTransitionTime": "2026-09-11T12:42:32Z",
         "observedGeneration": 1
       }

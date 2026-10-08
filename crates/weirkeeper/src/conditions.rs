@@ -759,14 +759,18 @@ pub const REASON_EXIT_CODE_NOT_ZERO: &str = "ExitCodeNotZero";
 /// its `outcome` is not `pass`. The `Restore` half of interface **I21**.
 pub const REASON_OUTCOME_NOT_PASS: &str = "OutcomeNotPass";
 
-/// [`CONDITION_VERIFIED`]'s reason when a `Restore`'s evidence verified, its
-/// `outcome` reads `pass` and its signed complete verification says
-/// `covered: false` — PROD-08.1a.
+/// [`CONDITION_VERIFIED`]'s reason when a `Restore`'s evidence verified and
+/// its signed complete verification says `covered: false` — PROD-08.1a.
 ///
-/// UNREACHABLE FROM A DOCUMENT EITHER READER ACCEPTS (arm IV-6 refuses a
-/// `pass` beside `covered: false`), and the rule reads it anyway: a badge rule
-/// that trusted one field to imply another would be one runner defect away
-/// from a green badge over a verification that did not cover the restore.
+/// THE REASON OF EVERY REAL ONE. A complete verification that a bound stopped,
+/// or that met an archive it could not compare, signs `fail-integrity` and
+/// exits 2; this reason is judged before `outcome`, so such a run reads
+/// `CompleteNotCovered` and not [`REASON_OUTCOME_NOT_PASS`], and an operator
+/// can alert on it. It is ALSO the reason of a status that says `pass` beside
+/// `covered: false` — a combination arm IV-6 keeps out of every document
+/// either reader accepts, read anyway because a badge rule that trusted one
+/// field to imply another would be one runner defect away from a green badge
+/// over a verification that did not cover the restore.
 pub const REASON_COMPLETE_NOT_COVERED: &str = "CompleteNotCovered";
 
 /// A `Backup` whose runner Job is NOT known to execute this object's frozen

@@ -314,8 +314,10 @@ fn a_rehearsal_schedule_view_says_sampled_or_complete() {
 /// reads the outcome files `e2e/tests/record_semantics.rs`'s
 /// `a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stack`
 /// writes on a compose slot). Each signed scorecard goes through the
-/// controller's own reader (`scorecard_observation`, `integrity_block`, the
-/// badge rule), onto a `Restore` status beside a `Valid` verdict, and through
+/// controller's own reader (`scorecard_observation`, `integrity_block`, and
+/// the badge rule, whose `Verified` condition replaces the fixture's and
+/// whose reason is asserted), onto a `Restore` status beside a `Valid`
+/// verdict, and through
 /// this crate's list and operation projections; the projections are written to
 /// `LOGWEIR_COVERAGE_OUT` for the console to render.
 ///
@@ -364,6 +366,27 @@ fn live_signed_scorecards_flow_through_the_controller_and_the_api() {
             "integrity".into(),
             Value::Object(weirkeeper::controllers::restore::integrity_block(&o)),
         );
+        // The `Verified` condition the controller would write over THIS
+        // status, from its own badge rule -- not the fixture's: a real
+        // `covered: false` run is `CompleteNotCovered` (review M2), a covered
+        // or sampled pass is `Verified`.
+        let badge = weirkeeper::verification::restore_badge(&doc["status"]);
+        let want = if covered == Some(false) {
+            weirkeeper::conditions::REASON_COMPLETE_NOT_COVERED
+        } else {
+            weirkeeper::conditions::REASON_VERIFIED
+        };
+        assert_eq!(badge.reason, want, "{label}: {badge:?}");
+        for condition in doc["status"]["conditions"]
+            .as_array_mut()
+            .expect("the fixture carries conditions")
+            .iter_mut()
+            .filter(|c| c["type"] == "Verified")
+        {
+            condition["status"] = json!(if badge.green { "True" } else { "False" });
+            condition["reason"] = json!(badge.reason);
+            condition["message"] = json!(badge.label);
+        }
         let object = cr(&doc);
         let row = serde_json::to_value(restore(&object, false)).unwrap();
         let detail = serde_json::to_value(restore(&object, true)).unwrap();

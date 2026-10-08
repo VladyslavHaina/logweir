@@ -1166,8 +1166,8 @@ pub struct Badge {
     pub green: bool,
     /// The `Verified` condition's `reason` — [`REASON_VERIFIED`] when green,
     /// and one of [`REASON_VERIFICATION_INVALID`],
-    /// [`REASON_VERIFICATION_NOT_ATTEMPTED`], [`REASON_EXIT_CODE_NOT_ZERO`] or
-    /// [`REASON_OUTCOME_NOT_PASS`] otherwise.
+    /// [`REASON_VERIFICATION_NOT_ATTEMPTED`], [`REASON_COMPLETE_NOT_COVERED`],
+    /// [`REASON_EXIT_CODE_NOT_ZERO`] or [`REASON_OUTCOME_NOT_PASS`] otherwise.
     pub reason: &'static str,
     /// "verified by weirkeeper at `<verifiedAt>` against key `<matchedKeyId>`"
     /// when green, and the literal [`UNVERIFIED`] in every other case.
@@ -1428,9 +1428,11 @@ pub fn backup_badge(status: &Value) -> Badge {
 }
 
 /// **Interface I21, the `Restore` half.** Green ⟺ `verification.result ==
-/// Valid` AND `status.outcome == pass` AND no recorded `exitCode` other than
-/// `0` AND no signed complete verification that says `covered: false`
-/// (PROD-08.1a, [`REASON_COMPLETE_NOT_COVERED`]).
+/// Valid` AND no signed complete verification that says `covered: false`
+/// (PROD-08.1a, [`REASON_COMPLETE_NOT_COVERED`], judged before the outcome so
+/// a real one — `fail-integrity`, exit 2 — is named by that reason and not by
+/// `OutcomeNotPass`) AND `status.outcome == pass` AND no recorded `exitCode`
+/// other than `0`.
 ///
 /// `outcome` is the scorecard's own string, copied onto the status by Task
 /// 20's reconciler and never re-derived — `pass`, `fail-objective`,
@@ -1457,6 +1459,17 @@ pub fn restore_badge(status: &Value) -> Badge {
         Ok(triple) => triple,
         Err(reason) => return Badge::not_green(reason),
     };
+    // PROD-08.1a: A COMPLETE VERIFICATION THAT DID NOT COVER THE RESTORE IS
+    // NEVER A PASS, whatever `outcome` says, and it is judged BEFORE the
+    // outcome so that it names itself. A real one signs `fail-integrity` and
+    // exits 2, and `OutcomeNotPass` would hide WHY it failed from an operator
+    // alerting on the reason; a document that said `pass` beside it (arm IV-6
+    // keeps that out of every document either reader accepts) gets the same
+    // reason. The verification is judged first, so a reason read off the
+    // status is only ever named over a document whose signature verified.
+    if status.pointer("/integrity/complete/covered") == Some(&Value::Bool(false)) {
+        return Badge::not_green(REASON_COMPLETE_NOT_COVERED);
+    }
     if status.get("outcome").and_then(Value::as_str) != Some("pass") {
         return Badge::not_green(REASON_OUTCOME_NOT_PASS);
     }
@@ -1465,12 +1478,6 @@ pub fn restore_badge(status: &Value) -> Badge {
         .is_some_and(|code| code.as_i64() != Some(0))
     {
         return Badge::not_green(REASON_EXIT_CODE_NOT_ZERO);
-    }
-    // PROD-08.1a: A COMPLETE VERIFICATION THAT DID NOT COVER THE RESTORE IS
-    // NEVER A PASS, whatever `outcome` says. Arm IV-6 keeps the two apart in
-    // every document either reader accepts; this keeps them apart here too.
-    if status.pointer("/integrity/complete/covered") == Some(&Value::Bool(false)) {
-        return Badge::not_green(REASON_COMPLETE_NOT_COVERED);
     }
     Badge::green(at, key, historical)
 }
