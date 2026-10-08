@@ -18,6 +18,14 @@ fn main() -> std::process::ExitCode {
         Err(e) => {
             let _ = e.print();
             return if e.use_stderr() {
+                // PROD-16.1 fix round (review H1): an `identity bootstrap`
+                // that clap refused ran none of its steps, so nothing else
+                // would delete the install's trust grant; the arguments
+                // still name it.
+                let argv: Vec<String> = std::env::args_os()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                logweir::identity::revoke_after_usage_error(&argv);
                 exit::ExitCode::Operational.into()
             } else {
                 std::process::ExitCode::SUCCESS

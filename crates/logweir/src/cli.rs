@@ -358,10 +358,14 @@ pub enum IdentityCmd {
         console_public_configmap_name: Option<String>,
         /// PROD-16.1: on a fresh install, create this cluster-scoped
         /// `TrustPolicy` (`default: true`) trusting the installation signer
-        /// (EvidenceSigning) and the console key (ConsoleConfirmation) — once,
-        /// and never when another default policy or `TrustRoster/default`
-        /// already exists.
-        #[arg(long)]
+        /// (EvidenceSigning) and the console key this run generated
+        /// (ConsoleConfirmation) — once, and never when any TrustPolicy or
+        /// `TrustRoster/default` already exists. Needs the console key and
+        /// the confirm marker: the automatic trust exists for nothing else.
+        #[arg(
+            long,
+            requires_all = ["console_secret_name", "mark_fresh_install_confirm"]
+        )]
         installation_trust_policy: Option<String>,
         /// A cluster id restores under the installation's TrustPolicy may
         /// target (`allowedTargetClusterIds`). Repeatable.
