@@ -1,0 +1,15 @@
+# Clippy configuration for the whole workspace (`just lint` runs clippy with
+# `-D warnings`, so every entry below is an error, not a hint).
+
+disallowed-methods = [
+    # T1 (docs/to-do/decisions/PROD-04.0-admin-path.md §3.1, §4.1, AP-04.1-4).
+    # rust-rdkafka 0.36.2's `GroupInfo::members` builds a slice from
+    # librdkafka's member array, which is NULL for every group without members:
+    # undefined behaviour, and an abort (exit 134) in a debug build, measured
+    # on Kafka 4.3.1 and 3.9.2. Fixed in rust-rdkafka 0.37.0 (commit 9be7eca2).
+    # Logweir's group listing does not build a `GroupInfo` at all
+    # (`logweir_rdkafka_ffi::groups::list_group_names`). This entry stays while
+    # the lock carries rdkafka below 0.37; `crates/logweir/tests/unsafe_scope_gate.rs`
+    # fails if it is removed before then.
+    { path = "rdkafka::groups::GroupInfo::members", reason = "T1: unsound on rdkafka 0.36.2 for a group without members (NULL slice); use logweir_rdkafka_ffi::groups" },
+]

@@ -1436,7 +1436,13 @@ pub const SECRET_ACCESS_KEY: &str = "sEcReT-aCcEsS-kEy-D2W12-NEVER-ECHOED";
 /// The access key id entered beside it.
 pub const ACCESS_KEY_ID: &str = "AKIAD2W12NEVERECHOED";
 
-/// A `CreateDestinationRequest` naming an EXISTING Secret.
+/// A `CreateDestinationRequest` whose grants are WORKLOAD IDENTITIES — no
+/// credential Secret at all.
+///
+/// FX-20: it named EXISTING Secrets (`logweir-s3`, `archive-reader`) until a
+/// create stopped accepting `secret.existing` (no existing Secret can be bound
+/// to a destination that does not exist yet). The rows that are about a
+/// credential use [`destination_body_with_new_credential`] or build their own.
 pub fn destination_body(name: &str) -> Value {
     json!({
         "name": name,
@@ -1451,8 +1457,8 @@ pub fn destination_body(name: &str) -> Value {
         },
         "transport": {"security": "tls", "caBundle": {"configMapName": "minio-ca", "key": "ca.crt"}},
         "access": {
-            "archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}},
-            "archiveRead": {"mode": "secretKeys", "secret": {"existing": {"name": "archive-reader"}}},
+            "archiveWrite": {"mode": "workloadIdentity", "workloadIdentity": {"serviceAccountName": "logweir-s3"}},
+            "archiveRead": {"mode": "workloadIdentity", "workloadIdentity": {"serviceAccountName": "logweir-s3"}},
             "evidenceRead": {"mode": "archiveReadGrant"}
         },
         "readiness": {"writeProbe": "createOnlyMarker"}

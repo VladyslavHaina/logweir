@@ -416,7 +416,7 @@ test("choosing_a_destination_on_the_mounted_forms_pins_its_uid_and_guards_a_move
 
 test("a_custom_endpoint_needs_path_style_and_the_page_says_so_without_changing_either", () => {
   const base = {
-    name: "p", bucket: "kafka-backups", archiveWriteSource: "existing", archiveWriteSecret: "s3",
+    name: "p", bucket: "kafka-backups", archiveWriteSource: "workloadIdentity",
   };
   const https = "https" + ":" + "//" + "minio.storage.svc:9000";
   const refused = validateDestination(Object.assign({}, base,

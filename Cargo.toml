@@ -145,6 +145,22 @@ tokio = { version = "1", features = ["rt", "time", "net", "macros"] }
 # the clock and entropy read lives in `crates/logweir/src/ids.rs`.
 ulid = "1"
 
+# THE `unsafe` FENCE, PUT IN RUSTC'S HANDS (OD-6 (a2); ADR 0004's amendment;
+# PROD-04.0b's fix round). Every member except the one FFI crate,
+# `crates/logweir-rdkafka-ffi`, takes this table with `[lints] workspace = true`,
+# so rustc refuses `unsafe` in EVERY target of the package: lib, bin, example,
+# integration test, bench and build script alike. A root
+# `#![forbid(unsafe_code)]` reaches only its own crate, and an integration test
+# or a build script is a crate of its own; the review of PROD-04.0b showed six
+# `unsafe`-capable constructs passing the text scan there (a macro expanding to
+# `unsafe`, `cfg_attr(.., no_mangle)`, `include!`, a pruned directory,
+# `global_asm!`, a `#[path]` into the perimeter). `forbid` also covers
+# `no_mangle`, `export_name`, `link_section` and `global_asm!`.
+# `scripts/check-unsafe-scope.sh` requires this table and every member's
+# `[lints] workspace = true`, and keeps its text scan as a second layer.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 # Task 22, addendum ruling A5. `cargo dist` reads its targets, installers and CI
 # backend from here; without this section `cargo dist plan` errors out and
 # `.github/workflows/release.yml` has no source of truth for the triples it

@@ -83,8 +83,8 @@ use crate::crds::backup_destination::BackupDestination;
 use crate::crds::backup_schedule::BackupSchedule;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::protection_policy::{
-    AlertDelivery, AlertEntry, AlertKind, NotificationRoute, ProtectionPolicy,
-    ProtectionPolicyStatus, SecretKeyRef,
+    AlertDelivery, AlertEntry, AlertKind, NotificationCredentialBinding, NotificationRoute,
+    ProtectionPolicy, ProtectionPolicyStatus, SecretKeyRef,
 };
 use crate::crds::recovery_catalog::RecoveryCatalog;
 use crate::crds::restore::Restore;
@@ -92,6 +92,7 @@ use crate::crds::{Condition, LocalRef, Time};
 use crate::identity;
 use crate::job::{self, ConfigMapMount, EnvFromSecret, RunnerImage, RunnerJobSpec, RunnerOwner};
 use crate::protection as p;
+use logweir_core::credential_binding::{self as binding, NotificationSink};
 
 use super::approval::ReconcileError;
 
@@ -120,6 +121,11 @@ pub const REASON_DELIVERY_PENDING: &str = "DeliveryPending";
 /// condition and does not touch a `Backup`, a `Restore`, a phase or a piece of
 /// evidence.
 pub const REASON_DELIVERY_FAILED: &str = "DeliveryFailed";
+/// …FX-20: a delivery failed because a route's credential Secret is not bound
+/// to this policy, its sink and its endpoint; nothing was posted to that sink.
+/// Takes precedence over [`REASON_DELIVERY_FAILED`], because it names the fix.
+pub const REASON_CREDENTIAL_BINDING_MISMATCH: &str =
+    logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH;
 /// …when the policy configures no route, or none for this kind. Reported as
 /// `True`: nothing failed, and an operator who configured no sink chose that.
 pub const REASON_NOTHING_TO_DELIVER: &str = "NothingToDeliver";
@@ -1425,6 +1431,13 @@ pub fn delivery_job_spec(
         env_literal.push((ALLOW_INSECURE_SINKS_ENV.to_string(), "1".to_string()));
     }
 
+    // FX-20: EVERY SINK'S CREDENTIAL TRAVELS WITH ITS BINDING PAIR. The
+    // controller's EXPECTED binding (the policy's UID, the sink kind and, for
+    // PagerDuty, the endpoint) is a literal; the Secret's own
+    // `logweir-binding` key is an OPTIONAL `secretKeyRef` beside the
+    // credential. `logweir notify deliver` compares the two before it builds a
+    // request, so a route that names another policy's Secret — or a PagerDuty
+    // endpoint edited after the Secret was bound — posts nothing to that sink.
     if let Some((route, channel)) = routes
         .iter()
         .find_map(|r| r.pager_duty.as_ref().map(|c| (r, c)))
@@ -1433,16 +1446,41 @@ pub fn delivery_job_spec(
         if let Some(endpoint) = channel.endpoint.as_deref() {
             env_literal.push((PAGERDUTY_ENDPOINT_ENV.to_string(), endpoint.to_string()));
         }
+        push_binding_pair(
+            &mut env_from_secret,
+            &mut env_literal,
+            NotificationSink::PagerDuty,
+            &channel.routing_key_secret_ref,
+            sink_binding(
+                &owner.uid,
+                NotificationSink::PagerDuty,
+                channel.endpoint.as_deref(),
+            ),
+        );
         debug!(route = %route.name, "the PagerDuty route this delivery Job addresses");
     }
     if let Some(channel) = routes.iter().find_map(|r| r.webhook.as_ref()) {
         env_from_secret.push(secret_env(WEBHOOK_URL_ENV, &channel.url_secret_ref));
+        push_binding_pair(
+            &mut env_from_secret,
+            &mut env_literal,
+            NotificationSink::Webhook,
+            &channel.url_secret_ref,
+            sink_binding(&owner.uid, NotificationSink::Webhook, None),
+        );
     }
     if let Some(channel) = routes.iter().find_map(|r| r.slack.as_ref()) {
         env_from_secret.push(secret_env(
             SLACK_WEBHOOK_URL_ENV,
             &channel.webhook_url_secret_ref,
         ));
+        push_binding_pair(
+            &mut env_from_secret,
+            &mut env_literal,
+            NotificationSink::Slack,
+            &channel.webhook_url_secret_ref,
+            sink_binding(&owner.uid, NotificationSink::Slack, None),
+        );
     }
 
     RunnerJobSpec {
@@ -1484,6 +1522,81 @@ fn secret_env(name: &str, reference: &SecretKeyRef) -> EnvFromSecret {
         optional: false,
         key: reference.key.clone(),
     }
+}
+
+/// The binding one sink's Secret must carry: [`binding::notification_binding`]
+/// over the policy's UID, or the fail-closed [`binding::UNBOUND_NO_UID`] when
+/// there is no UID to bind to.
+#[must_use]
+pub fn sink_binding(policy_uid: &str, sink: NotificationSink, endpoint: Option<&str>) -> String {
+    if policy_uid.trim().is_empty() {
+        return binding::UNBOUND_NO_UID.to_string();
+    }
+    binding::notification_binding(policy_uid, sink, endpoint)
+}
+
+/// The pair one sink contributes: the EXPECTED literal and the Secret's
+/// `logweir-binding` key as an OPTIONAL `secretKeyRef` — optional, so an
+/// unbound Secret still reaches the deliverer, which refuses it by name rather
+/// than the pod failing to start and the attempt reading "no exit code".
+fn push_binding_pair(
+    env_from_secret: &mut Vec<EnvFromSecret>,
+    env_literal: &mut Vec<(String, String)>,
+    sink: NotificationSink,
+    reference: &SecretKeyRef,
+    expected: String,
+) {
+    let (projected, expected_env) = sink.binding_env();
+    env_literal.push((expected_env.to_string(), expected));
+    env_from_secret.push(EnvFromSecret {
+        name: projected.to_string(),
+        secret_name: reference.name.clone(),
+        optional: true,
+        key: binding::CREDENTIAL_BINDING_KEY.to_string(),
+    });
+}
+
+/// FX-20: `status.credentialBindings` — one entry per channel a route names, in
+/// route order, so an operator binding a Secret by hand reads the value here
+/// (the same function the delivery Job's expectation comes from).
+#[must_use]
+pub fn notification_bindings(
+    policy_uid: &str,
+    routes: Option<&[NotificationRoute]>,
+) -> Vec<NotificationCredentialBinding> {
+    let mut out = Vec::new();
+    for route in routes.unwrap_or_default() {
+        let channels: [(NotificationSink, Option<&SecretKeyRef>, Option<&str>); 3] = [
+            (
+                NotificationSink::PagerDuty,
+                route.pager_duty.as_ref().map(|c| &c.routing_key_secret_ref),
+                route
+                    .pager_duty
+                    .as_ref()
+                    .and_then(|c| c.endpoint.as_deref()),
+            ),
+            (
+                NotificationSink::Webhook,
+                route.webhook.as_ref().map(|c| &c.url_secret_ref),
+                None,
+            ),
+            (
+                NotificationSink::Slack,
+                route.slack.as_ref().map(|c| &c.webhook_url_secret_ref),
+                None,
+            ),
+        ];
+        for (sink, reference, endpoint) in channels {
+            let Some(reference) = reference else { continue };
+            out.push(NotificationCredentialBinding {
+                route: route.name.clone(),
+                sink: sink.as_str().to_string(),
+                secret_name: reference.name.clone(),
+                binding: sink_binding(policy_uid, sink, endpoint),
+            });
+        }
+    }
+    out
 }
 
 /// Create the delivery Job, tolerating the duplicate-reconcile 409, with
@@ -1791,6 +1904,17 @@ pub fn build_status(
         rehearsal: verdict.rehearsal.clone(),
         stale_since: stale_since(stored, verdict.health, now),
         alerts: (!alerts.is_empty()).then_some(alerts),
+        credential_bindings: {
+            let bindings = notification_bindings(
+                policy.metadata.uid.as_deref().unwrap_or_default(),
+                policy
+                    .spec
+                    .notifications
+                    .as_ref()
+                    .and_then(|n| n.routes.as_deref()),
+            );
+            (!bindings.is_empty()).then_some(bindings)
+        },
         conditions: Some(vec![ready, protected, delivered]),
     };
     settle_clock_fields(stored, status, interval, now)
@@ -1893,6 +2017,7 @@ fn verdict_bytes(status: &ProtectionPolicyStatus) -> Value {
 fn delivery_condition(alerts: &[AlertEntry]) -> (&'static str, &'static str, String) {
     let mut pending = 0usize;
     let mut failed = 0usize;
+    let mut refused = 0usize;
     let mut delivered = 0usize;
     let mut suppressed = 0usize;
     for entry in alerts {
@@ -1903,11 +2028,28 @@ fn delivery_condition(alerts: &[AlertEntry]) -> (&'static str, &'static str, Str
             .and_then(p::DeliveryState::parse)
         {
             Some(p::DeliveryState::Pending) => pending += 1,
-            Some(p::DeliveryState::Failed) => failed += 1,
+            Some(p::DeliveryState::Failed) => {
+                failed += 1;
+                if entry.delivery.as_ref().is_some_and(p::binding_refused) {
+                    refused += 1;
+                }
+            }
             Some(p::DeliveryState::Delivered) => delivered += 1,
             Some(p::DeliveryState::Suppressed) => suppressed += 1,
             None => {}
         }
+    }
+    if refused > 0 {
+        return (
+            "False",
+            REASON_CREDENTIAL_BINDING_MISMATCH,
+            format!(
+                "{refused} alert transition(s) were not delivered to a sink whose credential \
+                 Secret is not bound to this policy (no `logweir-binding`, or one written for \
+                 another policy, sink or endpoint); nothing was posted to that sink. Set each \
+                 Secret's `logweir-binding` to its entry in status.credentialBindings"
+            ),
+        );
     }
     if failed > 0 {
         return (

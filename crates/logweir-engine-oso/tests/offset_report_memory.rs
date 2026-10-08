@@ -10,61 +10,72 @@
 //! the review: 1.5 GB peak RSS for a 2,000,000-pair report), enough to
 //! OOM-kill a memory-capped runner after a restore that exited 0.
 //!
-//! This file holds ONE test, so the allocations it meters are its own. A
-//! counting global allocator (test-only; it delegates every call to the
-//! system allocator) records the peak of live heap bytes while
-//! `read_engine_report` reads a synthetic report in the engine's
-//! pretty-printed shape. The read must stay under `BOUND` however many pairs
-//! the report holds; the control parses the same file into a `Value` and must
-//! exceed it many times over, which is what shows the meter would see a reader
-//! that materialises the section.
+//! This file holds ONE test, and it measures the read in a CHILD process: the
+//! test binary runs itself again with `FX23_MEM_CHILD` set, the child does the
+//! one read and exits, and the parent takes the child's peak resident set from
+//! `getrusage(RUSAGE_CHILDREN)` (a safe API; a counting global allocator would
+//! need `unsafe`, which the workspace lint forbids outside the FFI crate,
+//! PROD-04.0b). A baseline child that reads a report with no per-record pairs
+//! is measured first; the read may add at most `BOUND` to it, however many
+//! pairs the report holds. The control child parses the same file into a
+//! `Value` and must add many times `BOUND`, which is what shows the meter would
+//! see a reader that materialises the section.
 //!
 //! `FX23_REPORT_PAIRS` sets the size (default 200,000 pairs, about 23 MB);
-//! `FX23_SKIP_CONTROL=1` skips the control, for a measurement run under
-//! `/usr/bin/time -l` at millions of pairs.
+//! `FX23_SKIP_CONTROL=1` skips the control.
 use logweir_core::engine::EngineReport;
 use logweir_engine_oso::engine::read_engine_report;
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::Path;
 
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
+/// The most resident memory the streaming read may add to the baseline child,
+/// whatever the report's size: the `BufReader`'s buffer, serde's scratch and
+/// the allocator's own slack.
+const BOUND: u64 = 8 << 20;
 
-/// Counts live heap bytes and their peak; every call is the system
-/// allocator's own.
-struct Counting;
+const TEST_NAME: &str = "reading_the_engine_report_never_holds_its_per_record_section";
 
-// SAFETY: every method forwards to `System` with the caller's arguments
-// unchanged; the two atomics are bookkeeping only.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc(layout) };
-        if !p.is_null() {
-            let now = LIVE.fetch_add(layout.size(), Ordering::SeqCst) + layout.size();
-            PEAK.fetch_max(now, Ordering::SeqCst);
-        }
-        p
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) };
-        LIVE.fetch_sub(layout.size(), Ordering::SeqCst);
+/// The peak resident set, in bytes, of every child this process has waited
+/// for (`ru_maxrss` is kilobytes on Linux and bytes on macOS).
+fn children_peak_rss() -> u64 {
+    let usage = nix::sys::resource::getrusage(nix::sys::resource::UsageWho::RUSAGE_CHILDREN)
+        .expect("getrusage(RUSAGE_CHILDREN)");
+    let max = u64::try_from(usage.max_rss()).unwrap_or(0);
+    if cfg!(target_os = "macos") {
+        max
+    } else {
+        max * 1024
     }
 }
 
-#[global_allocator]
-static GLOBAL: Counting = Counting;
+/// Runs this test again in a child, in `mode`, over `path`, and returns the
+/// peak resident set of every child so far (the maximum is monotonic, so the
+/// caller runs the smallest first).
+fn child_peak(mode: &str, path: &Path) -> u64 {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+        .env("FX23_MEM_CHILD", mode)
+        .env("FX23_MEM_PATH", path)
+        .status()
+        .expect("the child test process starts");
+    assert!(status.success(), "the {mode} child failed: {status}");
+    children_peak_rss()
+}
 
-/// The most live heap the read may add, whatever the report's size: the
-/// `BufReader`'s buffer, serde's scratch string and the handful of entries.
-const BOUND: usize = 1 << 20;
-
-/// Peak live heap bytes `f` adds above what was live when it started.
-fn peak_added(f: impl FnOnce()) -> usize {
-    let base = LIVE.load(Ordering::SeqCst);
-    PEAK.store(base, Ordering::SeqCst);
-    f();
-    PEAK.load(Ordering::SeqCst) - base
+/// The child's half: one read of the file, then return (the test passes).
+fn run_child(mode: &str, path: &Path) {
+    match mode {
+        "read" | "baseline" => {
+            let report = read_engine_report(path);
+            assert!(matches!(report, EngineReport::Read(_)), "{report:?}");
+        }
+        "control" => {
+            let f = std::fs::File::open(path).unwrap();
+            let v: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(f)).unwrap();
+            assert!(v["detailed_mappings"].is_object());
+        }
+        other => panic!("unknown FX23_MEM_CHILD mode {other}"),
+    }
 }
 
 /// A report in the shape `serde_json::to_string_pretty(&OffsetMapping)` writes:
@@ -115,6 +126,11 @@ fn write_report(path: &std::path::Path, pairs: u64) -> u64 {
 
 #[test]
 fn reading_the_engine_report_never_holds_its_per_record_section() {
+    if let Ok(mode) = std::env::var("FX23_MEM_CHILD") {
+        let path = std::env::var("FX23_MEM_PATH").expect("FX23_MEM_PATH");
+        run_child(&mode, Path::new(&path));
+        return;
+    }
     let pairs: u64 = std::env::var("FX23_REPORT_PAIRS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -128,16 +144,14 @@ fn reading_the_engine_report_never_holds_its_per_record_section() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
+    let small = dir.join("baseline.json");
+    write_report(&small, 0);
     let path = dir.join("offsets.json");
     let size = write_report(&path, pairs);
 
-    let mut report = None;
-    let read = peak_added(|| report = Some(read_engine_report(&path)));
-    eprintln!(
-        "[fx23-mem] report {size} bytes, {pairs} pairs: read_engine_report peak heap +{read} bytes"
-    );
+    // What phase 7 needs is still answered, in this process.
     assert_eq!(
-        report.unwrap(),
+        read_engine_report(&path),
         EngineReport::Read(
             [0, 1, 2]
                 .into_iter()
@@ -146,24 +160,27 @@ fn reading_the_engine_report_never_holds_its_per_record_section() {
         ),
         "the reader still answers what phase 7 needs"
     );
+
+    let baseline = child_peak("baseline", &small);
+    let read = child_peak("read", &path).saturating_sub(baseline);
+    eprintln!(
+        "[fx23-mem] report {size} bytes, {pairs} pairs: baseline child {baseline} bytes RSS, \
+         read_engine_report adds {read}"
+    );
     assert!(
         read < BOUND,
-        "reading a {size}-byte report held {read} bytes of heap at its peak; the per-record \
-         section must be skipped as it streams past, never materialised (bound {BOUND})"
+        "reading a {size}-byte report added {read} bytes of resident memory at its peak; the \
+         per-record section must be skipped as it streams past, never materialised (bound {BOUND})"
     );
 
     if std::env::var("FX23_SKIP_CONTROL").as_deref() != Ok("1") {
         // The control: a reader that materialises the document. Its peak must
         // dwarf the bound, or this meter could not see the defect it guards.
-        let whole = peak_added(|| {
-            let f = std::fs::File::open(&path).unwrap();
-            let v: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(f)).unwrap();
-            assert!(v["detailed_mappings"].is_object());
-        });
-        eprintln!("[fx23-mem] control (whole document as Value): peak heap +{whole} bytes");
+        let whole = child_peak("control", &path).saturating_sub(baseline);
+        eprintln!("[fx23-mem] control (whole document as Value): adds {whole} bytes");
         assert!(
-            whole > 20 * BOUND,
-            "the control held only {whole} bytes; the meter cannot tell a streaming reader \
+            whole > 4 * BOUND,
+            "the control added only {whole} bytes; the meter cannot tell a streaming reader \
              from a materialising one at this size"
         );
     }

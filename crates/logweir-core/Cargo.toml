@@ -23,3 +23,8 @@ ulid = { version = "1", default-features = false }
 
 [features]
 default = []
+
+# `unsafe_code = "forbid"` for every target of this package, tests and build
+# scripts included (the root Cargo.toml's `[workspace.lints.rust]`).
+[lints]
+workspace = true

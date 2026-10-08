@@ -14,6 +14,7 @@
 //! the renderer IN-PROCESS, with no subprocess and no shell, and still be
 //! testing the same bytes CI diffs.
 
+#![forbid(unsafe_code)]
 use std::path::PathBuf;
 
 fn main() -> std::process::ExitCode {

@@ -134,6 +134,38 @@ pub fn reject_plaintext_endpoint_without_allow_http(
     Ok(())
 }
 
+/// **FX-20 fix round (review F1)**: the named reason a storage location whose
+/// S3 `region` is not a region name is refused. It names the message, not a
+/// terminal state: the `refusal-reason=` line stays `GuardRefused`, as FX-16's
+/// `PointBindingSetMismatch` does.
+pub const STORAGE_REGION_INVALID: &str = "StorageRegionInvalid";
+
+/// **FX-20 fix round (review F1)**: refuses a spec storage block whose S3
+/// `region` does not match [`crate::engine::S3_REGION_PATTERN`], before any
+/// client exists. Without an endpoint the region is part of the host the
+/// request goes to (`s3.<region>.amazonaws.com`), so `x@attacker.example/`
+/// would send the archive credential's signed requests elsewhere while the
+/// location's bucket, and so its binding, stayed the victim's. The location
+/// binding covers the region too; this is the second, independent rule.
+///
+/// The message names the field and never the value: a region crafted as a
+/// userinfo could carry a credential.
+pub fn reject_invalid_storage_region(
+    field: &str,
+    storage: &crate::engine::StorageUrl,
+) -> Result<(), GuardRefusal> {
+    if storage.has_invalid_region() {
+        return Err(GuardRefusal(format!(
+            "{STORAGE_REGION_INVALID}: {field}.region is not an S3 region name: it must match \
+             {}. Without an endpoint the region is part of the host the request is sent to, \
+             so any other spelling could carry the archive credential's signed requests to \
+             another host; the value is not repeated here. No client was built.",
+            crate::engine::S3_REGION_PATTERN
+        )));
+    }
+    Ok(())
+}
+
 /// **PROD-01.3: SASL/PLAIN only over TLS.** Refuses a spec's auth block whose
 /// mode is `plain` without `tls: true` — the message opens with
 /// `PlainWithoutTls: `, so the runner's `refusal-reason=` line names it

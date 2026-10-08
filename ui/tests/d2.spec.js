@@ -273,7 +273,7 @@ test("MUTANT_addressing_never_decides_transport_in_either_direction", () => {
   // the other way round.
   const base = {
     name: "p", bucket: "kafka-backups",
-    archiveWriteSource: "existing", archiveWriteSecret: "s3",
+    archiveWriteSource: "workloadIdentity",
   };
   const pathTls = destinationBody(Object.assign({}, base,
     { addressing: "pathStyle", security: "tls" }));
@@ -293,7 +293,7 @@ test("MUTANT_addressing_never_decides_transport_in_either_direction", () => {
 test("the_endpoint_scheme_and_the_transport_must_agree_and_neither_is_changed_to_suit", () => {
   const base = {
     name: "p", bucket: "kafka-backups", addressing: "pathStyle",
-    archiveWriteSource: "existing", archiveWriteSecret: "s3",
+    archiveWriteSource: "workloadIdentity",
   };
   const httpsWithPlaintext = validateDestination(Object.assign({}, base, {
     security: "insecureHttp", endpoint: "https" + ":" + "//" + "minio:9000",

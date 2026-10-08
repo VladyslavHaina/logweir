@@ -2746,16 +2746,23 @@ fn the_record_credential_is_decided_in_one_pure_place() {
     .expect("projected");
     assert_eq!(
         projected.len(),
-        2,
-        "two variables when no token is declared"
+        3,
+        "two credential variables when no token is declared, and FX-20's optional binding"
     );
+    let binding = projected.last().expect("the binding entry");
+    assert_eq!(
+        binding.name,
+        logweir_core::credential_binding::EVIDENCE_CREDENTIAL_BINDING_ENV
+    );
+    assert_eq!(binding.secret_name, "lw-evidence");
+    assert!(binding.optional);
     let with_token = ctrl::evidence_credential(
         Ok(&resolved_for(keys("lw-evidence", Some("t")))),
         true,
         Some("retention-delete"),
     )
     .expect("projected");
-    assert_eq!(with_token.len(), 3);
+    assert_eq!(with_token.len(), 4);
 
     // THE DOCUMENTED DEFAULT STANDS. `evidenceWrite` absent means
     // `archiveWrite`, exactly as `docs/kubernetes.md` §7 and `docs/install.md`
@@ -4569,6 +4576,28 @@ async fn harvest_pass(
     exit: i32,
     digest: &str,
 ) -> Value {
+    harvest_pass_logging(
+        spec,
+        status,
+        at,
+        run_id,
+        exit,
+        digest,
+        "retention-result=deleted=0 failed=0 objects=0\n",
+    )
+    .await
+}
+
+/// [`harvest_pass`] with the run's pod log chosen by the caller (FX-20).
+async fn harvest_pass_logging(
+    spec: &Value,
+    status: &Value,
+    at: DateTime<Utc>,
+    run_id: &str,
+    exit: i32,
+    digest: &str,
+    log: &str,
+) -> Value {
     let job_name = format!("{}-{run_id}", stem());
     let leaked: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
     // THE EVALUATION ROUTES ARE HERE TOO, DELIBERATELY. A pass that fails to
@@ -4580,11 +4609,7 @@ async fn harvest_pass(
     let mut routes = happy_routes(&six_points());
     routes.push(route("GET", leaked, job_body(&job_name, true)));
     routes.push(route("GET", "/pods", pod_list(exit)));
-    routes.push(route(
-        "GET",
-        "/log",
-        "retention-result=deleted=0 failed=0 objects=0\n".to_string(),
-    ));
+    routes.push(route("GET", "/log", log.to_string()));
     routes.push(route("PATCH", leaked, "{}".to_string()));
     routes.push(plan_config_map_route(digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
@@ -7057,5 +7082,186 @@ fn fx17_a_scheduled_set_and_its_retry_are_weighed_one_by_one() {
         candidate_ids(&evaluation).is_empty(),
         "no scheduled set was ever weighed while their ids were redacted: {:?}",
         candidate_ids(&evaluation)
+    );
+}
+
+// ===========================================================================
+// FX-20: the delete-capable key is bound to this policy, route and scope
+// ===========================================================================
+
+/// The archive route `destination_with_access` names — what every binding in
+/// this file is computed over.
+fn fx20_route() -> logweir_core::engine::StorageUrl {
+    logweir_core::engine::StorageUrl::S3 {
+        bucket: "lw-archive".to_string(),
+        prefix: SCOPE.to_string(),
+        region: Some("us-east-1".to_string()),
+        endpoint: Some("http://minio.storage.svc:9000".to_string()),
+        path_style: true,
+        allow_http: true,
+    }
+}
+
+/// **The enforcement Job carries two binding pairs: the DELETE key's, from
+/// `spec.enforcement.credentialSecretRef`, against this policy's binding; and
+/// the record key's, from the destination's `evidenceWrite` Secret, against
+/// the destination's.** The destination's own archive grant — and its binding
+/// — reach the pod on no variable.
+///
+/// KILLS: the delete key projected without its pair; the destination's
+/// expectation left on the delete key (so a Secret bound to the destination
+/// would delete); the record pair missing; the policy status not publishing
+/// the binding.
+#[tokio::test]
+async fn fx20_the_retention_job_binds_the_delete_key_to_the_policy_and_the_record_key_to_the_destination(
+) {
+    let destination = destination_with_access(four_principals());
+    let learn = fixture(routes_for_destination(&six_points(), destination.clone()));
+    run(&learn, &policy(enforcing(None), json!({}))).await;
+    let expected_delete =
+        logweir_core::credential_binding::retention_binding(UID, &fx20_route(), SCOPE);
+    assert_eq!(
+        learn.status()["credentialBinding"],
+        json!(expected_delete),
+        "the status names what the delete Secret must carry"
+    );
+    let digest = learn.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+    let mut routes = routes_for_destination(&six_points(), destination);
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+    let job = f.posted("/jobs").remove(0);
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .expect("env")
+        .clone();
+    let literal = |name: &str| {
+        env.iter()
+            .find(|e| e["name"] == name)
+            .and_then(|e| e["value"].as_str())
+            .map(str::to_string)
+    };
+    let reference = |name: &str| {
+        env.iter()
+            .find(|e| e["name"] == name)
+            .and_then(|e| e["valueFrom"].get("secretKeyRef"))
+            .cloned()
+    };
+    assert_eq!(
+        literal("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED"),
+        Some(expected_delete),
+        "the DELETE key is expected to be bound to this policy, its route and its scope"
+    );
+    let delete_pair = reference("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING").expect("the delete pair");
+    assert_eq!(delete_pair["name"], "retention-delete");
+    assert_eq!(delete_pair["key"], "logweir-binding");
+    assert_eq!(delete_pair["optional"], true);
+    assert_eq!(
+        literal("LOGWEIR_EVIDENCE_CREDENTIAL_BINDING_EXPECTED"),
+        Some(logweir_core::credential_binding::destination_binding(
+            DEST_UID,
+            &fx20_route()
+        ))
+    );
+    let record_pair = reference("LOGWEIR_EVIDENCE_CREDENTIAL_BINDING").expect("the record pair");
+    assert_eq!(record_pair["name"], "lw-evidence");
+    assert_eq!(record_pair["optional"], true);
+    let named: BTreeSet<String> = env
+        .iter()
+        .filter_map(|e| e["valueFrom"]["secretKeyRef"]["name"].as_str())
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        named,
+        BTreeSet::from(["lw-evidence".to_string(), "retention-delete".to_string()]),
+        "two Secrets, two pairs; the destination's archive grant is on no variable"
+    );
+    // The destination's own binding is NOT the delete key's expectation.
+    assert_ne!(
+        literal("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED"),
+        literal("LOGWEIR_EVIDENCE_CREDENTIAL_BINDING_EXPECTED")
+    );
+}
+
+/// **A re-created destination of the same NAME at another route moves the
+/// policy's binding**, so the delete key bound for the old route is refused
+/// there. `destinationRef` is immutable by name only.
+#[test]
+fn fx20_the_retention_binding_follows_the_route_not_the_name() {
+    let here = logweir_core::credential_binding::retention_binding(UID, &fx20_route(), SCOPE);
+    let mut moved = fx20_route();
+    if let logweir_core::engine::StorageUrl::S3 { endpoint, .. } = &mut moved {
+        *endpoint = Some("https://attacker.example:9000".to_string());
+    }
+    assert_ne!(
+        here,
+        logweir_core::credential_binding::retention_binding(UID, &moved, SCOPE)
+    );
+    assert_ne!(
+        here,
+        logweir_core::credential_binding::retention_binding(UID, &fx20_route(), "team-a/x"),
+        "and the scope"
+    );
+}
+
+/// **A run that refused its credential names `CredentialBindingMismatch` on
+/// `Enforced`**, read from the worker's closed `retention-refusal=` line; an
+/// exit 3 without it keeps the generic reason (CONTROL), and an unknown code is
+/// not read at all.
+///
+/// KILLS: the line not parsed; the reason left at `RunFailed`; a free-text
+/// code echoed into the status.
+#[tokio::test]
+async fn fx20_a_binding_refusal_is_named_on_the_enforced_condition() {
+    let digest = learned_digest().await;
+    let spec = unattended_enforcing();
+    let at = now();
+    let (started, run_id) = start_pass(&spec, &json!({}), at, &digest).await;
+    let refused = harvest_pass_logging(
+        &spec,
+        &started,
+        at + chrono::Duration::minutes(1),
+        &run_id,
+        3,
+        &digest,
+        "logweir-retention: CredentialBindingMismatch: x\nretention-refusal=CredentialBindingMismatch\n",
+    )
+    .await;
+    let enforced = condition_of(&refused, "Enforced").expect("Enforced");
+    assert_eq!(enforced["status"], "False");
+    assert_eq!(enforced["reason"], "CredentialBindingMismatch");
+    let message = enforced["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("Nothing was deleted") && message.contains("status.credentialBinding"),
+        "{message}"
+    );
+
+    // CONTROL: the same exit without the line is the generic refusal.
+    let (started, run_id) = start_pass(&spec, &json!({}), at, &digest).await;
+    let generic = harvest_pass_logging(
+        &spec,
+        &started,
+        at + chrono::Duration::minutes(1),
+        &run_id,
+        3,
+        &digest,
+        "retention-refusal=SomethingThisBuildDoesNotKnow\n",
+    )
+    .await;
+    let enforced = condition_of(&generic, "Enforced").expect("Enforced");
+    assert_eq!(enforced["reason"], "RunFailed");
+    assert!(!generic
+        .to_string()
+        .contains("SomethingThisBuildDoesNotKnow"));
+    assert_eq!(
+        ctrl::parse_run_lines("retention-refusal=CredentialBindingMismatch\n", Some(3))
+            .refusal_code,
+        Some("CredentialBindingMismatch")
     );
 }

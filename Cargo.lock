@@ -1900,6 +1900,7 @@ dependencies = [
  "logweir-kafka",
  "logweir-store",
  "lz4_flex",
+ "nix",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1927,10 +1928,18 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "logweir-core",
+ "logweir-rdkafka-ffi",
  "rdkafka",
  "sha2",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "logweir-rdkafka-ffi"
+version = "0.1.0"
+dependencies = [
+ "rdkafka",
 ]
 
 [[package]]

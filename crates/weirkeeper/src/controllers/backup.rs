@@ -2972,6 +2972,22 @@ pub fn runner_job_spec_from_inputs(
     secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
 
     let mut env_from_secret = projection.env_from_secret;
+    // FX-20: AN INLINE ARCHIVE'S SECRET IS BOUND TO THE LOCATION THE RUN
+    // WRITES — the frozen storage block's scheme, bucket and endpoint, which
+    // is where this run's archive AND its receipt (the same bucket's
+    // `logweir/`) go. A Secret bound to another location is refused by the
+    // runner before any store exists.
+    let inline_binding = match (
+        backup.spec.archive.secret_ref.as_ref(),
+        inputs.destination.as_ref(),
+    ) {
+        (Some(secret), None) => Some(crate::destination::inline_archive_binding_env(
+            &secret.name,
+            &inputs.archive.storage,
+            None,
+        )),
+        _ => None,
+    };
     if let Some(secret) = backup.spec.archive.secret_ref.as_ref() {
         env_from_secret.push(EnvFromSecret {
             name: ARCHIVE_ACCESS_KEY_ENV.to_string(),
@@ -2985,6 +3001,9 @@ pub fn runner_job_spec_from_inputs(
             optional: false,
             key: ARCHIVE_SECRET_KEY.to_string(),
         });
+    }
+    if let Some(binding) = inline_binding.as_ref() {
+        env_from_secret.extend(binding.from_secret.iter().cloned());
     }
 
     // === THE DESTINATION'S CONTRIBUTION, FROM THE FROZEN BLOCK (D2 §3.5) ===
@@ -3068,9 +3087,13 @@ pub fn runner_job_spec_from_inputs(
                     .iter()
                     .map(|v| (v.name.clone(), v.value.clone())),
             );
-            for block in [destination_env.as_ref(), evidence_env.as_ref()]
-                .into_iter()
-                .flatten()
+            for block in [
+                destination_env.as_ref(),
+                evidence_env.as_ref(),
+                inline_binding.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
             {
                 env.extend(block.literals.iter().cloned());
             }

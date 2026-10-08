@@ -325,4 +325,16 @@ fn the_write_only_dtos_serialize_no_value() {
     for value in ["AKIA", PASSWORD_ONE, PASSWORD_TWO] {
         assert!(!text.contains(value), "{text}");
     }
+    // FX-20 (PROD-01.3 review P3): EXACTLY the placeholder, field by field.
+    // The substring scan above misses a value serialized as something derived
+    // from it — its length, a prefix, a hash — and mutant R9 (the secret
+    // access key written as its length) survived it.
+    assert_eq!(
+        serde_json::to_value(&s3).unwrap(),
+        json!({
+            "accessKeyId": logweir_api::contract::WRITE_ONLY_PLACEHOLDER,
+            "secretAccessKey": logweir_api::contract::WRITE_ONLY_PLACEHOLDER,
+            "sessionToken": logweir_api::contract::WRITE_ONLY_PLACEHOLDER,
+        })
+    );
 }

@@ -123,6 +123,30 @@ them; a report that one of them is true is not a vulnerability report.
   credential, as strong as `get`: it can set a victim Secret's
   `logweir-binding` to a connection whose endpoint the patcher chose (the
   binding value is public on `status.credentialBinding`).
+- **The same binding guards every other credential reference (FX-20), with the
+  same residuals and three more.** A `BackupDestination` grant, a
+  `RetentionPolicy` delete key, a `ProtectionPolicy` route and an inline
+  archive `secretRef` are each refused (`CredentialBindingMismatch`) unless the
+  Secret carries the binding of that object, route or archive location
+  ([kubernetes.md](docs/kubernetes.md) §20.10); the kubelet still projects the
+  value into the refused pod, and Secret `patch` is still as strong as `get`.
+  Not bound: a **workload-identity grant** names a ServiceAccount, so a
+  destination author who may name another team's IRSA-annotated
+  ServiceAccount beside an endpoint they control gets requests signed with that
+  role's temporary credentials (the session token and access key id travel);
+  a destination's **CA reference** is mutable, so a principal who can both edit
+  it and intercept traffic to the (immutable) endpoint can read signed
+  requests; and an inline archive is bound to its **location** — every field
+  that shapes the URL the runner dials (scheme, bucket, endpoint, region,
+  addressing, `allowHttp`; never the prefix) — so any object in the namespace
+  may use that Secret at that location, what a `BackupDestination` in the
+  namespace already allows. A region that is not a region name is refused
+  outright (`StorageRegionInvalid`): without an endpoint the region is part of
+  the host, and before FX-20's fix round a plan keeping the victim's bucket
+  could spell one that sent the requests elsewhere. A standing rehearsal
+  authorization's scope does not name the storage a `Restore` reads
+  (PLAT-14.3b), so under one the location binding and the region rule are
+  what keep a Secret at its location.
 
 ## Cryptography
 
