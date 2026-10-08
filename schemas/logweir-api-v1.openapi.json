@@ -360,7 +360,7 @@
       },
       "post": {
         "operationId": "createConnection",
-        "summary": "Create a KafkaCluster that references an existing credential Secret by name.",
+        "summary": "Create a KafkaCluster. A SASL password or an mTLS client certificate and key may be entered ONCE in auth.credential; it becomes a Secret owned by and bound to the connection and is never read back or echoed. An existing Secret is never named.",
         "parameters": [
           {
             "name": "ns",
@@ -7175,7 +7175,7 @@
         }
       },
       "ConnectionAuthMode": {
-        "description": "The SASL mechanism, or `plaintext` for none.",
+        "description": "The SASL mechanism, `mtls` for a TLS client certificate, or `plaintext` for none.",
         "oneOf": [
           {
             "description": "No SASL.",
@@ -7190,33 +7190,66 @@
             "enum": [
               "scramSha512"
             ]
+          },
+          {
+            "description": "SASL/SCRAM-SHA-256 (PROD-01.3).",
+            "type": "string",
+            "enum": [
+              "scramSha256"
+            ]
+          },
+          {
+            "description": "SASL/PLAIN (PROD-01.3), accepted only with `tls: true`.",
+            "type": "string",
+            "enum": [
+              "plain"
+            ]
+          },
+          {
+            "description": "A TLS client certificate and no SASL (PROD-01.3), with `tls: true`.",
+            "type": "string",
+            "enum": [
+              "mtls"
+            ]
           }
         ]
       },
       "ConnectionAuthRequest": {
-        "description": "Authentication for a new connection. Existing credentials only: this request names a Secret; it never carries a password.",
+        "description": "Authentication for a new connection. The credential is TYPED, never named: this request carries a password or a client certificate and key once (`credential`), and no response ever returns either.",
         "type": "object",
         "required": [
           "mode",
           "tls"
         ],
         "properties": {
+          "credential": {
+            "description": "The credential, typed once: `password` for the three SASL modes, `certificatePem` and `privateKeyPem` for `mtls`; refused for `plaintext`.",
+            "default": null,
+            "$ref": "#/components/schemas/NewConnectionCredentialRequest",
+            "nullable": true
+          },
           "credentialRef": {
-            "description": "An existing Secret in this namespace holding the SASL password; required for `scramSha512`, refused for `plaintext`.",
+            "description": "**NO LONGER ACCEPTED** (PROD-01.3 security follow-up). It named an existing Secret, and a connection that may name any Secret can make the runner present a credential its author could not read. A request that sets it is refused (`existing_credential_refused`); enter the credential in `credential` instead. Kept in the grammar only so the refusal can say that, rather than an unknown-field error.",
             "default": null,
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
           },
           "mode": {
-            "description": "`plaintext` or `scramSha512`.",
+            "description": "`plaintext`, `scramSha512`, `scramSha256`, `plain` (with `tls: true` only) or `mtls` (with `tls: true`).",
             "$ref": "#/components/schemas/ConnectionAuthMode"
           },
           "tls": {
             "description": "Whether the transport is TLS.",
             "type": "boolean"
           },
+          "tlsCa": {
+            "description": "A private CA for a TLS connection, from a ConfigMap. Refused without `tls: true`.",
+            "default": null,
+            "$ref": "#/components/schemas/TlsCaRequest",
+            "nullable": true
+          },
           "username": {
-            "description": "The SASL principal; required for `scramSha512`, refused for `plaintext`.",
+            "description": "The SASL principal; required for `scramSha512`, `scramSha256` and `plain`, refused for `plaintext` and `mtls`.",
             "default": null,
             "type": "string",
             "nullable": true
@@ -7225,25 +7258,35 @@
         "additionalProperties": false
       },
       "ConnectionAuthView": {
-        "description": "Authentication settings of a stored connection.",
+        "description": "Authentication settings of a stored connection. **Write-only credentials:** a password or a private key is never readable back through this view or any other — it carries Secret NAMES, which are public references.",
         "type": "object",
         "required": [
           "mode",
           "tls"
         ],
         "properties": {
+          "clientCertificateRef": {
+            "description": "The `mtls` client-certificate Secret's NAME (PROD-01.3) — the one this service created from the entered certificate and key. Never its data: neither the certificate nor the key is ever returned.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
           "credentialRef": {
             "description": "The credential Secret's NAME. Never its data.",
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
           },
           "mode": {
-            "description": "`plaintext` or `scramSha512`.",
+            "description": "`plaintext`, `scramSha512`, `scramSha256`, `plain` or `mtls`.",
             "$ref": "#/components/schemas/ConnectionAuthMode"
           },
           "tls": {
             "description": "Whether the transport is TLS.",
             "type": "boolean"
+          },
+          "tlsCa": {
+            "description": "The private CA reference, when the connection names one (PROD-01.3).",
+            "$ref": "#/components/schemas/TlsCaView",
+            "nullable": true
           },
           "username": {
             "description": "The SASL principal.",
@@ -9051,8 +9094,33 @@
           }
         }
       },
+      "NewConnectionCredentialRequest": {
+        "description": "**PROD-01.3 security follow-up: the credential, typed ONCE.**\n\nWRITE-ONLY. The value becomes a Secret this service creates — owned by the connection, bound to it (`logweir-binding`) — and is never echoed in any response, log line, status, annotation or audit record; the only thing that comes out of it is the Secret's NAME. This replaces naming an existing Secret: a connection that could name any Secret in the namespace could make Logweir present another team's credential to a broker of its author's choosing.\n\n**IT SERIALIZES WITHOUT ITS VALUES.** `Serialize` is hand-written: every present field becomes [`WRITE_ONLY_PLACEHOLDER`]. The request DTO is serialized to compute the idempotency digests this service publishes on the object (`api.logweir.dev/request-sha256`) and writes into the audit record, and a digest over a password is an offline confirmation oracle for anyone who can read the object. With the placeholder, no serialization of this type — a digest, an audit field, a future debug dump — can carry a value.",
+        "type": "object",
+        "properties": {
+          "certificatePem": {
+            "description": "The PEM client certificate (chain) — `mtls`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "password": {
+            "description": "The SASL password — `scramSha512`, `scramSha256` and `plain`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "privateKeyPem": {
+            "description": "The PEM private key, unencrypted — `mtls`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
       "NewCredentialRequest": {
-        "description": "A credential value typed once.\n\nWRITE-ONLY. These bytes are turned into a Secret and are never echoed, in any response, log line, status, annotation or audit record. The Secret is created and never read back; the only thing that comes out of this field is a Secret NAME.",
+        "description": "A credential value typed once.\n\nWRITE-ONLY. These bytes are turned into a Secret and are never echoed, in any response, log line, status, annotation or audit record. The Secret is created and never read back; the only thing that comes out of this field is a Secret NAME.\n\n**IT SERIALIZES WITHOUT ITS VALUES**, for the reason [`NewConnectionCredentialRequest`] gives: the destination create's published `request-sha256` was the same oracle for an entered secret access key.",
         "type": "object",
         "required": [
           "accessKeyId",
@@ -9161,6 +9229,25 @@
             "type": "boolean"
           }
         }
+      },
+      "ObjectKeyRefRequest": {
+        "description": "One key of a ConfigMap in this namespace.",
+        "type": "object",
+        "required": [
+          "key",
+          "name"
+        ],
+        "properties": {
+          "key": {
+            "description": "The data key.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The object's name, in the same namespace.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "ObjectivesView": {
         "description": "What \"protected\" means here.",
@@ -13433,6 +13520,43 @@
           }
         },
         "additionalProperties": false
+      },
+      "TlsCaRequest": {
+        "description": "The CA that signs the brokers' certificates, when the runner image does not already trust it (PROD-01.3): one key of a ConfigMap. Requires `tls: true`.\n\nA REFERENCE, AND ONLY TO A CONFIGMAP. A CA certificate is public, and the runner uses it only as a local trust anchor — its bytes are never sent anywhere — so naming one cannot exfiltrate anything. Restricting this request to a ConfigMap keeps every Secret this service's connections use one it created itself (the credential, below); a CA that lives in a Secret is still set with `kubectl` on the `KafkaCluster` (`auth.tlsCa.secretKeyRef`).",
+        "type": "object",
+        "required": [
+          "configMapKeyRef"
+        ],
+        "properties": {
+          "configMapKeyRef": {
+            "description": "The ConfigMap key holding the PEM CA certificate(s).",
+            "$ref": "#/components/schemas/ObjectKeyRefRequest"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TlsCaView": {
+        "description": "Where a stored connection's CA certificate is — a reference, never the certificate.",
+        "type": "object",
+        "required": [
+          "key",
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "key": {
+            "description": "The data key.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`configMap` or `secret`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The object's name.",
+            "type": "string"
+          }
+        }
       },
       "TopicDiscovery": {
         "description": "A bounded topic inventory.",

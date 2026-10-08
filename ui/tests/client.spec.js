@@ -92,6 +92,17 @@ const VALUES = Object.freeze({
   mode: "scramSha512", username: "logweir-reader", secret: "orders-scram", tls: true,
 });
 
+/** PROD-01.3 security follow-up: a CONSOLE-mode create carries the password
+ *  TYPED ONCE and names no Secret. A fixture value, and a credential nowhere. */
+const TYPED_ONCE = "typed-once-ui-fixture";
+
+function consoleBody(values) {
+  return clusterBody(
+    Object.assign({}, values || VALUES, { enteredPassword: TYPED_ONCE }),
+    { console: true },
+  );
+}
+
 // ======================================================= the mode is decided
 
 test("the_mode_is_chosen_once_at_boot_and_never_per_request", async () => {
@@ -219,10 +230,10 @@ test("console_mode_lists_through_api_v1_and_projects_onto_the_resource_the_page_
       "an unknown reachability is ABSENT, not false: the page's own badge says `unknown` for it");
     assert.deepEqual(
       first.__contract.absent,
-      ["status.conditions", "spec.auth.secretRef.passwordKey", "spec.auth.tlsCa"],
+      ["status.conditions", "spec.auth.secretRef.passwordKey"],
       "what the projection cannot supply is named on the object, not quietly defaulted -- and " +
-        "since PLAT-07.2 that includes connection contract v1's two references, which the " +
-        "product API's ConnectionAuthView does not carry",
+        "that includes connection contract v1's data-key reference, which the product API's " +
+        "ConnectionAuthView does not carry (PROD-01.3 added the CA reference to it)",
     );
   } finally {
     wire.restore();
@@ -371,7 +382,7 @@ test("console_mode_creates_with_an_idempotency_key_that_is_a_function_of_the_obj
       : undefined);
   try {
     const api = apiClient();
-    const body = clusterBody(VALUES);
+    const body = consoleBody();
     const first = await api.create("team-a", "kafkaclusters", body);
     const second = await api.create("team-a", "kafkaclusters", body);
     assert.equal(wire.seen.length, 2);
@@ -386,10 +397,17 @@ test("console_mode_creates_with_an_idempotency_key_that_is_a_function_of_the_obj
     assert.equal(wire.seen[0].init.headers["Content-Type"], "application/json");
     const sent = JSON.parse(wire.seen[0].init.body);
     assert.deepEqual(Object.keys(sent).sort(), ["auth", "bootstrapServers", "role"]);
+    // PROD-01.3 security follow-up: the password TYPED ONCE, and no Secret
+    // named -- the product API creates and binds the credential Secret.
     assert.deepEqual(sent.auth, {
       mode: "scramSha512", tls: true, username: "logweir-reader",
-      credentialRef: { name: "orders-scram" },
+      credential: { password: TYPED_ONCE },
     });
+    assert.equal(
+      JSON.stringify(body).indexOf(TYPED_ONCE),
+      -1,
+      "the custom resource itself never carries the typed value (it rides off the object)",
+    );
     assert.equal(sent.metadata, undefined, "the product API mints the name; the body has none");
     assert.equal(first.kind, "KafkaCluster");
     assert.equal(createdOutcome(first), "created");
@@ -406,7 +424,7 @@ test("a_replayed_create_reads_as_existing_and_never_as_a_second_object", async (
   const wire = transport((u, init) =>
     init.method === "POST" ? { status: 200, body: replay } : undefined);
   try {
-    const outcome = await createOnce(apiClient(), "team-a", "kafkaclusters", clusterBody(VALUES), {});
+    const outcome = await createOnce(apiClient(), "team-a", "kafkaclusters", consoleBody(), {});
     assert.equal(
       outcome.outcome,
       "existing",
@@ -428,7 +446,7 @@ test("an_idempotency_conflict_reads_as_a_conflict_and_keeps_what_was_typed", asy
   keepDraft(key, VALUES, CLUSTER_DRAFT_FIELDS);
   try {
     await assert.rejects(
-      () => createOnce(apiClient(), "team-a", "kafkaclusters", clusterBody(VALUES), {}),
+      () => createOnce(apiClient(), "team-a", "kafkaclusters", consoleBody(), {}),
       (error) => {
         assert.equal(error.kind, "conflict");
         assert.equal(error.status, 409);
@@ -456,7 +474,7 @@ test("a_console_field_error_lands_beside_the_field_and_the_draft_is_kept", async
   try {
     let caught = null;
     try {
-      await createOnce(apiClient(), "team-a", "kafkaclusters", clusterBody(VALUES), {});
+      await createOnce(apiClient(), "team-a", "kafkaclusters", consoleBody(), {});
     } catch (error) {
       caught = error;
     }
@@ -501,7 +519,7 @@ test("a_legacy_field_error_lands_beside_the_same_field_from_the_same_page_table"
   try {
     let caught = null;
     try {
-      await createOnce(apiClient(), "team-a", "kafkaclusters", clusterBody(VALUES), {});
+      await createOnce(apiClient(), "team-a", "kafkaclusters", consoleBody(), {});
     } catch (error) {
       caught = error;
     }
@@ -552,7 +570,7 @@ test("a_read_carries_the_route_signal_and_a_create_never_does", async () => {
   try {
     const api = apiClient();
     await api.list("team-a", "kafkaclusters", readOptions(lifecycle));
-    await api.create("team-a", "kafkaclusters", clusterBody(VALUES));
+    await api.create("team-a", "kafkaclusters", consoleBody());
     assert.equal(wire.seen[0].init.signal, controller.signal, "the view's read is the view's");
     assert.equal(
       wire.seen[1].init.signal,
@@ -820,7 +838,7 @@ test("no_token_from_the_session_is_ever_written_to_browser_storage", async () =>
   try {
     const api = apiClient();
     await api.list("team-a", "kafkaclusters");
-    await api.create("team-a", "kafkaclusters", clusterBody(VALUES));
+    await api.create("team-a", "kafkaclusters", consoleBody());
     assert.deepEqual(writes, [], "nothing was written to browser storage");
     assert.deepEqual(cookies, [], "and this page writes no cookie");
     assert.equal(
@@ -1089,7 +1107,7 @@ test("every_request_body_this_client_builds_satisfies_the_published_request_shap
   const reviewed = await preparePlanDocument(fixture("plan-fields.json"));
   try {
     const api = apiClient();
-    await api.create("team-a", "kafkaclusters", clusterBody(VALUES));
+    await api.create("team-a", "kafkaclusters", consoleBody());
     await api.create("team-a", "backupschedules", {
       apiVersion: "logweir.dev/v1alpha1", kind: "BackupSchedule",
       metadata: { name: "orders-hourly" },

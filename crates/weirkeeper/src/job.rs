@@ -445,6 +445,13 @@ pub struct EnvFromSecret {
     pub secret_name: String,
     /// The key within that Secret.
     pub key: String,
+    /// `secretKeyRef.optional: true` — the variable is simply unset when the
+    /// Secret lacks the key, instead of the container failing to start.
+    /// `false` (rendered as an ABSENT `optional`, so every Job built before the
+    /// field existed is byte-identical) for every credential; `true` only for
+    /// the credential BINDING (PROD-01.3 security follow-up), whose absence the
+    /// RUNNER must see so it can refuse it by name.
+    pub optional: bool,
 }
 
 /// The runner container's requests and limits — FX-2.
@@ -737,7 +744,7 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
                 secret_key_ref: Some(SecretKeySelector {
                     name: e.secret_name.clone(),
                     key: e.key.clone(),
-                    optional: None,
+                    optional: e.optional.then_some(true),
                 }),
                 ..EnvVarSource::default()
             }),

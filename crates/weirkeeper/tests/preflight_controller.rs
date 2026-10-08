@@ -5057,6 +5057,8 @@ fn fixture_connection_plan() -> logweir_core::check_contract::ConnectionPlan {
         password_env: Some("LOGWEIR_SOURCE_PASSWORD".to_string()),
         tls: Some(true),
         ca_file: None,
+        client_cert_file: None,
+        client_key_file: None,
         principal: "User:backup".to_string(),
     }
 }

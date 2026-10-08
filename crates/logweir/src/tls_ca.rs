@@ -47,3 +47,78 @@ pub fn projected_ca_file(var: &str) -> Result<Option<String>, String> {
         )),
     }
 }
+
+/// The SOURCE side's client-certificate variables (PROD-01.3, `mtls`).
+pub const SOURCE_TLS_CERT_FILE_VAR: &str = logweir_core::connection::SOURCE_TLS_CERT_FILE_ENV;
+/// See [`SOURCE_TLS_CERT_FILE_VAR`].
+pub const SOURCE_TLS_KEY_FILE_VAR: &str = logweir_core::connection::SOURCE_TLS_KEY_FILE_ENV;
+/// The TARGET side's client-certificate variables (PROD-01.3, `mtls`).
+pub const TARGET_TLS_CERT_FILE_VAR: &str = logweir_core::connection::TARGET_TLS_CERT_FILE_ENV;
+/// See [`TARGET_TLS_CERT_FILE_VAR`].
+pub const TARGET_TLS_KEY_FILE_VAR: &str = logweir_core::connection::TARGET_TLS_KEY_FILE_ENV;
+
+/// Which runner side a connection is dialled for — selects the variable pair
+/// [`projected_client_certificate`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// `logweir cluster-probe` and `logweir backup run`.
+    Source,
+    /// `logweir restore run` / `drill run` and `doctor`.
+    Target,
+}
+
+/// Read one side's projected client-certificate pair (PROD-01.3): `Ok(None)`
+/// when NEITHER variable is set (or both are blank), `Ok(Some(files))` when
+/// both are.
+///
+/// **Paths only, never opened here**, for the reason the CA is not: both
+/// clients load the files themselves (`ssl.certificate.location` /
+/// `ssl.key.location`, the engine's `ssl_certificate_location` /
+/// `ssl_key_location`) and name the path in their error. So no Logweir
+/// process ever holds the private key's bytes — it can reach no log, status
+/// or document because nothing here has it.
+///
+/// # Errors
+///
+/// Exactly one of the two set ([`ClientCertificateRefusal::Incomplete`]'s
+/// text), or a value that is not UTF-8. The message names variables only.
+///
+/// [`ClientCertificateRefusal::Incomplete`]: logweir_core::connection::ClientCertificateRefusal::Incomplete
+pub fn projected_client_certificate(
+    side: Side,
+) -> Result<Option<logweir_core::connection::ClientCertificateFiles>, String> {
+    let (cert_var, key_var) = match side {
+        Side::Source => (SOURCE_TLS_CERT_FILE_VAR, SOURCE_TLS_KEY_FILE_VAR),
+        Side::Target => (TARGET_TLS_CERT_FILE_VAR, TARGET_TLS_KEY_FILE_VAR),
+    };
+    // The same blank-is-unset rule as the CA variable (E19(e)).
+    let cert = projected_path(cert_var)?;
+    let key = projected_path(key_var)?;
+    match (cert, key) {
+        (None, None) => Ok(None),
+        (Some(cert_file), Some(key_file)) => {
+            Ok(Some(logweir_core::connection::ClientCertificateFiles {
+                cert_file,
+                key_file,
+            }))
+        }
+        _ => Err(format!(
+            "{} (`{cert_var}`, `{key_var}`); nothing was dialled",
+            logweir_core::connection::ClientCertificateRefusal::Incomplete
+        )),
+    }
+}
+
+/// [`projected_ca_file`]'s rule for any file variable, with a message that
+/// names the variable and not a CA.
+fn projected_path(var: &str) -> Result<Option<String>, String> {
+    match std::env::var(var) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "`{var}` is not valid UTF-8, so it cannot name the file both TLS clients load; \
+             nothing was dialled"
+        )),
+    }
+}

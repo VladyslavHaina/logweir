@@ -1481,6 +1481,7 @@ fn secret_env(name: &str, reference: &SecretKeyRef) -> EnvFromSecret {
     EnvFromSecret {
         name: name.to_string(),
         secret_name: reference.name.clone(),
+        optional: false,
         key: reference.key.clone(),
     }
 }

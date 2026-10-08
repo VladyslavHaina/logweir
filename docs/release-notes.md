@@ -21,8 +21,9 @@ The last tag is `v0.2.0-rc.1` (candidate `56a60ebe`, publication `2c277dc1`);
 its record is in the next entry, whose twenty-seven items are what that
 candidate shipped. This entry collects what lands on `main` after that
 publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
-key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog)
-and 32 (PROD-05.1) so far. Items continue the next entry's
+key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
+32 (PROD-05.1) and 33 (PROD-01.3, client authentication modes and the
+credential binding) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -45,6 +46,10 @@ Item 32 is row PROD-05.1, proven on the compose stack on the 3.9 and 4.3 broker
 lines; it changes the runner's signed receipt and catalog record, the catalog's
 view (runner and controller), the product API and the console, so the PoC
 upgrade that carries it runs its catalog and console rows.
+Item 33 is PROD-01.3 and its security follow-up, proven on a compose stack
+(both clients, every mode); it changes the controller, the runner, the
+console and the `KafkaCluster` CRD, and the PoC upgrade that carries it runs
+the live `KafkaCluster` rows.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -411,6 +416,65 @@ no model; the 1.3.0 documents already written stay valid under both readers. A
 catalog synced by an older runner lists no topics, and the console then
 defaults as before and says why.
 
+#### 33. SASL/PLAIN over TLS, SCRAM-SHA-256 and mTLS; a connection presents only its own credential (PROD-01.3) — required action
+
+**Changed.** A connection (`KafkaCluster`, a spec's `auth:` block, the console
+form, `logweir cluster-probe --auth-mode`) may use **`scramSha256`**,
+**`plain`** (SASL/PLAIN — Confluent Cloud API keys, Azure Event Hubs
+connection strings) or **`mtls`** (a TLS client certificate, from
+`auth.clientCertificate`, a `kubernetes.io/tls`-shaped Secret) beside
+`plaintext` and `scramSha512`, on both clients. **`plain` without `tls: true` is
+refused, never dialled** (`PlainWithoutTls`: the CRD's rule, the controller,
+`refusal-reason=PlainWithoutTls` at exit 3, and both client builders). Signed
+documents name the mode: a receipt or catalog point naming a new mode is
+format **1.4.0**, a scorecard **1.5.0** (MINOR; [stability.md](stability.md));
+`verify_scorecard.py` is 1.21.0. **Security follow-up:** a connection presents
+only a credential bound to it. Every runner refuses a projected password or
+client key whose Secret lacks the connection's `logweir-binding` (UID and
+endpoint digest) — `CredentialBindingMismatch`, before any client exists — so
+a `KafkaCluster` that names another connection's Secret cannot make Logweir
+present that credential to a broker of its author's choosing. The console API
+takes the credential ONCE (`auth.credential`), creates the bound Secret itself
+(owned by the connection) and refuses `auth.credentialRef`
+(`422 existing_credential_refused`); a console CA comes from a ConfigMap.
+**Do:** suspend the schedules that use a credentialed connection, apply the
+CRDs, roll controller, runner and console together, then bind each existing
+credentialed connection's Secret **one at a time, by a command that names both
+the connection and the Secret, after an inventory** ([kubernetes.md](kubernetes.md)
+§20.9 has the procedure), and resume. Before this release a `KafkaCluster`
+could name another connection's Secret, so a connection naming a Secret that
+another connection also names is an incident to investigate, not a Secret to
+split or to bind in a loop: either would hand the credential to the second
+connection's endpoint. Binding needs Secret `patch`, which for a connection
+credential is as strong as Secret `get` — grant it accordingly. A client of
+the product API that named `credentialRef` sends the password in
+`auth.credential` instead; a credential value is no longer part of a create's
+idempotency identity, so a same-key retry that changes only the value replays
+the first create ([api.md](api.md)). A `BackupDestination` created with
+`secret.new` by an earlier build carries a request hash taken over its secret
+key: remove its `api.logweir.dev/request-sha256` annotation, or rotate the key. Admission-policy users: the
+chart's policy now also admits `logweir.dev/kafka-client-certificate`.
+**Scope:** on compose slot 4 (Kafka 3.7.1, engine 0.23.3 under emulation), the
+`auth` profile's four listener shapes each passed a real backup (Logweir's
+client at phase −1, the engine's client for the archive) and a real drill
+restoring it into the same cluster, with the receipt and scorecard VALID in both
+readers and a seeded-secret scan clean; a wrong password, a wrong CA, an
+untrusted client certificate and PLAIN without TLS were each refused
+(`e2e/tests/auth_modes.rs`, 8/8). The binding's refusal is proven on the shipped
+binary for `backup run`, `drill run`, `cluster-probe` and the check runner
+against a loopback sentinel that is never dialled; the API's write-only entry,
+its refusals and a seeded-value scan by `crates/logweir-api/tests/connection_credentials.rs`.
+No managed provider was dialled (OD-4): Confluent Cloud and Event Hubs move
+from unsupported to **untested**, MSK through SCRAM-SHA-512/TLS stays untested
+([support-matrix.md](support-matrix.md)). The live `KafkaCluster` journey on
+docker-desktop is the next PoC upgrade's; none of the PoC's twelve connections
+has a credential, so none needs binding there.
+**Rollback:** an older controller and runner ignore the binding pair and the
+new fields; a bound Secret keeps working with them. An older build cannot parse
+a spec naming a new mode, and an older reader refuses a 1.4.0/1.5.0 document
+that names one (the safe direction). An older console would send
+`credentialRef` again; roll the console with the controller.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -432,6 +496,20 @@ In addition to the next entry's six, in its order:
 - **After the runner image rolls, set each `RecoveryCatalog`'s
   `spec.syncRequest` to a new value** so its view is published again by the
   new runner (item 31).
+- **Bind each credentialed connection's Secret, one at a time, after an
+  inventory** (item 33). Suspend the schedules that use such a connection
+  before the roll; apply the CRDs and roll the controller, the runner and the
+  console together; list which `KafkaCluster` names which Secret and stop on
+  any Secret named twice (an incident, not a split); then, per connection, by a
+  command that names both, copy its `status.credentialBinding` into the Secret
+  it already named, once its owner confirms the endpoint
+  ([kubernetes.md](kubernetes.md) §20.9); resume the schedules. Until a Secret
+  is bound its runs are refused (`CredentialBindingMismatch`), closed. Never
+  bind in a loop over every connection. A connection with no credential
+  (`plaintext`, or TLS with no client certificate) needs nothing.
+- **Remove `api.logweir.dev/request-sha256` from each `BackupDestination` an
+  earlier build created with `secret.new`** (item 33), or rotate its key: that
+  hash was taken over the secret access key.
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -444,13 +522,15 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31 and 32, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32 and 33, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
 console's text), and item 31 takes effect at each catalog's next sync; item 32
 changes the runner's receipts and records, the catalog's view (runner and
-controller), the product API and the console. To roll back to
+controller), the product API and the console; item 33 changes the controller,
+the runner, the console and the `KafkaCluster` CRD, and needs each credentialed
+connection's Secret bound. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -462,6 +542,13 @@ controller), the product API and the console. To roll back to
    written stay valid under both readers. It writes 1.1.0 or 1.2.0 receipts
    again with no `topic_configuration` (item 32); the 1.3.0 receipts and
    records already written stay valid.
+3. Roll the console back with the controller and the runner (item 33): an older
+   console names an existing Secret again, which this API refuses. The bound
+   Secrets keep working with the older controller and runner, which ignore the
+   binding pair; a connection using a new mode stops working (an older build
+   cannot parse it), so delete or re-create those first. The 1.4.0 receipts
+   and 1.5.0 scorecards already written stay valid for every reader from
+   PROD-01.3 on, and older readers refuse them (the safe direction).
 
 ---
 

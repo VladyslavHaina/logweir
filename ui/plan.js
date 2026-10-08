@@ -144,12 +144,28 @@ export function renderPlanBytes(fields) {
   );
   const auth = target.auth;
   if (auth && auth.mode !== "plaintext") {
-    if (auth.mode !== "scramSha512") {
-      throw new TypeError("target.auth.mode must be plaintext or scramSha512");
+    // PROD-01.3: the runner's `AuthSpec` arms, byte for byte. The three SASL
+    // modes carry a username; `mtls` carries none (the identity is the client
+    // certificate, which no plan names). PLAIN and mTLS without TLS are
+    // refused here as the runner refuses them (`PlainWithoutTls`).
+    const sasl = ["scramSha512", "scramSha256", "plain"];
+    if (sasl.indexOf(auth.mode) === -1 && auth.mode !== "mtls") {
+      throw new TypeError(
+        "target.auth.mode must be plaintext, scramSha512, scramSha256, plain or mtls",
+      );
+    }
+    if ((auth.mode === "plain" || auth.mode === "mtls") && auth.tls !== true) {
+      throw new TypeError(
+        auth.mode === "plain"
+          ? "PlainWithoutTls: target.auth.mode plain is accepted only with tls: true"
+          : "target.auth.mode mtls requires tls: true",
+      );
     }
     out.push("  auth:");
     out.push("    mode: " + quote(auth.mode));
-    out.push("    username: " + quote(needed(auth.username, "target.auth.username")));
+    if (auth.mode !== "mtls") {
+      out.push("    username: " + quote(needed(auth.username, "target.auth.username")));
+    }
     out.push("    tls: " + (auth.tls === true ? "true" : "false"));
   }
   out.push("  mode: " + quote(requireMode(target.mode)));

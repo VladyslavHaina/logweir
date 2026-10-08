@@ -71,16 +71,45 @@ and 07) link 0.23.0, 0.23.1 and 0.23.3.
 ## Authentication modes, and what each one has actually been run against
 
 The recorded matrix row above is a **PLAINTEXT** drill. Authentication test
-coverage is separate from that recorded result: the Compose stack now has
-SCRAM listeners and `e2e/tests/scram.rs` exercises both clients with real
-brokers when the `e2e` feature and its infrastructure are enabled.
+coverage is separate from that recorded result: the Compose stack has SCRAM
+listeners and `e2e/tests/scram.rs` exercises both clients with real brokers
+when the `e2e` feature and its infrastructure are enabled, and the `auth`
+compose profile (PROD-01.5, extended by PROD-01.3) adds SASL/PLAIN over TLS,
+SCRAM-SHA-256 with and without TLS, and mTLS listeners behind a private CA,
+which `e2e/tests/auth_modes.rs` drives end to end.
 
 | `auth.mode` | Logweir's client | The engine's client | Exercised |
 |---|---|---|---|
 | `plaintext` (default) | `security.protocol: PLAINTEXT` | no `security:` block rendered — the engine's own default | **Yes**, by the 0.21.0 row above and by every e2e drill. |
 | `scramSha512`, `tls: false` | `security.protocol: SASL_PLAINTEXT`, `sasl.mechanism: SCRAM-SHA-512` | `security_protocol: SASL_PLAINTEXT`, `sasl_mechanism: SCRAM-SHA512` | **Automated e2e coverage exists.** `e2e/tests/scram.rs` exercises Logweir's librdkafka client and engine-backed backups against the Compose SCRAM listeners, plus an in-cluster pod. It requires the live stack and Kubernetes; it is not part of the default unit suite or an additional result row above. |
-| `scramSha512`, `tls: true` | `security.protocol: SASL_SSL` | `security_protocol: SASL_SSL` | **Exercised on docker-desktop, not in CI.** The compose stack speaks no TLS, so no automated e2e row covers it; PLAT-07.1's live run (2026-09-16, an in-namespace broker with a private CA) succeeded with `KafkaCluster.spec.auth.tlsCa` and failed at the handshake — never a plaintext dial — without the CA or with the wrong one. `auth.tlsCa` hands one CA file to both trust stores (Global Constraint 29; [kubernetes.md](kubernetes.md) §20.2). |
-| OAUTHBEARER / MSK IAM | `AuthConfig::Token` — constructing it returns an error | not rendered. The engine's YAML offers only PLAIN, SCRAM-SHA-256/512 and GSSAPI; other mechanisms need a programmatic plugin its CLI does not expose ([PROD-00.1](to-do/decisions/PROD-00-engine-route.md) C9) | **Not in tag 1.** |
+| `scramSha512`, `tls: true` | `security.protocol: SASL_SSL` | `security_protocol: SASL_SSL` | **Exercised on docker-desktop, not in CI.** The compose stack's TLS listeners (the `auth` profile) serve PLAIN and SCRAM-SHA-256, not SCRAM-SHA-512, so no automated e2e row covers this pair; PLAT-07.1's live run (2026-09-16, an in-namespace broker with a private CA) succeeded with `KafkaCluster.spec.auth.tlsCa` and failed at the handshake — never a plaintext dial — without the CA or with the wrong one. `auth.tlsCa` hands one CA file to both trust stores (Global Constraint 29; [kubernetes.md](kubernetes.md) §20.2). |
+| `scramSha256`, `tls: false` or `true` | `SASL_PLAINTEXT` / `SASL_SSL`, `sasl.mechanism: SCRAM-SHA-256` | `security_protocol: SASL_PLAINTEXT` / `SASL_SSL`, `sasl_mechanism: SCRAM-SHA256` (one hyphen) | **Automated e2e coverage exists (PROD-01.3).** `e2e/tests/auth_modes.rs` backs up, restores and verifies over the `auth` profile's SCRAM256 listener and, over TLS with the private CA, its SASL_SSL listener; a wrong password and (TLS) a wrong CA are refused. Compose slot 4, Kafka 3.7.1, engine 0.23.3, 2026-10-08. |
+| `plain`, `tls: true` only | `SASL_SSL`, `sasl.mechanism: PLAIN` | `security_protocol: SASL_SSL`, `sasl_mechanism: PLAIN` | **Automated e2e coverage exists (PROD-01.3)**, the same file and run: backup, restore and verify over the SASL_SSL listener; a wrong password and a wrong CA refused. **`plain` without TLS is refused, never dialled** — `refusal-reason=PlainWithoutTls` (exit 3) at the runner, the same named reason at the controller, and the CRD's admission rule — because SASL/PLAIN sends the password itself. |
+| `mtls`, `tls: true` only | `SSL`, `ssl.certificate.location` / `ssl.key.location` | `security_protocol: SSL`, `ssl_certificate_location` / `ssl_key_location` | **Automated e2e coverage exists (PROD-01.3)**, the same file and run, over the `auth` profile's MTLS listener (`ssl.client.auth=required`): backup, restore and verify with the CA-signed client certificate; a wrong CA and an untrusted (self-signed) client certificate refused. The key must be unencrypted PEM (PKCS#8, PKCS#1 or SEC1): the engine's loader takes no passphrase. |
+| OAUTHBEARER / MSK IAM | `AuthConfig::Token` — constructing it returns an error | not rendered. The engine's YAML offers only PLAIN, SCRAM-SHA-256/512 and GSSAPI; other mechanisms need a programmatic plugin its CLI does not expose ([PROD-00.1](to-do/decisions/PROD-00-engine-route.md) C9) | **Deferred** (OD-3, 2026-10-07), until a buyer asks. |
+
+Every credentialed mode also passes through the credential **binding**: a
+runner refuses a projected password or client key whose Secret does not carry
+the `logweir-binding` of the connection it was projected for
+(`CredentialBindingMismatch`, before any client exists) —
+[kubernetes.md](kubernetes.md), "Client authentication modes".
+
+## Managed Kafka providers
+
+**No managed provider has been run against** (OD-4: workers create no cloud
+resources, and only AWS is funded, per session, with the owner's approval).
+A provider is listed by the mode Logweir would reach it with; "untested" means
+the mode is implemented and exercised against the compose `auth` profile, and
+never that the provider was dialled. Local emulation does not certify a hosted
+provider.
+
+| Provider | How Logweir reaches it | Status |
+|---|---|---|
+| Confluent Cloud | `plain` over TLS (API key as `username`, API secret as the password), the public CA | **untested** (was unsupported: no SASL/PLAIN before PROD-01.3) |
+| Azure Event Hubs (Kafka endpoint, `:9093`) | `plain` over TLS, `username: $ConnectionString`, the connection string as the password, the public CA | **untested** (was unsupported, for the same reason) |
+| Amazon MSK | `scramSha512` over TLS (`:9096`, the Secrets Manager credential) | **untested** until the owner funds a session (OD-4) |
+| Amazon MSK IAM | not reachable: OAUTHBEARER/SigV4 is deferred (OD-3) | **unsupported** |
+| Redpanda Cloud, Aiven | `scramSha256` / `scramSha512` over TLS; Aiven also `mtls` | **untested** (no account funded) |
 
 **Nothing here is an MSK row.** `[UNVERIFIED — needs an MSK cluster]`: MSK
 holds SCRAM credentials in AWS Secrets Manager and requires TLS on its

@@ -93,6 +93,10 @@ smoke_auth() {
   if printf '%s' "$out" | grep -q -i 'authentication failed\|SaslAuthenticationException'; then pass auth.plain-tls.wrong-password-refused "$(printf '%s' "$out" | grep -i -m1 -o 'Authentication failed[^.]*')"; else fail auth.plain-tls.wrong-password-refused "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   out=$(hostside "printf '$(printf '%s' "$cfg" | sed 's|/certs/ca.pem|/certs/wrong-ca.pem|')\nsasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username=\"logweir\" password=\"$PASSWORD\";\n' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$plain --command-config /tmp/c --list")
   if printf '%s' "$out" | grep -q -i 'SSL handshake failed\|SSLHandshakeException\|PKIX'; then pass auth.plain-tls.wrong-ca-refused "TLS handshake refused"; else fail auth.plain-tls.wrong-ca-refused "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  # SCRAM-SHA-256 over TLS, on the same SASL_SSL listener (PROD-01.3) -------------
+  cfg="security.protocol=SASL_SSL\nsasl.mechanism=SCRAM-SHA-256\nssl.truststore.type=PEM\nssl.truststore.location=/certs/ca.pem\n$FAST"
+  out=$(hostside "printf '$cfg\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"logweir\" password=\"$PASSWORD\";\n' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$plain --command-config /tmp/c --list")
+  if printf '%s' "$out" | grep -qx logweir.scratch; then pass auth.scram-sha-256-tls "localhost:$plain lists the marker topic over SCRAM-SHA-256/TLS"; else fail auth.scram-sha-256-tls "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   # SCRAM-SHA-256 ------------------------------------------------------------------
   cfg="security.protocol=SASL_PLAINTEXT\nsasl.mechanism=SCRAM-SHA-256\n$FAST"
   out=$(hostside "printf '$cfg\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"logweir\" password=\"$PASSWORD\";\n' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$scram --command-config /tmp/c --list")
@@ -105,6 +109,9 @@ smoke_auth() {
   if printf '%s' "$out" | grep -qx orders; then pass auth.mtls "localhost:$mtls lists orders with client.pem"; else fail auth.mtls "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   out=$(hostside "printf '$cfg\n' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$mtls --command-config /tmp/c --list")
   if printf '%s' "$out" | grep -q -i 'SSL handshake failed\|SSLHandshakeException\|bad_certificate\|certificate_required'; then pass auth.mtls.no-client-cert-refused "handshake refused without a client certificate"; else fail auth.mtls.no-client-cert-refused "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  # PROD-01.3: a client certificate signed by nobody the broker trusts.
+  out=$(hostside "cat /certs/wrong-client.key /certs/wrong-client.pem > /tmp/k; printf '$cfg\nssl.keystore.type=PEM\nssl.keystore.location=/tmp/k\n' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$mtls --command-config /tmp/c --list")
+  if printf '%s' "$out" | grep -q -i 'SSL handshake failed\|SSLHandshakeException\|bad_certificate\|certificate_unknown\|unknown_ca'; then pass auth.mtls.wrong-client-cert-refused "handshake refused for an untrusted client certificate"; else fail auth.mtls.wrong-client-cert-refused "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
 }
 
 smoke_cluster3() {

@@ -555,17 +555,21 @@ CATALOG_PT="application/vnd.logweir.catalog-point+json;version=1.0.0"
 # that constant and this line together.
 CATALOG_COVERAGE_VERSION="1.1.0"
 # FX-7 (merged after FX-4): the catalog point format that ALSO carries
-# `archive.manifest_version_id` — record.rs's FORMAT_VERSION_WITH_MANIFEST_VERSION,
-# the newest MINOR. A renumber moves that constant, the justfile's
-# `catalog_schema_version` and this line together.
+# `archive.manifest_version_id` — record.rs's FORMAT_VERSION_WITH_MANIFEST_VERSION.
 CATALOG_PIN_VERSION="1.2.0"
 # PROD-05.1 (merged after FX-7): the catalog point format whose topics carry
 # the receipt's configuration model and partition count — record.rs's
-# FORMAT_VERSION_WITH_TOPIC_CONFIGURATION, the newest MINOR. A renumber moves
-# that constant, the justfile's `catalog_schema_version` and this line together.
+# FORMAT_VERSION_WITH_TOPIC_CONFIGURATION. A renumber moves that constant and
+# this line together.
 CATALOG_MODEL_VERSION="1.3.0"
+# PROD-01.3 (merged after PROD-05.1): the catalog point format whose
+# `source.auth_mode` may name one of the three modes PROD-01.3 added
+# (`scramSha256`, `plain`, `mtls`) — record.rs's FORMAT_VERSION_WITH_AUTH_MODES,
+# the newest MINOR. A renumber moves that constant, the justfile's
+# `catalog_schema_version` and this line together.
+CATALOG_AUTH_VERSION="1.4.0"
 mkdir -p "$tmp/catalog"
-"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" "$CATALOG_MODEL_VERSION" <<'PYEOF'
+"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" "$CATALOG_MODEL_VERSION" "$CATALOG_AUTH_VERSION" <<'PYEOF'
 import base64, hashlib, json, pathlib, sys
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -574,6 +578,7 @@ fix, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 coverage_version = sys.argv[4]
 pin_version = sys.argv[5]
 model_version = sys.argv[6]
+auth_version = sys.argv[7]
 key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
 der = key.public_key().public_bytes(
     serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -674,6 +679,18 @@ modelled["owner_detection"] = ["kafkaTopicResources"]
 modelled_payload = json.dumps(modelled, indent=2).encode() + b"\n"
 (out / "modelled.json").write_bytes(modelled_payload)
 (out / "modelled.sig").write_text(sign(modelled_payload))
+# PROD-01.3: the record of a point taken over mTLS — format 1.4.0, the MINOR
+# whose `source.auth_mode` may name `scramSha256`, `plain` or `mtls`, built on
+# PROD-05.1's modelled record (1.4.0 carries every earlier minor's fields). An
+# mTLS source has no SASL username, so the record names none. Signature-only
+# like the rest: both readers must ACCEPT it, and neither may start refusing a
+# point because its auth mode is one an older build did not know.
+modes = json.loads(json.dumps(modelled))
+modes["format_version"] = auth_version
+modes["source"]["auth_mode"] = "mtls"
+modes_payload = json.dumps(modes, indent=2).encode() + b"\n"
+(out / "auth14.json").write_bytes(modes_payload)
+(out / "auth14.sig").write_text(sign(modes_payload))
 PYEOF
 
 catalog_case() {
@@ -714,6 +731,9 @@ catalog_case pinned catalog-point 0 0
 grep -q "manifest_version_id=fx7-manifest-version-0001" "$tmp/py.out" \
     || fail "verify_scorecard.py does not print the pinned manifest version a $CATALOG_PIN_VERSION catalog point carries (FX-7)"
 catalog_case modelled catalog-point 0 0
+catalog_case auth14 catalog-point 0 0
+grep -q '"auth_mode": "mtls"' "$tmp/catalog/auth14.json" \
+    || fail "the $CATALOG_AUTH_VERSION catalog point case no longer names an mTLS source, so it proves nothing about PROD-01.3's modes"
 
 # Claim 2 and claim 3, on the accepted case, one reader at a time.
 cat "$tmp/catalog/good.json" >/dev/null
@@ -761,7 +781,7 @@ grep -q "sha256:aaaaaaaa" "$tmp/py.all" \
     || fail "verify_scorecard.py no longer prints the receipt digest that BINDS a catalog
 point; the short point_id is a display key and the digest is the binding (D3 §5.1)"
 
-echo "check-verifier-parity: both readers agree on all five catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION and $CATALOG_PIN_VERSION), and both report SIGNATURE-ONLY"
+echo "check-verifier-parity: both readers agree on all six catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION, $CATALOG_PIN_VERSION, $CATALOG_MODEL_VERSION and $CATALOG_AUTH_VERSION), and both report SIGNATURE-ONLY"
 
 # ---------------------------------------------------------------------------
 # FOURTH LOOP (FX-4): the scorecard at format 1.1.0, and what its exit 0 says
