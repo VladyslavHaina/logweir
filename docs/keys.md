@@ -56,7 +56,9 @@ beside an archive is never trusted merely by proximity. **Except once, on a
 fresh install (PROD-16.1):** the hook that generated the identity trusts its
 own signer, and the console key, in one default `TrustPolicy` it creates in the
 same run (*The console key and the fresh install's trust*, below) — the
-installation's own keys, never a key that arrived from elsewhere.
+installation's own keys, both GENERATED in that run, never a key that arrived
+from elsewhere (an adopted hand-made console key is published and trusted by
+nobody automatically).
 
 ## Generating a fixture or externally managed keypair
 
@@ -502,10 +504,13 @@ ConsoleConfirmation` — in the retained ConfigMap `logweir-console-trust`, neve
 regenerated on upgrade or reinstall, and a published public half without its
 private key is **key loss**: the hook stops and says to restore the Secret from
 backup. A Secret of that name made by hand (every PLAT-19.2 install) is adopted
-as it is. Back it up with `logweir-signing-key`.
+as it is — and is never trusted automatically: compare its fingerprint out of
+band before you put it on a policy. Back it up with `logweir-signing-key`. The
+chart manages the key only while `identity.bootstrapFeatures.consoleKey` is
+`true` (it moves with the re-pin of the bootstrap image, `docs/install.md`).
 
 **On a fresh install only** — the one hook run that generates the installation
-identity — the hook also creates ONE default `TrustPolicy`
+identity and the console key, with a console — the hook also creates ONE default `TrustPolicy`
 (`logweir-installation`) with exactly two keys, one usage each: the
 installation signer (`EvidenceSigning`, principal
 `install:<release-ns>/logweir-signing-key`) and the console key
@@ -513,18 +518,23 @@ installation signer (`EvidenceSigning`, principal
 `notBefore` five minutes before each Secret's creation, `notAfter`
 `9999-12-31T23:59:59Z` (shorten it when you rotate; G2 allows only that), and
 `allowedTargetClusterIds` from the chart. It never creates one beside existing
-trust (another default policy, one of that name, or `TrustRoster/default`),
-never edits one, and never runs on an upgrade. From then on the policy is the
+trust (ANY `TrustPolicy`, default or namespaced, or `TrustRoster/default`),
+never without a console key it generated, never edits one, and never runs on an
+upgrade. From then on the policy is the
 trust administrator's like any other: retire, revoke, add approver keys.
 
 **No standing grant.** Creating that policy needs `create` on `trustpolicies`,
 which RBAC cannot narrow by name, so the grant (`<release>-identity-trust`)
-exists only as a `post-install` hook of the first install, deleted by Helm when
-the install's post-install hooks have run and revoked by the hook itself right
-after the trust step. For those seconds, whoever can run a pod as
+exists only as a `post-install` hook of the first install — rendered only on
+Helm 3.19+ or 4.x, which delete it when the install's post-install hooks have
+run, succeeded or failed (older Helm keeps it after a failed hook, so the chart
+refuses there) — and is revoked by the hook itself on every exit path it
+controls. For those seconds, whoever can run a pod as
 `<release>-identity-bootstrap` could create a TrustPolicy — the residual
 SECURITY.md and `docs/kubernetes.md` §8 state; the installer holds
-cluster-admin then anyway. An upgrade renders no such grant.
+cluster-admin then anyway. An upgrade renders no such grant. After a failed
+first install, delete it: `kubectl delete clusterrolebinding,clusterrole
+<release>-identity-trust --ignore-not-found` (`docs/install.md` §5f).
 
 ### Migrating from the roster, and rolling back
 

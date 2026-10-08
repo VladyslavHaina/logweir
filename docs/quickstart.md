@@ -65,8 +65,10 @@ them can approve their own restore, or enforce a deletion plan they wrote.
    **Turn the console on in this same first install** (`api.enabled`,
    `api.console.enabled`, `api.console.mode`; step 3 and [install.md](install.md)
    §5e): a fresh install with a console starts in **confirm**, so its first
-   restore needs no key; a console turned on by a later upgrade does not, and
-   then you opt in ([install.md](install.md) §5f). Name the clusters a restore
+   restore needs no key (Helm 3.19+ or 4.x, and a chart whose
+   `identity.bootstrapFeatures.consoleKey` is on — the release default once its
+   bootstrap image is re-pinned); a console turned on by a later upgrade does
+   not, and then you opt in ([install.md](install.md) §5f). Name the clusters a restore
    may write into in `identity.installationTrust.allowedTargetClusterIds` if
    you know them. Add `retention.enabled=true` only if you will ever enforce
    retention.
@@ -81,9 +83,11 @@ them can approve their own restore, or enforce a deletion plan they wrote.
 ### 2. Trust, keys and approval policy
 
 On a **fresh install with the console** there is nothing to do here: the
-identity hook generated the console's key and created the default
-`TrustPolicy` `logweir-installation` for it and for the installation's
-signing key, and every namespace without its own policy is **confirm**. No
+identity hook generated the console's key and — on a cluster with no trust of
+its own — created the default `TrustPolicy` `logweir-installation` for it and
+for the installation's signing key, and every namespace without its own policy
+is **confirm** (`installation-trust skipped:…` in the hook's log says when it
+did not, and which public key ids to add to your trust). No
 key file, no `openssl`, no roster ([install.md](install.md) §5f).
 
 The steps below are for what that does not cover — a **strict** namespace, an

@@ -69,12 +69,26 @@ them; a report that one of them is true is not a vulnerability report.
 - **A fresh install's trust step holds `create` on `TrustPolicy` for its
   install alone.** RBAC cannot narrow `create` by name, so the identity hook's
   grant (`<release>-identity-trust`) is rendered only on a first install with
-  no existing identity, only as a `post-install` hook that Helm deletes when
-  the install's hooks finish, and the hook deletes its own binding right after
-  creating the one policy. For that window, whoever can run a pod as
+  no existing identity and the managed console key, only on Helm 3.19+ or 4.x
+  (older Helm keeps it bound when the hook fails, so the chart refuses to
+  render it there), only as a `post-install` hook that Helm deletes when the
+  install's hooks finish, succeeded or failed; and the hook deletes its own
+  binding on every exit path it controls (after the trust step, a failed step,
+  a usage error). For that window, whoever can run a pod as
   `<release>-identity-bootstrap` in the release namespace could create a
-  TrustPolicy; the installer holds cluster-admin then anyway. No standing
-  grant remains (`docs/kubernetes.md` §8).
+  TrustPolicy; the installer holds cluster-admin then anyway. A hook that never
+  runs its code (an image that cannot be pulled, a pod never admitted) or a
+  Helm client killed mid-install leaves the binding until the next hook run:
+  after a failed first install, delete it
+  (`kubectl delete clusterrolebinding,clusterrole <release>-identity-trust`,
+  `docs/install.md` §5f; `docs/kubernetes.md` §8).
+- **The controller's ServiceAccount can append a key to any existing
+  `TrustPolicy`** (pre-existing, not new in PROD-16.1). Its cluster-wide
+  `patch` on `trustpolicies` serves the compromise finalizer and no admission
+  policy narrows it to `metadata.finalizers`, so whoever can run a pod as
+  `weirkeeper` in the release namespace holds a trust administrator's power
+  wherever a policy exists — on a fresh install with a console, from the first
+  minute (`logweir-installation`). Owed: an admission fence on that account.
 - **On a fresh install, the trust administrator and the installation
   administrator can each change approval, as before.** The fresh-install
   `confirm` default is honoured only beside the `TrustPolicy` the identity

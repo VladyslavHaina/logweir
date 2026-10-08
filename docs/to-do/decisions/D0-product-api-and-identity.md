@@ -322,6 +322,17 @@ and only as follows:
   fresh install trusted by the hook-made policy. The grant that lets the hook
   create that cluster-scoped policy exists only during the first install's
   post-install hooks and is revoked by the hook itself.
+- **Fix round (2026-10-08, the Tier-A review of PROD-16.1).** The automatic
+  trust exists only for the console's confirmation: no console, an external
+  identity, or a console key the hook ADOPTED rather than generated creates no
+  policy, no marker and no grant; and any existing `TrustPolicy` (namespaced
+  too) or `TrustRoster/default` means the cluster's trust is administered and
+  the hook adds nothing. The grant renders only under Helm 3.19+ or 4.x, which
+  delete it when the hook fails (the chart refuses older Helm by name), and the
+  hook revokes it on every exit path it controls; a failed first install's
+  recovery command is documented. The chart passes the hook its PROD-16.1
+  flags only behind `identity.bootstrapFeatures.consoleKey`, flipped with the
+  re-pin of the bootstrap image, so a merge never breaks the pinned hook.
 - **`localAdmin` serves `confirm`** — the confirming principal is
   `urn:logweir:local-admin#admin` — superseding the 2026-09-23 amendment's
   "`localAdmin` refuses Ordinary" and the acceptance row "does not expose

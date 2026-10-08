@@ -1244,51 +1244,81 @@ scorecards already written stay valid under both readers.
 **Changed.** Three approval modes by name: **confirm** (one person clicks
 Create in the console, no key; internal `Ordinary`), **two-person** (PROD-16.2,
 refused by name) and **strict** (an approver's personal key; `Governed` or
-`legacy-governed-v1`). On a FIRST `helm install` with a console and the managed
-identity, the identity hook generates the console's `ConsoleConfirmation` key
+`legacy-governed-v1`). On a FIRST `helm install` (Helm 3.19+ or 4.x) with a
+console, the managed identity and `identity.bootstrapFeatures.consoleKey: true`,
+the identity hook generates the console's `ConsoleConfirmation` key
 (`logweir-console-confirmation`, retained, never regenerated, key loss stops
-the hook), creates one default `TrustPolicy` `logweir-installation` for the
-installation signer and the console key, and marks the install
-(`logweir.dev/approval-default` on `logweir-signing-trust`: a claim naming that
-policy's UID and both key ids, honoured by the console and the controller only
-beside that exact hook-made policy). Every namespace without its own policy is
-then confirm (`default-confirm-v1`); an explicit binding always wins. The
-`localAdmin` console confirms too, as `urn:logweir:local-admin#admin`.
-`approvalPolicy.default` (`confirm` with `allowOrdinaryConfirmation`, or
-`strict`) overrides the marker; `policies[].mode` accepts `confirm`/`strict`.
-The grant that lets the hook create a cluster-scoped `TrustPolicy` exists only
-during that first install's post-install hooks and is revoked by the hook. The
-API's policy view gains `operatorMode` and `basis`, the create's
-`authorization` gains `operatorMode` (OpenAPI `1.0.0-alpha.2`, additive).
-**An upgrade changes no namespace's approval:** no marker, no trust step, every
-unbound namespace stays `legacy-governed-v1`; the hook only generates the
+the hook) and — when the cluster has no trust of its own (no `TrustPolicy` at
+all, no `TrustRoster/default`) — creates one default `TrustPolicy`
+`logweir-installation` for exactly the installation signer and that generated
+console key, and marks the install (`logweir.dev/approval-default` on
+`logweir-signing-trust`: a claim naming that policy's UID and both key ids,
+honoured by the console and the controller only beside that exact hook-made
+policy). Every namespace without its own policy is then confirm
+(`default-confirm-v1`); an explicit binding always wins. An install without a
+console, with `identity.externalSecret`, or whose console key was adopted from
+a hand-made Secret gets no policy, no marker and no grant: no approver key by
+default only where the console's one click needs it. The `localAdmin` console
+confirms too, as `urn:logweir:local-admin#admin`. `approvalPolicy.default`
+(`confirm` with `allowOrdinaryConfirmation`, or `strict`) overrides the marker;
+`policies[].mode` accepts `confirm`/`strict`. The console's configuration gains
+`confirmationKeyManaged` (the managed key may arrive after the console starts;
+an operator-named key file that is missing still refuses to start). The API's
+policy view gains `operatorMode` and `basis`, the create's `authorization` gains
+`operatorMode` (OpenAPI `1.0.0-alpha.2`, additive). Item 28 lands after the
+`v0.2.0-rc.1` publication commit `2c277dc1` and is not in that candidate.
+**The install-only grant.** The `ClusterRole`/`ClusterRoleBinding`
+`<release>-identity-trust` that lets the hook create a cluster-scoped
+`TrustPolicy` is a `post-install` hook of that first install alone, deleted by
+Helm when the install's hooks finish — succeeded or failed on Helm 3.19+ and
+4.x; Helm 3.12–3.18 keeps it after a failed hook, so the chart refuses to render
+it there (`identity.installationTrust needs Helm 3.19.0 or newer`) — and the
+hook deletes it on every exit path it controls, a usage error included.
+**An upgrade changes no namespace's approval mode:** no marker, no trust step,
+every unbound namespace stays `legacy-governed-v1`; the hook only generates the
 console key, or ADOPTS the one a PLAT-19.2 install made by hand under that name.
+One thing does change on upgrade: a `localAdmin` console now confirms
+namespaces ALREADY bound to an `Ordinary` policy (it refused them before), so
+whoever can port-forward to it can authorise a restore there alone.
 **Do:** nothing, to keep today's approval. To opt an older install into
 confirm: a trust administrator adds the key from `logweir-console-trust` to the
 `TrustPolicy` governing those namespaces (`ConsoleConfirmation`), then set
 `approvalPolicy.allowOrdinaryConfirmation: true` and `approvalPolicy.default:
-confirm` and upgrade ([install.md](install.md) §5f). **Release coordinator:**
-re-pin `identity.bootstrapImage` to a runner carrying this identity CLI before
-release ([install.md](install.md), *Release coordinator: re-pin bootstrap
-bytes*): the chart passes the hook four new flags an older runner refuses.
+confirm` and upgrade ([install.md](install.md) §5f). **After a failed first
+install:** `kubectl delete clusterrolebinding,clusterrole
+<release>-identity-trust --ignore-not-found`, then check it is NotFound
+([install.md](install.md) §5f). **Release coordinator, two steps:** the merge
+is inert — `identity.bootstrapFeatures.consoleKey` is `false`, so the chart
+passes the pinned bootstrap image none of the new hook flags; after CI publishes
+the merge's runner, ONE commit re-pins `identity.bootstrapImage` to it,
+refreshes `crates/logweir/tests/fixtures/bootstrap-image-help.txt` from its
+`identity bootstrap --help` and flips the value to `true`
+([install.md](install.md), *Release coordinator: re-pin bootstrap bytes*).
 **Scope:** core rows (the unbound default, the bound marker with every binding
 broken once, an older reader refusing `defaultMode`), identity hook rows (fresh
-install creates trust and a claim the readers honour; upgraded, hand-provisioned
-and adopted identities get neither; a patched marker is ignored; the console key
-generated once, adopted, key loss; the trust grant revoked in every run; the
-policy body guard), console rows (seven attacks on an upgraded install read
-legacy and sign nothing; a fresh install confirms in one request; the managed
-key read when the hook writes it), controller and runner rows over an
-out-of-tree-signed `default-confirm-v1` confirmation, chart rows (the transient
-grant absent from an upgrade render, the grants pinned) and a host journey
-(localAdmin console, Playwright, compose slot 3). The PoC refresh that carries
-it runs the live controller rows.
+install creates trust and a claim the readers honour; no console, an adopted
+console key and any existing TrustPolicy create nothing; upgraded,
+hand-provisioned and adopted identities get neither; a patched marker is
+ignored; the console key generated once, adopted, key loss; the trust grant
+revoked on every exit path the binary controls; the policy body guard),
+controller rows (a refused marker is unmarked, a failed read keeps the last
+verdict), console rows (seven attacks on an upgraded install read legacy and
+sign nothing; a fresh install confirms in one request; only the managed key may
+be missing at start), controller and runner rows over an out-of-tree-signed
+`default-confirm-v1` confirmation, chart rows (the transient grant absent from
+an upgrade render and from installs without a console; the Helm floor, run with
+Helm 3.18.6; every render passes only flags the pinned image's `--help` lists),
+and a host journey (localAdmin console, Playwright, compose slot 3; a real
+ClusterRoleBinding deleted by a failing hook). The PoC refresh that carries it
+runs the live controller rows; the fresh-install rows wait for PROD-14.1's
+clean-install exercise.
 **Rollback:** remove `approvalPolicy.default` first (an older binary refuses a
-document carrying `defaultMode`). An older controller and console ignore the
-marker: every unbound namespace is `legacy-governed-v1` again and a pending
-confirmation under `default-confirm-v1` is refused `ApprovalPolicyMismatch` —
-fail closed. The installation `TrustPolicy`, both key Secrets and their public
-ConfigMaps stay.
+document carrying `defaultMode`), and `confirmationKeyManaged` goes with the
+chart (an older console refuses the unknown field). An older controller and
+console ignore the marker: every unbound namespace is `legacy-governed-v1` again
+and a pending confirmation under `default-confirm-v1` is refused
+`ApprovalPolicyMismatch` — fail closed. The installation `TrustPolicy`, both key
+Secrets and their public ConfigMaps stay.
 
 ### Verification scope: what "verified" means in this release
 

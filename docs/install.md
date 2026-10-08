@@ -283,6 +283,29 @@ docker run --rm --platform linux/amd64 docker.io/<namespace>/logweir@sha256:<rev
   identity bootstrap --help
 ```
 
+Save that output, with a `# image: <the pinned reference>` line, as
+`crates/logweir/tests/fixtures/bootstrap-image-help.txt`: `chart_lint` holds
+every render to the flags it lists and to that digest, so a re-pin without the
+refreshed help, or hook flags without a re-pin, is a red gate rather than a
+failed install.
+
+**New hook flags land in two steps (PROD-16.1).** The runner image that carries
+them is published by CI only after the commit that adds them, so:
+
+1. **The merge is inert.** The chart passes the hook the new flags
+   (`--console-secret-name`, `--console-public-configmap-name`,
+   `--installation-trust-policy`, `--allowed-target-cluster-id`,
+   `--mark-fresh-install-confirm`, `--revoke-trust-binding`) and renders their
+   objects only while `identity.bootstrapFeatures.consoleKey` is `true`, which
+   the merge leaves `false`: every install and upgrade runs exactly as before
+   with the image already pinned.
+2. **After CI publishes `sha-<merge>`, ONE commit** sets `identity.bootstrapImage`
+   to that runner's digest, refreshes the help fixture from it (it must list all
+   six flags), flips `identity.bootstrapFeatures.consoleKey: true`, and runs
+   `bash scripts/check-chart.sh --write`, `just chart-check`,
+   `bash scripts/render-install.sh --check` and
+   `cargo test -p logweir --test chart_lint`.
+
 End users supply neither a key nor an image hash.
 
 ---
@@ -1051,13 +1074,17 @@ person clicks Create in the console, no key (internal `Ordinary`);
 personal key (internal `Governed`, or today's `legacy-governed-v1`).
 
 **A fresh install with the console needs no step here.** A first `helm
-install` with `api.console.enabled` and the managed identity (path (c)): the
+install` — with **Helm 3.19 or newer, or Helm 4** — with `api.console.enabled`,
+the managed identity (path (c)) and a chart whose
+`identity.bootstrapFeatures.consoleKey` is `true` (the release default once its
+bootstrap image is re-pinned; until then
+`charts/logweir/examples/console-fresh-install.values.yaml` sets it): the
 identity hook generates the console's key (`logweir-console-confirmation`,
 retained like the installation identity), creates ONE default `TrustPolicy`
 (`identity.installationTrust.policyName`, default `logweir-installation`)
-trusting the installation signer (`EvidenceSigning`) and the console key
-(`ConsoleConfirmation`), and marks the install so that every namespace without
-its own policy is **confirm**. The first restore is confirmed in the console
+trusting exactly the installation signer (`EvidenceSigning`) and that console
+key (`ConsoleConfirmation`), and marks the install so that every namespace
+without its own policy is **confirm**. The first restore is confirmed in the console
 — in `localAdmin` mode too, as `urn:logweir:local-admin#admin` — and nobody
 runs `openssl`, edits a `TrustPolicy` or copies a key. What still needs a
 person is not a key: the clusters a restore may write into, which the policy
@@ -1075,16 +1102,40 @@ kubectl --context <ctx> -n <release-ns> get configmap logweir-signing-trust \
 # confirm;policy=logweir-installation;uid=…;signing=…;console=…
 ```
 
-The hook creates the policy only when the cluster has none of its own (no
-other `default: true` policy, none of that name, no `TrustRoster/default`) and
-then prints `installation-trust skipped:…` with the two public key ids to add
-to yours; without the hook-made policy nothing is marked and the install starts
-strict. The grant that lets the hook create a cluster-scoped `TrustPolicy`
-exists only during that first install's post-install hooks and the hook revokes
-it itself; no standing grant remains (§8 of `docs/kubernetes.md`, *The
-install-only trust grant*). **An install whose first hook run failed after
-generating the identity starts strict** — a later run does not finish the
-step; opt in as below.
+The hook creates the policy only when the cluster has no trust of its own —
+**no `TrustPolicy` at all** (default or namespaced) and no
+`TrustRoster/default` — and only for a console key this install GENERATED: a
+hand-made `logweir-console-confirmation` Secret present before the first
+install is adopted and published but trusted nowhere automatically (compare its
+fingerprint out of band first, `docs/keys.md`). Otherwise it prints
+`installation-trust skipped:…` with the public key ids to add to your trust;
+without the hook-made policy nothing is marked and the install starts strict.
+An install without a console, or with `identity.externalSecret`, gets no
+policy and no grant at all.
+
+**Helm versions.** The grant that lets the hook create a cluster-scoped
+`TrustPolicy` is a `post-install` hook that Helm deletes when the install's
+hooks finish, succeeded **or failed**; Helm 3.12–3.18 deletes only the failed
+hook and would leave it bound. So the chart **refuses to render it under Helm
+before 3.19** (`identity.installationTrust needs Helm 3.19.0 or newer`): use
+Helm 3.19+ or 4.x, or install with `identity.installationTrust.enabled=false`
+(the install starts strict and you trust the console key yourself, as below).
+The hook also deletes its own binding on every exit path it controls — after
+the trust step, after a failed step, after a usage error — so no standing grant
+remains (§8 of `docs/kubernetes.md`, *The install-only trust grant*).
+
+**A failed first install.** If `helm install` failed in its hooks (an image
+that could not be pulled, a pod never admitted, a Helm client killed mid-hook),
+remove the grant before anything else, then check it is gone:
+
+```bash
+kubectl --context <ctx> delete clusterrolebinding,clusterrole <release>-identity-trust --ignore-not-found
+kubectl --context <ctx> get clusterrolebinding <release>-identity-trust   # NotFound
+```
+
+`helm uninstall` does not delete hook objects. **An install whose first hook
+run failed after generating the identity starts strict** — a later run does not
+finish the step; opt in as below.
 
 **Choosing a mode.** `approvalPolicy.default: strict` keeps every unbound
 namespace on `legacy-governed-v1` even on a fresh install;
@@ -1117,11 +1168,16 @@ on the `TrustPolicy` with usage `ConsoleConfirmation`, the private half in that
 Secret under `confirmation.key`. A Secret named `logweir-console-confirmation`
 made by hand is adopted by the hook as the managed key.
 
-**Before release, the bootstrap image must be re-pinned** (*Release
-coordinator: re-pin bootstrap bytes* above): the chart now passes the hook
-`--console-secret-name`, `--installation-trust-policy`,
-`--mark-fresh-install-confirm` and `--revoke-trust-binding`, which a runner
-older than PROD-16.1 refuses — the hook fails and so does the install.
+**The bootstrap image and `identity.bootstrapFeatures.consoleKey` move
+together** (*Release coordinator: re-pin bootstrap bytes* above): the chart
+passes the hook `--console-secret-name`, `--installation-trust-policy`,
+`--mark-fresh-install-confirm` and `--revoke-trust-binding` only while the
+value is `true`, because a runner older than PROD-16.1 refuses them. With the
+value `false` a console's key works as before PROD-16.1: an empty
+`approvalPolicy.confirmationKeySecret` is no key, and a named one (including
+`logweir-console-confirmation`) is mounted as an operator-named key that must
+exist before the console starts. Setting the value `true` with an older
+`identity.bootstrapImage` makes the hook fail, and so the install.
 
 **Rollback.** `helm rollback` to a release before PROD-16.1: remove
 `approvalPolicy.default` first (an older binary refuses a document carrying
@@ -1132,7 +1188,7 @@ closed; nothing approves until an approver key is on the trust. The
 installation `TrustPolicy`, both key Secrets and their public ConfigMaps are
 retained (an older controller reads the policy, so evidence keeps verifying).
 
-### 5a. The installation policy `ConfigMap` (optional, and what it unlocks)### 5a. The installation policy `ConfigMap` (optional, and what it unlocks)
+### 5a. The installation policy `ConfigMap` (optional, and what it unlocks)
 
 The controller reads one administrator-owned document, `weirkeeper-policy`, in
 the **release** namespace, under the key `policy.json`. **It is optional**: an
@@ -1480,7 +1536,9 @@ overwrite either side. Preserve the old public material and old roster entry:
 old archive signatures remain verifiable only while their original public key
 and policy history remain available.
 
-Routine Helm 3 and Helm 4 upgrades, hook retries, and rollbacks to a chart
+Routine Helm 3 and Helm 4 upgrades (a FIRST install that renders the fresh
+install's trust grant needs Helm 3.19+ or 4.x, §5f), hook retries, and
+rollbacks to a chart
 version carrying the `post-rollback` identity hook validate and reuse the same
 private bytes. Empty retained objects are creation-only
 `pre-install,pre-upgrade` hooks, not ordinary release-manifest resources and

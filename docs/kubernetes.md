@@ -3408,9 +3408,10 @@ exactly like an explicit binding; an explicit binding always wins.
 
 **The fresh-install marker, and why an upgrade never reaches it.** The identity
 hook (`logweir identity bootstrap`) writes it only in the ONE run that
-**generates** the installation identity — a first `helm install` with a console
-and the managed identity. In that run it first creates the installation's
-default `TrustPolicy` (below), then writes, on the public identity ConfigMap
+**generates** the installation identity and the console key — a first `helm
+install` with a console, the managed identity and a bootstrap image that runs
+the PROD-16.1 flags (`identity.bootstrapFeatures.consoleKey`). In that run it
+first creates the installation's default `TrustPolicy` (below), then writes, on the public identity ConfigMap
 (`logweir-signing-trust`), the annotation
 `logweir.dev/approval-default: confirm;policy=<name>;uid=<uid>;signing=<keyId>;console=<keyId>`,
 and annotates the policy `logweir.dev/approval-default: confirm` beside its
@@ -3428,8 +3429,10 @@ one without the console key — is **unmarked**, logged as a WARN by both, and
 the namespace stays `legacy-governed-v1`. An upgraded install's identity
 already existed, so the hook neither creates the trust nor writes the claim;
 an adopted external identity may predate this chart and is never marked; a
-first install whose hook run was interrupted after generating the identity is
-not finished by a later run and starts strict.
+console key the hook ADOPTED (a hand-made Secret of the managed name present
+before the first install) is never trusted automatically, so that install is
+not marked either; a first install whose hook run was interrupted after
+generating the identity is not finished by a later run and starts strict.
 
 **The threat model, and the residual** (the PROD-16.1 security review).
 Before PROD-16.1, turning a governed namespace into one-person confirmation
@@ -3445,36 +3448,74 @@ as before; and in any console mode, whoever controls the console pod, its key
 Secret or the identity provider can approve alone, which `Ordinary` always
 accepted (SECURITY.md).
 
+**A pre-existing bound on both attackers** (the PROD-16.1 review's attacker
+model; not changed by PROD-16.1, and owed to the trust/RBAC owner). The
+controller's ServiceAccount holds cluster-wide `patch` on `trustpolicies` for
+the compromise finalizer (`charts/logweir/templates/clusterrole.yaml`,
+`controller-scope.yaml`; RBAC cannot narrow a finalizer patch below the
+object), and no admission policy fences that patch to `metadata.finalizers`. So
+whoever can run a pod as `weirkeeper` in the release namespace can append a key
+to ANY EXISTING `TrustPolicy` — a trust administrator's power wherever a policy
+exists. On a fresh install with a console that is from the first minute, because
+`logweir-installation` exists; before PROD-16.1 it waited for the first policy.
+A ValidatingAdmissionPolicy letting that account change only
+`metadata.finalizers` on `trustpolicies` would close it.
+
 **The install-only trust grant.** Creating that one `TrustPolicy` needs
 `create` on the cluster-scoped kind, which RBAC cannot narrow by name. The
 chart therefore renders the grant (`ClusterRole`/`ClusterRoleBinding`
 `<release>-identity-trust`: `list`+`create` TrustPolicy, `get`
 `TrustRoster/default`, `delete` its own binding) ONLY under one guard — a first
 install (`.Release.IsInstall`) into a namespace with no established signing
-Secret — and ONLY as a `post-install` hook (never upgrade or rollback),
-weighted before the Job, with `hook-delete-policy:
-before-hook-creation,hook-succeeded,hook-failed`: Helm (v4.0.1,
-`pkg/action/hooks.go` `execHook`) deletes it once the install's post-install
-hooks have run, and deletes earlier `hook-succeeded` hooks when a later one
-fails. The hook ALSO deletes the binding itself right after its trust step,
-and every later run deletes a binding still left (a Helm client that died
-mid-install). No standing grant remains. **The window:** from the post-install
-phase to the end of the trust step, whoever can run a pod as
-`<release>-identity-bootstrap` in the release namespace could create a
-TrustPolicy; the installer holds cluster-admin for that install anyway (CRDs,
-ClusterRoles). The hook itself creates only a policy of exactly the signer
-and the console key, `default: true`, and only when the cluster has no default
-policy, no policy of that name and no `TrustRoster/default`.
+Secret, with the managed console key (a console, the bootstrap feature, no
+`identity.externalSecret`: an install that never uses confirm gets no grant) —
+and ONLY as a `post-install` hook (never upgrade or rollback: a rollback replays
+the stored revision's hooks, and this one is not a rollback hook), weighted
+before the Job, with `hook-delete-policy:
+before-hook-creation,hook-succeeded,hook-failed`.
+
+*What removes it, and on which Helm.* On success, every Helm deletes it when
+the install's post-install hooks have run. When the identity Job FAILS, Helm
+3.19.0 and 4.x (`pkg/action/hooks.go` `execHook`,
+`deleteHooksByPolicy(executingHooks[0:i], HookSucceeded, …)`; v4.0.1 sha256
+`ebb121ed85cc27f7c2e249f49dede260e4b9aefa8b61606fd0844d39d600c58d`) also delete
+the earlier `hook-succeeded` hooks — this grant — but Helm 3.12–3.18 delete only
+the failed Job and would leave the grant bound. **The chart therefore refuses
+to render the grant under Helm before 3.19** (`identity.installationTrust
+needs Helm 3.19.0 or newer`; install with a newer Helm, or set
+`identity.installationTrust.enabled=false` and trust the console key
+yourself). The hook ALSO deletes the binding itself on every exit path it
+controls — after the trust step, after a failed step, after a store it could
+not open, after a panic, after a failed delete (on a fresh connection), and
+after a usage error such as a flag from a newer chart — and every later run
+deletes a binding still left. What neither covers is a hook that never runs
+its code (an image that cannot be pulled, a pod never admitted, a SIGKILL), a
+failed `Create` of a later hook, or a Helm client killed mid-install: then the
+binding outlives the install until the next hook run, and the failed-install
+recovery in `docs/install.md` §5f deletes it
+(`kubectl delete clusterrolebinding,clusterrole <release>-identity-trust`).
+`helm uninstall` does not delete hook objects.
+
+**The window:** from the post-install phase to the end of the trust step,
+whoever can run a pod as `<release>-identity-bootstrap` in the release
+namespace could create a TrustPolicy; the installer holds cluster-admin for
+that install anyway (CRDs, ClusterRoles). The hook itself creates only a policy
+of exactly the signer and the console key it GENERATED, `default: true`, and
+only when the cluster has **no TrustPolicy at all** (default or namespaced) and
+no `TrustRoster/default` — a default policy beside administered namespaced
+trust would turn every other unbound namespace into confirm.
 
 **The console key at install.** With a console and the managed identity, the
 hook generates the console's `ConsoleConfirmation` key (Ed25519) once into the
 retained Secret `logweir-console-confirmation` and publishes its public half in
 `logweir-console-trust` — the installation identity's lifecycle: never
 regenerated, a published half without its private key stops the hook (key
-loss), a hand-made Secret of that name (every PLAT-19.2 install) is adopted.
-The console mounts it `optional` and reads it on first use, because the hook
-runs after the console starts; until then a `confirm` request is refused
-before anything is created.
+loss), a hand-made Secret of that name (every PLAT-19.2 install) is adopted —
+and, adopted, trusted by nobody automatically. The console mounts it `optional`
+and reads it on first use (`confirmationKeyManaged: true` in its
+configuration), because the hook runs after the console starts; until then a
+`confirm` request is refused before anything is created. An operator-named key
+file that is missing is still a refusal to start.
 
 **Why installation configuration and not a namespaced object.** D0 puts the
 binding and the `allowOrdinaryConfirmation` floor in installation

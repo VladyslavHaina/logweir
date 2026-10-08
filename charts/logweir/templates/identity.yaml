@@ -20,8 +20,8 @@ PROD-16.1: the console's ConsoleConfirmation key, managed exactly like the
 installation identity — empty retained placeholders the hook fills once, never
 rendered again once they exist (the same `lookup` guard as above; PROD-14.1
 owns making the whole identity lookup-free). Rendered only when the chart
-manages the key (`logweir.consoleKey.managed`: a console runs and the operator
-named no other Secret).
+manages the key (`logweir.consoleKey.managed`: the bootstrap image runs it, a
+console runs and the operator named no other Secret).
 */ -}}
 {{- $consoleManaged := include "logweir.consoleKey.managed" . }}
 {{- $consoleSecret := include "logweir.consoleKey.managedName" . }}

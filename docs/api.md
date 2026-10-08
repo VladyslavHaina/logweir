@@ -185,7 +185,15 @@ The console reads the installation's approval-policy document —
 `approvalPolicyFile`, **the same file the controller mounts** — and its own
 `ConsoleConfirmation` private key — `confirmationKeyFile`, from a Secret. Both
 are optional; a served namespace bound to a policy without the key is a startup
-refusal (exit 2), because both modes carry the console's signature. The full
+refusal (exit 2), because both modes carry the console's signature. A
+configured key file that does not exist is a startup refusal too, unless
+`confirmationKeyManaged: true` says it is the key the identity hook generates
+(PROD-16.1), which the kubelet projects only after the post-install hook ran:
+then it is read on first use, and a confirm request before it exists is
+refused `409 policy_mismatch` before anything is created.
+`confirmationKeyManaged` without `confirmationKeyFile` is a configuration
+error. `installationIdentity: {namespace, publicConfigMap}` names where the
+fresh-install marker is read (the chart sets both only with the managed key). The full
 contract, the four enforcement points and upgrade/rollback are in
 `docs/kubernetes.md` §8, *Approval policy*.
 
