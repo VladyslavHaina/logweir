@@ -17,8 +17,10 @@ adopter's evidence bucket is a document some reader may already parse, so:
 - **Adding an optional field is a MINOR bump** — `1.1.0` — with a new schema
   file beside the old one. It is not a free edit and it is not "still 1.0.0".
 - **Changing a field's type, its meaning, or an identity rule
-  (`validate_invariants`) is a MAJOR bump** — `2.0.0` — and needs two maintainer
-  approvals ([MAINTAINERS.md](../MAINTAINERS.md)). The owner's decision
+  (`validate_invariants`) is a MAJOR bump** — `2.0.0` — and needs the owner's
+  recorded decision, a row in the tracker's
+  [Owner decisions](to-do/product-expansion.md#owner-decisions) table, while the
+  project has one maintainer ([MAINTAINERS.md](../MAINTAINERS.md)). The owner's decision
   [OD-7](to-do/product-expansion.md#owner-decisions), taken on 2026-10-05,
   rules two cases MINOR:
   - **A `validate_invariants` arm that reads ONLY a new optional block is
@@ -27,6 +29,19 @@ adopter's evidence bucket is a document some reader may already parse, so:
     the existing `topic_parity.unexpected_divergence` is MINOR** (OD-7's
     follow-up ruling, the same day), because it can only weaken an older
     reader's verdict.
+
+  On 2026-10-07 the owner added a third, general case (FX-7's review V3 and
+  FX-3):
+  - **A new cause for an existing value, or new content in an existing field,
+    is MINOR when it can only move a reader's verdict to the safer side**: not
+    restorable, not trusted, not intended. It is never MINOR when it can make
+    any verdict stronger. FX-7's superseded pin is this case: `availability:
+    Conflict`, exit 3, and exit 1 / `Unreadable` for a failed read of the
+    pinned version, reached only through the new optional
+    `archive.manifest_version_id`. So is FX-3's move of the new-topic
+    deviations from `intentionally_deviated` to `unexpected_divergence`, and
+    FX-8's refusal `PointInTimeByProducerTime`, a new cause for exit 3
+    ([below](#scorecard-format-130-sourcetime_basis-fx-8)).
 
   Nothing else is ruled: any other change to an existing field's content is
   still a MAJOR bump.
@@ -1078,11 +1093,80 @@ What changes for an operator:
   receipts, and both stay two catalog points.
 
 **Upgrade.** Nothing to migrate. A Backup Job whose first run was made by the older runner and that
-is lost and re-created after the upgrade finds no claim and runs the engine again — the one window
-the claim cannot close, because the older run never wrote one; let in-flight Backups finish before
-upgrading the controller. **Rollback.** An older runner ignores the claim objects (they are not
-receipts) and returns to the old behaviour; the claims stay in the bucket, harmlessly, and are
-honoured again after a re-upgrade.
+is lost and re-created after the upgrade finds no claim — the older run never wrote one — and,
+**since FX-7, is refused anyway**: after winning its claim the runner refuses a set that already
+holds its manifest or a segment, exit 1 `ExecutionAlreadyClaimed`, before the engine starts (the
+next section). **Rollback.** An older runner ignores the claim objects (they are not
+receipts) and the set check, and returns to the old behaviour; the claims stay in the bucket,
+harmlessly, and are honoured again after a re-upgrade.
+
+### A backup set that already exists is never written again; versioned buckets pin the manifest (FX-7)
+
+The execution claim stops a second run of an execution that took a claim. A set written by a build
+without the claim carries none, so the claim alone let a later run of the same `backup_id` start —
+a Backup Job lost across the upgrade and re-created with the new runner image, or a standalone
+`backup run` reusing a `backup_id` an older build wrote to (RECEIPT-DUP-UPGRADE-WINDOW). Measured on
+engine 0.21.0 (compose slot 3; a `v0.1.5` runner for the first run), such a second run exited 0,
+signed a second receipt, rewrote the first run's segment objects in place (segments are keyed by
+start offset) and — because its manifest merge keeps the first run's entry for every existing key —
+could leave the manifest bytes IDENTICAL: the first receipt's manifest digest still matched while
+the data under it had changed ([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
+What changes for an operator:
+
+- **A run over a set that already exists exits 1 naming `ExecutionAlreadyClaimed`**, with no engine
+  run and no receipt, whoever wrote the set — the same state, message class and remedy (a new
+  `backup_id`) as a claim that exists. After winning its claim, as the last refusal before the engine,
+  the runner looks for the set's manifest (`<prefix>/<backup_id>/manifest.json`) and for any segment
+  under `<prefix>/<backup_id>/topics/` — a finished set, or segments of a run that died or is still
+  running — and either refuses the run. Other objects there (an upstream archive's consumer-groups
+  snapshot, say) are not the engine's output in Logweir's configuration and do not refuse it. A read
+  that fails transiently (a transport error, a timeout, a 5xx the client already retried) is exit 1,
+  retried by a schedule under a new execution id; any other failed read (a 403, a wrong bucket) is
+  exit 4 `ExecutionClaimUnproven`. **No permission is added**: the run's read-back
+  already lists and reads the archive prefix.
+- **On a versioned bucket a receipt pins its manifest's version** —
+  `archive.manifest_version_id`, receipt and catalog record format `1.2.0`, the MINOR after FX-4's `1.1.0`
+  ([why](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)). When the
+  current version is not the pin, a point-bound restore and the catalog read the pinned version BY
+  ID. If the bucket still holds it, the set was written again there after the point was signed (by
+  a runner from before these checks, after a rollback, or by anything else), which the digest alone
+  cannot see when the manifest bytes came out identical: exit 3 `PointBindingMismatch`, and
+  `Conflict` in the catalog. If the bucket does not hold it — a version id belongs to one bucket, so
+  every byte-for-byte copy of the archive, an unversioned bucket, and a version that was expired or
+  deleted are this case — the digest decides, as for a point without a pin, and the runner's log and
+  the entry's remedy say the pin could not be checked in this bucket. A read of the pinned version
+  that fails otherwise (a 403 without `s3:GetObjectVersion`) is exit 1 / `Unreadable`. Only the
+  manifest is pinned — a rewrite is detected, not undone — and the detection covers the points THIS
+  build signed: an older runner's own receipt over a set it rewrote pins nothing and stays
+  selectable.
+- **The pin is checked only where the bucket still holds the pinned version and serves it by id.**
+  A version that was expired or DELETED, a copy synced after the set was written again, or a store
+  that cannot read by version leaves the digest alone, which an identical manifest over rewritten
+  segments passes ([the three routes](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+  Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
+  bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
+  merges the two views for you yet (PROD-09.2 owns that merge).
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key).
+  There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
+  the segment digests the manifest records.
+- **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and
+  `logweir catalog sync` never infers a pin for one.
+- **The owner ruled this cause MINOR on 2026-10-07 (FX-7 review, V3).** `availability: Conflict`
+  gains a cause: a pinned manifest version this bucket still holds that is no longer the current
+  one. Only a point whose receipt carries the new optional `archive.manifest_version_id` can reach
+  it, and it can only move a point toward not restorable, so it is the general MINOR case in the
+  rule above. The cause lives once in `crates/logweir/src/catalog/pin.rs` (`judge`'s `Superseded`
+  arm and `SUPERSEDED_CAUSE`).
+
+**Upgrade.** Nothing to migrate; readers of either major-1 format ignore the new field. An older
+runner that is still RUNNING when its Job is re-created, and has written nothing yet, is seen by
+neither the claim nor the set check: let such a Job finish before upgrading the runner. **Rollback.**
+An older runner ignores the pin (its reader ignores unknown fields inside major 1) and no longer
+refuses an existing set; an older catalog reader reports a superseded point by its digest alone.
+Rolled back while a `Backup` is in flight, an older runner whose Job is re-created re-runs the
+engine over the set: on a versioned bucket this build's point is then `Conflict`, and on an
+unversioned bucket nothing reports it (the first point keeps verifying over rewritten segments).
+Let in-flight `Backup`s finish before rolling the runner back.
 
 ### An empty configuration answer is a refused read, never "no overrides" (PROD-04.0 T13, FX-4)
 
@@ -1181,11 +1265,28 @@ The document is canonical JSON with the DSSE payload type
   "kind": "StandingRehearsalAuthorization",
   "subjectRef": {"apiVersion": "logweir.dev/v1alpha1", "kind": "RehearsalSchedule",
                  "namespace": "team-a", "name": "weekly-orders", "uid": "…"},
-  "scope": { …D3 §4.3's RehearsalScope, camelCase… },
+  "scope": {"templateDigest": "sha256:…", "targetClusterId": "…",
+            "topicPrefix": "rehearsal-3f2a91c7-", "topics": ["orders"],
+            "maxPartitions": 200, "recordsPerPartition": 25,
+            "deadlineSeconds": 3600, "modes": ["scratch"]},
   "issuedAt": "2026-06-01T00:00:00Z",
   "expiresAt": "2026-07-01T00:00:00Z"
 }
 ```
+
+The scope is D3 §4.3's `RehearsalScope` (`logweir_core::rehearsal_scope`). Each field bounds the plan
+a slot may run:
+
+| Field | What it bounds |
+|---|---|
+| `templateDigest` | `sha256` over the canonical JSON of the schedule's `spec` minus `suspend`: the binding to one schedule template. The controller recomputes it each slot; the runner does not check it (below). |
+| `targetClusterId` | The one cluster a rehearsal may restore into, compared with the id the cluster itself reports. |
+| `topicPrefix` | The prefix every restored topic name carries, rendered per schedule as `<prefix><schedule-uid-first-8>-`. |
+| `topics` | The source topics the authorization covers, by exact name. |
+| `maxPartitions` | The partition ceiling: each slot's plan carries the schedule's own bound as `sample.max_partitions`, which may not exceed it. |
+| `recordsPerPartition` | The most records per partition the plan may sample and verify. It does not bound how many records the restore writes, which is every archived record in the window. |
+| `deadlineSeconds` | The wall-clock bound on one run, the Job's `activeDeadlineSeconds`. The controller checks it; the runner does not. |
+| `modes` | The target modes permitted: `["scratch"]`, and nothing else in this build. A scope naming any other mode is refused. |
 
 Unknown fields are ignored on read. They cannot widen authority: the standing format carries no
 approval-policy mode (PLAT-19.2 carries one end to end for per-run Restores only, through

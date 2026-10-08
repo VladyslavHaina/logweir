@@ -29,7 +29,9 @@ fn justfile_schema_version(name: &str) -> String {
 /// **One version per document.** `just schema`/`schema-check` write and
 /// compare the file their justfile variable names; the writer's constant names
 /// the `$id` and the `format_version` it writes. They must be one number, or a
-/// renumber would regenerate one file and sign documents naming another.
+/// renumber would regenerate one file and sign documents naming another. For
+/// the receipt the CURRENT file is the newest MINOR's, the one a pinned receipt
+/// carries (FX-7, 1.2.0); FX-4's 1.1.0 file is frozen beside it.
 #[test]
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
@@ -38,7 +40,7 @@ fn the_justfile_schema_versions_are_the_writers_constants() {
     );
     assert_eq!(
         justfile_schema_version("receipt"),
-        logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
     );
 }
 
@@ -250,15 +252,16 @@ fn the_scorecard_top_level_shape_is_unchanged() {
 ///
 /// The named test behind the CI drift arm and behind the by-hand acceptance
 /// (`cargo run -p logweir-core --example emit_backup_receipt_schema > /tmp/r.json`
-/// then `diff -u schemas/logweir-backup-receipt-1.0.0.json /tmp/r.json`). It
-/// fails in both directions: a type change nobody regenerated, and a
-/// hand-edit of the published file.
+/// then `diff -u` against the current schema file, which `just schema-check`
+/// names). It fails in both directions: a type change nobody regenerated, and a
+/// hand-edit of the published file. The CURRENT file is the newest MINOR's,
+/// named by the writer's constant (FX-7 fix round): the 1.0.0 file is frozen.
 #[test]
 fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
     let checked_in = current_schema(
         "backup-receipt",
-        logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION,
     );
     assert_eq!(
         generated.trim_end(),
@@ -267,7 +270,7 @@ fn backup_receipt_schema_has_no_drift() {
          review the diff — a field added is a MINOR bump, a field removed or \
          retyped is a MAJOR bump (Global Constraint 12), and the receipt's \
          format_version is its own and not the scorecard's.",
-        logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
     );
 }
 
@@ -289,8 +292,18 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         v["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-            logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
         )
+    );
+    let archive = &v["definitions"]["ReceiptArchive"];
+    assert!(archive["properties"]["manifest_version_id"].is_object());
+    assert!(
+        !archive["required"]
+            .as_array()
+            .expect("ReceiptArchive has required fields")
+            .iter()
+            .any(|r| r == "manifest_version_id"),
+        "manifest_version_id is OPTIONAL: every 1.0.0 and 1.1.0 receipt lacks it and must still validate"
     );
     assert!(
         !v["required"]
@@ -316,9 +329,13 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
     }
 }
 
-/// FX-4: the 1.0.0 receipt schema is FROZEN beside the 1.1.0 one and still
-/// describes every receipt written before the bump: it names itself 1.0.0 and
-/// has no `config_coverage`.
+/// **The 1.0.0 receipt schema is FROZEN** (FX-4, and FX-7's fix round,
+/// review M-2) beside the newer ones and still describes every receipt written
+/// before FX-4: it names itself 1.0.0, it has no `config_coverage`, and its
+/// `ReceiptArchive` has no `manifest_version_id`. It is no longer regenerated
+/// (`just schema` writes the current file only), so this is the gate that it
+/// stays what adopters downloaded under that name — `docs/stability.md`'s "a
+/// new schema file beside the old one".
 #[test]
 fn the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -333,5 +350,56 @@ fn the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema() {
     assert!(
         frozen["properties"].get("config_coverage").is_none(),
         "the frozen 1.0.0 schema must not describe the 1.1.0 field"
+    );
+    let archive = &frozen["definitions"]["ReceiptArchive"]["properties"];
+    assert!(archive["manifest_sha256"].is_object());
+    assert!(
+        archive.get("manifest_version_id").is_none(),
+        "the frozen 1.0.0 schema must not describe the 1.2.0 field"
+    );
+    assert_ne!(
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        "1.0.0",
+        "the pin is a MINOR bump, so its schema is a NEW file"
+    );
+}
+
+/// **FX-4's 1.1.0 receipt schema is FROZEN** beside the 1.2.0 one (FX-7 merged
+/// after FX-4 and took the next MINOR). It still describes every receipt this
+/// build writes WITHOUT a pin — the [`RECEIPT_FORMAT_VERSION`] document: it
+/// names itself 1.1.0, it carries `config_coverage`, and its `ReceiptArchive`
+/// has no `manifest_version_id`. `just schema` no longer regenerates it, so
+/// this is the gate that it stays the file FX-4 published.
+///
+/// [`RECEIPT_FORMAT_VERSION`]: logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
+#[test]
+fn the_frozen_1_1_0_receipt_schema_is_still_fx4s() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.1.0.json"
+    ))
+    .expect("the frozen 1.1.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.1.0.json"
+    );
+    assert!(
+        frozen["properties"]["config_coverage"].is_object(),
+        "the 1.1.0 schema is FX-4's: it describes config_coverage"
+    );
+    let archive = &frozen["definitions"]["ReceiptArchive"]["properties"];
+    assert!(archive["manifest_sha256"].is_object());
+    assert!(
+        archive.get("manifest_version_id").is_none(),
+        "the frozen 1.1.0 schema must not describe the 1.2.0 field"
+    );
+    assert_eq!(
+        logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION,
+        "1.1.0",
+        "an unpinned receipt is FX-4's 1.1.0 document, which this file describes"
+    );
+    assert_ne!(
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION,
+        "the pin is a MINOR bump over FX-4's 1.1.0, so its schema is a NEW file"
     );
 }

@@ -477,11 +477,20 @@ evidence: {{backend: filesystem, path: {evidence}}}
     /// binding that truthfully names it, and the key that signed it. With
     /// `signed: false` the sidecar is left out -- an unsigned receipt.
     fn archive_signed(signed: bool) -> (tempfile::TempDir, String, String, SigningKey) {
+        archive_with(signed, None)
+    }
+
+    /// [`archive_signed`], with the receipt pinning `pin` as its manifest
+    /// version (FX-7) when given.
+    fn archive_with(
+        signed: bool,
+        pin: Option<&str>,
+    ) -> (tempfile::TempDir, String, String, SigningKey) {
         let dir = tempfile::tempdir().expect("tempdir");
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = sha256_prefixed(&manifest);
         let manifest_key = "logweir/backups/nightly-7/run-1.manifest.json";
-        let receipt = serde_json::json!({
+        let mut receipt = serde_json::json!({
             "format_version": "1.0.0",
             "run_id": "run-1",
             "backup_id": "nightly-7",
@@ -505,6 +514,11 @@ evidence: {{backend: filesystem, path: {evidence}}}
             "records": {"orders": 3},
             "covered": {"from_ms": 1, "to_ms": 2}
         });
+        if let Some(pin) = pin {
+            receipt["format_version"] =
+                logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION.into();
+            receipt["archive"]["manifest_version_id"] = pin.into();
+        }
         let receipt_bytes = serde_json::to_vec(&receipt).expect("receipt serialises");
         let receipt_key = "logweir/backups/nightly-7/run-1.receipt.json";
         let signer = SigningKey::generate_ed25519();
@@ -629,6 +643,49 @@ evidence: {{backend: filesystem, path: {evidence}}}
             run.transcript
         );
         assert_ne!(run.code, 0, "no broker is running, so it cannot succeed");
+    }
+
+    /// **FX-7 fix round (review H-1), through the real binary.** A receipt
+    /// taken on a versioned bucket pins its manifest's version; the same
+    /// signed point in a FILESYSTEM archive — which keeps no versions, like
+    /// any unversioned copy of the archive — is the same point. The run gets
+    /// past the binding (proven by its digest) and the runner LOGS that the
+    /// pin could not be checked here, rather than refusing it as written
+    /// again (exit 3), which it did before the fix.
+    #[test]
+    fn a_pinned_point_in_an_unversioned_copy_gets_past_the_binding_with_a_note() {
+        let (archive_dir, truthful, point_id, signer) =
+            archive_with(true, Some("67245234538f6f8cb9cc383496cb1fdf"));
+        let keys = evidence_keys(&signer, logweir_core::trust::KeyState::Active);
+        let evidence = tempfile::tempdir().expect("tempdir");
+        let run = run_bound_restore(
+            &plan(
+                archive_dir.path(),
+                &evidence.path().join("no-such-evidence-location"),
+                &truthful,
+            ),
+            Some(&keys),
+        );
+        assert!(
+            run.transcript.contains("recovery point binding verified")
+                && run.transcript.contains(&point_id),
+            "the copy is the signed point (exit {}):\n{}",
+            run.code,
+            run.transcript
+        );
+        assert!(
+            run.transcript.contains("PointPinUnchecked")
+                && run
+                    .transcript
+                    .contains("could not be checked in this bucket"),
+            "and the runner says the pin could not be checked here:\n{}",
+            run.transcript
+        );
+        assert!(
+            !run.transcript.contains("PointBindingMismatch"),
+            "never refused as written again:\n{}",
+            run.transcript
+        );
     }
 
     /// The refusal the ordering claim is about for SIGNATURES (D3 §5.5 step

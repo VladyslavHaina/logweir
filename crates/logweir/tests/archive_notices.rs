@@ -279,8 +279,12 @@ impl ClusterReader for StubReader {
 }
 
 /// A `DataEngine` whose backup "ran" and whose archive holds one topic with
-/// one segment. It spawns nothing.
-struct OneTopic;
+/// one segment. It spawns nothing, and — when given an archive — writes its
+/// manifest there DURING the run, as the real engine does: a backup run
+/// refuses a set whose manifest exists before its engine starts (FX-7).
+struct OneTopic {
+    archive: Option<Arc<Store>>,
+}
 
 fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
     s.parse().unwrap()
@@ -343,9 +347,18 @@ impl DataEngine for OneTopic {
     }
     fn backup(
         &self,
-        _plan: &BackupPlan,
+        plan: &BackupPlan,
         _obs: &mut dyn PhaseObserver,
     ) -> Result<BackupFacts, EngineError> {
+        if let Some(archive) = &self.archive {
+            let backup_id = &plan.backup_id;
+            archive
+                .put_create_only(
+                    &format!("{ARCHIVE_PREFIX}{backup_id}/manifest.json"),
+                    format!("{{\"backup_id\":\"{backup_id}\",\"topics\":[]}}").as_bytes(),
+                )
+                .map_err(|e| EngineError::Operational(e.to_string()))?;
+        }
         Ok(BackupFacts {
             started_at: ts("2026-09-29T03:00:00Z"),
             finished_at: ts("2026-09-29T03:04:00Z"),
@@ -404,17 +417,15 @@ fn a_backup_tells_an_unreadable_snapshot_and_still_writes_its_receipt() {
         receipt_out: None,
         backup_id_override: None,
     };
-    let archive = Store::in_memory(ARCHIVE_PREFIX);
-    archive
-        .put_create_only(
-            &format!("{ARCHIVE_PREFIX}{BACKUP_ID}/manifest.json"),
-            format!("{{\"backup_id\":\"{BACKUP_ID}\",\"topics\":[]}}").as_bytes(),
-        )
-        .unwrap();
+    // EMPTY: the engine double writes the manifest when it runs (FX-7: a set
+    // whose manifest exists before the engine starts is refused).
+    let archive = Arc::new(Store::in_memory(ARCHIVE_PREFIX));
     let evidence = Store::in_memory("logweir/");
     let snapshot_key = format!("{ARCHIVE_PREFIX}{BACKUP_ID}/consumer-groups-snapshot.json");
     let engine = Tells {
-        inner: Box::new(OneTopic),
+        inner: Box::new(OneTopic {
+            archive: Some(archive.clone()),
+        }),
         notices: vec![notice(&snapshot_key)],
     };
 

@@ -352,6 +352,89 @@ fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
 
 # ---------------------------------------------------------------------------
+# FX-7: the pinned manifest version (backup receipt format 1.2.0).
+# ---------------------------------------------------------------------------
+#
+# The loop above already requires BOTH readers to ACCEPT
+# `unmodified_receipt_pinned` (it is an index case with an empty reason). Two
+# things it cannot see are asserted here:
+#
+#   1. both readers PRINT the pin — it is the object version the manifest
+#      digest is over, the second fact an auditor goes looking with — and
+#   2. both readers REFUSE a pin of the wrong JSON type. Rust refuses it at
+#      deserialisation (`Option<String>`) and the script in its shape layer, in
+#      different words, so this is VERDICT parity, not text parity, and it is a
+#      document signed inline rather than an index case the text walk would
+#      then compare.
+PIN="fx7-manifest-version-0001"
+set +e
+"$BIN" drill verify --payload-type backup-receipt --scorecard "$tmp/receipt/unmodified_receipt_pinned.json" \
+    --signature "$tmp/receipt/unmodified_receipt_pinned.sig" --public-key "$FIX/public.pem" \
+    >"$tmp/rust.out" 2>"$tmp/rust.err"
+rust_rc=$?
+"$PY" "$VERIFIER" --payload-type backup-receipt "$tmp/receipt/unmodified_receipt_pinned.json" \
+    "$tmp/receipt/unmodified_receipt_pinned.sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+py_rc=$?
+set -e
+[ "$rust_rc" -eq 0 ] || fail "unmodified_receipt_pinned: drill verify exited $rust_rc on the re-run"
+[ "$py_rc" -eq 0 ] || fail "unmodified_receipt_pinned: verify_scorecard.py exited $py_rc on the re-run"
+grep -q "manifest version: $PIN" "$tmp/rust.out" \
+    || fail "drill verify does not print the manifest version a pinned receipt carries (FX-7)"
+grep -q "manifest_version_id=$PIN" "$tmp/py.out" \
+    || fail "verify_scorecard.py does not print the manifest version a pinned receipt carries (FX-7)"
+set +e
+"$BIN" drill verify --payload-type backup-receipt --scorecard "$tmp/receipt/unmodified_receipt.json" \
+    --signature "$tmp/receipt/unmodified_receipt.sig" --public-key "$FIX/public.pem" \
+    >"$tmp/rust.out" 2>"$tmp/rust.err"
+rust_rc=$?
+"$PY" "$VERIFIER" --payload-type backup-receipt "$tmp/receipt/unmodified_receipt.json" \
+    "$tmp/receipt/unmodified_receipt.sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+py_rc=$?
+set -e
+[ "$rust_rc" -eq 0 ] && [ "$py_rc" -eq 0 ] || fail "unmodified_receipt: a reader refused it on the re-run"
+if grep -q "manifest version" "$tmp/rust.out" || grep -q "manifest_version_id" "$tmp/py.out"; then
+    fail "a reader printed a manifest version for a receipt that pins none (FX-7: absent is printed as nothing)"
+fi
+
+"$PY" - "$CORPUS" "$tmp/receipt" <<'PYEOF2'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+corpus, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+key = serialization.load_pem_private_key(
+    (corpus.parent / "signed" / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+PT = "application/vnd.logweir.backup-receipt+json;version=1.0.0"
+doc = json.loads((corpus / "unmodified_receipt_pinned.json").read_text())
+doc["archive"]["manifest_version_id"] = 42
+payload = json.dumps(doc, indent=2).encode() + b"\n"
+t = PT.encode()
+msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+       + str(len(payload)).encode() + b" " + payload)
+(out / "pin_not_a_string.json").write_bytes(payload)
+(out / "pin_not_a_string.sig").write_text(json.dumps(
+    {"payloadType": PT,
+     "signatures": [{"keyid": hashlib.sha256(der).hexdigest(),
+                     "sig": base64.b64encode(key.sign(msg, ec.ECDSA(hashes.SHA256()))).decode()}]}))
+PYEOF2
+set +e
+"$BIN" drill verify --payload-type backup-receipt --scorecard "$tmp/receipt/pin_not_a_string.json" \
+    --signature "$tmp/receipt/pin_not_a_string.sig" --public-key "$FIX/public.pem" \
+    >"$tmp/rust.out" 2>"$tmp/rust.err"
+rust_rc=$?
+"$PY" "$VERIFIER" --payload-type backup-receipt "$tmp/receipt/pin_not_a_string.json" \
+    "$tmp/receipt/pin_not_a_string.sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+py_rc=$?
+set -e
+[ "$rust_rc" -ne 0 ] || fail "pin_not_a_string: drill verify ACCEPTED a manifest_version_id that is not a string"
+[ "$py_rc" -eq 1 ] || fail "pin_not_a_string: verify_scorecard.py exited $py_rc, expected 1 (INVALID)"
+grep -q "archive.manifest_version_id is not a string" "$tmp/py.err" \
+    || fail "pin_not_a_string: verify_scorecard.py refused it for another reason"
+echo "check-verifier-parity: both readers print a pinned manifest version, print none when absent, and refuse one that is not a string (FX-7)"
+
+# ---------------------------------------------------------------------------
 # THIRD LOOP: the recovery catalog point (PLAT-15.1, decision D3 §5.2).
 # ---------------------------------------------------------------------------
 #
@@ -386,18 +469,23 @@ echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $r
 # pipe, for the reason the header states.
 CATALOG_PT="application/vnd.logweir.catalog-point+json;version=1.0.0"
 # FX-4: the catalog point format that carries `topics[].config_coverage` —
-# `crates/logweir/src/catalog/record.rs`'s FORMAT_VERSION. A renumber (for
-# instance to 1.2.0) moves that constant, the justfile's
-# `catalog_schema_version` and this line together.
+# `crates/logweir/src/catalog/record.rs`'s FORMAT_VERSION. A renumber moves
+# that constant and this line together.
 CATALOG_COVERAGE_VERSION="1.1.0"
+# FX-7 (merged after FX-4): the catalog point format that ALSO carries
+# `archive.manifest_version_id` — record.rs's FORMAT_VERSION_WITH_MANIFEST_VERSION,
+# the newest MINOR. A renumber moves that constant, the justfile's
+# `catalog_schema_version` and this line together.
+CATALOG_PIN_VERSION="1.2.0"
 mkdir -p "$tmp/catalog"
-"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" <<'PYEOF'
+"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" <<'PYEOF'
 import base64, hashlib, json, pathlib, sys
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 fix, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 coverage_version = sys.argv[4]
+pin_version = sys.argv[5]
 key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
 der = key.public_key().public_bytes(
     serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -467,6 +555,16 @@ doc11["topics"][0]["config_coverage"] = {
 payload11 = json.dumps(doc11, indent=2).encode() + b"\n"
 (out / "good11.json").write_bytes(payload11)
 (out / "good11.sig").write_text(sign(payload11))
+# FX-7: the record of a point taken on a versioned bucket — format 1.2.0, the
+# MINOR after FX-4's 1.1.0 — as this build's writer produces it: FX-4's topic
+# coverage AND the receipt's pinned manifest version. Signature-only like the
+# rest.
+pinned = json.loads(json.dumps(doc11))
+pinned["format_version"] = pin_version
+pinned["archive"]["manifest_version_id"] = "fx7-manifest-version-0001"
+pinned_payload = json.dumps(pinned, indent=2).encode() + b"\n"
+(out / "pinned.json").write_bytes(pinned_payload)
+(out / "pinned.sig").write_text(sign(pinned_payload))
 PYEOF
 
 catalog_case() {
@@ -503,6 +601,9 @@ catalog_case good catalog-point 0 0
 catalog_case tampered catalog-point 4 1
 catalog_case good scorecard 4 1
 catalog_case good11 catalog-point 0 0
+catalog_case pinned catalog-point 0 0
+grep -q "manifest_version_id=fx7-manifest-version-0001" "$tmp/py.out" \
+    || fail "verify_scorecard.py does not print the pinned manifest version a $CATALOG_PIN_VERSION catalog point carries (FX-7)"
 
 # Claim 2 and claim 3, on the accepted case, one reader at a time.
 cat "$tmp/catalog/good.json" >/dev/null
@@ -550,7 +651,7 @@ grep -q "sha256:aaaaaaaa" "$tmp/py.all" \
     || fail "verify_scorecard.py no longer prints the receipt digest that BINDS a catalog
 point; the short point_id is a display key and the digest is the binding (D3 §5.1)"
 
-echo "check-verifier-parity: both readers agree on all four catalog-point documents (1.0.0 and $CATALOG_COVERAGE_VERSION), and both report SIGNATURE-ONLY"
+echo "check-verifier-parity: both readers agree on all five catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION and $CATALOG_PIN_VERSION), and both report SIGNATURE-ONLY"
 
 # ---------------------------------------------------------------------------
 # FOURTH LOOP (FX-4): the scorecard at format 1.1.0, and what its exit 0 says

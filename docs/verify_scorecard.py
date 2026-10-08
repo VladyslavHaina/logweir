@@ -370,6 +370,14 @@ FORMAT_VERSION = "1.3.0"
 # whose configuration was not assessed) is shape-checked like it and not
 # printed: the collisions themselves are not printed either.
 #
+# 1.16.0 (FX-7, which merged after FX-4) reads the backup receipt's
+# `archive.manifest_version_id` — the object version a receipt taken on a
+# versioned bucket pins (receipt format 1.2.0) — refuses it at the SHAPE layer
+# when it is present and not a string, and prints it, and prints a catalog point
+# record's copy of it (catalog point format 1.2.0). No invariant arm and no
+# payload type is added; a 1.15.0 reader reads a 1.2.0 receipt as the 1.1.0
+# document under it and prints no version line.
+#
 # 1.17.0 (FX-8) knows scorecard format 1.3.0 and its `source.time_basis`: the
 # approved plan's `restore.time_basis`, the source topics a restore selected by
 # producer time (recorded `LogAppendTime`, accepted by the plan) and the ones it
@@ -383,10 +391,11 @@ FORMAT_VERSION = "1.3.0"
 # `time basis:` lines say which topics were selected by producer time or with
 # an unrecorded type, and that a document before 1.3.0 does not say; a backup
 # receipt's `time basis:` lines name its LogAppendTime topics, whose covered
-# window is their producers' time. 1.17.0 because FX-3 holds 1.16.0 (and
-# scorecard format 1.2.0) on its branch; the orchestrator assigns the final
-# number at integration (this line, the literal pins in
-# docs/test_verify_scorecard.py and the guide's table move together).
+# window is their producers' time. 1.16.0 is FX-7's (on main); FX-3 also holds
+# 1.16.0 (and scorecard format 1.2.0) on its branch, so whichever of FX-3 and
+# FX-8 merges second renumbers; the orchestrator assigns the final number at
+# integration (this line, the literal pins in docs/test_verify_scorecard.py and
+# the guide's table move together).
 SCRIPT_VERSION = "1.17.0"
 
 # The first minor of SCORECARD format 1 that defines `source.time_basis` (arm
@@ -1454,6 +1463,14 @@ def _receipt_shape(doc) -> str:
             return f"covered.{name} is not an integer"
     if "manifest_key" not in doc["archive"]:
         return "the document has no archive.manifest_key field; it is not a backup receipt"
+    # FX-7 (receipt format 1.2.0): `archive.manifest_version_id` is OPTIONAL and,
+    # when present, a string — `ReceiptArchive::manifest_version_id` is an
+    # `Option<String>`, so Rust accepts it absent or null and refuses any other
+    # JSON type at deserialisation. Refused here at the same layer, so a
+    # document the Rust reader never parsed is never VALID here.
+    version_id = doc["archive"].get("manifest_version_id")
+    if version_id is not None and not isinstance(version_id, str):
+        return "archive.manifest_version_id is not a string"
     # FX-4, format 1.1.0: `config_coverage` is `Option<BTreeMap<String,
     # TopicConfigCoverage>>` over there, so every one of these is refused at
     # DESERIALISATION by the Rust reader before arm 6 runs; they belong in the
@@ -2057,6 +2074,14 @@ def main(
         if str(archive.get("manifest_key") or "").strip():
             print(f"       manifest {archive.get('manifest_key')}")
             print(f"       manifest_sha256={archive.get('manifest_sha256')}")
+            # FX-7: on a versioned bucket, WHICH version of that key the digest
+            # is over — read it back with `?versionId=`. Absent means no version
+            # was pinned, and nothing is printed rather than a placeholder.
+            if archive.get("manifest_version_id") is not None:
+                print(
+                    f"       manifest_version_id={archive.get('manifest_version_id')} "
+                    "(the object version the manifest digest is over)"
+                )
         else:
             print("       manifest: none — this receipt is for a backup that did not exit 0")
         print(
@@ -2144,6 +2169,15 @@ def main(
                 # point_id is its display form; this digest is the thing.
                 print(f"       receipt {receipt.get('key')}")
                 print(f"       receipt_sha256={receipt.get('sha256')}")
+            archive = doc.get("archive")
+            if isinstance(archive, dict) and archive.get("manifest_version_id") is not None:
+                # FX-7 (record format 1.2.0): a COPY of the receipt's pin, and
+                # informational like every copied fact — the receipt is the
+                # authority.
+                print(
+                    f"       manifest_version_id={archive.get('manifest_version_id')} "
+                    "(copied from the receipt)"
+                )
         print(
             "       This signature covers the record only. It is NOT a claim that the point "
             "is available, that its archive is readable, or that its copied facts are true: "
