@@ -24,7 +24,7 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
-  chromium, newSession, gotoHash, textOf, waitForText, connectCatalog, createCluster, chooseCatalogDestination, BASE, HOST, credential,
+  launchBrowser, newSession, gotoHash, textOf, waitForText, connectCatalog, createCluster, chooseCatalogDestination, BASE, HOST, credential,
   openWizard, wizardAt, wizardStep, readinessRows, showEveryPoint, listRow, revealInGrid, settledRows, checkVerdict, outcomeOf,
 } from "./console.mjs";
 
@@ -58,7 +58,7 @@ async function allBackups(page) {
   return out;
 }
 
-const browser = await chromium.launch();
+const browser = await launchBrowser();
 try {
   const { page, context } = await newSession(browser, "operator");
   // ------------------------------------------------------------------ P1

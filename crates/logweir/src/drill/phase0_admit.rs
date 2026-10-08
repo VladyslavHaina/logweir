@@ -7,7 +7,8 @@ use logweir_core::spec::{
     target_topic_prefix, AllowedClusters, Anchor, Coverage, DrillSpec, TargetMode,
 };
 use logweir_kafka::reader::{
-    ClusterReader, NewTopicSpec, TopicCreator, TopicDeleter, TARGET_TOPIC_CONFIGS,
+    ClusterReader, NewTopicSpec, TopicCreator, TopicDeleter, CREATED_TOPIC_SETTLE,
+    TARGET_TOPIC_CONFIGS,
 };
 use std::collections::BTreeMap;
 
@@ -778,7 +779,14 @@ fn target_topic_preflight(
              per-topic override could not be tested because creating `{name}` failed: {e}"
         )));
     }
-    let readback = reader.topic_configs(&probe);
+    // FX-18: the probe was created a moment ago, so it is read only once the
+    // cluster serves it. A plain `topic_configs` here raced the creation: a
+    // broker whose metadata did not hold the topic yet answered empty, which
+    // T13 names "not authorized" (PROD-00.3f's matrix row), and the drill
+    // exited 1 on a broker that would have answered a second later.
+    // `created_topic_configs` waits that out, bounded by
+    // `CREATED_TOPIC_SETTLE`, and still returns a real refusal (exit 1 below).
+    let readback = reader.created_topic_configs(&probe, 1, CREATED_TOPIC_SETTLE);
     let delete = deleter.delete_topics(std::slice::from_ref(&probe));
     // The probe topic is gone before any verdict is returned, so no path out of
     // here leaves it behind. A deletion that was REFUSED (a degenerate
@@ -896,6 +904,7 @@ fn target_topic_preflight(
 /// asserts.
 pub fn create_target_topics(
     creator: &dyn TopicCreator,
+    reader: &dyn ClusterReader,
     topic_mapping: &BTreeMap<String, String>,
     facts: &logweir_core::engine::BackupSetFacts,
     default_replication_factor: i16,
@@ -938,6 +947,25 @@ pub fn create_target_topics(
                 )))
             }
         }
+    }
+    // FX-18: the engine is handed topics the cluster SERVES, not topics the
+    // controller has merely committed. The engine retries
+    // NOT_LEADER_FOR_PARTITION on produce, but a partition its first metadata
+    // read does not list with a leader is `PartitionNotAvailable`, which it
+    // does not retry (`kafka-backup-core/src/kafka/partition_router.rs`,
+    // `get_leader` and `produce`, 0.23.3). Same bound as the phase-0 probe.
+    for spec in &specs {
+        reader
+            .await_served(&spec.name, spec.num_partitions, CREATED_TOPIC_SETTLE)
+            .map_err(|e| {
+                DrillError::Operational(format!(
+                    "target topic `{}` was created but the cluster did not serve its {} \
+                     partition(s) within {}s: {e}",
+                    spec.name,
+                    spec.num_partitions,
+                    CREATED_TOPIC_SETTLE.as_secs()
+                ))
+            })?;
     }
     Ok(())
 }

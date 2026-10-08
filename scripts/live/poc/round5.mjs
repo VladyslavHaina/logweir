@@ -43,7 +43,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chromium, newSession, gotoHash, waitForText, openWizard, wizardStep, wizardAt,
+  launchBrowser, newSession, gotoHash, waitForText, openWizard, wizardStep, wizardAt,
   settledRows, outcomeOf,
 } from "./console.mjs";
 
@@ -168,7 +168,7 @@ function newestPoint() {
 }
 const wizardHash = (b, extra) => `#/restore?ns=${NS}&backup=${b.metadata.name}&uid=${b.metadata.uid}${extra || ""}`;
 
-const browser = await chromium.launch();
+const browser = await launchBrowser();
 try {
   // ======================================================================== R31 (390 x 844)
   if (GROUPS.includes("R31")) {

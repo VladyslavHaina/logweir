@@ -14,7 +14,7 @@
 // window is per console process (docs/api.md, Rate limits). Nothing secret is printed.
 import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { chromium, newSession, gotoHash, textOf, openWizard, wizardStep, readinessRows, outcomeOf } from "./console.mjs";
+import { launchBrowser, newSession, gotoHash, textOf, openWizard, wizardStep, readinessRows, outcomeOf } from "./console.mjs";
 
 const OUT = process.argv[2] || "/tmp/poc-restore-burst";
 const N = Number(process.argv[3] || 3);
@@ -52,7 +52,7 @@ async function prepare(page, b, target, prefix) {
   return readiness.rows.filter((r) => r.gating === "blocking" && r.verdict !== "ready" && r.id !== "approval.state");
 }
 
-const browser = await chromium.launch();
+const browser = await launchBrowser();
 try {
   const { context, page: first } = await newSession(browser, "operator");
   const target = kj("get", "kafkaclusters").items.find((i) => i.spec.role === "target" && (i.status || {}).reachable !== false).metadata.name;
