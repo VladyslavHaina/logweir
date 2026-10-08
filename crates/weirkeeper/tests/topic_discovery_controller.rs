@@ -353,9 +353,22 @@ fn finished_routes(log: String, extra: Vec<Route>) -> Vec<Route> {
             status: 200,
             body: job_object(Some("Complete"), UID).to_string(),
         },
+        no_events(),
     ];
     routes.extend(extra);
     routes
+}
+
+/// An events list with nothing in it — FX-11's read of a Job with no provable
+/// pod, answered "no Event says why", so the classification is the one it was
+/// before Events were read.
+fn no_events() -> Route {
+    Route {
+        method: "GET",
+        path_suffix: "/events",
+        status: 200,
+        body: r#"{"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]}"#.to_string(),
+    }
 }
 
 /// The body of the first request matching `method` and a path containing
@@ -1232,6 +1245,7 @@ async fn a_job_that_hit_its_deadline_is_a_failed_discovery() {
             status: 200,
             body: pod_list(vec![]),
         },
+        no_events(),
         Route {
             method: "GET",
             path_suffix: PLAN_PATH,
@@ -2801,6 +2815,7 @@ async fn a_failed_status_conflict_never_patches_the_ttl() {
             status: 200,
             body: pod_list(vec![]),
         },
+        no_events(),
         Route {
             method: "GET",
             path_suffix: PLAN_PATH,

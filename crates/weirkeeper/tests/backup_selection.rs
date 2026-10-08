@@ -41,8 +41,9 @@ use weirkeeper::check::{job as cjob, plan};
 use weirkeeper::conditions::{
     CONDITION_TOPICS_RESOLVED, PHASE_RESOLVING, REASON_DISCOVERY_RUNNING, REASON_RESOLVED,
     TERMINAL_STATE_DISCOVERY_FAILED, TERMINAL_STATE_DISCOVERY_INCOMPLETE,
-    TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE, TERMINAL_STATE_SELECTION_EMPTY,
-    TERMINAL_STATE_SELECTION_TOO_LARGE, TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
+    TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE, TERMINAL_STATE_POD_CREATION_FORBIDDEN,
+    TERMINAL_STATE_SELECTION_EMPTY, TERMINAL_STATE_SELECTION_TOO_LARGE,
+    TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
 };
 use weirkeeper::controllers::backup::{
     reconcile_backup, reconcile_backup_with_runner_image, unobserved_archive,
@@ -484,6 +485,15 @@ fn finished_routes(
             path_suffix: disc_plan,
             status: 200,
             body: discovery_plan_config_map(uid, uid),
+        },
+        // FX-11: a finished discovery Job with no provable pod has its Events
+        // read (by the Job's UID). None here: the classification is the one
+        // it was before Events were read.
+        Route {
+            method: "GET",
+            path_suffix: "/events",
+            status: 200,
+            body: event_list(&[]),
         },
         Route {
             method: "PATCH",
@@ -3202,5 +3212,222 @@ async fn a_document_with_nothing_to_project_is_still_result_unreadable() {
         terminal.as_deref(),
         Some(TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE),
         "an unverifiable relay is still the not-retryable class"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FX-11 — a discovery pod the namespace refuses at creation
+// ---------------------------------------------------------------------------
+
+/// The admission's words for a quota-refused discovery pod, as the Job
+/// controller records them on its `FailedCreate` Event.
+const QUOTA_REFUSAL: &str =
+    "Error creating: pods \"lwd-3f1c8a5e-0000-4000-8000-0000000000a1-x7k2p\" \
+     is forbidden: exceeded quota: compute, requested: limits.cpu=1, used: limits.cpu=4, \
+     limited: limits.cpu=4";
+
+/// A core `EventList` of `FailedCreate` Events, each `(involved kind, involved
+/// name, involved uid, message)`.
+fn event_list(events: &[(&str, &str, &str, &str)]) -> String {
+    let items: Vec<Value> = events
+        .iter()
+        .enumerate()
+        .map(|(i, (kind, name, uid, message))| {
+            json!({
+                "apiVersion": "v1", "kind": "Event",
+                "metadata": {"name": format!("{name}.{i}"), "namespace": NS},
+                "involvedObject": {"apiVersion": "batch/v1", "kind": kind, "name": name,
+                                   "namespace": NS, "uid": uid},
+                "reason": "FailedCreate", "type": "Warning", "message": message
+            })
+        })
+        .collect();
+    json!({"apiVersion": "v1", "kind": "EventList", "metadata": {}, "items": items}).to_string()
+}
+
+/// [`finished_routes`] for a discovery Job that is NOT finished, created at
+/// `created`, with no pod, whose Events list answers `events`.
+fn refused_routes(created: &str, events: String) -> Vec<Route> {
+    let mut routes = finished_routes(NAME, UID, String::new(), pod_list(vec![]), CLUSTER_ID);
+    let unfinished = {
+        let mut job: Value =
+            serde_json::from_str(&discovery_job_body(UID, UID, None, &source_sha(CLUSTER_ID)))
+                .expect("JSON");
+        job["metadata"]["creationTimestamp"] = json!(created);
+        job.to_string()
+    };
+    for route in &mut routes {
+        if route.method == "GET" && route.path_suffix.ends_with(&discovery_job(UID)) {
+            route.body = unfinished.clone();
+        }
+        if route.method == "GET" && route.path_suffix == "/events" {
+            route.body = events.clone();
+        }
+    }
+    routes
+}
+
+/// The `fieldSelector` every events list carried, decoded.
+fn event_selectors(bodies: &[SeenBody]) -> Vec<String> {
+    bodies
+        .iter()
+        .filter(|b| b.method == "GET" && path(&b.uri).ends_with("/events"))
+        .map(|b| b.uri.replace("%3D", "=").replace("%2C", ","))
+        .collect()
+}
+
+/// The `activeDeadlineSeconds: 1` cancellations sent to the discovery Job.
+fn discovery_cancels(bodies: &[SeenBody]) -> usize {
+    bodies
+        .iter()
+        .filter(|b| {
+            b.method == "PATCH"
+                && path(&b.uri).ends_with(&format!("/jobs/{}", discovery_job(UID)))
+                && serde_json::from_str::<Value>(&b.body)
+                    .is_ok_and(|v| v["spec"]["activeDeadlineSeconds"] == json!(1))
+        })
+        .count()
+}
+
+/// **FX-11: A QUOTA-REFUSED DISCOVERY POD ENDS THE `Backup` AT ONCE, NAMING THE
+/// QUOTA.** The discovery Job is 90 s old and has no pod, and the Job
+/// controller's `FailedCreate` Event says the namespace's `ResourceQuota`
+/// refused it. The `Backup` ends `PodCreationForbidden` — the state its runner
+/// reaches for the same refusal — with the admission's words on the status,
+/// the discovery Job is cancelled, and no runner Job is ever created. Before
+/// FX-11 this read `Resolving` until the Job's deadline and then ended
+/// `DiscoveryFailed`, without the quota.
+///
+/// KILLS: the Events read dropped (`events: &[]` again); the message not
+/// propagated; the refusal mapped back to `DiscoveryFailed`; the early cancel
+/// dropped.
+#[tokio::test]
+async fn fx11_a_discovery_pod_the_quota_refuses_ends_the_backup_pod_creation_forbidden() {
+    let events = event_list(&[("Job", &discovery_job(UID), DISCOVERY_JOB_UID, QUOTA_REFUSAL)]);
+    let (terminal, bodies) = reconcile_with(
+        &visible_only(),
+        refused_routes("2026-09-16T01:58:30Z", events),
+    )
+    .await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_POD_CREATION_FORBIDDEN),
+        "{:?}",
+        calls(&bodies)
+    );
+    let status = patched_statuses(&bodies).pop().expect("a terminal status");
+    assert_eq!(status["status"]["phase"], json!("Failed"), "{status}");
+    let failed = condition_of(&status, "Failed").expect("the Failed condition");
+    assert_eq!(
+        failed["reason"],
+        json!(TERMINAL_STATE_POD_CREATION_FORBIDDEN),
+        "{status}"
+    );
+    let resolved = condition_of(&status, CONDITION_TOPICS_RESOLVED).expect("TopicsResolved");
+    assert_eq!(resolved["status"], json!("False"));
+    assert_eq!(
+        resolved["reason"],
+        json!(TERMINAL_STATE_POD_CREATION_FORBIDDEN)
+    );
+    let said = resolved["message"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("exceeded quota: compute") && said.contains("limits.cpu=1"),
+        "the admission's own words reach the object: {said}"
+    );
+    assert!(
+        said.contains("PodCreateRejected"),
+        "and the classifier's code is named: {said}"
+    );
+    assert_eq!(
+        discovery_cancels(&bodies),
+        1,
+        "the discovery Job is cancelled, not left to its deadline: {:?}",
+        calls(&bodies)
+    );
+    assert!(posted_jobs(&bodies).is_empty(), "no runner Job is created");
+    let selectors = event_selectors(&bodies);
+    assert_eq!(
+        selectors.len(),
+        1,
+        "one events list, never a scan: {selectors:?}"
+    );
+    assert!(
+        selectors[0].contains(&format!("involvedObject.uid={DISCOVERY_JOB_UID}")),
+        "by the Job's UID and never by name: {selectors:?}"
+    );
+}
+
+/// **FX-11 NEGATIVE CONTROL: no `FailedCreate` Event, no early verdict.** The
+/// same Job with no pod, and an Events list that says nothing: the `Backup`
+/// stays `Resolving`, nothing is cancelled, and the Job's own deadline is the
+/// only clock — exactly the path before FX-11.
+#[tokio::test]
+async fn fx11_control_no_event_leaves_the_discovery_resolving() {
+    let (terminal, bodies) = reconcile_with(
+        &visible_only(),
+        refused_routes("2026-09-16T01:58:30Z", event_list(&[])),
+    )
+    .await;
+    assert_eq!(terminal, None, "{:?}", calls(&bodies));
+    let status = patched_statuses(&bodies).pop().expect("a status");
+    assert_eq!(
+        status["status"]["phase"],
+        json!(PHASE_RESOLVING),
+        "{status}"
+    );
+    assert_eq!(discovery_cancels(&bodies), 0, "{:?}", calls(&bodies));
+    assert_eq!(event_selectors(&bodies).len(), 1, "the Events were read");
+
+    // And ANOTHER Job's refusal is not this one's: the matcher names the Job.
+    let foreign = event_list(&[("Job", "someone-elses-job", OTHER_JOB_UID, QUOTA_REFUSAL)]);
+    let (terminal, bodies) = reconcile_with(
+        &visible_only(),
+        refused_routes("2026-09-16T01:58:30Z", foreign),
+    )
+    .await;
+    assert_eq!(terminal, None, "{:?}", calls(&bodies));
+    assert_eq!(discovery_cancels(&bodies), 0);
+}
+
+/// **FX-11, THE GRACE AND THE COST BOUND.** A discovery Job 15 s old with no
+/// pod is not judged, even with a refusal Event on record — the 30 s grace
+/// `Preflight` uses — and NO events list is made at all: the read happens only
+/// when the classifier could use it.
+///
+/// KILLS: the grace period ignored; an events list per pass regardless.
+#[tokio::test]
+async fn fx11_inside_the_grace_period_nothing_is_read_or_decided() {
+    let events = event_list(&[("Job", &discovery_job(UID), DISCOVERY_JOB_UID, QUOTA_REFUSAL)]);
+    let (terminal, bodies) = reconcile_with(
+        &visible_only(),
+        refused_routes("2026-09-16T01:59:45Z", events),
+    )
+    .await;
+    assert_eq!(terminal, None, "{:?}", calls(&bodies));
+    assert_eq!(discovery_cancels(&bodies), 0);
+    assert!(
+        event_selectors(&bodies).is_empty(),
+        "no events list inside the grace period: {:?}",
+        calls(&bodies)
+    );
+}
+
+/// **FX-11: the mapping, pure.** Both `FailedCreate` codes project onto the
+/// runner kind's `PodCreationForbidden`; a deadline is still `DiscoveryFailed`.
+#[test]
+fn fx11_a_refused_discovery_pod_maps_to_pod_creation_forbidden() {
+    for code in [
+        CheckCode::PodCreateRejected,
+        CheckCode::RunnerServiceAccountMissing,
+    ] {
+        assert_eq!(
+            sel::discovery_failure_state(code),
+            TERMINAL_STATE_POD_CREATION_FORBIDDEN,
+            "{code}"
+        );
+    }
+    assert_eq!(
+        sel::discovery_failure_state(CheckCode::DeadlineExceeded),
+        TERMINAL_STATE_DISCOVERY_FAILED
     );
 }

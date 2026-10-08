@@ -1727,10 +1727,11 @@ fn every_probe_condition_reason_is_a_valid_metav1_reason() {
     );
     assert_eq!(
         PROBE_CONDITION_REASONS.len(),
-        8,
+        9,
         "the four probe verdicts — Reachable, ProbeReportedUnreachable, ProbeOutputUnreadable, \
          ProbeRunning — plus the four PLAT-07.1 saved-connection refusals this loop writes \
-         before any Job exists, which are the shared terminal states and not a second vocabulary"
+         before any Job exists, plus FX-11's PodCreationForbidden for a probe pod refused at \
+         creation; the last five are the shared terminal states and not a second vocabulary"
     );
     for r in PROBE_CONDITION_REASONS.iter().skip(4) {
         assert!(

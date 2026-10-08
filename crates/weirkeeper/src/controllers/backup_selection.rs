@@ -1179,6 +1179,26 @@ async fn resolve_inner(
 
     let api: Api<Backup> = Api::namespaced(client.clone(), namespace);
     if !job_finished(&job) {
+        // FX-11: A DISCOVERY POD THE NAMESPACE REFUSED ENDS THE RUN NOW. No
+        // request at all while the Job's own status counts a pod or it is
+        // younger than the 30-second grace (`check::waiting::no_pod_counted`);
+        // otherwise one pod list and, when it finds none, one events list by
+        // the Job's UID. The same `FailedCreate` row `check::classify` reads
+        // once the Job has finished, so both ends name the same refusal.
+        if let Some(refusal) = check::refused_pod_creation(client, namespace, &job, now)
+            .await
+            .map_err(BackupError::Api)?
+        {
+            check::cancel(client, namespace, &job, &uid)
+                .await
+                .map_err(BackupError::Api)?;
+            return Err(discovery_refused(
+                &job_name,
+                &name,
+                refusal.code,
+                &refusal.message,
+            ));
+        }
         write_status(&api, backup, resolving_status_patch(backup, &job_name, now)).await?;
         return Ok(Inner::Pending);
     }
@@ -1453,14 +1473,11 @@ async fn observe(
                     .await
                     .map_err(BackupError::Api)?;
             }
-            return Err(BackupError::Refused(
-                discovery_failure_state(observation.reason),
-                format!(
-                    "the topic discovery Job {job_name} for {name} did not produce a usable \
-                     result ({}): {}",
-                    observation.reason,
-                    redact(&observation.message)
-                ),
+            return Err(discovery_refused(
+                job_name,
+                &name,
+                observation.reason,
+                &observation.message,
             ));
         }
         check::CheckPhase::Succeeded => {}
@@ -1598,6 +1615,21 @@ async fn observe(
         "the per-run topic discovery resolved a selection; the names are about to be frozen"
     );
     Ok(Inner::Resolved(Box::new(selection)))
+}
+
+/// The refusal a discovery Job that did not produce a usable result ends its
+/// `Backup` with: [`discovery_failure_state`]'s terminal state, and a message
+/// naming the Job, the classifier's code and its (redacted) explanation — for
+/// a refused pod, the admission's own words (FX-11).
+fn discovery_refused(job_name: &str, name: &str, code: CheckCode, message: &str) -> BackupError {
+    BackupError::Refused(
+        discovery_failure_state(code),
+        format!(
+            "the topic discovery Job {job_name} for {name} did not produce a usable result \
+             ({code}): {}",
+            redact(message)
+        ),
+    )
 }
 
 /// D1 §7.2 R3's split: which refusals a retry could survive.
