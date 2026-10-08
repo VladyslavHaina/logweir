@@ -994,16 +994,20 @@ In addition to the next entry's six, in its order:
 
 ### Verification scope after `v0.2.0-rc.1`
 
-- **Complete coverage is a command-line plan value.** Only `logweir drill run`
-  and `logweir restore run` can ask for it (item 30). Record checks in a
-  `Restore` or a rehearsal remain samples, and `verificationScope` still never
-  says `complete`; the signed scorecard says which in
-  `integrity.verification.coverage`.
+- **Complete coverage can be asked for by a plan, a `Restore`, a rehearsal and
+  the console** (items 30 and 41). A `Restore` or a rehearsal that does not ask
+  still verifies a sample. The signed scorecard says which in
+  `integrity.verification.coverage`; the `Restore`'s status, the product API
+  (`Restore.coverage`, `verificationScope.coverage`) and the console repeat
+  it. A protection event's `verification_scope` describes a policy's newest
+  POINT and still never says `complete`. A complete verification that did not
+  cover the restore (`covered: false`) is never a pass.
 
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38 and 39, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39 and 41, in the order of the next entry's
+upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1019,7 +1023,11 @@ library calls no command uses yet) and needs nothing; item 38 changes the
 controller, every runner, the retention worker, the product API, the
 console and the status of three CRDs, and needs each destination,
 retention, notification and inline-archive credential Secret bound; item 39
-changes the runner's phase 0 only and needs nothing. To roll back to
+changes the runner's phase 0 only and needs nothing; item 41 changes the
+`Restore` and `RehearsalSchedule` CRDs, the controller, the runner's
+notification and metrics, the standing authorization's scope (format 1.1.0),
+the product API and the console, and needs nothing unless a rehearsal is to
+verify every record (a new schedule and a new authorization). To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

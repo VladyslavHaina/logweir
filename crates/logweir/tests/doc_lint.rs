@@ -2032,6 +2032,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a created topic is used only once served",
             "until every partition of each topic it created has a",
         ),
+        // PROD-08.1a (2026-10-08, item 41): complete coverage requested
+        // through the CRDs, the API and the console, and a standing scope
+        // that signs it.
+        (
+            "complete coverage through the CRDs, the API and the console",
+            "spec.coverage: complete",
+        ),
     ];
     assert_eq!(
         items.len(),
