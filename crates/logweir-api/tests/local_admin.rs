@@ -1184,3 +1184,308 @@ fn answered_keep_alive(address: &SocketAddr, port: u16) -> Result<TcpStream, Str
     }
     Ok(held)
 }
+
+/// `main::HEADER_READ_TIMEOUT`, which a test cannot import from a binary.
+/// [`the_header_deadline_these_rows_measure_is_mains`] reads it back out of
+/// `src/main.rs`, so the rows below cannot go on measuring a deadline the
+/// server no longer has.
+const HEADER_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How long past [`HEADER_DEADLINE`] the FX-24 rows wait for the server to act
+/// before calling it a hang: the same 15 s of slack the R4 row
+/// ([`a_connection_that_never_sends_its_headers_is_closed`]) gives its
+/// 25-second read.
+const DEADLINE_SLACK: Duration = Duration::from_secs(15);
+
+/// How many connections [`hold_silent_connections`] lets wait in the kernel's
+/// listen queue, unaccepted, at any one time. `kern.ipc.somaxconn` is 128 on
+/// macOS and the kernel resets a queued connection when the queue overflows,
+/// so 256 connections opened back to back only work while the accept loop
+/// keeps pace with the client (FX-18 measured it not keeping pace at load
+/// 20-40). A quarter of the queue leaves room for anything else on the host.
+const SILENT_BATCH: usize = 32;
+
+/// `count` connections to `port` that send nothing, every one proven ACCEPTED
+/// but the last, plus how long the slowest FIFO probe took and when the first
+/// of them connected.
+///
+/// They are opened [`SILENT_BATCH`] at a time, and after each batch a
+/// `GET /healthz` on a fresh connection must be answered before the next batch
+/// is opened. The kernel hands connections to `accept` in the order their
+/// handshakes completed, so that answer proves every connection opened before
+/// it was accepted, which is when the server's deadline for it starts. The
+/// probe needs a free permit to be answered, which is why the last connection
+/// is opened after the loop, unproven: whatever is queued behind it is queued
+/// behind it either way.
+fn hold_silent_connections(port: u16, count: usize) -> (Vec<TcpStream>, Duration, Instant) {
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let mut held = Vec::with_capacity(count);
+    let mut slowest = Duration::ZERO;
+    let first = Instant::now();
+    while held.len() < count - 1 {
+        for _ in 0..(count - 1 - held.len()).min(SILENT_BATCH) {
+            let i = held.len();
+            held.push(
+                TcpStream::connect_timeout(&address, Duration::from_secs(5))
+                    .unwrap_or_else(|e| panic!("silent connection {i}: {e}")),
+            );
+        }
+        let asked = Instant::now();
+        let answer = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+        assert!(
+            answer.starts_with("HTTP/1.1 200"),
+            "the probe behind {} silent connections was answered with: {answer}",
+            held.len()
+        );
+        slowest = slowest.max(asked.elapsed());
+    }
+    held.push(
+        TcpStream::connect_timeout(&address, Duration::from_secs(5))
+            .unwrap_or_else(|e| panic!("silent connection {}: {e}", count - 1)),
+    );
+    (held, slowest, first)
+}
+
+/// Read `stream` until the server ends it, for at most `limit`: `Ok(elapsed)`
+/// when it closed or reset the connection, and `Err` with what happened
+/// otherwise — bytes the server sent, or the read timing out with the
+/// connection still open.
+fn closed_by_the_server(stream: &mut TcpStream, limit: Duration) -> Result<Duration, String> {
+    stream
+        .set_read_timeout(Some(limit.max(Duration::from_millis(1))))
+        .unwrap();
+    let started = Instant::now();
+    let mut sink = Vec::new();
+    match stream.read_to_end(&mut sink) {
+        Ok(_) if sink.is_empty() => Ok(started.elapsed()),
+        Ok(_) => Err(format!(
+            "the server answered before closing: {:?}",
+            String::from_utf8_lossy(&sink)
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => Ok(started.elapsed()),
+        Err(error) => Err(format!(
+            "still open after {:?} ({error}), {} bytes received",
+            started.elapsed(),
+            sink.len()
+        )),
+    }
+}
+
+/// The deadline the rows below measure is the one `src/main.rs` configures.
+#[test]
+fn the_header_deadline_these_rows_measure_is_mains() {
+    let main =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs")).unwrap();
+    assert!(
+        main.contains(&format!(
+            "const HEADER_READ_TIMEOUT: Duration = Duration::from_secs({});",
+            HEADER_DEADLINE.as_secs()
+        )),
+        "src/main.rs no longer sets HEADER_READ_TIMEOUT to {HEADER_DEADLINE:?}; update \
+         HEADER_DEADLINE in this file with it"
+    );
+}
+
+/// **A connection that sends nothing at all is closed at the header deadline
+/// (FX-24).**
+///
+/// REGRESSION REASON. The accept loop used hyper-util's `auto` builder, which
+/// reads the first bytes to choose HTTP/1 or HTTP/2 with no timer; the header
+/// deadline belonged to the HTTP/1 connection that exists only after them. So
+/// the R4 row above, whose client sends a partial head, passed, while a socket
+/// that never sent a byte was still open at 16 s on the built binary
+/// (2026-10-08). The server now serves HTTP/1.1 directly, and hyper arms the
+/// deadline in its first read.
+///
+/// - **Closed.** The silent connection ends from the server's side no sooner
+///   than the deadline (counted from our connect, which precedes the accept)
+///   and no later than the deadline plus [`DEADLINE_SLACK`].
+/// - **NEGATIVE CONTROL: a client that sends in time is served.** A second
+///   connection, opened at the same moment and silent for three seconds,
+///   then sends a complete request and is answered `200` — so the bound is a
+///   deadline, not a refusal of every slow starter.
+#[test]
+fn a_connection_that_sends_nothing_is_closed_at_the_header_deadline() {
+    let fixture = Fixture::new("silent");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let mut silent = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    let opened = Instant::now();
+    let mut prompt = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+
+    std::thread::sleep(Duration::from_secs(3));
+    prompt
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    prompt
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        prompt,
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut answer = Vec::new();
+    prompt
+        .read_to_end(&mut answer)
+        .expect("a request sent three seconds after the connect is answered");
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(
+        answer.starts_with("HTTP/1.1 200"),
+        "a client that sent in time was refused: {answer}"
+    );
+
+    let limit = (HEADER_DEADLINE + DEADLINE_SLACK).saturating_sub(opened.elapsed());
+    let closed = closed_by_the_server(&mut silent, limit).map(|_| opened.elapsed());
+    let closed_at = closed.unwrap_or_else(|why| {
+        panic!(
+            "a connection that sent nothing was not closed within {:?} of its connect: {why}",
+            HEADER_DEADLINE + DEADLINE_SLACK
+        )
+    });
+    assert!(
+        closed_at >= HEADER_DEADLINE.saturating_sub(Duration::from_secs(1)),
+        "the silent connection was closed after {closed_at:?}, before the {HEADER_DEADLINE:?} \
+         header deadline"
+    );
+
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+}
+
+/// **Silent connections at the connection ceiling are released by the header
+/// deadline, and the request queued behind them is answered (FX-24).**
+///
+/// This is the denial of service the finding described, end to end: every
+/// one of `main::MAX_CONNECTIONS` (256) permits held by a socket that sends
+/// nothing, and a real request waiting in the kernel's queue behind them. On
+/// main `cee79f42` that request was still unanswered 25 s after it was sent.
+///
+/// - **Held first.** The request is not answered while the silent sockets
+///   hold every permit, for a window measured as in the ceiling row (four
+///   times the slowest probe, at least two seconds) that must end inside the
+///   deadline. Without this the row would pass on a server with no ceiling at
+///   all, and prove nothing about the deadline.
+/// - **Then released.** It is answered `200` within the deadline plus
+///   [`DEADLINE_SLACK`] of the last silent connect.
+/// - **By the server.** Every silent socket has been closed or reset from the
+///   server's side by then.
+#[test]
+fn silent_connections_cannot_hold_the_ceiling_past_the_header_deadline() {
+    const CEILING: usize = 256;
+    let fixture = Fixture::new("silentceiling");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let (mut held, slowest, first) = hold_silent_connections(port, CEILING);
+    let last = Instant::now();
+
+    let mut queued = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    queued
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        queued,
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+
+    // Held first. The first silent connection's deadline is the earliest any
+    // permit can come back by itself; the window must close a second before it.
+    let window = (slowest * 4).max(Duration::from_secs(2));
+    let budget = HEADER_DEADLINE
+        .saturating_sub(first.elapsed())
+        .saturating_sub(Duration::from_secs(1));
+    assert!(
+        window <= budget,
+        "inconclusive, not a product failure: opening {CEILING} connections took {:?} and the \
+         slowest probe {slowest:?}, which leaves {budget:?} before the first one's deadline for \
+         a {window:?} window",
+        first.elapsed()
+    );
+    queued.set_read_timeout(Some(window)).unwrap();
+    let mut buffer = [0u8; 64];
+    match queued.read(&mut buffer) {
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) => {}
+        other => panic!(
+            "the queued request was not held behind {CEILING} silent connections for \
+             {window:?}: {other:?} {:?}",
+            String::from_utf8_lossy(&buffer)
+        ),
+    }
+
+    // Then released, by the deadline and not by us: nothing here closes a
+    // silent connection before the queued request is answered.
+    let limit = (HEADER_DEADLINE + DEADLINE_SLACK).saturating_sub(last.elapsed());
+    queued.set_read_timeout(Some(limit)).unwrap();
+    let mut response = Vec::new();
+    let read = queued.read_to_end(&mut response);
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        read.is_ok() && text.starts_with("HTTP/1.1 200"),
+        "the request queued behind {CEILING} silent connections was not answered within {:?} \
+         of the last one: {read:?} {text:?}",
+        HEADER_DEADLINE + DEADLINE_SLACK
+    );
+
+    // By the server: every silent connection was ended from its side.
+    for (i, stream) in held.iter_mut().enumerate() {
+        let limit = (HEADER_DEADLINE + DEADLINE_SLACK).saturating_sub(last.elapsed());
+        if let Err(why) = closed_by_the_server(stream, limit) {
+            panic!("silent connection {i} of {CEILING} was not closed by the server: {why}");
+        }
+    }
+}
+
+/// **A client that speaks HTTP/2 with prior knowledge is closed at once, not
+/// served and not held (FX-24).**
+///
+/// The server is HTTP/1.1 only. hyper's HTTP/2 server has no header deadline,
+/// so under the old `auto` builder a client that sent the 24-byte preface and
+/// stopped was answered with a SETTINGS frame and was still open at 16 s
+/// (2026-10-08): bounding only the version read would have left that hole.
+/// Now the preface is an HTTP/1 request line with version `HTTP/2.0`, which
+/// hyper refuses at once. "At once" is asserted as well under half the header
+/// deadline, so a server that held the connection until the deadline fails
+/// too, and the server goes on answering afterwards.
+#[test]
+fn http2_prior_knowledge_is_closed_at_once() {
+    let fixture = Fixture::new("h2");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let mut h2 = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    h2.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    h2.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").unwrap();
+    h2.set_read_timeout(Some(HEADER_DEADLINE / 2)).unwrap();
+    let started = Instant::now();
+    let mut response = Vec::new();
+    let read = h2.read_to_end(&mut response);
+    let elapsed = started.elapsed();
+    let ended = match &read {
+        Ok(_) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset,
+    };
+    assert!(
+        ended && elapsed < HEADER_DEADLINE / 2,
+        "an HTTP/2 prior-knowledge connection was not closed at once: {read:?} after \
+         {elapsed:?}, {} bytes received {:?}",
+        response.len(),
+        &response[..response.len().min(16)]
+    );
+    // An HTTP/1 refusal or nothing; never an HTTP/2 frame (a SETTINGS frame
+    // starts with a 3-byte length and type 0x04).
+    assert!(
+        response.is_empty() || response.starts_with(b"HTTP/1.1 4"),
+        "the server answered HTTP/2 prior knowledge with {:?}",
+        &response[..response.len().min(16)]
+    );
+
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+}

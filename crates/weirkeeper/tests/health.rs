@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use weirkeeper::health::{probe, serve, watched, Health, Probe};
+use weirkeeper::health::{probe, serve, watched, Health, Probe, IO_DEADLINE};
 
 /// A current-thread runtime on its own OS thread, the controller's shape, with
 /// the health listener spawned on it. Returns the address and a handle that
@@ -171,4 +171,44 @@ fn the_listener_binds_loopback_only_and_main_binds_through_it() {
         !code.contains("TcpListener::bind("),
         "main.rs binds a socket other than through weirkeeper::health::bind"
     );
+}
+
+/// **A connection that sends nothing is dropped at the listener's I/O
+/// deadline** (FX-24's sweep of every Logweir listener). The listener answers
+/// one connection at a time, so a silent one occupies it; `serve` bounds each
+/// answer, its first read included, by `IO_DEADLINE`. Only a process inside
+/// the controller's pod can reach this loopback listener, so this is not the
+/// API's exposure, but the bound is what keeps one stray connection from
+/// holding the exec probe out for good. NEGATIVE CONTROL: a probe made once
+/// the silent connection is dropped is answered, so the listener survived it.
+#[test]
+fn a_connection_that_sends_nothing_is_dropped_at_the_io_deadline() {
+    use std::io::Read as _;
+    let health = Health::new();
+    let (addr, _block) = controller_like_runtime(health.clone());
+    let mut silent = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        .expect("the listener accepts");
+    let opened = Instant::now();
+    silent
+        .set_read_timeout(Some(IO_DEADLINE * 5))
+        .expect("a read deadline");
+    let mut buffer = [0u8; 64];
+    let read = silent.read(&mut buffer);
+    let elapsed = opened.elapsed();
+    let ended = match &read {
+        Ok(0) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset,
+        Ok(_) => false,
+    };
+    assert!(
+        ended,
+        "a silent connection was not dropped within {:?}: {read:?} after {elapsed:?}",
+        IO_DEADLINE * 5
+    );
+    assert!(
+        elapsed >= IO_DEADLINE.saturating_sub(Duration::from_millis(500))
+            && elapsed < IO_DEADLINE * 3,
+        "a silent connection was dropped after {elapsed:?}, not at the {IO_DEADLINE:?} deadline"
+    );
+    probe(addr, Probe::Live).expect("the listener answers once the silent connection is gone");
 }
