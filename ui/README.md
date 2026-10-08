@@ -1151,7 +1151,7 @@ storage, never durability.
 |---|---|---|
 | the source's factor, and the target has room | the source's | ``3 (the source's, as recovery catalog `primary` records point `lwp1-...`, the largest of the selected topics')`` |
 | the source's factor, above the target's broker count | the broker count | ``2 (capped at the target's 2 brokers; the source's is 3, as recovery catalog `primary` records point `lwp1-...`)`` |
-| only the target's broker count, at most 3 | the broker count | `2 (the target's 2 brokers; the source's replication factor is not published to this console)` |
+| only the target's broker count, at most 3 | the broker count | `2 (the target's 2 brokers; the source's replication factor is not known for this point)` |
 | only the target's broker count, above 3 | 3 | `3 (at most 3 by default, of the target's 5 brokers; ...)` |
 | nothing | the grammar's 1 | `1 (the plan grammar's default: neither the source's replication factor nor the target's broker count is known to this console)`, and a warning beside the input |
 | a value the operator typed | that value | `4 (set by you; the target has 5 brokers)` |
@@ -1177,8 +1177,10 @@ and one row holds the page and both documents to it.
 before the engine), the catalog point record copies it, the catalog's sync lists
 it for an `Available` point whose record agreed with its verified receipt, and
 the product API publishes it as `PointView.topics[]` (`partitions`,
-`replicationFactor`, `configCoverage`, `owner`, `applyRoute`). A catalog point
-carries its row. A `Backup`'s point is named by its receipt digest (`lwp1-` and
+`replicationFactor`, `configCoverage`, `owner`, `applyRoute`), with
+`PointView.ownerDetection` saying where the run looked for declarative owners:
+an un-owned topic's `applyRoute` is `adminApi` only where it looked, and
+`unknown` where it did not. A catalog point carries its row. A `Backup`'s point is named by its receipt digest (`lwp1-` and
 the first 32 hex digits of `status.evidence.receiptSha256`, the catalog's own
 identity) and looked up in the namespace's recovery catalogs, at most four,
 before the first paint. The default is the LARGEST of the selected topics'

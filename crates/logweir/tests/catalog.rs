@@ -2398,3 +2398,29 @@ fn two_records_conflict_on_configuration_only_where_both_carry_it() {
         other => panic!("two copies disagreeing on owner detection are a conflict: {other:?}"),
     }
 }
+
+/// **L6 (PROD-05.1 fix round).** The point id the console derives from a
+/// Backup's receipt digest (`ui/pages/restore-wizard.js`
+/// `pointIdOfReceiptDigest`) is the one this catalog writes: ONE fixture,
+/// `ui/tests/fixtures/point-id.json`, read here and by
+/// `ui/tests/replication-factor.spec.js`
+/// (`prod051_the_point_id_fixture_is_the_one_the_catalog_writes`).
+#[test]
+fn the_point_id_fixture_is_the_catalogs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("ui/tests/fixtures/point-id.json"))
+            .expect("the shared fixture is readable"),
+    )
+    .expect("the shared fixture is JSON");
+    let bytes = std::fs::read(root.join(fixture["receiptFile"].as_str().unwrap()))
+        .expect("the receipt the fixture names is readable");
+    assert_eq!(
+        logweir_core::ids::sha256_prefixed(&bytes),
+        fixture["receiptSha256"].as_str().unwrap()
+    );
+    assert_eq!(
+        logweir::catalog::record::point_id(&bytes),
+        fixture["pointId"].as_str().unwrap()
+    );
+}

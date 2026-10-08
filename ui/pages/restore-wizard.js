@@ -2738,8 +2738,8 @@ export const DEFAULT_REPLICATION_CEILING = 3;
 
 /** Why the source's factor is not the default, in the words both steps print
  *  beside the factor. */
-export const SOURCE_FACTOR_NOT_PUBLISHED =
-  "the source's replication factor is not published to this console";
+export const SOURCE_FACTOR_NOT_KNOWN =
+  "the source's replication factor is not known for this point";
 
 /** The long form, said once where the factor is chosen when the source's
  *  factor is not known: where it would come from. The page appends WHY it is
@@ -3231,11 +3231,11 @@ export function replicationBasisText(choice) {
   }
   if (c.basis === "brokers") {
     return "the target's " + brokersWord(c.brokers) + brokersAsOfText(c) + "; " +
-      SOURCE_FACTOR_NOT_PUBLISHED;
+      SOURCE_FACTOR_NOT_KNOWN;
   }
   if (c.basis === "ceiling") {
     return "at most " + String(DEFAULT_REPLICATION_CEILING) + " by default, of the target's " +
-      brokersWord(c.brokers) + brokersAsOfText(c) + "; " + SOURCE_FACTOR_NOT_PUBLISHED;
+      brokersWord(c.brokers) + brokersAsOfText(c) + "; " + SOURCE_FACTOR_NOT_KNOWN;
   }
   if (c.basis === "chosen") {
     return "set by you; " + (c.brokers === null

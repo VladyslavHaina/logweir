@@ -8561,6 +8561,10 @@ model records no settings (only its partition count and replication factor,
 [`topic_configuration`](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130)),
 and a later restore's configuration parity names that topic as not assessed
 ([the receipt field](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
+A `Backup` does not look for declarative owners yet (no `KafkaTopic` listing,
+no declared owners: PROD-05.1a), so its receipt records `owner_detection: []`,
+both readers say each topic's owner was not checked, and the product API
+publishes `applyRoute: unknown` for it, never the admin-API route.
 
 ### 21.7 Skipping a check is not answering it
 

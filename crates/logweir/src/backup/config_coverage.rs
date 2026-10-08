@@ -802,7 +802,7 @@ mod tests {
     }
 
     /// Whatever `model` and `classify` write together, a 1.3.0 receipt
-    /// carrying both satisfies arms 12-19: the writer cannot produce a model
+    /// carrying both satisfies arms 12-21: the writer cannot produce a model
     /// its own reader refuses.
     #[test]
     fn every_shape_model_produces_satisfies_the_receipts_arms() {

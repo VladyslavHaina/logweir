@@ -26,6 +26,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -184,11 +185,11 @@ test("fx5_the_basis_is_said_in_the_words_the_review_step_prints", () => {
   assert.equal(text([3], null),
     "3 (the source's; the target's broker count is not known to this console, so it is not capped)");
   assert.equal(text(null, 2),
-    "2 (the target's 2 brokers; the source's replication factor is not published to this console)");
+    "2 (the target's 2 brokers; the source's replication factor is not known for this point)");
   assert.equal(text(null, 1),
-    "1 (the target's 1 broker; the source's replication factor is not published to this console)");
+    "1 (the target's 1 broker; the source's replication factor is not known for this point)");
   assert.equal(text(null, 5), "3 (at most 3 by default, of the target's 5 brokers; the source's " +
-    "replication factor is not published to this console)");
+    "replication factor is not known for this point)");
   assert.equal(text(null, null), "1 (the plan grammar's default: neither the source's replication " +
     "factor nor the target's broker count is known to this console)",
     "NEGATIVE CONTROL: a bare \"1\" -- the silent default -- fails this");
@@ -326,7 +327,7 @@ test("fx5_a_count_past_its_freshness_sets_the_default_with_its_age_and_refuses_n
       "NEGATIVE CONTROL: 1 -- the grammar's default because the count was 16 minutes old -- " +
         "fails this");
     const said = "2 (the target's 2 brokers" + asOf + "; the source's replication factor is not " +
-      "published to this console)";
+      "known for this point)";
     assert.equal(replicationText(state), said,
       "NEGATIVE CONTROL: the fresh wording (no \"as of\") for an old count fails this");
     const step4 = renderTargetStep(state);
@@ -359,7 +360,7 @@ test("fx5_a_count_past_its_freshness_sets_the_default_with_its_age_and_refuses_n
     const big = expired();
     big.lastSuccessful.brokerCount = 5;
     assert.equal(replicationText(withAnswer(big)), "3 (at most 3 by default, of the target's 5 " +
-      "brokers" + asOf + "; the source's replication factor is not published to this console)");
+      "brokers" + asOf + "; the source's replication factor is not known for this point)");
   });
 
 // ------------------------------------------------- the state and the steps
@@ -395,8 +396,8 @@ test("fx5_a_fresh_discovery_of_the_target_sets_the_default_and_the_review_says_w
     const prepared = await preparePlan(state);
     assert.ok(prepared.bytes.includes("\n  default_replication_factor: 2\n"),
       "the plan an approver signs asks for it: " + prepared.bytes);
-    const said = "2 (the target's 2 brokers; the source's replication factor is not published " +
-      "to this console)";
+    const said = "2 (the target's 2 brokers; the source's replication factor is not known " +
+      "for this point)";
 
     const step4 = renderTargetStep(state);
     assert.equal(visible(byId(step4, "replication-basis")), "This plan asks for " + said + ".");
@@ -423,7 +424,7 @@ test("fx5_a_larger_target_is_capped_at_three_and_a_single_broker_at_one", async 
   assert.equal(replicationFactorOf(big), 3, "NEGATIVE CONTROL: 5 fails this");
   assert.equal(visible(byId(renderPlanStep(await preparePlan(big), big), "review-replication")),
     "3 (at most 3 by default, of the target's 5 brokers; the source's replication factor is " +
-    "not published to this console)");
+    "not known for this point)");
   // THE BOUNDARY, through a state and the plan (review L1): four brokers is
   // the first count the ceiling caps.
   const four = withBrokers(wizardState(), 4);
@@ -943,6 +944,19 @@ test("prod051_the_point_id_of_a_backup_is_its_receipts_digest_prefix", () => {
     "sha256:" + "AB".repeat(32)]) {
     assert.equal(pointIdOfReceiptDigest(bad), "", String(bad));
   }
+});
+
+// L6 (fix round): ONE fixture, read by this row AND by the catalog's own
+// (`crates/logweir/tests/catalog.rs::the_point_id_fixture_is_the_catalogs`):
+// the checked-in signed receipt, its digest and the point id the catalog
+// writes for it. A drift on either side fails the side that drifted.
+test("prod051_the_point_id_fixture_is_the_one_the_catalog_writes", () => {
+  const f = fixture("point-id.json");
+  const bytes = readFileSync(fileURLToPath(new URL("../../" + f.receiptFile, import.meta.url)));
+  assert.equal("sha256:" + createHash("sha256").update(bytes).digest("hex"), f.receiptSha256,
+    "the fixture's digest is the receipt's");
+  assert.equal(pointIdOfReceiptDigest(f.receiptSha256), f.pointId,
+    "the console looks a Backup's point up by the id the catalog writes");
 });
 
 test("prod051_the_source_factor_from_the_catalog_capped_by_the_brokers_with_its_source_said",

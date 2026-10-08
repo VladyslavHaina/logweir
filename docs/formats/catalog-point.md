@@ -169,6 +169,7 @@ all of them wanted:
 | `topics[].config_coverage` | object, **optional** (1.1.0) | The backup receipt's [`config_coverage`](backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110) entry for the topic, COPIED: `coverage` (`captured`, `notCaptured`, `captureDenied`), `reason` for `notCaptured`, and the effective `timestamp_type` with its `source`. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means UNKNOWN — every 1.0.0 record, and every record derived from a receipt that predates 1.1.0 — and is never read as `captured`. |
 | `topics[].partitions` | int, **optional** | The source's partition count, receipt-derived from the receipt's [`topic_configuration`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) (format 1.3.0): the count the archive manifest records and a restore creates the topic with. ABSENT — every record before 1.3.0, and a 1.3.0 one whose manifest recorded none — is unknown. See [absent means unknown](#absent-means-unknown-never-zero). |
 | `topics[].configuration` | object, **optional** (1.3.0) | The backup receipt's [`topic_configuration`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) entry for the topic, COPIED: `partitions`, `replication_factor`, the recorded `entries` with their `source` and `portability`, and the declarative `owner`. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0 — and is never read as "no configuration". |
+| `owner_detection` | string[], **optional** (1.3.0) | The backup receipt's [`owner_detection`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130), COPIED: where the run looked for declarative owners (`declared`, `kafkaTopicResources`). EMPTY means it looked nowhere, so a topic without an `owner` has its owner NOT CHECKED — never "applied through the admin API". Receipt-derived (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0. |
 | `source.cluster_id` | string | Read from the broker at admission and carried by the receipt — never from a spec. |
 | `source.bootstrap_servers` | string[] | Addressing. |
 | `source.auth_mode` | string | `plaintext` or `scramSha512` — the receipt's closed two-value set. |
@@ -244,7 +245,10 @@ and "which shard is it in" are one number.
    records of one point conflict on it only where both carry an entry.
    `topics[].configuration` and `topics[].partitions` (1.3.0) follow the same
    one-way rule: a model or a count the receipt does not back — an override
-   added, an owner dropped, a class changed — is a `RecordMismatch`.
+   added, an owner dropped, a class changed — is a `RecordMismatch`, and so is
+   an `owner_detection` the receipt does not carry (a record claiming the run
+   looked for owners it never looked for). Two records conflict on either only
+   where both carry it.
 5. **Nothing under `logweir/` is ever rewritten.** Every put is create-only. A
    correction is a new record under a new point id; a removal is a tombstone.
    An existing object at a record key is "already there", which is a success,

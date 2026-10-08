@@ -358,14 +358,18 @@ compaction, timestamps, min in-sync and the rest) — each with its source and a
 portability class from a table measured on the 3.9 and 4.3 broker lines — and
 the topic's declarative owner: a Strimzi `KafkaTopic`
 (`--kafka-topic-resources <file> [--strimzi-cluster <name>]`) or the plan's own
-`source.topic_owners`. A topic whose configuration read was denied records NO
-entries, never "no overrides". Keys Kafka 4.0 removed are recorded and marked
-`removedInKafka4`; a sensitive entry is recorded by key, never by value. The
-receipt and the catalog point record are format **1.3.0**; both readers check
-eight new arms, 12 to 19, and print one `topic_configuration` line per topic;
-`verify_scorecard.py` is 1.20.0. The catalog's view lists an `Available`
+`source.topic_owners` — and where the run looked for one
+(`owner_detection`), so an owner nobody looked for reads "owner not checked",
+never "applied through the admin API". A topic whose configuration read was
+denied records NO entries, never "no overrides". Keys Kafka 4.0 removed are
+recorded and marked `removedInKafka4`; a sensitive entry is recorded by key,
+never by value. The receipt and the catalog point record are format **1.3.0**;
+both readers check ten new arms, 12 to 21, and print one `topic_configuration`
+line per topic; `verify_scorecard.py` is 1.20.0. The catalog's view lists an `Available`
 point's topics with their recorded layout, the product API publishes them as
-`PointView.topics[]`, and the console's restore wizard defaults the
+`PointView.topics[]` with each topic's `applyRoute` (`unknown` where the run
+did not look for owners, beside `PointView.ownerDetection`), and the console's
+restore wizard defaults the
 replication factor to the largest selected topic's source factor, capped at
 the target's broker count, saying which catalog and point it came from
 ([backup-receipt.md](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130),
@@ -378,8 +382,12 @@ What changes on the upgrade:
 - **Every receipt and catalog record a new runner writes is 1.3.0**, pinned or
   not. Readers built before PROD-05.1 accept them and ignore the new fields.
 - **Phase −1 refuses**, exit 3, a backup plan whose `source.topic_owners`
-  names an unplanned topic, a kind other than `strimzi` or `external`, or a
-  reference that is blank, over 256 characters or carries a control character.
+  names an unplanned topic, a kind other than `strimzi` or `external`, a
+  reference that is blank, over 256 characters or carries a control character,
+  or one topic twice.
+- **A `Backup` or `BackupSchedule` records `owner_detection: []`**: the
+  controller passes neither a declaration nor `KafkaTopic` resources yet, so
+  its receipts say each un-owned topic's owner was not checked.
 - **The receipt's replication factor is read from the source's metadata**: the
   pinned engine's manifest keeps it for the first topic it saves only (measured;
   the decision record names the upstream lines).

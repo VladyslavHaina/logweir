@@ -1020,7 +1020,33 @@ fn a_backup_records_each_topics_model_and_its_owner() {
     assert!(verified["rust_checked"]
         .as_str()
         .unwrap()
-        .contains("all nineteen"));
+        .contains("all twenty-one"));
+    // WHERE THE RUN LOOKED for owners (fix round, M2): the plan's
+    // declarations and the `KafkaTopic` resources — so a topic neither owns is
+    // "no declarative owner found", applied through the admin API, and an
+    // owned one is restored by desired-state export.
+    assert_eq!(
+        r.owner_detection,
+        Some(vec![
+            "declared".to_string(),
+            "kafkaTopicResources".to_string()
+        ])
+    );
+    assert_eq!(
+        record["owner_detection"],
+        json!(["declared", "kafkaTopicResources"])
+    );
+    for line in verified["rust_model_lines"].as_array().unwrap() {
+        let line = line.as_str().unwrap();
+        assert!(
+            line.ends_with(", so restored by desired-state export")
+                || line.ends_with(
+                    ", no declarative owner found (declared, kafkaTopicResources), so applied \
+                     through the admin API"
+                ),
+            "{line}"
+        );
+    }
 
     // THE CATALOG POINT copies the model and the partition count.
     assert_eq!(record["format_version"], "1.3.0");
@@ -1150,6 +1176,18 @@ fn a_denied_describe_configs_records_no_entries_and_keeps_the_layout() {
         verified["rust_model_lines"], verified["python_model_lines"],
         "{verified}"
     );
+    // NO OWNER WAS LOOKED FOR (fix round, M2): no declaration, no resources —
+    // the shape of every controller-run Backup today. The receipt says so,
+    // and neither reader calls it the admin-API route.
+    assert_eq!(narrowed.receipt.owner_detection, Some(Vec::new()));
+    for line in verified["rust_model_lines"].as_array().unwrap() {
+        assert!(
+            line.as_str()
+                .unwrap()
+                .ends_with(", owner not checked, so how it is applied is not known"),
+            "{line}"
+        );
+    }
     assert!(
         leaks.is_empty(),
         "the principal's password reached {leaks:?}"

@@ -527,9 +527,10 @@ fn the_signed_receipt_fixture_verifies() {
     // below keeps the weaker sentence honest for the two document types that
     // still get it.
     assert!(
-        stdout.contains("the signature AND all nineteen backup-receipt invariants"),
-        "an exit 0 that checked the invariants must say so on stdout (nineteen since \
-         PROD-05.1's eight topic_configuration arms), got: {stdout}"
+        stdout.contains("the signature AND all twenty-one backup-receipt invariants"),
+        "an exit 0 that checked the invariants must say so on stdout (twenty-one since \
+         PROD-05.1's eight topic_configuration arms and two owner_detection arms), got: \
+         {stdout}"
     );
     // PROD-05.1: the checked-in receipt is a 1.0.0 document, so its topics'
     // configuration model is NOT RECORDED — said, never left to read as "none".

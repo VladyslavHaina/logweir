@@ -271,7 +271,8 @@ others** (arm 14), always beside `config_coverage` (arm 13):
     "owner": { "kind": "strimzi", "basis": "kafkaTopicResource", "reference": "kafka/orders" }
   },
   "payments": { "partitions": 1, "replication_factor": 1 }
-}
+},
+"owner_detection": ["kafkaTopicResources"]
 ```
 
 | Field | Type | Meaning |
@@ -286,6 +287,21 @@ others** (arm 14), always beside `config_coverage` (arm 13):
 | `owner.basis` | string | `kafkaTopicResource` (a Strimzi `KafkaTopic` named the topic; `strimzi` only) or `declared` (the plan's `source.topic_owners`). |
 | `owner.reference` | string, 1–256 characters | Where the desired state lives: the `KafkaTopic`'s `namespace/name`, or the plan's words. Never a credential. |
 
+`owner_detection` sits beside the block, at the top level of the receipt:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `owner_detection` | array of strings, optional | WHERE the run looked for declarative owners: `declared` (the plan carried `source.topic_owners`, an empty list included) and `kafkaTopicResources` (it was given `--kafka-topic-resources`), each at most once, only beside `topic_configuration` (arm 20). Every recorded `owner` names a source listed here (arm 21). **Empty means the run looked nowhere**: a topic without an `owner` then has its owner NOT CHECKED, and both readers print `owner not checked, so how it is applied is not known` for it — never the admin-API route. Absent reads as empty. |
+
+How a topic is applied follows from the two together: an owned topic is
+restored by exporting desired state for its owner; a topic without an owner is
+applied through the admin API only where `owner_detection` is not empty (both
+readers print `no declarative owner found (<sources>), so applied through the
+admin API`); otherwise how it is applied is not known. A `Backup` or
+`BackupSchedule` run by the controller passes neither a declaration nor
+resources yet (child row PROD-05.1a), so its receipts record `owner_detection:
+[]`.
+
 **The classes, the measured table and what a restore does with each** are in
 the [decision record](../to-do/decisions/PROD-05.1-configuration-model.md): the
 36 topic keys Apache Kafka 3.9 defines and the 33 of 4.x, each with its
@@ -299,11 +315,12 @@ cluster, when named), not annotated `strimzi.io/managed: "false"`, owns the
 topic its `spec.topicName` (else its name) names. The plan's
 `source.topic_owners` declares owners itself; phase −1 refuses, exit 3, a
 declaration naming an unplanned topic, another kind or an unusable reference,
-and a declaration wins over a resource for the same topic.
+or a topic declared twice, and a declaration wins over a resource for the same
+topic.
 
 ---
 
-## The nineteen arms
+## The twenty-one arms
 
 `logweir_core::backup_receipt::BackupReceipt::validate_invariants` implements
 these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
@@ -311,14 +328,15 @@ them ARM FOR ARM, IN ORDER. The messages below are the **exact** refusal text of
 BOTH readers — compared byte-for-byte by
 `crates/logweir-core/tests/backup_receipt.rs` (`backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message`
 over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` over arm 5,
-one `arm_N_…` test per arm 6–19, and
-`validate_invariants_has_exactly_nineteen_return_err_statements` over the total),
+one `arm_N_…` test per arm 6–21, and
+`validate_invariants_has_exactly_twenty_one_return_err_statements` over the total),
 by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
-over the twenty-nine documents in `e2e/fixtures/invariants/backup-receipt-index.json`,
+over the forty-five documents in `e2e/fixtures/invariants/backup-receipt-index.json`
+(a refusing case for each half of arms 15–19, not only for each arm),
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
-from both readers' source and refuses to balance if they are not the same nineteen
-arms in the same order.
+from both readers' source and refuses to balance if they are not the same
+twenty-one arms in the same order.
 
 Arms 6–11 read `config_coverage` and NOTHING ELSE, and run only when it is
 present — so every receipt without it, which is every receipt written before
@@ -330,7 +348,7 @@ Arms 12–19 run only when `topic_configuration` is present, after arms 1–11,
 and judge it against `config_coverage` and `source.topics` — so every receipt
 without it, which is every receipt written before 1.3.0, is decided exactly as
 before. Topics in name order; per topic arm 15, then arms 16 and 17 per entry in
-key order, then 18 and 19.
+key order, then 18 and 19. Arms 20 and 21 run last, over `owner_detection`.
 
 1. **`format_version` parses as semver and its major is `1`.** Checked first, so
    a document from a future major is refused before any other arm is evaluated
@@ -441,6 +459,17 @@ key order, then 18 and 19.
 
     > `topic_configuration["orders"] records partitions 6 and replication_factor 0: a recorded count is at least 1`
 
+20. **`owner_detection` is from the closed set, each source at most once, and
+    only beside `topic_configuration`.**
+
+    > `owner_detection ["declared", "labels"] is not a detection this format defines: it is present only beside topic_configuration, and lists "declared" and "kafkaTopicResources" each at most once`
+
+21. **Every recorded owner names a source the run looked in.** A `declared`
+    owner needs `declared`, a `kafkaTopicResource` owner needs
+    `kafkaTopicResources`; an absent `owner_detection` is an empty one.
+
+    > `topic_configuration["orders"].owner by "kafkaTopicResource" names no source owner_detection ["declared"] lists: a "declared" owner needs "declared", a "kafkaTopicResource" owner "kafkaTopicResources"`
+
 A block that serde itself cannot read — a `timestamp_type` without its `source`,
 a `coverage` that is not a string — is refused before any arm by both readers
 (`drill verify` exits 1 with serde's message; `verify_scorecard.py` exits 1 with
@@ -479,11 +508,11 @@ would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
 > **What each reader checks today, stated plainly rather than implied.** Both
-> readers run **all nineteen arms above** over a `--payload-type
+> readers run **all twenty-one arms above** over a `--payload-type
 > backup-receipt` document; arms 1–5 arrived together in Task 5b, arms 6–11
-> together in FX-4 and arms 12–19 together in PROD-05.1, so the two readers
+> together in FX-4 and arms 12–21 together in PROD-05.1, so the two readers
 > never disagreed in between.
-> `logweir drill verify` prints `checked:   the signature AND all nineteen
+> `logweir drill verify` prints `checked:   the signature AND all twenty-one
 > backup-receipt invariants …`; `docs/verify_scorecard.py` prints `verifier:
 > verify_scorecard.py <SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both also print
 > the configuration capture coverage in the same words, one
@@ -494,7 +523,10 @@ would break every existing invocation, every document and
 > between the two readers on every accepted receipt. Both print the topic
 > configuration model in the same words, one `topic_configuration["<topic>"]:
 > partitions <n>, replication factor <n>, <n> entries (<class> <count>, …),
-> <route>` line per topic — counts and classes, never a value — or
+> <route>` line per topic — counts and classes, never a value; the route is
+> `owned by …, so restored by desired-state export`, `no declarative owner
+> found (<sources>), so applied through the admin API` or `owner not checked,
+> so how it is applied is not known` — or
 > `topic_configuration: not recorded, …` for a receipt without the block, and
 > the parity script compares those lines too. Both print a pinned
 > `archive.manifest_version_id` when the receipt carries one (`manifest version:`

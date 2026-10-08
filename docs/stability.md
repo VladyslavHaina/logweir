@@ -282,7 +282,8 @@ and moves both documents to **1.3.0**
 `schemas/logweir-catalog-point-1.3.0.json`, FX-7's 1.2.0 files frozen beside
 them). Per named topic it records the source's partition count and replication
 factor, the configuration entries Logweir's own read returned with their
-source and portability class, and the topic's declarative owner
+source and portability class, and the topic's declarative owner, with a
+top-level `owner_detection` saying where the run looked for owners
 ([the receipt format](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130);
 [the model and the portability table](to-do/decisions/PROD-05.1-configuration-model.md)).
 
@@ -295,12 +296,20 @@ source and portability class, and the topic's declarative owner
   one is 1.3.0. FX-7's statement that an unpinned receipt is FX-4's 1.1.0
   document byte for byte holds for builds before PROD-05.1; a 1.3.0 receipt
   without a pin still has no `manifest_version_id` key.
-- **Eight arms, 12 to 19, are MINOR under OD-7 (a).** Each fires only on a
-  document carrying the block, and judges it against `config_coverage` and
-  `source.topics` the way FX-4's arm 7 judges `config_coverage` against
-  `source.topics`. No document without the block changes verdict; the corpus
-  (`e2e/fixtures/invariants/`, one case per arm) and the parity gate re-prove
-  that on every `just lint`.
+- **Ten arms, 12 to 21, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block (arm 20 also on one carrying `owner_detection`
+  without it, which no writer produces), and judges it against
+  `config_coverage` and `source.topics` the way FX-4's arm 7 judges
+  `config_coverage` against `source.topics`. No document without the block
+  changes verdict; the corpus (`e2e/fixtures/invariants/`, a case for each
+  refusing half of every arm) and the parity gate re-prove that on every
+  `just lint`.
+- **An owner nobody looked for is not "no owner".** `owner_detection` empty —
+  every `Backup` and `BackupSchedule` the controller runs today, which passes
+  neither a declaration nor `KafkaTopic` resources (PROD-05.1a) — makes both
+  readers print `owner not checked` for an un-owned topic and the product API
+  publish `applyRoute: unknown`, never the admin-API route a later restore
+  would act on.
 - **The class is the writer's.** The arms judge a class against its source and
   value, never against the key, so a later table refinement cannot make an
   older receipt refuse itself; a restore re-derives the class from its own
@@ -312,12 +321,14 @@ source and portability class, and the topic's declarative owner
   rehearsal selection's `maxPartitions` filter, can only refuse more points
   with a count than without one.
 - **The plan grammar gains `source.topic_owners`**, omitted from the serialised
-  plan when empty; a runner built before PROD-05.1 ignores it and records no
-  owner. Phase −1 refuses, exit 3, a declaration it cannot record.
+  plan when absent (an empty list is kept: it says no topic has a declared
+  owner, and the receipt records `declared` among the places the run looked); a
+  runner built before PROD-05.1 ignores it and records no owner. Phase −1
+  refuses, exit 3, a declaration it cannot record or a topic declared twice.
 - **Readers built before PROD-05.1** (`verify_scorecard.py` 1.19.0 and earlier,
   and an older `logweir`) accept every 1.3.0 document — the major is unchanged
   and the block is an optional field they ignore — print no model line, and do
-  not run arms 12 to 19.
+  not run arms 12 to 21.
 - **Rollback** is safe in both directions. An older `logweir` writes 1.1.0 or
   1.2.0 receipts and records again; the 1.3.0 documents already written stay
   valid under both readers. A catalog synced by an older runner lists no

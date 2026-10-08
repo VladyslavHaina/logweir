@@ -2602,6 +2602,10 @@ const D3_POINT = shapeOf(
     // Available), never "no topics"; `topicsOmitted` counts a list left out.
     topics: listOf(objectOf(D3_POINT_TOPIC)),
     topicsOmitted: int,
+    // Where the backup run looked for declarative owners, beside `topics`.
+    // EMPTY says it looked nowhere, so an un-owned topic's `applyRoute` is
+    // `unknown` -- never read as `adminApi`.
+    ownerDetection: listOf(str),
   },
 );
 

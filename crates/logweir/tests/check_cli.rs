@@ -6573,6 +6573,10 @@ fn only_entry(objects: FakeObjects) -> serde_json::Value {
 
 /// A 1.3.0 receipt over `topics`, each captured with the given replication
 /// factor and partition count, `orders` owned by a Strimzi `KafkaTopic`.
+/// A 1.3.0 receipt over `(topic, replication factor, partitions)`; a `0`
+/// count is NOT RECORDED (arm 19 forbids a recorded zero), the shape engine
+/// 0.23.3's manifest leaves for every topic after the first (FX-21). `orders`
+/// is owned by a Strimzi `KafkaTopic`, so the run read the resources.
 fn modelled_catalog_receipt(topics: &[(&str, u32, u32)]) -> BackupReceipt {
     use logweir_core::backup_receipt::{TopicConfigCoverage, TopicConfiguration, TopicOwner};
     let mut r = catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z");
@@ -6605,8 +6609,8 @@ fn modelled_catalog_receipt(topics: &[(&str, u32, u32)]) -> BackupReceipt {
                 (
                     (*t).to_string(),
                     TopicConfiguration {
-                        partitions: Some(*partitions),
-                        replication_factor: Some(*rf),
+                        partitions: (*partitions > 0).then_some(*partitions),
+                        replication_factor: (*rf > 0).then_some(*rf),
                         entries: Some(BTreeMap::new()),
                         owner: (*t == "orders").then(|| TopicOwner {
                             kind: "strimzi".into(),
@@ -6618,8 +6622,51 @@ fn modelled_catalog_receipt(topics: &[(&str, u32, u32)]) -> BackupReceipt {
             })
             .collect(),
     );
+    r.owner_detection = Some(vec!["kafkaTopicResources".into()]);
     assert_eq!(r.validate_invariants(), Ok(()));
     r
+}
+
+/// **M3 (fix round): an absent count stays absent.** A topic whose replication
+/// factor was not recorded — engine 0.23.3's manifest keeps it for the first
+/// topic only (FX-21) — and one whose partition count was not, are listed
+/// WITHOUT the key: never `1`, never `0`, never another topic's.
+#[test]
+fn a_topic_whose_factor_or_count_was_not_recorded_is_listed_without_it() {
+    let receipt = modelled_catalog_receipt(&[("orders", 3, 6), ("ledger", 0, 4), ("audit", 2, 0)]);
+    let (objects, _) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Available", "{entry}");
+    assert_eq!(
+        entry["topics"],
+        serde_json::json!([
+            {"name": "audit", "replicationFactor": 2, "configCoverage": "captured"},
+            {"name": "ledger", "partitions": 4, "configCoverage": "captured"},
+            {"name": "orders", "partitions": 6, "replicationFactor": 3, "configCoverage": "captured",
+             "owner": "strimzi"},
+        ]),
+        "{entry}"
+    );
+    // Where the run looked for owners travels with the topics (M2).
+    assert_eq!(
+        entry["ownerDetection"],
+        serde_json::json!(["kafkaTopicResources"]),
+        "{entry}"
+    );
+}
+
+/// **M2 (fix round).** A run that looked for owners nowhere publishes an EMPTY
+/// `ownerDetection` beside its topics — not an absent one, which is NOT
+/// PUBLISHED — so a reader can say "owner not checked" for every topic.
+#[test]
+fn a_point_whose_owners_were_never_looked_for_publishes_an_empty_detection() {
+    let mut receipt = modelled_catalog_receipt(&[("audit", 1, 1)]);
+    receipt.owner_detection = Some(Vec::new());
+    assert_eq!(receipt.validate_invariants(), Ok(()));
+    let (objects, _) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
+    let entry = only_entry(objects);
+    assert_eq!(entry["ownerDetection"], serde_json::json!([]), "{entry}");
+    assert!(entry["topics"][0].get("owner").is_none(), "{entry}");
 }
 
 /// **The console's source.** An `Available` 1.3.0 point lists every topic with
@@ -6679,6 +6726,8 @@ fn a_point_with_more_topics_than_the_cap_lists_none_and_counts_them() {
     let entry = only_entry(objects);
     assert!(entry.get("topics").is_none(), "{entry}");
     assert_eq!(entry["topicsOmitted"], MAX_ENTRY_TOPICS + 1, "{entry}");
+    // Nothing for `ownerDetection` to qualify, so it is not published either.
+    assert!(entry.get("ownerDetection").is_none(), "{entry}");
 }
 
 /// A pinned point whose pinned version IS the current one is `Available`,

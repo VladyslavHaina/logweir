@@ -12,7 +12,7 @@ PROD-05.2 ("Apply a reviewed target topic configuration") consumes it.
 - Brokers: `apache/kafka` 3.9.2 and 4.3.1, pinned by digest (`e2e/compose/stack-env.sh --lines`).
 - Code: `crates/logweir-core/src/topic_configuration.rs` (the table, the classification, the
   capture rule, the owners), `crates/logweir-core/src/backup_receipt.rs` (`TopicConfiguration`,
-  arms 12–19), `crates/logweir/src/backup/config_coverage.rs` (`model`),
+  arms 12–21), `crates/logweir/src/backup/config_coverage.rs` (`model`),
   `crates/logweir-kafka/src/reader.rs` (`ClusterReader::replication_factors`),
   `crates/logweir/src/catalog/` (record 1.3.0, the rule-3 cross-check),
   `crates/logweir/src/check/kinds/catalog_sync.rs` and `crates/weirkeeper/src/catalog_view.rs`
@@ -42,13 +42,15 @@ PROD-05.2 ("Apply a reviewed target topic configuration") consumes it.
    default. A secret is recorded by key, never by value.
 5. **Declarative owners** come from the plan (`source.topic_owners`) or from Strimzi `KafkaTopic`
    resources (`--kafka-topic-resources`). An owned topic is restored by exporting desired state for
-   its owner, never by the admin API around it (§4).
+   its owner, never by the admin API around it (§4). The receipt also records WHERE the run looked
+   (`owner_detection`): a topic without an owner where it looked nowhere is "owner not checked",
+   never the admin-API route (§4).
 6. **The replication factor is Logweir's own metadata read**, not the engine manifest's, because
    the pinned engine keeps it for the first topic it saves only (§5, measured).
 7. **The console's replication-factor default now starts from the source's factor**, read from a
    recovery catalog's view of the point and capped by the target's broker count, with where it came
    from said on both steps (§8). FX-5's refusal above the broker count stands.
-8. **Versioning:** receipt and catalog point 1.3.0, `verify_scorecard.py` 1.20.0, arms 12–19 MINOR
+8. **Versioning:** receipt and catalog point 1.3.0, `verify_scorecard.py` 1.20.0, arms 12–21 MINOR
    under OD-7 (a) (§6).
 
 ## 1. The model (receipt 1.3.0, `topic_configuration`)
@@ -80,7 +82,7 @@ One entry per `source.topics` entry and no others (arm 14), beside `config_cover
 | `entries.<key>.value` | the broker's answer | the entry is `secret` (arm 17) |
 | `entries.<key>.source` | the broker's `ConfigSource`, camel-cased (FX-4's six) | — |
 | `entries.<key>.portability` | §3 | — |
-| `owner` | §4 | no declarative owner is known: the topic is applied through the admin API |
+| `owner` | §4 | no owner found where the run looked (`owner_detection` not empty): applied through the admin API; the run looked nowhere (`owner_detection` empty): owner NOT CHECKED, how the topic is applied is not known |
 
 A block that is ABSENT (every receipt before 1.3.0) means NOT RECORDED for every topic. The catalog
 point record carries the same entry as `topics[].configuration` and fills its existing
@@ -187,8 +189,20 @@ line, and fails closed where the two disagree.
 | `strimzi` | `kafkaTopicResource` | a Strimzi `KafkaTopic` given to `logweir backup run --kafka-topic-resources <file>` (YAML as `kubectl get kafkatopics -A -o yaml` writes it) that is `kafka.strimzi.io/*`, carries a non-empty `strimzi.io/cluster` label (equal to `--strimzi-cluster` when given), is not annotated `strimzi.io/managed: "false"`, and names the topic (`spec.topicName`, else `metadata.name`). `reference` is `<namespace>/<name>`; two resources naming one topic (Strimzi's own conflict) give the reference that sorts first. |
 | `strimzi` or `external` | `declared` | the plan's `source.topic_owners: [{topic, kind, reference}]`. Phase −1 refuses (exit 3) a declaration naming an unplanned topic, another kind, or a reference that is blank, longer than 256 characters or carries a control character. A declaration wins over a detected resource for the same topic: it is what the approved plan says. |
 
-`reference` is copied into a signed document: never a credential. The product API publishes the
-kind and an `applyRoute` of `desiredStateExport` for an owned topic, `adminApi` otherwise.
+`reference` is copied into a signed document: never a credential.
+
+**Where the run looked (`owner_detection`, review M2).** An owner is only "absent" where someone
+looked for one. The receipt's top-level `owner_detection` lists the places the run looked —
+`declared` when the plan carries `source.topic_owners` (an empty list too: the operator says no
+topic has one), `kafkaTopicResources` when it was given `--kafka-topic-resources` — and arms 20–21
+hold it to the closed set and every owner to a source it lists. The rule for how a topic is applied
+lives once, in `logweir_core::topic_configuration::apply_route`: `desiredStateExport` for an owned
+topic; `adminApi` for an un-owned topic where `owner_detection` is not empty; `unknown` where it is
+empty. Both readers print the same three routes in words, and the product API publishes
+`applyRoute` from that function beside `PointView.ownerDetection`. A `Backup` or `BackupSchedule`
+run by the controller passes neither today (PROD-05.1a), so its receipts record `owner_detection:
+[]` and every un-owned topic reads "owner not checked": a Strimzi-managed source backed up by the
+controller is never published as the admin-API route.
 
 **Not detected, and why.** The controller does not list `KafkaTopic` resources for a `Backup` Job:
 that needs read access to the third-party `kafka.strimzi.io` API group in the controller's
@@ -218,14 +232,16 @@ bug reports out of a worker's hands).
 | document | new field | version |
 |---|---|---|
 | backup receipt | `topic_configuration` | 1.3.0 (`schemas/logweir-backup-receipt-1.3.0.json`; FX-7's 1.2.0 frozen) |
-| catalog point record | `topics[].configuration`, and the existing `topics[].partitions` filled | 1.3.0 (`schemas/logweir-catalog-point-1.3.0.json`; 1.2.0 frozen) |
-| catalog view entry, `PointView` | `topics[]`, `topicsOmitted` | the view grammar and the pre-release API (no format bump) |
+| backup receipt | `owner_detection` | 1.3.0, beside the block |
+| catalog point record | `topics[].configuration`, the existing `topics[].partitions` filled, and `owner_detection` | 1.3.0 (`schemas/logweir-catalog-point-1.3.0.json`; 1.2.0 frozen) |
+| catalog view entry, `PointView` | `topics[]`, `topicsOmitted`, `ownerDetection` | the view grammar and the pre-release API (no format bump) |
 
 Every receipt this build signs carries the block, so every one is 1.3.0, pinned or not; a 1.3.0
 receipt without a pin has no `manifest_version_id` key. FX-7's "an unversioned receipt is FX-4's
 1.1.0 byte for byte" holds for a build before this one.
 
-**The arms** (both readers, byte-identical text, one corpus case each, the parity script):
+**The arms** (both readers, byte-identical text, a corpus case for each refusing half, the parity
+script):
 
 | arm | refuses |
 |---|---|
@@ -237,8 +253,11 @@ receipt without a pin has no `manifest_version_id` key. FX-7's "an unversioned r
 | 17 | a `secret` with a value, a non-secret without one, or `inherited` where the source is the topic's override (and the converse) |
 | 18 | an owner outside the closed sets, a `kafkaTopicResource` owner that is not `strimzi`, or an unusable reference |
 | 19 | a recorded partition count or replication factor of 0 |
+| 20 | an `owner_detection` outside the closed set (`declared`, `kafkaTopicResources`), listing a source twice, or beside no `topic_configuration` |
+| 21 | an owner whose basis names a source `owner_detection` does not list (absent reads as empty) |
 
-All eight run only on a document carrying the new block, so no earlier receipt changes verdict.
+All ten run only on a document carrying the new block (arm 20 also on one carrying
+`owner_detection` without it, which no writer produces), so no earlier receipt changes verdict.
 They read `config_coverage` and `source.topics` as the context the block is judged in — FX-4's arm 7
 reads `source.topics` the same way under the same ruling. That is OD-7 (a): **MINOR**. No existing
 field's content or meaning changes; the catalog record's `topics[].partitions` is filled with the
@@ -274,7 +293,8 @@ and an inherited value classed by its key makes the WRITER refuse to sign (exit 
   (at most 64; more lists none and says how many in `topicsOmitted`). An entry keeps its list only
   while every later entry still fits slim in the sync body's 5 MB budget, so a topic list never
   costs a point its place in the view. The controller passes it through and the product API
-  publishes it as `PointView.topics[]` with `applyRoute`.
+  publishes it as `PointView.topics[]` with `applyRoute` (§4: `unknown` where the run did not look
+  for owners), beside `ownerDetection`.
 - **The console** reads it: a catalog point carries its row; a `Backup`'s point is named by its
   receipt digest (`lwp1-` and the first 32 hex digits, D3 §5.1) and looked up in the namespace's
   recovery catalogs (at most four), before the first paint. The default is the largest selected
@@ -326,7 +346,11 @@ Each with a pass predicate, a negative control and a fixture.
    `CreateTopics validate_only` refuses it (`remote.storage.enable=true` on the compose brokers).
 5. **Owners.** An owned topic is not created through the admin API; reviewed `KafkaTopic` YAML (for
    `strimzi`) or a desired-state document (for `external`) is emitted instead. *Control:* the
-   unowned neighbour is created.
+   unowned neighbour is created. **Only where detection ran:** a topic without an owner is applied
+   through the admin API only when the point's `owner_detection` is not empty (`applyRoute:
+   adminApi`); with an empty one (`applyRoute: unknown`) the restore refuses, or asks for the owner
+   to be declared, rather than treat "not checked" as "no owner". *Fixture:* row 3's receipt
+   (`owner_detection: []`).
 6. **Coverage.** A topic whose model records no entries (`captureDenied`, `describeFailed`) is
    created with safe recovery settings and its configuration reported NOT RECORDED, never applied
    from the manifest's empty record. *Fixture:* row 3.

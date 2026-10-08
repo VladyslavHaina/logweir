@@ -577,6 +577,16 @@ fn backup_run_refuses_a_declared_owner_it_cannot_record() {
             owners("orders", "external", "  "),
             "must be 1 to 256 characters",
         ),
+        // L3 (fix round): one topic declared twice — which of the two the
+        // receipt would carry is not the operator's to guess.
+        (
+            format!(
+                "{}{}",
+                owners("orders", "external", "terraform: a"),
+                "  - topic: orders\n    kind: external\n    reference: \"terraform: b\"\n"
+            ),
+            "source.topic_owners declares topic \"orders\" more than once",
+        ),
     ] {
         let f = fixture(
             &spec_yaml("mvp-demo", "[orders]", &extra),
@@ -599,24 +609,29 @@ fn backup_run_refuses_a_declared_owner_it_cannot_record() {
 /// **PROD-05.1: owners reach the receipt.** A Strimzi `KafkaTopic` given with
 /// `--kafka-topic-resources` owns its topic, and a declaration in the plan is
 /// laid over it; without the file and the declaration nothing is owned (the
-/// control).
+/// control). And the receipt says WHERE the run looked (`owner_detection`, fix
+/// round M2): nowhere is an empty list — the owner NOT CHECKED — and an empty
+/// `topic_owners: []` is the operator saying no topic has one.
 #[test]
 fn declared_and_detected_owners_reach_the_receipts_model() {
     let declared = concat!(
         "  topic_owners:\n  - topic: orders\n    kind: external\n",
         "    reference: \"terraform: kafka_topic.orders\"\n",
     );
-    for (extra, resources, want) in [
-        ("", false, None),
+    for (extra, resources, want, looked) in [
+        ("", false, None, &[][..]),
+        ("  topic_owners: []\n", false, None, &["declared"][..]),
         (
             "",
             true,
             Some(("strimzi", "kafkaTopicResource", "kafka/orders-kt")),
+            &["kafkaTopicResources"][..],
         ),
         (
             declared,
             true,
             Some(("external", "declared", "terraform: kafka_topic.orders")),
+            &["declared", "kafkaTopicResources"][..],
         ),
     ] {
         let mut f = fixture(
@@ -648,6 +663,10 @@ fn declared_and_detected_owners_reach_the_receipts_model() {
         assert_eq!(
             got,
             want.map(|(k, b, r)| (k.to_string(), b.to_string(), r.to_string())),
+            "extra {extra:?}, resources {resources}"
+        );
+        assert_eq!(
+            outcome.owner_detection, looked,
             "extra {extra:?}, resources {resources}"
         );
     }
