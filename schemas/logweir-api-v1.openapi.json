@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Logweir product API",
-    "version": "1.0.0-alpha.1",
+    "version": "1.0.0-alpha.2",
     "description": "The bounded shared-console product API (PLAT-17.1). Not a Kubernetes proxy: no generic resource path, no Secret, Pod, log, exec or Job access, no delete, and no arbitrary patch. Every error is application/problem+json. Unsafe methods require Content-Type: application/json and an Origin equal to the configured public origin. Durable creates require Idempotency-Key. Capabilities without a route are advertised false in /api/v1/session."
   },
   "paths": {

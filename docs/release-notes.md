@@ -1087,9 +1087,18 @@ policy or roster ([keys.md](keys.md)).
   archive needs Homebrew's `openssl@3`. `logweir --version` prints the
   workspace version (`0.1.0`), not the tag; `release.json` ties each archive
   to its tag and commit.
-- **The product API's OpenAPI document is still `1.0.0-alpha.1`**, although the
-  console image and the chart now consume it; ship and upgrade the console and
-  the API together until the owner freezes it ([stability.md](stability.md)).
+- **The product API's OpenAPI document is `1.0.0-alpha.2`, still a
+  pre-release**, although the console image and the chart consume it; ship and
+  upgrade the console and the API together until PROD-14.2 freezes it at
+  `1.0.0` ([stability.md](stability.md)). Since `1.0.0-alpha.1` (2026-09-16,
+  never published) it gained 38 operations and removed none: destinations
+  (list, create, read, usage, test, update access, adopt from legacy), catalogs
+  with their points and signers, topic discoveries, preflights, the operation
+  event stream, schedule updates, manual backups, the restore approval
+  submission, read-only protection, rehearsal, retention and trust policies,
+  the namespace's approval policy, cadence previews, and the shared console's
+  sign-in routes (`/auth/login`, `/auth/callback`, session logout). Its
+  component schemas grew from 66 to 257; none was removed.
 - **No in-place runner signing-key cutover** ([keys.md](keys.md), step 2 of
   *The supported procedure*).
 - **Restore admission does not hold on a retention lease** (above).
