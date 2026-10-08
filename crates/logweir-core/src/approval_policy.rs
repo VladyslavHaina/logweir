@@ -58,12 +58,16 @@
 //! 1. `defaultMode` in the installation document (`approvalPolicy.default` in
 //!    the chart): `confirm` or `strict`, an explicit installation-admin
 //!    rollout — and the way an operator of an OLDER install opts in;
-//! 2. otherwise the FRESH-INSTALL MARKER ([`InstallationMarker`]): the
-//!    annotation [`APPROVAL_DEFAULT_ANNOTATION`] that `logweir identity
-//!    bootstrap` writes once, in the same patch that first establishes the
-//!    installation identity. An upgraded install's identity already existed,
-//!    so it is never marked, and stays `legacy-governed-v1` (D0: "Ordinary
-//!    mode cannot be enabled merely by upgrading");
+//! 2. otherwise the FRESH-INSTALL MARKER ([`InstallationMarker`]): a
+//!    [`MarkerClaim`] that `logweir identity bootstrap` writes in the one run
+//!    that GENERATES the installation identity, naming the default
+//!    `TrustPolicy` the same run created for the identity and the console
+//!    key. [`verify_marker`] — the one decision both readers make — honours
+//!    it only beside that exact, hook-made trust entry. An upgraded install's
+//!    identity already existed, so the hook never marks it and never trusts
+//!    its console key, and an annotation patched in later names no such
+//!    entry: it stays `legacy-governed-v1` (D0: "Ordinary mode cannot be
+//!    enabled merely by upgrading");
 //! 3. otherwise `legacy-governed-v1`.
 //!
 //! The marker is runtime state (the API and the controller read it from the
@@ -96,15 +100,30 @@ pub const LEGACY_GOVERNED_POLICY_NAME: &str = "legacy-governed-v1";
 /// Reserved: no declared policy may carry it.
 pub const DEFAULT_CONFIRM_POLICY_NAME: &str = "default-confirm-v1";
 
-/// PROD-16.1: the annotation the identity bootstrap writes, ONCE, on the
-/// installation identity it has just generated (the retained signing Secret
-/// and, copied from it, the public identity ConfigMap). Its one meaningful
-/// value is [`APPROVAL_DEFAULT_CONFIRM`]; anything else, or no annotation, is
-/// [`InstallationMarker::Unmarked`].
+/// PROD-16.1: the annotation that records a fresh install's `confirm` unbound
+/// default. It appears in TWO places, both written by the identity hook in the
+/// one run that GENERATES the installation identity, and both are required:
+///
+/// * on the public identity ConfigMap, as a [`MarkerClaim`] naming the
+///   installation `TrustPolicy` the same run created (name and UID) and the
+///   two key ids it trusts;
+/// * on that `TrustPolicy`, as the bare value [`APPROVAL_DEFAULT_CONFIRM`].
+///
+/// [`verify_marker`] honours the claim only when the policy it names exists
+/// with that UID, the hook's provenance, `default: true`, this annotation, and
+/// exactly those two keys with their one usage each. Anything else is
+/// [`InstallationMarker::Unmarked`] — `legacy-governed-v1`.
 pub const APPROVAL_DEFAULT_ANNOTATION: &str = "logweir.dev/approval-default";
 
-/// The marker's one meaningful value.
+/// The value the hook-made `TrustPolicy` carries under
+/// [`APPROVAL_DEFAULT_ANNOTATION`], and the first field of a [`MarkerClaim`].
 pub const APPROVAL_DEFAULT_CONFIRM: &str = "confirm";
+
+/// PROD-16.1: the provenance annotation on the installation `TrustPolicy`.
+pub const CREATED_BY_ANNOTATION: &str = "logweir.dev/created-by";
+
+/// Its value: the identity hook.
+pub const CREATED_BY_IDENTITY_BOOTSTRAP: &str = "identity-bootstrap";
 
 /// The policy snapshot's own format version.
 pub const POLICY_SNAPSHOT_FORMAT_VERSION: &str = "1";
@@ -297,16 +316,203 @@ pub enum InstallationMarker {
     FreshInstallConfirm,
 }
 
-impl InstallationMarker {
-    /// The marker an annotation value spells. Only the exact value
-    /// [`APPROVAL_DEFAULT_CONFIRM`] marks anything.
+/// PROD-16.1 — the fresh-install claim the identity hook writes on the public
+/// identity ConfigMap:
+/// `confirm;policy=<name>;uid=<uid>;signing=<keyId>;console=<keyId>`.
+///
+/// It BINDS the marker to what the same run created: the installation
+/// `TrustPolicy` by name AND by the UID the API server assigned it (a policy
+/// deleted and re-created, or one an administrator wrote, has another), the
+/// installation identity's key id, and the console key's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkerClaim {
+    /// The installation `TrustPolicy`'s name.
+    pub policy_name: String,
+    /// Its `metadata.uid` as the API server answered the hook's create.
+    pub policy_uid: String,
+    /// The installation identity's key id (`EvidenceSigning`).
+    pub signing_key_id: String,
+    /// The console key's id (`ConsoleConfirmation`).
+    pub console_key_id: String,
+}
+
+impl MarkerClaim {
+    /// The annotation value.
     #[must_use]
-    pub fn from_annotation(value: Option<&str>) -> Self {
-        match value {
-            Some(APPROVAL_DEFAULT_CONFIRM) => Self::FreshInstallConfirm,
-            _ => Self::Unmarked,
+    pub fn to_annotation(&self) -> String {
+        format!(
+            "{APPROVAL_DEFAULT_CONFIRM};policy={};uid={};signing={};console={}",
+            self.policy_name, self.policy_uid, self.signing_key_id, self.console_key_id
+        )
+    }
+
+    /// Parse an annotation value. Exactly the five fields, in order, each
+    /// non-empty; anything else — the bare word `confirm` included — is not a
+    /// claim.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let mut parts = value.split(';');
+        if parts.next() != Some(APPROVAL_DEFAULT_CONFIRM) {
+            return None;
+        }
+        let mut field = |name: &str| {
+            parts
+                .next()
+                .and_then(|p| p.strip_prefix(name))
+                .and_then(|p| p.strip_prefix('='))
+                .filter(|v| !v.is_empty() && v.trim() == *v)
+                .map(str::to_string)
+        };
+        let claim = Self {
+            policy_name: field("policy")?,
+            policy_uid: field("uid")?,
+            signing_key_id: field("signing")?,
+            console_key_id: field("console")?,
+        };
+        parts.next().is_none().then_some(claim)
+    }
+}
+
+/// One key of a `TrustPolicy`, as a reader extracted it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustKeyFacts {
+    /// `keyId`.
+    pub key_id: String,
+    /// `usages`, as written.
+    pub usages: Vec<String>,
+    /// `principal.id`.
+    pub principal_id: String,
+}
+
+/// What a reader read of the `TrustPolicy` a [`MarkerClaim`] names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustPolicyFacts {
+    /// `metadata.uid`.
+    pub uid: String,
+    /// `spec.default`.
+    pub default: bool,
+    /// The [`CREATED_BY_ANNOTATION`] value.
+    pub created_by: Option<String>,
+    /// The [`APPROVAL_DEFAULT_ANNOTATION`] value.
+    pub approval_default: Option<String>,
+    /// `spec.keys`.
+    pub keys: Vec<TrustKeyFacts>,
+}
+
+/// Why a fresh-install marker was not honoured. Every arm is the strict side
+/// (`legacy-governed-v1`), and every arm is logged as a WARN by both readers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerRefusal {
+    /// The annotation is not a [`MarkerClaim`] (a bare `confirm`, a hand
+    /// edit, a truncated value).
+    NotAClaim,
+    /// The claim names another installation identity than the ConfigMap it
+    /// is on.
+    OtherIdentity,
+    /// The `TrustPolicy` it names does not exist.
+    PolicyMissing,
+    /// It exists with another UID: deleted and re-created, or written by
+    /// someone else.
+    PolicyReplaced,
+    /// It does not carry the hook's provenance or the confirm annotation.
+    NotHookMade,
+    /// It is no longer the default policy, so it no longer governs unbound
+    /// namespaces.
+    NotDefault,
+    /// It does not declare the claimed keys with exactly their one usage each
+    /// and the hook's principals.
+    KeysDiffer,
+}
+
+impl MarkerRefusal {
+    /// The sentence a WARN carries.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAClaim => "the annotation is not the claim the identity hook writes",
+            Self::OtherIdentity => "the claim names another installation identity",
+            Self::PolicyMissing => "the TrustPolicy the claim names does not exist",
+            Self::PolicyReplaced => "the TrustPolicy the claim names has another UID",
+            Self::NotHookMade => {
+                "the TrustPolicy the claim names lacks the identity hook's provenance or its \
+                 confirm annotation"
+            }
+            Self::NotDefault => "the TrustPolicy the claim names is no longer default: true",
+            Self::KeysDiffer => {
+                "the TrustPolicy the claim names does not declare the claimed keys with their \
+                 one usage each"
+            }
         }
     }
+}
+
+/// PROD-16.1 — THE ONE DECISION both readers (the console and the controller)
+/// make over the fresh-install marker, so they cannot disagree about it.
+///
+/// * `annotation`: the [`APPROVAL_DEFAULT_ANNOTATION`] value on the public
+///   identity ConfigMap, if any;
+/// * `identity_key_id`: that ConfigMap's `key-id`;
+/// * `installation_namespace`: its namespace;
+/// * `policy`: the `TrustPolicy` the claim names, as read (`None`: absent).
+///
+/// WHY THE BINDING (the PROD-16.1 security review). Before PROD-16.1, turning
+/// a governed namespace into one-person confirmation took two separate gates:
+/// an approval-policy rollout, and a trust administrator trusting the console
+/// key. An annotation alone would have been ONE ConfigMap patch. Bound, the
+/// marker is honoured only beside a trust entry the identity hook made in the
+/// same fresh-install run — so on an install that existed before, patching
+/// the annotation in changes nothing, and forging the trust entry is the
+/// trust administrator's gate, as before.
+///
+/// # Errors
+///
+/// `Ok(Unmarked)` for no annotation; `Err` for an annotation that is not
+/// honoured — which the caller ALSO treats as unmarked, and logs as a WARN.
+pub fn verify_marker(
+    annotation: Option<&str>,
+    identity_key_id: Option<&str>,
+    installation_namespace: &str,
+    policy: Option<&TrustPolicyFacts>,
+) -> Result<InstallationMarker, MarkerRefusal> {
+    let Some(annotation) = annotation else {
+        return Ok(InstallationMarker::Unmarked);
+    };
+    let claim = MarkerClaim::parse(annotation).ok_or(MarkerRefusal::NotAClaim)?;
+    if identity_key_id != Some(claim.signing_key_id.as_str()) {
+        return Err(MarkerRefusal::OtherIdentity);
+    }
+    let policy = policy.ok_or(MarkerRefusal::PolicyMissing)?;
+    if policy.uid != claim.policy_uid {
+        return Err(MarkerRefusal::PolicyReplaced);
+    }
+    if policy.created_by.as_deref() != Some(CREATED_BY_IDENTITY_BOOTSTRAP)
+        || policy.approval_default.as_deref() != Some(APPROVAL_DEFAULT_CONFIRM)
+    {
+        return Err(MarkerRefusal::NotHookMade);
+    }
+    if !policy.default {
+        return Err(MarkerRefusal::NotDefault);
+    }
+    let carries = |key_id: &str, usage: &str, principal_prefix: &str| {
+        policy.keys.iter().any(|k| {
+            k.key_id == key_id
+                && k.usages.len() == 1
+                && k.usages[0] == usage
+                && k.principal_id.starts_with(principal_prefix)
+        })
+    };
+    if !carries(
+        &claim.signing_key_id,
+        "EvidenceSigning",
+        &format!("install:{installation_namespace}/"),
+    ) || !carries(
+        &claim.console_key_id,
+        "ConsoleConfirmation",
+        &format!("console:{installation_namespace}/"),
+    ) {
+        return Err(MarkerRefusal::KeysDiffer);
+    }
+    Ok(InstallationMarker::FreshInstallConfirm)
 }
 
 /// The installation document's explicit unbound default (`defaultMode`).
@@ -632,23 +838,36 @@ impl ApprovalPolicySet {
         }
         let document: PolicySetDocument = serde_yaml::from_str(text)
             .map_err(|e| PolicyConfigError(format!("the document does not parse: {e}")))?;
-        let default_mode =
-            match document.default_mode.as_deref() {
-                None => None,
-                Some("confirm") => Some(UnboundDefault::Confirm),
-                Some("strict") => Some(UnboundDefault::Strict),
-                Some("two-person") => return Err(PolicyConfigError(
+        let default_mode = match document.default_mode.as_deref() {
+            None => None,
+            // D0's floor, kept for the explicit opt-in (PROD-16.1 security
+            // review): an Ordinary unbound default is an Ordinary policy, and
+            // a document that does not also say allowOrdinaryConfirmation
+            // never enables one.
+            Some("confirm") if !document.allow_ordinary_confirmation => {
+                return Err(PolicyConfigError(
+                    "defaultMode confirm is ordinary confirmation for every unbound namespace, \
+                     and allowOrdinaryConfirmation is not true; ordinary confirmation is an \
+                     explicit installation decision (D0) and is never enabled by one field alone"
+                        .to_string(),
+                ));
+            }
+            Some("confirm") => Some(UnboundDefault::Confirm),
+            Some("strict") => Some(UnboundDefault::Strict),
+            Some("two-person") => {
+                return Err(PolicyConfigError(
                     "defaultMode two-person is PROD-16.2 and not in this build; use confirm or \
                      strict"
                         .to_string(),
-                )),
-                Some(other) => {
-                    return Err(PolicyConfigError(format!(
+                ));
+            }
+            Some(other) => {
+                return Err(PolicyConfigError(format!(
                     "defaultMode {other:?} is not a mode; it is confirm or strict (or absent: the \
                      fresh-install marker decides)"
-                )))
-                }
-            };
+                )));
+            }
+        };
         if document.policies.len() > MAX_POLICIES {
             return Err(PolicyConfigError(format!(
                 "`policies` declares {} policies; at most {MAX_POLICIES}",
@@ -1734,40 +1953,154 @@ namespaces:
             strict.unbound_basis(),
             UnboundBasis::Configured(UnboundDefault::Strict)
         );
-        // The opt-in of an OLDER install: no marker, an explicit confirm.
+        // The opt-in of an OLDER install: no marker, an explicit confirm —
+        // which, like any Ordinary policy, needs D0's floor.
         let opted_in =
-            ApprovalPolicySet::parse("defaultMode: confirm\n").unwrap_or_else(|e| panic!("{e}"));
+            ApprovalPolicySet::parse("allowOrdinaryConfirmation: true\ndefaultMode: confirm\n")
+                .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(opted_in.installation(), InstallationMarker::Unmarked);
         assert_eq!(
             opted_in.resolve("x"),
             EffectivePolicy::Bound(default_confirm_policy())
         );
         assert!(!opted_in.is_empty(), "defaultMode is configuration");
-        // An explicit default does not need the Ordinary floor: it IS the
-        // installation-level decision (D0 as amended by OD-8).
-        assert!(!opted_in.allows_ordinary_confirmation());
+        assert!(opted_in.allows_ordinary_confirmation());
+        let floorless = ApprovalPolicySet::parse("defaultMode: confirm\n");
+        assert!(
+            floorless
+                .as_ref()
+                .is_err_and(|e| e.0.contains("allowOrdinaryConfirmation")),
+            "{floorless:?}"
+        );
+    }
+
+    const NS: &str = "logweir-system";
+
+    fn claim() -> MarkerClaim {
+        MarkerClaim {
+            policy_name: "logweir-installation".into(),
+            policy_uid: "uid-7".into(),
+            signing_key_id: "a".repeat(64),
+            console_key_id: "b".repeat(64),
+        }
+    }
+
+    fn hook_policy() -> TrustPolicyFacts {
+        TrustPolicyFacts {
+            uid: "uid-7".into(),
+            default: true,
+            created_by: Some(CREATED_BY_IDENTITY_BOOTSTRAP.into()),
+            approval_default: Some(APPROVAL_DEFAULT_CONFIRM.into()),
+            keys: vec![
+                TrustKeyFacts {
+                    key_id: "a".repeat(64),
+                    usages: vec!["EvidenceSigning".into()],
+                    principal_id: format!("install:{NS}/logweir-signing-key"),
+                },
+                TrustKeyFacts {
+                    key_id: "b".repeat(64),
+                    usages: vec!["ConsoleConfirmation".into()],
+                    principal_id: format!("console:{NS}/logweir-console-confirmation"),
+                },
+            ],
+        }
     }
 
     #[test]
-    fn the_marker_is_only_the_exact_annotation_value() {
-        assert_eq!(
-            InstallationMarker::from_annotation(Some(APPROVAL_DEFAULT_CONFIRM)),
-            InstallationMarker::FreshInstallConfirm
-        );
+    fn the_claim_round_trips_and_nothing_else_parses() {
+        let c = claim();
+        assert_eq!(MarkerClaim::parse(&c.to_annotation()), Some(c.clone()));
         for other in [
-            None,
-            Some(""),
-            Some("Confirm"),
-            Some(" confirm"),
-            Some("strict"),
-            Some("true"),
+            "confirm",
+            "Confirm;policy=p;uid=u;signing=s;console=c",
+            "confirm;policy=p;uid=u;signing=s",
+            "confirm;policy=p;uid=u;signing=s;console=c;extra=1",
+            "confirm;policy=;uid=u;signing=s;console=c",
+            "confirm;uid=u;policy=p;signing=s;console=c",
+            "confirm;policy=p ;uid=u;signing=s;console=c",
         ] {
+            assert_eq!(MarkerClaim::parse(other), None, "{other:?}");
+        }
+    }
+
+    /// THE BOUND MARKER (PROD-16.1 security review): honoured only beside the
+    /// trust entry the identity hook made in the same fresh-install run. Each
+    /// row below breaks ONE binding and must read unmarked.
+    #[test]
+    fn the_marker_is_honoured_only_beside_the_hook_made_trust_entry() {
+        let annotation = claim().to_annotation();
+        let id = "a".repeat(64);
+        let ok = verify_marker(Some(&annotation), Some(&id), NS, Some(&hook_policy()));
+        assert_eq!(ok, Ok(InstallationMarker::FreshInstallConfirm));
+        assert_eq!(
+            verify_marker(None, Some(&id), NS, None),
+            Ok(InstallationMarker::Unmarked),
+            "no annotation is simply unmarked"
+        );
+        let refused = |annotation: &str,
+                       identity: &str,
+                       namespace: &str,
+                       policy: Option<TrustPolicyFacts>| {
+            verify_marker(Some(annotation), Some(identity), namespace, policy.as_ref()).err()
+        };
+        // A marker patched in by hand (the bare word the first draft used).
+        assert_eq!(
+            refused("confirm", &id, NS, Some(hook_policy())),
+            Some(MarkerRefusal::NotAClaim)
+        );
+        // A marker naming another identity.
+        assert_eq!(
+            refused(&annotation, &"c".repeat(64), NS, Some(hook_policy())),
+            Some(MarkerRefusal::OtherIdentity)
+        );
+        // No hook-made trust entry at all (an UPGRADED install).
+        assert_eq!(
+            refused(&annotation, &id, NS, None),
+            Some(MarkerRefusal::PolicyMissing)
+        );
+        // A policy of that name an administrator wrote later: another UID.
+        let mut replaced = hook_policy();
+        replaced.uid = "uid-8".into();
+        assert_eq!(
+            refused(&annotation, &id, NS, Some(replaced)),
+            Some(MarkerRefusal::PolicyReplaced)
+        );
+        for strip in [0, 1] {
+            let mut p = hook_policy();
+            if strip == 0 {
+                p.created_by = None;
+            } else {
+                p.approval_default = None;
+            }
             assert_eq!(
-                InstallationMarker::from_annotation(other),
-                InstallationMarker::Unmarked,
-                "{other:?}"
+                refused(&annotation, &id, NS, Some(p)),
+                Some(MarkerRefusal::NotHookMade)
             );
         }
+        let mut not_default = hook_policy();
+        not_default.default = false;
+        assert_eq!(
+            refused(&annotation, &id, NS, Some(not_default)),
+            Some(MarkerRefusal::NotDefault)
+        );
+        // The console key missing, given another usage, or two.
+        let mut no_console = hook_policy();
+        no_console.keys.truncate(1);
+        let mut wrong_usage = hook_policy();
+        wrong_usage.keys[1].usages = vec!["GovernedApproval".into()];
+        let mut two_usages = hook_policy();
+        two_usages.keys[1].usages.push("EvidenceSigning".into());
+        for p in [no_console, wrong_usage, two_usages] {
+            assert_eq!(
+                refused(&annotation, &id, NS, Some(p)),
+                Some(MarkerRefusal::KeysDiffer)
+            );
+        }
+        assert_eq!(
+            refused(&annotation, &id, "elsewhere", Some(hook_policy())),
+            Some(MarkerRefusal::KeysDiffer),
+            "principals of another installation namespace"
+        );
     }
 
     #[test]
@@ -1863,7 +2196,10 @@ namespaces:
         // NEGATIVE CONTROL: the document an install without `approvalPolicy.default`
         // renders is still one the older reader accepts.
         assert!(old(DOC));
-        assert!(ApprovalPolicySet::parse("defaultMode: confirm\n").is_ok());
+        assert!(ApprovalPolicySet::parse(
+            "allowOrdinaryConfirmation: true\ndefaultMode: confirm\n"
+        )
+        .is_ok());
     }
 
     #[test]

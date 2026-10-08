@@ -3,11 +3,18 @@
 //! restore needs no key; an UPGRADED install keeps `legacy-governed-v1` until
 //! an administrator opts in; an explicit binding always wins.
 //!
-//! "Fresh" is the marker the identity hook writes, once, on the installation's
-//! public identity ConfigMap (`logweir.dev/approval-default: confirm`). These
-//! rows seed that object in the fake cluster exactly as the hook leaves it, and
-//! every stored confirmation is verified here with the same `verify_detached`
-//! the controller and the runner use.
+//! "Fresh" is the claim the identity hook writes, in the run that generated
+//! the installation identity, on the public identity ConfigMap
+//! (`logweir.dev/approval-default: confirm;policy=…;uid=…;signing=…;console=…`),
+//! beside the default `TrustPolicy` the same run created. These rows seed both
+//! objects in the fake cluster exactly as the hook leaves them, and every
+//! stored confirmation is verified here with the same `verify_detached` the
+//! controller and the runner use.
+//!
+//! THE SECURITY REVIEW'S ROWS: on an install that existed before PROD-16.1, a
+//! marker patched into the ConfigMap — bare, or as a claim naming a policy
+//! that is missing, replaced, not hook-made, or that trusts no console key —
+//! changes nothing: legacy, nothing signed.
 
 mod support;
 
@@ -15,7 +22,7 @@ use std::sync::Arc;
 
 use logweir_api::approval::{ApprovalSettings, ConfirmationKey, InstallationIdentityRef};
 use logweir_core::approval_policy::{
-    ApprovalPolicySet, RestoreAuthorization, DEFAULT_CONFIRM_POLICY_NAME,
+    ApprovalPolicySet, MarkerClaim, RestoreAuthorization, DEFAULT_CONFIRM_POLICY_NAME,
     PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
 };
 use logweir_evidence::keys::{SigningKey, VerifyingKey};
@@ -25,6 +32,23 @@ use support::{FakeKube, Options, TestApp, LOCAL_ADMIN_ACTOR, NS_A, NS_B};
 
 const RELEASE_NS: &str = "logweir-system";
 const IDENTITY_CM: &str = "logweir-signing-trust";
+const POLICY: &str = "logweir-installation";
+const POLICY_UID: &str = "00000000-0000-4000-8000-0000000016a1";
+
+fn signing_id() -> String {
+    "a".repeat(64)
+}
+
+/// The claim the hook writes for a console key id.
+fn claim(console_key_id: &str) -> String {
+    MarkerClaim {
+        policy_name: POLICY.into(),
+        policy_uid: POLICY_UID.into(),
+        signing_key_id: signing_id(),
+        console_key_id: console_key_id.into(),
+    }
+    .to_annotation()
+}
 
 /// The public identity ConfigMap as the hook leaves it; `marker` is the value
 /// of `logweir.dev/approval-default`, or none.
@@ -35,8 +59,49 @@ fn identity_configmap(marker: Option<&str>) -> Value {
     }
     json!({
         "metadata": {"name": IDENTITY_CM, "annotations": annotations},
-        "data": {"key-id": "0".repeat(64), "algorithm": "ecdsa-p256-sha256"}
+        "data": {"key-id": signing_id(), "algorithm": "ecdsa-p256-sha256"}
     })
+}
+
+/// The installation TrustPolicy as the hook creates it, trusting
+/// `console_key_id`.
+fn hook_policy(console_key_id: &str) -> Value {
+    json!({
+        "metadata": {
+            "name": POLICY,
+            "uid": POLICY_UID,
+            "annotations": {
+                "logweir.dev/created-by": "identity-bootstrap",
+                "logweir.dev/approval-default": "confirm"
+            }
+        },
+        "spec": {
+            "default": true,
+            "keys": [
+                {"keyId": signing_id(), "algorithm": "p256", "usages": ["EvidenceSigning"],
+                 "state": "Active", "notBefore": "2026-10-07T09:55:00Z",
+                 "notAfter": "9999-12-31T23:59:59Z",
+                 "principal": {"id": format!("install:{RELEASE_NS}/logweir-signing-key")},
+                 "spkiPem": "-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----\n"},
+                {"keyId": console_key_id, "algorithm": "ed25519",
+                 "usages": ["ConsoleConfirmation"], "state": "Active",
+                 "notBefore": "2026-10-07T09:55:00Z", "notAfter": "9999-12-31T23:59:59Z",
+                 "principal": {"id": format!("console:{RELEASE_NS}/logweir-console-confirmation")},
+                 "spkiPem": "-----BEGIN PUBLIC KEY-----\ny\n-----END PUBLIC KEY-----\n"}
+            ]
+        }
+    })
+}
+
+/// What the cluster holds of the installation's identity and trust.
+enum Cluster {
+    /// The fresh install, exactly as the hook leaves it.
+    Fresh,
+    /// The identity ConfigMap with this annotation (or none), and this
+    /// policy (or none) — an upgraded install, or an attack on one.
+    Seeded(Option<String>, Option<Value>),
+    /// No identity ConfigMap at all.
+    Nothing,
 }
 
 struct Install {
@@ -45,14 +110,26 @@ struct Install {
 }
 
 /// A console over `document` (empty: no approval policy configured at all),
-/// the managed key, and the marker location; `marker` seeds the identity
-/// ConfigMap (`None` seeds none).
-fn install(document: &str, marker: Option<Option<&str>>) -> Install {
+/// the managed key, and the marker location, over `cluster`.
+fn install(document: &str, cluster: Cluster) -> Install {
     let key = SigningKey::generate_ed25519();
     let public = key.verifying_key();
+    let console_id = key.key_id();
     let fake = FakeKube::new();
-    if let Some(marker) = marker {
-        fake.seed("configmaps", RELEASE_NS, identity_configmap(marker));
+    let seeded = match cluster {
+        Cluster::Fresh => Some((Some(claim(&console_id)), Some(hook_policy(&console_id)))),
+        Cluster::Seeded(marker, policy) => Some((marker, policy)),
+        Cluster::Nothing => None,
+    };
+    if let Some((marker, policy)) = seeded {
+        fake.seed(
+            "configmaps",
+            RELEASE_NS,
+            identity_configmap(marker.as_deref()),
+        );
+        if let Some(policy) = policy {
+            fake.seed_cluster("trustpolicies", policy);
+        }
     }
     let settings = ApprovalSettings {
         policies: ApprovalPolicySet::parse(document).expect("valid"),
@@ -123,7 +200,7 @@ async fn policy(app: &TestApp, ns: &str) -> Value {
 /// and the stored document verifies against the console key.
 #[tokio::test]
 async fn a_fresh_install_confirms_an_unbound_namespace_in_one_request() {
-    let install = install("", Some(Some("confirm")));
+    let install = install("", Cluster::Fresh);
     let view = policy(&install.app, NS_B).await;
     assert_eq!(view["name"], DEFAULT_CONFIRM_POLICY_NAME);
     assert_eq!(view["operatorMode"], "confirm");
@@ -159,43 +236,81 @@ async fn a_fresh_install_confirms_an_unbound_namespace_in_one_request() {
     install.app.fake.assert_strict();
 }
 
-/// **An upgrade never weakens approval.** The same console over an install
-/// whose identity carries NO marker — the upgraded install — and over one
-/// with no identity object at all: the unbound namespace keeps
-/// `legacy-governed-v1`, nothing is signed, the Restore awaits today's v1
-/// approval. NEGATIVE CONTROL for "the upgrade marker ignored": a console
-/// that treated every install as fresh fails both halves.
+/// **An upgrade never weakens approval, and a patched marker changes
+/// nothing** (the PROD-16.1 security review). An upgraded install: an identity
+/// ConfigMap with no marker, or none at all. Then the ATTACKS on it, one
+/// object edit each: a bare `confirm`; a claim naming a policy that does not
+/// exist; a claim beside a policy of that name an administrator wrote (no
+/// hook provenance) or re-created (another UID); a claim naming a policy that
+/// trusts no console key. Every one reads `legacy-governed-v1` and signs
+/// nothing. NEGATIVE CONTROL for "the marker honoured whenever present": a
+/// console that honoured any of these fails here.
 #[tokio::test]
-async fn an_upgraded_install_keeps_legacy_until_an_administrator_opts_in() {
-    for marker in [
-        Some(None),
-        None,
-        Some(Some("Confirm")),
-        Some(Some("strict")),
+async fn an_upgraded_install_keeps_legacy_and_a_patched_marker_changes_nothing() {
+    let console_id = "b".repeat(64);
+    let mut hand_made = hook_policy(&console_id);
+    hand_made["metadata"]["annotations"] = json!({});
+    let mut recreated = hook_policy(&console_id);
+    recreated["metadata"]["uid"] = json!("00000000-0000-4000-8000-000000000bad");
+    let mut no_console = hook_policy(&console_id);
+    no_console["spec"]["keys"] = json!([no_console["spec"]["keys"][0].clone()]);
+    for (what, cluster) in [
+        ("upgraded, unmarked", Cluster::Seeded(None, None)),
+        ("no identity object", Cluster::Nothing),
+        (
+            "bare confirm patched in",
+            Cluster::Seeded(Some("confirm".into()), None),
+        ),
+        (
+            "claim, no policy",
+            Cluster::Seeded(Some(claim(&console_id)), None),
+        ),
+        (
+            "claim, hand-made policy",
+            Cluster::Seeded(Some(claim(&console_id)), Some(hand_made.clone())),
+        ),
+        (
+            "claim, re-created policy",
+            Cluster::Seeded(Some(claim(&console_id)), Some(recreated.clone())),
+        ),
+        (
+            "claim, no console key",
+            Cluster::Seeded(Some(claim(&console_id)), Some(no_console.clone())),
+        ),
     ] {
-        let install = install("", marker);
+        let install = install("", cluster);
         let view = policy(&install.app, NS_B).await;
-        assert_eq!(view["name"], "legacy-governed-v1", "{marker:?}");
-        assert_eq!(view["operatorMode"], "strict");
-        assert_eq!(view["basis"], "legacy");
+        assert_eq!(view["name"], "legacy-governed-v1", "{what}");
+        assert_eq!(view["operatorMode"], "strict", "{what}");
+        assert_eq!(view["basis"], "legacy", "{what}");
         let created = create(&install.app, NS_B, "upgraded-restore-01").await;
-        assert_eq!(created.status, 201);
-        assert_eq!(created.json()["authorization"]["state"], "awaitingApproval");
-        assert_eq!(created.json()["authorization"]["legacy"], true);
+        assert_eq!(created.status, 201, "{what}");
+        assert_eq!(
+            created.json()["authorization"]["state"],
+            "awaitingApproval",
+            "{what}"
+        );
+        assert_eq!(created.json()["authorization"]["legacy"], true, "{what}");
         assert!(
             approvals_posted(&install.app.fake).is_empty(),
-            "nothing signed"
+            "{what}: nothing signed"
         );
     }
-    // THE OPT-IN: an explicit `defaultMode: confirm`, no marker.
-    let opted = install("defaultMode: confirm\n", Some(None));
+    // THE DOCUMENTED OPT-IN of an older install: an explicit
+    // `defaultMode: confirm` with D0's floor (an approval-policy rollout),
+    // beside a trust administrator adding the console key to the namespace's
+    // TrustPolicy (which the controller checks; not modelled here).
+    let opted = install(
+        "allowOrdinaryConfirmation: true\ndefaultMode: confirm\n",
+        Cluster::Seeded(None, None),
+    );
     let view = policy(&opted.app, NS_B).await;
     assert_eq!(view["basis"], "configured");
     assert_eq!(view["operatorMode"], "confirm");
     let created = create(&opted.app, NS_B, "opted-restore-01").await;
     assert_eq!(created.json()["authorization"]["state"], "confirmed");
-    // And an explicit `strict` beats a marker.
-    let strict = install("defaultMode: strict\n", Some(Some("confirm")));
+    // And an explicit `strict` beats a genuine fresh-install marker.
+    let strict = install("defaultMode: strict\n", Cluster::Fresh);
     assert_eq!(
         policy(&strict.app, NS_B).await["name"],
         "legacy-governed-v1"
@@ -211,7 +326,7 @@ async fn an_explicit_binding_wins_over_the_fresh_install_default() {
         &format!(
             "policies:\n  - name: prod-governed\n    mode: strict\nnamespaces:\n  {NS_A}: prod-governed\n"
         ),
-        Some(Some("confirm")),
+        Cluster::Fresh,
     );
     let bound = policy(&install.app, NS_A).await;
     assert_eq!(bound["name"], "prod-governed");
@@ -230,7 +345,7 @@ async fn an_explicit_binding_wins_over_the_fresh_install_default() {
 /// nothing could ever authorise it.
 #[tokio::test]
 async fn an_unreadable_marker_refuses_before_anything_is_created() {
-    let install = install("", Some(Some("confirm")));
+    let install = install("", Cluster::Fresh);
     install.app.fake.inject(support::Fault {
         method: "GET",
         path_contains: format!("/namespaces/{RELEASE_NS}/configmaps/{IDENTITY_CM}"),
@@ -271,12 +386,15 @@ async fn the_managed_key_is_read_when_the_identity_hook_has_written_it() {
         }),
         ..settings
     };
+    // The key the hook WILL write; the claim and the policy already name it.
+    let key = SigningKey::generate_ed25519();
     let fake = FakeKube::new();
     fake.seed(
         "configmaps",
         RELEASE_NS,
-        identity_configmap(Some("confirm")),
+        identity_configmap(Some(&claim(&key.key_id()))),
     );
+    fake.seed_cluster("trustpolicies", hook_policy(&key.key_id()));
     let app = TestApp::with(
         fake,
         Options {
@@ -300,7 +418,6 @@ async fn the_managed_key_is_read_when_the_identity_hook_has_written_it() {
     assert_eq!(posted(&app.fake), 0, "nothing was created");
 
     // THE HOOK WRITES IT (the kubelet projects the Secret into the volume).
-    let key = SigningKey::generate_ed25519();
     std::fs::write(&key_file, key.to_pkcs8_pem().expect("pem")).expect("write");
     assert_eq!(policy(&app, NS_B).await["confirmationKeyId"], key.key_id());
     let created = create(&app, NS_B, "pending-restore-01").await;

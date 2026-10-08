@@ -46,12 +46,15 @@
 //! # The fresh-install marker (PROD-16.1)
 //!
 //! An unbound namespace resolves to `confirm` on a fresh install. That fact is
-//! the annotation `logweir.dev/approval-default` on the installation's public
-//! identity ConfigMap, written by the identity hook in the patch that
-//! generated the identity; [`effective_policies`] reads it on every request
-//! that resolves a policy, so the console agrees with the controller (which
-//! reads the same object) without sharing state with it. An absent object or
-//! annotation is unmarked: `legacy-governed-v1`.
+//! a claim the identity hook writes, in the run that generated the identity,
+//! on the installation's public identity ConfigMap
+//! (`logweir.dev/approval-default`), naming the default `TrustPolicy` the same
+//! run created. [`effective_policies`] reads both on every request that
+//! resolves a policy and honours the claim only through
+//! `weirkeeper::approval_policy::marker_verdict` — the verdict the controller
+//! reaches over the same objects — so the two cannot disagree and an
+//! annotation patched into an older install changes nothing. An absent
+//! object, annotation or policy is unmarked: `legacy-governed-v1`.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -308,15 +311,46 @@ pub async fn effective_policies(
     if policies.default_mode().is_some() {
         return Ok(policies);
     }
-    let marker = match kube
+    let document = match kube
         .get_installation_identity(&identity.namespace, &identity.config_map)
         .await
     {
-        Ok(document) => InstallationMarker::from_annotation(
-            document.annotation(logweir_core::approval_policy::APPROVAL_DEFAULT_ANNOTATION),
-        ),
-        Err(crate::kube::KubeFailure::NotFound) => InstallationMarker::Unmarked,
+        Ok(document) => document,
+        Err(crate::kube::KubeFailure::NotFound) => return Ok(policies),
         Err(other) => return Err(other),
+    };
+    let annotation =
+        document.annotation(logweir_core::approval_policy::APPROVAL_DEFAULT_ANNOTATION);
+    // THE BOUND MARKER (PROD-16.1 security review): honoured only beside the
+    // TrustPolicy the identity hook made in the same fresh-install run, by the
+    // one verdict the controller reaches too.
+    let policy = match weirkeeper::approval_policy::claimed_policy(annotation) {
+        Some(name) => match kube
+            .get_cluster::<weirkeeper::crds::trust_policy::TrustPolicy>(&name)
+            .await
+        {
+            Ok(policy) => Some(policy),
+            Err(crate::kube::KubeFailure::NotFound) => None,
+            Err(other) => return Err(other),
+        },
+        None => None,
+    };
+    let marker = match weirkeeper::approval_policy::marker_verdict(
+        annotation,
+        document.data.get("key-id").map(String::as_str),
+        &identity.namespace,
+        policy.as_ref(),
+    ) {
+        Ok(marker) => marker,
+        Err(refusal) => {
+            tracing::warn!(
+                configmap = %format!("{}/{}", identity.namespace, identity.config_map),
+                refusal = refusal.as_str(),
+                "a fresh-install marker is present and NOT honoured: unbound namespaces stay \
+                 legacy-governed-v1"
+            );
+            InstallationMarker::Unmarked
+        }
     };
     Ok(policies.with_installation(marker))
 }

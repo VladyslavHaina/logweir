@@ -13,19 +13,27 @@
 //!   that name already holds, which is ADOPTED), its public half published in
 //!   a retained ConfigMap, never regenerated, and a published public half
 //!   without its private key is KEY LOSS, which stops the hook.
-//! * **The fresh-install marker** ([`APPROVAL_DEFAULT_ANNOTATION`]): written
-//!   only in the patch that GENERATES the installation identity, so it can
-//!   only ever mark a fresh install — an upgraded install's identity already
-//!   existed, and an adopted one may have. It is copied onto the public
-//!   identity ConfigMap, where the console and the controller read it.
-//! * **The installation `TrustPolicy`** ([`InstallationTrustArgs`]): on that
-//!   same fresh install, one cluster-scoped `default: true` policy trusting
-//!   the installation signer (`EvidenceSigning`) and the console key
-//!   (`ConsoleConfirmation`), so a first restore reaches a verified result
-//!   with no key handled by a person. Created once; never when the cluster
-//!   already has trust of its own (another default policy, or
-//!   `TrustRoster/default`); never modified afterwards — its keys are
-//!   append-only and its lifecycle is the trust administrator's.
+//! * **The installation `TrustPolicy`** ([`InstallationTrustArgs`]): ONLY in
+//!   the run that GENERATES the installation identity — a fresh install; an
+//!   upgraded install's identity already existed, and an adopted one may
+//!   have — one cluster-scoped `default: true` policy trusting the
+//!   installation signer (`EvidenceSigning`) and, when the chart runs a
+//!   console, the console key (`ConsoleConfirmation`), so a first restore
+//!   reaches a verified result with no key handled by a person. Never when
+//!   the cluster already has trust of its own (another default policy, a
+//!   policy of that name, or `TrustRoster/default`); never modified
+//!   afterwards — its keys are append-only and its lifecycle is the trust
+//!   administrator's. A retried hook that finds the identity already
+//!   generated does NOT finish this step: an install whose first run was
+//!   interrupted starts strict, the fail-safe side.
+//! * **The fresh-install marker** ([`APPROVAL_DEFAULT_ANNOTATION`]): in that
+//!   same run, after the policy exists, a [`MarkerClaim`] on the public
+//!   identity ConfigMap naming the policy by name and UID and both key ids.
+//!   The console and the controller honour it only beside that exact,
+//!   hook-made trust entry (`logweir_core::approval_policy::verify_marker`),
+//!   so an annotation patched into an older install changes nothing — the
+//!   PROD-16.1 security review's requirement that no single object edit can
+//!   do what two gates did before.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -34,7 +42,10 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use logweir_core::approval_policy::{APPROVAL_DEFAULT_ANNOTATION, APPROVAL_DEFAULT_CONFIRM};
+use logweir_core::approval_policy::{
+    MarkerClaim, APPROVAL_DEFAULT_ANNOTATION, APPROVAL_DEFAULT_CONFIRM, CREATED_BY_ANNOTATION,
+    CREATED_BY_IDENTITY_BOOTSTRAP,
+};
 use logweir_evidence::keys::{KeyAlg, SigningKey};
 use serde_json::{json, Value};
 
@@ -49,16 +60,25 @@ const PUBLIC_ALGORITHM: &str = "algorithm";
 const TRUST_REFERENCE: &str = "trust-reference";
 const DEFAULT_TRUST_REFERENCE: &str = "logweir.dev/v1alpha1/TrustRoster/default#spec.signingKeys";
 
-/// PROD-16.1: on the retained signing Secret, written in the SAME patch that
-/// generates the identity — the durable record that this installation was
-/// born here, which a retried hook reads to finish the fresh-install steps.
-const INSTALLATION_ORIGIN_ANNOTATION: &str = "logweir.dev/installation-origin";
-const INSTALLATION_ORIGIN_GENERATED: &str = "generated";
-
-/// PROD-16.1: on the public identity ConfigMap, what the installation-trust
-/// step did, written once after it — so the step is never repeated, and an
-/// administrator who later deletes or replaces the policy is not overruled.
+/// PROD-16.1: on the public identity ConfigMap, what the fresh install's
+/// trust step did — a record for the operator. Nothing reads it to decide
+/// anything: the step runs only in the identity-generating run.
 const INSTALLATION_TRUST_ANNOTATION: &str = "logweir.dev/installation-trust";
+
+/// What a stray marker on a placeholder is overwritten with when this run
+/// makes no claim: not a [`MarkerClaim`], so never honoured.
+const NO_CLAIM: &str = "none";
+
+/// How many times the fresh install's trust step is tried within its one run
+/// before the hook fails: it cannot be finished by a later run.
+const TRUST_ATTEMPTS: u32 = 3;
+
+/// The pause between two attempts (none in the rows).
+const TRUST_RETRY_DELAY: Duration = if cfg!(test) {
+    Duration::ZERO
+} else {
+    Duration::from_secs(2)
+};
 
 /// The console key's public record: the same shape as the identity's, with
 /// its own PEM key and, in place of the roster reference, the one usage the
@@ -157,17 +177,9 @@ struct PrivateRecord {
     pem: Option<String>,
     has_any_data: bool,
     has_annotations: bool,
-    /// PROD-16.1: every annotation, for the markers a generation wrote.
-    annotations: BTreeMap<String, String>,
     /// `metadata.creationTimestamp`: the earliest instant the key it holds
     /// can have existed.
     created_at: Option<String>,
-}
-
-impl PrivateRecord {
-    fn annotation(&self, key: &str) -> Option<&str> {
-        self.annotations.get(key).map(String::as_str)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -238,10 +250,11 @@ enum InitializeResult {
     Contended(u16),
 }
 
-/// The answer to a create: written, or the name was already taken.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The answer to a create: written (with the UID the API server assigned),
+/// or the name was already taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CreateResult {
-    Created,
+    Created { uid: String },
     AlreadyExists,
 }
 
@@ -267,13 +280,13 @@ trait IdentityStore {
         material: &PublicMaterial,
         markers: &[Marker<'_>],
     ) -> Result<InitializeResult, String>;
-    /// PROD-16.1: one annotation on the public identity ConfigMap, under a
-    /// `resourceVersion` precondition.
+    /// PROD-16.1: annotations on the public identity ConfigMap, in one
+    /// patch, under a `resourceVersion` precondition.
     fn annotate_public(
         &mut self,
         expected_resource_version: &str,
         has_annotations: bool,
-        marker: Marker<'_>,
+        markers: &[Marker<'_>],
     ) -> Result<InitializeResult, String>;
     /// PROD-16.1: the console key's retained Secret.
     fn console_private(&mut self, console: &ConsoleKeyArgs) -> Result<PrivateRecord, String>;
@@ -348,8 +361,8 @@ pub fn run(args: &BootstrapArgs) -> ExitCode {
 }
 
 /// The whole hook: the installation identity, then (PROD-16.1) the console
-/// key, then the installation `TrustPolicy`. Each step is create-once and
-/// idempotent, so a retried hook finishes what an interrupted one started.
+/// key, then — ONLY when this run generated the identity — the fresh
+/// install's trust and marker.
 fn bootstrap_all(
     store: &mut impl IdentityStore,
     args: &BootstrapArgs,
@@ -360,7 +373,11 @@ fn bootstrap_all(
         Some(console) => Some(bootstrap_console(store, console)?),
         None => None,
     };
-    let trust = ensure_installation_trust(store, args, console.as_ref(), now)?;
+    let trust = if identity.origin == Origin::Generated {
+        fresh_install_trust(store, args, console.as_ref(), now)?
+    } else {
+        None
+    };
     Ok(Report {
         identity,
         console: console.map(|(outcome, _, _)| outcome),
@@ -513,7 +530,7 @@ fn bootstrap(store: &mut impl IdentityStore, args: &BootstrapArgs) -> Result<Out
             }
         }
 
-        ensure_public(store, public, &material, &private)?;
+        ensure_public(store, public, &material)?;
         return Ok(Outcome {
             key_id: material.key_id,
             origin: Origin::Existing,
@@ -548,26 +565,12 @@ fn bootstrap(store: &mut impl IdentityStore, args: &BootstrapArgs) -> Result<Out
     };
     let candidate_material = public_material(&candidate.0)?;
 
-    // PROD-16.1: THE MARKERS GO IN THE PATCH THAT GENERATES THE KEY, and in no
-    // other. An adopted key may predate this chart (an upgrade that adopts a
-    // hand-provisioned signer), so only a key generated HERE says "this
-    // installation was born now".
-    let mut markers: Vec<Marker<'_>> = Vec::new();
-    if !external_mode {
-        markers.push((
-            INSTALLATION_ORIGIN_ANNOTATION,
-            INSTALLATION_ORIGIN_GENERATED,
-        ));
-        if args.mark_fresh_install_confirm {
-            markers.push((APPROVAL_DEFAULT_ANNOTATION, APPROVAL_DEFAULT_CONFIRM));
-        }
-    }
     let (winner, origin) = match store.initialize_private(
         &private.resource_version,
         private.has_annotations,
         &args.secret_key,
         &candidate.1,
-        &markers,
+        &[],
     )? {
         InitializeResult::Written => (
             candidate_material,
@@ -607,35 +610,19 @@ fn bootstrap(store: &mut impl IdentityStore, args: &BootstrapArgs) -> Result<Out
     };
 
     // Reload because a separate bootstrap may have published between the
-    // first reads and the successful/contended Secret initialization — and
-    // (PROD-16.1) because the markers the publication copies are the STORED
-    // winner's, whoever wrote it.
-    let current_private = store.managed_private()?;
+    // first reads and the successful/contended Secret initialization.
     let current_public = store.public_record()?;
-    ensure_public(store, current_public, &winner, &current_private)?;
+    ensure_public(store, current_public, &winner)?;
     Ok(Outcome {
         key_id: winner.key_id,
         origin,
     })
 }
 
-/// The markers the public identity ConfigMap carries, copied from the private
-/// Secret at the moment the public record is first written: today only the
-/// fresh-install approval default, which the console and the controller read
-/// there (they cannot read the Secret).
-fn published_markers(private: &PrivateRecord) -> Vec<Marker<'static>> {
-    if private.annotation(APPROVAL_DEFAULT_ANNOTATION) == Some(APPROVAL_DEFAULT_CONFIRM) {
-        vec![(APPROVAL_DEFAULT_ANNOTATION, APPROVAL_DEFAULT_CONFIRM)]
-    } else {
-        Vec::new()
-    }
-}
-
 fn ensure_public(
     store: &mut impl IdentityStore,
     record: PublicRecord,
     material: &PublicMaterial,
-    private: &PrivateRecord,
 ) -> Result<(), String> {
     if record.carries_identity() {
         return validate_public(&record, material, &SIGNING_LAYOUT);
@@ -646,12 +633,11 @@ fn ensure_public(
                 .to_string(),
         );
     }
-    let markers = published_markers(private);
     match store.initialize_public(
         &record.resource_version,
         record.has_annotations,
         material,
-        &markers,
+        &[],
     )? {
         InitializeResult::Written => Ok(()),
         InitializeResult::Contended(status) => {
@@ -836,26 +822,25 @@ fn ensure_console_public(
 // PROD-16.1: the installation TrustPolicy
 // ---------------------------------------------------------------------------
 
-/// The fresh install's `TrustPolicy`, once.
+/// The fresh install's `TrustPolicy` and marker — called ONLY in the run that
+/// generated the installation identity.
 ///
-/// Runs only when the chart asked for it AND the signing Secret records that
-/// its key was GENERATED here ([`INSTALLATION_ORIGIN_ANNOTATION`]) AND the
-/// public identity ConfigMap does not yet record the step's outcome
-/// ([`INSTALLATION_TRUST_ANNOTATION`]). It then:
+/// Creates nothing when the chart did not ask for it, or when the cluster
+/// already has trust of its own: a policy of the installation's name (left
+/// over, or an administrator's — never adopted or edited), another
+/// `default: true` policy (a second default would contest every namespace,
+/// `TrustPolicyConflict`), or `TrustRoster/default` (a default policy outranks
+/// it). Otherwise it creates the policy, `default: true`, one key per usage
+/// (CEL rule G8): the installation signer, and — when the chart asked for the
+/// confirm default and a console key is managed — the console key, with the
+/// policy annotated [`APPROVAL_DEFAULT_ANNOTATION`]`: confirm`. Then, in ONE
+/// patch on the public identity ConfigMap, it records the outcome and, beside
+/// a created policy with the console key, the [`MarkerClaim`] naming the
+/// policy's name and UID and both key ids.
 ///
-/// * accepts a policy of that name that already carries these keys with
-///   these usages (an interrupted earlier run created it), and refuses one
-///   that does not — it never edits a policy;
-/// * creates nothing when the cluster already has trust of its own — another
-///   `default: true` policy, or `TrustRoster/default` — because a second
-///   default would contest every namespace (`TrustPolicyConflict`) and a
-///   default policy outranks the roster;
-/// * otherwise creates it, `default: true`, one key per usage (CEL rule G8);
-///
-/// and records what it did on the public ConfigMap, so no later run repeats
-/// it — an administrator who deletes or replaces the policy afterwards is not
-/// overruled.
-fn ensure_installation_trust(
+/// The trust calls are retried within this run: a later run cannot finish
+/// them, because a later run finds the identity already generated.
+fn fresh_install_trust(
     store: &mut impl IdentityStore,
     args: &BootstrapArgs,
     console: Option<&(Outcome, PublicMaterial, PrivateRecord)>,
@@ -865,13 +850,7 @@ fn ensure_installation_trust(
         return Ok(None);
     };
     let private = store.managed_private()?;
-    if private.annotation(INSTALLATION_ORIGIN_ANNOTATION) != Some(INSTALLATION_ORIGIN_GENERATED) {
-        return Ok(None);
-    }
     let public = store.public_record()?;
-    if let Some(done) = public.annotation(INSTALLATION_TRUST_ANNOTATION) {
-        return Ok(Some(done.to_string()));
-    }
     let signing = PublicMaterial {
         key_id: public.key_id.clone().unwrap_or_default(),
         spki_pem: public.spki_pem.clone().unwrap_or_default(),
@@ -885,129 +864,137 @@ fn ensure_installation_trust(
         "Logweir installation signer",
         not_before(private.created_at.as_deref(), now),
     )];
-    if let (Some((_, material, console_private)), Some(console_args)) = (console, &args.console) {
-        keys.push((
-            material.clone(),
-            CONSOLE_CONFIRMATION_USAGE,
-            format!("console:{}/{}", args.namespace, console_args.secret_name),
-            "Logweir console confirmation",
-            not_before(console_private.created_at.as_deref(), now),
-        ));
-    }
-    let wanted: Vec<(String, &str)> = keys
-        .iter()
-        .map(|(m, usage, ..)| (m.key_id.clone(), *usage))
-        .collect();
-
-    let policies = store.trust_policies()?;
-    let named = |name: &str| {
-        policies
-            .iter()
-            .find(|p| p.pointer("/metadata/name").and_then(Value::as_str) == Some(name))
-    };
-    let outcome = if let Some(ours) = named(&trust.policy_name) {
-        accept_existing_policy(ours, &trust.policy_name, &wanted)?;
-        format!("existing:{}", trust.policy_name)
-    } else if let Some(other) = policies
-        .iter()
-        .find(|p| p.pointer("/spec/default").and_then(Value::as_bool) == Some(true))
-    {
-        format!(
-            "skipped:default-policy:{}",
-            other
-                .pointer("/metadata/name")
-                .and_then(Value::as_str)
-                .unwrap_or("<unnamed>")
-        )
-    } else if store.trust_roster_exists()? {
-        "skipped:roster".to_string()
-    } else {
-        let policy = installation_trust_policy(
-            &trust.policy_name,
-            &args.namespace,
-            &keys,
-            &trust.allowed_target_cluster_ids,
-        );
-        match store.create_trust_policy(&policy)? {
-            CreateResult::Created => format!("created:{}", trust.policy_name),
-            CreateResult::AlreadyExists => {
-                // A concurrent run won the create: accept it only if it is
-                // the same trust.
-                let again = store.trust_policies()?;
-                let ours = again
-                    .iter()
-                    .find(|p| {
-                        p.pointer("/metadata/name").and_then(Value::as_str)
-                            == Some(trust.policy_name.as_str())
-                    })
-                    .ok_or_else(|| {
-                        format!(
-                            "TrustPolicy {} was reported to exist and then could not be read",
-                            trust.policy_name
-                        )
-                    })?;
-                accept_existing_policy(ours, &trust.policy_name, &wanted)?;
-                format!("existing:{}", trust.policy_name)
-            }
-        }
-    };
-    record_trust_outcome(store, &outcome)?;
-    Ok(Some(outcome))
-}
-
-/// A policy of the installation's name is accepted only if it already
-/// declares every wanted key id with exactly the wanted usage.
-fn accept_existing_policy(
-    policy: &Value,
-    name: &str,
-    wanted: &[(String, &str)],
-) -> Result<(), String> {
-    let keys = policy
-        .pointer("/spec/keys")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for (key_id, usage) in wanted {
-        let carried = keys.iter().any(|k| {
-            k.get("keyId").and_then(Value::as_str) == Some(key_id.as_str())
-                && k.get("usages")
-                    .and_then(Value::as_array)
-                    .is_some_and(|u| u.len() == 1 && u[0].as_str() == Some(usage))
-        });
-        if !carried {
-            return Err(format!(
-                "TrustPolicy {name} already exists and does not declare key {key_id} with usage {usage}; refusing to adopt or edit a policy this hook did not write"
+    let confirm = match (console, &args.console) {
+        (Some((_, material, console_private)), Some(console_args))
+            if args.mark_fresh_install_confirm =>
+        {
+            keys.push((
+                material.clone(),
+                CONSOLE_CONFIRMATION_USAGE,
+                format!("console:{}/{}", args.namespace, console_args.secret_name),
+                "Logweir console confirmation",
+                not_before(console_private.created_at.as_deref(), now),
             ));
+            Some(material.key_id.clone())
         }
-    }
-    Ok(())
-}
+        _ => None,
+    };
+    let policy = installation_trust_policy(
+        &trust.policy_name,
+        &args.namespace,
+        &keys,
+        &trust.allowed_target_cluster_ids,
+        confirm.is_some(),
+    );
 
-/// Write the trust step's outcome onto the public identity ConfigMap, under a
-/// `resourceVersion` precondition; a lost race is accepted when the winner
-/// recorded an outcome too.
-fn record_trust_outcome(store: &mut impl IdentityStore, outcome: &str) -> Result<(), String> {
-    let public = store.public_record()?;
-    match store.annotate_public(
-        &public.resource_version,
-        public.has_annotations,
-        (INSTALLATION_TRUST_ANNOTATION, outcome),
-    )? {
-        InitializeResult::Written => Ok(()),
-        InitializeResult::Contended(status) => {
-            let again = store
-                .public_record()
-                .map_err(|error| contention_error(status, error))?;
-            if again.annotation(INSTALLATION_TRUST_ANNOTATION).is_some() {
-                Ok(())
-            } else {
-                Err(contention_error(
-                    status,
-                    "the public trust ConfigMap changed and records no installation-trust outcome",
+    let mut attempt = 0;
+    let outcome = loop {
+        attempt += 1;
+        match create_installation_trust(store, &trust.policy_name, &policy) {
+            Ok(outcome) => break outcome,
+            Err(error) if attempt < TRUST_ATTEMPTS => {
+                eprintln!(
+                    "installation-trust attempt {attempt}/{TRUST_ATTEMPTS} failed: {error}; retrying"
+                );
+                std::thread::sleep(TRUST_RETRY_DELAY);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "{error}; the installation identity is established, and a later run will NOT \
+                     create its TrustPolicy or mark it: this install starts strict (see \
+                     docs/install.md, the fresh-install trust)"
                 ))
             }
         }
+    };
+    let (recorded, claim) = match &outcome {
+        TrustOutcome::Created { uid } => (
+            format!("created:{}", trust.policy_name),
+            confirm.map(|console_key_id| MarkerClaim {
+                policy_name: trust.policy_name.clone(),
+                policy_uid: uid.clone(),
+                signing_key_id: signing.key_id.clone(),
+                console_key_id,
+            }),
+        ),
+        TrustOutcome::Skipped(reason) => (format!("skipped:{reason}"), None),
+    };
+    record_fresh_install(store, &recorded, claim.as_ref())?;
+    Ok(Some(recorded))
+}
+
+/// What the fresh install's trust step did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TrustOutcome {
+    Created { uid: String },
+    Skipped(String),
+}
+
+/// One attempt: read what trust the cluster has, then create the policy or
+/// say why not.
+fn create_installation_trust(
+    store: &mut impl IdentityStore,
+    name: &str,
+    policy: &Value,
+) -> Result<TrustOutcome, String> {
+    let policies = store.trust_policies()?;
+    let name_of = |p: &Value| {
+        p.pointer("/metadata/name")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    if policies.iter().any(|p| name_of(p).as_deref() == Some(name)) {
+        return Ok(TrustOutcome::Skipped(format!("name-taken:{name}")));
     }
+    if let Some(other) = policies
+        .iter()
+        .find(|p| p.pointer("/spec/default").and_then(Value::as_bool) == Some(true))
+    {
+        return Ok(TrustOutcome::Skipped(format!(
+            "default-policy:{}",
+            name_of(other).unwrap_or_else(|| "<unnamed>".into())
+        )));
+    }
+    if store.trust_roster_exists()? {
+        return Ok(TrustOutcome::Skipped("roster".into()));
+    }
+    match store.create_trust_policy(policy)? {
+        CreateResult::Created { uid } => Ok(TrustOutcome::Created { uid }),
+        // Taken between the list and the create: never adopted.
+        CreateResult::AlreadyExists => Ok(TrustOutcome::Skipped(format!("name-taken:{name}"))),
+    }
+}
+
+/// Record the trust step's outcome and, beside a created policy that trusts
+/// the console key, the marker — ONE `resourceVersion`-preconditioned patch,
+/// re-read and retried once on contention.
+fn record_fresh_install(
+    store: &mut impl IdentityStore,
+    outcome: &str,
+    claim: Option<&MarkerClaim>,
+) -> Result<(), String> {
+    let claim_value = claim.map(MarkerClaim::to_annotation);
+    for _ in 0..2 {
+        let public = store.public_record()?;
+        let mut markers: Vec<Marker<'_>> = vec![(INSTALLATION_TRUST_ANNOTATION, outcome)];
+        match claim_value.as_deref() {
+            Some(value) => markers.push((APPROVAL_DEFAULT_ANNOTATION, value)),
+            // A marker planted on the placeholder before this run is
+            // overwritten with a value that is not a claim: never honoured.
+            None if public.annotation(APPROVAL_DEFAULT_ANNOTATION).is_some() => {
+                markers.push((APPROVAL_DEFAULT_ANNOTATION, NO_CLAIM));
+            }
+            None => {}
+        }
+        match store.annotate_public(&public.resource_version, public.has_annotations, &markers)? {
+            InitializeResult::Written => return Ok(()),
+            InitializeResult::Contended(_) => continue,
+        }
+    }
+    Err(
+        "the public trust ConfigMap kept changing while the fresh-install outcome was recorded"
+            .to_string(),
+    )
 }
 
 /// A key's `notBefore`: five minutes before its Secret was created (the
@@ -1034,12 +1021,15 @@ fn trust_algorithm(algorithm: &str) -> &'static str {
 }
 
 /// The installation `TrustPolicy`, as the bytes this hook POSTs. Public
-/// material only.
+/// material only. `confirm`: the policy records the fresh install's confirm
+/// default ([`APPROVAL_DEFAULT_ANNOTATION`]), which the marker's readers
+/// require beside the claim.
 fn installation_trust_policy(
     name: &str,
     namespace: &str,
     keys: &[(PublicMaterial, &str, String, &str, String)],
     allowed_target_cluster_ids: &[String],
+    confirm: bool,
 ) -> Value {
     let keys: Vec<Value> = keys
         .iter()
@@ -1060,6 +1050,13 @@ fn installation_trust_policy(
     if !allowed_target_cluster_ids.is_empty() {
         spec["allowedTargetClusterIds"] = json!(allowed_target_cluster_ids);
     }
+    let mut annotations = json!({
+        (CREATED_BY_ANNOTATION): CREATED_BY_IDENTITY_BOOTSTRAP,
+        "logweir.dev/installation-namespace": namespace,
+    });
+    if confirm {
+        annotations[APPROVAL_DEFAULT_ANNOTATION] = json!(APPROVAL_DEFAULT_CONFIRM);
+    }
     json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "TrustPolicy",
@@ -1069,10 +1066,7 @@ fn installation_trust_policy(
                 "app.kubernetes.io/part-of": "logweir",
                 "app.kubernetes.io/component": "installation-trust",
             },
-            "annotations": {
-                "logweir.dev/created-by": "identity-bootstrap",
-                "logweir.dev/installation-namespace": namespace,
-            },
+            "annotations": annotations,
         },
         "spec": spec,
     })
@@ -1379,12 +1373,12 @@ impl IdentityStore for KubernetesStore {
         &mut self,
         expected_resource_version: &str,
         has_annotations: bool,
-        marker: Marker<'_>,
+        markers: &[Marker<'_>],
     ) -> Result<InitializeResult, String> {
         let mut patch = vec![
             json!({"op": "test", "path": "/metadata/resourceVersion", "value": expected_resource_version}),
         ];
-        patch.extend(annotation_ops(has_annotations, &[marker]));
+        patch.extend(annotation_ops(has_annotations, markers));
         self.patch(
             "configmaps",
             &self.public_configmap_name,
@@ -1470,7 +1464,23 @@ impl IdentityStore for KubernetesStore {
             .set("Authorization", &format!("Bearer {}", self.token))
             .send_json(policy.clone())
         {
-            Ok(_) => Ok(CreateResult::Created),
+            Ok(response) => {
+                let created: Value = response.into_json().map_err(|e| {
+                    format!("Kubernetes returned invalid JSON creating TrustPolicy {name}: {e}")
+                })?;
+                let uid = created
+                    .pointer("/metadata/uid")
+                    .and_then(Value::as_str)
+                    .filter(|uid| !uid.is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "Kubernetes created TrustPolicy {name} and returned no metadata.uid"
+                        )
+                    })?;
+                Ok(CreateResult::Created {
+                    uid: uid.to_string(),
+                })
+            }
             Err(ureq::Error::Status(409, _)) => Ok(CreateResult::AlreadyExists),
             Err(error) => Err(api_error("create", "trustpolicies", &name, error)),
         }
@@ -1616,7 +1626,6 @@ fn private_record(object: &Value, name: &str, key: &str) -> Result<PrivateRecord
             .pointer("/metadata/annotations")
             .and_then(Value::as_object)
             .is_some(),
-        annotations: all_annotations(object),
         created_at: object
             .pointer("/metadata/creationTimestamp")
             .and_then(Value::as_str)
@@ -1774,6 +1783,9 @@ mod tests {
         roster: bool,
         created_policies: Vec<Value>,
         create_conflict_with: Option<Value>,
+        /// Trust calls that fail before one succeeds.
+        trust_failures: u32,
+        next_uid: u32,
     }
 
     fn empty_private(created_at: &str) -> PrivateRecord {
@@ -1783,10 +1795,6 @@ mod tests {
             pem: None,
             has_any_data: false,
             has_annotations: true,
-            annotations: BTreeMap::from([(
-                IDENTITY_STATE_ANNOTATION.to_string(),
-                "uninitialized".to_string(),
-            )]),
             created_at: Some(created_at.into()),
         }
     }
@@ -1828,16 +1836,10 @@ mod tests {
         record.resource_version = "2".into();
     }
 
-    fn write_private(record: &mut PrivateRecord, pem: &str, markers: &[Marker<'_>]) {
+    fn write_private(record: &mut PrivateRecord, pem: &str) {
         record.pem = Some(pem.to_string());
         record.has_any_data = true;
         record.state = Some(ESTABLISHED.into());
-        record
-            .annotations
-            .insert(IDENTITY_STATE_ANNOTATION.into(), ESTABLISHED.into());
-        for (k, v) in markers {
-            record.annotations.insert((*k).into(), (*v).into());
-        }
         record.resource_version = "2".into();
     }
 
@@ -1857,6 +1859,8 @@ mod tests {
                 roster: false,
                 created_policies: Vec::new(),
                 create_conflict_with: None,
+                trust_failures: 0,
+                next_uid: 0,
             }
         }
 
@@ -1886,6 +1890,7 @@ mod tests {
             pem: &str,
             markers: &[Marker<'_>],
         ) -> Result<InitializeResult, String> {
+            assert!(markers.is_empty(), "no generation patch carries a marker");
             if expected_resource_version != self.private.resource_version {
                 return Ok(InitializeResult::Contended(409));
             }
@@ -1896,18 +1901,10 @@ mod tests {
                 return Ok(InitializeResult::Contended(422));
             }
             if let Some(winner) = self.concurrent_private.take() {
-                // The concurrent winner was a fresh-install bootstrap too.
-                write_private(
-                    &mut self.private,
-                    &winner,
-                    &[(
-                        INSTALLATION_ORIGIN_ANNOTATION,
-                        INSTALLATION_ORIGIN_GENERATED,
-                    )],
-                );
+                write_private(&mut self.private, &winner);
                 return Ok(InitializeResult::Contended(422));
             }
-            write_private(&mut self.private, pem, markers);
+            write_private(&mut self.private, pem);
             Ok(InitializeResult::Written)
         }
 
@@ -1936,12 +1933,16 @@ mod tests {
             &mut self,
             expected_resource_version: &str,
             _has_annotations: bool,
-            (key, value): Marker<'_>,
+            markers: &[Marker<'_>],
         ) -> Result<InitializeResult, String> {
             if expected_resource_version != self.public.resource_version {
                 return Ok(InitializeResult::Contended(409));
             }
-            self.public.annotations.insert(key.into(), value.into());
+            for (key, value) in markers {
+                self.public
+                    .annotations
+                    .insert((*key).into(), (*value).into());
+            }
             self.public.resource_version = "3".into();
             Ok(InitializeResult::Written)
         }
@@ -1964,7 +1965,7 @@ mod tests {
             if expected_resource_version != self.console_private.resource_version {
                 return Ok(InitializeResult::Contended(409));
             }
-            write_private(&mut self.console_private, pem, &[]);
+            write_private(&mut self.console_private, pem);
             Ok(InitializeResult::Written)
         }
 
@@ -1983,6 +1984,10 @@ mod tests {
         }
 
         fn trust_policies(&mut self) -> Result<Vec<Value>, String> {
+            if self.trust_failures > 0 {
+                self.trust_failures -= 1;
+                return Err("Kubernetes get trustpolicies <list> returned HTTP 503".into());
+            }
             Ok(self.policies.clone())
         }
 
@@ -1995,9 +2000,13 @@ mod tests {
                 self.policies.push(winner);
                 return Ok(CreateResult::AlreadyExists);
             }
-            self.created_policies.push(policy.clone());
-            self.policies.push(policy.clone());
-            Ok(CreateResult::Created)
+            self.next_uid += 1;
+            let uid = format!("00000000-0000-4000-8000-{:012}", self.next_uid);
+            let mut stored = policy.clone();
+            stored["metadata"]["uid"] = json!(uid);
+            self.created_policies.push(stored.clone());
+            self.policies.push(stored);
+            Ok(CreateResult::Created { uid })
         }
     }
 
@@ -2090,7 +2099,6 @@ mod tests {
                 pem: Some(pem(source_key)),
                 has_any_data: true,
                 has_annotations: true,
-                annotations: BTreeMap::new(),
                 created_at: None,
             },
             target: PrivateRecord {
@@ -2099,7 +2107,6 @@ mod tests {
                 pem: None,
                 has_any_data: false,
                 has_annotations: false,
-                annotations: BTreeMap::new(),
                 created_at: None,
             },
             concurrent_target: None,
@@ -2520,117 +2527,330 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // PROD-16.1: the fresh-install marker, the console key, the trust
+    // PROD-16.1: the console key, and the fresh install's trust and marker
     // ------------------------------------------------------------------
 
+    use logweir_core::approval_policy::{
+        verify_marker, InstallationMarker, MarkerRefusal, TrustKeyFacts, TrustPolicyFacts,
+    };
+
+    /// What a reader extracts from a stored policy — the same extraction the
+    /// console and the controller make.
+    fn facts(policy: &Value) -> TrustPolicyFacts {
+        let annotation = |key: &str| {
+            policy
+                .pointer(&format!(
+                    "/metadata/annotations/{}",
+                    json_pointer_escape(key)
+                ))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        TrustPolicyFacts {
+            uid: policy["metadata"]["uid"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+            default: policy["spec"]["default"].as_bool().unwrap_or(false),
+            created_by: annotation(CREATED_BY_ANNOTATION),
+            approval_default: annotation(APPROVAL_DEFAULT_ANNOTATION),
+            keys: policy["spec"]["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|k| TrustKeyFacts {
+                    key_id: k["keyId"].as_str().unwrap().into(),
+                    usages: k["usages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|u| u.as_str().unwrap().to_string())
+                        .collect(),
+                    principal_id: k["principal"]["id"].as_str().unwrap().into(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The readers' verdict over this store, exactly as they compute it.
+    fn read_marker(store: &MemoryStore) -> Result<InstallationMarker, MarkerRefusal> {
+        let annotation = store.public.annotation(APPROVAL_DEFAULT_ANNOTATION);
+        let named = annotation
+            .and_then(MarkerClaim::parse)
+            .and_then(|c| {
+                store
+                    .policies
+                    .iter()
+                    .find(|p| p["metadata"]["name"] == c.policy_name.as_str())
+            })
+            .map(facts);
+        verify_marker(
+            annotation,
+            store.public.key_id.as_deref(),
+            "logweir-system",
+            named.as_ref(),
+        )
+    }
+
     #[test]
-    fn a_fresh_install_marks_the_generated_identity_and_publishes_the_marker() {
+    fn a_fresh_install_creates_its_trust_and_a_bound_marker_the_readers_honour() {
         let mut store = MemoryStore::fresh();
         let report = bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
         assert_eq!(report.identity.origin, Origin::Generated);
         assert_eq!(
-            store.private.annotation(INSTALLATION_ORIGIN_ANNOTATION),
-            Some(INSTALLATION_ORIGIN_GENERATED)
+            report.trust.as_deref(),
+            Some("created:logweir-installation")
+        );
+        assert_eq!(store.created_policies.len(), 1);
+        let policy = &store.created_policies[0];
+        assert_eq!(policy["kind"], "TrustPolicy");
+        assert_eq!(policy["metadata"]["name"], "logweir-installation");
+        assert_eq!(
+            policy["metadata"]["annotations"][CREATED_BY_ANNOTATION],
+            CREATED_BY_IDENTITY_BOOTSTRAP
         );
         assert_eq!(
-            store.private.annotation(APPROVAL_DEFAULT_ANNOTATION),
-            Some(APPROVAL_DEFAULT_CONFIRM)
+            policy["metadata"]["annotations"][APPROVAL_DEFAULT_ANNOTATION],
+            APPROVAL_DEFAULT_CONFIRM
         );
-        // THE READERS' COPY: what the console and the controller read.
+        assert_eq!(policy["spec"]["default"], true);
         assert_eq!(
-            store.public.annotation(APPROVAL_DEFAULT_ANNOTATION),
-            Some(APPROVAL_DEFAULT_CONFIRM)
+            policy["spec"]["allowedTargetClusterIds"],
+            json!(["tQmDMMCERvy6yIB-vuOZCQ"])
         );
-        // NEGATIVE CONTROL: the same fresh install with no console asked for
-        // confirm (the chart passes the flag only when the console runs).
-        let mut unmarked = MemoryStore::fresh();
+        let keys = policy["spec"]["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        let signing = &keys[0];
+        assert_eq!(signing["keyId"], report.identity.key_id.as_str());
+        assert_eq!(signing["usages"], json!(["EvidenceSigning"]));
+        assert_eq!(signing["algorithm"], "p256");
+        assert_eq!(
+            signing["principal"]["id"],
+            "install:logweir-system/logweir-signing-key"
+        );
+        // The window opens five minutes before the Secret was created.
+        assert_eq!(signing["notBefore"], "2026-10-07T09:55:00Z");
+        assert_eq!(signing["notAfter"], INSTALLATION_TRUST_NOT_AFTER);
+        let console = &keys[1];
+        let console_id = report.console.as_ref().unwrap().key_id.clone();
+        assert_eq!(console["keyId"], console_id.as_str());
+        assert_eq!(console["usages"], json!(["ConsoleConfirmation"]));
+        assert_eq!(console["algorithm"], "ed25519");
+        assert_eq!(
+            console["principal"]["id"],
+            "console:logweir-system/logweir-console-confirmation"
+        );
+        assert_eq!(console["notBefore"], "2026-10-07T09:55:01Z");
+        for key in keys {
+            assert!(!key["spkiPem"].as_str().unwrap().contains("PRIVATE"));
+            assert_eq!(key["state"], "Active");
+        }
+        // THE MARKER names the policy by name AND UID, and both keys.
+        let claim = MarkerClaim::parse(
+            store
+                .public
+                .annotation(APPROVAL_DEFAULT_ANNOTATION)
+                .unwrap(),
+        )
+        .expect("a claim");
+        assert_eq!(claim.policy_name, "logweir-installation");
+        assert_eq!(
+            claim.policy_uid,
+            policy["metadata"]["uid"].as_str().unwrap()
+        );
+        assert_eq!(claim.signing_key_id, report.identity.key_id);
+        assert_eq!(claim.console_key_id, console_id);
+        assert_eq!(
+            store.public.annotation(INSTALLATION_TRUST_ANNOTATION),
+            Some("created:logweir-installation")
+        );
+        // AND THE READERS HONOUR WHAT THE HOOK WROTE.
+        assert_eq!(
+            read_marker(&store),
+            Ok(InstallationMarker::FreshInstallConfirm)
+        );
+    }
+
+    #[test]
+    fn a_fresh_install_without_a_console_trusts_no_console_key_and_marks_nothing() {
+        let mut store = MemoryStore::fresh();
         let args = BootstrapArgs {
             mark_fresh_install_confirm: false,
             ..chart_args()
         };
-        bootstrap_all(&mut unmarked, &args, at("2026-10-07T10:01:00Z")).unwrap();
-        assert_eq!(
-            unmarked.public.annotation(APPROVAL_DEFAULT_ANNOTATION),
-            None
-        );
-        assert_eq!(
-            unmarked.private.annotation(INSTALLATION_ORIGIN_ANNOTATION),
-            Some(INSTALLATION_ORIGIN_GENERATED),
-            "born here, but not marked confirm"
-        );
-    }
-
-    /// THE UPGRADE NEVER WEAKENS APPROVAL. An install whose identity already
-    /// existed — established by an earlier chart, or hand-provisioned before
-    /// the managed identity (rehearsal R1) — is never marked, whatever flag
-    /// this chart passes, and gets no installation TrustPolicy.
-    #[test]
-    fn an_upgraded_install_is_never_marked_and_gets_no_trust_policy() {
-        let old = SigningKey::generate_p256();
-        // (a) established by an earlier chart.
-        let mut established = MemoryStore::fresh();
-        write_private(&mut established.private, &pem(&old), &[]);
-        established.establish_public(&public_material(&old).unwrap());
-        // (b) a hand-provisioned key, public record not yet published.
-        let mut hand = MemoryStore::fresh();
-        hand.private.pem = Some(pem(&old));
-        hand.private.has_any_data = true;
-        for store in [&mut established, &mut hand] {
-            let report = bootstrap_all(store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
-            assert_eq!(report.identity.origin, Origin::Existing);
-            assert_eq!(store.private.annotation(APPROVAL_DEFAULT_ANNOTATION), None);
-            assert_eq!(store.public.annotation(APPROVAL_DEFAULT_ANNOTATION), None);
-            assert_eq!(report.trust, None, "no trust step on an upgrade");
-            assert!(store.created_policies.is_empty());
-            // The console key is still generated: it is new in this chart,
-            // and an explicit binding or an opt-in will need it.
-            assert_eq!(report.console.unwrap().origin, Origin::Generated);
-        }
-        // (c) an adopted external key may predate this chart: never marked.
-        let mut adopted = MemoryStore::fresh();
-        adopted.external = Ok(pem(&SigningKey::generate_ed25519()));
-        let args = BootstrapArgs {
-            external_secret: Some(("company-signer".into(), "identity.pem".into())),
-            ..chart_args()
-        };
-        let report = bootstrap_all(&mut adopted, &args, at("2026-10-07T10:01:00Z")).unwrap();
-        assert_eq!(report.identity.origin, Origin::Adopted);
-        assert_eq!(adopted.public.annotation(APPROVAL_DEFAULT_ANNOTATION), None);
-        assert_eq!(
-            adopted.private.annotation(INSTALLATION_ORIGIN_ANNOTATION),
-            None
-        );
-        assert!(adopted.created_policies.is_empty());
-    }
-
-    #[test]
-    fn a_retry_after_an_interrupted_fresh_run_publishes_the_marker_it_recorded() {
-        // The first run generated and marked the private key, then died
-        // before publishing. The retry takes the existing-key path and must
-        // still publish the marker the generation recorded.
-        let key = SigningKey::generate_p256();
-        let mut store = MemoryStore::fresh();
-        write_private(
-            &mut store.private,
-            &pem(&key),
-            &[
-                (
-                    INSTALLATION_ORIGIN_ANNOTATION,
-                    INSTALLATION_ORIGIN_GENERATED,
-                ),
-                (APPROVAL_DEFAULT_ANNOTATION, APPROVAL_DEFAULT_CONFIRM),
-            ],
-        );
-        let report = bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
-        assert_eq!(report.identity.origin, Origin::Existing);
-        assert_eq!(
-            store.public.annotation(APPROVAL_DEFAULT_ANNOTATION),
-            Some(APPROVAL_DEFAULT_CONFIRM)
-        );
+        let report = bootstrap_all(&mut store, &args, at("2026-10-07T10:01:00Z")).unwrap();
         assert_eq!(
             report.trust.as_deref(),
             Some("created:logweir-installation")
         );
+        let policy = &store.created_policies[0];
+        assert_eq!(
+            policy["spec"]["keys"].as_array().unwrap().len(),
+            1,
+            "signer only"
+        );
+        assert!(policy["metadata"]["annotations"]
+            .get(APPROVAL_DEFAULT_ANNOTATION)
+            .is_none());
+        assert_eq!(store.public.annotation(APPROVAL_DEFAULT_ANNOTATION), None);
+        assert_eq!(read_marker(&store), Ok(InstallationMarker::Unmarked));
+        // "A MARKER ADDED LATER": someone who can patch the ConfigMap names
+        // the hook-made policy. It is not honoured: that policy trusts no
+        // console key and records no confirm default.
+        let uid = policy["metadata"]["uid"].as_str().unwrap().to_string();
+        let forged = MarkerClaim {
+            policy_name: "logweir-installation".into(),
+            policy_uid: uid,
+            signing_key_id: report.identity.key_id.clone(),
+            console_key_id: report.console.unwrap().key_id,
+        };
+        store
+            .public
+            .annotations
+            .insert(APPROVAL_DEFAULT_ANNOTATION.into(), forged.to_annotation());
+        assert_eq!(read_marker(&store), Err(MarkerRefusal::NotHookMade));
+    }
+
+    /// THE UPGRADE NEVER WEAKENS APPROVAL (the PROD-16.1 security review).
+    /// An install whose identity already existed — established by an earlier
+    /// chart, hand-provisioned before the managed identity (rehearsal R1), or
+    /// adopted — gets no TrustPolicy, its console key is trusted nowhere, and
+    /// nothing is marked. Then the ATTACK: a marker patched into the
+    /// ConfigMap, bare or as a forged claim, is ignored.
+    #[test]
+    fn an_upgraded_install_gets_no_trust_and_a_patched_marker_changes_nothing() {
+        let old = SigningKey::generate_p256();
+        let mut established = MemoryStore::fresh();
+        write_private(&mut established.private, &pem(&old));
+        established.establish_public(&public_material(&old).unwrap());
+        let mut hand = MemoryStore::fresh();
+        hand.private.pem = Some(pem(&old));
+        hand.private.has_any_data = true;
+        let mut adopted = MemoryStore::fresh();
+        adopted.external = Ok(pem(&SigningKey::generate_ed25519()));
+        let external = BootstrapArgs {
+            external_secret: Some(("company-signer".into(), "identity.pem".into())),
+            ..chart_args()
+        };
+        for (store, args) in [
+            (&mut established, chart_args()),
+            (&mut hand, chart_args()),
+            (&mut adopted, external),
+        ] {
+            let report = bootstrap_all(store, &args, at("2026-10-07T10:01:00Z")).unwrap();
+            assert_ne!(report.identity.origin, Origin::Generated);
+            assert_eq!(report.trust, None, "no trust step on an upgrade");
+            assert!(store.created_policies.is_empty());
+            assert_eq!(store.public.annotation(APPROVAL_DEFAULT_ANNOTATION), None);
+            // The console key is still generated (new in this chart; an
+            // explicit binding or the documented opt-in needs it).
+            let console = report.console.unwrap();
+            assert_eq!(console.origin, Origin::Generated);
+
+            // THE ATTACK, bare.
+            store.public.annotations.insert(
+                APPROVAL_DEFAULT_ANNOTATION.into(),
+                APPROVAL_DEFAULT_CONFIRM.into(),
+            );
+            assert_eq!(read_marker(store), Err(MarkerRefusal::NotAClaim));
+            // And as a claim naming a policy that does not exist.
+            let forged = MarkerClaim {
+                policy_name: "logweir-installation".into(),
+                policy_uid: "guessed".into(),
+                signing_key_id: store.public.key_id.clone().unwrap(),
+                console_key_id: console.key_id.clone(),
+            };
+            store
+                .public
+                .annotations
+                .insert(APPROVAL_DEFAULT_ANNOTATION.into(), forged.to_annotation());
+            assert_eq!(read_marker(store), Err(MarkerRefusal::PolicyMissing));
+        }
+    }
+
+    #[test]
+    fn an_interrupted_fresh_run_is_not_finished_by_a_later_run() {
+        // The first run generated and published the identity, then died
+        // before the trust step. The retry finds the identity established
+        // and does NOT create the trust or mark anything: strict.
+        let key = SigningKey::generate_p256();
+        let mut store = MemoryStore::fresh();
+        write_private(&mut store.private, &pem(&key));
+        store.establish_public(&public_material(&key).unwrap());
+        let report = bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
+        assert_eq!(report.identity.origin, Origin::Existing);
+        assert_eq!(report.trust, None);
+        assert!(store.created_policies.is_empty());
+        assert_eq!(read_marker(&store), Ok(InstallationMarker::Unmarked));
+    }
+
+    #[test]
+    fn the_trust_step_is_retried_within_its_run_and_then_fails_the_hook() {
+        let mut flaky = MemoryStore::fresh();
+        flaky.trust_failures = TRUST_ATTEMPTS - 1;
+        let report = bootstrap_all(&mut flaky, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
+        assert_eq!(
+            report.trust.as_deref(),
+            Some("created:logweir-installation")
+        );
+
+        let mut down = MemoryStore::fresh();
+        down.trust_failures = TRUST_ATTEMPTS;
+        let error =
+            bootstrap_all(&mut down, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap_err();
+        assert!(error.contains("starts strict"), "{error}");
+        assert_eq!(down.public.annotation(APPROVAL_DEFAULT_ANNOTATION), None);
+    }
+
+    #[test]
+    fn existing_cluster_trust_is_never_contested_and_nothing_is_marked() {
+        let mut with_default = MemoryStore::fresh();
+        with_default.policies.push(json!({
+            "metadata": {"name": "org-default", "uid": "u1"},
+            "spec": {"default": true, "keys": []}
+        }));
+        let mut with_roster = MemoryStore::fresh();
+        with_roster.roster = true;
+        let mut name_taken = MemoryStore::fresh();
+        name_taken.policies.push(json!({
+            "metadata": {"name": "logweir-installation", "uid": "u2"},
+            "spec": {"default": false, "keys": []}
+        }));
+        let mut raced = MemoryStore::fresh();
+        raced.create_conflict_with = Some(json!({
+            "metadata": {"name": "logweir-installation", "uid": "u3"},
+            "spec": {"default": true, "keys": []}
+        }));
+        for (store, expected) in [
+            (&mut with_default, "skipped:default-policy:org-default"),
+            (&mut with_roster, "skipped:roster"),
+            (&mut name_taken, "skipped:name-taken:logweir-installation"),
+            (&mut raced, "skipped:name-taken:logweir-installation"),
+        ] {
+            let report = bootstrap_all(store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
+            assert_eq!(report.trust.as_deref(), Some(expected));
+            assert!(store.created_policies.is_empty());
+            assert_eq!(store.public.annotation(APPROVAL_DEFAULT_ANNOTATION), None);
+            assert_eq!(read_marker(store), Ok(InstallationMarker::Unmarked));
+        }
+        // The policy of that name is never edited.
+        assert_eq!(name_taken.policies[0]["spec"]["default"], false);
+    }
+
+    #[test]
+    fn a_marker_planted_on_the_placeholder_is_overwritten_when_this_run_makes_no_claim() {
+        let mut store = MemoryStore::fresh();
+        store.public.annotations.insert(
+            APPROVAL_DEFAULT_ANNOTATION.into(),
+            "confirm;policy=logweir-installation;uid=x;signing=y;console=z".into(),
+        );
+        store.roster = true;
+        bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
+        assert_eq!(
+            store.public.annotation(APPROVAL_DEFAULT_ANNOTATION),
+            Some(NO_CLAIM)
+        );
+        assert_eq!(read_marker(&store), Err(MarkerRefusal::NotAClaim));
     }
 
     #[test]
@@ -2643,7 +2863,6 @@ mod tests {
         let key = SigningKey::from_pkcs8_pem(&private_before).unwrap();
         assert_eq!(key.alg(), KeyAlg::Ed25519);
         assert_eq!(key.key_id(), console.key_id);
-        // The public record: exactly the four keys, the usage, no private half.
         assert_eq!(
             store.console_public.data_keys,
             BTreeSet::from([
@@ -2674,6 +2893,8 @@ mod tests {
             Some(private_before.as_str()),
             "an upgrade must leave the console key's bytes unchanged"
         );
+        assert_eq!(second.trust, None, "and creates no second trust");
+        assert_eq!(store.created_policies.len(), 1);
     }
 
     #[test]
@@ -2684,7 +2905,6 @@ mod tests {
         let mut store = MemoryStore::fresh();
         store.console_private.pem = Some(pem(&hand));
         store.console_private.has_any_data = true;
-        store.console_private.annotations.clear();
         store.console_private.state = None;
         let report = bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
         let console = report.console.unwrap();
@@ -2731,196 +2951,14 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_install_creates_one_default_trust_policy_with_one_usage_per_key() {
-        let mut store = MemoryStore::fresh();
-        let report = bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
-        assert_eq!(
-            report.trust.as_deref(),
-            Some("created:logweir-installation")
-        );
-        assert_eq!(store.created_policies.len(), 1);
-        let policy = &store.created_policies[0];
-        assert_eq!(policy["kind"], "TrustPolicy");
-        assert_eq!(policy["metadata"]["name"], "logweir-installation");
-        assert_eq!(policy["spec"]["default"], true);
-        assert_eq!(
-            policy["spec"]["allowedTargetClusterIds"],
-            json!(["tQmDMMCERvy6yIB-vuOZCQ"])
-        );
-        let keys = policy["spec"]["keys"].as_array().unwrap();
-        assert_eq!(keys.len(), 2);
-        let signing = &keys[0];
-        assert_eq!(signing["keyId"], report.identity.key_id.as_str());
-        assert_eq!(signing["usages"], json!(["EvidenceSigning"]));
-        assert_eq!(signing["algorithm"], "p256");
-        assert_eq!(
-            signing["principal"]["id"],
-            "install:logweir-system/logweir-signing-key"
-        );
-        // The window opens five minutes before the Secret was created.
-        assert_eq!(signing["notBefore"], "2026-10-07T09:55:00Z");
-        assert_eq!(signing["notAfter"], INSTALLATION_TRUST_NOT_AFTER);
-        let console = &keys[1];
-        assert_eq!(
-            console["keyId"],
-            report.console.as_ref().unwrap().key_id.as_str()
-        );
-        assert_eq!(console["usages"], json!(["ConsoleConfirmation"]));
-        assert_eq!(console["algorithm"], "ed25519");
-        assert_eq!(
-            console["principal"]["id"],
-            "console:logweir-system/logweir-console-confirmation"
-        );
-        assert_eq!(console["notBefore"], "2026-10-07T09:55:01Z");
-        for key in keys {
-            assert!(!key["spkiPem"].as_str().unwrap().contains("PRIVATE"));
-            assert_eq!(key["state"], "Active");
-        }
-        // Recorded, so the step never runs again.
-        assert_eq!(
-            store.public.annotation(INSTALLATION_TRUST_ANNOTATION),
-            Some("created:logweir-installation")
-        );
-    }
-
-    #[test]
-    fn the_trust_step_runs_once_and_never_overrules_the_administrator() {
-        let mut store = MemoryStore::fresh();
-        bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
-        // The administrator deletes the policy (or replaces it).
-        store.policies.clear();
-        let again = bootstrap_all(&mut store, &chart_args(), at("2026-10-08T10:01:00Z")).unwrap();
-        assert_eq!(again.trust.as_deref(), Some("created:logweir-installation"));
-        assert_eq!(store.created_policies.len(), 1, "not re-created");
-    }
-
-    #[test]
-    fn an_interrupted_trust_step_accepts_its_own_policy_and_refuses_a_foreign_one() {
-        // Created by an earlier run that died before recording the outcome.
-        let mut store = MemoryStore::fresh();
-        bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
-        store
-            .public
-            .annotations
-            .remove(INSTALLATION_TRUST_ANNOTATION);
-        let retry = bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:02:00Z")).unwrap();
-        assert_eq!(
-            retry.trust.as_deref(),
-            Some("existing:logweir-installation")
-        );
-        assert_eq!(store.created_policies.len(), 1);
-
-        // A policy of that name this hook did not write — or written with the
-        // wrong usage — is never adopted or edited.
-        let mut foreign = MemoryStore::fresh();
-        let mut wrong = installation_trust_policy("logweir-installation", "x", &[], &[]);
-        wrong["spec"]["keys"] = json!([]);
-        foreign.policies.push(wrong);
-        let error =
-            bootstrap_all(&mut foreign, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap_err();
-        assert!(error.contains("refusing to adopt or edit"), "{error}");
-        assert!(foreign.created_policies.is_empty());
-    }
-
-    #[test]
-    fn existing_cluster_trust_is_never_contested() {
-        let mut with_default = MemoryStore::fresh();
-        with_default.policies.push(json!({
-            "metadata": {"name": "org-default"},
-            "spec": {"default": true, "keys": []}
-        }));
-        let report =
-            bootstrap_all(&mut with_default, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
-        assert_eq!(
-            report.trust.as_deref(),
-            Some("skipped:default-policy:org-default")
-        );
-        assert!(with_default.created_policies.is_empty());
-
-        let mut with_roster = MemoryStore::fresh();
-        with_roster.roster = true;
-        let report =
-            bootstrap_all(&mut with_roster, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
-        assert_eq!(report.trust.as_deref(), Some("skipped:roster"));
-        assert!(with_roster.created_policies.is_empty());
-        // The marker does not depend on trust: a fresh identity is still a
-        // fresh install, and its console key must then be added by hand.
-        assert_eq!(
-            with_roster.public.annotation(APPROVAL_DEFAULT_ANNOTATION),
-            Some(APPROVAL_DEFAULT_CONFIRM)
-        );
-    }
-
-    #[test]
-    fn a_concurrent_create_is_accepted_only_when_it_is_the_same_trust() {
-        let mut store = MemoryStore::fresh();
-        // Pre-compute the winner the race will report: run once on a clone.
-        let mut probe = MemoryStore::fresh();
-        bootstrap_all(&mut probe, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap();
-        store.private = probe.private.clone();
-        store.public = probe.public.clone();
-        store
-            .public
-            .annotations
-            .remove(INSTALLATION_TRUST_ANNOTATION);
-        store.console_private = probe.console_private.clone();
-        store.console_public = probe.console_public.clone();
-        store.create_conflict_with = Some(probe.created_policies[0].clone());
-        let report = bootstrap_all(&mut store, &chart_args(), at("2026-10-07T10:01:30Z")).unwrap();
-        assert_eq!(
-            report.trust.as_deref(),
-            Some("existing:logweir-installation")
-        );
-
-        let mut other = MemoryStore::fresh();
-        other.create_conflict_with = Some(json!({
-            "metadata": {"name": "logweir-installation"},
-            "spec": {"default": true, "keys": []}
-        }));
-        let error =
-            bootstrap_all(&mut other, &chart_args(), at("2026-10-07T10:01:00Z")).unwrap_err();
-        assert!(error.contains("refusing to adopt or edit"), "{error}");
-    }
-
-    #[test]
-    fn the_generation_patch_carries_the_markers_and_no_other_patch_does() {
-        let patch = private_initialization_patch(
-            "7",
-            false,
-            "signing.pem",
-            "pem",
-            &[
-                (
-                    INSTALLATION_ORIGIN_ANNOTATION,
-                    INSTALLATION_ORIGIN_GENERATED,
-                ),
-                (APPROVAL_DEFAULT_ANNOTATION, APPROVAL_DEFAULT_CONFIRM),
-            ],
-        );
+    fn no_identity_patch_carries_a_marker() {
+        let patch = private_initialization_patch("7", false, "signing.pem", "pem", &[]);
+        assert_eq!(patch.as_array().unwrap().len(), 3);
         assert_eq!(patch[2]["path"], "/metadata/annotations");
-        assert_eq!(patch[2]["value"][IDENTITY_STATE_ANNOTATION], ESTABLISHED);
         assert_eq!(
-            patch[2]["value"][APPROVAL_DEFAULT_ANNOTATION],
-            APPROVAL_DEFAULT_CONFIRM
+            patch[2]["value"],
+            json!({(IDENTITY_STATE_ANNOTATION): ESTABLISHED})
         );
-        let present = private_initialization_patch(
-            "7",
-            true,
-            "signing.pem",
-            "pem",
-            &[(APPROVAL_DEFAULT_ANNOTATION, APPROVAL_DEFAULT_CONFIRM)],
-        );
-        assert_eq!(
-            present[2]["path"],
-            "/metadata/annotations/logweir.dev~1identity-state"
-        );
-        assert_eq!(
-            present[3]["path"],
-            "/metadata/annotations/logweir.dev~1approval-default"
-        );
-        // The distributor copies a key; it never marks anything.
-        let distributed = private_initialization_patch("7", true, "signing.pem", "pem", &[]);
-        assert_eq!(distributed.as_array().unwrap().len(), 3);
     }
 
     #[test]
@@ -2932,7 +2970,6 @@ mod tests {
         );
         assert_eq!(not_before(None, now), "2026-10-07T09:55:00Z");
         assert_eq!(not_before(Some("garbage"), now), "2026-10-07T09:55:00Z");
-        // A creation time in the future (skewed) is clamped to now.
         assert_eq!(
             not_before(Some("2026-10-07T11:00:00Z"), now),
             "2026-10-07T09:55:00Z"
@@ -2943,7 +2980,7 @@ mod tests {
     fn the_trust_calls_use_the_cluster_scoped_paths_and_read_their_statuses() {
         let (base_url, handle) = one_response(409, "Conflict");
         let mut store = store_for_http(base_url);
-        let policy = installation_trust_policy("logweir-installation", "ns", &[], &[]);
+        let policy = installation_trust_policy("logweir-installation", "ns", &[], &[], true);
         assert_eq!(
             store.create_trust_policy(&policy).unwrap(),
             CreateResult::AlreadyExists
@@ -2954,6 +2991,16 @@ mod tests {
             "{request}"
         );
         assert!(!request.contains("PRIVATE"), "{request}");
+
+        // A 201 with no body names no UID: refused, never a marker with none.
+        let (base_url, handle) = one_response(201, "Created");
+        let mut store = store_for_http(base_url);
+        let error = store.create_trust_policy(&policy).unwrap_err();
+        handle.join().unwrap();
+        assert!(
+            error.contains("TrustPolicy logweir-installation"),
+            "{error}"
+        );
 
         let (base_url, handle) = one_response(404, "Not Found");
         let mut store = store_for_http(base_url);
