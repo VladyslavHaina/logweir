@@ -407,7 +407,8 @@ EOF
     if [ $s = 0 ] && [ "$others" = "$want_others" ]; then pass "groups.$m.stop" "$mg Empty; every other live group still Stable: $others"; else fail "groups.$m.stop" "rc $s; Stable: '$others', want '$want_others'; $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
     out=$(innet "$reset")
     rb=$(innet "$T/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group $mg --offsets" | awk -v g="$mg" '$1 == g && $2 == "pa-orders" && $3 == 0 { print $4 }')
-    if printf '%s' "$out" | awk -v g="$mg" '$1 == g && $3 == 0 && $NF == 1 { f = 1 } END { exit !f }' && [ "$rb" = 1 ]; then pass "groups.$m.stopped-accepts-reset" "pa-orders 0 committed at 1, read back $rb"; else fail "groups.$m.stopped-accepts-reset" "readback '$rb': $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+    # One stream of words: 3.9.2's reset prints its row on the header's line.
+    if printf ' %s ' "$out" | tr -s '[:space:]' ' ' | grep -q -F " $mg pa-orders 0 1 " && [ "$rb" = 1 ]; then pass "groups.$m.stopped-accepts-reset" "pa-orders 0 committed at 1, read back $rb"; else fail "groups.$m.stopped-accepts-reset" "readback '$rb': $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
     out=$(bounded 300 bash e2e/compose/groups.sh start "$m" 2>&1)
     if [ $? = 0 ]; then pass "groups.$m.start" "$mg Stable again"; else fail "groups.$m.start" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   done

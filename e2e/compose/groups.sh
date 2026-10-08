@@ -328,6 +328,13 @@ EOF
 }
 
 # ---------------------------------------------------------------- visibility
+# True when `kafka-consumer-groups.sh --reset-offsets --execute` output $1
+# reports GROUP TOPIC PARTITION NEW-OFFSET = $2 $3 $4 $5. Read as one stream of
+# words: the 3.9.2 tool prints its row on the HEADER's line, with no newline
+# between them (measured), so a per-line match never finds it there.
+reset_row() {
+  printf ' %s ' "$1" | tr -s '[:space:]' ' ' | grep -q -F " $2 $3 $4 $5 "
+}
 VIS_ACLS="--allow-principal User:ops --operation Describe --operation Read --group pa-hidden
 --allow-principal User:ops --operation Describe --cluster"
 
@@ -345,10 +352,10 @@ cmd_visibility_apply() {
     # retry, bounded.
     for _ in $(seq 1 24); do
       out=$(aexec "$T/kafka-consumer-groups.sh --bootstrap-server $A --reset-offsets --group $g --topic pa-orders:0 --to-offset $v --execute" 2>&1)
-      printf '%s\n' "$out" | awk -v g="$g" -v v="$v" '$1 == g && $2 == "pa-orders" && $3 == 0 && $NF == v { f = 1 } END { exit !f }' && break
+      reset_row "$out" "$g" pa-orders 0 "$v" && break
       sleep 5
     done
-    printf '%s\n' "$out" | awk -v g="$g" -v v="$v" '$1 == g && $2 == "pa-orders" && $3 == 0 && $NF == v { f = 1 } END { exit !f }' \
+    reset_row "$out" "$g" pa-orders 0 "$v" \
       || die "could not create $g by a non-member commit: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
     say "$g: pa-orders 0 committed at $v"
   done
