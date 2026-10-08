@@ -45,7 +45,11 @@ adopter's evidence bucket is a document some reader may already parse, so:
     sampled-lane order check, a new cause for `fail-integrity`, and its
     phase-0 refusals of a plan that asks for two verifications at once, new
     causes for exit 3
-    ([below](#scorecard-format-140-integrityverification-prod-081)).
+    ([below](#scorecard-format-140-integrityverification-prod-081)). So is
+    FX-16's refusal `PointBindingSetMismatch`, a new cause for exit 3: a
+    point-bound plan that restored another set under the point's receipt is
+    now refused before any target is created
+    ([below](#a-point-bound-plan-restores-its-points-own-set-fx-16)).
 
   Nothing else is ruled: any other change to an existing field's content is
   still a MAJOR bump.
@@ -1553,6 +1557,56 @@ whose Job was not yet created when the controller was replaced renders a differe
 is refused `ApprovalBundleConflict` (terminal) rather than run without the keyring: delete it and create it
 again. A standalone `logweir restore run` of a point-bound plan now needs `--evidence-keys`.
 
+### A point-bound plan restores its point's own set (FX-16)
+
+The binding above proves that the receipt a plan names is intact, signed and over a manifest the
+archive holds. Until FX-16 nothing proved that the set the run then RESTORED was that receipt's
+set: `source.backup` chose it (`latestCompleted` or an id), and every decision the runner takes
+from the receipt — phases 3 and 7's configuration parity (FX-4's coverage), the time basis (FX-8's
+recorded timestamp types) and FX-7's pin verdict — was applied to whatever set that was. A plan
+bound to point A that named set B restored B's records under A's word; the controller's readiness
+check refuses such a plan (`CatalogPointBindingMismatch`), the runner did not. The runner now
+refuses it, exit 3, the message opening `PointBindingSetMismatch` (the general
+`refusal-reason=GuardRefused` line, like `PointBindingMismatch`), in two places:
+
+- **In the binding, before any broker is contacted**, when `source.backup` is not the receipt's
+  `backup_id`. **`latestCompleted` with `source.point` is refused there**, even when the point's set
+  happens to be the newest: it names whichever set is newest when the run starts, so the same
+  approved plan would restore another set after the next backup. A bound plan names its point's
+  own set, `source.backup: <the receipt's backup_id>` — what the console, the catalog route and
+  every rehearsal already render. **And there too when, under the plan's `source.storage`, the
+  engine would read the set somewhere other than the manifest the receipt attests** (fix round,
+  review M-1). The engine is told only the storage and the set id and loads
+  `<prefix>/<backup_id>/manifest.json`, so a plan whose prefix is a parent of the point's set (with
+  another same-id set at that path), or a plan pointed at a copy under another prefix, would
+  restore an object the point does not describe; the refusal names both keys and the prefix the
+  set was written under.
+- **After the set is described and before phase 2**, when the set the engine is about to restore
+  is not the one the binding verified: its set id, the digest of the manifest just read, or the
+  version that read answered (the manifest written again between the binding and the restore's
+  read). The set is selected by the point's manifest key — the engine's key — never as the first
+  listed set carrying the id, so a same-id copy listed first neither refuses a truthful plan nor is
+  described in its place (review L-1); a listing that does not show that key is exit 1. Phase 0 has run by then, so on a target whose own default is `LogAppendTime` its probe
+  topic has been created and deleted, the documented exception
+  ([above](#exit-3-has-one-documented-exception-phase-0s-logappendtime-override-probe)); no target
+  topic of the restore is created and the engine never starts.
+
+The binding also reads the receipt, its signature, the manifest and the pinned version through the
+archive handle the restore itself uses: under the store contract that is the controller-named
+credential and CA (`LOGWEIR_ARCHIVE_CREDENTIALS`, `LOGWEIR_ARCHIVE_CA_FILE`), where before it was the
+legacy environment-driven client, which ignored the CA and honoured a stray `AWS_ENDPOINT_URL`.
+
+**Compatibility.** A new cause for exit 3 that can only move a run to the safer side (refused
+instead of restoring another set under the point's word): MINOR under OD-7's third case. No
+format changes. A plan without `source.point` is untouched.
+**Migration.** A hand-written point-bound plan (the standalone disaster path) that says
+`backup: latestCompleted` is refused after the upgrade: name the point's set instead, which needs a
+new approval because the plan bytes change. So is one whose `source.storage` prefix is not the one
+the set was written under (the refusal names it); a copy of the archive that keeps the original
+keys, in another bucket, restores as before. Console, catalog and rehearsal plans already name it.
+**Rollback.** An older runner restores whatever `source.backup` names again; no archive, catalog
+or evidence object changes in either direction.
+
 ### The standing rehearsal authorization is SIGNED, and the runner checks the signature
 
 D3 §4.3(e) says the bundle carries "the authorization document, its signatures, the trusted public
@@ -1647,14 +1701,16 @@ controller pinned, and that the key may authorise.
 | a standing authorization outside its validity window | 3 | `GuardRefused`, message opens `AuthorizationExpired` |
 | a mounted keyring or sidecar that does not parse | 1 | — (structural corruption of a file, not a statement about authorisation) |
 | a bound point whose receipt or manifest digest differs | 3 | `GuardRefused`, message opens `PointBindingMismatch` |
+| a bound point that verifies, in a plan whose `source.backup` is not the point's set (`latestCompleted` included), under whose storage the engine would read another manifest than the receipt's, or whose restored set's id, manifest digest or manifest version is not the one the binding verified (FX-16) | 3 | `GuardRefused`, message opens `PointBindingSetMismatch` |
 | a bound point whose receipt carries no signature, a signature no mounted evidence key verifies, or a key whose lifecycle or usage refuses it — or a point-bound plan with no evidence keyring | 3 | `GuardRefused`, message opens `PointUntrusted` |
 | a bound point whose receipt or manifest is missing or unreadable | 1 | — (no refusal line; nothing about the plan was found wanting) |
 
-`logweir_core::guard::TERMINAL_STATES` is still the closed three-element list, so every refusal
-above classifies as the general `GuardRefused` and carries its state name as the first token of the
-message. Promoting `PointBindingMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `AuthorizationInvalid` and
-`AuthorizationExpired` to declared terminal states is a change to that list and to the controller's
-mapping, and is not made here.
+`logweir_core::guard::TERMINAL_STATES` is a closed list (four elements since FX-8, none of them a
+state above), so every refusal above classifies as the general `GuardRefused` and carries its state
+name as the first token of the message. Promoting `PointBindingMismatch`, `PointBindingSetMismatch`,
+`PointUntrusted`, `RehearsalScopeViolation`, `AuthorizationInvalid` and `AuthorizationExpired` to
+declared terminal states is a change to that list and to the controller's mapping, and is not made
+here.
 
 ### `logweir notify deliver`'s exit codes and its `notify-result=` lines (PLAT-14.2)
 

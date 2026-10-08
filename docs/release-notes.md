@@ -22,9 +22,9 @@ its record is in the next entry, whose twenty-seven items are what that
 candidate shipped. This entry collects what lands on `main` after that
 publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
 key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
-32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the
-credential binding) and 34 (PROD-00.2, the engine built from the vendored
-source) so far. Items continue the next entry's
+32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the credential
+binding), 34 (FX-16, a point-bound restore restores its point's set) and 35
+(PROD-00.2, the engine built from the vendored source) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -51,7 +51,11 @@ Item 33 is PROD-01.3 and its security follow-up, proven on a compose stack
 (both clients, every mode); it changes the controller, the runner, the
 console and the `KafkaCluster` CRD, and the PoC upgrade that carries it runs
 the live `KafkaCluster` rows.
-Item 34 is PROD-00.2 (owner decision OD-3), proven on a compose stack and by
+Item 34 is fix-now row FX-16, proven by unit, phase-sequence and real-binary
+rows and on the compose stack; it changes the runner only, and the PoC upgrade
+that carries it runs a console catalog-point restore (the binding's reads under
+the store contract).
+Item 35 is PROD-00.2 (owner decision OD-3), proven on a compose stack and by
 image checks on both platforms; the PoC refresh that carries it runs the
 runner's signed engine identity, and the first `main` publication after it
 runs the keyless signing.
@@ -480,7 +484,80 @@ a spec naming a new mode, and an older reader refuses a 1.4.0/1.5.0 document
 that names one (the safe direction). An older console would send
 `credentialRef` again; roll the console with the controller.
 
-#### 34. The engine is Logweir's build of `kafka-backup` 0.23.3, for amd64 and arm64; the images are signed (PROD-00.2)
+#### 34. A point-bound restore restores its point's own set, or nothing (FX-16)
+
+**Changed.** A plan bound to a recovery point (`source.point`) had the point's
+receipt, signature and manifest verified, and then restored whichever set
+`source.backup` named — `latestCompleted` included — while everything the
+runner takes from that receipt (the configuration capture coverage phases 3
+and 7 compare against, the timestamp types the time basis is decided from,
+the manifest pin) was applied to that set's records. The runner now refuses
+such a run, exit 3, the message opening `PointBindingSetMismatch`
+(`refusal-reason=GuardRefused`, so a `Restore` reads `exitReason:
+GuardRefused`):
+
+- **before any broker is contacted**, when `source.backup` is not the
+  receipt's set (`backup: latestCompleted` beside a bound point is always
+  refused: it names whichever set is newest when the run starts), or when,
+  under the plan's storage, the engine would read the set's manifest anywhere
+  but where the receipt attests it: the engine loads
+  `<prefix>/<backup_id>/manifest.json`, so a plan pointed at a copy under
+  another prefix, or at a parent of the point's prefix with another same-id
+  set there, is refused, naming the prefix the set was written under;
+- **after the set is described and before any target topic exists**, when the
+  set about to be restored is not the one the binding verified: another set
+  id, another manifest digest, or another manifest version (the manifest
+  written again during the run). The set is chosen by the point's manifest
+  key, never as the first listed set with the id, so a same-id copy elsewhere
+  under the prefix is neither restored nor a reason to refuse.
+
+The binding also reads the receipt, its signature and the manifest through the
+restore's own archive handle: under the store contract, the controller-named
+credential and CA, where it used the environment-driven client before.
+
+What changes on the upgrade:
+
+- **Console, catalog-route and rehearsal restores** name the point's set
+  already and run as before.
+- **A hand-written point-bound plan that says `backup: latestCompleted`** (the
+  standalone disaster path) is refused. Name the point's set instead
+  (`source.backup: <the receipt's backup_id>`, which `logweir catalog list`
+  shows) and approve the new plan.
+- **A standalone point-bound plan whose `source.storage` prefix is not the one
+  the point's set was written under** (a copy of the archive under another
+  prefix, or a parent prefix) is refused; the refusal names the prefix. A copy
+  that keeps the original keys, in another bucket, restores as before.
+
+**Do:** before the runner image rolls, change every standalone point-bound
+plan that says `backup: latestCompleted` to name its point's set, and approve
+it again. Nothing else.
+**Scope:** `crates/logweir/src/drill/binding.rs` (the plan half: another set
+and `latestCompleted` refused although the point verifies; each of the four
+restored-set disagreements refused alone, naming itself),
+`crates/logweir/tests/orchestrator.rs` (each disagreement refused with no target
+topic, no fingerprint and no scorecard; the matching set runs; the set check
+comes before FX-8's time basis), `crates/logweir/tests/restore_phase.rs` (the
+real binary refuses both plan shapes and a nested point before phase 0, the
+bootstrap never dialled), `crates/logweir-store/tests/storage.rs` (the engine's
+manifest key), source guards in `crates/logweir/src/drill/mod.rs` (where the
+check sits; the verified set travels with the coverage; one archive-handle
+constructor), and planted mutants, each killed (FX-16 and its fix round). Live,
+on compose slot 4 with engine 0.23.3 (`e2e/tests/point_set_binding.rs`): the
+plan bound to point A and naming A restored A's 30 records although a same-id
+copy of A was listed first; naming a later set B or `latestCompleted`, a copy
+of A under another prefix, an edited copy, and a point whose set is nested
+under the plan's prefix with another same-id set where the engine reads were
+all refused before phase 0, with no target topic. The build before FX-16
+restored each of them under the point's receipt (B's 45 records, a copy, or
+the other same-id set's 45 under a 60-record point, signed `fail-integrity`);
+the build at FX-16's first round still restored that last one, and refused
+the truthful plan because of the copy listed first. Not yet proven on the PoC: a catalog-point restore after
+the upgrade that carries FX-16.
+**Rollback:** an older runner restores whatever `source.backup` names again,
+`latestCompleted` included, and reads the binding through the environment's
+client. No archive, catalog or evidence object changes in either direction.
+
+#### 35. The engine is Logweir's build of `kafka-backup` 0.23.3, for amd64 and arm64; the images are signed (PROD-00.2)
 
 **Changed.** The runner image's engine is no longer OSO's released binary. It
 is **Logweir's build of the vendored OSO 0.23.3 source** (OD-3): the tarball is
@@ -579,8 +656,11 @@ In addition to the next entry's six, in its order:
 - **Remove `api.logweir.dev/request-sha256` from each `BackupDestination` an
   earlier build created with `secret.new`** (item 33), or rotate its key: that
   hash was taken over the secret access key.
+- **Before the runner image rolls, name the point's set in every standalone
+  point-bound plan that says `backup: latestCompleted`**, and approve it again
+  (item 34).
 - **Verify an image digest before you deploy it** with the pinned commands in
-  [install.md](install.md#verify-the-images) (item 34); a standalone CLI
+  [install.md](install.md#verify-the-images) (item 35); a standalone CLI
   install replaces its engine with Logweir's build and exports
   `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1` and its digest.
 
@@ -595,7 +675,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33 and 34, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34 and 35, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -603,8 +683,9 @@ console's text), and item 31 takes effect at each catalog's next sync; item 32
 changes the runner's receipts and records, the catalog's view (runner and
 controller), the product API and the console; item 33 changes the controller,
 the runner, the console and the `KafkaCluster` CRD, and needs each credentialed
-connection's Secret bound; item 34 changes the runner image (its engine and its
-platforms) and the controller's Job constants together. To roll back to
+connection's Secret bound; item 34 changes the runner only; item 35 changes the
+runner image (its engine and its platforms) and the controller's Job
+environment together. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -623,7 +704,7 @@ platforms) and the controller's Job constants together. To roll back to
    cannot parse it), so delete or re-create those first. The 1.4.0 receipts
    and 1.5.0 scorecards already written stay valid for every reader from
    PROD-01.3 on, and older readers refuse them (the safe direction).
-4. To roll back only the engine (item 34), use the one-release rollback image
+4. To roll back only the engine (item 35), use the one-release rollback image
    (`ENGINE_SOURCE=oso`, linux/amd64; [install.md](install.md#rolling-the-engine-back))
    rather than an older runner; it declares OSO's 0.23.3, so its documents say
    which engine ran.

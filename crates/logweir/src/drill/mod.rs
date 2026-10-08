@@ -1669,16 +1669,25 @@ pub struct Ctx {
     /// phases 3 and 7 report every topic's configuration parity `notAssessed`
     /// rather than comparing against a manifest record nobody vouched for.
     pub source_config_coverage: SourceConfigCoverage,
+    /// **FX-16.** The backup set the verified point's receipt describes —
+    /// from the SAME `binding::VerifiedPoint` as `source_config_coverage` —
+    /// which `binding::check_restored_set` compares with the set `describe`
+    /// read, before the time basis is decided and before phase 2. `None` for a
+    /// plan bound to no point.
+    pub bound_set: Option<binding::BoundSet>,
 }
 
 /// `source_config_coverage` is what the VERIFIED point binding established
 /// (FX-4): the context is BORN with it, so no later assignment can be dropped
 /// between the binding check and the phases that read it (review L1, X4).
+/// `bound_set` is the set that same binding's receipt describes (FX-16), born
+/// with the context for the same reason.
 fn context(
     spec_text: String,
     allowed_text: String,
     contract: bool,
     source_config_coverage: SourceConfigCoverage,
+    bound_set: Option<binding::BoundSet>,
 ) -> Result<Ctx, DrillError> {
     let spec: DrillSpec = serde_yaml::from_str(&spec_text)
         .map_err(|e| DrillError::Operational(format!("drill spec does not parse: {e}")))?;
@@ -1759,18 +1768,14 @@ fn context(
         (
             Store::from_url_with(&spec.evidence, &evidence_options)
                 .map_err(|e| DrillError::Operational(e.to_string()))?,
-            Store::read_only_with(&spec.source.storage, &archive_options)
-                .map_err(|e| DrillError::Operational(e.to_string()))?,
-            Store::read_only_with(&spec.source.storage, &archive_options)
-                .map_err(|e| DrillError::Operational(e.to_string()))?,
+            archive_read_handle(&spec.source.storage, Some(&archive_options))?,
+            archive_read_handle(&spec.source.storage, Some(&archive_options))?,
         )
     } else {
         (
             Store::from_url(&spec.evidence).map_err(|e| DrillError::Operational(e.to_string()))?,
-            Store::read_only_from_url(&spec.source.storage)
-                .map_err(|e| DrillError::Operational(e.to_string()))?,
-            Store::read_only_from_url(&spec.source.storage)
-                .map_err(|e| DrillError::Operational(e.to_string()))?,
+            archive_read_handle(&spec.source.storage, None)?,
+            archive_read_handle(&spec.source.storage, None)?,
         )
     };
 
@@ -1830,7 +1835,33 @@ fn context(
         // What `check_v2_bindings` verified; UNKNOWN for a plan bound to no
         // point, because there is then no signed capture record to read.
         source_config_coverage,
+        // FX-16: the set that record describes; `None` when nothing is bound.
+        bound_set,
     })
+}
+
+/// A READ-ONLY handle over the plan's archive, built the ONE way this run
+/// builds every archive handle: under the store contract with the options the
+/// controller named (`archive_options`: the named credential, the projected
+/// CA, no `AWS_*` relocation), otherwise with the legacy constructor.
+///
+/// **FX-16 class sweep.** The point binding used to build its own handle with
+/// `Store::read_only_from_url` whatever the contract said, so on a
+/// destination-backed run the receipt, its signature and the manifest the
+/// binding verified (and FX-7's pin, judged by version) were read through a
+/// client that ignored the archive's CA and could be relocated by a stray
+/// `AWS_ENDPOINT_URL`, while the engine and phase 7 read through this one. Two
+/// clients can answer for two archives; one constructor cannot.
+/// `tests::every_archive_handle_is_built_by_one_constructor` pins it.
+fn archive_read_handle(
+    storage: &logweir_core::engine::StorageUrl,
+    contract_options: Option<&logweir_engine_oso::storage::StoreOptions>,
+) -> Result<Store, DrillError> {
+    match contract_options {
+        Some(options) => Store::read_only_with(storage, options),
+        None => Store::read_only_from_url(storage),
+    }
+    .map_err(|e| DrillError::Operational(e.to_string()))
 }
 
 /// The phase sequence, over handles this function does not build. `pub`
@@ -2376,6 +2407,7 @@ fn execute_for_reporting(
         &startup,
         &authenticated_spec,
         contract.as_ref(),
+        store_contract,
         &signer.verifying_key(),
     ) {
         Ok(bindings) => bindings,
@@ -2425,6 +2457,7 @@ fn execute_for_reporting(
         startup.allowed_text,
         store_contract,
         bindings.source_config_coverage,
+        bindings.bound_set,
     ) {
         Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, approved),
         Err(error) => Err(error),
@@ -2440,6 +2473,9 @@ struct V2Bindings {
     /// **FX-4.** The verified recovery point's configuration capture coverage;
     /// [`SourceConfigCoverage::unknown`] when the plan binds no point.
     source_config_coverage: SourceConfigCoverage,
+    /// **FX-16.** The set the verified point's receipt describes; `None` when
+    /// the plan binds no point.
+    bound_set: Option<binding::BoundSet>,
 }
 
 /// The standing-authorization scope check and the recovery-point binding
@@ -2455,6 +2491,7 @@ fn check_v2_bindings(
     startup: &StartupInputs,
     plan: &DrillSpec,
     contract: Option<&ExecutionContract>,
+    store_contract: bool,
     signing_key: &logweir_evidence::keys::VerifyingKey,
 ) -> Result<V2Bindings, DrillError> {
     use logweir_core::execution_contract::AuthorizationKind;
@@ -2518,14 +2555,24 @@ fn check_v2_bindings(
     }
 
     let mut source_config_coverage = SourceConfigCoverage::unknown();
+    let mut bound_set = None;
     if plan.source.point.is_some() {
         // A READ-ONLY handle, built here and dropped here. `Store` is not
         // `Clone` and `context` builds its own; a read-only handle cannot put
         // at all (`put_create_only` refuses every key through it), so this
         // read can never become the first write of a run that is about to be
         // refused.
-        let archive = Store::read_only_from_url(&plan.source.storage)
-            .map_err(|error| DrillError::Operational(error.to_string()))?;
+        //
+        // FX-16 class sweep: built by `archive_read_handle`, with the store
+        // contract's options when this run is under it, so the archive the
+        // binding verifies is read through the same client configuration as
+        // the archive the engine restores and phase 7 reads.
+        let contract_options = if store_contract {
+            Some(crate::backup::store_contract::archive_options()?)
+        } else {
+            None
+        };
+        let archive = archive_read_handle(&plan.source.storage, contract_options.as_ref())?;
         // THE SIGNATURE HALF NEEDS THE CLOCK, read here (Global Constraint 1)
         // and passed down, like the standing authorization's.
         if let Some(verified) = binding::verify_point_binding(
@@ -2542,11 +2589,13 @@ fn check_v2_bindings(
                 tracing::warn!(point_id = %verified.point_id, "{note}");
             }
             source_config_coverage = verified.config_coverage;
+            bound_set = Some(verified.set);
         }
     }
     Ok(V2Bindings {
         standing_approved,
         source_config_coverage,
+        bound_set,
     })
 }
 
@@ -2780,12 +2829,29 @@ fn execute_with_validated_approval(
     // so a refused plan never opens the bucket. `set` is also what
     // `Selection::bind_backup_set` needs below — `BackupSetFacts` does not
     // carry a manifest key, so this is the only binding of it the drill has.
-    let set = pick_backup_set(c.engine.as_ref(), &c.spec)?;
+    let set = pick_backup_set(c.engine.as_ref(), &c.spec, c.bound_set.as_ref())?;
     // `describe_with_notices`, not `describe`: what the engine found that no
     // signed field carries — today an unreadable consumer-groups snapshot — is
     // told to the operator here, before any target is touched, rather than
     // dropped. It changes nothing this run does or signs.
     let (facts, notices) = c.engine.describe_with_notices(&set)?;
+    // **FX-16: THE SET IS THE BOUND POINT'S, checked here and before anything
+    // is decided from the point's receipt.** `pick_backup_set` chose `set` by
+    // `source.backup`, and the binding verified a receipt that describes ONE
+    // set; every decision below that reads the receipt — the time basis (its
+    // recorded timestamp types, FX-8), phases 3 and 7 (its capture coverage,
+    // FX-4) — and FX-7's pin verdict are about that set alone. So the set id,
+    // the manifest key, the digest `describe` just computed and the version it
+    // read must all be the ones the binding verified, or the run is refused
+    // exit 3 (`PointBindingSetMismatch`) before phase 2: no target topic of
+    // this restore is created and the engine never starts. A plan bound to no
+    // point compares nothing.
+    //
+    // `orchestrator.rs::a_restored_set_that_is_not_the_bound_points_creates_no_target_topic`
+    // fails if this moves after the creation step, and
+    // `a_restored_set_mismatch_is_refused_before_the_time_basis_reads_the_receipt`
+    // if it moves after `time_basis::decide`.
+    binding::check_restored_set(c.bound_set.as_ref(), &set, &facts)?;
     surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
     // **FX-8: THE TIME BASIS, decided here and nowhere later.** The first point
     // at which both of its records are in hand — the archive manifest just
@@ -3378,12 +3444,46 @@ fn sign_and_publish(
 /// silently falling back to the newest set — a drill that quietly restored a
 /// different backup than the approved plan named would make the whole
 /// approval chain meaningless.
-fn pick_backup_set(engine: &dyn DataEngine, spec: &DrillSpec) -> Result<BackupSetRef, DrillError> {
+///
+/// **A bound plan's set is selected by KEY (FX-16 fix round, review M-1 and
+/// L-1).** `list_backup_sets` lists every `…/manifest.json` under the prefix,
+/// recursively and sorted, naming each set by its parent directory, so two
+/// manifests can carry the bound id — a copy under a sub-prefix, a nested set.
+/// Choosing the FIRST by id let the drill describe one of them while the
+/// engine, told only the prefix and the id, restored
+/// `<prefix>/<backup_id>/manifest.json`; and let a same-id copy that sorts
+/// first refuse a truthful plan. For a bound plan `bound.manifest_key` is that
+/// engine key (the binding refuses any other), so the set chosen here, the set
+/// `describe` reads and the set the engine restores are one object. A plan
+/// bound to no point keeps the selection by id.
+fn pick_backup_set(
+    engine: &dyn DataEngine,
+    spec: &DrillSpec,
+    bound: Option<&binding::BoundSet>,
+) -> Result<BackupSetRef, DrillError> {
     let sets = engine.list_backup_sets(&spec.source.storage)?;
     if sets.is_empty() {
         return Err(DrillError::Operational(
             "the archive holds no backup set at the configured source storage location".into(),
         ));
+    }
+    if let Some(bound) = bound {
+        // The binding read this manifest moments ago, at this key; a listing
+        // that does not show it is the archive answering inconsistently, not
+        // the plan being wrong: exit 1.
+        return sets
+            .iter()
+            .find(|s| s.manifest_key == bound.manifest_key)
+            .cloned()
+            .ok_or_else(|| {
+                DrillError::Operational(format!(
+                    "the plan is bound to recovery point {} whose manifest is {}, and the \
+                     archive's listing under the plan's storage does not show it; refusing to \
+                     choose another set by id, which would restore something other than the \
+                     approved point",
+                    bound.point_id, bound.manifest_key
+                ))
+            });
     }
     if spec.source.backup == "latestCompleted" {
         // `list_manifests` returns them sorted by key, and manifest keys are
@@ -4012,10 +4112,139 @@ mod tests {
         );
         assert!(
             body.contains(
-                "Ok(V2Bindings {\n        standing_approved,\n        source_config_coverage,\n    })"
+                "Ok(V2Bindings {\n        standing_approved,\n        source_config_coverage,\n        \
+                 bound_set,\n    })"
             ),
             "check_v2_bindings must return the coverage it kept"
         );
+    }
+
+    /// **FX-16: the set the verified receipt describes travels WITH its
+    /// coverage**, from the same `VerifiedPoint`, through `V2Bindings` and
+    /// `context` into `Ctx::bound_set` — so a run whose coverage came from a
+    /// receipt always has that receipt's set to compare. A behaviour test over
+    /// the real binary cannot reach `describe` without a broker; this reads
+    /// the one path.
+    ///
+    /// KILLS: `check_v2_bindings` dropping the set (`bound_set` stays `None`
+    /// and `check_restored_set` compares nothing); `execute_for_reporting`
+    /// passing `None`; `context` storing anything but what it is given.
+    #[test]
+    fn the_verified_binding_hands_its_set_to_the_run() {
+        let src = include_str!("mod.rs");
+        let body = fn_body(src, "check_v2_bindings");
+        let after_verify = body
+            .split("binding::verify_point_binding(")
+            .nth(1)
+            .expect("check_v2_bindings verifies the point binding");
+        assert!(
+            after_verify.contains("bound_set = Some(verified.set);"),
+            "check_v2_bindings must keep the verified binding's set: {after_verify}"
+        );
+        assert_eq!(
+            body.matches("bound_set = ").count(),
+            2,
+            "exactly the `None` default and the verified assignment"
+        );
+        assert!(body.contains("let mut bound_set = None;"));
+        let run = fn_body(src, "execute_for_reporting");
+        let call = run
+            .split("match context(")
+            .nth(1)
+            .and_then(|r| r.split(") {").next())
+            .expect("execute_for_reporting builds its context with `match context(…) {`");
+        assert!(
+            call.contains("bindings.bound_set"),
+            "the run context must be built WITH the verified binding's set: {call}"
+        );
+        let ctx = fn_body(src, "context");
+        assert!(
+            ctx.contains("bound_set: Option<binding::BoundSet>,")
+                && ctx.contains("        bound_set,\n    })"),
+            "context() must take the set and store exactly what it is given"
+        );
+    }
+
+    /// **FX-16 class sweep: the archive the binding verifies is read through
+    /// the same client configuration as the archive the run restores.** Every
+    /// read-only archive handle in this module comes from
+    /// `archive_read_handle`, and the binding passes it the store contract's
+    /// options when the run is under the contract — so a destination's CA and
+    /// named credential apply to the receipt, signature, manifest and pin
+    /// reads exactly as to the engine's and phase 7's.
+    ///
+    /// KILLS: the binding building its own `Store::read_only_from_url` again
+    /// (the pre-FX-16 shape: no archive CA, relocatable by `AWS_ENDPOINT_URL`);
+    /// the binding ignoring `store_contract`.
+    #[test]
+    fn every_archive_handle_is_built_by_one_constructor() {
+        let src = include_str!("mod.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("mod.rs production half");
+        assert_eq!(prod.matches("Store::read_only_from_url(").count(), 1);
+        assert_eq!(prod.matches("Store::read_only_with(").count(), 1);
+        let handle = fn_body(src, "archive_read_handle");
+        assert!(
+            handle.contains("Store::read_only_from_url(")
+                && handle.contains("Store::read_only_with("),
+            "both constructors live in archive_read_handle: {handle}"
+        );
+        let body = fn_body(src, "check_v2_bindings");
+        assert!(
+            body.contains("let contract_options = if store_contract {")
+                && body.contains(
+                    "archive_read_handle(&plan.source.storage, contract_options.as_ref())?"
+                ),
+            "the binding builds its handle under the run's store contract: {body}"
+        );
+        let ctx = fn_body(src, "context");
+        assert_eq!(
+            ctx.matches("archive_read_handle(&spec.source.storage, Some(&archive_options))?")
+                .count(),
+            2,
+            "context's two archive handles under the contract"
+        );
+        let binding = include_str!("binding.rs");
+        let binding = binding.split("#[cfg(test)]").next().unwrap_or(binding);
+        assert!(
+            !binding.contains("Store::read_only") && !binding.contains("Store::from_url"),
+            "the binding reads only through the handle it is given"
+        );
+    }
+
+    /// **FX-16: WHERE the restored set is checked.** Exactly once, after
+    /// `describe` produced the facts it compares, and before every reader of
+    /// the receipt's word in the phase sequence: the time basis (FX-8), phase
+    /// 2, phase 3's diff and phase 7's parity (FX-4). The behaviour rows in
+    /// `tests/orchestrator.rs` prove the refusal creates no target topic and
+    /// pre-empts the time basis; this pins the order against the rest.
+    #[test]
+    fn the_restored_set_is_checked_after_describe_and_before_the_receipt_is_read() {
+        let src = include_str!("mod.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("mod.rs production half");
+        const CHECK: &str = "binding::check_restored_set(c.bound_set.as_ref(), &set, &facts)?;";
+        assert_eq!(prod.matches("check_restored_set(").count(), 1, "one check");
+        let body = fn_body(src, "execute_with_validated_approval");
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("execute_with_validated_approval has `{needle}`"))
+        };
+        let check = at(CHECK);
+        assert!(at("describe_with_notices(&set)") < check, "after describe");
+        for later in [
+            "logweir_core::time_basis::decide(",
+            "phase2_target::run(",
+            "phase3_diff::run(",
+            "&c.source_config_coverage",
+            "create_target_topics(",
+        ] {
+            assert!(check < at(later), "the set check must precede `{later}`");
+        }
     }
 
     #[test]
@@ -4039,7 +4268,7 @@ mod tests {
         let ctx = fn_body(src, "context");
         assert!(
             ctx.contains("source_config_coverage: SourceConfigCoverage,")
-                && ctx.contains("        source_config_coverage,\n    })"),
+                && ctx.contains("        source_config_coverage,\n        // FX-16"),
             "context() must take the coverage and store exactly what it is given"
         );
         assert!(
@@ -4929,20 +5158,129 @@ mod tests {
 
         spec.source.backup = "latestCompleted".into();
         assert_eq!(
-            pick_backup_set(&TwoSets, &spec).unwrap().backup_id,
+            pick_backup_set(&TwoSets, &spec, None).unwrap().backup_id,
             "newest",
             "latestCompleted takes the last set list_backup_sets returns"
         );
 
         spec.source.backup = "older".into();
-        assert_eq!(pick_backup_set(&TwoSets, &spec).unwrap().backup_id, "older");
+        assert_eq!(
+            pick_backup_set(&TwoSets, &spec, None).unwrap().backup_id,
+            "older"
+        );
 
         spec.source.backup = "a-backup-that-was-deleted".into();
-        let e = pick_backup_set(&TwoSets, &spec).unwrap_err();
+        let e = pick_backup_set(&TwoSets, &spec, None).unwrap_err();
         assert!(
             matches!(e, DrillError::Operational(ref m)
                      if m.contains("a-backup-that-was-deleted") && m.contains("refusing to fall back")),
             "the refusal must name the missing id: {e}"
+        );
+    }
+
+    /// **FX-16 fix round (review M-1, L-1): a bound plan's set is the one at
+    /// the point's key, whatever sorts first.** The listing returns three
+    /// manifests with id `nightly-7` — a copy under `0copy/`, a nested set
+    /// under `a/`, and the set at the engine's key `nightly-7/manifest.json` —
+    /// in key order. Bound to the last, the bound plan gets the last; bound to
+    /// a key the listing does not show, it is exit 1 naming the key, never
+    /// another set by id.
+    ///
+    /// KILLS: the bound selection removed (the first, `0copy/…`, is chosen —
+    /// L-1's false refusal; with a nested bound key, M-1's wrong restore).
+    /// The unbound control documents what a plan bound to no point still
+    /// does: the first by id (the class item owed in the report).
+    #[test]
+    fn a_bound_plan_picks_the_set_at_the_points_key_whatever_sorts_first() {
+        use logweir_core::engine::*;
+
+        struct SameIdSets;
+        impl DataEngine for SameIdSets {
+            fn id(&self) -> EngineId {
+                unreachable!()
+            }
+            fn list_backup_sets(&self, _l: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
+                Ok([
+                    "0copy/nightly-7/manifest.json",
+                    "a/nightly-7/manifest.json",
+                    "nightly-7/manifest.json",
+                ]
+                .iter()
+                .map(|k| BackupSetRef {
+                    backup_id: "nightly-7".into(),
+                    manifest_key: (*k).into(),
+                })
+                .collect())
+            }
+            fn describe(&self, _s: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
+                unreachable!()
+            }
+            fn preflight(&self, _p: &RestorePlan) -> Result<PreflightReport, EngineError> {
+                unreachable!()
+            }
+            fn restore(
+                &self,
+                _p: &RestorePlan,
+                _o: &mut dyn PhaseObserver,
+            ) -> Result<RestoreFacts, EngineError> {
+                unreachable!()
+            }
+            fn fingerprints(
+                &self,
+                _s: &SampleSelection,
+            ) -> Result<Vec<RecordFingerprint>, EngineError> {
+                unreachable!()
+            }
+        }
+
+        let spec: DrillSpec = serde_yaml::from_str(
+            "source:\n  storage:\n    backend: filesystem\n    path: /a\n  backup: nightly-7\n  \
+             topics: [t]\n\
+             target:\n  bootstrap_servers: [x:9092]\n  topic_mapping_prefix: \"d-\"\n\
+             sample:\n  window_start: \"2026-01-01T00:00:00Z\"\n  window_end: \"2026-01-02T00:00:00Z\"\n\
+             objectives: {}\n\
+             evidence:\n  backend: filesystem\n  path: /b\n",
+        )
+        .unwrap();
+        let bound = |key: &str| binding::BoundSet {
+            point_id: "lwp1-0123456789abcdef0123456789abcdef".into(),
+            backup_id: "nightly-7".into(),
+            manifest_key: key.into(),
+            manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+            manifest_version_id: None,
+        };
+
+        for key in [
+            "nightly-7/manifest.json",
+            "a/nightly-7/manifest.json",
+            "0copy/nightly-7/manifest.json",
+        ] {
+            assert_eq!(
+                pick_backup_set(&SameIdSets, &spec, Some(&bound(key)))
+                    .unwrap()
+                    .manifest_key,
+                key,
+                "a bound plan gets the set at its point's key"
+            );
+        }
+        let e = pick_backup_set(
+            &SameIdSets,
+            &spec,
+            Some(&bound("elsewhere/nightly-7/manifest.json")),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, DrillError::Operational(ref m)
+                     if m.contains("elsewhere/nightly-7/manifest.json")
+                         && m.contains("refusing to choose another set by id")),
+            "{e}"
+        );
+        assert_eq!(
+            pick_backup_set(&SameIdSets, &spec, None)
+                .unwrap()
+                .manifest_key,
+            "0copy/nightly-7/manifest.json",
+            "the unbound selection is unchanged: the first by id"
         );
     }
 
