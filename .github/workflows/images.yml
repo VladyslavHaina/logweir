@@ -77,18 +77,20 @@ jobs:
           labels: org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=console-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=console-${{ matrix.arch }}
+      # BOTH ARCHITECTURES SINCE PROD-00.2. The engine is Logweir's build of the
+      # vendored OSO source (the Dockerfile's `engine-logweir` stage), compiled
+      # natively on each runner, where OSO's own image is linux/amd64 only.
       - name: Build runner
-        if: matrix.arch == 'amd64'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
           tags: logweir:check
           labels: org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=runner-amd64
-          cache-to: type=gha,mode=max,scope=runner-amd64
+          cache-from: type=gha,scope=runner-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=runner-${{ matrix.arch }}
       # DEFECT RET-NOIMAGE, AND THE ONE CHECK THAT WOULD HAVE CAUGHT IT.
       #
       # The controller creates every retention enforcement Job with
@@ -122,9 +124,8 @@ jobs:
       # earns its place by failing in seconds, before the login step, and by
       # naming the defect; drop it if the duplication ever costs more than that.
       - name: The runner image carries the enforcement binary
-        if: matrix.arch == 'amd64'
         run: |
-          version="$(docker run --rm --platform linux/amd64 \
+          version="$(docker run --rm --platform linux/${{ matrix.arch }} \
             --entrypoint logweir-retention logweir:check --version)"
           case "$version" in
             "logweir-retention "*) echo "ok: $version" ;;
@@ -176,10 +177,22 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Push tested candidates and verify registry digests
         run: bash scripts/ci-images.sh candidates
+      # THE RUNNER'S SBOM (PROD-00.2), read from the exact candidate digest the
+      # registry returned, never from the local tag: an SPDX document of both
+      # binaries, the engine's crates included, and the Debian packages. The
+      # `sign` job attests it to that digest with the workflow's identity.
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        id: syft
+      - name: SBOM of the runner candidate
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: bash scripts/ci-images.sh sbom
       - uses: actions/upload-artifact@v4
         with:
           name: image-digests-${{ matrix.arch }}
-          path: image-digests/*.json
+          path: |
+            image-digests/*.json
+            image-digests/*.spdx.json
           if-no-files-found: error
           retention-days: 7
   promote:
@@ -233,3 +246,80 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: bash scripts/ci-images.sh chart
+
+  # SIGNATURES, THE SBOM AND SIGNED PROVENANCE (PROD-00.2) for the four images
+  # `promote` published, keyless: cosign and GitHub's attestation action take a
+  # short-lived certificate for THIS workflow run from Sigstore's Fulcio via
+  # GitHub's OIDC token, and log every signature in Rekor. No private key exists
+  # anywhere, in the repository or in a secret. A job of its own, after
+  # `promote`, so a Sigstore outage leaves the publication unsigned and this job
+  # red rather than the publication half done.
+  #
+  #   * `cosign sign --recursive`: the multi-platform index and each platform's
+  #     manifest, for all four images;
+  #   * `cosign attest --type spdxjson`: the runner's SBOM, per platform, to the
+  #     candidate digest it was read from;
+  #   * `actions/attest-build-provenance`: SLSA provenance for each index,
+  #     pushed to the registry beside it.
+  #
+  # Verification is `scripts/ci-images.sh verify-signatures` (docs/install.md,
+  # "Verify the images"): the exact identity (images.yml on main), and the
+  # CALLER pinned — this repository, main, a push — because a reusable
+  # workflow's certificate names the called file whoever called it. Every
+  # action here is pinned by commit: the job holds the Docker Hub token and the
+  # OIDC token.
+  # images.yml is a reusable workflow because ci.yml's `publish` job, its one
+  # caller, invokes it with `uses:`; nothing else may sign. In a run another
+  # repository starts by calling this file, `github.repository`, `ref` and
+  # `event_name` are the CALLER's, so this job does not run there.
+  sign:
+    needs: promote
+    if: github.repository == 'VladyslavHaina/logweir' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      NS: ${{ vars.DOCKERHUB_NAMESPACE || 'vladyslavhaina' }}
+      RUNNER_DIGEST: ${{ needs.promote.outputs.runner_digest }}
+      CONTROLLER_DIGEST: ${{ needs.promote.outputs.controller_digest }}
+      UI_DIGEST: ${{ needs.promote.outputs.ui_digest }}
+      CONSOLE_DIGEST: ${{ needs.promote.outputs.console_digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: image-digests-*
+          path: image-digests
+          merge-multiple: true
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+      - name: Sign the four images and attest the runner's SBOM
+        run: bash scripts/ci-images.sh sign
+      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: index.docker.io/${{ env.NS }}/logweir
+          subject-digest: ${{ env.RUNNER_DIGEST }}
+          push-to-registry: true
+      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: index.docker.io/${{ env.NS }}/weirkeeper
+          subject-digest: ${{ env.CONTROLLER_DIGEST }}
+          push-to-registry: true
+      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: index.docker.io/${{ env.NS }}/logweir-ui
+          subject-digest: ${{ env.UI_DIGEST }}
+          push-to-registry: true
+      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: index.docker.io/${{ env.NS }}/logweir-console
+          subject-digest: ${{ env.CONSOLE_DIGEST }}
+          push-to-registry: true
+      - name: Verify what was just signed, as an adopter would
+        run: bash scripts/ci-images.sh verify-signatures

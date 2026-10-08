@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SHA = "a" * 40
 NS = "promotion-test"
 PLATFORMS = {
-    "logweir": ("amd64",),
+    "logweir": ("amd64", "arm64"),
     "weirkeeper": ("amd64", "arm64"),
     "logweir-ui": ("amd64", "arm64"),
     "logweir-console": ("amd64", "arm64"),

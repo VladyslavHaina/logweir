@@ -1730,6 +1730,8 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             allowed,
             client: Box::new(client),
             engine: Box::new(engine),
+            // A double has no binary to ask for its version (PROD-00.2 L4).
+            engine_binary: None,
             archive,
             store: logweir_engine_oso::storage::Store::in_memory("logweir"),
             // No projected private CA: the fixture's target is a double, and a

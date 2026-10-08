@@ -50,7 +50,9 @@ jobs:
   e2e:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    timeout-minutes: 35
+    # 50, not 35: PROD-00.2 compiles the engine from the vendored source in
+    # this job (one release build of its own workspace, about 8 minutes cold).
+    timeout-minutes: 50
     env:
       AWS_EC2_METADATA_DISABLED: "true"
     runs-on: ubuntu-24.04
@@ -70,6 +72,16 @@ jobs:
       - run: cargo fetch --locked
       - name: Extract the pinned engine
         run: ./scripts/extract-engine.sh
+      # WHAT SHIPS IS WHAT THIS JOB TESTS (PROD-00.2). The extraction above
+      # pins OSO's release, which the compose stack's `kafka-backup` service
+      # uses to seed the drill archive. Every engine run by `logweir` below is
+      # LOGWEIR'S BUILD, the one the runner image carries: the vendored
+      # tarball, verified, plus the patch folder, compiled natively over
+      # `.engine/kafka-backup`. It prints `kafka-backup 0.23.3+logweir.1`,
+      # which is PROD-01.1's CONTRACT_ENGINE, so the record-semantics contract
+      # is asserted on the shipped engine on every run.
+      - name: Build Logweir's engine from the vendored source
+        run: bash scripts/engine-source.sh build
       - run: just e2e-up
       - run: ./scripts/e2e-seed.sh
       - run: cargo build --locked -p logweir
@@ -91,6 +103,12 @@ jobs:
   publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [check, e2e]
+    # images.yml's `sign` job signs keylessly (PROD-00.2): a reusable
+    # workflow's jobs get no more than this job grants.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/images.yml
     with:
       tag: sha-${{ github.sha }}

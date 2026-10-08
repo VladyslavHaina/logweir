@@ -713,3 +713,50 @@ fn a_mapped_target_topic_that_already_exists_is_refused() {
     // `run_with` empties it first.
     delete_all_drill_topics();
 }
+
+/// A stub engine that prints a version no run would sign, and records any
+/// OTHER invocation, so a test can prove the engine was asked only for its
+/// version (PROD-00.2 review L3/L4).
+fn other_version_engine(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let exe = demo_dir().join(format!("{name}-other-version-engine.sh"));
+    let log = demo_dir().join(format!("{name}-other-version-engine.log"));
+    let _ = std::fs::remove_file(&log);
+    std::fs::write(
+        &exe,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'kafka-backup 9.9.9-not-the-signed-engine'; exit 0; fi\n\
+             echo \"$@\" >> '{}'\nexit 0\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (exe, log)
+}
+
+/// **PROD-00.2 review L3/L4: a drill never signs an engine other than the one
+/// that runs.** The run declares the real engine's version (as the harness
+/// always does) but the binary it would execute prints another. Right after
+/// phase 0 the drill asks the binary, refuses with exit 1, and starts no engine
+/// command; no scorecard exists.
+#[test]
+fn a_drill_whose_engine_prints_another_version_is_refused_before_the_engine_runs() {
+    let (exe, log) = other_version_engine("drill");
+    let spec = spec_default();
+    let mut opts = RunOpts::new(&spec);
+    opts.env = vec![("LOGWEIR_ENGINE_BIN".into(), exe.display().to_string())];
+    let r = run_with(opts);
+    let e = r.out.stderr_utf8();
+    assert_eq!(r.out.status.code(), Some(1), "{e}");
+    assert!(
+        e.contains("refusing to sign") && e.contains("9.9.9-not-the-signed-engine"),
+        "the refusal must name both versions:\n{e}"
+    );
+    assert!(
+        !log.exists(),
+        "the engine ran a command: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    assert!(!r.scorecard.exists(), "no scorecard may be signed");
+}

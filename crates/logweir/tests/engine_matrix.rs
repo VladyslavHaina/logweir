@@ -804,13 +804,24 @@ fn the_declared_rows_follow_the_documented_floor() {
 /// need, and is not a pin statement. `CONTRACT_ENGINE` is gated by design
 /// (`contract_applies`) and is not one either.
 fn pin_statements(code: &str, pinned_digest: &str) -> Vec<String> {
+    // PROD-00.2: Logweir's build is a pin too. Reading
+    // `third_party/kafka-backup-build.env` to RECORD the build-input digest of
+    // the engine that ran is what the harness does; comparing an engine with
+    // the build's version constant or its digest literal is not.
+    let build_digest = read("third_party/kafka-backup-build.env")
+        .lines()
+        .find_map(|l| l.strip_prefix("ENGINE_DIGEST="))
+        .expect("the build env records ENGINE_DIGEST")
+        .to_string();
     let needles = [
         "ENGINE_PIN",
+        "ENGINE_UPSTREAM_RELEASE",
         "crates/weirkeeper/src/job.rs",
         "scripts/extract-engine.sh",
         "third_party/kafka-backup-v",
         "fake-engine-ok.sh",
         pinned_digest,
+        build_digest.as_str(),
     ];
     code.lines()
         .map(str::trim_start)
@@ -847,6 +858,11 @@ fn no_e2e_test_compares_the_engine_with_a_committed_pin() {
         .trim()
         .to_string();
     assert!(pinned_digest.starts_with("sha256:"), "{pinned_digest}");
+    let build_digest = read("third_party/kafka-backup-build.env")
+        .lines()
+        .find_map(|l| l.strip_prefix("ENGINE_DIGEST="))
+        .expect("the build env records ENGINE_DIGEST")
+        .to_string();
     let mut seen = Vec::new();
     let offenders = e2e_pin_offenders(&root().join("e2e/tests"), &pinned_digest, &mut seen);
     assert!(
@@ -884,7 +900,8 @@ fn no_e2e_test_compares_the_engine_with_a_committed_pin() {
             "use logweir::doctor::ENGINE_PIN;\n\
              fn digest_file() -> String {{ read(\"third_party/kafka-backup-binary.digest\") }}\n\
              #[test]\nfn t() {{\n    check(&read(\"crates/weirkeeper/src/job.rs\"), ENGINE_PIN, &digest_file());\n\
-             assert_eq!(digest_file(), \"{pinned_digest}\");\n}}\n"
+             assert_eq!(digest_file(), \"{pinned_digest}\");\n\
+             assert_eq!(engine_digest(), \"{build_digest}\");\n}}\n"
         ),
     )
     .unwrap();
@@ -902,6 +919,7 @@ fn no_e2e_test_compares_the_engine_with_a_committed_pin() {
         "ENGINE_PIN",
         "crates/weirkeeper/src/job.rs",
         pinned_digest.as_str(),
+        build_digest.as_str(),
     ] {
         assert!(
             caught

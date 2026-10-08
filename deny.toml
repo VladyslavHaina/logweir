@@ -11,6 +11,14 @@ multiple-versions = "warn"
 # Global Constraint 2: the OSO library must never enter the workspace graph.
 deny = [{ name = "kafka-backup-core" }]
 
+[sources]
+# PROD-00.2 review M2, swept: Logweir's own graph is crates.io only, and stays so
+# unless an exception is recorded here with its reason.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
 [advisories]
 yanked = "deny"
 unmaintained = "all"

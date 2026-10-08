@@ -19,11 +19,25 @@ floor below. This file is the row-by-row evidence behind it.
 |---|---|---|
 | **Warning-mechanism floor** | `kafka-backup` **0.16.0** | The `Ignoring unknown config key ...` message Logweir parses off the engine's streams. Below it, a rendered key the engine dropped fails **silently** instead of surfacing in `engine.levers.unknown_key_warnings`. |
 | **Full-drill floor** | `kafka-backup` **0.21.0** | The full drill as shipped. This is the version every vendored struct and CLI behaviour was first verified against. |
-| **The pin** | `kafka-backup` **0.23.3** | Not a floor: the engine the runner image carries and `third_party/kafka-backup-binary.digest` pins (since PROD-00.3f, 2026-10-07; it was 0.21.0 before). `logweir doctor` accepts exactly this version. The vendored structs are drift-gated against its source. |
+| **The pin** | `kafka-backup` **0.23.3+logweir.1** | Not a floor: **Logweir's build** of OSO's 0.23.3 source with Logweir's patch folder (PROD-00.2, OD-3; `third_party/kafka-backup-build.env`), the engine the runner image carries for linux/amd64 and linux/arm64. `logweir doctor` accepts exactly this version, and names OSO's own 0.23.3 (pinned by `third_party/kafka-backup-binary.digest` since PROD-00.3f, and the one-release rollback) as OSO's release. The vendored structs are drift-gated against the same source. |
 
 Anything below the full-drill floor is reported **`unsupported (lever-absent)`**
 — an engine that predates a lever Logweir needs. **That is never a fault Logweir
 raises against that engine or against an operator that defaults to it.**
+
+## Architectures
+
+| Image or binary | linux/amd64 | linux/arm64 |
+|---|---|---|
+| Runner image (Logweir's engine build, `logweir`, `logweir-retention`) | yes | **yes, since PROD-00.2** |
+| Controller, console, UI images | yes | yes |
+| OSO's released engine image (the rollback, the compose stack's seeding engine) | yes | no: OSO publishes none |
+| Standalone CLI archives (`release.yml`) | `x86_64-unknown-linux-gnu` | `aarch64-unknown-linux-gnu`, and `aarch64-apple-darwin` |
+
+Before PROD-00.2 the runner was amd64-only, because its engine was OSO's binary.
+Evidence for the arm64 runner is in the rows below and in the
+[decision record](to-do/decisions/PROD-00-engine-route.md) §13: `scripts/check-image.sh`
+on both platforms, and the parity runs against OSO's binary.
 
 ## The five outcomes
 
@@ -41,7 +55,8 @@ raises against that engine or against an operator that defaults to it.**
 |---|---|---|---|
 | **0.21.0** | `sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317` | **`pass`** | **The engine floor: `0.21.0` is the minimum supported `kafka-backup` version and the version this row was run against; it was also the shipped pin until PROD-00.3f (2026-10-07). [install.md](install.md) leads with it.** Full drill, 2026-09-05, against the compose stack (Kafka 3.7.1 KRaft + MinIO) via `scripts/demo.sh`: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `pass_rate_measured: 1.0`, `rto_excluding_preflight_seconds: 6`, `rpo_seconds: 9`, all three objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. `header_preflight: honoured`. |
 
-| **0.23.3** | `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db` | **`pass`** | **The pin since PROD-00.3f.** Full drill, 2026-10-08, against the compose stack (slot 4, Kafka 3.7.1 KRaft + MinIO, the `linux/amd64` image under emulation), `scripts/demo.sh` steps 4–6: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `header_preflight: honoured`, objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. The same day CI's e2e command passed (177 tests, PROD-01.1's contract asserted on 0.23.3), and the record-semantics, G-PITR, FX-1, FX-7 and full-drill rows passed on Kafka 4.3.1. An archive 0.21.0 wrote drills `pass` with 0.23.3, and the reverse ([decision record](to-do/decisions/PROD-00-engine-route.md) §12.5). |
+| **0.23.3+logweir.1** | build inputs `sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3` (not an image digest) | **`pass`** | **Logweir's build of 0.23.3, the engine the images ship since PROD-00.2.** On 2026-10-08, on the compose stack (Kafka 3.7.1 KRaft + MinIO), built for linux/arm64 (run natively) and linux/amd64 (run under emulation): the demo drill `outcome: pass`, `integrity: byte-fingerprint/pass` 150/150, `header_preflight: honoured`, objectives met, both readers VALID; `full_drill` 15/15, G-PITR (`pitr_boundary`) 1/1, and PROD-01.1's record-semantics rows 8/8 with the contract asserted. All of it compared SAME against OSO's 0.23.3 binary in the same session, and a deliberately modified build did not ([decision record](to-do/decisions/PROD-00-engine-route.md) §13.5). |
+| **0.23.3** | `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db` | **`pass`** | **OSO's release of the shipped source, and the one-release rollback since PROD-00.2; the pin from PROD-00.3f until then.** Full drill, 2026-10-08, against the compose stack (slot 4, Kafka 3.7.1 KRaft + MinIO, the `linux/amd64` image under emulation), `scripts/demo.sh` steps 4–6: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `header_preflight: honoured`, objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. The same day CI's e2e command passed (177 tests, PROD-01.1's contract asserted on 0.23.3), and the record-semantics, G-PITR, FX-1, FX-7 and full-drill rows passed on Kafka 4.3.1. An archive 0.21.0 wrote drills `pass` with 0.23.3, and the reverse ([decision record](to-do/decisions/PROD-00-engine-route.md) §12.5). |
 
 That is **one green row at the declared floor**, which is the release
 requirement, and one at the pin. These two are the rows that have been run
