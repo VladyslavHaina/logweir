@@ -257,3 +257,13 @@ follow the suite fixtures above field for field.
 
 Apache Kafka(R) and Kafka(R) are registered trademarks of the Apache Software Foundation. Logweir
 is not affiliated with or endorsed by the ASF.
+
+## The point-id fixture (`point-id.json`, PROD-05.1)
+
+`point-id.json` names the checked-in signed receipt `e2e/fixtures/signed/backup-receipt.json`, its
+`sha256:` digest and the recovery-point id the catalog writes for it (`lwp1-` and the first 32 hex
+digits). Two rows read it: `prod051_the_point_id_fixture_is_the_one_the_catalog_writes` in
+`replication-factor.spec.js` (the console's `pointIdOfReceiptDigest`, and the digest recomputed in
+`node:crypto`) and `the_point_id_fixture_is_the_catalogs` in `crates/logweir/tests/catalog.rs`
+(`catalog::record::point_id`). A change on either side fails the side that changed. Re-minting the
+signed receipt changes its digest, so the fixture's two values are updated with it.

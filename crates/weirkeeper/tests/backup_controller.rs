@@ -2224,8 +2224,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        44,
-        "the forty-four terminal states that are NOT an exit code — the original ten, plus \
+        46,
+        "the forty-six terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2261,7 +2261,10 @@ fn every_exit_code_maps_to_its_wire_reason() {
          authorization document v2 expired before admission; both immutable, both terminal, \
          plus FX-8's `PointInTimeByProducerTime` — the runner's refusal of a point-in-time \
          selection over a `LogAppendTime` source the plan did not accept by producer time, read \
-         off `refusal-reason=` like `TargetTopicConfigRefused`; \
+         off `refusal-reason=` like `TargetTopicConfigRefused`, plus PROD-01.3's two — \
+         `PlainWithoutTls` (SASL/PLAIN without TLS, refused by the resolver and by the runner) \
+         and `CredentialBindingMismatch` (a projected credential whose `logweir-binding` does not \
+         name the connection the Job was built for); \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not

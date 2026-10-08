@@ -3,13 +3,15 @@
 `application/vnd.logweir.catalog-point+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-catalog-point-1.2.0.json`](../../schemas/logweir-catalog-point-1.2.0.json),
+[`schemas/logweir-catalog-point-1.3.0.json`](../../schemas/logweir-catalog-point-1.3.0.json),
 regenerated from the Rust type by `just schema` and `diff -u`'d against the
 checked-in file by `just schema-check`, so this document and the schema cannot
 drift apart silently. A MINOR bump is a new schema file beside the old one: the
-[`1.1.0` schema](../../schemas/logweir-catalog-point-1.1.0.json), which
-describes every record written without the manifest-version pin (FX-4,
-`topics[].config_coverage`), and the
+[`1.2.0` schema](../../schemas/logweir-catalog-point-1.2.0.json) (FX-7,
+`archive.manifest_version_id`) and the
+[`1.1.0` schema](../../schemas/logweir-catalog-point-1.1.0.json) (FX-4,
+`topics[].config_coverage`), which describe the records written before
+PROD-05.1, and the
 [`1.0.0` schema](../../schemas/logweir-catalog-point-1.0.0.json), which
 describes every record written before format 1.1.0, are frozen beside it and
 never regenerated.
@@ -133,7 +135,7 @@ all of them wanted:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; this build writes `1.1.0`, or `1.2.0` for a record that carries `archive.manifest_version_id`. |
+| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; this build writes `1.4.0` for a record whose `source.auth_mode` is `scramSha256`, `plain` or `mtls` (PROD-01.3), else `1.3.0` for a record whose receipt carries `topic_configuration` (every receipt it signs), else `1.2.0` for a record that carries `archive.manifest_version_id`, else `1.1.0`. |
 | `point_id` | string | `lwp1-` + 32 lowercase hex. See [Point identity](#point-identity). |
 | `recorded_at` | RFC 3339 | When the RECORD was written. **Not** a fact about the backup. |
 | `receipt.key` / `.sidecar_key` | string | Where the signed backup receipt and its sidecar are, in this archive's evidence root. |
@@ -165,14 +167,19 @@ all of them wanted:
 | `topics[].name` | string | One entry per topic the receipt names. |
 | `topics[].records` | int | Records this run captured for the topic. |
 | `topics[].config_coverage` | object, **optional** (1.1.0) | The backup receipt's [`config_coverage`](backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110) entry for the topic, COPIED: `coverage` (`captured`, `notCaptured`, `captureDenied`), `reason` for `notCaptured`, and the effective `timestamp_type` with its `source`. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means UNKNOWN — every 1.0.0 record, and every record derived from a receipt that predates 1.1.0 — and is never read as `captured`. |
-| `topics[].partitions` | int, **optional** | ABSENT on every record this build writes: a backup receipt records no partition count at all. See [absent means unknown](#absent-means-unknown-never-zero). |
+| `topics[].partitions` | int, **optional** | The source's partition count, receipt-derived from the receipt's [`topic_configuration`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) (format 1.3.0): the count the archive manifest records and a restore creates the topic with. ABSENT — every record before 1.3.0, and a 1.3.0 one whose manifest recorded none — is unknown. See [absent means unknown](#absent-means-unknown-never-zero). |
+| `topics[].configuration` | object, **optional** (1.3.0) | The backup receipt's [`topic_configuration`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) entry for the topic, COPIED: `partitions`, `replication_factor`, the recorded `entries` with their `source` and `portability`, and the declarative `owner`. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0 — and is never read as "no configuration". |
+| `owner_detection` | string[], **optional** (1.3.0) | The backup receipt's [`owner_detection`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130), COPIED: where the run looked for declarative owners (`declared`, `kafkaTopicResources`). EMPTY means it looked nowhere, so a topic without an `owner` has its owner NOT CHECKED — never "applied through the admin API". Receipt-derived (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0. |
 | `source.cluster_id` | string | Read from the broker at admission and carried by the receipt — never from a spec. |
 | `source.bootstrap_servers` | string[] | Addressing. |
-| `source.auth_mode` | string | `plaintext` or `scramSha512` — the receipt's closed two-value set. |
+| `source.auth_mode` | string | The receipt's `source.auth.mode`, copied: `plaintext` or `scramSha512`, and from 1.4.0 also `scramSha256`, `plain` or `mtls` — the receipt's versioned closed set. |
 
 **Nothing in this document may hold a credential**, and there is deliberately no
 `username` even though the receipt has one: a catalog is the surface an operator
-lists in bulk, and a SASL principal is not a fact a recovery point needs.
+lists in bulk, and a SASL principal is not a fact a recovery point needs. The
+1.3.0 `topics[].configuration` copy holds no secret either: an entry the broker
+flags sensitive is recorded by key with no value (class `secret`), and an
+owner's `reference` names where desired state lives, never a credential.
 
 ### Provenance (optional, and mostly absent on this build)
 
@@ -224,7 +231,7 @@ and "which shard is it in" are one number.
    schema pins the major with a pattern (`^1\.[0-9]+\.[0-9]+$`) as well, so a
    schema-only validator refuses a `9.9.9` document too.
 2. **Unknown fields are ignored inside major 1.** A minor bump adds optional
-   fields and a 1.0.0 reader must still read a 1.1.0 or 1.2.0 record.
+   fields and a 1.0.0 reader must still read a 1.1.0, 1.2.0 or 1.3.0 record.
 3. **Absent optional fields mean UNKNOWN — never zero.** See below.
 4. **Everything except the receipt-derived facts is informational.** The
    receipt's signature is the verification root. `backup_id`, `run_id`,
@@ -236,6 +243,12 @@ and "which shard is it in" are one number.
    coverage the receipt does not carry — `captured` beside a `captureDenied`
    receipt, or any coverage beside a 1.0.0 receipt, is a `RecordMismatch`. Two
    records of one point conflict on it only where both carry an entry.
+   `topics[].configuration` and `topics[].partitions` (1.3.0) follow the same
+   one-way rule: a model or a count the receipt does not back — an override
+   added, an owner dropped, a class changed — is a `RecordMismatch`, and so is
+   an `owner_detection` the receipt does not carry (a record claiming the run
+   looked for owners it never looked for). Two records conflict on either only
+   where both carry it.
 5. **Nothing under `logweir/` is ever rewritten.** Every put is create-only. A
    correction is a new record under a new point id; a removal is a tombstone.
    An existing object at a record key is "already there", which is a success,
@@ -251,6 +264,8 @@ This is the rule that is easiest to get wrong and most expensive to get wrong.
 * absent `execution` → provenance **unknown** (an imported archive from another
   installation).
 * absent `installation` → the writing installation is **unknown**.
+* absent `topics[].configuration` → the topic's configuration model is **not
+  recorded**; a restore that needs it knows none and says so.
 * absent `topics[].config_coverage` → whether that topic's configuration was
   captured is **unknown**, and never `captured`. A restore does not read this
   copy at all: its configuration parity takes coverage from the bound point's
@@ -320,7 +335,19 @@ none of them.
   its manifest's version; every other record this build writes stays 1.1.0. A
   record without it (an older writer, or an unversioned bucket) is unknown, and
   `cross_check` accepts it; one whose copy differs from the receipt's is a
-  mismatch.
+  mismatch. **1.3.0 (PROD-05.1)** is the third: `topics[].configuration`, and
+  the existing `topics[].partitions` filled, from a receipt that carries
+  `topic_configuration` — every receipt this build signs, so every record it
+  writes is 1.3.0, pinned or not. A record backfilled from an older receipt
+  keeps the format it would have had. The catalog's view lists a point's topics
+  with their recorded layout from these fields (`PointView.topics[]` in the
+  product API) for an `Available` point only.
+  **1.4.0 (PROD-01.3)** is the fourth: no new field, three new values of
+  `source.auth_mode` (`scramSha256`, `plain`, `mtls`), written only for a
+  point whose receipt names one (and so is itself 1.4.0); every other record
+  stays as above. No verifier evaluates a catalog record's invariants, so an
+  older reader still reads it; the receipt it names is what an older verifier
+  refuses.
 * **A major bump** is for a change a `1.x` reader could misread — a field whose
   meaning changed, or a required field removed. It writes under a new key path.
 * **Absent optional fields are unknown**, in every version.

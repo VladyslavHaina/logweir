@@ -57,7 +57,7 @@ golden:
 # as revised): the drill scorecard and the backup receipt; PLAT-17.1 adds a
 # THIRD, `schemas/logweir-api-v1.openapi.json`, the product API's OpenAPI
 # document generated from `crates/logweir-api`'s DTOs; PLAT-15.1 adds a
-# FOURTH, `schemas/logweir-catalog-point-1.2.0.json` (1.0.0 and 1.1.0 frozen beside it), the recovery catalog's
+# FOURTH, `schemas/logweir-catalog-point-1.3.0.json` (1.0.0, 1.1.0 and 1.2.0 frozen beside it), the recovery catalog's
 # point record, generated from `crates/logweir`'s own type (the type is runner
 # vocabulary, so its emitter lives beside it rather than in `logweir-core`).
 # `logweir schema` still accepts exactly the two names Global Constraint 13
@@ -96,16 +96,32 @@ golden:
 # `-1.2.0.json` is frozen beside the new file the same way
 # (`the_frozen_1_1_0_scorecard_schema_does_not_describe_the_time_basis`,
 # `the_frozen_1_2_0_scorecard_schema_does_not_describe_the_time_basis`).
+# PROD-08.1 moved the scorecard to 1.4.0 (`integrity.verification`), and FX-8's
+# `-1.3.0.json` is frozen beside the new file the same way
+# (`the_frozen_1_3_0_scorecard_schema_does_not_describe_the_verification`).
+# PROD-05.1 moved the receipt and the catalog point to 1.3.0
+# (`topic_configuration`, `topics[].configuration`), and FX-7's `-1.2.0.json`
+# files are frozen beside the new ones the same way
+# (`the_frozen_1_2_0_receipt_schema_is_still_fx7s`,
+# `the_frozen_1_2_0_catalog_point_schema_is_still_fx7s`).
+#
+# PROD-01.3 moved all three to their next minor (scorecard 1.4.0, receipt and
+# catalog point 1.3.0): the closed set of auth-mode values grows by three
+# (`scramSha256`, `plain`, `mtls`), and a document naming one declares the new
+# version. The scorecard's `-1.3.0.json`, the receipt's and the catalog point's
+# `-1.2.0.json` are frozen beside the new files; this build still writes those
+# versions for every `plaintext` and `scramSha512` run.
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
-# each must equal its writer's constant (`logweir_core::FORMAT_VERSION`,
-# `backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION`,
-# `catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION`), which also builds
-# the schema's `$id`. A renumber moves the constant and this line, and keeps
-# the old file frozen beside the new.
-scorecard_schema_version := "1.3.0"
-receipt_schema_version := "1.2.0"
-catalog_schema_version := "1.2.0"
+# each must equal its writer's newest constant
+# (`scorecard::FORMAT_VERSION_WITH_AUTH_MODES`,
+# `backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES`,
+# `catalog::record::FORMAT_VERSION_WITH_AUTH_MODES`), which also builds the
+# schema's `$id`. A renumber moves the constant and this line, and keeps the old
+# file frozen beside the new.
+scorecard_schema_version := "1.5.0"
+receipt_schema_version := "1.4.0"
+catalog_schema_version := "1.4.0"
 
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json
@@ -232,7 +248,7 @@ e2e-up:
 # stack — or another slot — from under its user.
 e2e-down:
     ./e2e/compose/stack-env.sh --check
-    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile streams --profile objectstore --profile registry --profile acl down -v --remove-orphans
+    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile streams --profile streams-protocol --profile objectstore --profile registry --profile acl down -v --remove-orphans
 
 # AWS_EC2_METADATA_DISABLED (fix round 1, review F7): with no AWS credentials
 # in the environment, `AmazonS3Builder::from_env()` falls through to the EC2

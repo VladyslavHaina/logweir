@@ -88,6 +88,12 @@ export const CONSOLE_FIELD_PATHS = Object.freeze({
     ["auth.tls", "spec.auth.tls"],
     ["auth.username", "spec.auth.username"],
     ["auth.credentialRef", "spec.auth.secretRef"],
+    // PROD-01.3: the write-only credential and the ConfigMap CA.
+    ["auth.credential.password", "spec.auth.credential.password"],
+    ["auth.credential", "spec.auth.credential"],
+    ["auth.tlsCa.configMapKeyRef.name", "spec.auth.tlsCa.configMapKeyRef.name"],
+    ["auth.tlsCa.configMapKeyRef.key", "spec.auth.tlsCa.configMapKeyRef.key"],
+    ["auth.tlsCa", "spec.auth.tlsCa"],
     ["auth", "spec.auth"],
     ["markerTopic", "spec.markerTopic"],
   ]),
@@ -224,13 +230,35 @@ export function validateRequest(plural, body) {
     if (AUTH_MODES.indexOf(auth.mode) === -1) {
       fail(errors, "spec.auth.mode", "invalid_enum", "auth mode is one of " + AUTH_MODES.join(", "));
     }
-    if (auth.mode === "scramSha512") {
-      text(errors, auth.username, "spec.auth.username", "scramSha512 needs the SASL username");
+    const sasl = ["scramSha512", "scramSha256", "plain"].indexOf(auth.mode) !== -1;
+    // A CONSOLE-MODE create carries the credential TYPED ONCE, off the custom
+    // resource's own fields (`clusterBody`'s non-enumerable `__credential`),
+    // and names no Secret: the product API creates and binds it.
+    const entered = b.__credential !== undefined;
+    if (sasl && entered) {
+      text(errors, auth.username, "spec.auth.username", auth.mode + " needs the SASL username");
+    } else if (sasl) {
+      text(errors, auth.username, "spec.auth.username", auth.mode + " needs the SASL username");
       nameRef(errors, auth.secretRef, "spec.auth.secretRef",
-        "scramSha512 needs the name of the Secret that holds the password");
+        auth.mode + " needs the name of the Secret that holds the password");
     } else if (auth.secretRef !== undefined && auth.secretRef !== null) {
       nameRef(errors, auth.secretRef, "spec.auth.secretRef",
         "a Secret name is lowercase letters, digits, '-' and '.'");
+    }
+    // PROD-01.3: the CRD's own rules, as messages beside the field.
+    if (auth.mode === "plain" && auth.tls !== true) {
+      fail(errors, "spec.auth.tls", "plain_requires_tls",
+        "PlainWithoutTls: SASL/PLAIN sends the password itself, so it is accepted only with TLS on");
+    }
+    if (auth.mode === "mtls") {
+      if (auth.tls !== true) {
+        fail(errors, "spec.auth.tls", "mtls_requires_tls",
+          "mtls presents a TLS client certificate, so it requires TLS on");
+      }
+      if (!entered) {
+        nameRef(errors, auth.clientCertificate, "spec.auth.clientCertificate",
+          "mtls needs the name of the Secret holding tls.crt and tls.key");
+      }
     }
   } else if (plural === "backupschedules") {
     text(errors, spec.schedule, "spec.schedule", "a schedule expression is required");

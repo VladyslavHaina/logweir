@@ -2307,6 +2307,7 @@ fn the_backup_runner_argv_is_one_the_cli_accepts() {
                 tls: true,
             },
             topics: vec!["orders".to_string()],
+            topic_owners: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "kafka-backups".to_string(),
@@ -7204,6 +7205,7 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
                 tls: true,
             },
             topics: vec!["orders".to_string()],
+            topic_owners: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "lw-a".to_string(),
@@ -7444,6 +7446,7 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
                 tls: true,
             },
             topics: vec!["orders".to_string()],
+            topic_owners: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "lw-a".to_string(),
@@ -7507,6 +7510,17 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
         command
             .env("AWS_ACCESS_KEY_ID", "test-access-key-id")
             .env("AWS_SECRET_ACCESS_KEY", "test-secret-access-key");
+        // AND THE BINDING A BOUND CREDENTIAL SECRET WOULD PROJECT (PROD-01.3
+        // security follow-up): the controller renders the EXPECTED binding as
+        // a literal and the Secret's `logweir-binding` as an optional
+        // `secretKeyRef`; a Secret the console created for this connection
+        // carries exactly the expected value, so the row supplies it.
+        if let Some((_, expected)) = env
+            .iter()
+            .find(|(n, _)| n == "LOGWEIR_SOURCE_CREDENTIAL_BINDING_EXPECTED")
+        {
+            command.env("LOGWEIR_SOURCE_CREDENTIAL_BINDING", expected);
+        }
         let out = command.output().expect("the runner binary runs");
         (
             out.status.code(),

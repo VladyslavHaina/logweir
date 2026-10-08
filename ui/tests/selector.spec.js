@@ -869,7 +869,14 @@ test("both_client_modes_produce_the_same_selection_and_the_same_probe_words", as
   assert.equal(probeState(asCr, late).stale, true);
 });
 
-test("console_mode_names_the_two_contract_v1_fields_it_cannot_carry_and_refuses_them", async () => {
+test("console_mode_types_the_credential_once_names_no_secret_and_refuses_what_it_cannot_carry", async () => {
+  // PROD-01.3 security follow-up. The product API no longer accepts the NAME
+  // of an existing Secret for a connection's credential: a connection that
+  // could name any Secret could make Logweir present another team's
+  // credential to brokers of its author's choosing. So the console TYPES the
+  // credential once and names no Secret; a CA may come from a ConfigMap only;
+  // a data key or a Secret-held CA is refused by name and never reaches the
+  // network.
   const originalFetch = globalThis.fetch;
   resetMode();
   await selectMode({ probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }) });
@@ -886,36 +893,46 @@ test("console_mode_names_the_two_contract_v1_fields_it_cannot_carry_and_refuses_
     const api = apiClient();
     const base = {
       name: "orders-prod", servers: "kafka-0:9093", role: "source",
-      mode: "scramSha512", username: "u", secret: "s", tls: true,
+      mode: "scramSha512", username: "u", tls: true, enteredPassword: "typed-once-selector",
       passwordKey: "", tlsCaKind: "none", tlsCaName: "", tlsCaKey: "",
     };
-    // A contract-v1-free connection goes through, as it did before.
-    await api.create("team-a", "kafkaclusters", clusterBody(base));
+    await api.create("team-a", "kafkaclusters", clusterBody(base, { console: true }));
     assert.equal(sent.length, 1);
+    const auth = JSON.parse(sent[0].init.body).auth;
+    assert.deepEqual(auth.credential, { password: "typed-once-selector" });
+    assert.equal(auth.credentialRef, undefined, "no Secret is ever named");
 
-    // A `passwordKey` is REFUSED BY NAME rather than dropped: dropping it
-    // would create a connection that projects a different entry of the Secret.
-    await assert.rejects(
-      () => api.create("team-a", "kafkaclusters", clusterBody(Object.assign({}, base, { passwordKey: "sasl-pw" }))),
-      (error) => {
-        assert.equal(error.reason, "NoConsoleRoute");
-        assert.equal(error.kind, "refused");
-        assert.match(error.message, /spec\.auth\.secretRef\.passwordKey/);
-        return true;
-      },
-    );
-    // And a `tlsCa` likewise: a connection created without the CA it named
-    // would dial trusting the image's own store.
+    // A CA from a ConfigMap travels.
+    await api.create("team-a", "kafkaclusters", clusterBody(Object.assign({}, base, {
+      tlsCaKind: "configMap", tlsCaName: "ca", tlsCaKey: "ca.crt",
+    }), { console: true }));
+    assert.deepEqual(JSON.parse(sent[1].init.body).auth.tlsCa, {
+      configMapKeyRef: { name: "ca", key: "ca.crt" },
+    });
+
+    // A Secret NAMED on the resource (a legacy-shaped body) is refused, not
+    // sent: the KILLED mutant is "translate secretRef into credentialRef".
     await assert.rejects(
       () => api.create("team-a", "kafkaclusters", clusterBody(Object.assign({}, base, {
-        tlsCaKind: "configMap", tlsCaName: "ca", tlsCaKey: "ca.crt",
+        secret: "another-teams-sasl",
       }))),
       (error) => {
-        assert.match(error.message, /spec\.auth\.tlsCa/);
+        assert.equal(error.reason, "NoConsoleRoute");
+        assert.match(error.message, /never names an existing Secret/);
         return true;
       },
     );
-    assert.equal(sent.length, 1, "neither refusal reached the network");
+    // A Secret-held CA likewise.
+    const secretCa = clusterBody(base, { console: true });
+    secretCa.spec.auth.tlsCa = { secretKeyRef: { name: "ca", key: "ca.crt" } };
+    await assert.rejects(
+      () => api.create("team-a", "kafkaclusters", secretCa),
+      (error) => {
+        assert.match(error.message, /ConfigMap only/);
+        return true;
+      },
+    );
+    assert.equal(sent.length, 2, "neither refusal reached the network");
   } finally {
     globalThis.fetch = originalFetch;
     resetMode();

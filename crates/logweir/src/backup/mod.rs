@@ -104,6 +104,14 @@ pub struct BackupRunArgs {
     /// `BackupOutcome`. Task 18 passes `<schedule>-<slot>`; nothing about a
     /// schedule is decided here.
     pub backup_id_override: Option<String>,
+    /// **PROD-05.1.** Strimzi `KafkaTopic` resources, as YAML: a named topic
+    /// one of them manages is recorded as owned by it
+    /// (`logweir_core::topic_configuration::strimzi_owners`). `None` detects
+    /// nothing; the plan's own `source.topic_owners` still apply.
+    pub kafka_topic_resources: Option<PathBuf>,
+    /// **PROD-05.1.** Only `KafkaTopic` resources labelled
+    /// `strimzi.io/cluster=<this>` count.
+    pub strimzi_cluster: Option<String>,
 }
 
 /// What one `logweir backup run` established. Task 5b turns this into the
@@ -161,6 +169,18 @@ pub struct BackupOutcome {
     /// `phase_run::build_receipt` writes it as the receipt's 1.1.0
     /// `config_coverage` block.
     pub config_coverage: BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>,
+    /// **PROD-05.1.** Per named topic, the configuration model —
+    /// `config_coverage::model` over the same read, the manifest's counts and
+    /// the run's declarative owners. One entry per named topic;
+    /// `phase_run::build_receipt` writes it as the receipt's 1.3.0
+    /// `topic_configuration` block.
+    pub topic_configuration: BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>,
+    /// **PROD-05.1.** Where this run looked for declarative owners
+    /// (`topic_configuration::owner_detection`): the receipt's
+    /// `owner_detection`. Empty when it looked nowhere, and then a topic
+    /// without an owner reads "not checked", never "applied through the admin
+    /// API".
+    pub owner_detection: Vec<String>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -354,11 +374,31 @@ pub fn build_plan_with_tls_ca(
     backup_id: &str,
     tls_ca_file: Option<String>,
 ) -> Result<BackupPlan, BackupError> {
+    build_plan_with_tls_files(spec, backup_id, tls_ca_file, None)
+}
+
+/// [`build_plan_with_tls_ca`] plus the projected client-certificate pair of an
+/// `mtls` source (PROD-01.3), so the engine document carries
+/// `ssl_certificate_location` / `ssl_key_location`.
+///
+/// # Errors
+///
+/// `BackupError::Operational` for a CA on a transport that is not TLS, and for
+/// a certificate on a mode that presents none or none on `mtls` — exit 1:
+/// nothing was dialled, and the controller never projects either shape.
+pub fn build_plan_with_tls_files(
+    spec: &BackupSpec,
+    backup_id: &str,
+    tls_ca_file: Option<String>,
+    client_certificate: Option<logweir_core::connection::ClientCertificateFiles>,
+) -> Result<BackupPlan, BackupError> {
     let plan = build_plan(spec, backup_id);
     let source_auth = plan
         .source_auth
         .clone()
         .with_tls_ca_file(tls_ca_file)
+        .map_err(|e| BackupError::Operational(format!("source.auth: {e}")))?
+        .with_client_certificate(client_certificate)
         .map_err(|e| BackupError::Operational(format!("source.auth: {e}")))?;
     Ok(BackupPlan {
         source_auth,
@@ -372,6 +412,18 @@ struct Inputs {
     spec: BackupSpec,
     spec_text: String,
     allowed: AllowedClusters,
+    /// **PROD-05.1.** The declarative owner of each named topic that has one:
+    /// the `KafkaTopic` resources' owners, with the plan's
+    /// `source.topic_owners` laid over them (`merge_owners`: a declaration is
+    /// what the plan says, so a resource for the same topic does not replace
+    /// it). Phase −1 refuses an invalid declaration before anything is
+    /// recorded.
+    owners: BTreeMap<String, logweir_core::backup_receipt::TopicOwner>,
+    /// **PROD-05.1.** Where the run looked for owners: `declared` when the
+    /// plan carries `source.topic_owners` (an empty list too: the operator
+    /// says no topic has one), `kafkaTopicResources` when it was given the
+    /// resources file.
+    owner_detection: Vec<String>,
 }
 
 fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
@@ -384,10 +436,58 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
     })?;
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
         .map_err(|e| BackupError::Operational(format!("allowed-clusters does not parse: {e}")))?;
+    let detected = match &args.kafka_topic_resources {
+        None => BTreeMap::new(),
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| BackupError::Operational(format!("{}: {e}", path.display())))?;
+            let mut docs = Vec::new();
+            for doc in serde_yaml::Deserializer::from_str(&text) {
+                let value =
+                    <serde_yaml::Value as serde::Deserialize>::deserialize(doc).map_err(|e| {
+                        BackupError::Operational(format!(
+                            "--kafka-topic-resources {}: not YAML: {e}",
+                            path.display()
+                        ))
+                    })?;
+                if !value.is_null() {
+                    docs.push(value);
+                }
+            }
+            for (topic, reference) in logweir_core::topic_configuration::strimzi_unrecordable(
+                &docs,
+                &spec.source.topics,
+                args.strimzi_cluster.as_deref(),
+            ) {
+                tracing::warn!(
+                    topic = %topic,
+                    reference = %reference,
+                    "a KafkaTopic resource manages this topic, but its namespace/name is longer \
+                     than the receipt records (256 characters): the topic is recorded with no \
+                     owner. Declare the owner in source.topic_owners with a shorter reference"
+                );
+            }
+            logweir_core::topic_configuration::strimzi_owners(
+                &docs,
+                &spec.source.topics,
+                args.strimzi_cluster.as_deref(),
+            )
+        }
+    };
+    let owners = logweir_core::topic_configuration::merge_owners(
+        detected,
+        spec.source.topic_owners.as_deref().unwrap_or(&[]),
+    );
+    let owner_detection = logweir_core::topic_configuration::owner_detection(
+        spec.source.topic_owners.is_some(),
+        args.kafka_topic_resources.is_some(),
+    );
     Ok(Inputs {
         spec,
         spec_text,
         allowed,
+        owners,
+        owner_detection,
     })
 }
 
@@ -528,10 +628,14 @@ fn execute_with_signer(
     // attached to the reader's `ssl.ca.location` (an environment read is stable
     // for the life of the process, so the two clients see one path). Unset, the
     // plan is exactly `build_plan`'s.
-    let plan = build_plan_with_tls_ca(
+    let plan = build_plan_with_tls_files(
         &inputs.spec,
         &backup_id,
         crate::tls_ca::projected_ca_file(crate::tls_ca::SOURCE_TLS_CA_FILE_VAR)
+            .map_err(BackupError::Operational)?,
+        // PROD-01.3: the `mtls` pair `run` handed the reader, from the same
+        // two variables.
+        crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Source)
             .map_err(BackupError::Operational)?,
     )?;
 
@@ -602,10 +706,26 @@ fn execute_with_signer(
     // capture cannot answer this.
     let observed = config_coverage::observe(reader, &plan.topics);
     config_coverage::log(&observed);
+    // PROD-05.1: each named topic's replication factor, from the same reader's
+    // metadata, before the engine — the pinned engine's manifest keeps it for
+    // the first topic it saves only (`config_coverage::model`). Never fatal: a
+    // failed read leaves the factor NOT RECORDED.
+    let factors = reader
+        .replication_factors(&plan.topics)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                "the topics' replication factors could not be read before the engine; the \
+                 receipt records them only where the archive manifest does"
+            );
+            BTreeMap::new()
+        });
 
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
     let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
+    let topic_configuration =
+        config_coverage::model(&observed, &ran.manifest_layouts, &factors, &inputs.owners);
 
     let mut outcome = BackupOutcome {
         backup_id,
@@ -629,6 +749,8 @@ fn execute_with_signer(
         covered_from_ms: ran.covered_from_ms,
         covered_to_ms: ran.covered_to_ms,
         config_coverage: coverage,
+        topic_configuration,
+        owner_detection: inputs.owner_detection.clone(),
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the
@@ -962,6 +1084,14 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
     if let Err(e) = phase_minus1_admit::local(args, &inputs.spec, &inputs.spec_text) {
         return report(&run_id, Err(e));
     }
+    // PROD-01.3 security follow-up: a projected credential Secret whose
+    // `logweir-binding` does not name the connection this Job was built for is
+    // refused HERE — exit 3, `refusal-reason=CredentialBindingMismatch` —
+    // before any client exists, so the credential is never presented to a
+    // broker it was not entered for.
+    if let Err(refusal) = crate::credential_binding::check_projected_bindings() {
+        return report(&run_id, Err(refusal.into()));
+    }
 
     // Signing is a prerequisite for starting a backup, not a postcondition
     // checked after the engine has written an archive. Load, exercise and
@@ -1099,6 +1229,13 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
             Ok(ca) => ca,
             Err(e) => return report(&run_id, Err(BackupError::Operational(e))),
         };
+    // PROD-01.3: the `mtls` certificate pair, read once and handed to both
+    // clients like the CA.
+    let source_client_certificate =
+        match crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Source) {
+            Ok(files) => files,
+            Err(e) => return report(&run_id, Err(BackupError::Operational(e))),
+        };
     let source_auth = match logweir_kafka::reader::AuthConfig::from_spec(
         &inputs.spec.source.auth,
         match crate::drill::validated_password(crate::drill::SOURCE_PASSWORD_VAR) {
@@ -1107,6 +1244,7 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
         },
     )
     .and_then(|auth| auth.with_tls_ca_file(source_tls_ca.clone()))
+    .and_then(|auth| auth.with_client_certificate(source_client_certificate.clone()))
     {
         Ok(a) => a,
         Err(e) => {

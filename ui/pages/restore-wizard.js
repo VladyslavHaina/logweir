@@ -728,7 +728,7 @@ function receiptVerified(status) {
 //     API could not finish cannot say that no `Backup` refused this receipt,
 //     and this page does not guess;
 //   * the row carries everything the plan binding needs, unredacted: the
-//     point id, the receipt key, and both digests;
+//     point id, the backup set id, the receipt key, and both digests;
 //   * and, when the offer came from a `Backup` (a destination-backed run the
 //     controller could not verify itself, so it wrote no window), that
 //     Backup's OWN verdict is absent or `NotAttempted` -- never a reached
@@ -757,6 +757,104 @@ export const REDACTION_MARKER = "[redacted]";
 /** Whether a published archive key is the redactor's output rather than a key. */
 export function isRedacted(value) {
   return typeof value === "string" && value.indexOf(REDACTION_MARKER) !== -1;
+}
+
+/** A bare UUID in either case (`check_contract.rs` `is_uuid` takes any hex
+ *  digit), or a LOWER-case UID followed by a scheduled run's slot and retry
+ *  suffix (`is_scheduled_set_id`). */
+const MINTED_SET_ID =
+  /^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-([0-9]{8})-([0-9]{6})(?:-r[1-9])?)$/;
+
+/** Whether `id` is a set id the catalog sync's redactor reads as an IDENTITY
+ *  (`check_contract.rs` `is_set_id`): a UUID -- a manual run's set id is the
+ *  `Backup`'s own UID -- or a scheduled run's `<schedule uid>-<yyyymmdd>-
+ *  <hhmmss>`, `-r<k>` for a retry, whose slot is an instant chrono accepts:
+ *  a real date and time, the year `0000` and a leap second (`...60`)
+ *  included, exactly as the Rust side's round trip does (review L-4).
+ *  `ui/tests/fixtures/set-ids.json` is read by this side's test and by the
+ *  redactor's, so the two agree, edges included.
+ *
+ *  Used only to say WHY a binding came back redacted -- never to decide an
+ *  offer: the offer is refused on the marker itself. */
+export function isMintedSetId(id) {
+  const m = MINTED_SET_ID.exec(typeof id === "string" ? id : "");
+  if (m === null) {
+    return false;
+  }
+  if (m[1] === undefined) {
+    return true;
+  }
+  const n = (s, from, to) => Number(s.slice(from, to));
+  const [y, mo, d] = [n(m[1], 0, 4), n(m[1], 4, 6), n(m[1], 6, 8)];
+  const [h, mi, se] = [n(m[2], 0, 2), n(m[2], 2, 4), n(m[2], 4, 6)];
+  // `setUTCFullYear` takes a year below 100 literally (`Date.UTC` would add
+  // 1900), and a leap second is checked as the :59 it extends.
+  const t = new Date(0);
+  t.setUTCFullYear(y, mo - 1, d);
+  t.setUTCHours(h, mi, Math.min(se, 59), 0);
+  return se <= 60 && t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 &&
+    t.getUTCDate() === d && t.getUTCHours() === h && t.getUTCMinutes() === mi &&
+    t.getUTCSeconds() === Math.min(se, 59);
+}
+
+/** What a set id chosen for `logweir backup run` must be for its points to be
+ *  restorable from the console: the key `backup run` writes is
+ *  `logweir/backups/<set id>/<run id>.receipt.json`, the run id already
+ *  spends the key's ONE free component, so the set id must be a public form.
+ *  The common ones are named, as examples (review L-4): a SHA-256 digest is
+ *  public too, and so is a scheduled run's own id. */
+const CHOSEN_SET_ID_RULE =
+  "a set id chosen for `logweir backup run` survives when it is a public form -- for " +
+  "example a UUID, or lower-case letters, digits, `.`, `-`, `_` and `=` under 40 characters";
+
+/** WHY A POINT'S PLAN BINDING CAME BACK REDACTED -- one sentence, or `null`
+ *  when neither binding field carries the marker (FX-17).
+ *
+ *  The binding is `source.backup` (the set id) and `source.point.receipt_key`;
+ *  the catalog sync passes both through the product's redactor, and a field
+ *  that comes back as its output cannot be put into a plan. The sentence says
+ *  which field, and the cause the published values still let this page tell
+ *  apart:
+ *    * the SET ID went: the redactor did not read it as an identity. Runners up
+ *      to v0.2.0-rc.1 did that to every scheduled run's set id, which is the
+ *      PoC's whole first Catalog page (FX-17); a chosen set id outside the
+ *      public forms does it too;
+ *    * only the KEY went, beside a set id this product mints: the run id in
+ *      it was withheld, which runners older than v0.2.0-rc.1 did
+ *      (CATALOG-RECEIPTKEY-REDACTED, the ULID exemption);
+ *    * only the KEY went, beside a set id someone chose: that id and the run
+ *      id are two free components, one more than an archive key may carry. */
+export function redactedBindingReason(entry) {
+  const e = entry || {};
+  const setGone = isRedacted(e.backupId);
+  const keyGone = isRedacted(e.receiptKey);
+  if (!setGone && !keyGone) {
+    return null;
+  }
+  const what = [];
+  if (setGone) {
+    what.push("backup set id as `" + e.backupId + "`");
+  }
+  if (keyGone) {
+    what.push("receipt key as `" + e.receiptKey + "`");
+  }
+  const head = "the catalog published this point's " + what.join(" and its ") +
+    ", the redactor's output rather than the value in the bucket, so no plan binding can name " +
+    "the objects the runner must re-read: ";
+  if (setGone) {
+    return head +
+      "the catalog sync did not read the set id as an identity. Runners up to v0.2.0-rc.1 " +
+      "withhold every scheduled run's set id (its schedule's UID, then the slot) this way; " +
+      "upgrade the runner image and sync the catalog again. And " + CHOSEN_SET_ID_RULE;
+  }
+  if (isMintedSetId(e.backupId)) {
+    return head +
+      "the redactor withheld the run id in the key, which runners older than v0.2.0-rc.1 " +
+      "did; sync the catalog again with a current runner image";
+  }
+  return head +
+    "its set id `" + String(e.backupId || "") + "` and the run id are two chosen components, " +
+    "and an archive key may carry only one past the redactor; " + CHOSEN_SET_ID_RULE;
 }
 
 /** The two verdicts that let a catalog row answer for a `Backup`: none at all,
@@ -962,12 +1060,12 @@ export function catalogPointOffer(entry, page) {
   if (typeof e.receiptKey !== "string" || e.receiptKey.trim().length === 0) {
     return no("the catalog published no receipt key for this point");
   }
-  if (isRedacted(e.receiptKey)) {
-    return no(
-      "the catalog published this point's receipt key as `" + e.receiptKey + "`: the " +
-        "archive-key redactor rewrote it, so the plan binding cannot name the object the " +
-        "runner must re-read; re-sync the catalog with a runner that keeps a ULID run id",
-    );
+  // ONE REASON FOR A REDACTED BINDING, whichever of its two fields carries
+  // the marker (FX-17). The set id used to fall through to "no usable backup
+  // set id" below -- true of `[redacted]`, and no help to anyone.
+  const redacted = redactedBindingReason(e);
+  if (redacted !== null) {
+    return no(redacted);
   }
   if (typeof e.receiptSha256 !== "string" || !DIGEST_SHAPE.test(e.receiptSha256)) {
     return no("the catalog published no well-formed receipt digest for this point");
@@ -1309,6 +1407,10 @@ export function catalogRecoveryPoint(catalog, entry, destination, backup) {
       coveredTo: e.coveredTo,
       locationId: location === null ? null : location.locationId,
       runId: e.runId,
+      // PROD-05.1: the point's recorded topic layout, when the view lists it
+      // -- what the replication-factor default reads (`sourceFactsOfEntry`).
+      topics: Array.isArray(e.topics) ? e.topics : null,
+      topicsOmitted: Number.isInteger(e.topicsOmitted) ? e.topicsOmitted : null,
       backup: backup === null || backup === undefined
         ? null
         : { name: (backup.metadata || {}).name, uid: (backup.metadata || {}).uid },
@@ -2558,13 +2660,42 @@ export const MAPPING_RULE_SENTENCE =
  *  never seen one. So the count is absent and said to be absent, which is the
  *  difference between this line and a number a page invented. */
 export const PARTITION_COUNT_NOT_PUBLISHED =
-  "Partition counts are not shown before the run: this build publishes a per-topic partition " +
-  "count only after one, on the Restore's own completion (status.completion.newTopics[].partitions, " +
-  "from the target diff). The archive manifest holds the source counts and the runner reads it; " +
-  "no field of a Backup or of its product-API projection carries them, so there is nothing here " +
-  "to read and this page will not guess. A topic discovery publishes a live partition count for a " +
-  "SOURCE CLUSTER, which is a different fact: it is a probe of the cluster now, not the manifest's " +
-  "count at this recovery point, and it hangs off a connection rather than off this Backup.";
+  "Partition counts are shown before the run only when a recovery catalog's view lists this " +
+  "point's topic layout, which it does for a backup whose receipt records it (format 1.3.0 and " +
+  "later); the restore creates each topic with the count the archive manifest records. Otherwise " +
+  "this build publishes a per-topic partition count only after the run, on the Restore's own " +
+  "completion (status.completion.newTopics[].partitions, from the target diff), and this page " +
+  "will not guess. A topic discovery publishes a live partition count for a SOURCE CLUSTER, which " +
+  "is a different fact: it is a probe of the cluster now, not the manifest's count at this " +
+  "recovery point, and it hangs off a connection rather than off this Backup.";
+
+/** The selected topics' SOURCE partition counts, as the catalog's view of this
+ *  point records them (PROD-05.1) -- the counts the restore creates each topic
+ *  with -- or `null` when it records none of them. */
+export function partitionCountsText(state) {
+  const facts = sourceFactsOf(state);
+  if (!Array.isArray(facts.topics)) {
+    return null;
+  }
+  const byName = new Map(facts.topics.map((t) => [t.name, t]));
+  const selected = selectedTopics(state).map(String);
+  const known = [];
+  let missing = 0;
+  for (const name of selected) {
+    const t = byName.get(name);
+    if (t !== undefined && Number.isInteger(t.partitions) && t.partitions >= 1) {
+      known.push(name + " " + String(t.partitions));
+    } else {
+      missing += 1;
+    }
+  }
+  if (known.length === 0) {
+    return null;
+  }
+  return known.join(", ") + " (the source's, which the restore creates each topic with" +
+    (facts.catalog.length > 0 ? ", as recovery catalog `" + facts.catalog + "` records them" : "") +
+    (missing > 0 ? "; not recorded for " + String(missing) + " of the selected topics" : "") + ")";
+}
 
 // ------------------------------------------------ the replication factor (FX-5)
 //
@@ -2607,15 +2738,196 @@ export const DEFAULT_REPLICATION_CEILING = 3;
 
 /** Why the source's factor is not the default, in the words both steps print
  *  beside the factor. */
-export const SOURCE_FACTOR_NOT_PUBLISHED =
-  "the source's replication factor is not published to this console";
+export const SOURCE_FACTOR_NOT_KNOWN =
+  "the source's replication factor is not known for this point";
 
-/** The long form, said once where the factor is chosen. */
+/** The long form, said once where the factor is chosen when the source's
+ *  factor is not known: where it would come from. The page appends WHY it is
+ *  not known for this point ([`sourceFactorNote`]). */
 export const SOURCE_FACTOR_NOTE =
-  "The source's replication factor is recorded in the archive manifest, which only the restore " +
-  "Job reads. No record this console reads carries it yet -- not the backup receipt, not a " +
-  "catalog point, not the Backup's status -- so the default cannot start from it, and a topic " +
+  "The source's replication factor comes from a recovery catalog's view of this point: the " +
+  "topic layout its backup recorded (backup receipt format 1.3.0 and later). The " +
+  "product API holds no object-store credential to read the archive manifest itself, and a topic " +
   "discovery of the source would describe the cluster as it is now, not this recovery point.";
+
+/** [`SOURCE_FACTOR_NOTE`], with why this point's factor is not known. */
+export function sourceFactorNote(state) {
+  const why = sourceFactsWhy(state);
+  return SOURCE_FACTOR_NOTE + (why.length > 0 ? " For this point: " + why + "." : "");
+}
+
+/** What this page knows of the SOURCE's recorded topic layout before anything
+ *  is read (PROD-05.1). */
+export const SOURCE_FACTS_NOT_READ = Object.freeze({
+  topics: null, catalog: "", pointId: "", omitted: null,
+  why: "the recovery catalogs of this namespace have not been read",
+});
+
+/** The most recovery catalogs a Backup point's source facts are looked for in.
+ *  A namespace holds one catalog per archive location, rarely more; past this
+ *  many the page says it stopped rather than reading on. */
+export const MAX_SOURCE_CATALOGS = 4;
+
+/** THE CATALOG'S IDENTITY OF A BACKUP'S POINT (D3 section 5.1): `lwp1-` and the
+ *  first 32 hex digits of its receipt's sha256 -- `logweir::catalog::record::
+ *  point_id` over the same bytes -- or `""` for a digest not in that shape. */
+export function pointIdOfReceiptDigest(digest) {
+  const m = /^sha256:([0-9a-f]{64})$/.exec(String(digest === undefined || digest === null
+    ? "" : digest));
+  return m === null ? "" : "lwp1-" + m[1].slice(0, 32);
+}
+
+/** The source facts one catalog row carries: its topics with their recorded
+ *  layout, or why it lists none. Pure. */
+export function sourceFactsOfEntry(entry, catalogName) {
+  const e = entry || {};
+  const catalog = String(catalogName === undefined || catalogName === null ? "" : catalogName);
+  const facts = {
+    topics: null, catalog: catalog, pointId: String(e.pointId || ""), omitted: null, why: "",
+  };
+  const count = (n) => (Number.isInteger(n) && n >= 1 ? n : null);
+  const topics = (Array.isArray(e.topics) ? e.topics : [])
+    .filter((t) => t !== null && typeof t === "object" && typeof t.name === "string");
+  if (topics.length > 0) {
+    facts.topics = topics.map((t) => ({
+      name: t.name,
+      partitions: count(t.partitions),
+      replicationFactor: count(t.replicationFactor),
+      configCoverage: typeof t.configCoverage === "string" ? t.configCoverage : null,
+      owner: typeof t.owner === "string" ? t.owner : null,
+    }));
+    return facts;
+  }
+  if (Number.isInteger(e.topicsOmitted) && e.topicsOmitted > 0) {
+    facts.omitted = e.topicsOmitted;
+    facts.why = "recovery catalog `" + catalog + "` lists this point without its " +
+      String(e.topicsOmitted) + " topics (more than its view lists for one point, or more than " +
+      "its sync could carry)";
+    return facts;
+  }
+  facts.why = "recovery catalog `" + catalog + "` publishes no topic layout for this point: its " +
+    "backup receipt predates format 1.3.0, the catalog was synced by an older runner, or the " +
+    "point is not Available";
+  return facts;
+}
+
+/** The source facts on the state, or the not-read ones. */
+export function sourceFactsOf(state) {
+  const facts = (state || {}).sourceFacts;
+  return facts !== null && typeof facts === "object" ? facts : SOURCE_FACTS_NOT_READ;
+}
+
+/** Why the source's factor is not known for the SELECTED topics, or `""` when
+ *  at least one of them records one. */
+export function sourceFactsWhy(state) {
+  const facts = sourceFactsOf(state);
+  if (!Array.isArray(facts.topics)) {
+    return facts.why;
+  }
+  const factors = sourceReplicationFactorsOf(state) || [];
+  return factors.some((n) => n !== null)
+    ? ""
+    : "recovery catalog `" + facts.catalog + "` records no replication factor for the selected " +
+      "topics";
+}
+
+/** READ THE SOURCE'S RECORDED TOPIC LAYOUT for the point on the state, once,
+ *  before the first paint (PROD-05.1).
+ *
+ *  A CATALOG POINT carries its row already: nothing is read. A BACKUP's point
+ *  is named in the catalog by its receipt's digest ([`pointIdOfReceiptDigest`])
+ *  -- the Backup's own `status.evidence.receiptSha256`, or, where the list
+ *  this page holds does not carry it (the product API's list projection does
+ *  not), the run's own operation, read once -- and looked for in this
+ *  namespace's recovery catalogs, at most [`MAX_SOURCE_CATALOGS`] of them. A
+ *  read that fails is a reason, never an error, because the factor then falls
+ *  back to the target's broker count and the page says why. */
+export async function refreshSourceFacts(state, api, lifecycle) {
+  const s = state || {};
+  const point = s.point || {};
+  let facts;
+  if (isCatalogPoint(point)) {
+    facts = sourceFactsOfEntry(point.catalogPoint, point.catalogPoint.catalog);
+  } else {
+    const readers = catalogReadersOf(api, s.ns, lifecycle);
+    let digest = (((point.status || {}).evidence) || {}).receiptSha256;
+    let unread = "";
+    if (pointIdOfReceiptDigest(digest).length === 0) {
+      const name = String(((point.metadata || {}).name) || "");
+      try {
+        digest = name.length > 0 ? ((await readers.ownVerdict(name)) || {}).receiptSha256 : null;
+      } catch (failed) {
+        if (cancelled(failed, lifecycle)) {
+          throw failed;
+        }
+        unread = String(((failed || {}).message) || failed);
+      }
+    }
+    const pointId = pointIdOfReceiptDigest(digest);
+    facts = pointId.length === 0
+      ? Object.assign({}, SOURCE_FACTS_NOT_READ, {
+        why: unread.length > 0
+          ? "this Backup's receipt digest could not be read (" + unread + "), so no recovery " +
+            "catalog point can be named for it"
+          : "this Backup records no receipt digest, so no recovery catalog point can be named " +
+            "for it",
+      })
+      : await findSourceFacts(readers, pointId, lifecycle);
+  }
+  if (!active(lifecycle)) {
+    return false;
+  }
+  s.sourceFacts = facts;
+  syncReplicationDefault(s);
+  return true;
+}
+
+async function findSourceFacts(readers, pointId, lifecycle) {
+  const none = (why) => Object.assign({}, SOURCE_FACTS_NOT_READ, { pointId: pointId, why: why });
+  const reason = (e) => String(((e || {}).message) || e);
+  let catalogs;
+  try {
+    catalogs = itemsOf(await readers.listCatalogs());
+  } catch (unread) {
+    if (cancelled(unread, lifecycle)) {
+      throw unread;
+    }
+    return none("this namespace's recovery catalogs could not be read: " + reason(unread));
+  }
+  if (catalogs.length === 0) {
+    return none("no recovery catalog in this namespace lists point `" + pointId + "`");
+  }
+  const failed = [];
+  for (const catalog of catalogs.slice(0, MAX_SOURCE_CATALOGS)) {
+    const name = String(((catalog || {}).metadata || {}).name || "");
+    try {
+      const found = await findCatalogPoint((query) => readers.readPoints(name, query), pointId);
+      if (found.entry !== null) {
+        // ONLY A ROW THE CATALOG STANDS BEHIND sets a default: a row that is
+        // not selectable -- unreadable, unverified, or refused by the run's
+        // own verdict -- is a row whose layout nobody vouches for.
+        const e = found.entry;
+        if (e.selectable !== true || (typeof e.backupVerdict === "string" &&
+          e.backupVerdict.length > 0)) {
+          return none("recovery catalog `" + name + "` lists point `" + pointId + "` as not " +
+            "selectable (" + String(e.availability) + ", " + String(e.verification) + "), so " +
+            "its topic layout is not used");
+        }
+        return sourceFactsOfEntry(e, name);
+      }
+    } catch (unread) {
+      if (cancelled(unread, lifecycle)) {
+        throw unread;
+      }
+      failed.push("`" + name + "` (" + reason(unread) + ")");
+    }
+  }
+  return none("no recovery catalog in this namespace lists point `" + pointId + "`" +
+    (catalogs.length > MAX_SOURCE_CATALOGS
+      ? "; only the first " + String(MAX_SOURCE_CATALOGS) + " catalogs were read"
+      : "") +
+    (failed.length > 0 ? "; not readable: " + failed.join(", ") : ""));
+}
 
 /** Said when the factor is the grammar's 1 because nothing better is known. */
 export const REPLICATION_UNKNOWN_WARNING =
@@ -2635,8 +2947,8 @@ export const REPLICATION_HELP =
  *  source's factor: a source kept on one replica comes back on three, and every
  *  restored byte is stored three times, or a source kept on five comes back on
  *  three. Said beside the basis on step 4 and under the review row on step 6
- *  whenever [`replicationMayDiffer`] -- in this build always, because no record
- *  this console reads carries the source's factor. `ui/README.md` and
+ *  whenever [`replicationMayDiffer`] -- unless the catalog's view records the
+ *  selected topics' factor and the plan asks for exactly it. `ui/README.md` and
  *  `docs/quickstart.md` (section 7) carry the same sentence, and
  *  `ui/tests/replication-factor.spec.js` holds all three to it. */
 export const REPLICATION_DIFFERS_NOTE =
@@ -2652,27 +2964,37 @@ export function replicationMayDiffer(choice) {
   return !(Number.isInteger(c.source) && c.value === c.source);
 }
 
-/** THE SOURCE'S REPLICATION FACTOR FOR EACH SELECTED TOPIC -- and in this
- *  build there is none to read, so the answer is `null`, by name.
+/** THE SOURCE'S REPLICATION FACTOR FOR EACH SELECTED TOPIC (PROD-05.1), as a
+ *  recovery catalog's view of this point records it: one entry per topic of
+ *  `selectedTopics(state)`, `null` where the view records none, or `null` for
+ *  all when the page knows no topic layout for the point ([`sourceFactsWhy`]
+ *  says why). `replicationDefault` takes the largest.
  *
- *  WHERE IT LIVES. The backup engine records it per topic in the archive
- *  manifest (`topics[].source_replication_factor`; the vendored struct is
- *  `crates/logweir-engine-oso/src/vendored/manifest.rs`), and the runner reads
- *  it after a restore, in phase 7, to say whether the target's factor differs.
- *  Nothing this page reads carries it: the backup receipt counts records per
- *  topic and nothing else, a catalog point's topics carry a name, a record
- *  count and an always-absent partition count, `Backup.status` has no per-topic
- *  block, a topic discovery lists the cluster as it is NOW, and the product
- *  API holds no object-store credential with which to read a manifest.
- *  Projecting it into the receipt, the catalog and the API is PROD-05.1's.
- *
- *  THE ONE PLACE THAT PROJECTION IS WIRED IN. When a point publishes its
- *  topics' factors, this answers them for `selectedTopics(state)`, `null` for
- *  a topic whose factor was not recorded, and `replicationDefault` takes the
- *  largest. Until then the source arms below are reached by their own rows in
- *  `ui/tests/replication-factor.spec.js` and by nothing a cluster says. */
-export function sourceReplicationFactorsOf() {
-  return null;
+ *  WHERE IT COMES FROM. Since PROD-05.1 the backup run reads the factor from
+ *  the source cluster's metadata before the engine starts (the smallest
+ *  replica count of the topic's partitions) and records it in the receipt's
+ *  `topic_configuration`. Only where that read named none does it fall back
+ *  to the archive manifest's `source_replication_factor`. When the read was
+ *  unavailable, a topic the manifest records no factor for has none, and this
+ *  function returns `null` for it. The catalog point record copies it, the
+ *  catalog's sync lists it for an `Available` point whose record agreed with
+ *  its verified receipt, and the product API publishes it as
+ *  `PointView.topics[]`. A catalog point carries its row; a Backup's point
+ *  is looked up by its receipt's digest ([`refreshSourceFacts`]). A topic
+ *  discovery of the source is NOT a substitute: it lists the cluster as it is
+ *  now, not the point. */
+export function sourceReplicationFactorsOf(state) {
+  const facts = sourceFactsOf(state);
+  if (!Array.isArray(facts.topics)) {
+    return null;
+  }
+  const byName = new Map(facts.topics.map((t) => [t.name, t]));
+  return selectedTopics(state).map((name) => {
+    const t = byName.get(String(name));
+    return t !== undefined && Number.isInteger(t.replicationFactor) && t.replicationFactor >= 1
+      ? t.replicationFactor
+      : null;
+  });
 }
 
 /** THE DEFAULT, from two facts and one rule. Pure: no DOM, no network.
@@ -2839,8 +3161,17 @@ export function replicationChoice(state) {
       brokersAsOf: asOf,
     };
   }
-  return Object.assign(replicationDefault(sourceReplicationFactorsOf(s), fact.count),
-    { brokersAsOf: asOf });
+  // PROD-05.1: WHERE THE SOURCE'S FACTOR WAS READ, said in the basis -- the
+  // catalog and the point -- and how many selected topics it covered.
+  const factors = sourceReplicationFactorsOf(s);
+  const facts = sourceFactsOf(s);
+  return Object.assign(replicationDefault(factors, fact.count), {
+    brokersAsOf: asOf,
+    sourceCatalog: facts.catalog,
+    sourcePoint: facts.pointId,
+    sourceSelected: factors === null ? 0 : factors.length,
+    sourceKnown: factors === null ? 0 : factors.filter((n) => n !== null).length,
+  });
 }
 
 /** Puts the default on the plan, unless the operator set a factor. The one
@@ -2890,21 +3221,21 @@ function brokersAsOfText(choice) {
 export function replicationBasisText(choice) {
   const c = choice || {};
   if (c.basis === "source") {
-    return c.brokers === null
-      ? "the source's; the target's broker count is not known to this console, so it is not capped"
-      : "the source's";
+    return "the source's" + sourceProvenanceText(c) + (c.brokers === null
+      ? "; the target's broker count is not known to this console, so it is not capped"
+      : "");
   }
   if (c.basis === "capped") {
     return "capped at the target's " + brokersWord(c.brokers) + brokersAsOfText(c) +
-      "; the source's is " + String(c.source);
+      "; the source's is " + String(c.source) + sourceProvenanceText(c);
   }
   if (c.basis === "brokers") {
     return "the target's " + brokersWord(c.brokers) + brokersAsOfText(c) + "; " +
-      SOURCE_FACTOR_NOT_PUBLISHED;
+      SOURCE_FACTOR_NOT_KNOWN;
   }
   if (c.basis === "ceiling") {
     return "at most " + String(DEFAULT_REPLICATION_CEILING) + " by default, of the target's " +
-      brokersWord(c.brokers) + brokersAsOfText(c) + "; " + SOURCE_FACTOR_NOT_PUBLISHED;
+      brokersWord(c.brokers) + brokersAsOfText(c) + "; " + SOURCE_FACTOR_NOT_KNOWN;
   }
   if (c.basis === "chosen") {
     return "set by you; " + (c.brokers === null
@@ -2914,6 +3245,26 @@ export function replicationBasisText(choice) {
   }
   return "the plan grammar's default: neither the source's replication factor nor the " +
     "target's broker count is known to this console";
+}
+
+/** WHERE THE SOURCE'S FACTOR WAS READ (PROD-05.1): `, as recovery catalog
+ *  `primary` records point `lwp1-...``, the largest of several selected
+ *  topics, and how many it does not cover. Empty for a choice that names no
+ *  catalog -- the rule's own rows. */
+function sourceProvenanceText(choice) {
+  const c = choice || {};
+  if (typeof c.sourceCatalog !== "string" || c.sourceCatalog.length === 0) {
+    return "";
+  }
+  const selected = Number.isInteger(c.sourceSelected) ? c.sourceSelected : 0;
+  const known = Number.isInteger(c.sourceKnown) ? c.sourceKnown : 0;
+  return ", as recovery catalog `" + c.sourceCatalog + "` records point `" + c.sourcePoint +
+    "`" +
+    (known > 1 ? ", the largest of the selected topics'" : "") +
+    (selected > known
+      ? "; not recorded for " + String(selected - known) + " of the " + String(selected) +
+        " selected topics"
+      : "");
 }
 
 /** The factor and where it came from, on one line: `3 (the source's)`. */
@@ -3010,7 +3361,7 @@ export function renderReplicationField(state) {
         messageText(problems.replicationFactor) + "</p>"
       : "") +
     "<p class=\"note\" id=\"replication-basis\">This plan asks for " +
-    esc(replicationText(s)) + ".</p>" +
+    messageText(replicationText(s)) + ".</p>" +
     (replicationMayDiffer(choice)
       ? "<p class=\"note\" id=\"replication-differs\">" + esc(REPLICATION_DIFFERS_NOTE) + "</p>"
       : "") +
@@ -3020,7 +3371,7 @@ export function renderReplicationField(state) {
       : "") +
     renderBrokerFact(s) +
     (choice.source === null && choice.basis !== "chosen"
-      ? "<p class=\"note\" id=\"replication-source\">" + esc(SOURCE_FACTOR_NOTE) + "</p>"
+      ? "<p class=\"note\" id=\"replication-source\">" + messageText(sourceFactorNote(s)) + "</p>"
       : "") +
     "<p class=\"help\">" + esc(REPLICATION_HELP) + "</p></div>"
   );
@@ -3065,16 +3416,19 @@ export const RESUME_NOT_IMPLEMENTED =
 export function renderRecoveryLimits(state) {
   const s = state || {};
   const mode = String(((s.fields || {}).target || {}).mode);
+  const partitions = partitionCountsText(s);
   const cutover = COMPLETION_GUIDANCE[mode];
   const meaning = TARGET_MODE_MEANING[mode];
   return (
     "<h4 id=\"recovery-limits\">What this recovery changes, and what it does not</h4>" +
     facts([
-      ["target replication factor", esc(replicationText(s))],
-      ["target partition counts", cell(null)],
+      ["target replication factor", messageText(replicationText(s))],
+      ["target partition counts", partitions === null ? cell(null) : messageText(partitions)],
       ["target mode", cell(mode)],
     ]) +
-    "<p class=\"note\" id=\"partition-counts\">" + esc(PARTITION_COUNT_NOT_PUBLISHED) + "</p>" +
+    (partitions === null
+      ? "<p class=\"note\" id=\"partition-counts\">" + esc(PARTITION_COUNT_NOT_PUBLISHED) + "</p>"
+      : "") +
     "<p class=\"scope\" id=\"verification-plan\">" + esc(verificationPlanSentence(s)) + "</p>" +
     (typeof meaning === "string"
       ? "<p class=\"note\" id=\"target-mode-meaning\">" + esc(meaning) + "</p>"
@@ -3562,7 +3916,7 @@ export function renderPlanStep(prepared, state) {
       ["plan hash", renderable ? "<code id=\"plan-hash-value\">" + esc(p.hash) + "</code>" : cell(null)],
       ["Restore metadata.name", renderable ? "<code>" + esc(p.restoreName) + "</code>" : cell(null)],
       ["Approval metadata.name", renderable ? "<code>" + esc(p.approvalName) + "</code>" : cell(null)],
-      ["replication factor", "<span id=\"review-replication\">" + esc(replicationText(s)) +
+      ["replication factor", "<span id=\"review-replication\">" + messageText(replicationText(s)) +
         "</span>"],
       // FX-8: THE CLOCK THE POINT IS READ ON, beside the plan that states it.
       ["time basis", "<span id=\"review-time-basis\">" + esc(timeBasisText(s)) + "</span>"],
@@ -5225,6 +5579,12 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
         dropDraft(key);
       }
     }
+    // PROD-05.1: THE SOURCE'S RECORDED TOPIC LAYOUT, from the catalog's view of
+    // this Backup's point, before the first paint.
+    await refreshSourceFacts(state, api, lifecycle);
+    if (!active(lifecycle)) {
+      return;
+    }
     // FX-5: THE TARGET'S BROKER COUNT BEFORE THE FIRST PAINT, for the target the
     // draft left selected, so the factor on screen is never one that moves a
     // moment after it is read.
@@ -5415,7 +5775,12 @@ async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clu
       dropDraft(key);
     }
   }
-  // FX-5: the target's broker count before the first paint, as for a Backup.
+  // PROD-05.1: the catalog row's own topic layout (no read), then FX-5's
+  // target broker count, before the first paint, as for a Backup.
+  await refreshSourceFacts(state, api, lifecycle);
+  if (!active(lifecycle)) {
+    return;
+  }
   await refreshTargetBrokers(state, api, lifecycle);
   if (!active(lifecycle)) {
     return;
@@ -5868,6 +6233,9 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     // (`refreshTargetBrokers`), and the default follows it.
     replicationChosen: false,
     targetBrokers: BROKERS_NOT_READ,
+    // PROD-05.1: the source's recorded topic layout for this point, read by
+    // the mount half before the first paint (`refreshSourceFacts`).
+    sourceFacts: SOURCE_FACTS_NOT_READ,
     editing: null,
     deadlineSeconds: 3600,
     fields: {

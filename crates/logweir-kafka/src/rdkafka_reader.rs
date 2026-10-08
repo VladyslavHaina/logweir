@@ -44,6 +44,29 @@ pub struct RdKafkaReader {
     scratch_prefix: Option<String>,
 }
 
+/// The two TLS controls every TLS arm of [`RdKafkaReader::client_config`] sets.
+///
+/// Hostname verification is pinned explicitly rather than left to the default,
+/// for the reason `allow.auto.create.topics` is: it is librdkafka 2.x's
+/// default (`https`) and this pins it, so an upgrade cannot quietly turn it
+/// off. There is deliberately no override — the engine's rustls client
+/// verifies the broker hostname with no way to turn that off, and the two
+/// clients must agree (PLAT-07.1). [VERIFIED rdkafka-sys 4.10.0+2.12.1's
+/// vendored librdkafka/CONFIGURATION.md: ssl.endpoint.identification.algorithm
+/// `none, https`, default `https`.]
+///
+/// With a CA file, `SSL_CTX_load_verify_locations` on that file ONLY: with
+/// `ssl.ca.location` set, librdkafka skips the default verify paths, so the
+/// connection trusts exactly the projected CA — the same set the engine's
+/// `ssl_ca_location` builds [VERIFIED vendored librdkafka/src/rdkafka_ssl.c:
+/// the `ca_location` branch clears `ca_probe`].
+fn pin_tls(base: &mut ClientConfig, tls_ca_file: Option<&str>) {
+    base.set("ssl.endpoint.identification.algorithm", "https");
+    if let Some(ca) = tls_ca_file {
+        base.set("ssl.ca.location", ca);
+    }
+}
+
 impl RdKafkaReader {
     /// The exact `ClientConfig` [`RdKafkaReader::connect`] dials with, before
     /// the consumer-only keys are added.
@@ -81,6 +104,33 @@ impl RdKafkaReader {
             // name that does not exist
             // [VERIFIED rdkafka-sys librdkafka/CONFIGURATION.md:63].
             .set("allow.auto.create.topics", "false");
+        // One SASL arm for the three SASL mechanisms (PROD-01.3): the keys are
+        // the same, only `sasl.mechanism` differs — librdkafka's spellings,
+        // two hyphens for SCRAM, where the engine writes one.
+        let sasl = |base: &mut ClientConfig,
+                    mechanism: &str,
+                    username: &str,
+                    password: &str,
+                    tls: bool,
+                    tls_ca_file: Option<&str>,
+                    mode: &'static str|
+         -> Result<(), KafkaError> {
+            base.set(
+                "security.protocol",
+                if tls { "SASL_SSL" } else { "SASL_PLAINTEXT" },
+            )
+            .set("sasl.mechanism", mechanism)
+            .set("sasl.username", username)
+            .set("sasl.password", password);
+            if tls {
+                pin_tls(base, tls_ca_file);
+            } else if tls_ca_file.is_some() {
+                return Err(KafkaError::Client(
+                    logweir_core::connection::TlsCaWithoutTls { mode }.to_string(),
+                ));
+            }
+            Ok(())
+        };
         match auth {
             AuthConfig::Plaintext => {
                 base.set("security.protocol", "PLAINTEXT");
@@ -90,49 +140,66 @@ impl RdKafkaReader {
                 password,
                 tls,
                 tls_ca_file,
+            } => sasl(
+                &mut base,
+                "SCRAM-SHA-512",
+                username,
+                password,
+                *tls,
+                tls_ca_file.as_deref(),
+                logweir_core::connection::AUTH_MODE_SCRAM_SHA_512,
+            )?,
+            AuthConfig::ScramSha256 {
+                username,
+                password,
+                tls,
+                tls_ca_file,
+            } => sasl(
+                &mut base,
+                "SCRAM-SHA-256",
+                username,
+                password,
+                *tls,
+                tls_ca_file.as_deref(),
+                logweir_core::connection::AUTH_MODE_SCRAM_SHA_256,
+            )?,
+            // ALWAYS TLS: `AuthConfig::Plain` has no `tls` field, because
+            // `from_spec` refuses a `plain` spec without TLS (PlainWithoutTls).
+            AuthConfig::Plain {
+                username,
+                password,
+                tls_ca_file,
+            } => sasl(
+                &mut base,
+                "PLAIN",
+                username,
+                password,
+                true,
+                tls_ca_file.as_deref(),
+                logweir_core::connection::AUTH_MODE_PLAIN,
+            )?,
+            // `SSL` with the client certificate and key as FILE PATHS —
+            // librdkafka's `ssl.certificate.location` / `ssl.key.location`,
+            // the same two files the engine's `ssl_certificate_location` /
+            // `ssl_key_location` load. No `ssl.key.password`: the projected
+            // key is unencrypted PEM, the one form the engine's loader reads.
+            AuthConfig::Mtls {
+                tls_ca_file,
+                client_certificate,
             } => {
-                let tls = *tls;
-                base.set(
-                    "security.protocol",
-                    if tls { "SASL_SSL" } else { "SASL_PLAINTEXT" },
-                )
-                .set("sasl.mechanism", "SCRAM-SHA-512")
-                .set("sasl.username", username.as_str())
-                .set("sasl.password", password.as_str());
-                if tls {
-                    // Explicit rather than relying on the default, for the
-                    // reason `allow.auto.create.topics` is above: hostname
-                    // verification is librdkafka 2.x's default (`https`) and
-                    // this pins it, so an upgrade cannot quietly turn it off.
-                    // There is deliberately no override — the engine's rustls
-                    // client verifies the broker hostname with no way to turn
-                    // that off, and the two clients must agree (PLAT-07.1).
-                    // [VERIFIED rdkafka-sys 4.10.0+2.12.1's vendored
-                    // librdkafka/CONFIGURATION.md: ssl.endpoint.identification.algorithm
-                    // `none, https`, default `https`.]
-                    base.set("ssl.endpoint.identification.algorithm", "https");
-                    if let Some(ca) = tls_ca_file.as_deref() {
-                        // `SSL_CTX_load_verify_locations` on this file ONLY:
-                        // with `ssl.ca.location` set, librdkafka skips the
-                        // default verify paths, so the connection trusts
-                        // exactly the projected CA — the same set the engine's
-                        // `ssl_ca_location` builds [VERIFIED vendored
-                        // librdkafka/src/rdkafka_ssl.c: the `ca_location` branch
-                        // clears `ca_probe`].
-                        base.set("ssl.ca.location", ca);
-                    }
-                } else if tls_ca_file.is_some() {
+                let Some(files) = client_certificate else {
                     return Err(KafkaError::Client(
-                        logweir_core::connection::TlsCaWithoutTls {
-                            mode: "scramSha512",
-                        }
-                        .to_string(),
+                        logweir_core::connection::ClientCertificateRefusal::Missing.to_string(),
                     ));
-                }
+                };
+                base.set("security.protocol", "SSL")
+                    .set("ssl.certificate.location", files.cert_file.as_str())
+                    .set("ssl.key.location", files.key_file.as_str());
+                pin_tls(&mut base, tls_ca_file.as_deref());
             }
             AuthConfig::Token(_) => {
                 return Err(KafkaError::Client(
-                    "token auth (OAUTHBEARER / MSK IAM) is introduced by SP4".into(),
+                    "token auth (OAUTHBEARER / MSK IAM) is deferred (OD-3)".into(),
                 ));
             }
         }
@@ -441,6 +508,26 @@ impl ClusterReader for RdKafkaReader {
                     t.name(),
                     Self::classify_topic_error(t.name(), err.into()).to_string(),
                 ),
+            })
+            .collect())
+    }
+
+    fn replication_factors(&self, topics: &[String]) -> Result<BTreeMap<String, u32>, KafkaError> {
+        if topics.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let md = self
+            .consumer
+            .fetch_metadata(None, T)
+            .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        Ok(md
+            .topics()
+            .iter()
+            .filter(|t| t.error().is_none() && topics.iter().any(|n| n == t.name()))
+            .filter_map(|t| {
+                let factor =
+                    replication_factor_of(t.partitions().iter().map(|p| p.replicas().len()))?;
+                Some((t.name().to_string(), factor))
             })
             .collect())
     }
@@ -954,6 +1041,17 @@ impl TopicDeleter for RdKafkaReader {
     }
 }
 
+/// **PROD-05.1.** A topic's replication factor from its partitions' replica
+/// counts: the SMALLEST. A partition mid-reassignment lists the replicas being
+/// added beside the ones being removed, so the largest count can exceed the
+/// topic's factor; the smallest never does. `None` for a topic with no
+/// partitions (metadata the principal could not read) or a count of zero —
+/// NOT RECORDED, never `0`.
+fn replication_factor_of(replica_counts: impl Iterator<Item = usize>) -> Option<u32> {
+    let smallest = replica_counts.min()?;
+    u32::try_from(smallest).ok().filter(|n| *n >= 1)
+}
+
 #[cfg(test)]
 mod tests {
     //! These need the `client` feature (this whole file is gated on it) but
@@ -966,6 +1064,141 @@ mod tests {
     //! (`BorrowedMessage` has no public constructor) and is not attempted
     //! here — see the Task 10 fix report's "unproven without a live broker"
     //! list.
+
+    /// **PROD-01.3: librdkafka's settings for the three new modes**, with no
+    /// socket. Each row is the property its mutant breaks: SCRAM-SHA-256's
+    /// two-hyphen spelling (the ENGINE writes one), PLAIN only as `SASL_SSL`
+    /// with hostname verification pinned, and mTLS as `SSL` with the two FILE
+    /// paths and no SASL key — and a client config without the certificate,
+    /// which has no identity to present, refused.
+    #[test]
+    fn the_prod_01_3_modes_configure_librdkafka_as_the_engine_is_configured() {
+        use super::RdKafkaReader;
+        use crate::reader::AuthConfig;
+        use logweir_core::connection::ClientCertificateFiles;
+        let bootstrap = vec!["b0:9093".to_string()];
+
+        for (tls, protocol) in [(false, "SASL_PLAINTEXT"), (true, "SASL_SSL")] {
+            let cfg = RdKafkaReader::client_config(
+                &bootstrap,
+                &AuthConfig::ScramSha256 {
+                    username: "u".into(),
+                    password: "pw".into(),
+                    tls,
+                    tls_ca_file: None,
+                },
+            )
+            .expect("scram-256 configures");
+            assert_eq!(cfg.get("security.protocol"), Some(protocol));
+            assert_eq!(cfg.get("sasl.mechanism"), Some("SCRAM-SHA-256"));
+            assert_eq!(cfg.get("sasl.username"), Some("u"));
+            assert_eq!(
+                cfg.get("ssl.endpoint.identification.algorithm"),
+                tls.then_some("https")
+            );
+        }
+
+        let plain = RdKafkaReader::client_config(
+            &bootstrap,
+            &AuthConfig::Plain {
+                username: "u".into(),
+                password: "pw".into(),
+                tls_ca_file: Some("/ca.crt".into()),
+            },
+        )
+        .expect("plain configures");
+        assert_eq!(
+            plain.get("security.protocol"),
+            Some("SASL_SSL"),
+            "never SASL_PLAINTEXT"
+        );
+        assert_eq!(plain.get("sasl.mechanism"), Some("PLAIN"));
+        assert_eq!(
+            plain.get("ssl.endpoint.identification.algorithm"),
+            Some("https")
+        );
+        assert_eq!(plain.get("ssl.ca.location"), Some("/ca.crt"));
+
+        let mtls = RdKafkaReader::client_config(
+            &bootstrap,
+            &AuthConfig::Mtls {
+                tls_ca_file: None,
+                client_certificate: Some(ClientCertificateFiles {
+                    cert_file: "/c/tls.crt".into(),
+                    key_file: "/c/tls.key".into(),
+                }),
+            },
+        )
+        .expect("mtls configures");
+        assert_eq!(mtls.get("security.protocol"), Some("SSL"));
+        assert_eq!(mtls.get("ssl.certificate.location"), Some("/c/tls.crt"));
+        assert_eq!(mtls.get("ssl.key.location"), Some("/c/tls.key"));
+        assert_eq!(
+            mtls.get("ssl.endpoint.identification.algorithm"),
+            Some("https")
+        );
+        assert_eq!(mtls.get("sasl.mechanism"), None);
+        assert!(RdKafkaReader::client_config(
+            &bootstrap,
+            &AuthConfig::Mtls {
+                tls_ca_file: None,
+                client_certificate: None,
+            },
+        )
+        .is_err());
+    }
+
+    /// **PROD-01.3: the transport refusals at the ONE construction site, and
+    /// no password in `Debug` for either new SASL arm.**
+    #[test]
+    fn from_spec_refuses_plain_and_mtls_without_tls_and_debug_redacts() {
+        use crate::reader::AuthConfig;
+        use logweir_core::spec::AuthSpec;
+        let err = AuthConfig::from_spec(
+            &AuthSpec::Plain {
+                username: "u".into(),
+                tls: false,
+            },
+            Some("pw-SEEDED-7".into()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("PlainWithoutTls"), "{err}");
+        assert!(!err.contains("pw-SEEDED-7"), "{err}");
+        assert!(AuthConfig::from_spec(&AuthSpec::Mtls { tls: false }, None).is_err());
+        assert!(AuthConfig::from_spec(&AuthSpec::Mtls { tls: true }, None).is_ok());
+        for spec in [
+            AuthSpec::Plain {
+                username: "u".into(),
+                tls: true,
+            },
+            AuthSpec::ScramSha256 {
+                username: "u".into(),
+                tls: false,
+            },
+        ] {
+            let auth = AuthConfig::from_spec(&spec, Some("pw-SEEDED-7".into())).expect("builds");
+            assert!(!format!("{auth:?}").contains("pw-SEEDED-7"), "{auth:?}");
+            // A missing password is operational and names the mode.
+            let missing = AuthConfig::from_spec(&spec, None).unwrap_err().to_string();
+            assert!(missing.contains(spec.mode_str()), "{missing}");
+        }
+    }
+
+    /// L5 (PROD-05.1 fix round): the SMALLEST replica count is the factor —
+    /// a partition mid-reassignment (four replicas listed while the topic's
+    /// factor is three) must not raise it, and an RF-1 partition beside RF-3
+    /// ones is what a restore can count on. No partitions, or a zero, is NOT
+    /// RECORDED.
+    #[test]
+    fn the_replication_factor_is_the_smallest_replica_count() {
+        use super::replication_factor_of;
+        assert_eq!(replication_factor_of([3, 4, 3].into_iter()), Some(3));
+        assert_eq!(replication_factor_of([3, 1, 3].into_iter()), Some(1));
+        assert_eq!(replication_factor_of([2].into_iter()), Some(2));
+        assert_eq!(replication_factor_of(std::iter::empty()), None);
+        assert_eq!(replication_factor_of([0, 3].into_iter()), None);
+    }
 
     /// **THE TLS CLIENT PINS HOSTNAME VERIFICATION AND TRUSTS THE PROJECTED
     /// CA** — PLAT-07.1 review findings H1 and H2.

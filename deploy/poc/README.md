@@ -439,7 +439,9 @@ kubectl --context "$CTX" diff --server-side --force-conflicts -f poc-secrets/cha
 helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
   -f deploy/poc/logweir.values.yaml --show-only templates/demo-kafka/kafka.yaml \
   | kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" diff -l app.kubernetes.io/component=demo-kafka -f -
-# 2. Controller, runner and console images TOGETHER, approval bindings unchanged.
+# 2. Controller, runner and console images TOGETHER. The approval bindings are
+#    lifted for this step (the namespaces resolve to the strict legacy mode, never
+#    a weaker one) and come back in step 3.
 helm upgrade logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --kube-context "$CTX" \
   -n "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml \
   --set-json 'approvalPolicy.namespaces={}' --wait --timeout 15m

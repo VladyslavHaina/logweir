@@ -23,7 +23,7 @@ use crate::contract::{
     LastTestView, MissedSlotView, MissedSlotsView, NameRef, NextRunView, ObservedAuthView,
     ReachabilityState, ReachabilityView, RemovableSetView, Restore, RestoreMode, RestoreTargetView,
     RetentionReportView, RetentionView, RetryPolicy, Schedule, SchedulePolicyView, ScheduleRefView,
-    ScheduleStatusView, SubjectRefView, TopicExclusions, TriggerKind, TriggerView,
+    ScheduleStatusView, SubjectRefView, TlsCaView, TopicExclusions, TriggerKind, TriggerView,
     VerifiedSubjectView, WindowCoveredView,
 };
 use crate::status::{backup_operation, condition_view, restore_operation, summary, MAX_CONDITIONS};
@@ -66,6 +66,9 @@ pub fn connection(cluster: &KafkaCluster, last_test: Option<LastTestView>) -> Co
             mode: match cluster.spec.auth.mode {
                 AuthMode::Plaintext => ConnectionAuthMode::Plaintext,
                 AuthMode::ScramSha512 => ConnectionAuthMode::ScramSha512,
+                AuthMode::ScramSha256 => ConnectionAuthMode::ScramSha256,
+                AuthMode::Plain => ConnectionAuthMode::Plain,
+                AuthMode::Mtls => ConnectionAuthMode::Mtls,
             },
             username: cluster.spec.auth.username.clone(),
             // PLAT-07.1 gave the credential reference a `passwordKey`. The
@@ -77,6 +80,30 @@ pub fn connection(cluster: &KafkaCluster, last_test: Option<LastTestView>) -> Co
                 name: r.name.clone(),
             }),
             tls: cluster.spec.auth.tls,
+            // PROD-01.3: the Secret NAME only, like `credential_ref` — never
+            // its keys' values, which this service cannot read anyway.
+            client_certificate_ref: cluster.spec.auth.client_certificate.as_ref().map(|r| {
+                NameRef {
+                    name: r.name.clone(),
+                }
+            }),
+            tls_ca: cluster.spec.auth.tls_ca.as_ref().and_then(|ca| {
+                match (ca.config_map_key_ref.as_ref(), ca.secret_key_ref.as_ref()) {
+                    (Some(r), None) => Some(TlsCaView {
+                        kind: "configMap".to_string(),
+                        name: r.name.clone(),
+                        key: r.key.clone(),
+                    }),
+                    (None, Some(r)) => Some(TlsCaView {
+                        kind: "secret".to_string(),
+                        name: r.name.clone(),
+                        key: r.key.clone(),
+                    }),
+                    // Both or neither: the resolver refuses the object, and a
+                    // view does not pick one on its behalf.
+                    _ => None,
+                }
+            }),
         },
         marker_topic: cluster.spec.marker_topic.clone(),
         reachability: ReachabilityView {

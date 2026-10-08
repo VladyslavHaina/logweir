@@ -528,9 +528,77 @@ pub struct SampleSpec {
     pub anchor: Anchor,
     #[serde(default)]
     pub max_partitions: Option<u32>,
+    /// **PROD-08.1.** How much of the restore phase 7 verifies: `sampled`
+    /// (the default, and every plan written before this field) or `complete`
+    /// — every archived segment of every restored partition hashed and
+    /// decoded, the expected output computed from each record's OWN timestamp,
+    /// and every restored record compared with it by `x-original-offset`
+    /// (see [`Coverage`]).
+    ///
+    /// `skip_serializing_if` the default, so a plan that does not ask for
+    /// complete coverage serialises byte for byte as it did before the field
+    /// existed (a rehearsal's rendered plan, and its hash, included). A runner
+    /// that predates the field ignores it (the grammar ignores unknown keys),
+    /// runs a sampled drill and signs no `integrity.verification` block, which
+    /// every reader prints as "coverage not recorded", never as complete.
+    #[serde(default, skip_serializing_if = "Coverage::is_sampled")]
+    pub coverage: Coverage,
+    /// **PROD-08.1.** The bound on a `complete` verification: the most
+    /// archived records it decodes, summed over every restored partition.
+    /// Absent means no bound. When the next partition would take the total
+    /// past it, that partition and every later one are NOT compared, and the
+    /// signed `integrity.verification.complete` says so (`covered: false`,
+    /// its `incomplete_reason` naming the bound) — complete coverage is never
+    /// silently replaced by sampling. Refused at phase 0 beside `coverage:
+    /// sampled`, where it would bound nothing the plan asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complete_max_records: Option<u64>,
 }
 fn n25() -> usize {
     25
+}
+
+/// **PROD-08.1.** How much of a restore phase 7 verifies — `sample.coverage`
+/// in the plan, `integrity.verification.coverage` in the signed scorecard
+/// (format 1.4.0).
+///
+/// - **`Sampled`** — today's verification, unchanged: the first
+///   `records_per_partition` records of each sampled partition, reconciled by
+///   their sorted-header fingerprint; the sha256 of the segments those
+///   records came from; and the manifest's count BOUND for the window, which
+///   reads segment first and last timestamps (PROD-01.1 S6, S9).
+/// - **`Complete`** — every archived segment of every partition of every
+///   restored topic is read, its sha256 checked against the manifest and its
+///   records decoded; the expected output is the archived records whose OWN
+///   timestamp is inside the restore window, independent of the engine's
+///   first/last-timestamp segment selection; every restored record is read
+///   back and compared with it by `x-original-offset` — content (with header
+///   order), count, duplicates and order. The contract is
+///   `docs/to-do/decisions/PROD-08.1-integrity-contract.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Coverage {
+    #[default]
+    Sampled,
+    Complete,
+}
+
+impl Coverage {
+    /// The wire spelling, in the plan and in the signed scorecard's
+    /// `integrity.verification.coverage`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Coverage::Sampled => crate::scorecard::COVERAGE_SAMPLED,
+            Coverage::Complete => crate::scorecard::COVERAGE_COMPLETE,
+        }
+    }
+
+    /// `skip_serializing_if` for [`SampleSpec::coverage`].
+    #[must_use]
+    pub fn is_sampled(&self) -> bool {
+        *self == Coverage::Sampled
+    }
 }
 
 /// WHICH records in the sampled window a drill reconciles.
@@ -662,6 +730,36 @@ pub enum AuthSpec {
         #[serde(default)]
         tls: bool,
     },
+    /// **PROD-01.3.** SASL/SCRAM-SHA-256: the same exchange as `scramSha512`
+    /// with SHA-256, over TLS or not. The engine spells the mechanism
+    /// `SCRAM-SHA256` and librdkafka `SCRAM-SHA-256`.
+    ScramSha256 {
+        username: String,
+        #[serde(default)]
+        tls: bool,
+    },
+    /// **PROD-01.3.** SASL/PLAIN — Confluent Cloud's API keys and Azure Event
+    /// Hubs' connection strings use it. **Over TLS only**: PLAIN sends the
+    /// password itself, so `tls: false` (or absent) is refused with
+    /// [`crate::connection::PlainWithoutTls`] by
+    /// [`AuthSpec::transport_refusal`], which every runner entry point applies
+    /// before any client exists. `tls` stays a field rather than being implied
+    /// because it is the only switch that turns TLS on, in this grammar and in
+    /// the `KafkaCluster` CRD alike: a mode never turns it on by itself.
+    Plain {
+        username: String,
+        #[serde(default)]
+        tls: bool,
+    },
+    /// **PROD-01.3.** A TLS client certificate and no SASL (`security.protocol`
+    /// `SSL`). There is no username: the identity is the certificate, which
+    /// reaches the runner as a projected file pair
+    /// ([`crate::connection::ClientCertificateFiles`]) and never through a
+    /// spec. `tls: false` is refused ([`crate::connection::MtlsWithoutTls`]).
+    Mtls {
+        #[serde(default)]
+        tls: bool,
+    },
 }
 
 impl AuthSpec {
@@ -669,26 +767,49 @@ impl AuthSpec {
     /// `RestorePlan::target_auth`. It maps and never refuses: the mode a spec
     /// names is carried faithfully into the plan, so a plan that asked for
     /// SCRAM can never be rendered unauthenticated on the operator's behalf.
+    /// (A `plain` or `mtls` spec without TLS is carried as it is too, and
+    /// the renderer refuses it — the backstop behind
+    /// [`AuthSpec::transport_refusal`].)
     ///
     /// **It carries no password, at any variant** — see `AuthRender`'s own doc
     /// comment. The secret reaches the engine through the engine's own
     /// `${VAR}` expansion of its config text and reaches Logweir's client
     /// through `AuthConfig::from_spec`; neither path passes through a plan.
     pub fn to_render(&self) -> crate::engine::AuthRender {
+        use crate::engine::AuthRender;
         match self {
-            AuthSpec::Plaintext => crate::engine::AuthRender::Plaintext,
-            AuthSpec::ScramSha512 { username, tls } => crate::engine::AuthRender::ScramSha512 {
+            AuthSpec::Plaintext => AuthRender::Plaintext,
+            AuthSpec::ScramSha512 { username, tls } => AuthRender::ScramSha512 {
                 username: username.clone(),
                 tls: *tls,
                 // A spec names no trust anchor: the CA is a projected file the
                 // runner attaches afterwards (`AuthRender::with_tls_ca_file`).
                 tls_ca_file: None,
             },
+            AuthSpec::ScramSha256 { username, tls } => AuthRender::ScramSha256 {
+                username: username.clone(),
+                tls: *tls,
+                tls_ca_file: None,
+            },
+            AuthSpec::Plain { username, tls } => AuthRender::Plain {
+                username: username.clone(),
+                tls: *tls,
+                tls_ca_file: None,
+            },
+            // The certificate pair is attached by the runner from the
+            // projected files (`AuthRender::with_client_certificate`), like
+            // the CA: a spec names no file.
+            AuthSpec::Mtls { tls } => AuthRender::Mtls {
+                tls: *tls,
+                tls_ca_file: None,
+                client_certificate: None,
+            },
         }
     }
 
-    /// The mode as the two documents spell it: `"plaintext"` or
-    /// `"scramSha512"`.
+    /// The mode as the documents spell it: one of
+    /// [`crate::connection::AUTH_MODES`] — `"plaintext"`, `"scramSha512"`,
+    /// and since PROD-01.3 `"scramSha256"`, `"plain"` and `"mtls"`.
     ///
     /// **These are the serde tag values of this enum, and they are the
     /// `KafkaCluster` CRD's `auth.mode` enum, byte for byte and in that
@@ -700,12 +821,16 @@ impl AuthSpec {
     /// `crates/logweir/tests/auth_binding.rs::the_scorecard_auth_block_and_auth_spec_agree`
     /// rather than kept in step by three comments.
     ///
-    /// `&'static str` on purpose: a closed set of two literals cannot be
-    /// handed a value computed at run time.
+    /// `&'static str` on purpose: a closed set of literals cannot be handed a
+    /// value computed at run time.
     pub fn mode_str(&self) -> &'static str {
+        use crate::connection as c;
         match self {
-            AuthSpec::Plaintext => "plaintext",
-            AuthSpec::ScramSha512 { .. } => "scramSha512",
+            AuthSpec::Plaintext => c::AUTH_MODE_PLAINTEXT,
+            AuthSpec::ScramSha512 { .. } => c::AUTH_MODE_SCRAM_SHA_512,
+            AuthSpec::ScramSha256 { .. } => c::AUTH_MODE_SCRAM_SHA_256,
+            AuthSpec::Plain { .. } => c::AUTH_MODE_PLAIN,
+            AuthSpec::Mtls { .. } => c::AUTH_MODE_MTLS,
         }
     }
 
@@ -722,11 +847,58 @@ impl AuthSpec {
     /// is rendered from the plan and never from a cluster object read at run
     /// time.
     ///
-    /// `None` under `Plaintext`, which is not the same as an empty username.
+    /// `None` under `Plaintext`, which is not the same as an empty username,
+    /// and `None` under `Mtls`, whose identity is the client certificate — a
+    /// file the plan names nowhere, so for `mtls` G-ID binds the mode and the
+    /// transport and NOT the principal (`docs/kubernetes.md`, "Client
+    /// authentication modes").
     pub fn username(&self) -> Option<&str> {
         match self {
-            AuthSpec::Plaintext => None,
-            AuthSpec::ScramSha512 { username, .. } => Some(username),
+            AuthSpec::Plaintext | AuthSpec::Mtls { .. } => None,
+            AuthSpec::ScramSha512 { username, .. }
+            | AuthSpec::ScramSha256 { username, .. }
+            | AuthSpec::Plain { username, .. } => Some(username),
+        }
+    }
+
+    /// Whether the transport is TLS — the `tls` field of every arm that has
+    /// one, `false` for `plaintext`.
+    pub fn tls(&self) -> bool {
+        match self {
+            AuthSpec::Plaintext => false,
+            AuthSpec::ScramSha512 { tls, .. }
+            | AuthSpec::ScramSha256 { tls, .. }
+            | AuthSpec::Plain { tls, .. }
+            | AuthSpec::Mtls { tls } => *tls,
+        }
+    }
+
+    /// Whether this mode authenticates with a SASL password — the arms whose
+    /// client reads `LOGWEIR_{SOURCE,TARGET}_PASSWORD`.
+    pub fn uses_password(&self) -> bool {
+        self.username().is_some()
+    }
+
+    /// Whether this mode presents a TLS client certificate.
+    pub fn uses_client_certificate(&self) -> bool {
+        matches!(self, AuthSpec::Mtls { .. })
+    }
+
+    /// **The PLAIN-over-TLS rule, and its `mtls` twin** — the refusal every
+    /// runner entry point applies to a spec before any client exists, and the
+    /// rule the controller's resolver and the CRD's admission rule state for a
+    /// `KafkaCluster`.
+    ///
+    /// `Some` for `plain` without TLS ([`crate::connection::PlainWithoutTls`],
+    /// the named reason `PlainWithoutTls`) and for `mtls` without TLS
+    /// ([`crate::connection::MtlsWithoutTls`]); `None` for every other shape.
+    pub fn transport_refusal(&self) -> Option<String> {
+        match self {
+            AuthSpec::Plain { tls: false, .. } => {
+                Some(crate::connection::PlainWithoutTls.to_string())
+            }
+            AuthSpec::Mtls { tls: false } => Some(crate::connection::MtlsWithoutTls.to_string()),
+            _ => None,
         }
     }
 }
@@ -755,6 +927,21 @@ pub struct BackupSourceSpec {
     /// "everything" to the engine, and a mandatory allowlist whose absence
     /// means "all topics" is not an allowlist.
     pub topics: Vec<String>,
+    /// **PROD-05.1.** Topics whose configuration a declarative owner manages
+    /// outside Kafka's admin API — a Strimzi `KafkaTopic`, Terraform, a GitOps
+    /// repository — declared by the plan. Each names one of `topics`, a kind
+    /// (`strimzi` or `external`) and where its desired state lives; phase −1
+    /// refuses anything else (exit 3). The receipt records the owner, and a
+    /// restore exports desired state for such a topic instead of applying its
+    /// settings through the admin API, which the owner would revert.
+    ///
+    /// Optional: an older runner ignores the key, and a plan without it is the
+    /// plan it was. ABSENT and EMPTY differ: an absent list declares nothing
+    /// and the receipt's `owner_detection` does not name `declared`; an empty
+    /// list is the operator's statement that no topic of the plan has a
+    /// declared owner, and it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_owners: Option<Vec<crate::topic_configuration::DeclaredOwner>>,
 }
 
 /// The `backup:` block's tunables. The two keys the rendered document pins

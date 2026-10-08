@@ -387,7 +387,7 @@ them is published by CI only after the commit that adds them, so:
    `--installation-trust-policy`, `--allowed-target-cluster-id`,
    `--mark-fresh-install-confirm`, `--revoke-trust-binding`) and renders their
    objects only while `identity.bootstrapFeatures.consoleKey` is `true`, which
-   the merge leaves `false`: every install and upgrade runs exactly as before
+   the merge left `false`: every install and upgrade ran exactly as before
    with the image already pinned.
 2. **After CI publishes `sha-<merge>`, ONE commit** sets `identity.bootstrapImage`
    to that runner's digest, refreshes the help fixture from it (it must list all
@@ -396,7 +396,10 @@ them is published by CI only after the commit that adds them, so:
    `bash scripts/render-install.sh --check` and
    `cargo test -p logweir --test chart_lint`.
 
-End users supply neither a key nor an image hash.
+Both steps are done for PROD-16.1: `identity.bootstrapImage` is pinned to the
+runner main CI published for rev `2fe8d907` (the digest is in
+`charts/logweir/values.yaml`) and the value is `true` by default. End users
+supply neither a key nor an image hash.
 
 ---
 
@@ -1340,8 +1343,10 @@ credential cannot be read back by any route. `create` alone is still the widest
 grant the service asks for: in a namespace it could in principle mint a
 `kubernetes.io/service-account-token` Secret for any ServiceAccount there.
 
-Both credential builders stamp a distinct `type` —
-`logweir.dev/object-store-credential` and `logweir.dev/kafka-sasl-password` —
+The credential builders stamp a distinct `type` —
+`logweir.dev/object-store-credential`, `logweir.dev/kafka-sasl-password` and
+(PROD-01.3, an mTLS connection's certificate and key)
+`logweir.dev/kafka-client-certificate` —
 and the `app.kubernetes.io/managed-by: logweir` label, so a
 `ValidatingAdmissionPolicy` can require both:
 

@@ -133,10 +133,11 @@ pub fn reason_for_exit(code: i32) -> &'static str {
 
 /// The terminal states that are **not** an exit code.
 ///
-/// TWO PRODUCERS, ONE LIST. Four of these are printed by the RUNNER on its
+/// TWO PRODUCERS, ONE LIST. Five of these are printed by the RUNNER on its
 /// `refusal-reason=` line and are declared in
 /// `logweir_core::guard::TERMINAL_STATES` — `TargetTopicConfigRefused`,
-/// `CredentialNotRenderable`, `PointInTimeByProducerTime` (FX-8), and the
+/// `CredentialNotRenderable`, `PointInTimeByProducerTime` (FX-8),
+/// `PlainWithoutTls` (PROD-01.3), and the
 /// default `GuardRefused` which this list
 /// spells [`TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON`] on the controller
 /// side because the controller reaches it for a DIFFERENT observation (the
@@ -162,6 +163,12 @@ pub const TERMINAL_STATES: &[&str] = &[
     // FX-8: the runner's refusal of a time selection by producer time over a
     // `LogAppendTime` source, read off `refusal-reason=` like the two above.
     "PointInTimeByProducerTime",
+    // PROD-01.3: SASL/PLAIN without TLS — the resolver's refusal of such a
+    // `KafkaCluster`, and the runner's `refusal-reason=` for such a plan.
+    TERMINAL_STATE_PLAIN_WITHOUT_TLS,
+    // PROD-01.3 security follow-up: a projected credential whose binding does
+    // not name the connection the Job was built for, read off `refusal-reason=`.
+    TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
     "NoExitCode",
     TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
     "GuardRefusedUnknownReason",
@@ -379,6 +386,26 @@ pub const TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED: &str = "ConnectionFieldUn
 /// immutable and the plan is approved bytes, so the fix is a new plan built
 /// from the saved connection, and a new approval.
 pub const TERMINAL_STATE_CONNECTION_PLAN_MISMATCH: &str = "ConnectionPlanMismatch";
+
+/// **PROD-01.3.** A `KafkaCluster` (or a plan) whose auth mode is `plain`
+/// (SASL/PLAIN) without `tls: true`. PLAIN sends the password itself, so the
+/// connection is refused before any Job exists rather than dialled in the
+/// clear. SHARED WITH THE RUNNER'S OWN LIST (`logweir_core::guard::
+/// TERMINAL_STATE_PLAIN_WITHOUT_TLS`, the same string), like
+/// [`TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE`]. The CRD's admission rule
+/// refuses the same shape first; this is what an object admitted by an older
+/// CRD meets.
+pub const TERMINAL_STATE_PLAIN_WITHOUT_TLS: &str = logweir_core::connection::PLAIN_WITHOUT_TLS;
+
+/// **PROD-01.3 security follow-up.** The runner refused the credential the
+/// Job projected because the Secret's `logweir-binding` is absent or names
+/// another connection or endpoint (`logweir_core::connection::
+/// CredentialBindingRefusal`) — the guard that stops a `KafkaCluster` naming
+/// another connection's Secret from turning Logweir into the deputy that
+/// presents it to a broker of its author's choosing. Nothing was dialled.
+/// SHARED WITH THE RUNNER'S OWN LIST, the same string.
+pub const TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH: &str =
+    logweir_core::connection::CREDENTIAL_BINDING_MISMATCH;
 
 /// A `scramSha512` `KafkaCluster` carries no `auth.username`, so the plan
 /// document cannot name the identity the run will present.

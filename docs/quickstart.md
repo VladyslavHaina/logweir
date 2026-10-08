@@ -185,7 +185,10 @@ always a destination with no `evidenceRead` grant.
 2. In the wizard, choose the target connection (a `target` role), the topics and
    the new-topic mapping, and the point in time inside the covered window.
    Restores only ever write **new** topics. Check the **replication factor** in
-   step 4: it defaults to the target's broker count, at most 3, when a
+   step 4: it defaults to the source's factor when a recovery catalog's view of
+   the point records it (the largest of the selected topics', from backups
+   whose receipt is format 1.3.0 or later), capped at the target's broker
+   count; otherwise to the target's broker count, at most 3, when a
    *Discover topics* of the target connection has read it (until the controller
    collects that discovery, a day by default; past the discovery's freshness,
    15 minutes by default, the count sets the default but refuses no factor),
@@ -241,8 +244,10 @@ and its operation page reaches `Succeeded` with a completion panel.
 - **The record check is a sample.** *Records verified in the sampled window* is
   the count read back from the new topics inside the sampled window, and *records
   sampled and matching* is how many of those matched byte for byte. Neither is
-  the total the restore wrote, and no level in this version compares every
-  record (*Terms* below).
+  the total the restore wrote, and a `Restore` cannot ask for a comparison of
+  every record in this version; only the command-line runner can, with
+  `sample.coverage: complete` ([release notes](release-notes.md), item 30;
+  *Terms* below).
 - **Check it without Logweir.** Fetch the scorecard and its sidecar from the
   keys on the `Restore` (`status.evidence`) and run
   `python3 docs/verify_scorecard.py` over them ([verify-a-scorecard.md](verify-a-scorecard.md)).

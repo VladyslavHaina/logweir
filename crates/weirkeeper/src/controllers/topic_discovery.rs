@@ -285,10 +285,7 @@ pub fn connection_plan(resolved: &ResolvedConnection) -> ConnectionPlan {
     ConnectionPlan {
         bootstrap_servers: resolved.bootstrap_servers.clone(),
         auth_mode: resolved.auth.mode_str().to_string(),
-        username: match &resolved.auth {
-            logweir_core::spec::AuthSpec::ScramSha512 { username, .. } => Some(username.clone()),
-            logweir_core::spec::AuthSpec::Plaintext => None,
-        },
+        username: resolved.auth.username().map(str::to_string),
         password_env: resolved
             .password
             .as_ref()
@@ -303,6 +300,16 @@ pub fn connection_plan(resolved: &ResolvedConnection) -> ConnectionPlan {
         // controller out of the credential path entirely, and makes the check's
         // answer one about the path the real run takes.
         ca_file: resolved.tls_ca.as_ref().map(|_| side.ca_file_path()),
+        // PROD-01.3: the `mtls` pair's IN-POD PATHS, exactly where the
+        // resolver's own projection mounts them — never key material.
+        client_cert_file: resolved
+            .client_certificate
+            .as_ref()
+            .map(|_| side.client_cert_file_path()),
+        client_key_file: resolved
+            .client_certificate
+            .as_ref()
+            .map(|_| side.client_key_file_path()),
         principal: resolved.principal.clone(),
     }
 }

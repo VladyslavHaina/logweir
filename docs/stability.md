@@ -41,7 +41,11 @@ adopter's evidence bucket is a document some reader may already parse, so:
     `archive.manifest_version_id`. So is FX-3's move of the new-topic
     deviations from `intentionally_deviated` to `unexpected_divergence`. So is
     FX-8's refusal `PointInTimeByProducerTime`, a new cause for exit 3
-    ([below](#scorecard-format-130-sourcetime_basis-fx-8)).
+    ([below](#scorecard-format-130-sourcetime_basis-fx-8)). So is PROD-08.1's
+    sampled-lane order check, a new cause for `fail-integrity`, and its
+    phase-0 refusals of a plan that asks for two verifications at once, new
+    causes for exit 3
+    ([below](#scorecard-format-140-integrityverification-prod-081)).
 
   Nothing else is ruled: any other change to an existing field's content is
   still a MAJOR bump.
@@ -212,6 +216,176 @@ which it selected by time with **no recorded timestamp type**
   documents again with no block, runs the selections FX-8 refuses, and signs
   them without a label — the pre-FX-8 behaviour. The 1.3.0 documents already
   written stay valid under both readers.
+
+### Scorecard format 1.4.0: `integrity.verification` (PROD-08.1)
+
+PROD-08.1 adds one nested optional block to the drill scorecard,
+`integrity.verification`, and moves the scorecard to **1.4.0**
+(`schemas/logweir-drill-scorecard-1.4.0.json`, with FX-8's 1.3.0 frozen beside
+it). The block says what a verdict COVERED — a sample, or every selected record
+— and, for a complete verification, what it found
+([the scorecard format](formats/drill-scorecard.md#integrityverification-format-140);
+[the plan field](formats/drill-spec.md#samplecoverage-and-samplecomplete_max_records-prod-081);
+[the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
+- **Absent means not recorded, read as sampled.** A document without the block
+  — every scorecard before 1.4.0 — is never read as a complete verification,
+  and both readers print an `integrity coverage: not recorded` line for it.
+  Every 1.4.0 run that reaches phase 7 writes the block.
+- **The block is additive and optional: MINOR.**
+- **Seven arms, IV-1 to IV-7, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block and judges the block, or `integrity.result`
+  against it (IV-6, as NR-2 to NR-5 judge the existing parity lists against
+  `not_reconstructed`), and each can only refuse. No document without the block
+  changes verdict; the corpus (`e2e/fixtures/invariants/`) and the parity gate
+  re-prove that on every `just lint`.
+- **A complete verification fills the existing counters with the complete
+  comparison**: `integrity.records_sampled` is the expected records of the
+  compared partitions, `sample.records_expected` the same (the whole expected
+  output only when `complete.covered` is `true`),
+  `sample.partitions` and `sample.topics` every partition and topic it
+  verified. Each field keeps its meaning — how many records the drill set out
+  to reconcile, and how many it did — and a reader that predates the block
+  reads a large sample, never a complete one.
+- **Two new causes for existing values, each only to the safer side (OD-7's
+  third case).** The sampled lane now FAILS a selection whose restored head
+  repeats or goes backwards in `x-original-offset` (it used to key the head by
+  that header in a map, where a duplicate collapsed and order was invisible):
+  a new cause for `fail-integrity`. And phase 0 now refuses, exit 3, a plan
+  asking for two verifications at once (`coverage: complete` with
+  `max_partitions`; `complete_max_records` with sampled coverage, or `0`).
+  Neither makes any verdict stronger.
+- **A complete verification can pass a restore the sampled check fails, and
+  fail one it passes** — the point. The exact per-partition model replaces the
+  manifest's first/last count bound, so PROD-01.1's correct point-in-time
+  restore over an out-of-order segment passes complete coverage, and its
+  skipped segment and below-the-floor record fail it
+  ([the limitation](#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+  Both are new runs under a new plan value, signed with the block; no earlier
+  document is re-read.
+- **Readers built before PROD-08.1** accept every 1.4.0 document — the major
+  is unchanged and the block is a nested optional field they ignore — and print
+  no coverage line. They do not run IV-1 to IV-7.
+- **The plan grammar gains `sample.coverage` and `sample.complete_max_records`**,
+  both omitted from the serialised plan at their defaults. A runner built
+  before PROD-08.1 ignores them, runs a sampled check, and signs no block.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.3.0
+  documents again, sampled, with no block; the 1.4.0 documents already written
+  stay valid under both readers.
+
+### Receipt and catalog-point format 1.3.0: `topic_configuration` (PROD-05.1)
+
+PROD-05.1 adds one optional block to the backup receipt, `topic_configuration`,
+and its per-topic copy to the catalog point record, `topics[].configuration`,
+and moves both documents to **1.3.0**
+(`schemas/logweir-backup-receipt-1.3.0.json` and
+`schemas/logweir-catalog-point-1.3.0.json`, FX-7's 1.2.0 files frozen beside
+them). Per named topic it records the source's partition count and replication
+factor, the configuration entries Logweir's own read returned with their
+source and portability class, and the topic's declarative owner, with a
+top-level `owner_detection` saying where the run looked for owners
+([the receipt format](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130);
+[the model and the portability table](to-do/decisions/PROD-05.1-configuration-model.md)).
+
+- **Absent means not recorded.** A receipt without the block — every receipt
+  before 1.3.0 — records no topic's configuration model, and a reader that
+  needs one has none; never "no configuration". Within the block, a topic whose
+  configuration read was denied or failed records NO entries (arm 15), never an
+  empty set.
+- **Every receipt this build signs carries the block**, pinned or not, so every
+  one is 1.3.0. FX-7's statement that an unpinned receipt is FX-4's 1.1.0
+  document byte for byte holds for builds before PROD-05.1; a 1.3.0 receipt
+  without a pin still has no `manifest_version_id` key.
+- **Ten arms, 12 to 21, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block (arm 20 also on one carrying `owner_detection`
+  without it, which no writer produces), and judges it against
+  `config_coverage` and `source.topics` the way FX-4's arm 7 judges
+  `config_coverage` against `source.topics`. No document without the block
+  changes verdict; the corpus (`e2e/fixtures/invariants/`, a case for each
+  refusing half of every arm) and the parity gate re-prove that on every
+  `just lint`.
+- **An owner nobody looked for is not "no owner".** `owner_detection` empty —
+  every `Backup` and `BackupSchedule` the controller runs today, which passes
+  neither a declaration nor `KafkaTopic` resources (PROD-05.1a) — makes both
+  readers print `owner not checked` for an un-owned topic and the product API
+  publish `applyRoute: unknown`, never the admin-API route a later restore
+  would act on.
+- **The class is the writer's.** The arms judge a class against its source and
+  value, never against the key, so a later table refinement cannot make an
+  older receipt refuse itself; a restore re-derives the class from its own
+  table and fails closed on a disagreement (PROD-05.2).
+- **The catalog record's existing `topics[].partitions` is now filled** from
+  the receipt (it was always absent: no receipt recorded a count). Its meaning
+  is unchanged — the source's partition count — and `reader::cross_check`
+  refuses a record whose count the receipt does not back. Its one reader,
+  rehearsal selection's `maxPartitions` filter, can only refuse more points
+  with a count than without one.
+- **The plan grammar gains `source.topic_owners`**, omitted from the serialised
+  plan when absent (an empty list is kept: it says no topic has a declared
+  owner, and the receipt records `declared` among the places the run looked); a
+  runner built before PROD-05.1 ignores it and records no owner. Phase −1
+  refuses, exit 3, a declaration it cannot record or a topic declared twice.
+- **Readers built before PROD-05.1** (`verify_scorecard.py` 1.19.0 and earlier,
+  and an older `logweir`) accept every 1.3.0 document — the major is unchanged
+  and the block is an optional field they ignore — print no model line, and do
+  not run arms 12 to 21.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.1.0 or
+  1.2.0 receipts and records again; the 1.3.0 documents already written stay
+  valid under both readers. A catalog synced by an older runner lists no
+  topics for a point (the console then says the source's layout is not
+  published, and defaults as FX-5 did).
+
+### Three new auth modes: receipt and catalog point 1.4.0, scorecard 1.5.0 (PROD-01.3)
+
+PROD-01.3 adds `scramSha256`, `plain` (SASL/PLAIN, over TLS only) and `mtls`
+to the closed set of auth modes. Two existing fields carry the mode in signed
+documents — the backup receipt's `source.auth.mode` and the scorecard's
+`target.auth.mode` — and the catalog point record copies the receipt's.
+
+- **The value set is versioned, and only a document that names a new value
+  moves.** A receipt or catalog point naming one of the three is **1.4.0**, a
+  scorecard **1.5.0**; every document of a `plaintext` or `scramSha512` run is
+  written at the version it always was, byte for byte. Each new schema file
+  differs from the frozen one beside it in that field's description only.
+- **MINOR, under OD-7's third case** (2026-10-07): this is new content in an
+  existing field that can only move an older reader's verdict to the safer
+  side. A reader built before PROD-01.3 refuses such a document (the mode is
+  outside the two it knows) — never accepts it as something stronger — and
+  decides every other document exactly as before. Each reader's one auth arm
+  becomes three statements, mirrored in both: the closed two below the new
+  version (unchanged), a new value under a version that predates it (refused),
+  and the closed five from the new version. The corpus
+  (`e2e/fixtures/invariants/`, three cases per document) and the parity gate
+  re-prove it on every `just lint`; `verify_scorecard.py` is 1.21.0.
+- **Two runner terminal states are added**, each a refusal that names its
+  cause: `PlainWithoutTls` (SASL/PLAIN without TLS) and
+  `CredentialBindingMismatch` (a projected credential whose Secret's
+  `logweir-binding` does not name the connection — the PROD-01.3 security
+  follow-up, [kubernetes.md](kubernetes.md) §20.9). Both are new causes for
+  exit 3 and can only refuse.
+- **The `KafkaCluster` CRD is additive**: three enum values appended,
+  `auth.clientCertificate`, `status.credentialBinding`, and three CEL rules
+  that are vacuously true for every object an earlier release could write.
+  **One existing behaviour changes, deliberately:** every credentialed
+  connection now needs its Secret bound (`logweir-binding`), or its runs are
+  refused — the upgrade step is in [kubernetes.md](kubernetes.md) §20.9.
+- **The product API no longer accepts `auth.credentialRef`** on a connection
+  create (`422 existing_credential_refused`); the credential is entered once in
+  `auth.credential`. A pre-release API change (below), listed in the release
+  notes.
+- **A credential value is no longer part of a create's idempotency identity**
+  (connections and destinations): the digests the API publishes on the object
+  and in the audit record are taken with every write-only value replaced by
+  `<write-only>`, because a digest over the value let anyone who could read the
+  object confirm a guessed credential offline. A same-key retry that changes
+  only the value now replays instead of answering `409 idempotency_conflict`;
+  a retry spanning the upgrade of a create that carried a value answers `409`
+  (retry with a new key).
+- **Rollback.** An older `logweir` cannot parse a spec naming a new mode, so it
+  writes no 1.4.0/1.5.0 document; those already written stay valid for every
+  reader from PROD-01.3 on, and older readers refuse them (the safe direction).
+  An older controller and runner ignore the binding pair; a bound Secret keeps
+  working with them.
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -629,6 +803,17 @@ and last records are inside the window holds a later record. Measured by three r
 `non_monotonic_create_time_inside_a_wholly_inside_segment` (the correct restore signed
 `fail-integrity`).
 
+Since PROD-08.1 a plan can ask for **complete coverage** (`sample.coverage:
+complete`), which selects the expected output by each archived record's own
+timestamp and compares every restored record with it, so the same three rows
+read differently there: the skipped record and the record below the floor are
+reported missing and the restore is signed `fail-integrity` (at the point too),
+and the correct point-in-time restore is signed `pass`. The restores themselves
+are unchanged — the engine still selects by first and last timestamps, and the
+floor still drops the record — until PROD-01.1b. Measured by the same rows'
+complete restores
+([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
 ### `LogAppendTime` sources are restored with the producers' timestamps
 
 For a topic on `message.timestamp.type=LogAppendTime`, the archive holds the timestamp each
@@ -698,6 +883,11 @@ a duplicated target was not measured. Measured by
 `e2e/tests/record_semantics.rs::a_lost_produce_acknowledgement_during_restore`, an `#[ignore]`d
 row that freezes the broker and runs alone with `--ignored`
 ([decision record §5.1](to-do/decisions/PROD-01.1-record-semantics.md#51-a-lost-produce-acknowledgement--run)).
+Since PROD-08.1, a duplicated target that DOES reach phase 7 is counted:
+complete coverage reports each repeated `x-original-offset` as a duplicate and
+fails the restore, and the sampled check fails a duplicate inside the head it
+reads (measured over a duplicated target on the real broker by
+`e2e/tests/record_semantics.rs::complete_coverage_over_faulted_targets_on_the_real_broker_and_archive`).
 
 ### SASL/SCRAM-SHA-512: two clients, two trust stores, and one password variable
 
@@ -1268,7 +1458,7 @@ What changes for an operator:
   Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
   bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
   merges the two views for you yet (PROD-09.2 owns that merge).
-- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key).
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), and an unpinned one still has no `manifest_version_id` key.
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and

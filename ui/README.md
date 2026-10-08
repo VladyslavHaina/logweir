@@ -529,7 +529,7 @@ the adapter records what it cannot supply on every object it projects, under
 
 | kind | absent in console mode |
 |---|---|
-| `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` and `spec.auth.tlsCa` (connection contract v1's two references, which `ConnectionAuthView` does not carry) |
+| `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` (connection contract v1's data-key reference, which `ConnectionAuthView` does not carry; the CA reference and the mTLS Secret name it does, since PROD-01.3) |
 | `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**, which the retention panel prints with where the keys are, beside a line when the API cut a list at 100 entries); `status.pendingRun` and `status.history`. `status.lastSlot` and `status.missedSlots` ARE projected since console-ux-1 (MCP-13), so an absent one means the controller has recorded nothing yet |
 | `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.evidence` -- the detail view reads it from the operation route. A list row's `status.exitCode` comes from the summary's `exitCode` since console-ux-1 (MCP-17) |
 | `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.evidence`, and `status.outcome` when an older API omits the summary's `outcome` (MCP-17). A DETAIL carries the operation route's `verificationScope` under `status.verificationScope`, which is what the History detail's scope sentence reads first |
@@ -696,8 +696,9 @@ is exactly this, and it is the same in every form:
   private-key PEM -- in any case, across any run of whitespace including a line
   break, and so for the PKCS#8, PKCS#1, SEC1, encrypted and OpenSSH labels
   alike -- whichever field it was pasted into, and for any field a form does
-  not name in its own allowlist. The forms have no field a password goes in: a
-  credential is always a **Secret's name**, which is also why `private-key`
+  not name in its own allowlist. No form KEEPS a password: a kept credential
+  is always a **Secret's name** (the console connection form's write-only
+  inputs, PROD-01.3, are on no draft list at all), which is also why `private-key`
   joined by a dash or an underscore counts only inside a PEM `BEGIN` line: a
   Secret may honestly be called `minio-private-key`. That test reads words, so
   a renamed, headerless blob spells none and is beyond it -- which is why the
@@ -938,9 +939,18 @@ catalog table, the schedule detail and the wizard's own mount share): the API
 row is `selectable` -- the controller's conjunction, joined server side with the
 namespace's `Backup` verdicts; no `backupVerdict`; no `backupVerdictsIncomplete`
 on the page (a join nobody finished cannot say that no `Backup` refused this
-receipt); a current view; a point id, an unredacted receipt key and both
-digests; and a covered window. Anything else is a refusal naming the reason,
-with no plan, no hash and no submit, and never a substituted point.
+receipt); a current view; a point id, an unredacted backup set id and receipt
+key, and both digests; and a covered window. Anything else is a refusal naming
+the reason, with no plan, no hash and no submit, and never a substituted point.
+A set id or receipt key that came back as the catalog sync's `[redacted]` is ONE
+refusal naming the field and the cause (`redactedBindingReason`): runners up to
+v0.2.0-rc.1 withheld every scheduled run's set id (`<schedule uid>-<slot>`) and
+the keys built from it, so a catalog synced by one offered none of its scheduled
+points (FX-17) -- upgrade the runner image and sync the catalog again. A set id
+chosen for `logweir backup run` survives when it is a public form -- for
+example a UUID, or lower-case letters, digits, `.`, `-`, `_` and `=` under 40
+characters. The schedule page joins a run to its catalog row on the same set
+id, so until the re-sync a scheduled run there reads `not in the catalog`.
 
 **What the six steps do with it.** Step 1 reads the archive the catalog reads
 (its saved destination, frozen at mount by UID and location digest and checked
@@ -1070,7 +1080,9 @@ a contract constant or a plan field and never from prose this page invented:
   manifest's. PLAT-15.1's catalog is where that would come from;
 * the **sampled verification scope**, from the plan's `sample` block, closing
   with the clause D3 section 3.5 makes non-optional -- *a sampled check, not an
-  exhaustive comparison*. No level in this version compares every record;
+  exhaustive comparison*. No restore the console starts compares every record
+  (complete coverage, PROD-08.1, is a plan field the wizard does not offer
+  yet);
 * the **consumer cutover limitation**, byte for byte from `render.js`'s
   `COMPLETION_GUIDANCE` and `TARGET_MODE_MEANING` -- the same fixed sentences
   the completion panel shows afterwards;
@@ -1138,9 +1150,9 @@ storage, never durability.
 
 | what is known | the default | step 4 and step 6 say |
 |---|---|---|
-| the source's factor, and the target has room | the source's | `3 (the source's)` |
-| the source's factor, above the target's broker count | the broker count | `2 (capped at the target's 2 brokers; the source's is 3)` |
-| only the target's broker count, at most 3 | the broker count | `2 (the target's 2 brokers; the source's replication factor is not published to this console)` |
+| the source's factor, and the target has room | the source's | ``3 (the source's, as recovery catalog `primary` records point `lwp1-...`, the largest of the selected topics')`` |
+| the source's factor, above the target's broker count | the broker count | ``2 (capped at the target's 2 brokers; the source's is 3, as recovery catalog `primary` records point `lwp1-...`)`` |
+| only the target's broker count, at most 3 | the broker count | `2 (the target's 2 brokers; the source's replication factor is not known for this point)` |
 | only the target's broker count, above 3 | 3 | `3 (at most 3 by default, of the target's 5 brokers; ...)` |
 | nothing | the grammar's 1 | `1 (the plan grammar's default: neither the source's replication factor nor the target's broker count is known to this console)`, and a warning beside the input |
 | a value the operator typed | that value | `4 (set by you; the target has 5 brokers)` |
@@ -1148,8 +1160,8 @@ storage, never durability.
 **The factor can differ from the source's, and both steps say what that
 costs** (FX-5 review M1). A default worked out from the target's brokers knows
 nothing of the source's factor. So unless the source's factor is known and the
-plan asks for exactly it (never, in this build), step 4 prints this beside the
-basis, and the review step prints it under its row:
+plan asks for exactly it, step 4 prints this beside the basis, and the review
+step prints it under its row:
 
 > This factor can differ from the source's, and the target's storage follows
 > it: a topic the source kept at replication factor 1, restored at 3, takes
@@ -1160,18 +1172,28 @@ The sentence is `REPLICATION_DIFFERS_NOTE` and the rule is
 `replicationMayDiffer`; the quickstart (section 7) carries the same sentence,
 and one row holds the page and both documents to it.
 
-**The source's factor is not readable in this build, and the page says so.**
-The backup engine records it per topic in the archive manifest
-(`topics[].source_replication_factor`), and only the restore Job reads the
-manifest. The backup receipt counts records per topic and nothing else, a
-catalog point's topics carry a name, a record count and an always-absent
-partition count, `Backup.status` has no per-topic block, and the product API
-holds no object-store credential. So the first two rows of the table are
-reached by the rule's own test rows and by nothing a cluster says; projecting
-the factor into the receipt, the catalog and the API is PROD-05.1's (capture
-topic configuration with coverage), and `sourceReplicationFactorsOf` is the
-one function that changes when it lands. A topic discovery of the SOURCE is
-not a substitute: it lists the cluster as it is now, not the recovery point.
+**The source's factor comes from a recovery catalog's view of the point**
+(PROD-05.1). The backup receipt records it per topic (format 1.3.0,
+`topic_configuration`, read by the backup runner from the source's metadata
+before the engine), the catalog point record copies it, the catalog's sync lists
+it for an `Available` point whose record agreed with its verified receipt, and
+the product API publishes it as `PointView.topics[]` (`partitions`,
+`replicationFactor`, `configCoverage`, `owner`, `applyRoute`), with
+`PointView.ownerDetection` saying where the run looked for declarative owners:
+an un-owned topic's `applyRoute` is `adminApi` only where it looked, and
+`unknown` where it did not. A catalog point carries its row. A `Backup`'s point is named by its receipt digest (`lwp1-` and
+the first 32 hex digits of `status.evidence.receiptSha256`, the catalog's own
+identity) and looked up in the namespace's recovery catalogs, at most four,
+before the first paint. The default is the LARGEST of the selected topics'
+factors, and both steps say which catalog and point it came from and, when a
+selected topic records none, how many. When no catalog lists the point, or
+lists it without a layout (a receipt before 1.3.0, a catalog synced by an older
+runner, a point that is not `Available`), step 4 says why and the default is
+the broker count's, as before. `Backup.status` does not carry the factor: a
+status is not a second copy of a receipt. A topic discovery of the SOURCE is not
+a substitute: it lists the cluster as it is now, not the recovery point. The
+review step also shows the selected topics' SOURCE partition counts, which the
+restore creates each topic with, when the catalog row records them.
 
 **The target's broker count comes from a topic discovery of the target
 connection.** It is `TopicDiscovery.status.result.brokerCount`, which the
@@ -1560,10 +1582,42 @@ The create form takes contract v1's two references, and neither is a value:
   resolver rather than dialled in the clear, and the form says so beside the
   box before a request is made.
 
-**There is no field a password could be typed into**, `CLUSTER_DRAFT_FIELDS`
-names none, and `FORBIDDEN_CLUSTER_FIELDS` holds the names that are forbidden as
-data so the guard is an exact list rather than a regex that cannot tell
-`passwordKey` -- the name of a data key -- from a credential.
+**In LEGACY (kubectl proxy) mode there is no field a password could be typed
+into**, `CLUSTER_DRAFT_FIELDS` names none, and `FORBIDDEN_CLUSTER_FIELDS` holds
+the names that are forbidden as data so the guard is an exact list rather than
+a regex that cannot tell `passwordKey` -- the name of a data key -- from a
+credential. That mode names Secrets, and since PROD-01.3 the Secret must carry
+the connection's `logweir-binding` (its `status.credentialBinding`): a Secret
+without it is refused by every run (`CredentialBindingMismatch`), which is what
+the form's note says. For `mtls` it names the client-certificate Secret
+(`spec.auth.clientCertificate`, `tls.crt`/`tls.key`).
+
+### Five auth modes, and the credential typed once in console mode (PROD-01.3)
+
+The mode control offers `plaintext`, `scramSha512`, `scramSha256`, `plain`
+(SASL/PLAIN, accepted only with TLS on -- the page says `PlainWithoutTls`
+beside the box before any request) and `mtls` (a client certificate, TLS on).
+
+**In CONSOLE mode the credential is TYPED, never NAMED.** The product API no
+longer accepts the name of an existing Secret for a connection's credential: a
+connection that could name any Secret could make Logweir present another
+team's credential to brokers of its author's choosing. So the console form has
+three WRITE-ONLY inputs -- a `type="password"` field (`autocomplete=
+"new-password"`) for the SASL password and two text areas for the mTLS
+certificate and unencrypted key -- listed in `WRITE_ONLY_CLUSTER_FIELDS`:
+
+* they render **empty**, always; no draft list names them, so a refusal or a
+  trip to another route means typing the value again;
+* the value travels off the custom resource's own fields (a non-enumerable
+  `__credential` on the body `clusterBody` builds), so no JSON of the object,
+  no draft and no legacy-mode request can carry it; `ui/client.js`'s console
+  `requestBody` is its one reader and moves it into `auth.credential`;
+* the product API creates a Secret owned by and bound to the connection, and
+  never returns the value; the list and detail views show the Secret's name.
+
+A console CA comes from a **ConfigMap** only (`none` / `configMap`); a
+Secret-held CA or a `passwordKey` is refused by name and never sent. The rows
+are `ui/tests/connection-auth-modes.spec.js`.
 
 ## Addressing style never enables plaintext transport
 

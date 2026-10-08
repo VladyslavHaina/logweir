@@ -49,7 +49,8 @@
 //! value, so [`observe`] has no error path.
 
 use logweir_core::backup_receipt::{
-    EffectiveConfigValue, TopicConfigCoverage, NOT_CAPTURED_REASONS, TIMESTAMP_TYPES,
+    ConfigEntry, EffectiveConfigValue, TopicConfigCoverage, TopicConfiguration, TopicOwner,
+    NOT_CAPTURED_REASONS, TIMESTAMP_TYPES,
 };
 use logweir_kafka::reader::{
     ClusterReader, ConfigEntryObservation, ConfigSourceKind, KafkaError, TopicConfigRead,
@@ -71,6 +72,12 @@ pub enum Observation {
         /// The effective `message.timestamp.type` and its source, when the
         /// broker reported one of the two values the receipt defines.
         timestamp_type: Option<EffectiveConfigValue>,
+        /// **PROD-05.1.** The entries the configuration MODEL records, by key
+        /// — `logweir_core::topic_configuration::entry_of` over every entry
+        /// of the answer: each override and each semantic key's effective
+        /// value, classified, and a sensitive entry by key only. Computed
+        /// here, at the read, so a sensitive value never outlives it.
+        model: BTreeMap<String, ConfigEntry>,
     },
     /// The broker's authorizer refused the read — directly, or by T13's rule
     /// for an empty answer on a visible topic. The detail is the reader's.
@@ -143,9 +150,22 @@ fn read_of(entries: &[ConfigEntryObservation]) -> Observation {
             value: v.to_string(),
             source: source.wire_name().to_string(),
         });
+    let model = entries
+        .iter()
+        .filter_map(|e| {
+            logweir_core::topic_configuration::entry_of(
+                &e.name,
+                e.value.as_deref(),
+                e.source.wire_name(),
+                e.sensitive,
+            )
+            .map(|recorded| (e.name.clone(), recorded))
+        })
+        .collect();
     Observation::Read {
         engine_view,
         timestamp_type,
+        model,
     }
 }
 
@@ -175,6 +195,7 @@ pub fn classify(
                 Observation::Read {
                     engine_view,
                     timestamp_type,
+                    ..
                 } => {
                     let complete = manifest.get(topic) == Some(engine_view);
                     TopicConfigCoverage {
@@ -199,6 +220,67 @@ pub fn classify(
         .collect()
 }
 
+/// The archive's record of one topic's layout: the manifest's
+/// `original_partition_count` and `source_replication_factor`.
+pub type Layout = (Option<i32>, Option<i16>);
+
+/// **PROD-05.1: the receipt's `topic_configuration`**, one entry per observed
+/// topic — which [`observe`] makes exactly the named set, so arm 14 holds by
+/// construction.
+///
+/// - `entries`: the read's model when the read SUCCEEDED, and absent when it
+///   was denied or failed — exactly arm 15's rule, because [`classify`] calls
+///   a successful read `captured` or `notCaptured`/`manifestDiffers` and
+///   nothing else.
+/// - `partitions`: the manifest's `original_partition_count` (`layouts`, the
+///   topics the manifest mentions) — the count the restore creates the topic
+///   with (`drill::phase3_diff::restore_partition_count`).
+/// - `replication_factor`: Logweir's OWN metadata read before the engine
+///   (`factors`, `ClusterReader::replication_factors`), and the manifest's
+///   `source_replication_factor` only where that read named none. Not the
+///   manifest first, because the pinned engine records the factor reliably
+///   only for the FIRST topic it saves: its `merge_manifests` carries
+///   `original_partition_count` from each later save and drops
+///   `source_replication_factor` (engine 0.23.3 `backup/engine.rs:1683-1705`;
+///   measured on compose, PROD-05.1 report).
+/// - A count that is absent, or `0` or less, is NOT RECORDED rather than
+///   written as a value arm 19 refuses — a run must not refuse its own receipt
+///   after the archive exists.
+/// - `owner`: from `owners`, whatever the read said: who manages a topic does
+///   not depend on whether its configuration could be read.
+#[must_use]
+pub fn model(
+    observations: &BTreeMap<String, Observation>,
+    layouts: &BTreeMap<String, Layout>,
+    factors: &BTreeMap<String, u32>,
+    owners: &BTreeMap<String, TopicOwner>,
+) -> BTreeMap<String, TopicConfiguration> {
+    let count = |n: Option<i64>| n.filter(|n| *n >= 1).and_then(|n| u32::try_from(n).ok());
+    observations
+        .iter()
+        .map(|(topic, observed)| {
+            let (partitions, manifest_factor) = layouts.get(topic).copied().unwrap_or((None, None));
+            let factor = factors
+                .get(topic)
+                .map(|n| i64::from(*n))
+                .or(manifest_factor.map(i64::from));
+            let entries = match observed {
+                Observation::Read { model, .. } => Some(model.clone()),
+                Observation::Denied(_) | Observation::Failed(_) => None,
+            };
+            (
+                topic.clone(),
+                TopicConfiguration {
+                    partitions: count(partitions.map(i64::from)),
+                    replication_factor: count(factor),
+                    entries,
+                    owner: owners.get(topic).cloned(),
+                },
+            )
+        })
+        .collect()
+}
+
 /// One line per topic for the run's log, so an operator reading `backup run`'s
 /// output learns a denied read without opening the receipt.
 pub fn log(observations: &BTreeMap<String, Observation>) {
@@ -207,9 +289,21 @@ pub fn log(observations: &BTreeMap<String, Observation>) {
             Observation::Read {
                 engine_view,
                 timestamp_type,
+                model,
             } => tracing::info!(
                 topic = %topic,
                 overrides = engine_view.len(),
+                // Counts only: a configuration VALUE is the adopter's data, and
+                // a secret's is never held at all.
+                recorded = model.len(),
+                unportable = model
+                    .values()
+                    .filter(|e| !matches!(
+                        e.portability.as_str(),
+                        logweir_core::topic_configuration::PORTABLE
+                            | logweir_core::topic_configuration::INHERITED
+                    ))
+                    .count(),
                 timestamp_type = ?timestamp_type,
                 "topic configuration read before the engine"
             ),
@@ -588,7 +682,247 @@ mod tests {
                 to_ms: 2,
             },
             config_coverage: Some(block),
+            topic_configuration: None,
+            owner_detection: None,
         };
         assert_eq!(receipt.validate_invariants(), Ok(()));
+    }
+
+    fn sensitive(name: &str, source: ConfigSourceKind) -> ConfigEntryObservation {
+        ConfigEntryObservation {
+            name: name.to_string(),
+            value: Some("hunter2-not-a-secret-fixture".to_string()),
+            source,
+            read_only: false,
+            sensitive: true,
+        }
+    }
+
+    /// **PROD-05.1, the projection.** A compacted, min-in-sync-2 topic with
+    /// an inherited retention, a removed-in-4.0 override, a provider-only
+    /// override and a secret; a delete-policy topic denied; a third whose
+    /// read failed. Every class lands where the table puts it, a secret is
+    /// recorded by key with no value, a refused read records NO entries (not
+    /// an empty set), and the manifest's counts and the owner travel.
+    #[test]
+    fn the_model_records_overrides_semantic_defaults_and_secrets_by_key_only() {
+        let observed = observe(
+            &Scripted(Ok(vec![
+                (
+                    "orders".into(),
+                    Ok(vec![
+                        entry(
+                            "cleanup.policy",
+                            "compact",
+                            ConfigSourceKind::DynamicTopicConfig,
+                        ),
+                        entry(
+                            "min.insync.replicas",
+                            "2",
+                            ConfigSourceKind::DynamicTopicConfig,
+                        ),
+                        entry("retention.ms", "604800000", ConfigSourceKind::DefaultConfig),
+                        // Not semantic and inherited: not recorded.
+                        entry(
+                            "segment.bytes",
+                            "1073741824",
+                            ConfigSourceKind::StaticBrokerConfig,
+                        ),
+                        entry(
+                            "message.format.version",
+                            "3.0-IV1",
+                            ConfigSourceKind::DynamicTopicConfig,
+                        ),
+                        entry(
+                            "confluent.placement.constraints",
+                            "{}",
+                            ConfigSourceKind::DynamicTopicConfig,
+                        ),
+                        sensitive("vendor.token", ConfigSourceKind::DynamicTopicConfig),
+                    ]),
+                ),
+                (
+                    "payments".into(),
+                    Err(KafkaError::NotAuthorized("payments".into())),
+                ),
+                ("audit".into(), Err(KafkaError::Client("timeout".into()))),
+            ])),
+            &names(&["orders", "payments", "audit"]),
+        );
+        let mut layouts = BTreeMap::new();
+        layouts.insert("orders".to_string(), (Some(3), Some(3)));
+        layouts.insert("payments".to_string(), (Some(6), Some(1)));
+        // A manifest that holds a zero count: NOT RECORDED, never 0.
+        layouts.insert("audit".to_string(), (Some(0), None));
+        let mut owners = BTreeMap::new();
+        owners.insert(
+            "orders".to_string(),
+            TopicOwner {
+                kind: "strimzi".into(),
+                basis: "kafkaTopicResource".into(),
+                reference: "kafka/orders".into(),
+            },
+        );
+        let m = model(&observed, &layouts, &BTreeMap::new(), &owners);
+        let orders = &m["orders"];
+        assert_eq!(
+            (orders.partitions, orders.replication_factor),
+            (Some(3), Some(3))
+        );
+        assert_eq!(orders.owner.as_ref().unwrap().reference, "kafka/orders");
+        let e = orders
+            .entries
+            .as_ref()
+            .expect("a successful read records entries");
+        let class = |k: &str| e[k].portability.as_str();
+        assert_eq!(class("cleanup.policy"), "portable");
+        assert_eq!(e["cleanup.policy"].value.as_deref(), Some("compact"));
+        assert_eq!(class("min.insync.replicas"), "portable");
+        assert_eq!(class("retention.ms"), "inherited");
+        assert_eq!(e["retention.ms"].source, "defaultConfig");
+        assert_eq!(class("message.format.version"), "removedInKafka4");
+        assert_eq!(class("confluent.placement.constraints"), "providerOnly");
+        assert_eq!(class("vendor.token"), "secret");
+        assert_eq!(e["vendor.token"].value, None);
+        assert!(!e.contains_key("segment.bytes"));
+        assert!(
+            !format!("{m:?}").contains("hunter2"),
+            "a sensitive value never reaches the model"
+        );
+        let payments = &m["payments"];
+        assert_eq!(payments.entries, None, "a denied read records no entries");
+        assert_eq!(
+            (payments.partitions, payments.replication_factor),
+            (Some(6), Some(1))
+        );
+        assert_eq!(payments.owner, None);
+        let audit = &m["audit"];
+        assert_eq!(audit.entries, None, "a failed read records no entries");
+        assert_eq!((audit.partitions, audit.replication_factor), (None, None));
+    }
+
+    /// Whatever `model` and `classify` write together, a 1.3.0 receipt
+    /// carrying both satisfies arms 12-21: the writer cannot produce a model
+    /// its own reader refuses.
+    #[test]
+    fn every_shape_model_produces_satisfies_the_receipts_arms() {
+        let observed = observe(
+            &Scripted(Ok(vec![
+                ("a".into(), Err(KafkaError::NotAuthorized("a".into()))),
+                ("b".into(), Err(KafkaError::Client("x".into()))),
+                (
+                    "c".into(),
+                    Ok(vec![
+                        entry(TIMESTAMP_TYPE_KEY, "CreateTime", ConfigSourceKind::Unknown),
+                        sensitive("s", ConfigSourceKind::DynamicTopicConfig),
+                    ]),
+                ),
+                (
+                    "d".into(),
+                    Ok(vec![
+                        entry("retention.ms", "5", ConfigSourceKind::DynamicTopicConfig),
+                        entry("x.vendor", "1", ConfigSourceKind::DynamicTopicConfig),
+                    ]),
+                ),
+            ])),
+            &names(&["a", "b", "c", "d"]),
+        );
+        let coverage = classify(
+            &observed,
+            // `c`'s manifest record disagrees (manifestDiffers): entries stand.
+            &manifest(&[
+                ("c", &[("retention.ms", "1")]),
+                ("d", &[("retention.ms", "5")]),
+            ]),
+        );
+        let mut layouts = BTreeMap::new();
+        layouts.insert("a".to_string(), (Some(-1), Some(0)));
+        layouts.insert("d".to_string(), (Some(2), Some(1)));
+        let mut owners = BTreeMap::new();
+        owners.insert(
+            "b".to_string(),
+            TopicOwner {
+                kind: "external".into(),
+                basis: "declared".into(),
+                reference: "gitops: topics/b.yaml".into(),
+            },
+        );
+        let m = model(&observed, &layouts, &BTreeMap::new(), &owners);
+        let topics = names(&["a", "b", "c", "d"]);
+        let receipt = logweir_core::backup_receipt::BackupReceipt {
+            format_version: logweir_core::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
+                .into(),
+            run_id: "r".into(),
+            backup_id: "b".into(),
+            requested_at: chrono::Utc::now(),
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            exit_code: 0,
+            triggered_by: String::new(),
+            source: logweir_core::backup_receipt::ReceiptSource {
+                cluster_id: "c".into(),
+                bootstrap_servers: vec![],
+                auth: logweir_core::backup_receipt::ReceiptAuth {
+                    mode: "plaintext".into(),
+                    username: None,
+                },
+                topics: topics.clone(),
+            },
+            engine: logweir_core::backup_receipt::ReceiptEngine {
+                id: "e".into(),
+                version: "v".into(),
+                digest: "d".into(),
+            },
+            archive: logweir_core::backup_receipt::ReceiptArchive {
+                manifest_key: "k".into(),
+                manifest_sha256: "s".into(),
+                manifest_version_id: None,
+                prefix: "p".into(),
+            },
+            records: topics.into_iter().map(|t| (t, 1)).collect(),
+            covered: logweir_core::backup_receipt::ReceiptCovered {
+                from_ms: 1,
+                to_ms: 2,
+            },
+            config_coverage: Some(coverage),
+            topic_configuration: Some(m),
+            owner_detection: Some(vec!["declared".into()]),
+        };
+        assert_eq!(receipt.validate_invariants(), Ok(()));
+    }
+
+    /// **The factor's source** (PROD-05.1, measured): Logweir's own metadata
+    /// read wins over the manifest, which the pinned engine fills for the
+    /// first topic it saves only; the manifest's stands where the read named
+    /// none; a zero from either is NOT RECORDED.
+    #[test]
+    fn the_factor_is_logweirs_own_read_and_the_manifests_only_where_that_named_none() {
+        let observed = observe(
+            &Scripted(Ok(vec![
+                ("a".into(), Err(KafkaError::Client("x".into()))),
+                ("b".into(), Err(KafkaError::Client("x".into()))),
+                ("c".into(), Err(KafkaError::Client("x".into()))),
+                ("d".into(), Err(KafkaError::Client("x".into()))),
+            ])),
+            &names(&["a", "b", "c", "d"]),
+        );
+        let mut layouts = BTreeMap::new();
+        layouts.insert("a".to_string(), (Some(6), Some(2)));
+        layouts.insert("b".to_string(), (Some(6), Some(1)));
+        layouts.insert("c".to_string(), (Some(1), None));
+        layouts.insert("d".to_string(), (Some(1), Some(0)));
+        let mut factors = BTreeMap::new();
+        factors.insert("a".to_string(), 3);
+        factors.insert("c".to_string(), 0);
+        let m = model(&observed, &layouts, &factors, &BTreeMap::new());
+        assert_eq!(m["a"].replication_factor, Some(3), "the read wins");
+        assert_eq!(
+            m["b"].replication_factor,
+            Some(1),
+            "the manifest where the read named none"
+        );
+        assert_eq!(m["c"].replication_factor, None, "a zero is not recorded");
+        assert_eq!(m["d"].replication_factor, None, "a zero is not recorded");
+        assert_eq!(m["a"].partitions, Some(6), "partitions are the manifest's");
     }
 }

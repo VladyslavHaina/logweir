@@ -178,6 +178,10 @@ pub const PROBE_CONDITION_REASONS: &[&str] = &[
     crate::conditions::TERMINAL_STATE_CONNECTION_REFERENCE_INVALID,
     crate::conditions::TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED,
     crate::conditions::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+    // PROD-01.3: the resolver's PLAIN-without-TLS refusal, and the probe's
+    // refusal of a credential whose binding names another connection.
+    crate::conditions::TERMINAL_STATE_PLAIN_WITHOUT_TLS,
+    crate::conditions::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
     // FX-11: the probe Job's pod was refused at creation. The shared terminal
     // state a `Backup`'s or a `Restore`'s runner reaches for the same refusal.
     crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN,
@@ -258,6 +262,12 @@ pub struct ProbeReport {
     /// Anything else — an absent line, a truncated one, a third spelling — is
     /// `None`, and `None` is never turned into `false`.
     pub reachable: Option<bool>,
+    /// **PROD-01.3 security follow-up.** `true` when the tail carries the
+    /// probe's stderr line `refusal-reason=CredentialBindingMismatch`: the
+    /// probe refused the projected credential before dialling, because its
+    /// binding does not name this `KafkaCluster`. Read only beside
+    /// `reachable=false`; it can never make a probe read as reachable.
+    pub credential_binding_refused: bool,
 }
 
 /// Read the two contract lines out of a pod log, **by key name, from a bounded
@@ -296,6 +306,14 @@ pub fn probe_report(log: &str) -> ProbeReport {
                 "false" => Some(false),
                 _ => None,
             };
+        }
+        if line.trim()
+            == format!(
+                "refusal-reason={}",
+                crate::conditions::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH
+            )
+        {
+            report.credential_binding_refused = true;
         }
     }
     report
@@ -341,6 +359,14 @@ pub fn verdict(report: &ProbeReport) -> Verdict {
             reason: REASON_REACHABLE.to_string(),
             reachable: Some(true),
             cluster_id: report.cluster_id.clone(),
+        },
+        // PROD-01.3 security follow-up: the probe refused the credential's
+        // binding and dialled nothing — the named reason, not "unreachable".
+        Some(false) if report.credential_binding_refused => Verdict {
+            status: "False",
+            reason: crate::conditions::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH.to_string(),
+            reachable: Some(false),
+            cluster_id: None,
         },
         Some(false) => Verdict {
             status: "False",
@@ -420,6 +446,10 @@ pub fn auth_mode_flag(mode: AuthMode) -> &'static str {
     match mode {
         AuthMode::Plaintext => "plaintext",
         AuthMode::ScramSha512 => "scramSha512",
+        // PROD-01.3.
+        AuthMode::ScramSha256 => "scramSha256",
+        AuthMode::Plain => "plain",
+        AuthMode::Mtls => "mtls",
     }
 }
 
@@ -631,7 +661,7 @@ async fn patch_status_if_changed(
 /// controller has never seen the object".
 #[must_use]
 pub fn probe_started_patch(cluster: &KafkaCluster, job_name: &str, now: DateTime<Utc>) -> Value {
-    json!({
+    let mut patch = json!({
         "status": {
             "reason": REASON_PROBE_RUNNING,
             "conditions": [condition(
@@ -642,7 +672,25 @@ pub fn probe_started_patch(cluster: &KafkaCluster, job_name: &str, now: DateTime
                 now,
             )],
         }
-    })
+    });
+    // PROD-01.3 security follow-up: publish the binding the credential Secret
+    // must carry, so an operator creating it by hand can copy it. Public (a
+    // UID and an endpoint digest); written only for a connection that HAS a
+    // credential, and only once the object resolves (a refused object never
+    // reaches this pass).
+    if let Some(binding) = credential_binding_of(cluster) {
+        patch["status"]["credentialBinding"] = json!(binding);
+    }
+    patch
+}
+
+/// The binding the cluster's credential Secret must carry, when it has a
+/// credential and resolves — [`ResolvedConnection::credential_binding`].
+#[must_use]
+pub fn credential_binding_of(cluster: &KafkaCluster) -> Option<String> {
+    let resolved = connection::resolve(cluster, ConnectionUse::Probe).ok()?;
+    resolved.credential_secret()?;
+    resolved.credential_binding()
 }
 
 /// The `/status` merge patch for a probe whose log has been read.

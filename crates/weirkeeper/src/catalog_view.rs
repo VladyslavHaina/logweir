@@ -1005,16 +1005,55 @@ pub const MAX_ENTRY_LOCATIONS: usize = 16;
 /// because a truncated page set would silently drop points.
 pub const MAX_BODY_PAGES: usize = 8;
 
+/// **PROD-05.1.** The most topics one entry may list — the runner's own cap
+/// (`logweir::check::kinds::catalog_sync::MAX_ENTRY_TOPICS`, held equal by
+/// `the_grammar_this_runner_writes_is_the_grammar_the_controller_parses`). An
+/// entry listing more is MALFORMED, for the reason [`MAX_ENTRY_LOCATIONS`]
+/// gives: an unbounded list is one a page may not be able to hold.
+pub const MAX_ENTRY_TOPICS: usize = 64;
+
+/// **PROD-05.1 (fix round, M2).** The most words an entry's `ownerDetection`
+/// may carry: the sources the receipt format defines
+/// (`logweir_core::topic_configuration::OWNER_DETECTION_SOURCES`), each at
+/// most once.
+pub const MAX_OWNER_DETECTION: usize =
+    logweir_core::topic_configuration::OWNER_DETECTION_SOURCES.len();
+
+/// **PROD-05.1.** One topic of a point, as the runner lists it: the record's
+/// layout and how its configuration is held — never a configuration value.
+/// Informational: two observations of one point are not compared on it (the
+/// runner's rule-3 cross-check already tied it to the verified receipt).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryTopic {
+    /// The source topic's name.
+    pub name: String,
+    /// The source's partition count, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<u32>,
+    /// The source's replication factor, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication_factor: Option<u32>,
+    /// FX-4's capture coverage word, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_coverage: Option<String>,
+    /// The declarative owner's kind, when one manages the topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
 /// One point, as the sync Job reports it.
 ///
 /// **The receipt-derived facts are the binding** (D3 §5.2 rule 3): the point
 /// id, the receipt digest and the manifest digest are what a later restore
 /// re-checks. Everything else here is for display and for selection.
 ///
-/// `topics` is deliberately ABSENT: a view entry is ~350 bytes so that 5 000 of
-/// them fit in two `ConfigMap`s, and a topic list is unbounded. The topics of a
-/// point live in its signed record in object storage, which is where PLAT-15.2's
-/// wizard reads them from.
+/// `topics` is BOUNDED, not absent (PROD-05.1): a view entry stays small so
+/// that 5 000 of them fit in two `ConfigMap`s, so an entry lists at most
+/// [`MAX_ENTRY_TOPICS`] topics — an entry listing more is malformed and
+/// skipped — and the runner drops the list (counting it in `topicsOmitted`)
+/// before it would push a point out of the body. The full topic set and its
+/// configuration model live in the point's signed record in object storage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerEntry {
@@ -1067,6 +1106,23 @@ pub struct RunnerEntry {
     /// credential, a principal or log content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remedy: Option<String>,
+    /// **PROD-05.1.** The point's topics with their recorded layout, bounded
+    /// by [`MAX_ENTRY_TOPICS`]. Empty is NOT PUBLISHED — an older runner, a
+    /// record before 1.3.0, a point that is not `Available` — never "no
+    /// topics".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<EntryTopic>,
+    /// How many topics the runner left out of `topics`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topics_omitted: Option<u32>,
+    /// **PROD-05.1 (fix round, M2).** Where the run looked for declarative
+    /// owners (`declared`, `kafkaTopicResources`), beside `topics` and only
+    /// there. An EMPTY list says no owner was looked for, so a topic without
+    /// an `owner` is "not checked", never "applied through the admin API";
+    /// ABSENT is NOT PUBLISHED. At most [`MAX_OWNER_DETECTION`] words — an
+    /// entry carrying more is malformed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_detection: Option<Vec<String>>,
 }
 
 impl RunnerEntry {
@@ -1188,6 +1244,15 @@ pub struct ViewEntry {
     /// See [`RunnerEntry::remedy`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remedy: Option<String>,
+    /// See [`RunnerEntry::topics`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<EntryTopic>,
+    /// See [`RunnerEntry::topics_omitted`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topics_omitted: Option<u32>,
+    /// See [`RunnerEntry::owner_detection`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_detection: Option<Vec<String>>,
 }
 
 /// What the sync counted over the WHOLE walk, not only over the window.
@@ -1623,6 +1688,19 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
                 Ok(entry) if entry.locations.len() > MAX_ENTRY_LOCATIONS => {
                     skipped = skipped.saturating_add(1);
                 }
+                // PROD-05.1: the same rule for `topics[]`.
+                Ok(entry) if entry.topics.len() > MAX_ENTRY_TOPICS => {
+                    skipped = skipped.saturating_add(1);
+                }
+                // And for `ownerDetection` (fix round, M2).
+                Ok(entry)
+                    if entry
+                        .owner_detection
+                        .as_ref()
+                        .is_some_and(|d| d.len() > MAX_OWNER_DETECTION) =>
+                {
+                    skipped = skipped.saturating_add(1);
+                }
                 Ok(entry) => entries.push(entry),
                 // SKIPPED AND COUNTED, NEVER FATAL — D3 §5.2's reading rules:
                 // a malformed entry is one point this build cannot show, not a
@@ -1748,6 +1826,19 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
                 if worse_signature(entry.signature, kept.signature) {
                     kept.signature = entry.signature;
                     kept.signer_key_id = entry.signer_key_id;
+                }
+                // PROD-05.1: a copy that lists the topics fills a kept entry
+                // that does not. Both lists come from records the runner
+                // cross-checked against the one verified receipt, so two
+                // non-empty lists are the same list.
+                if kept.topics.is_empty() && !entry.topics.is_empty() {
+                    kept.topics = entry.topics;
+                    kept.topics_omitted = entry.topics_omitted;
+                    // Where the run looked for owners travels WITH the list
+                    // it qualifies (fix round, M2).
+                    kept.owner_detection = entry.owner_detection;
+                } else if kept.topics.is_empty() && kept.topics_omitted.is_none() {
+                    kept.topics_omitted = entry.topics_omitted;
                 }
             }
         }
@@ -2182,6 +2273,9 @@ pub fn view_entry(entry: RunnerEntry, trust: &TrustView, now: DateTime<Utc>) -> 
         verification,
         signer_key_id: entry.signer_key_id,
         remedy: entry.remedy,
+        topics: entry.topics,
+        topics_omitted: entry.topics_omitted,
+        owner_detection: entry.owner_detection,
     }
 }
 

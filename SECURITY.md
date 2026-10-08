@@ -105,6 +105,24 @@ them; a report that one of them is true is not a vulnerability report.
   provenance); editing that policy, or the approval-policy document, changes
   approval. On an install that existed before PROD-16.1 a marker patched into
   the identity ConfigMap changes nothing.
+- **A connection's credential binding is enforced by the runner, after the
+  kubelet has projected the credential.** A `KafkaCluster` that names another
+  connection's credential Secret cannot make Logweir present it anywhere: every
+  runner compares the Secret's `logweir-binding` with the binding of the
+  connection it was built for and refuses a mismatch before any client exists
+  (`CredentialBindingMismatch`, [kubernetes.md](docs/kubernetes.md) §20.9).
+  But the controller reads no Secret, so it is the kubelet that resolves the
+  reference, and the foreign value sits in the refused pod's environment (or,
+  for a client key, its projected volume) for the moment before the runner
+  exits — inside a pod that mounts no ServiceAccount token and sends nothing.
+  Anyone who can already read pods' environment or exec into a runner pod in
+  that namespace can read any credential a run projects, bound or not. And
+  anyone who can WRITE a Secret can bind a credential they put there to their
+  own connection — that is their own credential, which the binding exists to
+  allow. For the same reason Secret `patch` WITHOUT `get` is, for a connection
+  credential, as strong as `get`: it can set a victim Secret's
+  `logweir-binding` to a connection whose endpoint the patcher chose (the
+  binding value is public on `status.credentialBinding`).
 
 ## Cryptography
 

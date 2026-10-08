@@ -1655,6 +1655,12 @@ pub struct Ctx {
     /// the engine renders, so both TLS clients trust one file. `None` for a
     /// connection that names no CA.
     pub target_tls_ca_file: Option<String>,
+    /// **PROD-01.3.** The projected client-certificate pair of an `mtls`
+    /// TARGET connection, read once in `context` from
+    /// `LOGWEIR_TARGET_TLS_{CERT,KEY}_FILE` — paths, never PEM. Handed to the
+    /// reader and to the plan's `target_auth`, so both clients present the
+    /// same certificate. `None` for every other mode.
+    pub target_client_certificate: Option<logweir_core::connection::ClientCertificateFiles>,
     /// **FX-4.** Each SOURCE topic's configuration capture coverage, from the
     /// backup receipt the plan's recovery point binds — VERIFIED (signature,
     /// digest, manifest) by `binding::verify_point_binding` before this
@@ -1694,12 +1700,19 @@ fn context(
     let target_tls_ca_file =
         crate::tls_ca::projected_ca_file(crate::tls_ca::TARGET_TLS_CA_FILE_VAR)
             .map_err(DrillError::Operational)?;
+    // PROD-01.3: the `mtls` certificate pair, read once like the CA.
+    let target_client_certificate =
+        crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Target)
+            .map_err(DrillError::Operational)?;
     let target_auth =
         AuthConfig::from_spec(&spec.target.auth, validated_password(TARGET_PASSWORD_VAR)?)
             .map_err(|e| naming_the_password_var(e, TARGET_PASSWORD_VAR))?
             // PLAT-07.1: librdkafka's `ssl.ca.location`. Refuses a CA for a
-            // target whose plan is not SCRAM over TLS, before any client exists.
-            .with_tls_ca_file(target_tls_ca_file.clone())?;
+            // target whose plan is not TLS, before any client exists.
+            .with_tls_ca_file(target_tls_ca_file.clone())?
+            // PROD-01.3: `ssl.certificate.location` / `ssl.key.location`.
+            // Refuses a certificate for a mode that presents none.
+            .with_client_certificate(target_client_certificate.clone())?;
     let connect = || {
         logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
             &spec.target.bootstrap_servers,
@@ -1813,6 +1826,7 @@ fn context(
         archive,
         store,
         target_tls_ca_file,
+        target_client_certificate,
         // What `check_v2_bindings` verified; UNKNOWN for a plan bound to no
         // point, because there is then no signed capture record to read.
         source_config_coverage,
@@ -1940,10 +1954,22 @@ pub fn naming_the_password_var(
     e: logweir_kafka::reader::KafkaError,
     var: &str,
 ) -> logweir_kafka::reader::KafkaError {
+    // ONLY the missing-password error is rewritten (PROD-01.3): `from_spec`
+    // has other `Client` errors now — its PlainWithoutTls / MtlsWithoutTls
+    // backstops — and re-stating one of those as "the password is unset"
+    // would send an operator to a Secret when the fault is the transport.
+    // The mode is carried over from `from_spec`'s own text, which names it.
     match e {
-        logweir_kafka::reader::KafkaError::Client(_) => {
+        logweir_kafka::reader::KafkaError::Client(message)
+            if message.contains("no SASL password was projected") =>
+        {
+            let mode = message
+                .strip_prefix("auth.mode is ")
+                .and_then(|rest| rest.split_once(' '))
+                .map_or("a SASL mode", |(mode, _)| mode)
+                .to_string();
             logweir_kafka::reader::KafkaError::Client(format!(
-                "auth.mode is scramSha512 but ${var} is unset. Nothing was refused: this is \
+                "auth.mode is {mode} but ${var} is unset. Nothing was refused: this is \
                  operational (exit 1), not a guard refusal (exit 3) — project the Secret and \
                  re-run. The engine would otherwise substitute the EMPTY STRING for the \
                  placeholder behind nothing but a warning \
@@ -2269,6 +2295,12 @@ fn execute_for_reporting(
                     .version)
         )
     );
+    // PROD-01.3 security follow-up, FIRST: a projected credential whose
+    // binding does not name the connection this Job was built for is refused
+    // before it is even validated (`CredentialBindingMismatch`, exit 3).
+    if let Err(error) = crate::credential_binding::check_projected_bindings() {
+        return (Err(error.into()), None);
+    }
     // I11, and BEFORE `context`: no client of any kind is constructed on this
     // refusal path.
     if let Err(error) = check_projected_credentials() {
@@ -2317,6 +2349,18 @@ fn execute_for_reporting(
             )
         }
     };
+    // **PROD-01.3: SASL/PLAIN only over TLS**, over the AUTHENTICATED plan
+    // and BEFORE `context`, which builds the target client: a `plain` target
+    // without `tls: true` is refused here at exit 3 with
+    // `refusal-reason=PlainWithoutTls`, so the password is never sent to a
+    // listener the plan would reach in the clear. Phase 0 repeats the check
+    // (`phase0_admit::local`) for every path that reaches it another way.
+    if let Err(error) = logweir_core::guard::reject_auth_without_required_tls(
+        "target.auth",
+        &authenticated_spec.target.auth,
+    ) {
+        return (Err(error.into()), Some(authenticated_spec));
+    }
     // **Execution contract v2's two bindings, and they go HERE.**
     //
     // After `load_startup_inputs`, so the plan bytes they read are the bytes
@@ -2822,6 +2866,10 @@ fn execute_with_validated_approval(
             .target_auth
             .clone()
             .with_tls_ca_file(c.target_tls_ca_file.clone())
+            .map_err(|e| DrillError::Operational(format!("target.auth: {e}")))?
+            // PROD-01.3: the engine's `ssl_certificate_location` /
+            // `ssl_key_location`, the same files the reader presents.
+            .with_client_certificate(c.target_client_certificate.clone())
             .map_err(|e| DrillError::Operational(format!("target.auth: {e}")))?,
         ..plan
     };
@@ -3034,7 +3082,7 @@ fn execute_with_validated_approval(
 
     // 7
     let verified = record(&mut sc, 7, "verify", || {
-        phase7_verify::run(
+        phase7_verify::run_with_coverage(
             c.engine.as_ref(),
             reader,
             &c.archive,
@@ -3046,11 +3094,15 @@ fn execute_with_validated_approval(
             // FX-3: the spec's mode, the one `target_info` signs as
             // `target.mode`, decides `intended` versus `not_reconstructed`.
             c.spec.target.mode,
+            // PROD-08.1: the approved plan's coverage and its bound.
+            c.spec.sample.coverage,
+            c.spec.sample.complete_max_records,
         )
     })?;
     sc.integrity = verified.integrity.clone();
     sc.topic_parity = verified.topic_parity.clone();
     sc.sample.records_restored = verified.records_restored;
+    complete_sample_info(&mut sc.sample, &sc.integrity);
 
     // 7 -> 8: SCORE BEFORE SIGNING. `phase8_score::run` signs the document it is
     // handed and never recomputes, so `measured`, `outcome` and `objectives`
@@ -3569,7 +3621,15 @@ pub fn build_plan_with_floor(
 fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
     let id = c.engine.id();
     Scorecard {
-        format_version: logweir_core::FORMAT_VERSION.to_string(),
+        // PROD-01.3: 1.5.0 when the target's auth mode is one PROD-01.3 added
+        // (`target_info` fills `target.auth.mode` from the same spec field),
+        // the 1.4.0 document otherwise — so no scorecard of a `plaintext` or
+        // `scramSha512` target changes by a byte.
+        format_version: logweir_core::scorecard::format_version_for_target(Some(&AuthSummary {
+            mode: c.spec.target.auth.mode_str().into(),
+            username: None,
+        }))
+        .to_string(),
         run_id: run_id.to_string(),
         // Global Constraint 1: the clock is read HERE, never in logweir-core.
         requested_at: chrono::Utc::now(),
@@ -3700,6 +3760,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             mismatches: 0,
             pass_rate_measured: None,
             restored_principal_could_consume: None,
+            verification: None,
         },
         topic_parity: TopicParity {
             intentionally_deviated: Vec::new(),
@@ -3812,11 +3873,12 @@ fn target_info(
         // its branch. Applied at the rebase of 5b onto Task 6, which is the
         // first tree where both halves are present.
         //
-        // `mode_str()` returns `"plaintext"` or `"scramSha512"` and nothing
-        // else — a closed set of two `&'static str` (`spec.rs::mode_str`) that
-        // is the `KafkaCluster` CRD's `auth.mode` enum byte for byte, the
-        // receipt's `source.auth.mode`, and exactly what BOTH readers accept
-        // for this field. `crates/logweir/tests/auth_binding.rs::
+        // `mode_str()` returns one of a closed set of `&'static str`
+        // (`spec.rs::mode_str`; five since PROD-01.3) that is the
+        // `KafkaCluster` CRD's `auth.mode` enum byte for byte, the receipt's
+        // `source.auth.mode`, and exactly what BOTH readers accept for this
+        // field under the version `new_scorecard` wrote (1.4.0 for the three
+        // PROD-01.3 modes). `crates/logweir/tests/auth_binding.rs::
         // the_scorecard_auth_block_and_auth_spec_agree` asserts the two
         // strings and the `{mode, username}` round trip; the two readers'
         // `target.auth` arms refuse any third spelling.
@@ -3858,6 +3920,28 @@ fn sample_info(
             sel.notes.join("; ")
         },
     }
+}
+
+/// **PROD-08.1.** A COMPLETE verification set out to reconcile every
+/// expected record of every restored partition, so `sample` says so: its
+/// canary is the expected output of every COMPARED partition
+/// (`records_expected`, which `integrity.records_sampled` is held to) — the
+/// whole expected output only when the block is `covered`, since a partition
+/// the bound stopped is never decoded and contributes 0 (review L-3) — over
+/// every partition and topic the complete block lists. A sampled
+/// verification's `sample` is phase 4's, untouched.
+fn complete_sample_info(sample: &mut SampleInfo, integrity: &logweir_core::scorecard::Integrity) {
+    let Some(c) = integrity
+        .verification
+        .as_ref()
+        .and_then(|v| v.complete.as_ref())
+    else {
+        return;
+    };
+    sample.records_expected = c.replay.expected;
+    sample.partitions = u32::try_from(c.partitions.len()).unwrap_or(u32::MAX);
+    let topics: BTreeSet<&str> = c.partitions.iter().map(|p| p.topic.as_str()).collect();
+    sample.topics = u32::try_from(topics.len()).unwrap_or(u32::MAX);
 }
 
 #[cfg(test)]

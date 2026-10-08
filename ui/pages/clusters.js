@@ -120,8 +120,24 @@ export const CLUSTER_FORM = "cluster-form";
  *  be typed into, and a field added later is not kept unless it is named here. */
 export const CLUSTER_DRAFT_FIELDS = Object.freeze([
   "name", "servers", "role", "mode", "username", "secret", "passwordKey",
-  "tls", "tlsCaKind", "tlsCaName", "tlsCaKey", "intent",
+  "clientCertSecret", "tls", "tlsCaKind", "tlsCaName", "tlsCaKey", "intent",
 ]);
+
+/** PROD-01.3 security follow-up: the WRITE-ONLY inputs of the console-mode
+ *  form. The product API no longer accepts the NAME of an existing Secret --
+ *  a connection that could name any Secret could make Logweir present another
+ *  team's credential to brokers of its author's choosing -- so in console mode
+ *  the credential is TYPED ONCE here and the API turns it into a Secret bound
+ *  to the connection. These names are on no draft list, are never rendered
+ *  with a value, and travel to `ui/client.js` off the custom resource's own
+ *  fields (`clusterBody`'s non-enumerable `__credential`), so neither a draft,
+ *  a JSON dump nor the legacy form can carry them. */
+export const WRITE_ONLY_CLUSTER_FIELDS = Object.freeze([
+  "enteredPassword", "enteredCertificatePem", "enteredPrivateKeyPem",
+]);
+
+/** The modes a SASL password goes with (PROD-01.3 added two). */
+export const SASL_MODES = Object.freeze(["scramSha512", "scramSha256", "plain"]);
 
 // ------------------------------------------------ who names the connection
 //
@@ -202,6 +218,10 @@ export const CLUSTER_FIELD_PATHS = Object.freeze([
   ["spec.auth.tlsCa.configMapKeyRef.name", "tlsCaName"],
   ["spec.auth.tlsCa", "tlsCaName"],
   ["spec.auth.tls", "tls"],
+  // PROD-01.3: the mTLS reference (legacy) and the write-only entry (console).
+  ["spec.auth.clientCertificate", "clientCertSecret"],
+  ["spec.auth.credential.password", "enteredPassword"],
+  ["spec.auth.credential", "enteredCertificatePem"],
 ]);
 
 /** What the API server fills in when a create omits it: the CRD defaults
@@ -258,6 +278,10 @@ export function authCell(spec) {
     if (typeof ref.passwordKey === "string" && ref.passwordKey.length > 0) {
       parts.push("key " + esc(ref.passwordKey));
     }
+  }
+  const cert = auth.clientCertificate || {};
+  if (typeof cert.name === "string" && cert.name.length > 0) {
+    parts.push("client certificate from Secret " + esc(cert.name));
   }
   parts.push(auth.tls === true ? "TLS" : "no TLS");
   parts.push(caWords(auth.tlsCa));
@@ -856,8 +880,15 @@ export function renderTopicFilters(filters) {
 /** The values an empty form starts from. */
 const CLUSTER_DEFAULTS = Object.freeze({
   name: "", servers: "", role: "source", mode: "plaintext", username: "", secret: "",
-  passwordKey: "", tls: false, tlsCaKind: "none", tlsCaName: "", tlsCaKey: "",
+  passwordKey: "", clientCertSecret: "", tls: false, tlsCaKind: "none", tlsCaName: "",
+  tlsCaKey: "",
 });
+
+/** The CA sources the CONSOLE form offers: a ConfigMap only. A CA certificate
+ *  is public and is only ever a local trust anchor, so naming one cannot
+ *  exfiltrate anything; keeping the console to ConfigMaps keeps every Secret a
+ *  console-made connection uses one the product API created itself. */
+export const CONSOLE_TLS_CA_KINDS = Object.freeze(["none", "configMap"]);
 
 /** The three answers the private-CA control takes. `none` is the default and
  *  means the runner image's own trust store, which is what every connection to
@@ -888,8 +919,9 @@ const HOST_PORT = /^(\[[0-9A-Fa-f:.]+\]|[^\s:[\]]+):([0-9]{1,5})$/;
  *  acceptable, and nothing for a field that is. A CONVENIENCE -- the API
  *  server's schema and the controller's probe are the gate -- that turns a
  *  round trip and a generic 422 into a message beside the field. */
-export function validateCluster(values) {
+export function validateCluster(values, options) {
   const v = values || {};
+  const consoleMode = ((options || {}).console) === true;
   const problems = Object.create(null);
   if (!isObjectName(v.name)) {
     problems.name = "a KafkaCluster name is lowercase letters, digits, '-' and '.', starting and " +
@@ -910,16 +942,35 @@ export function validateCluster(values) {
   if (typeof v.role !== "string" || v.role.trim().length === 0) {
     problems.role = "a role is required; source or target is what the controller reports";
   }
-  if (v.mode !== "plaintext" && v.mode !== "scramSha512") {
-    problems.mode = "auth mode is plaintext or scramSha512";
+  const modes = ["plaintext"].concat(SASL_MODES, ["mtls"]);
+  if (modes.indexOf(v.mode) === -1) {
+    problems.mode = "auth mode is one of " + modes.join(", ");
   }
-  if (v.mode === "scramSha512" && (typeof v.username !== "string" || v.username.length === 0)) {
-    problems.username = "scramSha512 needs the SASL username";
+  const sasl = SASL_MODES.indexOf(v.mode) !== -1;
+  if (sasl && (typeof v.username !== "string" || v.username.length === 0)) {
+    problems.username = v.mode + " needs the SASL username";
   }
-  if (v.mode === "scramSha512" && (typeof v.secret !== "string" || v.secret.length === 0)) {
-    problems.secret = "scramSha512 needs the name of the Secret that holds the password";
-  } else if (typeof v.secret === "string" && v.secret.length > 0 && !isObjectName(v.secret)) {
-    problems.secret = "a Secret name is lowercase letters, digits, '-' and '.'";
+  if (consoleMode) {
+    // THE CREDENTIAL IS TYPED, NEVER NAMED (PROD-01.3 security follow-up).
+    if (sasl && (typeof v.enteredPassword !== "string" || v.enteredPassword.length === 0)) {
+      problems.enteredPassword = v.mode + " needs the SASL password, entered once here";
+    }
+    if (v.mode === "mtls" && (
+      typeof v.enteredCertificatePem !== "string" || v.enteredCertificatePem.trim().length === 0 ||
+      typeof v.enteredPrivateKeyPem !== "string" || v.enteredPrivateKeyPem.trim().length === 0
+    )) {
+      problems.enteredCertificatePem = "mtls needs the client certificate and its unencrypted " +
+        "private key, pasted once here as PEM";
+    }
+  } else {
+    if (sasl && (typeof v.secret !== "string" || v.secret.length === 0)) {
+      problems.secret = v.mode + " needs the name of the Secret that holds the password";
+    } else if (typeof v.secret === "string" && v.secret.length > 0 && !isObjectName(v.secret)) {
+      problems.secret = "a Secret name is lowercase letters, digits, '-' and '.'";
+    }
+    if (v.mode === "mtls" && !isObjectName(String(v.clientCertSecret || "").trim())) {
+      problems.clientCertSecret = "mtls needs the name of the Secret holding tls.crt and tls.key";
+    }
   }
   // CONTRACT v1, THE SAME FOUR RULES `weirkeeper::connection::resolve` AND THE
   // CRD's CEL APPLY. A CONVENIENCE and never the gate: the API server refuses
@@ -937,9 +988,19 @@ export function validateCluster(values) {
   if (v.mode === "plaintext" && v.tls === true) {
     problems.tls = "auth mode plaintext with TLS on -- TLS without SASL -- is not supported by " +
       "saved-connection contract v1 and is refused rather than dialled without TLS. Choose " +
-      "scramSha512 over TLS, or leave TLS off for a plaintext listener";
+      "scramSha512 over TLS, mtls for a client certificate, or leave TLS off for a plaintext " +
+      "listener";
   }
-  const kind = TLS_CA_KINDS.indexOf(v.tlsCaKind) === -1 ? "none" : v.tlsCaKind;
+  // PROD-01.3: PLAIN only over TLS (the named reason), and mTLS needs TLS.
+  if (v.mode === "plain" && v.tls !== true) {
+    problems.tls = "PlainWithoutTls: SASL/PLAIN sends the password itself, so it is accepted " +
+      "only with TLS on";
+  }
+  if (v.mode === "mtls" && v.tls !== true) {
+    problems.tls = "mtls presents a TLS client certificate, so it requires TLS on";
+  }
+  const offered = consoleMode ? CONSOLE_TLS_CA_KINDS : TLS_CA_KINDS;
+  const kind = offered.indexOf(v.tlsCaKind) === -1 ? "none" : v.tlsCaKind;
   if (kind !== "none") {
     if (v.tls !== true) {
       problems.tlsCaName = "a CA verifies a TLS transport, so naming one requires TLS on";
@@ -994,34 +1055,26 @@ export function renderClusterForm(view) {
     line("cluster-role", "role") + "</div>" +
     "<div class=\"field\"><label for=\"cluster-mode\">auth mode</label>" +
     "<select id=\"cluster-mode\" name=\"mode\"" + field("cluster-mode", "mode") + ">" +
-    "<option value=\"plaintext\"" + (d.mode === "plaintext" ? " selected" : "") + ">plaintext</option>" +
-    "<option value=\"scramSha512\"" + (d.mode === "scramSha512" ? " selected" : "") + ">scramSha512</option>" +
-    "</select>" + line("cluster-mode", "mode") + "</div>" +
+    ["plaintext"].concat(SASL_MODES, ["mtls"]).map(
+      (mode) => "<option value=\"" + mode + "\"" + (d.mode === mode ? " selected" : "") + ">" +
+        mode + "</option>",
+    ).join("") +
+    "</select>" + line("cluster-mode", "mode") +
+    "<p class=\"help\">plain is SASL/PLAIN and is accepted only with TLS on; mtls authenticates " +
+    "with a TLS client certificate and also needs TLS on.</p></div>" +
     "</div>" +
-    "<div class=\"field-row\">" +
     "<div class=\"field\"><label for=\"cluster-username\">auth username</label>" +
     "<input id=\"cluster-username\" name=\"username\" value=\"" + esc(d.username) + "\"" +
-    field("cluster-username", "username") + ">" + line("cluster-username", "username") + "</div>" +
-    "<div class=\"field\"><label for=\"cluster-secret\">auth Secret name</label>" +
-    "<input id=\"cluster-secret\" name=\"secret\" value=\"" + esc(d.secret) + "\"" +
-    field("cluster-secret", "secret") + ">" +
-    "<p class=\"help\">The NAME of the Secret holding the credential. The value is never read " +
-    "by this page.</p>" + line("cluster-secret", "secret") + "</div>" +
-    "</div>" +
-    "<div class=\"field\"><label for=\"cluster-password-key\">data key in that Secret " +
-    "(spec.auth.secretRef.passwordKey)</label>" +
-    "<input id=\"cluster-password-key\" name=\"passwordKey\" value=\"" + esc(d.passwordKey) +
-    "\"" + field("cluster-password-key", "passwordKey") + ">" +
-    "<p class=\"help\">Which entry of that Secret the controller projects. Leave it blank for " +
-    "the entry every earlier release used, which is what a KafkaCluster created before " +
-    "connection contract v1 means. This is the KEY's name, not its value: nothing on this page " +
-    "reads the Secret.</p>" + line("cluster-password-key", "passwordKey") + "</div>" +
+    field("cluster-username", "username") + ">" +
+    "<p class=\"help\">The SASL principal, for scramSha512, scramSha256 and plain.</p>" +
+    line("cluster-username", "username") + "</div>" +
+    (v.minted === true ? credentialEntry(field, line) : credentialReferences(d, field, line)) +
     "<label class=\"inline\"><input id=\"cluster-tls\" name=\"tls\" type=\"checkbox\"" +
     (d.tls === true ? " checked" : "") + "> TLS</label>" +
     line("cluster-tls", "tls") +
-    "<p class=\"help\">The only switch that turns TLS on, and it is independent of the auth " +
-    "mode: contract v1 supports scramSha512 over TLS (SASL_SSL). plaintext with TLS on is " +
-    "refused rather than dialled in the clear.</p>" +
+    "<p class=\"help\">The only switch that turns TLS on: scramSha512 and scramSha256 may use " +
+    "it (SASL_SSL), plain and mtls require it. plaintext with TLS on is refused rather than " +
+    "dialled in the clear.</p>" +
     "<fieldset class=\"ca\"><legend>private certificate authority " +
     "(spec.auth.tlsCa)</legend>" +
     "<p class=\"help\">Only when the brokers' certificates are signed by an authority the " +
@@ -1031,7 +1084,7 @@ export function renderClusterForm(view) {
     "TLS on.</p>" +
     "<div class=\"field\"><label for=\"cluster-tls-ca-kind\">CA source</label>" +
     "<select id=\"cluster-tls-ca-kind\" name=\"tlsCaKind\">" +
-    TLS_CA_KINDS.map(
+    (v.minted === true ? CONSOLE_TLS_CA_KINDS : TLS_CA_KINDS).map(
       (kind) =>
         "<option value=\"" + esc(kind) + "\"" + (d.tlsCaKind === kind ? " selected" : "") + ">" +
         esc(kind === "none" ? "none (trust the runner image's own store)" : kind) + "</option>",
@@ -1053,23 +1106,88 @@ export function renderClusterForm(view) {
     mutationStatus(state, { kind: "KafkaCluster", name: d.name }, ((v.errors || {}).unmatched)) +
     "</div>" +
     "</form>" +
-    "<p class=\"note\">The credential itself lives in the Secret named above and " +
-    "is never read by this page, by a status field or by a rendered document. What you type " +
-    "here is kept in this page's memory until the cluster exists -- through an error, a lost " +
-    "response or a visit to another page -- and never written to browser storage; a reload " +
-    "starts empty.</p>" +
+    (v.minted === true
+      ? "<p class=\"note\">The credential you type is sent ONCE, to the product API, which " +
+        "stores it in a Secret owned by and bound to this connection. It is never shown again, " +
+        "never kept in this page's draft (re-enter it after an error) and never written to " +
+        "browser storage; nothing on this page or in any response can read it back.</p>"
+      : "<p class=\"note\">The credential itself lives in the Secret named above and " +
+        "is never read by this page, by a status field or by a rendered document. That Secret " +
+        "must carry this connection's binding under the key logweir-binding (the value is the " +
+        "connection's status.credentialBinding once it exists); a Secret without it is refused " +
+        "by every run (CredentialBindingMismatch). What you type here is kept in this page's " +
+        "memory until the cluster exists -- through an error, a lost response or a visit to " +
+        "another page -- and never written to browser storage; a reload starts empty.</p>") +
     "</section>"
+  );
+}
+
+/** CONSOLE MODE: the credential, typed once (PROD-01.3 security follow-up).
+ *  Every input renders EMPTY -- a draft never holds these and nothing renders
+ *  them back -- and the password input is `type="password"` with
+ *  `autocomplete="new-password"`. */
+function credentialEntry(field, line) {
+  return (
+    "<fieldset class=\"credential\"><legend>credential, entered once</legend>" +
+    "<div class=\"field\"><label for=\"cluster-entered-password\">SASL password " +
+    "(scramSha512, scramSha256, plain)</label>" +
+    "<input id=\"cluster-entered-password\" name=\"enteredPassword\" type=\"password\" " +
+    "autocomplete=\"new-password\" value=\"\"" +
+    field("cluster-entered-password", "enteredPassword") + ">" +
+    line("cluster-entered-password", "enteredPassword") + "</div>" +
+    "<div class=\"field\"><label for=\"cluster-entered-certificate\">client certificate, PEM " +
+    "(mtls)</label>" +
+    "<textarea id=\"cluster-entered-certificate\" name=\"enteredCertificatePem\" rows=\"3\" " +
+    "autocomplete=\"off\" spellcheck=\"false\"" +
+    field("cluster-entered-certificate", "enteredCertificatePem") + "></textarea>" +
+    line("cluster-entered-certificate", "enteredCertificatePem") + "</div>" +
+    "<div class=\"field\"><label for=\"cluster-entered-private-key\">client private key, PEM, " +
+    "unencrypted (mtls)</label>" +
+    "<textarea id=\"cluster-entered-private-key\" name=\"enteredPrivateKeyPem\" rows=\"3\" " +
+    "autocomplete=\"off\" spellcheck=\"false\"></textarea></div>" +
+    "<p class=\"help\">The product API creates a Secret from what you enter here, owned by and " +
+    "bound to this connection. A connection never names an existing Secret.</p>" +
+    "</fieldset>"
+  );
+}
+
+/** LEGACY MODE (kubectl proxy): the Secret REFERENCES the object carries. */
+function credentialReferences(d, field, line) {
+  return (
+    "<div class=\"field\"><label for=\"cluster-secret\">auth Secret name</label>" +
+    "<input id=\"cluster-secret\" name=\"secret\" value=\"" + esc(d.secret) + "\"" +
+    field("cluster-secret", "secret") + ">" +
+    "<p class=\"help\">The NAME of the Secret holding the SASL password. The value is never " +
+    "read by this page.</p>" + line("cluster-secret", "secret") + "</div>" +
+    "<div class=\"field\"><label for=\"cluster-password-key\">data key in that Secret " +
+    "(spec.auth.secretRef.passwordKey)</label>" +
+    "<input id=\"cluster-password-key\" name=\"passwordKey\" value=\"" + esc(d.passwordKey) +
+    "\"" + field("cluster-password-key", "passwordKey") + ">" +
+    "<p class=\"help\">Which entry of that Secret the controller projects. Leave it blank for " +
+    "the entry every earlier release used, which is what a KafkaCluster created before " +
+    "connection contract v1 means. This is the KEY's name, not its value: nothing on this page " +
+    "reads the Secret.</p>" + line("cluster-password-key", "passwordKey") + "</div>" +
+    "<div class=\"field\"><label for=\"cluster-client-cert-secret\">client certificate " +
+    "Secret name (spec.auth.clientCertificate, mtls)</label>" +
+    "<input id=\"cluster-client-cert-secret\" name=\"clientCertSecret\" value=\"" +
+    esc(d.clientCertSecret) + "\"" + field("cluster-client-cert-secret", "clientCertSecret") + ">" +
+    "<p class=\"help\">The NAME of a Secret holding tls.crt and tls.key (kubectl create secret " +
+    "tls), for mtls only.</p>" + line("cluster-client-cert-secret", "clientCertSecret") + "</div>"
   );
 }
 
 /** The request body a filled-in form produces. Pure: it reads a plain object
  *  of field values, not the DOM. */
-export function clusterBody(values) {
+export function clusterBody(values, options) {
+  const consoleMode = ((options || {}).console) === true;
   const auth = { mode: values.mode || "plaintext", tls: values.tls === true };
-  if (values.username) {
+  if (values.username && SASL_MODES.indexOf(auth.mode) !== -1) {
     auth.username = values.username;
   }
-  if (values.secret) {
+  if (!consoleMode && values.mode === "mtls" && values.clientCertSecret) {
+    auth.clientCertificate = { name: String(values.clientCertSecret).trim() };
+  }
+  if (!consoleMode && values.secret && SASL_MODES.indexOf(auth.mode) !== -1) {
     auth.secretRef = { name: values.secret };
     // ABSENT IS A MEANING, so a blank key is left out rather than sent as the
     // default: an object that omits `passwordKey` is byte-for-byte what every
@@ -1091,7 +1209,7 @@ export function clusterBody(values) {
       ? { secretKeyRef: reference }
       : { configMapKeyRef: reference };
   }
-  return {
+  const body = {
     apiVersion: "logweir.dev/v1alpha1",
     kind: "KafkaCluster",
     metadata: { name: values.name },
@@ -1104,6 +1222,23 @@ export function clusterBody(values) {
       role: values.role || "source",
     },
   };
+  if (consoleMode) {
+    // THE CREDENTIAL RIDES OFF THE OBJECT'S OWN FIELDS: non-enumerable, so a
+    // JSON dump, a draft or the legacy create never carries it, and only
+    // `ui/client.js`'s console `requestBody` reads it into `auth.credential`.
+    const credential = SASL_MODES.indexOf(auth.mode) !== -1
+      ? { password: String(values.enteredPassword || "") }
+      : auth.mode === "mtls"
+        ? {
+          certificatePem: String(values.enteredCertificatePem || ""),
+          privateKeyPem: String(values.enteredPrivateKeyPem || ""),
+        }
+        : null;
+    if (credential !== null) {
+      Object.defineProperty(body, "__credential", { value: credential, enumerable: false });
+    }
+  }
+  return body;
 }
 
 /** Checks the values, then creates the cluster idempotently by name. Throws an
@@ -1116,14 +1251,16 @@ export async function submitCluster(ns, values, deps) {
   // sends it: the create body has no name member.
   const minted = connectionNamesMinted();
   const v = values || {};
-  const problems = validateCluster(minted ? Object.assign({}, v, { name: "minted" }) : v);
+  const problems = validateCluster(minted ? Object.assign({}, v, { name: "minted" }) : v,
+    { console: minted });
   if (minted && !(typeof v.intent === "string" && v.intent.length >= 8)) {
     problems.name = "this draft carries no idempotency intent; reload the page and fill it in again";
   }
   if (Object.keys(problems).length > 0) {
     throw invalidInput(problems);
   }
-  const body = clusterBody(minted ? Object.assign({}, v, { name: v.intent }) : v);
+  const body = clusterBody(minted ? Object.assign({}, v, { name: v.intent }) : v,
+    { console: minted });
   return createOnce(deps || API, ns, PLURAL, body, CLUSTER_SPEC_RULES);
 }
 
@@ -1970,8 +2107,17 @@ export function readClusterValues(form) {
     role: String(e.role.value).trim(),
     mode: String(e.mode.value),
     username: String(e.username.value).trim(),
-    secret: String(e.secret.value).trim(),
-    passwordKey: String(e.passwordKey.value).trim(),
+    // LEGACY-MODE REFERENCES, absent from the console form.
+    secret: e.secret === undefined ? "" : String(e.secret.value).trim(),
+    passwordKey: e.passwordKey === undefined ? "" : String(e.passwordKey.value).trim(),
+    clientCertSecret: e.clientCertSecret === undefined ? "" : String(e.clientCertSecret.value).trim(),
+    // CONSOLE-MODE WRITE-ONLY VALUES (PROD-01.3): read for the one submit, on
+    // no draft list, and never trimmed (a password is exactly what was typed).
+    enteredPassword: e.enteredPassword === undefined ? "" : String(e.enteredPassword.value),
+    enteredCertificatePem: e.enteredCertificatePem === undefined
+      ? "" : String(e.enteredCertificatePem.value),
+    enteredPrivateKeyPem: e.enteredPrivateKeyPem === undefined
+      ? "" : String(e.enteredPrivateKeyPem.value),
     tls: e.tls.checked === true,
     tlsCaKind: String(e.tlsCaKind.value),
     tlsCaName: String(e.tlsCaName.value).trim(),

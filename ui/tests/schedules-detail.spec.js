@@ -31,6 +31,7 @@ import {
   NO_HISTORY_SENTENCE,
   NO_POINTS_SENTENCE,
   TWO_VERDICTS_SENTENCE,
+  catalogRefuses,
   pointsForRun,
   readSchedulePoints,
   renderArchivedSchedule,
@@ -199,6 +200,56 @@ test("an_unavailable_archive_and_incomplete_evidence_are_not_rendered_as_healthy
     "a run the catalog has never seen is not green on either axis");
   assert.equal((unknown.match(new RegExp(NOT_IN_CATALOG, "g")) || []).length, 8,
     "two columns per run say so by name rather than being blank");
+});
+
+// FX-17 (review M-1): THE RUN<->CATALOG JOIN IS ON THE SET ID, and a runner
+// up to v0.2.0-rc.1 published every SCHEDULED run's set id as `[redacted]`. So
+// on the PoC every nightly run here read "not in the catalog" while the catalog
+// held all of them, and a not-selectable scheduled set never withheld its
+// link. With the set id published whole (`check_contract::is_scheduled_set_id`)
+// the join finds the row: the catalog's own words, and its refusal, apply.
+test("fx17_a_scheduled_run_joins_its_whole_catalog_row_and_a_redacted_row_does_not", () => {
+  const SET = SCHEDULE_UID + "-20260920-023000";
+  const RUN = "01M4CKTADX268PREVHJAAYXEMZ";
+  const scheduled = run("logweir-backup-nightly-20260920-023000", "Succeeded", { backupId: SET });
+  const row = (redacted, selectable) => ({
+    pointId: "lwp1-324e405be6e21da94338e90966d61884", runId: RUN,
+    backupId: redacted ? "[redacted]" : SET,
+    receiptKey: redacted
+      ? "[redacted].receipt.json"
+      : "logweir/backups/" + SET + "/" + RUN + ".receipt.json",
+    receiptSha256: "sha256:" + "ab".repeat(32),
+    availability: "Available",
+    verification: selectable ? "Verified" : "UntrustedSigner",
+    selectable,
+  });
+  const page = (points) => renderScheduleHistory(NS, schedule(), [scheduled], points, null);
+
+  // AS THIS BUILD'S RUNNER PUBLISHES IT: joined, the catalog's words, a link.
+  const whole = page([row(false, true)]);
+  assert.equal(pointsForRun(scheduled, [row(false, true)]).length, 1);
+  assert.equal(whole.indexOf(NOT_IN_CATALOG), -1, "a listed run is not 'not in the catalog'");
+  assert.equal((whole.match(/badge-green">Verified</g) || []).length, 1);
+  assert.equal((whole.match(/Restore this point/g) || []).length, 1);
+  // …and a scheduled set the catalog does NOT mark selectable is refused here.
+  const refused = page([row(false, false)]);
+  assert.equal(catalogRefuses(scheduled, [row(false, false)]), true);
+  assert.match(refused, /data-restore-refused="catalog"/);
+  assert.match(refused, />UntrustedSigner</);
+  assert.equal((refused.match(/Restore this point/g) || []).length, 0);
+
+  // NEGATIVE CONTROL: the SAME run against the rows an rc.1 runner publishes.
+  // Nothing joins, both columns say "not in the catalog", and the
+  // not-selectable row cannot withhold the link -- the PoC's page today.
+  for (const selectable of [true, false]) {
+    const redacted = page([row(true, selectable)]);
+    assert.equal(pointsForRun(scheduled, [row(true, selectable)]).length, 0);
+    assert.equal(catalogRefuses(scheduled, [row(true, selectable)]), false);
+    assert.equal((redacted.match(new RegExp(NOT_IN_CATALOG, "g")) || []).length, 2,
+      "both columns say so by name");
+    assert.equal((redacted.match(/Restore this point/g) || []).length, 1,
+      "an unlisted run is not ruled out by a catalog that said nothing");
+  }
 });
 
 test("a_running_run_and_a_failed_run_are_listed_and_offer_no_restore", () => {

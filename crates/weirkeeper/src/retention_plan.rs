@@ -47,6 +47,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog_view::{Availability, Verification};
+use logweir_core::check_contract::REDACTED as REDACTION_MARKER;
 
 // ---------------------------------------------------------------------------
 // The media types and the one root nothing may delete under
@@ -631,6 +632,23 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
         // never authorises a delete, so such a point is kept `Unknown` rather
         // than left to refuse the whole plan at the writer.
         if point.backup_id.is_empty() || point.backup_id.contains('/') {
+            verdicts.push((*located, Verdict::Protected(ProtectReason::Unknown)));
+            continue;
+        }
+        // NOR a point whose set id or manifest key the catalog published as the
+        // redactor's output (FX-17 review L-1). `[redacted]` names no
+        // directory: every such point would share the one set `[redacted]`,
+        // and a candidate among them makes `plan_document`'s `validate_key`
+        // refuse the WHOLE plan (`[redacted].json` is under no set bound), so
+        // one unreadable set id blocked every other set's expiry. A current
+        // runner publishes every set id the controller mints whole; what is
+        // left is a long set id someone chose. "Could not tell" is `Unknown`.
+        if point.backup_id.contains(REDACTION_MARKER)
+            || point
+                .manifest_key
+                .as_deref()
+                .is_some_and(|m| m.contains(REDACTION_MARKER))
+        {
             verdicts.push((*located, Verdict::Protected(ProtectReason::Unknown)));
             continue;
         }

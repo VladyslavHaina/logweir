@@ -2257,7 +2257,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: 'A Kafka cluster Logweir connects to (saved-connection contract v1): bootstrap servers, auth mode and username, the TLS switch and an optional private CA reference, role, and the marker topic that proves a scratch target. The password lives in a Secret and the CA in a Secret or ConfigMap, both in this namespace and both referenced, never copied; `status.clusterId` is read from the broker and never from this spec. `spec` is immutable.'
+        description: 'A Kafka cluster Logweir connects to (saved-connection contract v1): bootstrap servers, auth mode (plaintext, scramSha512, scramSha256, plain over TLS, or mtls) and username, the TLS switch, an optional private CA reference and an mtls client-certificate reference, role, and the marker topic that proves a scratch target. The password and the client key live in Secrets and the CA in a Secret or ConfigMap, all in this namespace and all referenced, never copied; `status.clusterId` is read from the broker and never from this spec. `spec` is immutable.'
         properties:
           spec:
             description: '`KafkaCluster.spec`.'
@@ -2265,14 +2265,44 @@ spec:
               auth:
                 description: How Logweir authenticates here.
                 properties:
+                  clientCertificate:
+                    description: 'The TLS client certificate and private key an `mtls` connection presents: two keys of ONE Secret in this namespace — `kubectl create secret tls` writes exactly the default keys. Required when `mode` is `mtls` and refused for every other mode. Logweir never reads the Secret: the kubelet projects it read-only into the runner pod, and both clients load the two files from there.'
+                    nullable: true
+                    properties:
+                      certificateKey:
+                        description: The data key holding the PEM client certificate (chain). Absent means `tls.crt`, the `kubernetes.io/tls` Secret's key.
+                        maxLength: 253
+                        minLength: 1
+                        nullable: true
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                      name:
+                        description: The Secret's `metadata.name`, in this namespace.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      privateKeyKey:
+                        description: The data key holding the PEM private key, UNENCRYPTED (PKCS#8, PKCS#1 or SEC1; the engine's loader takes no passphrase). Absent means `tls.key`.
+                        maxLength: 253
+                        minLength: 1
+                        nullable: true
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                    required:
+                    - name
+                    type: object
                   mode:
-                    description: The SASL mechanism, or `plaintext` for none.
+                    description: The SASL mechanism (`scramSha512`, `scramSha256`, `plain`), `mtls` for a TLS client certificate, or `plaintext` for none.
                     enum:
                     - plaintext
                     - scramSha512
+                    - scramSha256
+                    - plain
+                    - mtls
                     type: string
                   secretRef:
-                    description: A Secret in this namespace holding the SASL password, and the key it is under. Required when `mode` is `scramSha512`. Logweir never reads its value into a status field, a log line or a rendered document.
+                    description: A Secret in this namespace holding the SASL password, and the key it is under. Required when `mode` is `scramSha512`, `scramSha256` or `plain`. Logweir never reads its value into a status field, a log line or a rendered document.
                     nullable: true
                     properties:
                       name:
@@ -2290,7 +2320,7 @@ spec:
                     type: object
                   tls:
                     default: false
-                    description: 'Whether the transport is TLS — the only switch that turns TLS on. Independent of `mode`; in connection contract v1 TLS is supported with `scramSha512` (SASL_SSL), and `plaintext` with `tls: true` is refused rather than dialled without TLS.'
+                    description: 'Whether the transport is TLS — the only switch that turns TLS on. Independent of `mode`; TLS is supported with `scramSha512` and `scramSha256` (SASL_SSL), REQUIRED with `plain` (SASL_SSL) and `mtls` (SSL), and `plaintext` with `tls: true` is refused rather than dialled without TLS.'
                     type: boolean
                   tlsCa:
                     description: 'The certificate authority that signs the brokers'' certificates, when it is not one the runner image already trusts: exactly one key of a Secret or a ConfigMap in this namespace. It replaces the default trust store for this connection in BOTH clients (the engine''s `ssl_ca_location` and librdkafka''s `ssl.ca.location`). Requires `tls: true`.'
@@ -2341,7 +2371,7 @@ spec:
                     - message: auth.tlsCa names exactly one of secretKeyRef or configMapKeyRef
                       rule: has(self.secretKeyRef) != has(self.configMapKeyRef)
                   username:
-                    description: The SASL principal. Required when `mode` is `scramSha512`; it is what `planBytes` binds, so changing it after an approval invalidates that approval's plan hash. Never read from a Secret.
+                    description: The SASL principal. Required when `mode` is `scramSha512`, `scramSha256` or `plain`; it is what `planBytes` binds, so changing it after an approval invalidates that approval's plan hash. Never read from a Secret.
                     nullable: true
                     type: string
                 required:
@@ -2350,6 +2380,12 @@ spec:
                 x-kubernetes-validations:
                 - message: 'auth.tlsCa names a CA for a TLS transport, so it requires auth.tls: true'
                   rule: '!has(self.tlsCa) || self.tls'
+                - message: 'PlainWithoutTls: auth.mode plain (SASL/PLAIN) sends the password itself, so it is accepted only with auth.tls: true'
+                  rule: self.mode != 'plain' || self.tls
+                - message: 'auth.mode mtls presents a TLS client certificate, so it requires auth.tls: true'
+                  rule: self.mode != 'mtls' || self.tls
+                - message: auth.clientCertificate is required when auth.mode is mtls and refused for every other mode
+                  rule: (self.mode == 'mtls') == has(self.clientCertificate)
               bootstrapServers:
                 description: The broker bootstrap addresses, `host:port`.
                 items:
@@ -2413,6 +2449,10 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              credentialBinding:
+                description: The binding this connection's credential Secret must carry under its `logweir-binding` key — `v1:<uid>:sha256:<digest of the endpoint>` — for the runner to present the credential at all. Public (a UID and a digest, never a credential). The console writes it into the Secret it creates; an operator who creates the Secret with `kubectl` copies it from here. A Secret without it, or with another connection's, is refused by every runner (`CredentialBindingMismatch`). Absent for a connection with no credential (`plaintext`).
+                nullable: true
+                type: string
               observedAt:
                 description: When the probe above was performed.
                 format: date-time
@@ -7095,7 +7135,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-api-config-692870cab6
+  name: logweir-api-config-1cd41bf9be
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
@@ -7154,6 +7194,11 @@ data:
     cursorKey:
       file: /var/run/logweir/keys/cursor.key
       expectedVersion: 1
+    confirmationKeyFile: /var/run/logweir/confirmation/confirmation.key
+    confirmationKeyManaged: true
+    installationIdentity:
+      namespace: logweir-system
+      publicConfigMap: logweir-signing-trust
 ---
 # Source: logweir/templates/clusterrole.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -7660,7 +7705,8 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
-    resourceNames: ["weirkeeper-policy"]
+    # PROD-16.1: and the public identity ConfigMap, for the fresh-install marker.
+    resourceNames: ["weirkeeper-policy", "logweir-signing-trust"]
     verbs: ["get"]
 ---
 # Source: logweir/templates/identity.yaml
@@ -7692,6 +7738,33 @@ rules:
     resources: ["configmaps"]
     resourceNames: ["logweir-signing-trust"]
     verbs: ["get", "patch"]
+  # PROD-16.1: the console key's two retained objects, by name, and nothing else.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["logweir-console-confirmation"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["logweir-console-trust"]
+    verbs: ["get", "patch"]
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: logweir-api-installation
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["logweir-signing-trust"]
+    verbs: ["get"]
 ---
 # Source: logweir/templates/ui/api-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -7861,6 +7934,27 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
+  name: logweir-api-installation
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: logweir-api-installation
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
+    namespace: logweir-system
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
   name: logweir-api-trusted-proxy
   namespace: traefik
   labels:
@@ -7961,6 +8055,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: LOGWEIR_WATCH_NAMESPACES
               value: "team-a,team-b"
+            - name: LOGWEIR_IDENTITY_PUBLIC_CONFIGMAP
+              value: "logweir-signing-trust"
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -8020,7 +8116,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/logweir-api-config: 692870cab6f6a6b8ea53a1338c15d9b34d76fc3f59bfb5b9bd8ae2372f511e4d
+        checksum/logweir-api-config: 1cd41bf9be2a9636b6d8d71ad0d363823a49a13cb0b481a7cf7cca1cc557820c
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
@@ -8081,10 +8177,13 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            - name: confirmation
+              mountPath: /var/run/logweir/confirmation
+              readOnly: true
       volumes:
         - name: config
           configMap:
-            name: logweir-api-config-692870cab6
+            name: logweir-api-config-1cd41bf9be
             items:
               - key: config.yaml
                 path: config.yaml
@@ -8108,6 +8207,14 @@ spec:
                 path: ca.crt
         - name: tmp
           emptyDir: {}
+        - name: confirmation
+          secret:
+            secretName: logweir-console-confirmation
+            defaultMode: 0440
+            optional: true
+            items:
+              - key: confirmation.key
+                path: confirmation.key
 ---
 # Source: logweir/templates/ui/api-ingress.yaml
 apiVersion: networking.k8s.io/v1
@@ -8166,6 +8273,30 @@ type: Opaque
 data: {}
 ---
 # Source: logweir/templates/identity.yaml
+# PROD-16.1: the console's ConsoleConfirmation key, rendered EMPTY like the
+# signing key above; the hook generates an Ed25519 key into it once (or adopts
+# the key a hand-made Secret of this name already holds), and `keep` makes it
+# survive uninstall and reinstall like the installation identity.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logweir-console-confirmation
+  namespace: logweir-system
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/identity-state: uninitialized
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: console-confirmation
+type: Opaque
+data: {}
+---
+# Source: logweir/templates/identity.yaml
 # Public verification material only: key-id, algorithm, SPKI PEM and the exact
 # current TrustRoster field that consumes it. Retained with the private object
 # so an absent private key is detected as loss, never treated as a fresh install.
@@ -8188,6 +8319,27 @@ metadata:
 data: {}
 ---
 # Source: logweir/templates/identity.yaml
+# PROD-16.1: the console key's PUBLIC half — key-id, algorithm, PEM and the one
+# usage it may be trusted for. A publication record, not authorization.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logweir-console-trust
+  namespace: logweir-system
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/identity-state: uninitialized
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: console-confirmation-trust
+data: {}
+---
+# Source: logweir/templates/identity.yaml
 # A fixed, authority-free cluster-scoped marker makes the current singleton
 # contract explicit. It contains no key material and grants no permissions.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -8207,6 +8359,79 @@ metadata:
     helm.sh/chart: logweir-0.1.0
     app.kubernetes.io/component: signing-identity
 rules: []
+---
+# Source: logweir/templates/identity.yaml
+# PROD-16.1: THE FRESH INSTALL'S TRUST, AND ONLY FOR THE INSTALL. In the one run
+# that GENERATES the installation identity and the console key, the hook reads
+# which trust the cluster already has (`list` TrustPolicy, `get` the one roster
+# name) and, when it has none at all, creates ONE default TrustPolicy trusting
+# the installation signer and that console key. `create` cannot be narrowed by
+# resourceName in RBAC, so this grant must not outlive the install (security
+# review of 428a481a; fix round of 2026-10-08): it is rendered only under
+# `$freshTrust`, only on Helm 3.19+ (the `fail` above), as a `post-install` hook
+# — never upgrade or rollback — weighted before the Job that spends it, and
+# deleted by Helm when the install's post-install hooks have run, succeeded or
+# failed (`hook-succeeded`, `hook-failed`; Helm 3.19.0 and v4.0.1
+# `pkg/action/hooks.go` `execHook` delete every earlier `hook-succeeded` hook
+# when a later one fails; 3.12–3.18 do not, hence the floor). The hook ALSO
+# deletes this binding itself after its trust step, on every exit path the
+# binary controls (`delete` on this one binding name). What neither covers: a
+# failed `Create` of a later hook, or a Helm client killed mid-hook — the next
+# hook run, or the recovery command in docs/install.md, removes it. The
+# installer already holds cluster-admin for the CRDs and ClusterRoles of this
+# chart; for those seconds, whoever can run a pod as
+# `<release>-identity-bootstrap` in the release namespace could create a
+# TrustPolicy — the residual docs/kubernetes.md §8 states.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-identity-trust
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["list", "create"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters"]
+    resourceNames: ["default"]
+    verbs: ["get"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    resourceNames: ["logweir-identity-trust"]
+    verbs: ["delete"]
+---
+# Source: logweir/templates/identity.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: logweir-identity-trust
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-identity-trust
+subjects:
+  - kind: ServiceAccount
+    name: logweir-identity-bootstrap
+    namespace: logweir-system
 ---
 # Source: logweir/templates/identity.yaml
 apiVersion: batch/v1
@@ -8245,7 +8470,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: bootstrap
-          image: docker.io/vladyslavhaina/logweir@sha256:2d20f4bdb2bd8b9f2fb9fa298371740eb9a368d42cf031a7ebe1272542477e19
+          image: docker.io/vladyslavhaina/logweir@sha256:ea106328eb5f9364a4682e640ba258242c6fc949b5d2198140c57bf719a13968
           imagePullPolicy: IfNotPresent
           args:
             - identity
@@ -8254,6 +8479,15 @@ spec:
             - logweir-system
             - --public-configmap-name
             - logweir-signing-trust
+            - --console-secret-name
+            - logweir-console-confirmation
+            - --console-public-configmap-name
+            - logweir-console-trust
+            - --installation-trust-policy
+            - logweir-installation
+            - --mark-fresh-install-confirm
+            - --revoke-trust-binding
+            - logweir-identity-trust
           resources:
             limits:
               memory: 128Mi
