@@ -8291,3 +8291,105 @@ async fn a_preflights_own_skip_list_reaches_its_plan() {
         "the Job was created from that plan"
     );
 }
+
+/// **FX-20: every object-store credential a check pod carries travels with
+/// its binding pair** — the destination grant's (`AWS_*`), and a separated
+/// `evidenceRead` grant's (`LOGWEIR_EVIDENCE_READ_AWS_*`) — each expecting the
+/// destination's binding, each projected OPTIONALLY from the same Secret as
+/// the credential it guards. The check runner refuses every store build while
+/// one pair disagrees (`crates/logweir/tests/store_binding.rs`).
+///
+/// KILLS: the evidence-read pair dropped (a separated reader Secret written for
+/// another destination would read this one's evidence root); the expectation
+/// left off.
+#[test]
+fn fx20_every_credential_in_a_check_pod_carries_its_binding_pair() {
+    use logweir_core::credential_binding as cb;
+    let inputs = inputs_for(
+        PreflightOperation::DestinationAccess,
+        &reading_destination(evidence_read_secret_grant()),
+        vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceRead],
+    );
+    let shape = shape_of(&inputs).expect("renders");
+    for (credential, projected_binding, expected_binding) in [
+        (
+            "AWS_ACCESS_KEY_ID",
+            cb::ARCHIVE_CREDENTIAL_BINDING_ENV,
+            cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV,
+        ),
+        (
+            "LOGWEIR_EVIDENCE_READ_AWS_ACCESS_KEY_ID",
+            cb::EVIDENCE_READ_CREDENTIAL_BINDING_ENV,
+            cb::EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV,
+        ),
+    ] {
+        let secret = projected(&shape, credential).expect(credential);
+        let pair = shape
+            .spec
+            .env_from_secret
+            .iter()
+            .find(|e| e.name == projected_binding)
+            .unwrap_or_else(|| panic!("{credential}: no projected binding"));
+        assert_eq!(
+            pair.secret_name, secret,
+            "{credential}: from the same Secret"
+        );
+        assert_eq!(pair.key, cb::CREDENTIAL_BINDING_KEY);
+        assert!(pair.optional, "{credential}");
+        let expected = literal(&shape, expected_binding)
+            .unwrap_or_else(|| panic!("{credential}: no expectation"));
+        assert!(expected.starts_with("v1:"), "{credential}: {expected}");
+    }
+    assert_eq!(
+        literal(&shape, cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        literal(&shape, cb::EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV),
+        "one destination, one binding for both of its Secrets"
+    );
+}
+
+/// **FX-20: a legacy source's check pod expects the LOCATION binding — the
+/// one the restore Job expects — not the fail-closed no-UID value** an object
+/// without a UID would get. The pseudo-destination stands for an inline
+/// archive, and its Secret is bound where it is read.
+///
+/// KILLS: `inline_archive` not set on the legacy resolution (every legacy
+/// readiness check would refuse a correctly bound Secret); the location binding
+/// over another storage block than the restore Job's.
+#[test]
+fn fx20_a_legacy_source_check_expects_the_restore_jobs_location_binding() {
+    use logweir_core::credential_binding as cb;
+    let plan = legacy_plan_yaml("kafka-backups");
+    let source = legacy_plan_source(&plan);
+    let resolved = pf::legacy_source_destination(
+        NS,
+        &legacy(),
+        Some(&source),
+        &weirkeeper::check::policy::LegacyArchiveAddressing::default(),
+    )
+    .expect("resolves");
+    assert!(resolved.inline_archive);
+    assert_eq!(
+        resolved.credential_binding(),
+        cb::archive_location_binding(&source)
+    );
+    let env = resolved.job_env();
+    assert_eq!(
+        env.literal(cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        Some(cb::archive_location_binding(&source).as_str())
+    );
+    assert_ne!(
+        env.literal(cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        Some(cb::UNBOUND_NO_UID)
+    );
+    // And it is the value the restore Job projects for the same plan.
+    let restore_env =
+        weirkeeper::controllers::restore::inline_restore_binding_env(LEGACY_SECRET, &plan, &[]);
+    assert_eq!(
+        restore_env
+            .literals
+            .iter()
+            .find(|(n, _)| n == cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV)
+            .map(|(_, v)| v.as_str()),
+        env.literal(cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV)
+    );
+}

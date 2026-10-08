@@ -406,6 +406,28 @@ pub struct AlertDelivery {
     pub last_error: Option<String>,
 }
 
+/// One notification route's credential binding (FX-20).
+///
+/// What the route's Secret must carry under its `logweir-binding` key for the
+/// delivery Job to use it at all: `v1:<policy uid>:sha256:<digest>` over the
+/// sink kind and, for PagerDuty, the endpoint. Public — a UID and a digest of
+/// public values, never a credential. A Secret without it, or with another
+/// policy's, route's or endpoint's, is refused before anything is posted
+/// (`notify-result=<sink>:refused`, `CredentialBindingMismatch`).
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationCredentialBinding {
+    /// The route's `name`.
+    #[schemars(length(min = 1, max = 63))]
+    pub route: String,
+    /// `pagerduty`, `webhook` or `slack`.
+    pub sink: String,
+    /// The Secret the route names.
+    pub secret_name: String,
+    /// The value its `logweir-binding` key must hold.
+    pub binding: String,
+}
+
 /// One entry of the deduplication ledger.
 ///
 /// A LEDGER AND NOT A LOG. `transition` increments on open, on resolve and on
@@ -484,6 +506,14 @@ pub struct ProtectionPolicyStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 16))]
     pub alerts: Option<Vec<AlertEntry>>,
+    /// FX-20: the binding each notification route's credential Secret must
+    /// carry under `logweir-binding`, one entry per channel a route names.
+    /// Absent when no route is configured. An edit to a PagerDuty route's
+    /// `endpoint` changes its binding, so the old Secret is refused until it is
+    /// bound again: the routing key never follows an endpoint edit silently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 12))]
+    pub credential_bindings: Option<Vec<NotificationCredentialBinding>>,
     /// The condition set: `Ready`, `Protected`, `NotificationsDelivered`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,

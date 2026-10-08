@@ -307,6 +307,12 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
             "The destination asks for workload identity and none was injected. Annotate the \
              runner ServiceAccount, or switch the destination to static credentials."
         }
+        CheckCode::CredentialBindingMismatch => {
+            "The destination's credential Secret carries no `logweir-binding`, or one written \
+             for another object or endpoint, so the check refused to present it anywhere. Enter \
+             the credential again through the console, or set the Secret's `logweir-binding` \
+             key to the destination's status.credentialBinding (docs/kubernetes.md §20.10)."
+        }
         CheckCode::CredentialSecretKeyMissing => {
             "A credential the check plan says is projected is not in the check pod's \
              environment, so the check did not use any other. Re-create the check; if it \

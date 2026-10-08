@@ -1430,3 +1430,61 @@ fn the_topic_preflight_line_is_printed_by_name_on_a_passing_run() {
         phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX
     );
 }
+
+/// **FX-20 fix round (review F1), phase 0's own arm.** The restore runner
+/// refuses an injected S3 region before the archive is read
+/// (`guard_cli.rs::fx20_an_injected_region_exits_3_before_the_archive_is_read`);
+/// phase 0 holds the same rule for every caller that reaches it another way,
+/// on the source archive and on the evidence store, before any broker call.
+/// CONTROL: the same plan with real regions is admitted.
+#[test]
+fn fx20_phase0_refuses_an_injected_region_on_either_store() {
+    let s3 = |region: &str| logweir_core::engine::StorageUrl::S3 {
+        bucket: "victim-backups".into(),
+        prefix: "logweir/".into(),
+        region: Some(region.into()),
+        endpoint: None,
+        path_style: false,
+        allow_http: false,
+    };
+    let reader = || BrokerDouble::new(&[("log.message.timestamp.type", "CreateTime")]);
+    for field in ["source.storage", "evidence"] {
+        let mut spec = a_recent_spec();
+        if field == "evidence" {
+            spec.evidence = s3("x@127.0.0.1:9/");
+        } else {
+            spec.source.storage = s3("x@127.0.0.1:9/");
+        }
+        let creator = RecordingCreator::default();
+        let deleter = RecordingDeleter::default();
+        let refusal = phase0_admit::run(
+            &spec,
+            "restore: {}\n",
+            &allowed(),
+            &reader(),
+            &creator,
+            &deleter,
+        )
+        .expect_err("an injected region is refused at phase 0");
+        let DrillError::Guard(GuardRefusal(message)) = refusal else {
+            panic!("{field}: a guard refusal, not {refusal:?}");
+        };
+        assert!(
+            message.starts_with(&format!("StorageRegionInvalid: {field}.region")),
+            "{field}: {message}"
+        );
+        assert!(creator.calls.lock().unwrap().is_empty());
+    }
+    let mut spec = a_recent_spec();
+    spec.source.storage = s3("eu-west-1");
+    spec.evidence = s3("eu-west-1");
+    phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader(),
+        &RecordingCreator::default(),
+        &RecordingDeleter::default(),
+    )
+    .expect("real regions are admitted");
+}

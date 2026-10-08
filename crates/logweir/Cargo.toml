@@ -63,3 +63,8 @@ logweir-engine-oso = { path = "../logweir-engine-oso" }
 p256 = { version = "0.13", features = ["pkcs8", "pem"] }
 serde_json.workspace = true
 tempfile = "3"
+
+# `unsafe_code = "forbid"` for every target of this package, tests and build
+# scripts included (the root Cargo.toml's `[workspace.lints.rust]`).
+[lints]
+workspace = true

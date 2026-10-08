@@ -25,6 +25,13 @@
 //!    a log line this controller writes.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use logweir_core::credential_binding::{
+    notification_binding, NotificationSink, CREDENTIAL_BINDING_KEY,
+    NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV, NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV,
+    NOTIFY_SLACK_CREDENTIAL_BINDING_ENV, NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV,
+    NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV, NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV,
+    UNBOUND_NO_UID,
+};
 use serde_json::{json, Value};
 use weirkeeper::controllers::protection_policy::{self as pp, ProtectionContext};
 use weirkeeper::crds::protection_policy::{
@@ -60,6 +67,26 @@ const PAGE_PATH: &str = "/configmaps/primary-catalog-p0";
 /// A routing key the fake API server echoes back everywhere it can. No byte of
 /// it may reach anything this controller writes.
 const ROUTING_KEY: &str = "R0UT1NGK3Y-do-not-leak-me";
+
+/// The literal env the fixture spec's delivery Job carries: `RUST_LOG`, the
+/// installation's hatch when it is on, and FX-20's binding expectation for
+/// each of the fixture's two sinks (PagerDuty at the default endpoint, the
+/// webhook), in projection order.
+fn fixture_literals(hatch: bool) -> Vec<(String, String)> {
+    let mut out = vec![("RUST_LOG".to_string(), "warn".to_string())];
+    if hatch {
+        out.push((pp::ALLOW_INSECURE_SINKS_ENV.to_string(), "1".to_string()));
+    }
+    out.push((
+        NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV.to_string(),
+        notification_binding(POLICY_UID, NotificationSink::PagerDuty, None),
+    ));
+    out.push((
+        NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV.to_string(),
+        notification_binding(POLICY_UID, NotificationSink::Webhook, None),
+    ));
+    out
+}
 
 fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 17, 12, 0, 0)
@@ -1836,12 +1863,13 @@ fn a_sink_error_is_reported_and_never_echoed_from_the_log() {
     assert!(message.contains("pagerduty:failed"));
     assert!(
         !message.contains("webhook:ok"),
-        "`webhook:ok <key>` is not one of the seven values this build knows, so it is not read \
+        "`webhook:ok <key>` is not one of the ten values this build knows, so it is not read \
          at all"
     );
     assert_eq!(p::known_result("pagerduty:ok"), Some("pagerduty:ok"));
     assert_eq!(p::known_result("pagerduty:maybe"), None);
-    assert_eq!(p::NOTIFY_RESULTS.len(), 7);
+    // FX-20 added the three `<sink>:refused` values.
+    assert_eq!(p::NOTIFY_RESULTS.len(), 10);
 
     let long = "x".repeat(4096);
     assert!(p::cap_error(&long).chars().count() <= p::MAX_ERROR_CHARS);
@@ -2556,7 +2584,16 @@ fn a_sink_credential_value_never_reaches_the_status() {
         .iter()
         .map(|e| e.name.as_str())
         .collect();
-    assert_eq!(names, vec![pp::ROUTING_KEY_ENV, pp::WEBHOOK_URL_ENV]);
+    // FX-20: each credential travels with its Secret's optional binding.
+    assert_eq!(
+        names,
+        vec![
+            pp::ROUTING_KEY_ENV,
+            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV,
+            pp::WEBHOOK_URL_ENV,
+            NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV
+        ]
+    );
     for entry in &job_spec.env_from_secret {
         assert!(!entry.secret_name.is_empty() && !entry.key.is_empty());
     }
@@ -4754,9 +4791,10 @@ fn a_delivery_job_carries_no_insecure_sink_variable_unless_the_installation_set_
     );
     assert_eq!(
         job_spec.env_literal,
-        vec![("RUST_LOG".to_string(), "warn".to_string())],
+        fixture_literals(false),
         "the unset case is a GOLDEN: a delivery Job on a default installation carries exactly \
-         the literal env it carried before `notify.allowInsecureSinks` existed"
+         the literal env it carried before `notify.allowInsecureSinks` existed, plus FX-20's \
+         two binding expectations"
     );
     let rendered =
         serde_json::to_string(&weirkeeper::job::build(&job_spec)).expect("the Job serialises");
@@ -4797,10 +4835,7 @@ fn the_installation_hatch_reaches_the_delivery_job_as_the_documented_variable() 
     );
     assert_eq!(
         on.env_literal,
-        vec![
-            ("RUST_LOG".to_string(), "warn".to_string()),
-            (pp::ALLOW_INSECURE_SINKS_ENV.to_string(), "1".to_string())
-        ],
+        fixture_literals(true),
         "`1` and only `1`: it is the value `logweir::notify`'s reader and this crate's own \
          predicate both accept, so the two halves of one decision cannot drift"
     );
@@ -4903,7 +4938,13 @@ fn a_policy_cannot_turn_the_insecure_sink_hatch_on() {
     );
     assert_eq!(
         job_spec.env_literal,
-        vec![("RUST_LOG".to_string(), "warn".to_string())],
+        vec![
+            ("RUST_LOG".to_string(), "warn".to_string()),
+            (
+                NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV.to_string(),
+                notification_binding(POLICY_UID, NotificationSink::Webhook, None)
+            ),
+        ],
         "a policy asking three times over still gets the default install's Job"
     );
 }
@@ -5344,4 +5385,273 @@ fn fx11_control_a_podless_delivery_with_no_event_keeps_the_old_path() {
         status["status"]["alerts"][0]["delivery"]["lastError"],
         json!("the delivery Job finished with no exit code")
     );
+}
+
+// ===========================================================================
+// FX-20: every sink credential is bound to this policy, its sink and endpoint
+// ===========================================================================
+
+fn three_sink_routes(
+    endpoint: Option<&str>,
+) -> Vec<weirkeeper::crds::protection_policy::NotificationRoute> {
+    let mut pd = json!({"routingKeySecretRef": {"name": "pd", "key": "routing-key"}});
+    if let Some(e) = endpoint {
+        pd["endpoint"] = json!(e);
+    }
+    serde_json::from_value(json!([
+        {"name": "oncall", "pagerDuty": pd},
+        {"name": "ops", "webhook": {"urlSecretRef": {"name": "hooks", "key": "ops"}}},
+        {"name": "chat", "slack": {"webhookUrlSecretRef": {"name": "slack", "key": "url"}}}
+    ]))
+    .expect("the route fixture parses")
+}
+
+/// **Every sink's credential travels with its binding pair: the Secret's own
+/// `logweir-binding` as an OPTIONAL `secretKeyRef` from the SAME Secret, and
+/// the controller's expectation — over this policy's UID, the sink kind and
+/// the PagerDuty endpoint — as a literal.**
+///
+/// Optional, because an unbound Secret must still reach the deliverer, which
+/// refuses it by name (`<sink>:refused`); a required key would make the pod
+/// fail to start and the attempt read "no exit code".
+///
+/// KILLS: a sink projected without its pair; the pair read from another
+/// Secret; the binding key required; the endpoint left out of the expectation.
+#[test]
+fn fx20_every_sink_secret_travels_with_its_binding_pair() {
+    let endpoint = "https://events.eu.pagerduty.com/v2/enqueue";
+    let routes = three_sink_routes(Some(endpoint));
+    let job_spec = pp::delivery_job_spec(
+        "j",
+        NS,
+        &pp::owner_of(POLICY, POLICY_UID),
+        "cm",
+        Some(&routes),
+        &RunnerImage::default(),
+        false,
+    );
+    for (credential_env, secret, sink, projected, expected_env, expected) in [
+        (
+            pp::ROUTING_KEY_ENV,
+            "pd",
+            "pagerduty",
+            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV,
+            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV,
+            notification_binding(POLICY_UID, NotificationSink::PagerDuty, Some(endpoint)),
+        ),
+        (
+            pp::WEBHOOK_URL_ENV,
+            "hooks",
+            "webhook",
+            NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV,
+            NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV,
+            notification_binding(POLICY_UID, NotificationSink::Webhook, None),
+        ),
+        (
+            pp::SLACK_WEBHOOK_URL_ENV,
+            "slack",
+            "slack",
+            NOTIFY_SLACK_CREDENTIAL_BINDING_ENV,
+            NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV,
+            notification_binding(POLICY_UID, NotificationSink::Slack, None),
+        ),
+    ] {
+        let credential = job_spec
+            .env_from_secret
+            .iter()
+            .find(|e| e.name == credential_env)
+            .unwrap_or_else(|| panic!("{sink}: no credential variable"));
+        assert_eq!(credential.secret_name, secret);
+        assert!(
+            !credential.optional,
+            "{sink}: the credential itself is required"
+        );
+        let pair = job_spec
+            .env_from_secret
+            .iter()
+            .find(|e| e.name == projected)
+            .unwrap_or_else(|| panic!("{sink}: the Secret's binding is not projected"));
+        assert_eq!(
+            pair.secret_name, secret,
+            "{sink}: the binding comes from the SAME Secret"
+        );
+        assert_eq!(pair.key, CREDENTIAL_BINDING_KEY);
+        assert!(
+            pair.optional,
+            "{sink}: an unbound Secret must reach the deliverer"
+        );
+        let literal = job_spec
+            .env_literal
+            .iter()
+            .find(|(n, _)| n == expected_env)
+            .unwrap_or_else(|| panic!("{sink}: no expectation"));
+        assert_eq!(literal.1, expected, "{sink}");
+    }
+    // The endpoint is IN the expectation: the default endpoint's binding is
+    // not what this route expects.
+    let pd_expected = &job_spec
+        .env_literal
+        .iter()
+        .find(|(n, _)| n == NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV)
+        .expect("the pair")
+        .1;
+    assert_ne!(
+        *pd_expected,
+        notification_binding(POLICY_UID, NotificationSink::PagerDuty, None)
+    );
+    let rendered = serde_json::to_string(&weirkeeper::job::build(&job_spec)).expect("JSON");
+    assert!(rendered.contains("\"optional\":true"), "{rendered}");
+
+    // FAIL CLOSED: a policy with no UID projects an expectation no Secret
+    // satisfies.
+    let job_spec = pp::delivery_job_spec(
+        "j",
+        NS,
+        &pp::owner_of(POLICY, ""),
+        "cm",
+        Some(&routes),
+        &RunnerImage::default(),
+        false,
+    );
+    for (name, value) in &job_spec.env_literal {
+        if name.ends_with("_CREDENTIAL_BINDING_EXPECTED") {
+            assert_eq!(value, UNBOUND_NO_UID, "{name}");
+        }
+    }
+}
+
+/// **The status publishes each route's binding, and editing a PagerDuty
+/// endpoint moves it** — so the Secret bound for the old endpoint is refused
+/// until it is bound again. The policy's spec is mutable; this is the row that
+/// makes "keep the key, change the endpoint" a refusal rather than a re-route.
+///
+/// KILLS: the status field dropped; the endpoint left out of the binding.
+#[test]
+fn fx20_the_status_publishes_each_routes_binding_and_an_endpoint_edit_moves_it() {
+    let routes = three_sink_routes(None);
+    let published = pp::notification_bindings(POLICY_UID, Some(&routes));
+    let view: Vec<(&str, &str, &str)> = published
+        .iter()
+        .map(|b| (b.route.as_str(), b.sink.as_str(), b.secret_name.as_str()))
+        .collect();
+    assert_eq!(
+        view,
+        vec![
+            ("oncall", "pagerduty", "pd"),
+            ("ops", "webhook", "hooks"),
+            ("chat", "slack", "slack")
+        ]
+    );
+    let edited = pp::notification_bindings(
+        POLICY_UID,
+        Some(&three_sink_routes(Some("https://evil.example/v2/enqueue"))),
+    );
+    assert_ne!(
+        edited[0].binding, published[0].binding,
+        "the endpoint edit moves the binding"
+    );
+    assert_eq!(edited[1].binding, published[1].binding);
+    assert_eq!(edited[2].binding, published[2].binding);
+
+    // And the reconcile writes it.
+    let no_catalog = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"objectives": {"requireCatalogAvailability": false}}),
+        );
+        value
+    };
+    let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
+    routes.push(patch(STATUS_PATH));
+    let (_, _, bodies) = drive(&policy_with(no_catalog, json!({})), routes);
+    let status = last_status_patch(&bodies);
+    assert_eq!(
+        status["status"]["credentialBindings"],
+        json!([
+            {"route": "oncall", "sink": "pagerduty", "secretName": "pd",
+             "binding": notification_binding(POLICY_UID, NotificationSink::PagerDuty, None)},
+            {"route": "oncall", "sink": "webhook", "secretName": "hooks",
+             "binding": notification_binding(POLICY_UID, NotificationSink::Webhook, None)}
+        ])
+    );
+}
+
+/// **A refused sink is a failed delivery whose `lastError` and
+/// `NotificationsDelivered` reason name `CredentialBindingMismatch`** — read
+/// from the closed `notify-result=` table, never from the pod's prose.
+///
+/// KILLS: `refused` unknown to the controller (read as "no notify-result
+/// line"); the condition reason left at `DeliveryFailed`; pod text echoed.
+#[test]
+fn fx20_a_refused_sink_is_a_failed_delivery_named_credential_binding_mismatch() {
+    let (state, message) = p::classify_delivery(
+        Some(1),
+        &[
+            &format!("pagerduty: CredentialBindingMismatch: {ROUTING_KEY}"),
+            "notify-result=pagerduty:refused",
+            "notify-result=webhook:ok",
+        ],
+    );
+    assert_eq!(state, p::DeliveryState::Failed);
+    assert!(
+        message.starts_with("CredentialBindingMismatch: "),
+        "{message}"
+    );
+    assert!(message.contains("pagerduty route"), "{message}");
+    assert!(!message.contains(ROUTING_KEY), "{message}");
+    // CONTROL: an ordinary failed sink is not a binding refusal.
+    let (_, message) = p::classify_delivery(Some(1), &["notify-result=pagerduty:failed"]);
+    assert!(
+        !message.starts_with("CredentialBindingMismatch"),
+        "{message}"
+    );
+
+    // Driven: the pod exited 1 with a refused line.
+    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
+    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 1);
+    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
+    let policy = policy_with(
+        {
+            let mut value = spec_value();
+            merge(
+                &mut value,
+                &json!({"objectives": {"requireCatalogAvailability": false}}),
+            );
+            value
+        },
+        json!({
+            "alerts": [{
+                "key": key, "kind": "Staleness", "state": "Open",
+                "openedAt": at(4), "transition": 1, "notifiedTransition": 1,
+                "delivery": {
+                    "state": "Pending", "attempts": 1, "lastAttemptAt": at(1),
+                    "jobRef": {"name": job_name.clone()}
+                }
+            }]
+        }),
+    );
+    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
+    routes.push(ok(job_path, finished_job(&job_name, "Failed")));
+    routes.push(ok("/pods", pod_list_exiting(&job_name, JOB_UID, 1)));
+    routes.push(ok(
+        POD_LOG_PATH,
+        "notify-result=pagerduty:refused\nnotify-result=webhook:ok\n".to_string(),
+    ));
+    routes.push(patch(STATUS_PATH));
+    routes.push(patch(job_path));
+    let (_, _, bodies) = drive(&policy, routes);
+    let status = last_status_patch(&bodies);
+    let delivery = &status["status"]["alerts"][0]["delivery"];
+    assert_eq!(delivery["state"], json!("Failed"));
+    assert!(
+        delivery["lastError"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("CredentialBindingMismatch: "),
+        "{delivery}"
+    );
+    let delivered = condition(&status, "NotificationsDelivered");
+    assert_eq!(delivered["status"], json!("False"));
+    assert_eq!(delivered["reason"], json!("CredentialBindingMismatch"));
 }

@@ -63,6 +63,7 @@ use kube::ResourceExt as _;
 use serde::{Deserialize, Serialize};
 
 use logweir_core::check_contract::CheckCode;
+use logweir_core::credential_binding;
 use logweir_core::destination::{
     engine_compatible, validate, validate_ca_bundle, Addressing, DestinationLocation,
     StorageProvider, TransportSecurity,
@@ -387,6 +388,14 @@ pub struct ResolvedDestination {
     pub ca_pem: Option<Vec<u8>>,
     /// The grant for [`ResolvedDestination::role`], after defaulting.
     pub grant: ResolvedGrant,
+    /// FX-20: this resolution stands for an INLINE archive — a legacy
+    /// `secretRef` read where an approved plan or an inline `archive.url`
+    /// says — and not for a `BackupDestination` object. Its Secret is bound to
+    /// the LOCATION ([`logweir_core::credential_binding::archive_location_binding`]),
+    /// because there is no object UID to bind it to. Omitted when `false`, so
+    /// every resolution serialised before it existed reads the same.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inline_archive: bool,
 }
 
 /// Where a CA bundle is, as a reference.
@@ -646,6 +655,7 @@ pub fn resolve(
         ca_sha256: None,
         ca_pem: None,
         grant,
+        inline_archive: false,
     })
 }
 
@@ -1186,7 +1196,23 @@ impl ResolvedDestination {
             self.location.region.as_deref(),
             self.ca_bundle.is_some(),
             &self.grant,
+            &self.credential_binding(),
         )
+    }
+
+    /// FX-20: the binding this destination's `SecretKeys` Secrets must carry
+    /// under `logweir-binding` — its UID and its whole archive route
+    /// ([`logweir_core::credential_binding::destination_binding`]), or the
+    /// fail-closed `unbound:no-uid` for an object with no UID. What
+    /// `status.credentialBinding` publishes, what the console writes into the
+    /// Secrets it creates, and what every Job built from this destination
+    /// expects.
+    #[must_use]
+    pub fn credential_binding(&self) -> String {
+        if self.inline_archive {
+            return credential_binding::archive_location_binding(&self.plan_storage());
+        }
+        binding_for(&self.uid, &self.plan_storage())
     }
 
     /// The EVIDENCE-side environment for a Job that already carries `archive`'s
@@ -1265,7 +1291,20 @@ impl ResolvedDestination {
             .ca_bundle
             .is_some()
             .then(|| format!("{PLAN_MOUNT_PATH}/{EVIDENCE_CA_PLAN_KEY}"));
-        Ok(render_evidence_env(&self.grant, &archive.grant, ca_file))
+        // THE EVIDENCE DESTINATION'S OWN BINDING, ALSO IN THE `archive` ARM.
+        // When the two grants name one Secret the evidence store presents the
+        // archive credential to THIS destination's route, so the Secret must
+        // be bound to THIS destination too — which a Secret bound to another
+        // destination is not (FX-20).
+        Ok(render_evidence_env(
+            &self.grant,
+            &archive.grant,
+            ca_file,
+            EvidenceBindings {
+                evidence: &self.credential_binding(),
+                archive: &archive.credential_binding(),
+            },
+        ))
     }
 
     /// The EVIDENCE-WRITE environment a CHECK Job adds so the create-only
@@ -1333,7 +1372,16 @@ impl ResolvedDestination {
                 ),
             ));
         }
-        Ok(Some(render_evidence_env(evidence_write, &self.grant, None)))
+        let binding = self.credential_binding();
+        Ok(Some(render_evidence_env(
+            evidence_write,
+            &self.grant,
+            None,
+            EvidenceBindings {
+                evidence: &binding,
+                archive: &binding,
+            },
+        )))
     }
 
     /// The value a run FREEZES — seam **S4**.
@@ -1412,6 +1460,13 @@ impl ResolvedDestination {
 ///
 /// `AWS_ENDPOINT_URL` is absent by construction: see
 /// [`AWS_ENDPOINT_URL_ENV`].
+///
+/// **FX-20: a `SecretKeys` grant brings its binding pair** —
+/// `LOGWEIR_ARCHIVE_CREDENTIAL_BINDING` as an OPTIONAL `secretKeyRef` to the
+/// same Secret's `logweir-binding` key, and
+/// `LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED` = `binding` as a literal — so
+/// every runner refuses a Secret written for another destination before it
+/// builds a store.
 #[must_use]
 fn render_job_env(
     transport: TransportSecurity,
@@ -1419,6 +1474,7 @@ fn render_job_env(
     region: Option<&str>,
     has_ca: bool,
     grant: &ResolvedGrant,
+    binding: &str,
 ) -> DestinationEnv {
     let mut env = DestinationEnv {
         literals: vec![
@@ -1485,6 +1541,13 @@ fn render_job_env(
                     key: token.clone(),
                 });
             }
+            push_binding_pair(
+                &mut env,
+                secret,
+                credential_binding::ARCHIVE_CREDENTIAL_BINDING_ENV,
+                credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV,
+                binding,
+            );
         }
         ResolvedGrant::WorkloadIdentity {
             service_account_name,
@@ -1545,11 +1608,25 @@ fn render_evidence_env(
     evidence_grant: &ResolvedGrant,
     archive_grant: &ResolvedGrant,
     ca_file: Option<String>,
+    bindings: EvidenceBindings<'_>,
 ) -> DestinationEnv {
     let mut env = DestinationEnv::default();
     if let Some(path) = ca_file {
         env.literals.push((EVIDENCE_CA_FILE_ENV.to_string(), path));
     }
+    // FX-20: AN EVIDENCE CREDENTIAL FROM A SECRET CARRIES ITS BINDING PAIR —
+    // its own Secret's `logweir-binding` against the EVIDENCE destination's
+    // binding. In the `archive` arm the evidence store reuses the archive
+    // credential, whose Secret the archive pair already checks; the pair is
+    // added there only when the two destinations' bindings DIFFER (a Restore
+    // whose evidence destination is another object), so a Secret bound to the
+    // source is refused before it reaches the evidence destination's route,
+    // and a Backup's one destination projects nothing twice.
+    let pair_needed = match evidence_grant {
+        _ if evidence_grant == archive_grant => bindings.evidence != bindings.archive,
+        ResolvedGrant::SecretKeys { .. } => true,
+        _ => false,
+    };
     match evidence_grant {
         _ if evidence_grant == archive_grant => {
             env.literals.push((
@@ -1601,8 +1678,133 @@ fn render_evidence_env(
         // the least harmful of the three ways to react to the impossible.
         ResolvedGrant::ControllerIdentity | ResolvedGrant::NotConfigured => {}
     }
+    if let (true, ResolvedGrant::SecretKeys { secret, .. }) = (pair_needed, evidence_grant) {
+        push_binding_pair(
+            &mut env,
+            secret,
+            credential_binding::EVIDENCE_CREDENTIAL_BINDING_ENV,
+            credential_binding::EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV,
+            bindings.evidence,
+        );
+    }
     env.literals.sort_by(|a, b| a.0.cmp(&b.0));
     env
+}
+
+/// FX-20: the two destinations' bindings an evidence environment is rendered
+/// against — the EVIDENCE destination's and the ARCHIVE destination's. Equal
+/// for a Backup (one destination), possibly different for a Restore.
+#[derive(Clone, Copy)]
+struct EvidenceBindings<'a> {
+    evidence: &'a str,
+    archive: &'a str,
+}
+
+/// FX-20: the binding pair one Secret-backed credential contributes — the
+/// Secret's `logweir-binding` key as an OPTIONAL `secretKeyRef` (an unbound
+/// Secret still reaches the runner, which refuses it by name) and the
+/// expectation as a literal.
+fn push_binding_pair(
+    env: &mut DestinationEnv,
+    secret: &str,
+    projected: &str,
+    expected_env: &str,
+    expected: &str,
+) {
+    env.literals
+        .push((expected_env.to_string(), expected.to_string()));
+    env.from_secret.push(EnvFromSecret {
+        name: projected.to_string(),
+        secret_name: secret.to_string(),
+        optional: true,
+        key: credential_binding::CREDENTIAL_BINDING_KEY.to_string(),
+    });
+}
+
+/// FX-20: what an INLINE archive's `secretRef` contributes to a runner Job —
+/// the binding pair for the `AWS_*` credential it projects, over the LOCATION
+/// the runner dials (`archive`: scheme, bucket and endpoint), and, when the
+/// run also writes evidence with that credential somewhere ELSE (an inline
+/// `Restore` whose approved plan names another bucket or endpoint for its
+/// `evidence:`), a second pair from the same Secret expecting the evidence
+/// location's binding — which one Secret cannot carry beside the first, so
+/// such a run is refused rather than presenting the credential at a location
+/// it was never bound to.
+///
+/// Literals and `secretKeyRef`s, appended by the caller beside the
+/// `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` pair it already projects.
+#[must_use]
+pub fn inline_archive_binding_env(
+    secret: &str,
+    archive: &StorageUrl,
+    evidence: Option<&StorageUrl>,
+) -> DestinationEnv {
+    let mut env = DestinationEnv::default();
+    let archive_binding = credential_binding::archive_location_binding(archive);
+    push_binding_pair(
+        &mut env,
+        secret,
+        credential_binding::ARCHIVE_CREDENTIAL_BINDING_ENV,
+        credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV,
+        &archive_binding,
+    );
+    if let Some(evidence) = evidence {
+        let evidence_binding = credential_binding::archive_location_binding(evidence);
+        if evidence_binding != archive_binding {
+            push_binding_pair(
+                &mut env,
+                secret,
+                credential_binding::EVIDENCE_CREDENTIAL_BINDING_ENV,
+                credential_binding::EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV,
+                &evidence_binding,
+            );
+        }
+    }
+    env
+}
+
+/// The location an inline-archive runner actually dials: the plan's (or the
+/// frozen) storage block, with an S3 endpoint and region the block leaves out
+/// filled from the `AWS_ENDPOINT_URL` and `AWS_REGION` the Job is handed —
+/// `object_store`'s own fall-back, so the binding covers the host the request
+/// really goes to. The region joined the location binding in FX-20's fix
+/// round (review F1); filling it here makes a `Restore` whose plan omits it
+/// expect the same binding as a `Backup` at that location, whose frozen block
+/// already carries the controller's `AWS_REGION`
+/// (`crate::retention::storage_url_for`).
+#[must_use]
+pub fn effective_inline_storage(
+    storage: &StorageUrl,
+    addressing: &[(String, String)],
+) -> StorageUrl {
+    let forwarded = |var: &str| {
+        addressing
+            .iter()
+            .find(|(name, value)| name == var && !value.trim().is_empty())
+            .map(|(_, value)| value.clone())
+    };
+    let mut effective = storage.clone();
+    if let StorageUrl::S3 {
+        endpoint, region, ..
+    } = &mut effective
+    {
+        if endpoint.as_deref().is_none_or(|e| e.trim().is_empty()) {
+            *endpoint = forwarded(AWS_ENDPOINT_URL_ENV);
+        }
+        if region.is_none() {
+            *region = forwarded(AWS_REGION_ENV);
+        }
+    }
+    effective
+}
+
+/// FX-20: a destination's binding, or the fail-closed expectation for an
+/// object with no UID.
+fn binding_for(uid: &str, archive: &StorageUrl) -> String {
+    if uid.trim().is_empty() {
+        return credential_binding::UNBOUND_NO_UID.to_string();
+    }
+    credential_binding::destination_binding(uid, archive)
 }
 
 /// The region one frozen archive `StorageUrl` names, or `None`.
@@ -1745,7 +1947,16 @@ impl ResolvedDestinationSnapshot {
             region_of(&self.archive_storage),
             self.ca_sha256.is_some(),
             &self.grant,
+            &self.credential_binding(),
         )
+    }
+
+    /// FX-20: [`ResolvedDestination::credential_binding`] over the FROZEN
+    /// block — the same UID and the same archive route, so a Job re-created
+    /// from the snapshot expects exactly what the first one did.
+    #[must_use]
+    pub fn credential_binding(&self) -> String {
+        binding_for(&self.uid, &self.archive_storage)
     }
 
     /// The EVIDENCE-side environment a Job rendered from THIS FROZEN BLOCK
@@ -1770,7 +1981,16 @@ impl ResolvedDestinationSnapshot {
         let evidence = self.evidence_grant.as_ref().unwrap_or(&self.grant);
         let ca_file = (self.ca_sha256.is_some() && *evidence != self.grant)
             .then(|| format!("{PLAN_MOUNT_PATH}/{ARCHIVE_CA_PLAN_KEY}"));
-        render_evidence_env(evidence, &self.grant, ca_file)
+        let binding = self.credential_binding();
+        render_evidence_env(
+            evidence,
+            &self.grant,
+            ca_file,
+            EvidenceBindings {
+                evidence: &binding,
+                archive: &binding,
+            },
+        )
     }
 
     /// The ONE canonical encoding of this block — `logweir_core::det_json`, the

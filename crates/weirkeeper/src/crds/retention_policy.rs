@@ -499,6 +499,16 @@ pub struct RetentionPolicyStatus {
     /// The points a run has claimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease: Option<RetentionLease>,
+    /// FX-20: the binding `spec.enforcement.credentialSecretRef`'s Secret must
+    /// carry under its `logweir-binding` key —
+    /// `v1:<policy uid>:sha256:<digest of the destination's route and the
+    /// scope>` — for the worker to use the delete-capable key at all. Public
+    /// (a UID and a digest, never a credential). A Secret without it, or with
+    /// another policy's, or bound before the destination of this name was
+    /// re-created at another route, is refused before any handle is built
+    /// (`CredentialBindingMismatch`). Absent without `spec.enforcement`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_binding: Option<String>,
     /// How many runs have failed in a row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consecutive_run_failures: Option<i64>,

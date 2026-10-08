@@ -7496,7 +7496,9 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
     );
     let argv = argv_against(&dir, &emitted);
 
-    let run = |env: &[(String, String)]| {
+    // `archive_binding`: what the archive Secret's `logweir-binding` projects —
+    // `None` for the value a bound Secret carries (the expectation itself).
+    let run_with = |env: &[(String, String)], archive_binding: Option<&str>| {
         let mut command = std::process::Command::new(runner_binary());
         command.args(&argv).env_remove("LOGWEIR_SOURCE_PASSWORD");
         for (name, value) in env {
@@ -7521,6 +7523,17 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
         {
             command.env("LOGWEIR_SOURCE_CREDENTIAL_BINDING", expected);
         }
+        // FX-20: the same for the DESTINATION's Secret — its `logweir-binding`
+        // carries the destination's binding when the console created it.
+        if let Some((_, expected)) = env
+            .iter()
+            .find(|(n, _)| n == "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED")
+        {
+            command.env(
+                "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING",
+                archive_binding.unwrap_or(expected),
+            );
+        }
         let out = command.output().expect("the runner binary runs");
         (
             out.status.code(),
@@ -7528,6 +7541,7 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
             String::from_utf8_lossy(&out.stderr).into_owned(),
         )
     };
+    let run = |env: &[(String, String)]| run_with(env, None);
 
     // ---- POSITIVE: the complete rendered env gets PAST the stores -------
     let (code, _stdout, stderr) = run(&rendered);
@@ -7571,6 +7585,41 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
         stdout.lines().any(|l| l.starts_with("refusal-reason=")),
         "…and it refuses through Global Constraint 11's channel, so a controller can read the \
          reason off the pod log. stdout: {stdout}"
+    );
+
+    // ---- FX-20: the destination Secret bound to ANOTHER destination -----
+    //
+    // The complete rendered env, but the archive Secret's `logweir-binding`
+    // names another destination: the real runner refuses with
+    // `CredentialBindingMismatch` before it builds a store (the positive arm
+    // above is the control: same env, bound Secret, past the stores).
+    let foreign = logweir_core::credential_binding::destination_binding(
+        "e0000000-0000-4000-8000-0000000000ff",
+        &logweir_core::engine::StorageUrl::S3 {
+            bucket: "lw-a".to_string(),
+            prefix: "team-a/prod".to_string(),
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://minio-a.storage.svc:9000".to_string()),
+            path_style: true,
+            allow_http: false,
+        },
+    );
+    let (code, stdout, stderr) = run_with(&rendered, Some(&foreign));
+    assert_eq!(code, Some(3), "stderr: {stderr}");
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l == "refusal-reason=CredentialBindingMismatch"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING")
+            && !stderr.contains("$LOGWEIR_SOURCE_PASSWORD is unset"),
+        "refused at the binding, before the stores and the credential projection: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&foreign),
+        "the foreign binding is never echoed: {stderr}"
     );
 }
 

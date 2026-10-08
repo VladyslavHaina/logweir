@@ -793,6 +793,78 @@ Branch `claude/prod-04-0a`. `logweir-kafka` keeps `#![forbid(unsafe_code)]` and 
 
 The ACL setup is built inside the row itself, on FX-4's `acl` profile, for PROD-04.0d to absorb.
 
+
+## 14. Landed: PROD-04.0b
+
+Branch `claude/prod-04-0b`. OD-6 (a2): this row is the first to land FFI, so it took all four steps of §7.4.
+
+**The fence.**
+- `#![forbid(unsafe_code)]` on the five roots L1 found without it, and on the ten `examples/` targets the review listed.
+- ONE crate may contain `unsafe`: `crates/logweir-rdkafka-ffi`, used only by `logweir-kafka` (behind its `client` feature), depending only on `rdkafka`. No third-party package was added; the graph grew by this workspace member (403 packages).
+- `scripts/check-unsafe-scope.sh`, in `just lint`: the perimeter is exactly that crate (its users and its dependencies included); every lib, bin and example root elsewhere forbids `unsafe_code`; no code-shaped `unsafe`, foreign `extern` block, `no_mangle`/`export_name`/`link_section` or relaxed `unsafe_code` lint outside the perimeter's `src/` (comments and literals stripped first); the perimeter's root keeps `deny(unsafe_op_in_unsafe_fn)` and `deny(clippy::undocumented_unsafe_blocks)`; every `unsafe` in it sits under a `// SAFETY:` comment (an `unsafe fn` under a `# Safety` section). Its negative control is `crates/logweir/tests/unsafe_scope_gate.rs` (overlays with planted violations).
+- `clippy.toml` (new) disallows rust-rdkafka's `GroupInfo::members` (T1) while rdkafka is below 0.37, with AP-04.1-4's gate test.
+
+**The calls** (`logweir-rdkafka-ffi`, owned values, no interpretation): `groups::list_consumer_groups` (ListConsumerGroups), `groups::list_group_names` (`rd_kafka_list_groups`, for the names of every type), `groups::describe_consumer_groups`, `cluster::describe_cluster` (authorized operations) and `acls::describe_acls`. The name listing is made inside the perimeter rather than through rust-rdkafka's `fetch_group_list`, so no `GroupInfo` is ever built (T1), each group's error is visible (C2), and text that is not UTF-8 cannot panic. ADR 0004's amendment (§8.1, filled in for (a2)) names it beside the four calls. It is an ADR 0004 amendment, not an ADR 0008 one, so rule 8 does not gate it.
+
+**The decisions** are pure modules of `logweir-kafka`, available under `--no-default-features`: `groups` (§5, one verdict per selected id), `acls` (T9–T11), `access` (DescribeCluster's three states). `RdKafkaReader` gains `classify_groups`, `describe_groups`, `group_listings`, `cluster_access`, `capture_acls` and `with_admin_bound` (default 15 s).
+
+**Found while landing it.**
+- **A typed listing can be `Ok` and incomplete.** With no broker reachable, librdkafka answers ListConsumerGroups with no group and one per-broker `_TIMED_OUT` entry, not a call error (unit row `every_group_call_is_bounded_without_a_broker`). A listing with per-broker errors is therefore never complete (T16's class).
+- **T19 (new): the legacy name listing keeps only the last broker's error.** Both callbacks of `rd_kafka_list_groups` end with `state->err = err` (`rdkafka.c:5028`, `:5119` in rdkafka-sys 4.10.0+2.12.1), so on a cluster of several brokers a failed broker followed by one that answered reads as success, without the failed broker's groups. Guard: every id of the typed listing must appear in the name listing, or the listings are not complete. Limit: it cannot see a lost broker that coordinates only share or streams groups; single-broker fixtures cannot show it.
+- **T20 (new): a refused coordinator lookup leaks inside librdkafka.** A targeted DescribeConsumerGroups for a group the principal may not Describe (FindCoordinator answers 30) leaks the coordinator request: 224 bytes per call, measured with `leaks` (1 call: 2 leaks, 224 bytes; 20 calls: 40 leaks, 4,480 bytes). The permanent-error branch of `rd_kafka_coord_req_handle_FindCoordinator` returns without dropping the reference `rd_kafka_coord_req_fsm` took (`rdkafka_coord.c:429-431` against `:569`), unchanged in v2.15.1 (`artifacts/prod-04-0b/librdkafka-v2.15.1-rdkafka_coord.c`, sha256 `4f6a9671…`). It costs a short-lived capture nothing measurable; a long-lived process that classifies hidden groups repeatedly grows by 224 bytes per hidden group per classification. Upstream report proposed, not filed.
+- **DescribeCluster's NULL is not an empty set.** librdkafka returns NULL authorized operations when the broker reported none, and a non-NULL zero-length array when it reported a refusal of everything (`rdkafka_admin.c:7713-7749`). `ClusterAccess::NotReported` and `Reported(vec![])` keep them apart.
+- **AP-05.3-1 and AP-05.3-2 meet in §3.8's denied principal**, whose DescribeConfigs is refused (the authorizer key is missing, T13) AND whose cluster operations are reported empty. `acl_coverage` gives `captureDenied`: the reported refusal is the positive fact. A missing key with Describe allowed stays `unverified` (measured below). PROD-05.3 should state this precedence in its export.
+
+**Measured** on a PROD-01.5 slot (slot 2, `--profiles acl,streams-protocol`), by `e2e/tests/group_admin.rs`, every row against the broker's own tools:
+
+| Row | Kafka 4.3.1 | Kafka 3.9.2 |
+| --- | --- | --- |
+| one verdict per fixture id | classic and consumer groups captured with the broker's type, state and member count; `pa-share-idle`, `pa-share-live` and `logweir-e2e-streams-protocol` `GroupTypeNotCaptured`; an absent id `GroupNotFound` (complete listing) and still absent after; the typed listing alone showed 4 of the 7 groups | the two classic groups captured (Empty, 0 members; Stable, 1 member on `range`); the absent id as on 4.3.1 |
+| hidden group (§3.9 setup, `User:logweir`) | listing not complete (`NoDescribeOnCluster`); `pa-hidden` `NotVisibleToPrincipal`; an absent id `GroupNotFound` by targeted describe; `pa-visible` captured; 180 ms. Super user: complete, `pa-hidden` captured. Describe on the cluster granted: complete, `pa-hidden` captured, its description `NotAuthorized` | the same verdicts; 249 ms |
+| ACLs, no authorizer | `AuthorizerDisabled`; `kafka-acls.sh` says SecurityDisabledException | the same |
+| ACLs, StandardAuthorizer, super user | `Captured`; 7 nameable bindings equal `kafka-acls.sh --list` exactly (CLUSTER named CLUSTER, PREFIXED kept); 4 not representable (USER CreateTokens and DescribeTokens, DELEGATION_TOKEN Describe, TRANSACTIONAL_ID TwoPhaseCommit), the same 4 the CLI lists | the same 7; 3 not representable (3.9 has no TwoPhaseCommit) |
+| ACLs, `User:logweir` under the §3.9 setup | `CaptureDenied`; Describe on the cluster granted: `Unverified` (its DescribeConfigs refused); DescribeConfigs too: `Captured`, the super user's 5 bindings | the same |
+| soak | 7,000 admin calls (6,000 through the FFI crate) in 23 s; resident set 14,720 → 13,472 KiB | 7,000 in 16 s; 15,104 → 14,960 KiB |
+
+**The legacy 3.7.1 line** (measured once, not a committed row): it serves ListGroups below v5, so the typed listing carries type 0 (Unknown) for every group, and T4's rule excludes both classic fixture groups as `GroupTypeNotCaptured` (`UnknownType { raw: 0 }`; the broker's own `--list --type` cannot say either). 3.7 is a legacy line (PROD-01.5), and PROD-01.5a moves the default off it. If PROD-04.1 must capture there, it needs a rule this row does not take: for example, a group of Unknown type that the classic describe answers live with protocol type `consumer`, on a broker without KIP-848 groups, is classic. That is a decision for PROD-04.1's brief, not a change to T4.
+
+**Memory checks.** `leaks --atExit` over five e2e rows (4.3.1): one leak root, T20's (librdkafka's coordinator request), none in this crate. Guard Malloc (`libgmalloc`, freed pages unmapped) over the FFI unit rows, including a 100,000-call soak, and over five e2e rows (4.3.1): no fault. `-Zsanitizer=address` (stable 1.89 with `RUSTC_BOOTSTRAP=1`; no nightly is installed) builds, but its runtime deadlocks in its own initialization on this macOS (`artifacts/prod-04-0b/asan-init-deadlock-sample.txt`), so no ASan run exists.
+
+**For PROD-01.4a: adding DescribeTopics to the crate.**
+1. A module `crates/logweir-rdkafka-ffi/src/topics.rs` with `describe_topics(client, names, timeout)`, built on `raw::run` (`RD_KAFKA_ADMIN_OP_DESCRIBETOPICS`, `RD_KAFKA_EVENT_DESCRIBETOPICS_RESULT`), returning owned values. Validate the names first (empty list, blank, NUL, duplicates), as `groups::describe_request` does.
+2. The topic collection from `rd_kafka_TopicCollection_of_topic_names` in a guard whose `Drop` calls `rd_kafka_TopicCollection_destroy` exactly once; librdkafka copies the names into the request (`rd_strdup`).
+3. Read each `rd_kafka_TopicDescription_t` while the event lives: the name through `raw::text`, the per-topic error through `raw::raw_error` (its code through `sys::error_code`, T12), and the id's two halves through `rd_kafka_Uuid_most_significant_bits` and `…_least_significant_bits` (`i64`). Never `rd_kafka_Uuid_base64str` (PROD-01.4 C4). Read no field of a librdkafka struct whose binding type is a Rust enum except through a pointer cast to a C integer.
+4. A `// SAFETY:` comment over every `unsafe` block, naming the obligations it relies on; `cargo clippy -D warnings` and `check-unsafe-scope.sh` refuse one without it. The gate needs no change: the perimeter is the same crate, and it must still depend on `rdkafka` alone.
+5. The interpretation (zero halves are `null`, the canonical text, the fallback heuristic) in a pure module of `logweir-kafka`, reached by a method on `RdKafkaReader`.
+6. Tests: a broker-free bounded-call row (`test_support::offline_client`), the existing `raw` soak, Guard Malloc over the unit rows, and an e2e row comparing ids with `kafka-topics.sh --describe` on 4.3 and 3.9.
+7. ADR 0004's amendment then reads "wraps DescribeTopics" in the present tense, and the crate's table of calls gains a row.
+
+**Not run here:** clusters of several brokers (T6's duplicates, T19); a consumer group caught in `Assigning` or `Reconciling` (T4 rests on unit rows); a broker that reports no authorized operations (unit rows only).
+
+
+### 14.1 Fix round (2026-10-08, review `claude/prod-04-0b.review.md`)
+
+- **H1: the fixture row on the legacy default line.** CI's `e2e` job and engine-matrix's 3.7.1 rows run the non-ignored `group_admin` rows on the 3.7.1 default stack, where the broker prints TYPE `-` and the typed listing carries type 0. The row now reads the line from the broker's answer and, there, asserts the legacy outcome: every typed fixture entry has type 0, every fixture group is `GroupTypeNotCaptured { UnknownType { raw: 0 } }`, and no description is taken. It never skips.
+- **M1, M2: rustc is the first layer of the fence.** The root `Cargo.toml` carries `[workspace.lints.rust] unsafe_code = "forbid"`, and every member except the perimeter takes it, so rustc refuses `unsafe`, `no_mangle`, `export_name`, `link_section` and `global_asm!` in every target: tests, benches and build scripts included. Measured: a test target holding the review's macro, `cfg_attr(.., no_mangle)` and `global_asm!` is refused, and so is a build script's `unsafe` block. The gate requires the table and each opt-in, and its scan now flags any `unsafe` token, those attributes anywhere, `global_asm!`/`naked_asm!`, `allow`/`warn`/`expect` of `unsafe_code`, any `include!`, and a `#[path]` into the perimeter or out of the tree. It prunes only at the root. Every pattern has a negative control.
+- **L1: absence and "other type" need a listing that lost no broker.**
+  - The classic stand-in proves an unlisted id absent only when the listings are incomplete through the principal's visibility (no Describe on the cluster, operations not reported or unread). With a typed-listing error, `_PARTIAL` or T19's mismatch, the verdict is `failed: AbsenceUnproven`.
+  - Its twin: a group only the name listing shows is `GroupTypeNotCaptured` only when the typed listing lost no broker. Otherwise it is `failed: TypeUnproven`, since a classic or consumer group the lost broker coordinates is missing from the typed listing too.
+- **L2:** the e2e soak's bound is 1 MiB. Measured growth was 0 KiB; one leaked name listing per round grows it by about 3 MiB.
+- **L3:** the glue's choice of targeted ids and its answer mapping are the pure `groups::classify_with`, unit-tested with a fake describe.
+- **ASan, from the review:** the FFI unit rows pass under AddressSanitizer on Linux (nightly, aarch64, in Docker, 4 MB quarantine), with a planted double free and a planted use-after-free each reported. LeakSanitizer gave no signal there; leak coverage rests on the RSS soaks and macOS `leaks`.
+- **L4:** `e2e/tests/group_admin.rs::on_three_brokers_an_existing_group_is_never_excluded_while_one_is_down`, on the `cluster3` profile. Measured on 3.9.2 and 4.3.1:
+  - 12 groups were spread over all three coordinators, with 12 typed entries (no T6 duplicate on librdkafka 2.12.1 here).
+  - With `kafka-c3-2` stopped, every classification in the minute was not complete: DescribeCluster timed out waiting for the controller, the typed listing carried `_TIMED_OUT`, the name listing failed `_TRANSPORT` (−195), and T19's cross-check fired.
+  - All 12 groups stayed captured: the typed listing still listed them from their new coordinators, and none was ever excluded.
+  - T19's silent masking itself was not provoked. The legacy listing failed outright instead.
+
+**The rule recommended for PROD-04.1 on brokers below ListGroups v5 (3.7.x; PROD-04.1 decides).** Keep T4: an Unknown type is never captured on the listing's word alone. Add one narrow legacy rule, applied only to entries of the typed listing whose type is Unknown:
+- capture as **classic** an entry whose protocol type is empty (`is_simple`): KIP-848 groups always list protocol type `consumer`, and the typed listing keeps only `""` and `consumer` (C7);
+- for an entry whose protocol type is `consumer`, send a targeted DescribeConsumerGroups, and capture it as the type described only when that answer cannot be the stand-in: **Consumer** (a KIP-848 early-access group, answered by ConsumerGroupDescribe), or **Classic** with at least one member or with the listing's own non-Dead state (the classic describe tells the truth for a real classic group, §3.1);
+- everything else stays `GroupTypeNotCaptured { UnknownType }`.
+
+Commit it with unit rows, the 3.7.1 e2e row turned to expect captures, and a negative control: a Dead, memberless stand-in is never captured. The alternative is to declare 3.7 unsupported for group capture and land PROD-01.5a (the default line off 3.7.1) first. Either way the 3.7.1 row states the outcome.
+
 ---
 
 Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).

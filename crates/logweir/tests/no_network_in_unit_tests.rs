@@ -115,7 +115,7 @@ const DIAL_TOKENS: [&str; 17] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 29] = [
+const ALLOWED: [(&str, &str); 31] = [
     (
         "crates/logweir/src/check/kafka.rs",
         "production: D2 §4.2's check runner dials BY DESIGN, and this module is the one \
@@ -239,6 +239,19 @@ const ALLOWED: [(&str, &str); 29] = [
          defines all four constructors by name; `127.0.0.1:1` is DEAD_METADATA_ENDPOINT, \
          the address D2 §3.5 pins the instance-metadata endpoint to precisely so that a \
          credential chain reaching it is refused instead of picking up a node role",
+    ),
+    (
+        "crates/logweir-store/tests/region_backstop.rs",
+        "FX-20 fix round (review F1): builds handles only and issues NO request — it \
+         asserts that every constructor refuses a region that is not a region name before \
+         a client exists, and that real regions build; no endpoint is ever contacted",
+    ),
+    (
+        "crates/weirkeeper/tests/fx20_region_binding.rs",
+        "FX-20 fix round (review F1), the reviewer's probe as a row: the refused \
+         constructors build no client; the NEGATIVE CONTROL dials only a loopback listener \
+         the test itself binds on 127.0.0.1:0 (one GET, a 2 s timeout, no retries), which is \
+         what makes `the listener saw nothing` an observation and not an assumption",
     ),
     (
         "crates/logweir-store/tests/options.rs",

@@ -1,0 +1,243 @@
+{
+  "_comment": "FX-20 (and its fix round, review F1/F2): every credential binding form, as scripts/bind-credential.py computes it from an object's spec and as logweir_core computes it in the product. Read by scripts/test_bind_credential_rows.py and crates/logweir-core/tests/binding_fixture.rs; a drift on either side fails both.",
+  "location": [
+    {
+      "url": "s3://kafka-backups/team-a/prod",
+      "endpoint": "HTTPS://MinIO.storage.svc:9000/",
+      "region": "us-east-1",
+      "pathStyle": true,
+      "allowHttp": false,
+      "binding": "v1:location:sha256:83a99a8ec3917561e9ea11394b08fc3f65015eb399b28f6863dc4a5453ab87bb"
+    },
+    {
+      "url": "s3://kafka-backups",
+      "endpoint": "https://minio.storage.svc:9000",
+      "region": "us-east-1",
+      "pathStyle": true,
+      "allowHttp": false,
+      "binding": "v1:location:sha256:83a99a8ec3917561e9ea11394b08fc3f65015eb399b28f6863dc4a5453ab87bb"
+    },
+    {
+      "url": "s3://victim-backups/team-a",
+      "endpoint": "aws",
+      "region": "us-east-1",
+      "pathStyle": false,
+      "allowHttp": false,
+      "binding": "v1:location:sha256:200e9576477040565f0333994001e76d9a8f78a77df3ef75cfef51ff8d50c85c"
+    },
+    {
+      "url": "s3://victim-backups/team-a",
+      "endpoint": "aws",
+      "region": "x@127.0.0.1:9/",
+      "pathStyle": false,
+      "allowHttp": false,
+      "binding": "v1:location:sha256:f2c6847551f419521957da0a202e22eaa42d3699ea3e36e2139f78b6f8fd9816"
+    },
+    {
+      "url": "s3://victim-backups/team-a",
+      "endpoint": "aws",
+      "region": "us-east-1",
+      "pathStyle": true,
+      "allowHttp": false,
+      "binding": "v1:location:sha256:2e272dbe728de18b5e2d2ce3d85a592bc104c1c6a4a8775a31445caf41d736e1"
+    },
+    {
+      "url": "s3://kafka-backups",
+      "endpoint": "http://minio:9000",
+      "region": null,
+      "pathStyle": true,
+      "allowHttp": true,
+      "binding": "v1:location:sha256:2a46d47fc6a822c2bc75b1e26186e0d86d2ac20f87f7d50c0b2e171fcdeacce1"
+    },
+    {
+      "url": "gs://gcs-archive/p",
+      "endpoint": "aws",
+      "region": null,
+      "pathStyle": false,
+      "allowHttp": false,
+      "binding": "v1:location:sha256:448c0659e01e2ad5568c798b6544986e9db569d20fa1aa1938f057a2f550309b"
+    },
+    {
+      "url": "az://account/container/p",
+      "endpoint": "aws",
+      "region": null,
+      "pathStyle": false,
+      "allowHttp": false,
+      "binding": "v1:location:sha256:6ea8581798f8872ad18a2d4142088409221683af7e94eba95b96108a9cddac23"
+    }
+  ],
+  "destination": [
+    {
+      "uid": "1f646ab8-98c1-4164-b52b-3573971db4c0",
+      "spec": {
+        "storage": {
+          "provider": "S3",
+          "bucket": "kafka-backups",
+          "prefix": "poc",
+          "endpoint": "http://logweir-minio.logweir-system.svc:9000",
+          "addressing": "PathStyle"
+        },
+        "transport": {
+          "security": "InsecureHTTP"
+        }
+      },
+      "binding": "v1:1f646ab8-98c1-4164-b52b-3573971db4c0:sha256:7b9f86e609354bbca582f72ebb603e2883a2a73540956eaf3a1fa8e7c356e274"
+    },
+    {
+      "uid": "1f646ab8-98c1-4164-b52b-3573971db4c0",
+      "spec": {
+        "storage": {
+          "provider": "S3",
+          "bucket": "victim-backups",
+          "prefix": "team-a",
+          "region": "eu-west-1",
+          "addressing": "VirtualHosted"
+        },
+        "transport": {
+          "security": "TLS"
+        }
+      },
+      "binding": "v1:1f646ab8-98c1-4164-b52b-3573971db4c0:sha256:9f1a50e26040da5f0940a6534d7d4f59083a0a738f23278c15ff2acd3a54c7e3"
+    }
+  ],
+  "retention": [
+    {
+      "uid": "7d1c2b9e-0000-4000-8000-0000000000r1",
+      "destinationSpec": {
+        "storage": {
+          "provider": "S3",
+          "bucket": "kafka-backups",
+          "prefix": "poc",
+          "endpoint": "http://logweir-minio.logweir-system.svc:9000",
+          "addressing": "PathStyle"
+        },
+        "transport": {
+          "security": "InsecureHTTP"
+        }
+      },
+      "scope": "poc/old",
+      "binding": "v1:7d1c2b9e-0000-4000-8000-0000000000r1:sha256:d944cf647690ef046a069fc051c442b349ede8832deb18ba569bbddfb21c6d25"
+    },
+    {
+      "uid": "7d1c2b9e-0000-4000-8000-0000000000r1",
+      "destinationSpec": {
+        "storage": {
+          "provider": "S3",
+          "bucket": "victim-backups",
+          "prefix": "team-a",
+          "region": "eu-west-1",
+          "addressing": "VirtualHosted"
+        },
+        "transport": {
+          "security": "TLS"
+        }
+      },
+      "scope": "team-a",
+      "binding": "v1:7d1c2b9e-0000-4000-8000-0000000000r1:sha256:0612818a807a24c257843ed64a91d3d0ac1937f69adf67c4bca0bb20609de45f"
+    }
+  ],
+  "notification": [
+    {
+      "uid": "3a9e7f10-0000-4000-8000-0000000000p1",
+      "sink": "pagerduty",
+      "endpoint": null,
+      "binding": "v1:3a9e7f10-0000-4000-8000-0000000000p1:sha256:d3c4a77dbaa94c2650138824db1f2bdd644ad00b2f4dc13c33710befa6261d12"
+    },
+    {
+      "uid": "3a9e7f10-0000-4000-8000-0000000000p1",
+      "sink": "pagerduty",
+      "endpoint": " https://events.eu.pagerduty.com/v2/enqueue ",
+      "binding": "v1:3a9e7f10-0000-4000-8000-0000000000p1:sha256:652657cff97ad943e9ea192df0512de443c8b5b057de9ea181977eebdd2242c3"
+    },
+    {
+      "uid": "3a9e7f10-0000-4000-8000-0000000000p1",
+      "sink": "webhook",
+      "endpoint": null,
+      "binding": "v1:3a9e7f10-0000-4000-8000-0000000000p1:sha256:fec0e5231f70b0973b4b3002d5a964da7152144f8d235fb509e6590e5b9deac3"
+    },
+    {
+      "uid": "3a9e7f10-0000-4000-8000-0000000000p1",
+      "sink": "slack",
+      "endpoint": null,
+      "binding": "v1:3a9e7f10-0000-4000-8000-0000000000p1:sha256:a6c8b343cb12828350d915e731a82001b0632f468451049701e21a16b95b89b5"
+    }
+  ],
+  "kafka": [
+    {
+      "uid": "5b1e0000-0000-4000-8000-0000000000k1",
+      "spec": {
+        "bootstrapServers": [
+          "b-2.kafka:9096",
+          " b-1.kafka:9096",
+          "b-2.kafka:9096"
+        ],
+        "auth": {
+          "mode": "scramSha512",
+          "username": "svc-logweir",
+          "tls": true,
+          "secretRef": {
+            "name": "kafka-pw"
+          },
+          "tlsCa": {
+            "configMapKeyRef": {
+              "name": "kafka-ca",
+              "key": "ca.crt"
+            }
+          }
+        }
+      },
+      "binding": "v1:5b1e0000-0000-4000-8000-0000000000k1:sha256:e1085aac8b0018faf73eb44e50be0dfe5123ec2a069a651bb63a4ecd55d02606"
+    },
+    {
+      "uid": "5b1e0000-0000-4000-8000-0000000000k2",
+      "spec": {
+        "bootstrapServers": [
+          "kafka:9092"
+        ],
+        "auth": {
+          "mode": "plaintext"
+        }
+      },
+      "binding": "v1:5b1e0000-0000-4000-8000-0000000000k2:sha256:1a364164b0db6e125ddb91b0e78376e2523e629857f5bede197bb9b418aede31"
+    },
+    {
+      "uid": "5b1e0000-0000-4000-8000-0000000000k3",
+      "spec": {
+        "bootstrapServers": [
+          "kafka:9093"
+        ],
+        "auth": {
+          "mode": "mtls",
+          "tls": true,
+          "clientCertificate": {
+            "name": "client-tls"
+          },
+          "tlsCa": {
+            "secretKeyRef": {
+              "name": "kafka-ca",
+              "key": "ca.crt"
+            }
+          }
+        }
+      },
+      "binding": "v1:5b1e0000-0000-4000-8000-0000000000k3:sha256:a9ea27d5eda72eb7f346ce6a533790f2ba31d53ed5136e18eb5d2bd0c16725a1"
+    },
+    {
+      "uid": "5b1e0000-0000-4000-8000-0000000000k4",
+      "spec": {
+        "bootstrapServers": [
+          "pkc.confluent.cloud:9092"
+        ],
+        "auth": {
+          "mode": "plain",
+          "username": "API-KEY-ID",
+          "tls": true,
+          "secretRef": {
+            "name": "cc"
+          }
+        }
+      },
+      "binding": "v1:5b1e0000-0000-4000-8000-0000000000k4:sha256:91fa7974e1399c914ed620f6b28508401101ca0c49caaf2cf6eeb97fcec70446"
+    }
+  ]
+}

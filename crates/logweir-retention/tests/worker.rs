@@ -1088,3 +1088,177 @@ fn the_key_lines_are_shaped_as_the_contract_prints_them() {
         "retention-result=deleted=1 failed=0 objects=2"
     );
 }
+
+// ===========================================================================
+// FX-20: the delete-capable key is used only when it is bound to this policy
+// ===========================================================================
+
+/// **An unbound or foreign delete key — or record key — is refused at
+/// admission, before the plan file is even read; its own binding admits.**
+///
+/// The confused deputy: a `RetentionPolicy` author who cannot read Secrets
+/// names another policy's delete-capable Secret, or keeps theirs while the
+/// destination of that NAME is re-created at an endpoint they control. The
+/// worker signs requests (and deletes) with whatever Secret the Job projected,
+/// so the binding is checked first.
+///
+/// KILLS: the admission check dropped; only one of the two pairs checked; the
+/// check placed after the plan read.
+#[test]
+fn fx20_an_unbound_or_foreign_credential_is_refused_before_anything_is_read() {
+    let bytes = plan_bytes(vec![line("lwp1-a", "set-a", &["seg-0"])]);
+    let digest = digest_of(&bytes);
+    let route = logweir_core::engine::StorageUrl::S3 {
+        bucket: "kafka-backups".to_string(),
+        prefix: SCOPE.to_string(),
+        region: Some("us-east-1".to_string()),
+        endpoint: Some("http://minio.storage.svc:9000".to_string()),
+        path_style: true,
+        allow_http: true,
+    };
+    let delete_binding = logweir_core::credential_binding::retention_binding(UID, &route, SCOPE);
+    let record_binding = logweir_core::credential_binding::destination_binding("dest-uid", &route);
+    let bound = |archive: Option<&str>, evidence: Option<&str>| {
+        let mut env = full_env(&digest);
+        env.insert(
+            "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED".to_string(),
+            delete_binding.clone(),
+        );
+        env.insert(
+            "LOGWEIR_EVIDENCE_CREDENTIAL_BINDING_EXPECTED".to_string(),
+            record_binding.clone(),
+        );
+        if let Some(v) = archive {
+            env.insert(
+                "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING".to_string(),
+                v.to_string(),
+            );
+        }
+        if let Some(v) = evidence {
+            env.insert(
+                "LOGWEIR_EVIDENCE_CREDENTIAL_BINDING".to_string(),
+                v.to_string(),
+            );
+        }
+        env
+    };
+    let other_policy = logweir_core::credential_binding::retention_binding(
+        "99999999-0000-4000-8000-000000000099",
+        &route,
+        SCOPE,
+    );
+    for (row, env, variable) in [
+        (
+            "delete key unbound",
+            bound(None, Some(&record_binding)),
+            "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING",
+        ),
+        (
+            "delete key bound to another policy",
+            bound(Some(&other_policy), Some(&record_binding)),
+            "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING",
+        ),
+        (
+            "record key bound elsewhere",
+            bound(Some(&delete_binding), Some(&other_policy)),
+            "LOGWEIR_EVIDENCE_CREDENTIAL_BINDING",
+        ),
+    ] {
+        let read = std::cell::Cell::new(false);
+        let err = admit(&argv(), &env, |_| {
+            read.set(true);
+            Ok(bytes.clone())
+        })
+        .expect_err(row);
+        assert!(
+            matches!(err, Refusal::CredentialBinding(_)),
+            "{row}: {err:?}"
+        );
+        assert_eq!(err.exit_code(), EXIT_REFUSED, "{row}");
+        assert_eq!(err.code(), Some("CredentialBindingMismatch"), "{row}");
+        let message = err.to_string();
+        assert!(
+            message.starts_with("CredentialBindingMismatch: ") && message.contains(variable),
+            "{row}: {message}"
+        );
+        assert!(!message.contains("delete-secret") && !message.contains(&other_policy));
+        assert!(
+            !read.get(),
+            "{row}: the plan was read before the binding refusal"
+        );
+    }
+    // CONTROL: both bound — admitted, and both keys carried.
+    let admitted = admit_with(
+        &argv(),
+        &bound(Some(&delete_binding), Some(&record_binding)),
+        bytes.clone(),
+    )
+    .expect("both credentials bound to this run admit");
+    assert!(admitted.archive_keys.is_some() && admitted.evidence_keys.is_some());
+}
+
+/// **The shipped binary prints the closed `retention-refusal=` code its
+/// controller publishes, exits 3, and deletes nothing.** A process row, with a
+/// deadline, because the line is written by `main` and not by the library.
+#[test]
+fn fx20_the_shipped_worker_names_a_binding_refusal_on_stdout() {
+    // No `tempfile` dev-dependency in this crate: a unique scratch directory
+    // under the system temp dir, removed at the end.
+    let dir = std::env::temp_dir().join(format!(
+        "fx20-retention-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let plan = dir.join("plan.json");
+    let bytes = plan_bytes(vec![line("lwp1-a", "set-a", &["seg-0"])]);
+    std::fs::write(&plan, &bytes).expect("plan written");
+    let digest = digest_of(&bytes);
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_logweir-retention"));
+    cmd.args([
+        "run",
+        "--plan",
+        plan.to_str().expect("utf-8"),
+        "--retention-contract-version",
+        "1",
+    ])
+    .env_clear()
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    for (k, v) in full_env(&digest) {
+        cmd.env(k, v);
+    }
+    cmd.env(
+        "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED",
+        "v1:mine:sha256:00",
+    )
+    .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", "v1:theirs:sha256:11");
+    let mut child = cmd.spawn().expect("the worker spawns");
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the worker did not exit within 60 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let output = child.wait_with_output().expect("output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(status.code(), Some(EXIT_REFUSED), "stderr: {stderr}");
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec!["retention-refusal=CredentialBindingMismatch"],
+        "the closed code and nothing else; stderr: {stderr}"
+    );
+    assert!(stderr.contains("nothing is deleted"), "{stderr}");
+    assert!(!stderr.contains("delete-secret") && !stdout.contains("delete-secret"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

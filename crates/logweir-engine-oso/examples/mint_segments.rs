@@ -2,6 +2,7 @@
 //! the layout kbak.rs decodes. Given in full because every later golden compares
 //! against these bytes, so "generate it once" is only reproducible if the
 //! generator is in the plan.
+#![forbid(unsafe_code)]
 use byteorder::{WriteBytesExt, LE};
 use std::io::Write;
 

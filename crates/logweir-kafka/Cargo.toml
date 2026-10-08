@@ -29,6 +29,14 @@ thiserror.workspace = true
 # block the calling thread for its whole timeout instead of being driven.
 # The tokio dependency therefore also needs `time`, not `rt` alone.
 rdkafka = { version = "0.36", default-features = false, features = ["cmake-build", "libz", "zstd", "ssl", "sasl", "tokio"], optional = true }
+# PROD-04.0b: the ONE crate where librdkafka is called directly (OD-6 (a2);
+# ADR 0004's amendment). This crate keeps `#![forbid(unsafe_code)]` and
+# reaches the group, cluster and ACL calls the safe rdkafka API lacks only
+# through it; `scripts/check-unsafe-scope.sh` refuses any other crate that
+# depends on it. ADDS NO THIRD-PARTY PACKAGE: it is a workspace member whose
+# only dependency is the `rdkafka` above. Behind `client`, like `rdkafka`, so
+# `--no-default-features` builds no C code.
+logweir-rdkafka-ffi = { path = "../logweir-rdkafka-ffi", optional = true }
 # "net" is REQUIRED, not optional: `Builder::enable_all()` cfg-gates its
 # `enable_io()` on net/process/signal, so without it the runtime driving
 # `describe_configs` has no reactor and `cargo test -p logweir-kafka --features
@@ -41,5 +49,10 @@ tokio = { version = "1", default-features = false, features = ["rt", "time", "ne
 # available with --no-default-features. The broker client is opt-in, which is
 # what lets no-oso.yml build this crate with no C toolchain.
 default = ["client"]
-client = ["dep:rdkafka", "dep:tokio"]
+client = ["dep:rdkafka", "dep:tokio", "dep:logweir-rdkafka-ffi"]
 e2e = ["client"]
+
+# `unsafe_code = "forbid"` for every target of this package, tests and build
+# scripts included (the root Cargo.toml's `[workspace.lints.rust]`).
+[lints]
+workspace = true

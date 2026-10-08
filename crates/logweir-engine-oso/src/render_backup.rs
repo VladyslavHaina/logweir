@@ -124,6 +124,14 @@ pub enum RenderError {
     /// must take every run's document (`render_restore::render_all`).
     #[error("this restore plan needs {0} engine runs (its partition subsets differ between topics, and the engine's source_partitions applies to every topic of one run); render every run's document with render_all, never one of them as the plan's")]
     MultipleRuns(usize),
+    /// **FX-20 fix round (review F1)**: an S3 storage block whose `region` is
+    /// not a region name (`^[a-z0-9-]{1,32}$`). With no endpoint the engine's
+    /// client builds the host from the region, so the document would send the
+    /// archive credential's signed requests wherever the region points. The
+    /// runner refuses the same block before any plan exists; this is the
+    /// renderer's backstop. Carries no payload: the value is never echoed.
+    #[error("StorageRegionInvalid: the storage region is not an S3 region name (^[a-z0-9-]{{1,32}}$); without an endpoint the region is part of the host the engine dials, so this document is refused rather than rendered")]
+    StorageRegionInvalid,
 }
 
 /// The rendered backup document and the SHA-256 of the EXACT bytes a caller

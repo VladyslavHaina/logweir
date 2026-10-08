@@ -7,6 +7,7 @@
 //! NOT the AWS SDK chain: `~/.aws/credentials` profiles, `AWS_PROFILE` and SSO
 //! are unsupported. docs/stability.md states this in one sentence, because an
 //! adopter discovering it at drill time is a support ticket.
+#![forbid(unsafe_code)]
 use logweir_core::engine::{BackupSetRef, EngineError, StorageUrl};
 use object_store::path::Path as OPath;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutMode, PutOptions};
@@ -211,6 +212,17 @@ impl Store {
                     allow_http,
                     ..
                 } => {
+                    // FX-20 fix round (review F1): `from_env()` reads
+                    // `AWS_REGION`/`AWS_DEFAULT_REGION` when the location names
+                    // none, and the region becomes the host on an endpoint-less
+                    // location, so the environment's spelling is held to the
+                    // same rule as the location's.
+                    refuse_invalid_region(region.as_deref())?;
+                    if region.is_none() {
+                        for var in ["AWS_REGION", "AWS_DEFAULT_REGION"] {
+                            refuse_invalid_region(env_value(var).as_deref())?;
+                        }
+                    }
                     let mut b = object_store::aws::AmazonS3Builder::from_env()
                         .with_bucket_name(bucket)
                         .with_virtual_hosted_style_request(!*path_style)
@@ -1829,6 +1841,9 @@ pub fn s3_effective(u: &StorageUrl, opts: &StoreOptions) -> Result<S3Effective, 
             backend_name(u)
         )));
     };
+    // FX-20 fix round (review F1): the builder below takes the region as it
+    // is, and with no endpoint the region is the host.
+    refuse_invalid_region(region.as_deref())?;
 
     // Which NAMED variables this source may read, and what the credential
     // chain resolves to. Nothing here looks at `AWS_ENDPOINT_URL`,
@@ -1946,6 +1961,29 @@ pub fn s3_effective(u: &StorageUrl, opts: &StoreOptions) -> Result<S3Effective, 
         reads_environment: !read.is_empty(),
         environment_variables_read: read,
     })
+}
+
+/// **FX-20 fix round (review F1), the store's backstop.** A region that is not
+/// a region name ([`logweir_core::engine::S3_REGION_PATTERN`]) builds no
+/// client: on an endpoint-less S3 location `object_store` interpolates it
+/// into the host (`s3.<region>.amazonaws.com`), so `x@attacker/` would carry
+/// the credential's signed requests to another host. Every runner refuses the
+/// same location earlier, by name, before this is reached; this is the rule
+/// held once more where the client is built, for every caller. Never echoes
+/// the value.
+fn refuse_invalid_region(region: Option<&str>) -> Result<(), StoreError> {
+    match region {
+        Some(region) if !logweir_core::engine::is_valid_s3_region(region) => {
+            Err(StoreError::Backend(format!(
+                "{}: the S3 region is not a region name (it must match {}); no client is \
+                 built, because without an endpoint the region is part of the host a request \
+                 is sent to",
+                logweir_core::guard::STORAGE_REGION_INVALID,
+                logweir_core::engine::S3_REGION_PATTERN
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn backend_name(u: &StorageUrl) -> &'static str {

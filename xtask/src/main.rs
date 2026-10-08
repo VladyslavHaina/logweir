@@ -54,6 +54,7 @@
 //! (`third_party/kafka-backup-v*.tar.gz`), so `cargo test --workspace` runs it
 //! on every CI build, and they fail on a file under `vendored/` that `CHECKS`
 //! does not cover.
+#![forbid(unsafe_code)]
 use std::collections::BTreeSet;
 use std::path::Path;
 

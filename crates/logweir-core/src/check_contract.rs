@@ -247,6 +247,12 @@ closed_vocabulary! {
         ConnectionNotFound => "ConnectionNotFound",
         ConnectionInvalid => "ConnectionInvalid",
         CredentialReferenceMissing => "CredentialReferenceMissing",
+        // FX-20: a projected object-store credential whose Secret's
+        // `logweir-binding` is absent or names another object or endpoint, so
+        // the runner refused it before building a client
+        // (`logweir_core::credential_binding`). The same string as PROD-01.3's
+        // `CredentialBindingMismatch` terminal state.
+        CredentialBindingMismatch => "CredentialBindingMismatch",
         ClusterIdentityChanged => "ClusterIdentityChanged",
         SourceIsAllowlistedTarget => "SourceIsAllowlistedTarget",
         TopicNotFound => "TopicNotFound",

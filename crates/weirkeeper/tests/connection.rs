@@ -1038,6 +1038,43 @@ fn without_binding(mut job: Value, file: &str, credentialed: bool) -> Value {
     let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
         .as_array_mut()
         .expect("the runner has an env list");
+    // FX-20: an inline archive `secretRef` (the legacy Backup and Restore
+    // fixtures name `logweir-s3`) brings the OBJECT-STORE pair — its location
+    // binding — beside `AWS_*`. Asserted here and removed, so the connection's
+    // own pair below is counted as before.
+    let store_pair = |n: &str| {
+        n.starts_with("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING")
+            || n.starts_with("LOGWEIR_EVIDENCE_CREDENTIAL_BINDING")
+    };
+    let inline_archive = env.iter().any(|e| e["name"] == json!("AWS_ACCESS_KEY_ID"));
+    let store: Vec<Value> = env
+        .iter()
+        .filter(|e| e["name"].as_str().is_some_and(store_pair))
+        .cloned()
+        .collect();
+    if inline_archive {
+        assert!(
+            store.iter().any(
+                |e| e["name"] == json!("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED")
+                    && e["value"]
+                        .as_str()
+                        .is_some_and(|v| v.starts_with("v1:location:sha256:"))
+            ),
+            "{file}: the inline archive's location binding is expected: {store:?}"
+        );
+        assert!(
+            store.iter().all(|e| e.get("valueFrom").is_none()
+                || (e["valueFrom"]["secretKeyRef"]["key"] == json!("logweir-binding")
+                    && e["valueFrom"]["secretKeyRef"]["optional"] == json!(true))),
+            "{file}: {store:?}"
+        );
+    } else {
+        assert!(
+            store.is_empty(),
+            "{file}: no inline Secret, no store pair: {store:?}"
+        );
+    }
+    env.retain(|e| !e["name"].as_str().is_some_and(store_pair));
     let before = env.len();
     let binding: Vec<Value> = env
         .iter()

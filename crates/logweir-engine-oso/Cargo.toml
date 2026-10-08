@@ -51,3 +51,8 @@ insta.workspace = true
 [features]
 default = []
 e2e = []
+
+# `unsafe_code = "forbid"` for every target of this package, tests and build
+# scripts included (the root Cargo.toml's `[workspace.lints.rust]`).
+[lints]
+workspace = true

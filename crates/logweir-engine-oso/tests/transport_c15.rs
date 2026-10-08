@@ -204,3 +204,34 @@ fn the_refusal_names_the_rule_and_not_the_endpoint() {
         "{message}"
     );
 }
+
+/// **FX-20 fix round (review F1)**, the renderer's backstop: a region that is
+/// not a region name never reaches an engine document, in any of the three;
+/// a real region and no region render (the negative control).
+#[test]
+fn fx20_every_document_refuses_a_region_that_is_not_a_region_name() {
+    let with_region = |region: Option<&str>| StorageUrl::S3 {
+        bucket: "victim-backups".into(),
+        prefix: "team-a".into(),
+        region: region.map(str::to_string),
+        endpoint: None,
+        path_style: true,
+        allow_http: false,
+    };
+    for region in ["x@127.0.0.1:9/", "us-east-1.attacker.example#", "US-EAST-1"] {
+        for (doc, result) in render_all(&with_region(Some(region))) {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error,
+                RenderError::StorageRegionInvalid,
+                "{doc} over {region:?}"
+            );
+            assert!(!error.to_string().contains(region), "{error}");
+        }
+    }
+    for region in [Some("eu-west-1"), None] {
+        for (doc, result) in render_all(&with_region(region)) {
+            assert!(result.is_ok(), "{doc} over {region:?}: {result:?}");
+        }
+    }
+}

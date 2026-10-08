@@ -2399,6 +2399,23 @@ fn execute_for_reporting(
     ) {
         return (Err(error.into()), Some(authenticated_spec));
     }
+    // **FX-20 fix round (review F1)**: a storage region that is not a region
+    // name is refused here, exit 3 (`StorageRegionInvalid`), before the point
+    // binding below reads the archive and before any client exists. On an
+    // endpoint-less location the region IS the host the archive credential
+    // signs for, so `x@attacker/` beside the victim's bucket would carry it
+    // elsewhere. Phase 0 repeats the check; the store refuses to build such a
+    // client as a backstop.
+    let region_refusal = logweir_core::guard::reject_invalid_storage_region(
+        "source.storage",
+        &authenticated_spec.source.storage,
+    )
+    .and_then(|()| {
+        logweir_core::guard::reject_invalid_storage_region("evidence", &authenticated_spec.evidence)
+    });
+    if let Err(error) = region_refusal {
+        return (Err(error.into()), Some(authenticated_spec));
+    }
     // **Execution contract v2's two bindings, and they go HERE.**
     //
     // After `load_startup_inputs`, so the plan bytes they read are the bytes
