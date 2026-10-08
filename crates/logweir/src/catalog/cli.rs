@@ -741,6 +741,13 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
             }
         }
     }
+    // FX-20: a projected store credential whose Secret is not bound to the
+    // location this process was built for is refused FIRST — before the signer
+    // is even opened, and before the store exists.
+    if let Err(refusal) = crate::credential_binding::check_store_bindings() {
+        eprintln!("{refusal}");
+        return ExitCode::GuardRefused;
+    }
     // Signing is a PREREQUISITE, resolved and self-verified before the store
     // is dialled — the same ordering `backup run` uses, for the same reason: a
     // key that cannot sign must cost an operator a message, not a half-written
@@ -752,12 +759,6 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
             return ExitCode::SigningOrLock;
         }
     };
-    // FX-20: a projected store credential whose Secret is not bound to the
-    // location this Job was built for is refused before the store exists.
-    if let Err(refusal) = crate::credential_binding::check_store_bindings() {
-        eprintln!("{refusal}");
-        return ExitCode::GuardRefused;
-    }
     let evidence = match Store::from_url(&url) {
         Ok(s) => s,
         Err(e) => {

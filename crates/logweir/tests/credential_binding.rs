@@ -459,3 +459,87 @@ fn fx20_drill_run_refuses_a_foreign_store_credential_first_thing() {
         );
     }
 }
+
+/// **`logweir catalog sync` and `logweir doctor` refuse a foreign store
+/// credential too** (hand-run tools, checked like the Jobs' runners when an
+/// expectation is set): `catalog sync` exits 3 before its signer or its store,
+/// and never dials the endpoint; `doctor`'s storage check names the mismatch.
+/// CONTROLS: bound, `catalog sync` passes the check and stops on the absent
+/// signing key (exit 4), and `doctor` does not name a mismatch.
+#[test]
+fn fx20_catalog_sync_and_doctor_refuse_a_foreign_store_credential() {
+    for (label, binding, refused) in [
+        ("foreign", Some(FOREIGN), true),
+        ("absent", None, true),
+        ("bound", Some(EXPECTED), false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (listener, address) = sentinel();
+        let mut command = base(root.path());
+        command
+            .args(["catalog", "sync", "--url", "s3://lw-a", "--endpoint"])
+            .arg(format!("http://{address}"))
+            .args(["--path-style", "--allow-http", "--signing-key"])
+            .arg(root.path().join("absent-signing-key.pem"))
+            .arg("--public-key")
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../e2e/fixtures/signed/public.pem"),
+            )
+            .env("AWS_ACCESS_KEY_ID", "AKIASTOREROW")
+            .env("AWS_SECRET_ACCESS_KEY", SEEDED_S3)
+            .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED", EXPECTED);
+        if let Some(b) = binding {
+            command.env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", b);
+        }
+        let out = run(command, label);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        if refused {
+            assert_eq!(out.status.code(), Some(3), "{label}: {stdout}\n{stderr}");
+            assert!(
+                stderr.contains("CredentialBindingMismatch")
+                    && stderr.contains("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING"),
+                "{label}: {stderr}"
+            );
+        } else {
+            assert_eq!(out.status.code(), Some(4), "{label}: {stdout}\n{stderr}");
+            assert!(
+                !stderr.contains("CredentialBindingMismatch"),
+                "{label}: {stderr}"
+            );
+        }
+        assert!(!stdout.contains(SEEDED_S3) && !stderr.contains(SEEDED_S3));
+        assert_no_connection(&listener, label);
+    }
+
+    // doctor: the storage check names the mismatch, from the same pairs.
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (label, binding, refused) in [("foreign", FOREIGN, true), ("bound", EXPECTED, false)] {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = base(root.path());
+        command
+            .args(["doctor", "--spec"])
+            // A filesystem archive with no backup set: the storage check
+            // answers at once, so the CONTROL reaches it without a dial.
+            .arg(manifest.join("../../e2e/fixtures/drill-empty-archive.yaml"))
+            .arg("--allowed-clusters")
+            .arg(manifest.join("../../examples/allowed-clusters.json"))
+            .arg("--approver-key")
+            .arg(manifest.join("../../e2e/fixtures/signed/public.pem"))
+            .env(
+                "LOGWEIR_ENGINE_BIN",
+                manifest.join("../../e2e/fixtures/fake-engine-ok.sh"),
+            )
+            .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED", EXPECTED)
+            .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", binding);
+        let out = run(command, label);
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            text.contains("CredentialBindingMismatch"),
+            refused,
+            "doctor {label}: {text}"
+        );
+    }
+}

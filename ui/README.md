@@ -1767,7 +1767,7 @@ to a NEW Secret bound to the destination, and the old one is left for the
 operator to delete. The schedule form's inline-archive Secret field says what
 the Secret must carry (`logweir-binding`, the location's binding), because this
 console never reads a Secret and the runner refuses an unbound one
-([kubernetes.md](../docs/kubernetes.md) §20.10).
+([kubernetes.md](../docs/kubernetes.md) section 20.10).
 
 ### What the three surfaces show, and the five sentences they will not write
 
