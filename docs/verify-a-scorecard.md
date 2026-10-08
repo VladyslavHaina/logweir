@@ -158,7 +158,8 @@ The current scorecard checks include:
   reported as met, and `pass_rate_measured` is null outside `byte-fingerprint`.
 - Matrix `fail` carries a reason; matrix `pass` requires a passing drill at
   `byte-fingerprint` level.
-- An auth block names a nonblank supported mode (`plaintext` or `scramSha512`);
+- An auth block names a nonblank supported mode (`plaintext` or `scramSha512`,
+  and from format 1.5.0 also `scramSha256`, `plain` or `mtls`);
   a username without a mode is refused. `redactions` is empty.
 - `topic_parity`'s lists are arrays of strings. A `topic_parity.not_reconstructed`
   (format 1.2.0) appears only under a `format_version` of at least `1.2.0`, and
@@ -673,10 +674,11 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.19.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.21.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
-since FX-3, `1.3.0` since FX-8, or `1.4.0` since PROD-08.1). It
+since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, or `1.5.0` for a
+restore into a target whose auth mode is one PROD-01.3 added). It
 changes when the reader's accepted-document set changes. The compatibility
 history is:
 
@@ -691,7 +693,7 @@ history is:
 | `1.7.0` | Requires all six non-block fields and rejects null for nonoptional `u64` values; the five optional `u64` fields still permit null. |
 | `1.8.0` | Type-checks the six non-block fields using their Rust-implied JSON types, closing cases such as `run_id: 42`, `phases: "x"` and `requested_at: 5`. |
 | `1.9.0` | Adds backup-receipt verification and scorecard auth-field consistency checks. |
-| `1.10.0` | Restricts scorecard/backup-receipt auth modes to `plaintext` or `scramSha512`. |
+| `1.10.0` | Restricts scorecard/backup-receipt auth modes to `plaintext` or `scramSha512` (widened by version in `1.21.0`). |
 | `1.11.0` | Requires offset-report key and digest to be present or absent together. |
 | `1.12.0` | Requires a marker topic unless target mode is `newTopic`. |
 | `1.13.0` | Rejects present target modes other than `scratch` or `newTopic`, including null; retains acceptance of failed integrity results with or without a partial reason. |
@@ -701,14 +703,27 @@ history is:
 | `1.17.0` | Knows scorecard format `1.2.0` (FX-3). Adds the five `topic_parity.not_reconstructed` arms (NR-1 to NR-5; NR-4 and NR-5 refuse a `newTopic` document carrying the field whose `intentionally_deviated` is not empty, or whose block omits a divergence on a setting the restore decides) and prints the reconstruction line. Refuses `topic_parity.intentionally_deviated` and `unexpected_divergence` that are not arrays of strings, and a `format_version` whose major Rust's integer parse refuses (`" 1.0.0"`, `"0_1.0.0"`): `drill verify` refused all of these while earlier versions printed `VALID`. Every other document without the new field is decided exactly as before. |
 | `1.18.0` | Knows scorecard format `1.3.0` (FX-8). Adds `source.time_basis`'s four arms (TB-1 to TB-4) and its shape check, and prints the `time basis:` lines for a scorecard and, for a backup receipt, one per topic it records as `LogAppendTime`. Every document without the block is decided exactly as before. |
 | `1.19.0` | Knows scorecard format `1.4.0` (PROD-08.1). Adds `integrity.verification`'s seven arms (IV-1 to IV-7), its shape check and the domain of its 25 nested counts (24 refuse null), and prints the `integrity coverage:` lines. Every blank test (ruling R-A) now strips exactly the set Rust's `trim` strips: before, a reason, key, mode or marker made only of U+001C–U+001F was blank here and not in `logweir drill verify`, so the two readers split on it (the writer never produces one). Apart from such a value, every document without the block is decided exactly as before. |
+| `1.20.0` | Knows backup-receipt and catalog-point format `1.3.0` (PROD-05.1). Adds the backup receipt's eight `topic_configuration` arms (12–19) and two `owner_detection` arms (20–21), their shape checks (the counts are `u32`, an entry's value a string or absent, `owner_detection` a list of strings) and the `topic_configuration` lines: per topic the recorded partition count, replication factor, entry counts by portability class and the apply route — never a configuration value. The route is the admin API only where `owner_detection` says the run looked for an owner; otherwise the line says the owner was not checked. Every document without the block is decided exactly as before. |
+| `1.21.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.4.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.4.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
 reports `run_id`. Both refuse; this is not an acceptance disagreement.
 
+A verifier older than `1.21.0`, and a `logweir` built before PROD-01.3,
+**refuse** a 1.5.0 scorecard or a 1.4.0 receipt that names `scramSha256`,
+`plain` or `mtls` — as a mode outside the two they know — which is the safer
+verdict (OD-7, third case). Every document naming `plaintext` or `scramSha512`
+is still written at its earlier version and still verifies with them.
+
 A verifier older than `1.18.0`, and a `logweir` built before FX-8, accept a
 1.3.0 scorecard — the major is unchanged — ignore `source.time_basis`, check
 none of its four arms and print no time-basis line.
+
+A verifier older than `1.20.0`, and a `logweir` built before PROD-05.1, accept a
+1.3.0 backup receipt or catalog point: they ignore `topic_configuration` (and the
+record's `topics[].configuration`) and `owner_detection`, check none of arms
+12 to 21 and print no model line.
 
 A verifier older than `1.19.0`, and a `logweir` built before PROD-08.1, accept a
 1.4.0 scorecard the same way: they ignore `integrity.verification`, check none

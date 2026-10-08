@@ -1679,3 +1679,140 @@ async fn an_unattributable_refusal_marks_the_page_incomplete() {
         .iter()
         .all(|i| i.get("backupVerdict").is_none()));
 }
+
+/// Seed one catalog page whose FIRST entry carries `topics` and, when given,
+/// `ownerDetection`; return that point as the point view lists it, and the
+/// other points.
+async fn listed_with_topics(topics: Value, detection: Option<Value>) -> (Value, Vec<Value>) {
+    let fake = seeded();
+    let mut lines = entry_lines();
+    let mut first: Value = serde_json::from_str(&lines[0]).expect("the fixture's entry is JSON");
+    first["topics"] = topics;
+    if let Some(detection) = detection {
+        first["ownerDetection"] = detection;
+    }
+    lines[0] = serde_json::to_string(&first).unwrap();
+    let digest = seed_page(&fake, "primary-g1-p0", &lines);
+    let mut catalog = fixture("recovery-catalog.json");
+    catalog["status"]["pages"] = json!([{
+        "configMapName": "primary-g1-p0",
+        "index": 0,
+        "count": lines.len(),
+        "sha256": digest,
+    }]);
+    fake.seed("recoverycatalogs", NS_A, catalog);
+    let app = TestApp::with(fake, Options::default());
+    let v = app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await
+        .json();
+    app.fake.assert_strict();
+    let items = v["items"].as_array().unwrap().clone();
+    let listed = items
+        .iter()
+        .find(|i| i["pointId"] == first["pointId"])
+        .expect("the point is listed")
+        .clone();
+    let others = items
+        .into_iter()
+        .filter(|i| i["pointId"] != first["pointId"])
+        .collect();
+    (listed, others)
+}
+
+/// **PROD-05.1: the point view publishes a point's topics** — the recorded
+/// partition count, replication factor, configuration coverage and owner
+/// kind — with the apply route a declarative owner implies, and an entry that
+/// lists none publishes none (absent is NOT PUBLISHED, never "no topics").
+/// This is what the console's restore wizard defaults a replication factor
+/// from.
+#[tokio::test]
+async fn the_point_view_publishes_each_topics_recorded_layout_and_apply_route() {
+    let (listed, others) = listed_with_topics(
+        json!([
+            {"name": "audit", "partitions": 1, "replicationFactor": 1, "configCoverage": "captureDenied"},
+            {"name": "orders", "partitions": 6, "replicationFactor": 3, "configCoverage": "captured",
+             "owner": "strimzi"},
+        ]),
+        Some(json!(["kafkaTopicResources"])),
+    )
+    .await;
+    assert_eq!(
+        listed["topics"],
+        json!([
+            {"name": "audit", "partitions": 1, "replicationFactor": 1,
+             "configCoverage": "captureDenied", "applyRoute": "adminApi"},
+            {"name": "orders", "partitions": 6, "replicationFactor": 3,
+             "configCoverage": "captured", "owner": "strimzi",
+             "applyRoute": "desiredStateExport"},
+        ]),
+        "{listed}"
+    );
+    assert_eq!(
+        listed["ownerDetection"],
+        json!(["kafkaTopicResources"]),
+        "{listed}"
+    );
+    for other in &others {
+        assert!(other.get("topics").is_none(), "{other}");
+        assert!(other.get("topicsOmitted").is_none(), "{other}");
+        assert!(other.get("ownerDetection").is_none(), "{other}");
+    }
+}
+
+/// **M2 (fix round): an owner nobody looked for is never the admin-API
+/// route.** A point whose run looked for owners nowhere (`ownerDetection`
+/// empty — every controller-run Backup today) publishes `applyRoute:
+/// unknown` for each topic without an owner, and so does a view that does not
+/// say where the run looked (an older runner). An owned topic stays
+/// `desiredStateExport` either way.
+#[tokio::test]
+async fn an_owner_never_looked_for_publishes_an_unknown_apply_route() {
+    let topics = json!([
+        {"name": "audit", "partitions": 1, "replicationFactor": 1, "configCoverage": "captured"},
+        {"name": "orders", "partitions": 6, "replicationFactor": 3, "configCoverage": "captured",
+         "owner": "strimzi"},
+    ]);
+    for (detection, published) in [(Some(json!([])), Some(json!([]))), (None, None)] {
+        let (listed, _) = listed_with_topics(topics.clone(), detection.clone()).await;
+        let routes: Vec<&Value> = listed["topics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| &t["applyRoute"])
+            .collect();
+        assert_eq!(
+            routes,
+            vec![&json!("unknown"), &json!("desiredStateExport")],
+            "{detection:?}: {listed}"
+        );
+        assert_eq!(listed.get("ownerDetection").cloned(), published, "{listed}");
+    }
+}
+
+/// **M3 (fix round): an absent count stays absent in the API.** A topic whose
+/// replication factor was not recorded (engine 0.23.3 keeps it for the first
+/// topic only, FX-21), and one whose partition count was not, are published
+/// WITHOUT the key — never `1`, never `0` — so the console says the factor is
+/// not recorded rather than defaulting from an invented one.
+#[tokio::test]
+async fn a_topic_whose_factor_or_count_was_not_recorded_is_published_without_it() {
+    let (listed, _) = listed_with_topics(
+        json!([
+            {"name": "audit", "replicationFactor": 2, "configCoverage": "captured"},
+            {"name": "ledger", "partitions": 4, "configCoverage": "captured"},
+        ]),
+        Some(json!(["declared"])),
+    )
+    .await;
+    assert_eq!(
+        listed["topics"],
+        json!([
+            {"name": "audit", "replicationFactor": 2, "configCoverage": "captured",
+             "applyRoute": "adminApi"},
+            {"name": "ledger", "partitions": 4, "configCoverage": "captured",
+             "applyRoute": "adminApi"},
+        ]),
+        "{listed}"
+    );
+}

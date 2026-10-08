@@ -307,6 +307,81 @@ pub fn coverage_lines(
         .collect()
 }
 
+/// One line per topic of a backup receipt's `topic_configuration`
+/// (PROD-05.1), or the one line that says it is absent.
+/// `docs/verify_scorecard.py` prints the same lines, and
+/// `scripts/check-verifier-parity.sh` compares every line starting
+/// `topic_configuration` between the two readers.
+///
+/// Counts and classes, never a configuration VALUE: a verify report is pasted
+/// into tickets, and a value is the adopter's data.
+///
+/// How a topic is applied follows `logweir_core::topic_configuration::
+/// apply_route`: an owned topic is restored by desired-state export; a topic
+/// without an owner is applied through the admin API only where the run
+/// LOOKED for one (`detection`, the receipt's `owner_detection`, is not
+/// empty), and otherwise its owner was not checked and the line says how it
+/// is applied is not known.
+#[must_use]
+pub fn topic_configuration_lines(
+    block: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>>,
+    detection: Option<&[String]>,
+) -> Vec<String> {
+    let Some(block) = block else {
+        return vec![
+            "topic_configuration: not recorded, so no topic's partition count, replication \
+             factor or settings are known to a restore from this receipt"
+                .to_string(),
+        ];
+    };
+    let count = |n: Option<u32>| n.map_or_else(|| "not recorded".to_string(), |n| n.to_string());
+    // An absent detection is an empty one (receipt arm 21).
+    let looked: &[String] = detection.unwrap_or(&[]);
+    block
+        .iter()
+        .map(|(topic, model)| {
+            let entries = match &model.entries {
+                None => "entries not recorded".to_string(),
+                Some(entries) => {
+                    let by_class: Vec<String> =
+                        logweir_core::topic_configuration::PORTABILITY_CLASSES
+                            .iter()
+                            .filter_map(|class| {
+                                let n =
+                                    entries.values().filter(|e| e.portability == *class).count();
+                                (n > 0).then(|| format!("{class} {n}"))
+                            })
+                            .collect();
+                    if by_class.is_empty() {
+                        format!("{} entries", entries.len())
+                    } else {
+                        format!("{} entries ({})", entries.len(), by_class.join(", "))
+                    }
+                }
+            };
+            let route = match &model.owner {
+                Some(o) => format!(
+                    "owned by {} ({} {:?}), so restored by desired-state export",
+                    o.kind, o.basis, o.reference
+                ),
+                None if looked.is_empty() => {
+                    "owner not checked, so how it is applied is not known".to_string()
+                }
+                None => format!(
+                    "no declarative owner found ({}), so applied through the admin API",
+                    looked.join(", ")
+                ),
+            };
+            format!(
+                "topic_configuration[{topic:?}]: partitions {}, replication factor {}, \
+                 {entries}, {route}",
+                count(model.partitions),
+                count(model.replication_factor)
+            )
+        })
+        .collect()
+}
+
 /// The time-basis lines both readers print for a scorecard (FX-8): one per
 /// non-empty list of `source.time_basis`, the one line that says it was not
 /// recorded, or nothing when the restore selected no topic by producer time
@@ -408,6 +483,12 @@ pub enum Verdict {
         /// The 1.1.0 block (FX-4), as read; `None` is UNKNOWN coverage.
         config_coverage:
             Option<BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
+        /// The 1.3.0 block (PROD-05.1), as read; `None` is NOT RECORDED.
+        topic_configuration:
+            Option<BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>>,
+        /// The 1.3.0 `owner_detection` (PROD-05.1), as read: where the run
+        /// looked for owners. `None` reads as empty (arm 21).
+        owner_detection: Option<Vec<String>>,
     },
     /// The signature verified over these exact bytes under this key, and the
     /// sidecar's `payloadType` is the one asked for. **Nothing about the
@@ -570,6 +651,8 @@ pub fn verify_scorecard(
             manifest_key: receipt.archive.manifest_key,
             manifest_version_id: receipt.archive.manifest_version_id,
             config_coverage: receipt.config_coverage,
+            topic_configuration: receipt.topic_configuration,
+            owner_detection: receipt.owner_detection,
         });
     }
     if payload_type != PAYLOAD_TYPE_SCORECARD {
@@ -700,6 +783,19 @@ fn print_report(r: &VerifyReport) {
     }
 }
 
+/// The receipt blocks the verdict prints per topic, beside the identity
+/// fields `print_backup_receipt` takes one by one.
+struct ReceiptBlocks<'a> {
+    /// FX-4's 1.1.0 block; `None` is UNKNOWN coverage.
+    config_coverage:
+        Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
+    /// PROD-05.1's 1.3.0 block; `None` is NOT RECORDED.
+    topic_configuration:
+        Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>>,
+    /// PROD-05.1's `owner_detection`; `None` reads as empty.
+    owner_detection: Option<&'a [String]>,
+}
+
 /// What a `BackupReceipt` verdict prints.
 ///
 /// It says which invariant set ran, in as many words, because the whole point
@@ -713,8 +809,10 @@ fn print_backup_receipt(
     run_id: &str,
     manifest_key: &str,
     manifest_version_id: Option<&str>,
-    config_coverage: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
+    blocks: &ReceiptBlocks<'_>,
 ) {
+    let config_coverage = blocks.config_coverage;
+    let topic_configuration = blocks.topic_configuration;
     println!("signature: VALID  key {key_id}");
     println!("payload:   {payload_type}");
     println!("run_id:    {run_id}");
@@ -746,11 +844,21 @@ fn print_backup_receipt(
     for line in receipt_time_basis_lines(config_coverage) {
         println!("time:      {line}");
     }
+    // PROD-05.1: the configuration model, one line per topic — or the line
+    // that says it was not recorded, which is never "no configuration".
+    for line in topic_configuration_lines(topic_configuration, blocks.owner_detection) {
+        println!("model:     {line}");
+    }
     println!(
-        "checked:   the signature AND all eleven backup-receipt invariants \
+        "checked:   the signature AND all twenty-one backup-receipt invariants \
          (format_version, exit_code/manifest_key, records/topics, covered window, \
-         source.auth.mode, and config_coverage's six: its version, its topic set, \
-         coverage, reason, timestamp-after-a-read, timestamp value and source)"
+         source.auth.mode, config_coverage's six: its version, its topic set, \
+         coverage, reason, timestamp-after-a-read, timestamp value and source, \
+         topic_configuration's eight: its version, beside config_coverage, its topic \
+         set, entries exactly where the read succeeded, closed source and class, \
+         secret and inherited, the owner, counts of at least one, and \
+         owner_detection's two: its closed set beside the model, an owner only from \
+         a source it lists)"
     );
 }
 
@@ -792,6 +900,8 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             manifest_key,
             manifest_version_id,
             config_coverage,
+            topic_configuration,
+            owner_detection,
         }) => {
             print_backup_receipt(
                 &payload_type,
@@ -800,7 +910,11 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
                 &run_id,
                 &manifest_key,
                 manifest_version_id.as_deref(),
-                config_coverage.as_ref(),
+                &ReceiptBlocks {
+                    config_coverage: config_coverage.as_ref(),
+                    topic_configuration: topic_configuration.as_ref(),
+                    owner_detection: owner_detection.as_deref(),
+                },
             );
             ExitCode::Ok
         }

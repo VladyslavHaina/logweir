@@ -190,3 +190,72 @@ fn check_6b_a_reachable_but_empty_archive_is_named_as_a_storage_problem() {
     a[0] = ("--spec", "../../e2e/fixtures/drill-empty-archive.yaml");
     assert_fails_with(doctor(&a, &ENGINE_OK), "zero backup sets");
 }
+
+/// **PROD-01.3 security follow-up: `doctor` reports the credential binding
+/// `drill run` will refuse**, by its named reason, and dials nothing — the
+/// target here is a loopback listener that records any connection. CONTROL:
+/// the same run with the binding equal to the expectation gets past the
+/// binding (it then fails on the stub target, by a different message).
+#[test]
+fn check_7_a_target_credential_bound_to_another_connection_is_named() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("archive");
+    std::fs::create_dir_all(archive.join("b-0001")).unwrap();
+    std::fs::write(archive.join("b-0001/manifest.json"), "{}").unwrap();
+    let spec = dir.path().join("drill-bound-target.yaml");
+    std::fs::write(
+        &spec,
+        format!(
+            "source:\n  storage:\n    backend: filesystem\n    path: {archive}\n  \
+             backup: latestCompleted\n  topics: [orders]\n\
+             target:\n  bootstrap_servers: [127.0.0.1:{port}]\n  marker_topic: logweir.scratch\n  \
+             topic_mapping_prefix: \"drill-\"\n  default_replication_factor: 1\n  \
+             teardown: delete\n  auth:\n    mode: scramSha256\n    username: logweir\n    tls: false\n\
+             sample:\n  window_start: \"2026-08-29T00:00:00Z\"\n  \
+             window_end: \"2026-08-30T02:00:00Z\"\n  records_per_partition: 25\n  \
+             anchor: random\n\
+             objectives:\n  rto_seconds: 900\n  rpo_seconds: 300\n  pass_rate: 1.0\n\
+             evidence:\n  backend: filesystem\n  path: {evidence}\n\
+             notifications:\n  webhooks: []\n",
+            archive = archive.display(),
+            evidence = dir.path().join("evidence").display(),
+        ),
+    )
+    .unwrap();
+    let mut a = OK_ARGS;
+    a[0] = ("--spec", spec.to_str().unwrap());
+    let password: &'static str = concat!("doctor-", "seeded-pw");
+    let env = |binding: &'static str| {
+        [
+            ENGINE_OK[0],
+            ("LOGWEIR_TARGET_PASSWORD", password),
+            (
+                "LOGWEIR_TARGET_CREDENTIAL_BINDING_EXPECTED",
+                "v1:this-uid:sha256:00",
+            ),
+            ("LOGWEIR_TARGET_CREDENTIAL_BINDING", binding),
+        ]
+    };
+
+    let refused = doctor(&a, &env("v1:another-uid:sha256:11"));
+    let text = String::from_utf8_lossy(&refused.stdout).to_string()
+        + &String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{text}");
+    assert!(text.contains("CredentialBindingMismatch"), "{text}");
+    assert!(!text.contains(password), "{text}");
+    assert!(
+        listener.accept().is_err(),
+        "doctor dialled the target with a credential bound to another connection"
+    );
+
+    // CONTROL: the matching binding passes the check and reaches the dial.
+    let control = doctor(&a, &env("v1:this-uid:sha256:00"));
+    let text = String::from_utf8_lossy(&control.stdout).to_string()
+        + &String::from_utf8_lossy(&control.stderr);
+    assert!(!text.contains("CredentialBindingMismatch"), "{text}");
+}

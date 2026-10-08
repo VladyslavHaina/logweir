@@ -1144,6 +1144,316 @@ fn every_direct_compose_call_checks_coherence() {
 }
 
 // ---------------------------------------------------------------------------
+// 7b. The groups and ACL fixtures (PROD-04.0d).
+// ---------------------------------------------------------------------------
+
+/// The shell helpers beside the compose file: every `e2e/compose/*.sh` but the
+/// list itself, as (relative path, text).
+fn compose_helpers() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(root().join("e2e/compose"))
+        .unwrap()
+        .flatten()
+    {
+        let n = e.file_name().to_string_lossy().to_string();
+        if n.ends_with(".sh") && n != "stack-lib.sh" {
+            let rel = format!("e2e/compose/{n}");
+            let text = read(&rel);
+            out.push((rel, text));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `text`'s lines with backslash continuations joined, each with the 1-based
+/// number of its first physical line; comment lines are dropped.
+fn shell_code_lines(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut acc = String::new();
+    let mut first = 0;
+    for (i, line) in text.lines().enumerate() {
+        if acc.is_empty() {
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
+            first = i + 1;
+        }
+        match line.strip_suffix('\\') {
+            Some(head) => {
+                acc.push_str(head);
+                acc.push(' ');
+            }
+            None => {
+                acc.push_str(line);
+                out.push((first, std::mem::take(&mut acc)));
+            }
+        }
+    }
+    out
+}
+
+/// **Every single-node broker sizes the share-group state topic for one
+/// broker** (PROD-04.0 §3.8). With the defaults — replication factor 3, min
+/// ISR 2 — a one-broker cluster never creates `__share_group_state`, so its
+/// share groups get members but no share-partition state. A Kafka node whose
+/// offsets topic has replication factor 1 is a single-node cluster and must
+/// carry both settings at 1; the three-node cluster keeps the defaults its
+/// three brokers can meet.
+///
+/// Mutant: delete the two lines from `kafka-acl` → fails naming `kafka-acl`.
+#[test]
+fn every_single_node_broker_sizes_the_share_state_topic_for_one_broker() {
+    let mut doc = compose_yaml();
+    doc.apply_merge()
+        .expect("the compose file's merge keys resolve");
+    let as_text = |v: &serde_yaml::Value| match v {
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        _ => None,
+    };
+    let mut single = Vec::new();
+    let mut wrong = Vec::new();
+    for (name, svc) in doc["services"].as_mapping().expect("services") {
+        let name = name.as_str().expect("service names are strings");
+        let env = &svc["environment"];
+        if env.get("KAFKA_NODE_ID").is_none() {
+            continue;
+        }
+        let rf = env
+            .get("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR")
+            .and_then(as_text)
+            .unwrap_or_else(|| panic!("{name}: a Kafka node without an offsets RF"));
+        let share = |k: &str| env.get(k).and_then(as_text);
+        let (srf, sisr) = (
+            share("KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR"),
+            share("KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR"),
+        );
+        if rf == "1" {
+            single.push(name.to_string());
+            if srf.as_deref() != Some("1") || sisr.as_deref() != Some("1") {
+                wrong.push(format!(
+                    "{name}: share-state RF {srf:?}, min ISR {sisr:?} (want 1 and 1)"
+                ));
+            }
+        } else if srf.is_some() || sisr.is_some() {
+            wrong.push(format!(
+                "{name}: a {rf}-replica cluster sets share-state RF {srf:?} / min ISR {sisr:?}; \
+                 its defaults (3 and 2) are the ones its brokers can meet"
+            ));
+        }
+    }
+    assert!(
+        single.len() >= 4,
+        "the scan found the single-node brokers (kafka-broker-1, kafka-auth, kafka-cluster2, \
+         kafka-acl): {single:?}"
+    );
+    assert!(
+        wrong.is_empty(),
+        "share-group state sizing:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
+/// **Every helper that reaches a stack checks coherence first.** A
+/// `e2e/compose/*.sh` that runs `docker` must source `stack-lib.sh` and call
+/// `lw_e2e_check_coherent` on a code line BEFORE its first `docker` line:
+/// the shell twin of `every_direct_compose_call_checks_coherence`, for
+/// `groups.sh` and `profile-smoke.sh`.
+///
+/// Mutant: comment out `lw_e2e_check_coherent || exit 1` in `groups.sh` →
+/// fails naming `groups.sh`.
+#[test]
+fn every_compose_helper_checks_coherence_before_docker() {
+    let mut checked = Vec::new();
+    let mut bad = Vec::new();
+    for (rel, text) in compose_helpers() {
+        let code = shell_code_lines(&text);
+        let Some(&(first_docker, _)) = code
+            .iter()
+            .find(|(_, l)| l.contains("docker compose") || l.contains("docker run"))
+        else {
+            continue;
+        };
+        let sources = code
+            .iter()
+            .any(|(_, l)| l.trim_start().starts_with(". ") && l.contains("stack-lib.sh"));
+        let check = code
+            .iter()
+            .find(|(_, l)| l.contains("lw_e2e_check_coherent"))
+            .map(|&(n, _)| n);
+        match check {
+            Some(n) if sources && n < first_docker => checked.push(rel),
+            _ => bad.push(format!(
+                "{rel}: first `docker` on line {first_docker}, sources stack-lib.sh: {sources}, \
+                 coherence check on line {check:?}"
+            )),
+        }
+    }
+    for helper in ["e2e/compose/groups.sh", "e2e/compose/profile-smoke.sh"] {
+        assert!(
+            checked.iter().any(|r| r == helper) || bad.iter().any(|b| b.starts_with(helper)),
+            "the scan did not reach {helper}"
+        );
+    }
+    assert!(
+        bad.is_empty(),
+        "these helpers can reach a stack nobody meant:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
+/// **`docker compose exec` never reads the helper's stdin.** It attaches stdin
+/// even with `-T`, so inside a `while read … done <<EOF` loop the first call
+/// swallows the loop's remaining input — measured on `groups.sh up`, whose
+/// wait loop then checked one group of seven and returned 0. Every
+/// `docker compose … exec` in the compose helpers and `scripts/` redirects
+/// stdin from `/dev/null`.
+///
+/// Mutant: drop `</dev/null` from `groups.sh`'s `kexec` → fails naming the
+/// line.
+#[test]
+fn compose_exec_in_a_shell_helper_never_reads_stdin() {
+    let mut files = compose_helpers();
+    for e in std::fs::read_dir(root().join("scripts")).unwrap().flatten() {
+        let n = e.file_name().to_string_lossy().to_string();
+        if n.ends_with(".sh") {
+            let rel = format!("scripts/{n}");
+            let text = read(&rel);
+            files.push((rel, text));
+        }
+    }
+    let mut execs = 0;
+    let mut bad = Vec::new();
+    for (rel, text) in &files {
+        for (n, l) in shell_code_lines(text) {
+            let Some(at) = l.find("docker compose") else {
+                continue;
+            };
+            if !l[at..].split_whitespace().any(|w| w == "exec") {
+                continue;
+            }
+            execs += 1;
+            if !l.contains("</dev/null") && !l.contains("< /dev/null") {
+                bad.push(format!("{rel}:{n}: {}", l.trim()));
+            }
+        }
+    }
+    assert!(
+        execs >= 3,
+        "found only {execs} `docker compose … exec` line(s)"
+    );
+    assert!(
+        bad.is_empty(),
+        "`docker compose exec` without `</dev/null` (it would read the caller's stdin):\n  {}",
+        bad.join("\n  ")
+    );
+}
+
+/// **A member's stop pattern matches its member and nothing else** (PROD-04.0
+/// §3.3: `pkill -f "group pa-classic-live"` inside `sh -c` matched its own
+/// shell and killed it before the next pkill ran). `groups.sh`'s `pattern()`
+/// is run here, and its regex — `pkill`/`pgrep -f` use extended regular
+/// expressions — must match the member's command lines (the `timeout`
+/// wrapper's and the JVM's), and must NOT match: a command line that carries
+/// the pattern (quoted or not, last or not), a group whose name extends it,
+/// or the other members. It is bracketed (`[g]roup …`), as the record asks.
+/// And every `pkill`/`pgrep` in the compose helpers goes through it.
+///
+/// Mutants: `pattern()` printing `group %s` (no bracket, no anchor) → the
+/// carrier and neighbour rows fail; dropping only the `$` → the neighbour
+/// row fails; dropping only the bracket → the bracket assertion fails.
+#[test]
+fn a_member_stop_pattern_matches_only_its_member() {
+    let groups = read("e2e/compose/groups.sh");
+    let def = groups
+        .lines()
+        .find(|l| l.starts_with("pattern() {"))
+        .expect("groups.sh defines pattern() on one line");
+    let probe = |group: &str, lines: &[String]| -> (String, Vec<bool>) {
+        // One bash: define pattern(), then grep -E each candidate line.
+        let mut script = format!("{def}\np=$(pattern {group})\nprintf '%s\\n' \"$p\"\n");
+        for l in lines {
+            script.push_str(&format!(
+                "if printf '%s\\n' '{}' | grep -E -q -- \"$p\"; then echo MATCH; else echo NO; fi\n",
+                l.replace('\'', "'\\''")
+            ));
+        }
+        let (code, out, err) = run_bash(&["-c", &script], &[]);
+        assert_eq!(code, Some(0), "bash failed: {err}");
+        let mut it = out.lines();
+        let pat = it.next().expect("pattern() printed a pattern").to_string();
+        (pat, it.map(|l| l == "MATCH").collect())
+    };
+    let g = "pa-classic-live";
+    let pat = format!("[g]roup {g}$");
+    let member = vec![
+        format!(
+            "timeout 7200 /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server \
+             kafka-broker-1:9094 --topic pa-orders --from-beginning --consumer-property \
+             group.protocol=classic --group {g}"
+        ),
+        format!(
+            "/opt/java/openjdk/bin/java -Xmx512M -cp /opt/kafka/libs/* \
+             org.apache.kafka.tools.consumer.ConsoleConsumer --bootstrap-server \
+             kafka-broker-1:9094 --topic pa-orders --group {g}"
+        ),
+    ];
+    let (printed, got) = probe(g, &member);
+    assert_eq!(
+        got,
+        vec![true, true],
+        "the pattern {printed:?} must match its member's command lines"
+    );
+    let never = vec![
+        // The carriers: the shell that runs the pkill, in every spelling.
+        format!("bash -c pkill -TERM -f '{pat}'"),
+        format!("sh -c pkill -f {pat}; pkill -f [g]roup pa-consumer-live$"),
+        format!("bash -c pgrep -f '{pat}' >/dev/null"),
+        // A group whose name extends this one, and the neighbours.
+        format!("timeout 7200 kafka-console-consumer.sh --group {g}2"),
+        format!("timeout 7200 kafka-console-consumer.sh --group {g}-b --max-messages 1"),
+        "timeout 7200 kafka-console-consumer.sh --group pa-consumer-live".to_string(),
+        "timeout 7200 kafka-console-share-consumer.sh --group pa-share-live".to_string(),
+        "timeout 90 kafka-console-consumer.sh --max-messages 12 --group pa-classic-empty"
+            .to_string(),
+    ];
+    let (_, got) = probe(g, &never);
+    let hits: Vec<&String> = never
+        .iter()
+        .zip(&got)
+        .filter(|(_, m)| **m)
+        .map(|(l, _)| l)
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "the pattern {printed:?} for {g} also matches:\n  {}",
+        hits.iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert_eq!(
+        printed, pat,
+        "pattern() must print the bracketed, anchored form the record asks for"
+    );
+    // Every pkill/pgrep in the helpers uses pattern().
+    let mut direct = Vec::new();
+    for (rel, text) in compose_helpers() {
+        for (n, l) in shell_code_lines(&text) {
+            if (l.contains("pkill ") || l.contains("pgrep ")) && !l.contains("$(pattern ") {
+                direct.push(format!("{rel}:{n}: {}", l.trim()));
+            }
+        }
+    }
+    assert!(
+        direct.is_empty(),
+        "a pkill/pgrep that does not go through groups.sh's pattern():\n  {}",
+        direct.join("\n  ")
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 8. The render: Docker, but no container (behind `e2e`).
 // ---------------------------------------------------------------------------
 

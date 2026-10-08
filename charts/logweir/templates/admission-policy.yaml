@@ -10,9 +10,10 @@ in principle mint a `kubernetes.io/service-account-token` Secret for any
 ServiceAccount there, which is a token for an identity the console was never
 given. The two credential builders already stamp a distinct, immutable-after-
 create `type` — `logweir.dev/object-store-credential` (PLAT-08.1's destination
-credential) and `logweir.dev/kafka-sasl-password` (PLAT-07.1's connection
-credential) — and the `app.kubernetes.io/managed-by: logweir` label, precisely
-so this policy can require both.
+credential), `logweir.dev/kafka-sasl-password` (PLAT-07.1's connection
+credential) and `logweir.dev/kafka-client-certificate` (PROD-01.3's mTLS
+connection credential) — and the `app.kubernetes.io/managed-by: logweir` label,
+precisely so this policy can require both.
 
 WHAT IT DOES NOT CLOSE, said plainly. A cluster administrator can delete this
 policy (O0, default (a), spec §9); it raises the cost of a mistake and of a
@@ -113,10 +114,12 @@ spec:
   validations:
     - expression: >-
         has(object.type) && (object.type == 'logweir.dev/object-store-credential' ||
-        object.type == 'logweir.dev/kafka-sasl-password')
+        object.type == 'logweir.dev/kafka-sasl-password' ||
+        object.type == 'logweir.dev/kafka-client-certificate')
       message: >-
         the Logweir console may create only its own credential Secrets: type must be
-        logweir.dev/object-store-credential or logweir.dev/kafka-sasl-password
+        logweir.dev/object-store-credential, logweir.dev/kafka-sasl-password or
+        logweir.dev/kafka-client-certificate
       reason: Forbidden
     - expression: >-
         has(object.metadata.labels) &&

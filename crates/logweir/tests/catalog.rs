@@ -87,6 +87,8 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
             to_ms: 1_757_984_400_000,
         },
         config_coverage: None,
+        topic_configuration: None,
+        owner_detection: None,
     }
 }
 
@@ -1560,10 +1562,11 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // shape `crates/logweir-api/tests/contract.rs` uses for the OpenAPI
     // document. `just schema` is the only sanctioned way to change the file.
     // The CURRENT file is the newest MINOR's, named by the writer's constant
-    // (FX-7 fix round, review M-2; 1.2.0 since FX-7 merged after FX-4), so a
-    // renumber moves the constant and the justfile, not this test; the 1.0.0
-    // and 1.1.0 files are frozen beside it.
-    let version = logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION;
+    // (FX-7 fix round, review M-2; 1.3.0 since PROD-05.1, 1.4.0 since
+    // PROD-01.3's auth modes), so a renumber moves the constant and the
+    // justfile, not this test; the 1.0.0, 1.1.0, 1.2.0 and 1.3.0 files are
+    // frozen beside it.
+    let version = logweir::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES;
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../schemas/logweir-catalog-point-{version}.json"
     ));
@@ -2132,4 +2135,293 @@ fn a_1_0_0_record_reads_with_its_coverage_unknown() {
         }
         other => panic!("a 1.0.0 record must read: {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// PROD-05.1: `topics[].configuration` and `topics[].partitions`, catalog
+// point 1.3.0
+// ---------------------------------------------------------------------------
+
+/// **FX-7's 1.2.0 catalog-point schema is FROZEN** beside PROD-05.1's 1.3.0
+/// one: it names itself 1.2.0, carries `archive.manifest_version_id` and
+/// `topics[].config_coverage`, and does NOT describe `topics[].configuration`.
+#[test]
+fn the_frozen_1_2_0_catalog_point_schema_is_still_fx7s() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../schemas/logweir-catalog-point-1.2.0.json");
+    let frozen: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display())),
+    )
+    .expect("the frozen schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-catalog-point-1.2.0.json"
+    );
+    let topic = &frozen["definitions"]["RecordTopic"]["properties"];
+    assert!(topic["config_coverage"].is_object());
+    assert!(
+        topic.get("configuration").is_none(),
+        "the frozen 1.2.0 schema must not describe the 1.3.0 field"
+    );
+    assert!(
+        frozen["definitions"]["RecordArchive"]["properties"]["manifest_version_id"].is_object()
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir::catalog::schema::catalog_point_schema()).unwrap();
+    assert!(current["definitions"]["RecordTopic"]["properties"]["configuration"].is_object());
+    assert_ne!(current["$id"], frozen["$id"]);
+}
+
+/// The same receipt at 1.3.0: `orders` captured, a compacted RF-3 topic of
+/// six partitions owned by a Strimzi `KafkaTopic`.
+fn receipt_1_3() -> BackupReceipt {
+    let mut r = receipt_1_1("captured");
+    r.format_version = "1.3.0".into();
+    r.topic_configuration = Some(BTreeMap::from([(
+        "orders".to_string(),
+        TopicConfiguration {
+            partitions: Some(6),
+            replication_factor: Some(3),
+            entries: Some(BTreeMap::from([
+                (
+                    "cleanup.policy".to_string(),
+                    ConfigEntry {
+                        value: Some("compact".into()),
+                        source: "dynamicTopicConfig".into(),
+                        portability: "portable".into(),
+                    },
+                ),
+                (
+                    "retention.ms".to_string(),
+                    ConfigEntry {
+                        value: Some("604800000".into()),
+                        source: "defaultConfig".into(),
+                        portability: "inherited".into(),
+                    },
+                ),
+            ])),
+            owner: Some(TopicOwner {
+                kind: "strimzi".into(),
+                basis: "kafkaTopicResource".into(),
+                reference: "kafka/orders".into(),
+            }),
+        },
+    )]));
+    // The run read the `KafkaTopic` resources (arm 21: the owner's basis
+    // names a source this list carries).
+    r.owner_detection = Some(vec!["kafkaTopicResources".into()]);
+    assert_eq!(r.validate_invariants(), Ok(()));
+    r
+}
+
+/// The writer COPIES the receipt's model and its partition count, at 1.3.0,
+/// pinned or not; an older receipt leaves both absent (NOT RECORDED and
+/// UNKNOWN) and keeps the format it had.
+#[test]
+fn a_1_3_0_record_copies_the_receipts_configuration_and_partitions() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_3();
+    let p = point_for(&r, "s3://kafka-backups/prod", &key);
+    assert_eq!(p.format_version, "1.3.0");
+    assert_eq!(p.topics[0].partitions, Some(6));
+    assert_eq!(
+        p.topics[0].configuration,
+        r.topic_configuration
+            .as_ref()
+            .unwrap()
+            .get("orders")
+            .cloned()
+    );
+    let mut pinned = receipt_1_3();
+    pinned.archive.manifest_version_id = Some("v-1".into());
+    assert_eq!(
+        point_for(&pinned, "s3://kafka-backups/prod", &key).format_version,
+        "1.3.0"
+    );
+    assert_eq!(
+        p.owner_detection,
+        Some(vec!["kafkaTopicResources".to_string()])
+    );
+    let older = point_for(&receipt_1_1("captured"), "s3://kafka-backups/prod", &key);
+    assert_eq!(older.format_version, "1.1.0");
+    assert_eq!(older.topics[0].partitions, None);
+    assert_eq!(older.topics[0].configuration, None);
+    assert_eq!(older.owner_detection, None);
+    let text = String::from_utf8(older.canonical_bytes().unwrap()).unwrap();
+    assert!(
+        !text.contains("\"configuration\"")
+            && !text.contains("\"partitions\"")
+            && !text.contains("\"owner_detection\""),
+        "{text}"
+    );
+    assert_eq!(CatalogLogEntry::of(&p).format_version, "1.0.0");
+}
+
+/// **Rule 3 for the model.** A record whose configuration or partition count
+/// its receipt does not back — an override added, an owner dropped, a class
+/// changed, a count beside a receipt that records none — is a
+/// `RecordMismatch`; a record that knows less agrees.
+#[test]
+fn a_record_claiming_a_configuration_its_receipt_does_not_back_is_a_record_mismatch() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_3();
+    let bytes = receipt_bytes(&r);
+    let honest = point_for(&r, "s3://kafka-backups/prod", &key);
+    assert_eq!(reader::cross_check(&honest, &r, &bytes), CrossCheck::Agrees);
+
+    let mismatch = |p: &CatalogPoint, receipt: &BackupReceipt, want: &str| match reader::cross_check(
+        p,
+        receipt,
+        &receipt_bytes(receipt),
+    ) {
+        CrossCheck::RecordMismatch(d) => {
+            assert!(d.iter().any(|m| m.starts_with(want)), "{want}: {d:?}")
+        }
+        other => panic!("{want}: must not agree: {other:?}"),
+    };
+    let mut dropped_owner = honest.clone();
+    dropped_owner.topics[0]
+        .configuration
+        .as_mut()
+        .unwrap()
+        .owner = None;
+    mismatch(&dropped_owner, &r, "topics[\"orders\"].configuration");
+    let mut reclassed = honest.clone();
+    reclassed.topics[0]
+        .configuration
+        .as_mut()
+        .unwrap()
+        .entries
+        .as_mut()
+        .unwrap()
+        .get_mut("retention.ms")
+        .unwrap()
+        .portability = "portable".into();
+    mismatch(&reclassed, &r, "topics[\"orders\"].configuration");
+    let mut recounted = honest.clone();
+    recounted.topics[0].partitions = Some(12);
+    mismatch(&recounted, &r, "topics[\"orders\"].partitions");
+    // Beside a receipt with no model at all.
+    let old = receipt_1_1("captured");
+    let mut invented = point_for(&old, "s3://kafka-backups/prod", &key);
+    invented.topics[0].partitions = Some(6);
+    invented.topics[0].configuration = honest.topics[0].configuration.clone();
+    match reader::cross_check(&invented, &old, &receipt_bytes(&old)) {
+        CrossCheck::RecordMismatch(d) => {
+            assert_eq!(d.len(), 2, "{d:?}");
+            assert!(d.iter().all(|m| m.contains("none in the receipt")), "{d:?}");
+        }
+        other => panic!("a model the receipt cannot hold must not agree: {other:?}"),
+    }
+    // M2 (fix round): a record that claims the run looked for owners it did
+    // not look for would turn "owner not checked" into "applied through the
+    // admin API" — refused, against a 1.3.0 receipt and against an older one.
+    let mut widened = honest.clone();
+    widened.owner_detection = Some(vec!["declared".into(), "kafkaTopicResources".into()]);
+    mismatch(&widened, &r, "owner_detection");
+    let mut emptied = honest.clone();
+    emptied.owner_detection = Some(Vec::new());
+    mismatch(&emptied, &r, "owner_detection");
+    let mut claimed = point_for(&old, "s3://kafka-backups/prod", &key);
+    claimed.owner_detection = Some(vec!["declared".into()]);
+    match reader::cross_check(&claimed, &old, &receipt_bytes(&old)) {
+        CrossCheck::RecordMismatch(d) => {
+            assert_eq!(
+                d,
+                vec!["owner_detection: [\"declared\"] vs none in the receipt".to_string()]
+            );
+        }
+        other => panic!("a detection the receipt cannot hold must not agree: {other:?}"),
+    }
+    // Knowing less is not a contradiction.
+    let mut quieter = honest.clone();
+    quieter.topics[0].configuration = None;
+    quieter.topics[0].partitions = None;
+    quieter.owner_detection = None;
+    assert_eq!(
+        reader::cross_check(&quieter, &r, &bytes),
+        CrossCheck::Agrees
+    );
+    // A mismatch line never carries a configuration VALUE.
+    if let CrossCheck::RecordMismatch(d) = reader::cross_check(&reclassed, &r, &bytes) {
+        assert!(!d.join(" ").contains("604800000"), "{d:?}");
+    }
+}
+
+/// **Rule 4 for the model.** Two records of one point conflict only where both
+/// carry a model (or a count) and they differ.
+#[test]
+fn two_records_conflict_on_configuration_only_where_both_carry_it() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_3();
+    let a = point_for(&r, "s3://kafka-backups/prod", &key);
+    let mut b = point_for(&r, "s3://dr-copy/prod", &key);
+    b.topics[0].configuration = None;
+    b.topics[0].partitions = None;
+    b.owner_detection = None;
+    assert!(matches!(
+        reader::reconcile(&a, &b),
+        Duplicate::SameIdentity { .. }
+    ));
+    let mut c = a.clone();
+    c.archive.location_id = "s3://dr-copy/prod".into();
+    c.topics[0].partitions = Some(1);
+    c.topics[0]
+        .configuration
+        .as_mut()
+        .unwrap()
+        .replication_factor = Some(1);
+    match reader::reconcile(&a, &c) {
+        Duplicate::Conflict(d) => {
+            assert!(
+                d.iter()
+                    .any(|m| m.starts_with("topics[\"orders\"].configuration")),
+                "{d:?}"
+            );
+            assert!(
+                d.iter()
+                    .any(|m| m.starts_with("topics[\"orders\"].partitions")),
+                "{d:?}"
+            );
+        }
+        other => panic!("two copies disagreeing on the model are a conflict: {other:?}"),
+    }
+    // M2 (fix round): and on where the run looked for owners.
+    let mut d = a.clone();
+    d.archive.location_id = "s3://dr-copy/prod".into();
+    d.owner_detection = Some(Vec::new());
+    match reader::reconcile(&a, &d) {
+        Duplicate::Conflict(found) => assert_eq!(
+            found,
+            vec!["owner_detection: [\"kafkaTopicResources\"] vs []".to_string()]
+        ),
+        other => panic!("two copies disagreeing on owner detection are a conflict: {other:?}"),
+    }
+}
+
+/// **L6 (PROD-05.1 fix round).** The point id the console derives from a
+/// Backup's receipt digest (`ui/pages/restore-wizard.js`
+/// `pointIdOfReceiptDigest`) is the one this catalog writes: ONE fixture,
+/// `ui/tests/fixtures/point-id.json`, read here and by
+/// `ui/tests/replication-factor.spec.js`
+/// (`prod051_the_point_id_fixture_is_the_one_the_catalog_writes`).
+#[test]
+fn the_point_id_fixture_is_the_catalogs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("ui/tests/fixtures/point-id.json"))
+            .expect("the shared fixture is readable"),
+    )
+    .expect("the shared fixture is JSON");
+    let bytes = std::fs::read(root.join(fixture["receiptFile"].as_str().unwrap()))
+        .expect("the receipt the fixture names is readable");
+    assert_eq!(
+        logweir_core::ids::sha256_prefixed(&bytes),
+        fixture["receiptSha256"].as_str().unwrap()
+    );
+    assert_eq!(
+        logweir::catalog::record::point_id(&bytes),
+        fixture["pointId"].as_str().unwrap()
+    );
 }

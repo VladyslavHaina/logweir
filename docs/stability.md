@@ -45,7 +45,11 @@ adopter's evidence bucket is a document some reader may already parse, so:
     sampled-lane order check, a new cause for `fail-integrity`, and its
     phase-0 refusals of a plan that asks for two verifications at once, new
     causes for exit 3
-    ([below](#scorecard-format-140-integrityverification-prod-081)).
+    ([below](#scorecard-format-140-integrityverification-prod-081)). So is
+    FX-16's refusal `PointBindingSetMismatch`, a new cause for exit 3: a
+    point-bound plan that restored another set under the point's receipt is
+    now refused before any target is created
+    ([below](#a-point-bound-plan-restores-its-points-own-set-fx-16)).
 
   Nothing else is ruled: any other change to an existing field's content is
   still a MAJOR bump.
@@ -272,6 +276,120 @@ it). The block says what a verdict COVERED — a sample, or every selected recor
 - **Rollback** is safe in both directions. An older `logweir` writes 1.3.0
   documents again, sampled, with no block; the 1.4.0 documents already written
   stay valid under both readers.
+
+### Receipt and catalog-point format 1.3.0: `topic_configuration` (PROD-05.1)
+
+PROD-05.1 adds one optional block to the backup receipt, `topic_configuration`,
+and its per-topic copy to the catalog point record, `topics[].configuration`,
+and moves both documents to **1.3.0**
+(`schemas/logweir-backup-receipt-1.3.0.json` and
+`schemas/logweir-catalog-point-1.3.0.json`, FX-7's 1.2.0 files frozen beside
+them). Per named topic it records the source's partition count and replication
+factor, the configuration entries Logweir's own read returned with their
+source and portability class, and the topic's declarative owner, with a
+top-level `owner_detection` saying where the run looked for owners
+([the receipt format](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130);
+[the model and the portability table](to-do/decisions/PROD-05.1-configuration-model.md)).
+
+- **Absent means not recorded.** A receipt without the block — every receipt
+  before 1.3.0 — records no topic's configuration model, and a reader that
+  needs one has none; never "no configuration". Within the block, a topic whose
+  configuration read was denied or failed records NO entries (arm 15), never an
+  empty set.
+- **Every receipt this build signs carries the block**, pinned or not, so every
+  one is 1.3.0. FX-7's statement that an unpinned receipt is FX-4's 1.1.0
+  document byte for byte holds for builds before PROD-05.1; a 1.3.0 receipt
+  without a pin still has no `manifest_version_id` key.
+- **Ten arms, 12 to 21, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block (arm 20 also on one carrying `owner_detection`
+  without it, which no writer produces), and judges it against
+  `config_coverage` and `source.topics` the way FX-4's arm 7 judges
+  `config_coverage` against `source.topics`. No document without the block
+  changes verdict; the corpus (`e2e/fixtures/invariants/`, a case for each
+  refusing half of every arm) and the parity gate re-prove that on every
+  `just lint`.
+- **An owner nobody looked for is not "no owner".** `owner_detection` empty —
+  every `Backup` and `BackupSchedule` the controller runs today, which passes
+  neither a declaration nor `KafkaTopic` resources (PROD-05.1a) — makes both
+  readers print `owner not checked` for an un-owned topic and the product API
+  publish `applyRoute: unknown`, never the admin-API route a later restore
+  would act on.
+- **The class is the writer's.** The arms judge a class against its source and
+  value, never against the key, so a later table refinement cannot make an
+  older receipt refuse itself; a restore re-derives the class from its own
+  table and fails closed on a disagreement (PROD-05.2).
+- **The catalog record's existing `topics[].partitions` is now filled** from
+  the receipt (it was always absent: no receipt recorded a count). Its meaning
+  is unchanged — the source's partition count — and `reader::cross_check`
+  refuses a record whose count the receipt does not back. Its one reader,
+  rehearsal selection's `maxPartitions` filter, can only refuse more points
+  with a count than without one.
+- **The plan grammar gains `source.topic_owners`**, omitted from the serialised
+  plan when absent (an empty list is kept: it says no topic has a declared
+  owner, and the receipt records `declared` among the places the run looked); a
+  runner built before PROD-05.1 ignores it and records no owner. Phase −1
+  refuses, exit 3, a declaration it cannot record or a topic declared twice.
+- **Readers built before PROD-05.1** (`verify_scorecard.py` 1.19.0 and earlier,
+  and an older `logweir`) accept every 1.3.0 document — the major is unchanged
+  and the block is an optional field they ignore — print no model line, and do
+  not run arms 12 to 21.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.1.0 or
+  1.2.0 receipts and records again; the 1.3.0 documents already written stay
+  valid under both readers. A catalog synced by an older runner lists no
+  topics for a point (the console then says the source's layout is not
+  published, and defaults as FX-5 did).
+
+### Three new auth modes: receipt and catalog point 1.4.0, scorecard 1.5.0 (PROD-01.3)
+
+PROD-01.3 adds `scramSha256`, `plain` (SASL/PLAIN, over TLS only) and `mtls`
+to the closed set of auth modes. Two existing fields carry the mode in signed
+documents — the backup receipt's `source.auth.mode` and the scorecard's
+`target.auth.mode` — and the catalog point record copies the receipt's.
+
+- **The value set is versioned, and only a document that names a new value
+  moves.** A receipt or catalog point naming one of the three is **1.4.0**, a
+  scorecard **1.5.0**; every document of a `plaintext` or `scramSha512` run is
+  written at the version it always was, byte for byte. Each new schema file
+  differs from the frozen one beside it in that field's description only.
+- **MINOR, under OD-7's third case** (2026-10-07): this is new content in an
+  existing field that can only move an older reader's verdict to the safer
+  side. A reader built before PROD-01.3 refuses such a document (the mode is
+  outside the two it knows) — never accepts it as something stronger — and
+  decides every other document exactly as before. Each reader's one auth arm
+  becomes three statements, mirrored in both: the closed two below the new
+  version (unchanged), a new value under a version that predates it (refused),
+  and the closed five from the new version. The corpus
+  (`e2e/fixtures/invariants/`, three cases per document) and the parity gate
+  re-prove it on every `just lint`; `verify_scorecard.py` is 1.21.0.
+- **Two runner terminal states are added**, each a refusal that names its
+  cause: `PlainWithoutTls` (SASL/PLAIN without TLS) and
+  `CredentialBindingMismatch` (a projected credential whose Secret's
+  `logweir-binding` does not name the connection — the PROD-01.3 security
+  follow-up, [kubernetes.md](kubernetes.md) §20.9). Both are new causes for
+  exit 3 and can only refuse.
+- **The `KafkaCluster` CRD is additive**: three enum values appended,
+  `auth.clientCertificate`, `status.credentialBinding`, and three CEL rules
+  that are vacuously true for every object an earlier release could write.
+  **One existing behaviour changes, deliberately:** every credentialed
+  connection now needs its Secret bound (`logweir-binding`), or its runs are
+  refused — the upgrade step is in [kubernetes.md](kubernetes.md) §20.9.
+- **The product API no longer accepts `auth.credentialRef`** on a connection
+  create (`422 existing_credential_refused`); the credential is entered once in
+  `auth.credential`. A pre-release API change (below), listed in the release
+  notes.
+- **A credential value is no longer part of a create's idempotency identity**
+  (connections and destinations): the digests the API publishes on the object
+  and in the audit record are taken with every write-only value replaced by
+  `<write-only>`, because a digest over the value let anyone who could read the
+  object confirm a guessed credential offline. A same-key retry that changes
+  only the value now replays instead of answering `409 idempotency_conflict`;
+  a retry spanning the upgrade of a create that carried a value answers `409`
+  (retry with a new key).
+- **Rollback.** An older `logweir` cannot parse a spec naming a new mode, so it
+  writes no 1.4.0/1.5.0 document; those already written stay valid for every
+  reader from PROD-01.3 on, and older readers refuse them (the safe direction).
+  An older controller and runner ignore the binding pair; a bound Secret keeps
+  working with them.
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -1336,7 +1454,7 @@ What changes for an operator:
   Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
   bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
   merges the two views for you yet (PROD-09.2 owns that merge).
-- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key).
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), and an unpinned one still has no `manifest_version_id` key.
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and
@@ -1430,6 +1548,56 @@ does not know `--evidence-keys` and fails argument parsing (exit 1, a usage erro
 whose Job was not yet created when the controller was replaced renders a different bundle now, and
 is refused `ApprovalBundleConflict` (terminal) rather than run without the keyring: delete it and create it
 again. A standalone `logweir restore run` of a point-bound plan now needs `--evidence-keys`.
+
+### A point-bound plan restores its point's own set (FX-16)
+
+The binding above proves that the receipt a plan names is intact, signed and over a manifest the
+archive holds. Until FX-16 nothing proved that the set the run then RESTORED was that receipt's
+set: `source.backup` chose it (`latestCompleted` or an id), and every decision the runner takes
+from the receipt — phases 3 and 7's configuration parity (FX-4's coverage), the time basis (FX-8's
+recorded timestamp types) and FX-7's pin verdict — was applied to whatever set that was. A plan
+bound to point A that named set B restored B's records under A's word; the controller's readiness
+check refuses such a plan (`CatalogPointBindingMismatch`), the runner did not. The runner now
+refuses it, exit 3, the message opening `PointBindingSetMismatch` (the general
+`refusal-reason=GuardRefused` line, like `PointBindingMismatch`), in two places:
+
+- **In the binding, before any broker is contacted**, when `source.backup` is not the receipt's
+  `backup_id`. **`latestCompleted` with `source.point` is refused there**, even when the point's set
+  happens to be the newest: it names whichever set is newest when the run starts, so the same
+  approved plan would restore another set after the next backup. A bound plan names its point's
+  own set, `source.backup: <the receipt's backup_id>` — what the console, the catalog route and
+  every rehearsal already render. **And there too when, under the plan's `source.storage`, the
+  engine would read the set somewhere other than the manifest the receipt attests** (fix round,
+  review M-1). The engine is told only the storage and the set id and loads
+  `<prefix>/<backup_id>/manifest.json`, so a plan whose prefix is a parent of the point's set (with
+  another same-id set at that path), or a plan pointed at a copy under another prefix, would
+  restore an object the point does not describe; the refusal names both keys and the prefix the
+  set was written under.
+- **After the set is described and before phase 2**, when the set the engine is about to restore
+  is not the one the binding verified: its set id, the digest of the manifest just read, or the
+  version that read answered (the manifest written again between the binding and the restore's
+  read). The set is selected by the point's manifest key — the engine's key — never as the first
+  listed set carrying the id, so a same-id copy listed first neither refuses a truthful plan nor is
+  described in its place (review L-1); a listing that does not show that key is exit 1. Phase 0 has run by then, so on a target whose own default is `LogAppendTime` its probe
+  topic has been created and deleted, the documented exception
+  ([above](#exit-3-has-one-documented-exception-phase-0s-logappendtime-override-probe)); no target
+  topic of the restore is created and the engine never starts.
+
+The binding also reads the receipt, its signature, the manifest and the pinned version through the
+archive handle the restore itself uses: under the store contract that is the controller-named
+credential and CA (`LOGWEIR_ARCHIVE_CREDENTIALS`, `LOGWEIR_ARCHIVE_CA_FILE`), where before it was the
+legacy environment-driven client, which ignored the CA and honoured a stray `AWS_ENDPOINT_URL`.
+
+**Compatibility.** A new cause for exit 3 that can only move a run to the safer side (refused
+instead of restoring another set under the point's word): MINOR under OD-7's third case. No
+format changes. A plan without `source.point` is untouched.
+**Migration.** A hand-written point-bound plan (the standalone disaster path) that says
+`backup: latestCompleted` is refused after the upgrade: name the point's set instead, which needs a
+new approval because the plan bytes change. So is one whose `source.storage` prefix is not the one
+the set was written under (the refusal names it); a copy of the archive that keeps the original
+keys, in another bucket, restores as before. Console, catalog and rehearsal plans already name it.
+**Rollback.** An older runner restores whatever `source.backup` names again; no archive, catalog
+or evidence object changes in either direction.
 
 ### The standing rehearsal authorization is SIGNED, and the runner checks the signature
 
@@ -1525,14 +1693,16 @@ controller pinned, and that the key may authorise.
 | a standing authorization outside its validity window | 3 | `GuardRefused`, message opens `AuthorizationExpired` |
 | a mounted keyring or sidecar that does not parse | 1 | — (structural corruption of a file, not a statement about authorisation) |
 | a bound point whose receipt or manifest digest differs | 3 | `GuardRefused`, message opens `PointBindingMismatch` |
+| a bound point that verifies, in a plan whose `source.backup` is not the point's set (`latestCompleted` included), under whose storage the engine would read another manifest than the receipt's, or whose restored set's id, manifest digest or manifest version is not the one the binding verified (FX-16) | 3 | `GuardRefused`, message opens `PointBindingSetMismatch` |
 | a bound point whose receipt carries no signature, a signature no mounted evidence key verifies, or a key whose lifecycle or usage refuses it — or a point-bound plan with no evidence keyring | 3 | `GuardRefused`, message opens `PointUntrusted` |
 | a bound point whose receipt or manifest is missing or unreadable | 1 | — (no refusal line; nothing about the plan was found wanting) |
 
-`logweir_core::guard::TERMINAL_STATES` is still the closed three-element list, so every refusal
-above classifies as the general `GuardRefused` and carries its state name as the first token of the
-message. Promoting `PointBindingMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `AuthorizationInvalid` and
-`AuthorizationExpired` to declared terminal states is a change to that list and to the controller's
-mapping, and is not made here.
+`logweir_core::guard::TERMINAL_STATES` is a closed list (four elements since FX-8, none of them a
+state above), so every refusal above classifies as the general `GuardRefused` and carries its state
+name as the first token of the message. Promoting `PointBindingMismatch`, `PointBindingSetMismatch`,
+`PointUntrusted`, `RehearsalScopeViolation`, `AuthorizationInvalid` and `AuthorizationExpired` to
+declared terminal states is a change to that list and to the controller's mapping, and is not made
+here.
 
 ### `logweir notify deliver`'s exit codes and its `notify-result=` lines (PLAT-14.2)
 

@@ -21,8 +21,9 @@ The last tag is `v0.2.0-rc.1` (candidate `56a60ebe`, publication `2c277dc1`);
 its record is in the next entry, whose twenty-seven items are what that
 candidate shipped. This entry collects what lands on `main` after that
 publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
-key by default), 30 (PROD-08.1) and 31 (FX-17, scheduled points in the catalog)
-so far. Items continue the next entry's
+key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
+32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the credential
+binding) and 34 (FX-16, a point-bound restore restores its point's set) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -41,6 +42,18 @@ sampled rows unchanged. Item 31 is fix-now row FX-17, proven on the compose
 stack with the console on the host; it changes the runner (the catalog sync)
 and the console's text, and the PoC upgrade that carries it re-syncs the PoC's
 catalog and checks its first page and the nightly schedule's page.
+Item 32 is row PROD-05.1, proven on the compose stack on the 3.9 and 4.3 broker
+lines; it changes the runner's signed receipt and catalog record, the catalog's
+view (runner and controller), the product API and the console, so the PoC
+upgrade that carries it runs its catalog and console rows.
+Item 33 is PROD-01.3 and its security follow-up, proven on a compose stack
+(both clients, every mode); it changes the controller, the runner, the
+console and the `KafkaCluster` CRD, and the PoC upgrade that carries it runs
+the live `KafkaCluster` rows.
+Item 34 is fix-now row FX-16, proven by unit, phase-sequence and real-binary
+rows and on the compose stack; it changes the runner only, and the PoC upgrade
+that carries it runs a console catalog-point restore (the binding's reads under
+the store contract).
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -345,6 +358,200 @@ for those points, and retention treats every scheduled set as one shared set
 again. Nothing in the archive changes on the rollback itself; sets an
 `Enforce` policy deleted in between stay deleted.
 
+#### 32. A recovery point records each topic's configuration, its portability and its owner, and the console defaults the replication factor from the source's (PROD-05.1)
+
+**Added.** Every backup receipt `logweir backup run` signs now records, per
+named topic, the source's partition count and replication factor, the topic's
+explicit overrides and the effective value of each semantic key (retention,
+compaction, timestamps, min in-sync and the rest) — each with its source and a
+portability class from a table measured on the 3.9 and 4.3 broker lines — and
+the topic's declarative owner: a Strimzi `KafkaTopic`
+(`--kafka-topic-resources <file> [--strimzi-cluster <name>]`) or the plan's own
+`source.topic_owners` — and where the run looked for one
+(`owner_detection`), so an owner nobody looked for reads "owner not checked",
+never "applied through the admin API". A topic whose configuration read was
+denied records NO entries, never "no overrides". Keys Kafka 4.0 removed are
+recorded and marked `removedInKafka4`; a sensitive entry is recorded by key,
+never by value. The receipt and the catalog point record are format **1.3.0**;
+both readers check ten new arms, 12 to 21, and print one `topic_configuration`
+line per topic; `verify_scorecard.py` is 1.20.0. The catalog's view lists an `Available`
+point's topics with their recorded layout, the product API publishes them as
+`PointView.topics[]` with each topic's `applyRoute` (`unknown` where the run
+did not look for owners, beside `PointView.ownerDetection`), and the console's
+restore wizard defaults the
+replication factor to the largest selected topic's source factor, capped at
+the target's broker count, saying which catalog and point it came from
+([backup-receipt.md](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130),
+[stability.md](stability.md#receipt-and-catalog-point-format-130-topic_configuration-prod-051),
+[the model and the table](to-do/decisions/PROD-05.1-configuration-model.md),
+[ui/README.md](../ui/README.md)).
+
+What changes on the upgrade:
+
+- **Every receipt and catalog record a new runner writes is 1.3.0**, pinned or
+  not. Readers built before PROD-05.1 accept them and ignore the new fields.
+- **Phase −1 refuses**, exit 3, a backup plan whose `source.topic_owners`
+  names an unplanned topic, a kind other than `strimzi` or `external`, a
+  reference that is blank, over 256 characters or carries a control character,
+  or one topic twice.
+- **A `Backup` or `BackupSchedule` records `owner_detection: []`**: the
+  controller passes neither a declaration nor `KafkaTopic` resources yet, so
+  its receipts say each un-owned topic's owner was not checked.
+- **The receipt's replication factor is read from the source's metadata**: the
+  pinned engine's manifest keeps it for the first topic it saves only (measured;
+  the decision record names the upstream lines).
+
+**Do:** nothing for existing plans. Pass `--kafka-topic-resources` (or declare
+`source.topic_owners`) for topics an operator such as Strimzi or Terraform
+manages; a restore of such a topic is meant to export desired state for its
+owner rather than change it behind the owner's back (PROD-05.2). A `Backup`
+cannot declare owners yet (child row PROD-05.1a). **Scope:**
+`crates/logweir-core/tests/backup_receipt.rs` (one row per arm),
+`crates/logweir/src/backup/config_coverage.rs` (the projection, the secret, the
+factor's source), the corpus and the parity gate over both readers, the catalog
+and view rows (`crates/logweir/tests/catalog.rs`,
+`crates/logweir/tests/check_cli.rs`, `crates/weirkeeper/tests/catalog_controller.rs`,
+`crates/logweir-api/tests/d3_reads.rs`), the console rows
+(`ui/tests/replication-factor.spec.js`), and live, on the compose stack on 3.9.2
+and 4.3.1: `e2e/tests/topic_configuration.rs`'s three rows (the table against
+the broker, the model end to end with its owners, a denied DescribeConfigs).
+**Rollback:** an older runner writes 1.1.0 or 1.2.0 receipts again and records
+no model; the 1.3.0 documents already written stay valid under both readers. A
+catalog synced by an older runner lists no topics, and the console then
+defaults as before and says why.
+
+#### 33. SASL/PLAIN over TLS, SCRAM-SHA-256 and mTLS; a connection presents only its own credential (PROD-01.3) — required action
+
+**Changed.** A connection (`KafkaCluster`, a spec's `auth:` block, the console
+form, `logweir cluster-probe --auth-mode`) may use **`scramSha256`**,
+**`plain`** (SASL/PLAIN — Confluent Cloud API keys, Azure Event Hubs
+connection strings) or **`mtls`** (a TLS client certificate, from
+`auth.clientCertificate`, a `kubernetes.io/tls`-shaped Secret) beside
+`plaintext` and `scramSha512`, on both clients. **`plain` without `tls: true` is
+refused, never dialled** (`PlainWithoutTls`: the CRD's rule, the controller,
+`refusal-reason=PlainWithoutTls` at exit 3, and both client builders). Signed
+documents name the mode: a receipt or catalog point naming a new mode is
+format **1.4.0**, a scorecard **1.5.0** (MINOR; [stability.md](stability.md));
+`verify_scorecard.py` is 1.21.0. **Security follow-up:** a connection presents
+only a credential bound to it. Every runner refuses a projected password or
+client key whose Secret lacks the connection's `logweir-binding` (UID and
+endpoint digest) — `CredentialBindingMismatch`, before any client exists — so
+a `KafkaCluster` that names another connection's Secret cannot make Logweir
+present that credential to a broker of its author's choosing. The console API
+takes the credential ONCE (`auth.credential`), creates the bound Secret itself
+(owned by the connection) and refuses `auth.credentialRef`
+(`422 existing_credential_refused`); a console CA comes from a ConfigMap.
+**Do:** suspend the schedules that use a credentialed connection, apply the
+CRDs, roll controller, runner and console together, then bind each existing
+credentialed connection's Secret **one at a time, by a command that names both
+the connection and the Secret, after an inventory** ([kubernetes.md](kubernetes.md)
+§20.9 has the procedure), and resume. Before this release a `KafkaCluster`
+could name another connection's Secret, so a connection naming a Secret that
+another connection also names is an incident to investigate, not a Secret to
+split or to bind in a loop: either would hand the credential to the second
+connection's endpoint. Binding needs Secret `patch`, which for a connection
+credential is as strong as Secret `get` — grant it accordingly. A client of
+the product API that named `credentialRef` sends the password in
+`auth.credential` instead; a credential value is no longer part of a create's
+idempotency identity, so a same-key retry that changes only the value replays
+the first create ([api.md](api.md)). A `BackupDestination` created with
+`secret.new` by an earlier build carries a request hash taken over its secret
+key: remove its `api.logweir.dev/request-sha256` annotation, or rotate the key. Admission-policy users: the
+chart's policy now also admits `logweir.dev/kafka-client-certificate`.
+**Scope:** on compose slot 4 (Kafka 3.7.1, engine 0.23.3 under emulation), the
+`auth` profile's four listener shapes each passed a real backup (Logweir's
+client at phase −1, the engine's client for the archive) and a real drill
+restoring it into the same cluster, with the receipt and scorecard VALID in both
+readers and a seeded-secret scan clean; a wrong password, a wrong CA, an
+untrusted client certificate and PLAIN without TLS were each refused
+(`e2e/tests/auth_modes.rs`, 8/8). The binding's refusal is proven on the shipped
+binary for `backup run`, `drill run`, `cluster-probe` and the check runner
+against a loopback sentinel that is never dialled; the API's write-only entry,
+its refusals and a seeded-value scan by `crates/logweir-api/tests/connection_credentials.rs`.
+No managed provider was dialled (OD-4): Confluent Cloud and Event Hubs move
+from unsupported to **untested**, MSK through SCRAM-SHA-512/TLS stays untested
+([support-matrix.md](support-matrix.md)). The live `KafkaCluster` journey on
+docker-desktop is the next PoC upgrade's; none of the PoC's twelve connections
+has a credential, so none needs binding there.
+**Rollback:** an older controller and runner ignore the binding pair and the
+new fields; a bound Secret keeps working with them. An older build cannot parse
+a spec naming a new mode, and an older reader refuses a 1.4.0/1.5.0 document
+that names one (the safe direction). An older console would send
+`credentialRef` again; roll the console with the controller.
+
+#### 34. A point-bound restore restores its point's own set, or nothing (FX-16)
+
+**Changed.** A plan bound to a recovery point (`source.point`) had the point's
+receipt, signature and manifest verified, and then restored whichever set
+`source.backup` named — `latestCompleted` included — while everything the
+runner takes from that receipt (the configuration capture coverage phases 3
+and 7 compare against, the timestamp types the time basis is decided from,
+the manifest pin) was applied to that set's records. The runner now refuses
+such a run, exit 3, the message opening `PointBindingSetMismatch`
+(`refusal-reason=GuardRefused`, so a `Restore` reads `exitReason:
+GuardRefused`):
+
+- **before any broker is contacted**, when `source.backup` is not the
+  receipt's set (`backup: latestCompleted` beside a bound point is always
+  refused: it names whichever set is newest when the run starts), or when,
+  under the plan's storage, the engine would read the set's manifest anywhere
+  but where the receipt attests it: the engine loads
+  `<prefix>/<backup_id>/manifest.json`, so a plan pointed at a copy under
+  another prefix, or at a parent of the point's prefix with another same-id
+  set there, is refused, naming the prefix the set was written under;
+- **after the set is described and before any target topic exists**, when the
+  set about to be restored is not the one the binding verified: another set
+  id, another manifest digest, or another manifest version (the manifest
+  written again during the run). The set is chosen by the point's manifest
+  key, never as the first listed set with the id, so a same-id copy elsewhere
+  under the prefix is neither restored nor a reason to refuse.
+
+The binding also reads the receipt, its signature and the manifest through the
+restore's own archive handle: under the store contract, the controller-named
+credential and CA, where it used the environment-driven client before.
+
+What changes on the upgrade:
+
+- **Console, catalog-route and rehearsal restores** name the point's set
+  already and run as before.
+- **A hand-written point-bound plan that says `backup: latestCompleted`** (the
+  standalone disaster path) is refused. Name the point's set instead
+  (`source.backup: <the receipt's backup_id>`, which `logweir catalog list`
+  shows) and approve the new plan.
+- **A standalone point-bound plan whose `source.storage` prefix is not the one
+  the point's set was written under** (a copy of the archive under another
+  prefix, or a parent prefix) is refused; the refusal names the prefix. A copy
+  that keeps the original keys, in another bucket, restores as before.
+
+**Do:** before the runner image rolls, change every standalone point-bound
+plan that says `backup: latestCompleted` to name its point's set, and approve
+it again. Nothing else.
+**Scope:** `crates/logweir/src/drill/binding.rs` (the plan half: another set
+and `latestCompleted` refused although the point verifies; each of the four
+restored-set disagreements refused alone, naming itself),
+`crates/logweir/tests/orchestrator.rs` (each disagreement refused with no target
+topic, no fingerprint and no scorecard; the matching set runs; the set check
+comes before FX-8's time basis), `crates/logweir/tests/restore_phase.rs` (the
+real binary refuses both plan shapes and a nested point before phase 0, the
+bootstrap never dialled), `crates/logweir-store/tests/storage.rs` (the engine's
+manifest key), source guards in `crates/logweir/src/drill/mod.rs` (where the
+check sits; the verified set travels with the coverage; one archive-handle
+constructor), and planted mutants, each killed (FX-16 and its fix round). Live,
+on compose slot 4 with engine 0.23.3 (`e2e/tests/point_set_binding.rs`): the
+plan bound to point A and naming A restored A's 30 records although a same-id
+copy of A was listed first; naming a later set B or `latestCompleted`, a copy
+of A under another prefix, an edited copy, and a point whose set is nested
+under the plan's prefix with another same-id set where the engine reads were
+all refused before phase 0, with no target topic. The build before FX-16
+restored each of them under the point's receipt (B's 45 records, a copy, or
+the other same-id set's 45 under a 60-record point, signed `fail-integrity`);
+the build at FX-16's first round still restored that last one, and refused
+the truthful plan because of the copy listed first. Not yet proven on the PoC: a catalog-point restore after
+the upgrade that carries FX-16.
+**Rollback:** an older runner restores whatever `source.backup` names again,
+`latestCompleted` included, and reads the binding through the environment's
+client. No archive, catalog or evidence object changes in either direction.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -366,6 +573,23 @@ In addition to the next entry's six, in its order:
 - **After the runner image rolls, set each `RecoveryCatalog`'s
   `spec.syncRequest` to a new value** so its view is published again by the
   new runner (item 31).
+- **Bind each credentialed connection's Secret, one at a time, after an
+  inventory** (item 33). Suspend the schedules that use such a connection
+  before the roll; apply the CRDs and roll the controller, the runner and the
+  console together; list which `KafkaCluster` names which Secret and stop on
+  any Secret named twice (an incident, not a split); then, per connection, by a
+  command that names both, copy its `status.credentialBinding` into the Secret
+  it already named, once its owner confirms the endpoint
+  ([kubernetes.md](kubernetes.md) §20.9); resume the schedules. Until a Secret
+  is bound its runs are refused (`CredentialBindingMismatch`), closed. Never
+  bind in a loop over every connection. A connection with no credential
+  (`plaintext`, or TLS with no client certificate) needs nothing.
+- **Remove `api.logweir.dev/request-sha256` from each `BackupDestination` an
+  earlier build created with `secret.new`** (item 33), or rotate its key: that
+  hash was taken over the secret access key.
+- **Before the runner image rolls, name the point's set in every standalone
+  point-bound plan that says `backup: latestCompleted`**, and approve it again
+  (item 34).
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -377,12 +601,16 @@ In addition to the next entry's six, in its order:
 
 ### Migration and rollback after `v0.2.0-rc.1`
 
-An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30
-and 31, in the order of the next entry's upgrade path. Item 28 moves the engine in
+An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
+31, 32, 33 and 34, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
-console's text), and item 31 takes effect at each catalog's next sync. To roll back to
+console's text), and item 31 takes effect at each catalog's next sync; item 32
+changes the runner's receipts and records, the catalog's view (runner and
+controller), the product API and the console; item 33 changes the controller,
+the runner, the console and the `KafkaCluster` CRD, and needs each credentialed
+connection's Secret bound; item 34 changes the runner only. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -391,7 +619,16 @@ console's text), and item 31 takes effect at each catalog's next sync. To roll b
 2. Roll the controller and the runner back together (item 28): they run the
    0.21.0 engine again, and that build's `doctor` refuses 0.23.3. The runner
    signs format 1.3.0 again, sampled (item 30); the 1.4.0 scorecards already
-   written stay valid under both readers.
+   written stay valid under both readers. It writes 1.1.0 or 1.2.0 receipts
+   again with no `topic_configuration` (item 32); the 1.3.0 receipts and
+   records already written stay valid.
+3. Roll the console back with the controller and the runner (item 33): an older
+   console names an existing Secret again, which this API refuses. The bound
+   Secrets keep working with the older controller and runner, which ignore the
+   binding pair; a connection using a new mode stops working (an older build
+   cannot parse it), so delete or re-create those first. The 1.4.0 receipts
+   and 1.5.0 scorecards already written stay valid for every reader from
+   PROD-01.3 on, and older readers refuse them (the safe direction).
 
 ---
 

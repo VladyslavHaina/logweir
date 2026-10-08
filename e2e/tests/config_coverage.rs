@@ -1398,6 +1398,8 @@ fn readiness_row(before: Option<BTreeMap<String, String>>) -> Value {
                 password_env: Some("FX4_SCRAM_PASSWORD".into()),
                 tls: Some(false),
                 ca_file: None,
+                client_cert_file: None,
+                client_key_file: None,
                 principal: format!("User:{}", s.scram_user),
             },
             source_destination: DestinationPlan {

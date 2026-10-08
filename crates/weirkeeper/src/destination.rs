@@ -1468,17 +1468,20 @@ fn render_job_env(
             env.from_secret.push(EnvFromSecret {
                 name: AWS_ACCESS_KEY_ID_ENV.to_string(),
                 secret_name: secret.clone(),
+                optional: false,
                 key: access_key_id_key.clone(),
             });
             env.from_secret.push(EnvFromSecret {
                 name: AWS_SECRET_ACCESS_KEY_ENV.to_string(),
                 secret_name: secret.clone(),
+                optional: false,
                 key: secret_access_key_key.clone(),
             });
             if let Some(token) = session_token_key {
                 env.from_secret.push(EnvFromSecret {
                     name: AWS_SESSION_TOKEN_ENV.to_string(),
                     secret_name: secret.clone(),
+                    optional: false,
                     key: token.clone(),
                 });
             }
@@ -1567,17 +1570,20 @@ fn render_evidence_env(
             env.from_secret.push(EnvFromSecret {
                 name: EVIDENCE_ACCESS_KEY_ID_ENV.to_string(),
                 secret_name: secret.clone(),
+                optional: false,
                 key: access_key_id_key.clone(),
             });
             env.from_secret.push(EnvFromSecret {
                 name: EVIDENCE_SECRET_ACCESS_KEY_ENV.to_string(),
                 secret_name: secret.clone(),
+                optional: false,
                 key: secret_access_key_key.clone(),
             });
             if let Some(token) = session_token_key {
                 env.from_secret.push(EnvFromSecret {
                     name: EVIDENCE_SESSION_TOKEN_ENV.to_string(),
                     secret_name: secret.clone(),
+                    optional: false,
                     key: token.clone(),
                 });
             }

@@ -87,7 +87,7 @@ pub enum RenderError {
     /// invites; `crates/logweir-engine-oso/tests/render_scram.rs::
     /// the_unsupported_auth_mode_rail_is_unreachable_from_both_arms` pins
     /// which of the two claims is true today.
-    #[error("auth mode `{0}` is not supported by this build; tag 1 renders PLAINTEXT and SASL/SCRAM-SHA-512 and no other. A plan that asked for it is REFUSED rather than rendered unauthenticated — an unauthenticated document from a plan that named a SASL mode would be a downgrade performed on the operator's behalf")]
+    #[error("auth mode `{0}` is not supported by this build; it renders PLAINTEXT, SASL/SCRAM-SHA-512, SASL/SCRAM-SHA-256, SASL/PLAIN over TLS and TLS client certificates (mtls) and no other. A plan that asked for it is REFUSED rather than rendered unauthenticated — an unauthenticated document from a plan that named a SASL mode would be a downgrade performed on the operator's behalf")]
     UnsupportedAuthMode(String),
     /// A TLS CA file attached to a connection whose transport is not TLS
     /// (PLAT-07.1). Refused rather than rendered without the key: a document
@@ -95,6 +95,19 @@ pub enum RenderError {
     /// connection its author configured to verify.
     #[error("a TLS CA file (ssl_ca_location) was attached to a connection whose security protocol is not TLS; the CA is refused rather than dropped, because dropping it would dial without TLS a connection configured to be verified")]
     TlsCaWithoutTls,
+    /// **PROD-01.3.** SASL/PLAIN on a connection that is not TLS. Refused,
+    /// never rendered: PLAIN sends the password itself, and a document with
+    /// `SASL_PLAINTEXT` + `PLAIN` would put it on the wire in the clear. The
+    /// named reason is `PlainWithoutTls`, the runner's refusal of the same
+    /// spec before any plan exists.
+    #[error("PlainWithoutTls: auth mode `plain` (SASL/PLAIN) on a connection without TLS; PLAIN sends the password itself, so it is rendered only over SASL_SSL and this document is refused rather than rendered")]
+    PlainWithoutTls,
+    /// **PROD-01.3.** `mtls` on a connection that is not TLS.
+    #[error("auth mode `mtls` on a connection without TLS; a client certificate is presented in a TLS handshake, so this document is refused rather than rendered")]
+    MtlsWithoutTls,
+    /// **PROD-01.3.** `mtls` with no client-certificate pair attached.
+    #[error("auth mode `mtls` with no client certificate and key attached; the engine would dial with no identity to present, so this document is refused rather than rendered")]
+    ClientCertificateMissing,
     /// **C15** (PROD-00.3f): an S3 storage block whose endpoint is plain
     /// `http://` while `allow_http` is false. Engine 0.22.0 and later derive
     /// plaintext transport from the endpoint's scheme on the YAML path, so the

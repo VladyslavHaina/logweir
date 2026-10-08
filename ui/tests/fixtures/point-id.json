@@ -1,0 +1,5 @@
+{
+  "receiptFile": "e2e/fixtures/signed/backup-receipt.json",
+  "receiptSha256": "sha256:e5d06fee699fe97156b33eb1000f6aefce13bb24c827604aa45102b5dc540aa4",
+  "pointId": "lwp1-e5d06fee699fe97156b33eb1000f6aef"
+}

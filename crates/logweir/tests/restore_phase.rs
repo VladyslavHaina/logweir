@@ -486,10 +486,24 @@ evidence: {{backend: filesystem, path: {evidence}}}
         signed: bool,
         pin: Option<&str>,
     ) -> (tempfile::TempDir, String, String, SigningKey) {
+        archive_laid_out(signed, pin, "nightly-7/manifest.json", &[])
+    }
+
+    /// [`archive_with`], with the receipt attesting its manifest at
+    /// `manifest_key` and every `(key, bytes)` of `others` written beside it.
+    /// The plan's filesystem storage has no prefix, so the key the engine
+    /// reads set `nightly-7` at is `nightly-7/manifest.json` (FX-16 fix round:
+    /// the binding refuses a receipt that attests any other; this fixture
+    /// said `logweir/backups/nightly-7/run-1.manifest.json` until then).
+    fn archive_laid_out(
+        signed: bool,
+        pin: Option<&str>,
+        manifest_key: &str,
+        others: &[(&str, &[u8])],
+    ) -> (tempfile::TempDir, String, String, SigningKey) {
         let dir = tempfile::tempdir().expect("tempdir");
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = sha256_prefixed(&manifest);
-        let manifest_key = "logweir/backups/nightly-7/run-1.manifest.json";
         let mut receipt = serde_json::json!({
             "format_version": "1.0.0",
             "run_id": "run-1",
@@ -526,6 +540,9 @@ evidence: {{backend: filesystem, path: {evidence}}}
             (receipt_key, receipt_bytes.clone()),
             (manifest_key, manifest),
         ];
+        for (key, bytes) in others {
+            objects.push((key, bytes.to_vec()));
+        }
         if signed {
             let sidecar = sign_detached(
                 &signer,
@@ -758,5 +775,99 @@ evidence: {{backend: filesystem, path: {evidence}}}
         let evidence = tempfile::tempdir().expect("tempdir");
         let run = run_bound_restore(&plan(archive_dir.path(), evidence.path(), &truthful), None);
         refused_before_phase_zero(&run, "no evidence-signing keyring");
+    }
+
+    /// **FX-16 fix round (review M-1), through the real binary.** The point's
+    /// set is nested under the plan's storage (`a/nightly-7/`) and another set
+    /// with the same id and other bytes sits where the engine reads under that
+    /// storage (`nightly-7/manifest.json`). The receipt and its signature
+    /// verify; the run is refused exit 3 `PointBindingSetMismatch` naming the
+    /// engine's key, before phase 0, the bootstrap never dialled. Its control
+    /// is `a_truthful_binding_gets_past_the_check_and_fails_later` (the point's
+    /// set at the engine's key).
+    #[test]
+    fn a_point_the_engine_would_not_read_is_refused_before_phase_zero() {
+        let (archive_dir, truthful, point_id, signer) = archive_laid_out(
+            true,
+            None,
+            "a/nightly-7/manifest.json",
+            &[("nightly-7/manifest.json", br#"{"topics":[],"other":"set"}"#)],
+        );
+        let keys = evidence_keys(&signer, logweir_core::trust::KeyState::Active);
+        let evidence = tempfile::tempdir().expect("tempdir");
+        let run = run_bound_restore(
+            &plan(archive_dir.path(), evidence.path(), &truthful),
+            Some(&keys),
+        );
+        assert_eq!(run.code, 3, "{}", run.transcript);
+        for expected in [
+            "PointBindingSetMismatch",
+            point_id.as_str(),
+            "attests set `nightly-7`'s manifest at a/nightly-7/manifest.json",
+            "the engine would read set `nightly-7` at nightly-7/manifest.json",
+            "refusal-reason=GuardRefused",
+        ] {
+            assert!(
+                run.transcript.contains(expected),
+                "{expected:?} missing:\n{}",
+                run.transcript
+            );
+        }
+        assert!(
+            !run.transcript.contains("progress-phase=0:admit") && !run.transcript.contains("19098"),
+            "before phase 0, the bootstrap never dialled:\n{}",
+            run.transcript
+        );
+    }
+
+    /// **FX-16, through the real binary: a plan binding point A (of set
+    /// `nightly-7`) while naming set B is refused before phase 0.** The
+    /// receipt, its signature under the mounted keyring and its manifest all
+    /// verify — the truthful binding of the control row above — and the plan's
+    /// `source.backup` alone differs. Exit 3, `PointBindingSetMismatch`, no
+    /// phase announced, the bootstrap never dialled, so no target topic can
+    /// exist. Its control is `a_truthful_binding_gets_past_the_check_and_fails_later`
+    /// (the same archive and binding with `backup: nightly-7`).
+    #[test]
+    fn a_plan_naming_another_set_than_its_point_is_refused_before_phase_zero() {
+        for (backup, needle) in [
+            ("nightly-8", "names set `nightly-8`"),
+            (
+                "latestCompleted",
+                "names `latestCompleted`, which restores whichever set is newest",
+            ),
+        ] {
+            let (archive_dir, truthful, point_id, signer) = archive();
+            let keys = evidence_keys(&signer, logweir_core::trust::KeyState::Active);
+            let evidence = tempfile::tempdir().expect("tempdir");
+            let plan_text = plan(archive_dir.path(), evidence.path(), &truthful)
+                .replace("  backup: nightly-7\n", &format!("  backup: {backup}\n"));
+            assert!(plan_text.contains(&format!("  backup: {backup}\n")));
+            let run = run_bound_restore(&plan_text, Some(&keys));
+            assert_eq!(run.code, 3, "{backup}: {}", run.transcript);
+            for expected in [
+                "PointBindingSetMismatch",
+                needle,
+                point_id.as_str(),
+                "source.backup: nightly-7",
+                "refusal-reason=GuardRefused",
+            ] {
+                assert!(
+                    run.transcript.contains(expected),
+                    "{backup}: {expected:?} missing:\n{}",
+                    run.transcript
+                );
+            }
+            assert!(
+                !run.transcript.contains("progress-phase=0:admit"),
+                "{backup}: no restore phase may begin:\n{}",
+                run.transcript
+            );
+            assert!(
+                !run.transcript.contains("19098"),
+                "{backup}: the plan's bootstrap must never be dialled:\n{}",
+                run.transcript
+            );
+        }
     }
 }

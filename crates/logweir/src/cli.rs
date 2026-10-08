@@ -112,11 +112,14 @@ pub enum Command {
     /// field through unconditionally, and it changes neither the output nor the
     /// exit code.
     ///
-    /// With `--auth-mode scramSha512` the SASL password is read from the
-    /// environment variable `LOGWEIR_SOURCE_PASSWORD` and from nowhere else:
-    /// there is deliberately NO flag for it, because a secret on an argv is
-    /// visible in every process listing on the host and in the Job spec a
-    /// controller creates.
+    /// With a SASL mode (`scramSha512`, `scramSha256`, `plain`) the SASL
+    /// password is read from the environment variable
+    /// `LOGWEIR_SOURCE_PASSWORD` and from nowhere else: there is deliberately
+    /// NO flag for it, because a secret on an argv is visible in every process
+    /// listing on the host and in the Job spec a controller creates. With
+    /// `--auth-mode mtls` the client certificate and key are the files named
+    /// by `LOGWEIR_SOURCE_TLS_CERT_FILE` and `LOGWEIR_SOURCE_TLS_KEY_FILE`,
+    /// for the same reason.
     ClusterProbe {
         /// The broker bootstrap addresses, `host:port`, comma-separated. ONE
         /// value rather than a repeated flag: a controller joins the cluster
@@ -124,15 +127,17 @@ pub enum Command {
         /// writes is a string it can compare against what it read.
         #[arg(long)]
         bootstrap: String,
-        /// `plaintext` or `scramSha512` — byte-identical to the spec's and the
-        /// `KafkaCluster` CRD's own spellings, so a value read off the object
-        /// can be copied straight onto this argv. Anything else is reported as
-        /// an unreachable probe naming the mode, never as a usage error: the
-        /// two contract lines exist for every command line that parsed.
+        /// `plaintext`, `scramSha512`, `scramSha256`, `plain` (with `--tls`
+        /// only) or `mtls` (with `--tls`) — byte-identical to the spec's and
+        /// the `KafkaCluster` CRD's own spellings, so a value read off the
+        /// object can be copied straight onto this argv. Anything else is
+        /// reported as an unreachable probe naming the mode, never as a usage
+        /// error: the two contract lines exist for every command line that
+        /// parsed.
         #[arg(long, default_value = crate::probe::AUTH_MODE_PLAINTEXT)]
         auth_mode: String,
-        /// The SASL principal. Required in practice at
-        /// `--auth-mode scramSha512`; ignored at `plaintext`.
+        /// The SASL principal. Required in practice at the three SASL modes;
+        /// ignored at `plaintext` and `mtls`.
         #[arg(long)]
         username: Option<String>,
         /// Whether the transport is TLS, INDEPENDENT of the mode: SASL/SCRAM
@@ -567,9 +572,14 @@ pub enum DrillCmd {
     /// Run the drill: restore a sampled window into the scratch cluster,
     /// reconcile it per record, and emit a signed scorecard.
     ///
-    /// With `target.auth.mode: scramSha512` in the spec, the SASL password is
-    /// read from the environment variable `LOGWEIR_TARGET_PASSWORD` and from
-    /// nowhere else: there is deliberately NO flag for it, at any command. A
+    /// With a SASL `target.auth.mode` in the spec (`scramSha512`,
+    /// `scramSha256`, or `plain`, which is accepted only with `tls: true` and
+    /// otherwise refused with exit 3, `refusal-reason=PlainWithoutTls`), the
+    /// SASL password is read from the environment variable
+    /// `LOGWEIR_TARGET_PASSWORD` and from nowhere else; with `mtls` the client
+    /// certificate and key are the files named by
+    /// `LOGWEIR_TARGET_TLS_CERT_FILE` and `LOGWEIR_TARGET_TLS_KEY_FILE`. There
+    /// is deliberately NO flag for any of them, at any command. A
     /// secret on an argv is visible in `/proc/<pid>/cmdline`, in a shell
     /// history and in every process listing on the host, and it would land in
     /// the Job spec a controller creates. An UNSET variable under that mode
@@ -636,9 +646,12 @@ pub enum RestoreCmd {
     /// be in `--allowed-clusters`, and phase 9 deletes the topics this run
     /// created.
     ///
-    /// With `target.auth.mode: scramSha512` in the spec, the SASL password is
-    /// read from the environment variable `LOGWEIR_TARGET_PASSWORD` and from
-    /// nowhere else — see `drill run` for why there is no flag for it.
+    /// With a SASL `target.auth.mode` in the spec (`scramSha512`,
+    /// `scramSha256`, `plain` over TLS), the SASL password is read from the
+    /// environment variable `LOGWEIR_TARGET_PASSWORD` and from nowhere else;
+    /// with `mtls`, the files named by `LOGWEIR_TARGET_TLS_CERT_FILE` and
+    /// `LOGWEIR_TARGET_TLS_KEY_FILE` — see `drill run` for why there is no
+    /// flag for either.
     Run(RestoreRunArgs),
 }
 
@@ -801,10 +814,15 @@ pub enum BackupCmd {
     /// Take a backup of the named source topics with the pinned engine, behind
     /// phase −1's admission guard, and read the resulting archive back.
     ///
-    /// With `source.auth.mode: scramSha512` in the spec, the SASL password is
-    /// read from the environment variable `LOGWEIR_SOURCE_PASSWORD` and from
-    /// nowhere else — see `drill run` for why there is no flag, and for the
-    /// two exit codes an unset and an unrenderable value produce.
+    /// With a SASL `source.auth.mode` in the spec (`scramSha512`,
+    /// `scramSha256`, or `plain`, accepted only with `tls: true` and otherwise
+    /// refused at phase −1 with exit 3, `refusal-reason=PlainWithoutTls`), the
+    /// SASL password is read from the environment variable
+    /// `LOGWEIR_SOURCE_PASSWORD` and from nowhere else; with `mtls`, the files
+    /// named by `LOGWEIR_SOURCE_TLS_CERT_FILE` and
+    /// `LOGWEIR_SOURCE_TLS_KEY_FILE` — see `drill run` for why there is no
+    /// flag, and for the two exit codes an unset and an unrenderable value
+    /// produce.
     //
     // GC18(c)'s four rails all bind this command; `crates/logweir/src/backup/mod.rs`
     // says where each one is enforced. It is a SUBCOMMAND under `backup` rather
@@ -853,6 +871,21 @@ pub enum BackupCmd {
         /// 18's `BackupSchedule` reconciler passes `<schedule>-<slot>`.
         #[arg(long)]
         backup_id_override: Option<String>,
+        /// Strimzi `KafkaTopic` resources, as YAML (`kubectl get kafkatopics
+        /// -A -o yaml` writes a `List`; separate documents work too). A named
+        /// topic that a resource labelled `strimzi.io/cluster` manages — and
+        /// not annotated `strimzi.io/managed: "false"` — is recorded as owned
+        /// by it in the receipt's `topic_configuration`, so a restore exports
+        /// desired state for it instead of applying settings Strimzi would
+        /// revert (PROD-05.1). A file that cannot be read or parsed fails the
+        /// run, exit 1, before anything is dialled.
+        #[arg(long)]
+        kafka_topic_resources: Option<PathBuf>,
+        /// Count only `KafkaTopic` resources labelled
+        /// `strimzi.io/cluster=<this>`: the Strimzi cluster that IS this
+        /// backup's source. Without it, any cluster label counts.
+        #[arg(long, requires = "kafka_topic_resources")]
+        strimzi_cluster: Option<String>,
     },
 }
 

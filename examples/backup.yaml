@@ -34,6 +34,17 @@ source:
   # TopicSelection reads include entries as glob patterns, so a wildcard here
   # is refused by phase −1 (exit 3) rather than silently widened to a set.
   topics: [orders, payments]
+  # Optional (receipt format 1.3.0): topics whose configuration a declarative
+  # owner manages outside Kafka's admin API. The receipt records the owner, and
+  # a restore exports desired state for such a topic instead of changing it
+  # behind the owner's back. `kind` is `strimzi` or `external`; `reference`
+  # (1 to 256 characters, never a credential) says where the desired state
+  # lives. Strimzi `KafkaTopic` resources can also be given on the command line:
+  # `--kafka-topic-resources kafkatopics.yaml [--strimzi-cluster <name>]`.
+  # topic_owners:
+  #   - topic: payments
+  #     kind: external
+  #     reference: "terraform: kafka_topic.payments"
 
 storage:
   backend: s3

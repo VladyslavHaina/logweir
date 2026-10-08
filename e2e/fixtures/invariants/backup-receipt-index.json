@@ -72,6 +72,38 @@
     "arm": "source.auth.mode \"scram-sha-512\" is not one of the two values this format defines: \"plaintext\" or \"scramSha512\""
   },
   {
+    "id": "source_auth_mode_plain_under_1_0_0",
+    "file": "source_auth_mode_plain_under_1_0_0.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source.auth.mode \"plain\" is defined from 1.4.0 and format_version \"1.0.0\" predates it",
+    "arm": "source.auth.mode \"plain\" is defined from 1.4.0 and format_version \"1.0.0\" predates it"
+  },
+  {
+    "id": "source_auth_mode_outside_the_five",
+    "file": "source_auth_mode_outside_the_five.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source.auth.mode \"oauthbearer\" is not one of the five values this format defines: \"plaintext\", \"scramSha512\", \"scramSha256\", \"plain\" or \"mtls\"",
+    "arm": "source.auth.mode \"oauthbearer\" is not one of the five values this format defines: \"plaintext\", \"scramSha512\", \"scramSha256\", \"plain\" or \"mtls\""
+  },
+  {
+    "id": "source_auth_mode_mtls_under_1_3_0",
+    "file": "source_auth_mode_mtls_under_1_3_0.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source.auth.mode \"mtls\" is defined from 1.4.0 and format_version \"1.3.0\" predates it",
+    "arm": "source.auth.mode \"mtls\" is defined from 1.4.0 and format_version \"1.3.0\" predates it"
+  },
+  {
+    "id": "source_auth_mode_mtls_under_1_4_0",
+    "file": "source_auth_mode_mtls_under_1_4_0.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
     "id": "receipt_1_1_with_config_coverage",
     "file": "receipt_1_1_with_config_coverage.json",
     "rust_exit": 0,
@@ -142,5 +174,221 @@
     "python_exit": 1,
     "reason": "config_coverage[\"orders\"].timestamp_type \"LogAppendTime\" from \"DYNAMIC_DEFAULT_BROKER_CONFIG\" is not a value and source this format defines: the value is \"CreateTime\" or \"LogAppendTime\", and the source is \"dynamicTopicConfig\", \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\"",
     "arm": "config_coverage[\"orders\"].timestamp_type \"LogAppendTime\" from \"DYNAMIC_DEFAULT_BROKER_CONFIG\" is not a value and source this format defines: the value is \"CreateTime\" or \"LogAppendTime\", and the source is \"dynamicTopicConfig\", \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\""
+  },
+  {
+    "id": "receipt_1_3_with_topic_configuration",
+    "file": "receipt_1_3_with_topic_configuration.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "receipt_1_3_pinned_with_topic_configuration",
+    "file": "receipt_1_3_pinned_with_topic_configuration.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "topic_configuration_under_format_1_2_0",
+    "file": "topic_configuration_under_format_1_2_0.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration is present but format_version \"1.2.0\" predates it: the field is defined from 1.3.0",
+    "arm": "topic_configuration is present but format_version \"1.2.0\" predates it: the field is defined from 1.3.0"
+  },
+  {
+    "id": "topic_configuration_without_config_coverage",
+    "file": "topic_configuration_without_config_coverage.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration is present under format_version \"1.3.0\" but config_coverage is not: a topic's configuration entries cannot be judged without the read that produced them",
+    "arm": "topic_configuration is present under format_version \"1.3.0\" but config_coverage is not: a topic's configuration entries cannot be judged without the read that produced them"
+  },
+  {
+    "id": "topic_configuration_missing_a_named_topic",
+    "file": "topic_configuration_missing_a_named_topic.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
+    "arm": "topic_configuration covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}"
+  },
+  {
+    "id": "topic_configuration_entries_beside_a_denied_read",
+    "file": "topic_configuration_entries_beside_a_denied_read.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"payments\"].entries present does not fit its config_coverage \"captureDenied\": entries are recorded exactly when the configuration read succeeded (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")",
+    "arm": "topic_configuration[\"payments\"].entries present does not fit its config_coverage \"captureDenied\": entries are recorded exactly when the configuration read succeeded (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")"
+  },
+  {
+    "id": "topic_configuration_class_outside_the_set",
+    "file": "topic_configuration_class_outside_the_set.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].entries[\"segment.ms\"] source \"dynamicTopicConfig\" and portability \"portableish\" are not a source and class this format defines: the source is \"dynamicTopicConfig\", \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\", and the class is \"portable\", \"inherited\", \"removedInKafka4\", \"clusterBound\", \"requiresTieredStorage\", \"providerOnly\" or \"secret\"",
+    "arm": "topic_configuration[\"orders\"].entries[\"segment.ms\"] source \"dynamicTopicConfig\" and portability \"portableish\" are not a source and class this format defines: the source is \"dynamicTopicConfig\", \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\", and the class is \"portable\", \"inherited\", \"removedInKafka4\", \"clusterBound\", \"requiresTieredStorage\", \"providerOnly\" or \"secret\""
+  },
+  {
+    "id": "topic_configuration_default_passed_off_as_an_override",
+    "file": "topic_configuration_default_passed_off_as_an_override.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].entries[\"retention.ms\"] is \"portable\" from \"defaultConfig\" with a value: an entry is \"secret\" exactly when it carries no value, and otherwise \"inherited\" exactly when its source is not \"dynamicTopicConfig\"",
+    "arm": "topic_configuration[\"orders\"].entries[\"retention.ms\"] is \"portable\" from \"defaultConfig\" with a value: an entry is \"secret\" exactly when it carries no value, and otherwise \"inherited\" exactly when its source is not \"dynamicTopicConfig\""
+  },
+  {
+    "id": "topic_configuration_secret_with_a_value",
+    "file": "topic_configuration_secret_with_a_value.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].entries[\"vendor.token\"] is \"secret\" from \"dynamicTopicConfig\" with a value: an entry is \"secret\" exactly when it carries no value, and otherwise \"inherited\" exactly when its source is not \"dynamicTopicConfig\"",
+    "arm": "topic_configuration[\"orders\"].entries[\"vendor.token\"] is \"secret\" from \"dynamicTopicConfig\" with a value: an entry is \"secret\" exactly when it carries no value, and otherwise \"inherited\" exactly when its source is not \"dynamicTopicConfig\""
+  },
+  {
+    "id": "topic_configuration_owner_outside_the_sets",
+    "file": "topic_configuration_owner_outside_the_sets.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"payments\"].owner \"external\" by \"kafkaTopicResource\" is not an owner this format defines: the kind is \"strimzi\" or \"external\", the basis is \"kafkaTopicResource\" (for \"strimzi\" only) or \"declared\", and the reference is 1 to 256 characters with no control character",
+    "arm": "topic_configuration[\"payments\"].owner \"external\" by \"kafkaTopicResource\" is not an owner this format defines: the kind is \"strimzi\" or \"external\", the basis is \"kafkaTopicResource\" (for \"strimzi\" only) or \"declared\", and the reference is 1 to 256 characters with no control character"
+  },
+  {
+    "id": "topic_configuration_zero_replication_factor",
+    "file": "topic_configuration_zero_replication_factor.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"] records partitions 6 and replication_factor 0: a recorded count is at least 1",
+    "arm": "topic_configuration[\"orders\"] records partitions 6 and replication_factor 0: a recorded count is at least 1"
+  },
+  {
+    "id": "receipt_1_3_owner_not_checked",
+    "file": "receipt_1_3_owner_not_checked.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "owner_detection_outside_the_set",
+    "file": "owner_detection_outside_the_set.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "owner_detection [\"declared\", \"labels\"] is not a detection this format defines: it is present only beside topic_configuration, and lists \"declared\" and \"kafkaTopicResources\" each at most once",
+    "arm": "owner_detection [\"declared\", \"labels\"] is not a detection this format defines: it is present only beside topic_configuration, and lists \"declared\" and \"kafkaTopicResources\" each at most once"
+  },
+  {
+    "id": "owner_detection_lists_a_source_twice",
+    "file": "owner_detection_lists_a_source_twice.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "owner_detection [\"kafkaTopicResources\", \"kafkaTopicResources\"] is not a detection this format defines: it is present only beside topic_configuration, and lists \"declared\" and \"kafkaTopicResources\" each at most once",
+    "arm": "owner_detection [\"kafkaTopicResources\", \"kafkaTopicResources\"] is not a detection this format defines: it is present only beside topic_configuration, and lists \"declared\" and \"kafkaTopicResources\" each at most once"
+  },
+  {
+    "id": "owner_detection_beside_no_topic_configuration",
+    "file": "owner_detection_beside_no_topic_configuration.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "owner_detection [] is not a detection this format defines: it is present only beside topic_configuration, and lists \"declared\" and \"kafkaTopicResources\" each at most once",
+    "arm": "owner_detection [] is not a detection this format defines: it is present only beside topic_configuration, and lists \"declared\" and \"kafkaTopicResources\" each at most once"
+  },
+  {
+    "id": "owner_from_resources_the_run_did_not_read",
+    "file": "owner_from_resources_the_run_did_not_read.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].owner by \"kafkaTopicResource\" names no source owner_detection [\"declared\"] lists: a \"declared\" owner needs \"declared\", a \"kafkaTopicResource\" owner \"kafkaTopicResources\"",
+    "arm": "topic_configuration[\"orders\"].owner by \"kafkaTopicResource\" names no source owner_detection [\"declared\"] lists: a \"declared\" owner needs \"declared\", a \"kafkaTopicResource\" owner \"kafkaTopicResources\""
+  },
+  {
+    "id": "owner_beside_an_absent_owner_detection",
+    "file": "owner_beside_an_absent_owner_detection.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].owner by \"kafkaTopicResource\" names no source owner_detection [] lists: a \"declared\" owner needs \"declared\", a \"kafkaTopicResource\" owner \"kafkaTopicResources\"",
+    "arm": "topic_configuration[\"orders\"].owner by \"kafkaTopicResource\" names no source owner_detection [] lists: a \"declared\" owner needs \"declared\", a \"kafkaTopicResource\" owner \"kafkaTopicResources\""
+  },
+  {
+    "id": "topic_configuration_no_entries_beside_a_captured_read",
+    "file": "topic_configuration_no_entries_beside_a_captured_read.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].entries absent does not fit its config_coverage \"captured\": entries are recorded exactly when the configuration read succeeded (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")",
+    "arm": "topic_configuration[\"orders\"].entries absent does not fit its config_coverage \"captured\": entries are recorded exactly when the configuration read succeeded (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")"
+  },
+  {
+    "id": "topic_configuration_no_entries_beside_a_manifest_that_differs",
+    "file": "topic_configuration_no_entries_beside_a_manifest_that_differs.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].entries absent does not fit its config_coverage \"notCaptured/manifestDiffers\": entries are recorded exactly when the configuration read succeeded (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")",
+    "arm": "topic_configuration[\"orders\"].entries absent does not fit its config_coverage \"notCaptured/manifestDiffers\": entries are recorded exactly when the configuration read succeeded (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")"
+  },
+  {
+    "id": "topic_configuration_entries_beside_a_failed_read",
+    "file": "topic_configuration_entries_beside_a_failed_read.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].entries present does not fit its config_coverage \"notCaptured/describeFailed\": entries are recorded exactly when the configuration read succeeded (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")",
+    "arm": "topic_configuration[\"orders\"].entries present does not fit its config_coverage \"notCaptured/describeFailed\": entries are recorded exactly when the configuration read succeeded (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")"
+  },
+  {
+    "id": "topic_configuration_source_outside_the_set",
+    "file": "topic_configuration_source_outside_the_set.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].entries[\"cleanup.policy\"] source \"DYNAMIC_TOPIC_CONFIG\" and portability \"portable\" are not a source and class this format defines: the source is \"dynamicTopicConfig\", \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\", and the class is \"portable\", \"inherited\", \"removedInKafka4\", \"clusterBound\", \"requiresTieredStorage\", \"providerOnly\" or \"secret\"",
+    "arm": "topic_configuration[\"orders\"].entries[\"cleanup.policy\"] source \"DYNAMIC_TOPIC_CONFIG\" and portability \"portable\" are not a source and class this format defines: the source is \"dynamicTopicConfig\", \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\", and the class is \"portable\", \"inherited\", \"removedInKafka4\", \"clusterBound\", \"requiresTieredStorage\", \"providerOnly\" or \"secret\""
+  },
+  {
+    "id": "topic_configuration_override_with_no_value",
+    "file": "topic_configuration_override_with_no_value.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].entries[\"cleanup.policy\"] is \"portable\" from \"dynamicTopicConfig\" with no value: an entry is \"secret\" exactly when it carries no value, and otherwise \"inherited\" exactly when its source is not \"dynamicTopicConfig\"",
+    "arm": "topic_configuration[\"orders\"].entries[\"cleanup.policy\"] is \"portable\" from \"dynamicTopicConfig\" with no value: an entry is \"secret\" exactly when it carries no value, and otherwise \"inherited\" exactly when its source is not \"dynamicTopicConfig\""
+  },
+  {
+    "id": "topic_configuration_override_passed_off_as_inherited",
+    "file": "topic_configuration_override_passed_off_as_inherited.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"orders\"].entries[\"min.insync.replicas\"] is \"inherited\" from \"dynamicTopicConfig\" with a value: an entry is \"secret\" exactly when it carries no value, and otherwise \"inherited\" exactly when its source is not \"dynamicTopicConfig\"",
+    "arm": "topic_configuration[\"orders\"].entries[\"min.insync.replicas\"] is \"inherited\" from \"dynamicTopicConfig\" with a value: an entry is \"secret\" exactly when it carries no value, and otherwise \"inherited\" exactly when its source is not \"dynamicTopicConfig\""
+  },
+  {
+    "id": "topic_configuration_owner_reference_over_256",
+    "file": "topic_configuration_owner_reference_over_256.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"payments\"].owner \"external\" by \"declared\" is not an owner this format defines: the kind is \"strimzi\" or \"external\", the basis is \"kafkaTopicResource\" (for \"strimzi\" only) or \"declared\", and the reference is 1 to 256 characters with no control character",
+    "arm": "topic_configuration[\"payments\"].owner \"external\" by \"declared\" is not an owner this format defines: the kind is \"strimzi\" or \"external\", the basis is \"kafkaTopicResource\" (for \"strimzi\" only) or \"declared\", and the reference is 1 to 256 characters with no control character"
+  },
+  {
+    "id": "topic_configuration_owner_reference_with_a_control_character",
+    "file": "topic_configuration_owner_reference_with_a_control_character.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"payments\"].owner \"external\" by \"declared\" is not an owner this format defines: the kind is \"strimzi\" or \"external\", the basis is \"kafkaTopicResource\" (for \"strimzi\" only) or \"declared\", and the reference is 1 to 256 characters with no control character",
+    "arm": "topic_configuration[\"payments\"].owner \"external\" by \"declared\" is not an owner this format defines: the kind is \"strimzi\" or \"external\", the basis is \"kafkaTopicResource\" (for \"strimzi\" only) or \"declared\", and the reference is 1 to 256 characters with no control character"
+  },
+  {
+    "id": "topic_configuration_owner_reference_blank",
+    "file": "topic_configuration_owner_reference_blank.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"payments\"].owner \"external\" by \"declared\" is not an owner this format defines: the kind is \"strimzi\" or \"external\", the basis is \"kafkaTopicResource\" (for \"strimzi\" only) or \"declared\", and the reference is 1 to 256 characters with no control character",
+    "arm": "topic_configuration[\"payments\"].owner \"external\" by \"declared\" is not an owner this format defines: the kind is \"strimzi\" or \"external\", the basis is \"kafkaTopicResource\" (for \"strimzi\" only) or \"declared\", and the reference is 1 to 256 characters with no control character"
+  },
+  {
+    "id": "topic_configuration_zero_partitions",
+    "file": "topic_configuration_zero_partitions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "topic_configuration[\"payments\"] records partitions 0 and replication_factor 1: a recorded count is at least 1",
+    "arm": "topic_configuration[\"payments\"] records partitions 0 and replication_factor 1: a recorded count is at least 1"
   }
 ]

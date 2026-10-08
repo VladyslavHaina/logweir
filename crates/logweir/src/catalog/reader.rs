@@ -262,6 +262,8 @@ pub fn cross_check(
         }
     }
     disagreements.extend(unbacked_coverage(point, receipt));
+    disagreements.extend(unbacked_configuration(point, receipt));
+    disagreements.extend(unbacked_owner_detection(point, receipt));
     if disagreements.is_empty() {
         CrossCheck::Agrees
     } else {
@@ -303,6 +305,115 @@ fn unbacked_coverage(point: &CatalogPoint, receipt: &BackupReceipt) -> Vec<Strin
             })
         })
         .collect()
+}
+
+/// **PROD-05.1, rule 3 for `topics[].configuration` and
+/// `topics[].partitions`.** The same one-way rule as [`unbacked_coverage`]: a
+/// record may carry LESS than its receipt (an older writer copies nothing:
+/// absent is NOT RECORDED or UNKNOWN, rule 2), never more and never something
+/// else. A configuration model, or a partition count, the receipt does not
+/// back is a `RecordMismatch` — a catalog that could add an override, drop a
+/// declarative owner or change a class would hand a restore a desired state
+/// nobody signed.
+fn unbacked_configuration(point: &CatalogPoint, receipt: &BackupReceipt) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in &point.topics {
+        let backed = receipt
+            .topic_configuration
+            .as_ref()
+            .and_then(|block| block.get(&t.name));
+        if let Some(claimed) = t.configuration.as_ref() {
+            if backed != Some(claimed) {
+                out.push(format!(
+                    "topics[{:?}].configuration: {} vs {}",
+                    t.name,
+                    configuration_summary(Some(claimed)),
+                    backed.map_or_else(
+                        || "none in the receipt".to_string(),
+                        |b| configuration_summary(Some(b))
+                    )
+                ));
+            }
+        }
+        if let Some(count) = t.partitions {
+            let attested = backed.and_then(|b| b.partitions);
+            if attested != Some(count) {
+                out.push(format!(
+                    "topics[{:?}].partitions: {count} vs {}",
+                    t.name,
+                    attested.map_or_else(|| "none in the receipt".to_string(), |n| n.to_string())
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// **PROD-05.1, rule 3 for `owner_detection`.** The same one-way rule: a
+/// record may carry none (an older writer), never a list its receipt does
+/// not. A record that claims the run looked for owners it never looked for
+/// would turn "owner not checked" into "applied through the admin API".
+fn unbacked_owner_detection(point: &CatalogPoint, receipt: &BackupReceipt) -> Option<String> {
+    let claimed = point.owner_detection.as_ref()?;
+    (receipt.owner_detection.as_ref() != Some(claimed)).then(|| {
+        format!(
+            "owner_detection: {claimed:?} vs {}",
+            receipt
+                .owner_detection
+                .as_ref()
+                .map_or_else(|| "none in the receipt".to_string(), |d| format!("{d:?}"))
+        )
+    })
+}
+
+/// A model entry in one short phrase, for a disagreement line: counts, the
+/// number of entries, the owner. Never a configuration VALUE: a mismatch line
+/// is logged, and a value is the adopter's data.
+fn configuration_summary(c: Option<&logweir_core::backup_receipt::TopicConfiguration>) -> String {
+    match c {
+        None => "none".to_string(),
+        Some(c) => format!(
+            "partitions {:?}, replication factor {:?}, {} entries, owner {:?}",
+            c.partitions,
+            c.replication_factor,
+            c.entries
+                .as_ref()
+                .map_or_else(|| "no".to_string(), |e| e.len().to_string()),
+            c.owner.as_ref().map(|o| o.kind.as_str())
+        ),
+    }
+}
+
+/// **PROD-05.1, rule 4.** Two records of one point must agree on a topic's
+/// configuration model and partition count wherever BOTH carry one.
+fn configuration_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
+    let mut out = Vec::new();
+    for ta in &a.topics {
+        let Some(tb) = b.topics.iter().find(|tb| tb.name == ta.name) else {
+            continue;
+        };
+        if let (Some(ca), Some(cb)) = (ta.configuration.as_ref(), tb.configuration.as_ref()) {
+            if ca != cb {
+                out.push(format!(
+                    "topics[{:?}].configuration: {} vs {}",
+                    ta.name,
+                    configuration_summary(Some(ca)),
+                    configuration_summary(Some(cb))
+                ));
+            }
+        }
+        if let (Some(pa), Some(pb)) = (ta.partitions, tb.partitions) {
+            if pa != pb {
+                out.push(format!("topics[{:?}].partitions: {pa} vs {pb}", ta.name));
+            }
+        }
+    }
+    if let (Some(da), Some(db)) = (a.owner_detection.as_ref(), b.owner_detection.as_ref()) {
+        if da != db {
+            out.push(format!("owner_detection: {da:?} vs {db:?}"));
+        }
+    }
+    out
 }
 
 /// **FX-4, rule 4 for `topics[].config_coverage`.** Two records of one point
@@ -358,6 +469,7 @@ pub fn reconcile(a: &CatalogPoint, b: &CatalogPoint) -> Duplicate {
     }
     let mut disagreements = ReceiptFacts::of_record(a).disagreements(&ReceiptFacts::of_record(b));
     disagreements.extend(coverage_conflicts(a, b));
+    disagreements.extend(configuration_conflicts(a, b));
     if !disagreements.is_empty() {
         return Duplicate::Conflict(disagreements);
     }
