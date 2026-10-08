@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.19.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.20.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -2223,9 +2223,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.19.0 (PROD-08.1) adds the scorecard's seven `integrity.verification`
     # arms, its shape check, the nested u64 counts and the `integrity
     # coverage:` lines. Map still five.
+    #
+    # 1.20.0 (PROD-05.1) adds the backup receipt's eight `topic_configuration`
+    # arms (12-19), their shape check and the `topic_configuration` lines.
+    # Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.19.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.20.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -2241,6 +2245,91 @@ def test_the_config_coverage_minor_is_the_rust_readers():
     m = re.search(r"pub const CONFIG_COVERAGE_SINCE_MINOR: u64 = (\d+);", rust)
     assert m, "backup_receipt.rs no longer declares CONFIG_COVERAGE_SINCE_MINOR"
     assert mod.RECEIPT_CONFIG_COVERAGE_SINCE_MINOR == int(m.group(1))
+
+
+def test_the_topic_configuration_minor_is_the_rust_readers():
+    # Arm 12's minor is ONE number in each reader (PROD-05.1); a renumber must
+    # move both, and the arm's message is built from it on both sides.
+    mod = _verifier_module()
+    rust = (pathlib.Path(__file__).resolve().parent.parent
+            / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    m = re.search(r"pub const TOPIC_CONFIGURATION_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "backup_receipt.rs no longer declares TOPIC_CONFIGURATION_SINCE_MINOR"
+    assert mod.RECEIPT_TOPIC_CONFIGURATION_SINCE_MINOR == int(m.group(1))
+
+
+def test_the_portability_classes_and_sources_are_the_rust_readers():
+    # Arm 16's two closed sets, and the order the `topic_configuration` lines
+    # count classes in, are the Rust constants' — read from the source so a
+    # class added on one side only fails here before it splits the readers.
+    mod = _verifier_module()
+    root = pathlib.Path(__file__).resolve().parent.parent
+    model = (root / "crates/logweir-core/src/topic_configuration.rs").read_text()
+    block = model.split("pub const PORTABILITY_CLASSES", 1)[1].split("];", 1)[0]
+    names = re.findall(r"^\s+([A-Z_0-9]+),$", block, re.M)
+    values = {k: v for k, v in re.findall(r'pub const ([A-Z_0-9]+): &str = "([^"]+)";', model)}
+    assert tuple(values[n] for n in names) == mod.PORTABILITY_CLASSES
+    receipt = (root / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    sources = receipt.split("pub const CONFIG_SOURCES", 1)[1].split("];", 1)[0]
+    assert tuple(re.findall(r'"([^"]+)"', sources)) == mod.RECEIPT_CONFIG_SOURCES
+
+
+def test_the_topic_configuration_shape_is_the_rust_deserialisers():
+    # Rust refuses each of these at DESERIALISATION, so the Python reader must
+    # refuse them in its shape layer, never reach arm 12 with them.
+    mod = _verifier_module()
+    base = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_3_with_topic_configuration.json").read_text())
+    assert mod._receipt_shape(base) == ""
+    cases = [
+        (["topic_configuration"], [], "topic_configuration is not an object"),
+        (["topic_configuration", "orders", "partitions"], -1,
+         'topic_configuration["orders"].partitions is not a u32'),
+        (["topic_configuration", "orders", "partitions"], 2 ** 32,
+         'topic_configuration["orders"].partitions is not a u32'),
+        (["topic_configuration", "orders", "replication_factor"], True,
+         'topic_configuration["orders"].replication_factor is not a u32'),
+        (["topic_configuration", "orders", "replication_factor"], 3.0,
+         'topic_configuration["orders"].replication_factor is not a u32'),
+        (["topic_configuration", "orders", "entries"], [],
+         'topic_configuration["orders"].entries is not an object'),
+        (["topic_configuration", "orders", "entries", "cleanup.policy", "value"], 1,
+         'topic_configuration["orders"].entries["cleanup.policy"].value is not a string'),
+        (["topic_configuration", "orders", "entries", "cleanup.policy", "portability"], None,
+         'topic_configuration["orders"].entries["cleanup.policy"].portability is not a string'),
+        (["topic_configuration", "orders", "owner", "reference"], 7,
+         'topic_configuration["orders"].owner.reference is not a string'),
+    ]
+    for path, value, want in cases:
+        doc = json.loads(json.dumps(base))
+        at = doc
+        for step in path[:-1]:
+            at = at[step]
+        at[path[-1]] = value
+        assert mod._receipt_shape(doc) == want, (path, value)
+    # `null` is absent on both sides: the counts, the entries and the owner.
+    doc = json.loads(json.dumps(base))
+    for name in ("partitions", "replication_factor", "owner"):
+        doc["topic_configuration"]["orders"][name] = None
+    assert mod._receipt_shape(doc) == ""
+
+
+def test_the_topic_configuration_lines_never_carry_a_value():
+    mod = _verifier_module()
+    doc = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_3_with_topic_configuration.json").read_text())
+    lines = mod._topic_configuration_lines(doc["topic_configuration"])
+    assert lines == [
+        'topic_configuration["orders"]: partitions 6, replication factor 3, 5 entries '
+        '(portable 2, inherited 1, removedInKafka4 1, secret 1), owned by strimzi '
+        '(kafkaTopicResource "kafka/orders"), so restored by desired-state export',
+        'topic_configuration["payments"]: partitions 1, replication factor 1, entries not '
+        'recorded, owned by external (declared "terraform: kafka_topic.payments"), so '
+        'restored by desired-state export',
+    ], lines
+    assert "compact" not in " ".join(lines) and "604800000" not in " ".join(lines)
+    assert mod._topic_configuration_lines(None) == [
+        "topic_configuration: not recorded, so no topic's partition count, replication "
+        "factor or settings are known to a restore from this receipt"
+    ]
 
 
 def test_the_payload_type_resolver_accepts_every_short_name_and_media_type():

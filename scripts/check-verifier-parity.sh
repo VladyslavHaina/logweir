@@ -259,6 +259,7 @@ PYEOF
 
 receipt_count=0
 receipt_tb_cases=0
+receipt_model_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
     receipt_count=$((receipt_count + 1))
@@ -350,6 +351,37 @@ $want_tb
 $rust_tb"
         fi
         [ -z "$want_tb" ] || receipt_tb_cases=$((receipt_tb_cases + 1))
+        # PROD-05.1: both readers print the topic configuration model, one line
+        # per topic or the one line saying it was not recorded, and the SAME
+        # lines — an exit 0 is never read as "no configuration" by one reader
+        # while the other lists overrides. The topics are read from the
+        # DOCUMENT, so a reader that dropped or invented a topic's line fails
+        # here, and at least one accepted case must carry the block (below).
+        rust_tc="$(grep -oE 'topic_configuration(\[|:).*' "$tmp/rust.all" || true)"
+        py_tc="$(grep -oE 'topic_configuration(\[|:).*' "$tmp/py.all" || true)"
+        [ -n "$rust_tc" ] || fail "$name: drill verify printed no topic_configuration line for an accepted receipt"
+        if [ "$rust_tc" != "$py_tc" ]; then
+            fail "$name: the two readers print DIFFERENT topic configuration lines.
+  rust:
+$rust_tc
+  python:
+$py_tc"
+        fi
+        want_tc="$("$PY" -c 'import json, sys
+model = json.load(open(sys.argv[1])).get("topic_configuration")
+if model is None:
+    print("topic_configuration: not recorded")
+for t in sorted(model or {}):
+    print("topic_configuration[" + json.dumps(t) + "]")' "$doc")"
+        got_tc="$(printf '%s\n' "$rust_tc" | sed -n -e 's/^\(topic_configuration\[".*"\]\):.*/\1/p' -e 's/^\(topic_configuration: not recorded\),.*/\1/p')"
+        if [ "$got_tc" != "$want_tc" ]; then
+            fail "$name: the topic configuration lines do not name exactly the receipt's modelled topics.
+  want:
+$want_tc
+  got:
+$rust_tc"
+        fi
+        [ "$want_tc" = "topic_configuration: not recorded" ] || receipt_model_cases=$((receipt_model_cases + 1))
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -360,6 +392,9 @@ if [ "$receipt_count" -eq 0 ]; then
 fi
 if [ "$receipt_tb_cases" -eq 0 ]; then
     fail "no accepted backup-receipt case records a LogAppendTime topic, so the time-basis lines (FX-8) were never compared"
+fi
+if [ "$receipt_model_cases" -eq 0 ]; then
+    fail "no accepted backup-receipt case carries topic_configuration, so the model lines (PROD-05.1) were never compared"
 fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
 
@@ -489,8 +524,13 @@ CATALOG_COVERAGE_VERSION="1.1.0"
 # the newest MINOR. A renumber moves that constant, the justfile's
 # `catalog_schema_version` and this line together.
 CATALOG_PIN_VERSION="1.2.0"
+# PROD-05.1 (merged after FX-7): the catalog point format whose topics carry
+# the receipt's configuration model and partition count — record.rs's
+# FORMAT_VERSION_WITH_TOPIC_CONFIGURATION, the newest MINOR. A renumber moves
+# that constant, the justfile's `catalog_schema_version` and this line together.
+CATALOG_MODEL_VERSION="1.3.0"
 mkdir -p "$tmp/catalog"
-"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" <<'PYEOF'
+"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" "$CATALOG_MODEL_VERSION" <<'PYEOF'
 import base64, hashlib, json, pathlib, sys
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -498,6 +538,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 fix, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 coverage_version = sys.argv[4]
 pin_version = sys.argv[5]
+model_version = sys.argv[6]
 key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
 der = key.public_key().public_bytes(
     serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -577,6 +618,26 @@ pinned["archive"]["manifest_version_id"] = "fx7-manifest-version-0001"
 pinned_payload = json.dumps(pinned, indent=2).encode() + b"\n"
 (out / "pinned.json").write_bytes(pinned_payload)
 (out / "pinned.sig").write_text(sign(pinned_payload))
+# PROD-05.1: the record this build writes — format 1.3.0, its topic rows
+# carrying the receipt's configuration model and partition count. Both readers
+# must accept it (signature-only); its facts are the Rust catalog reader's
+# rule-3 cross-check, not this gate's.
+modelled = json.loads(json.dumps(pinned))
+modelled["format_version"] = model_version
+modelled["topics"][0]["partitions"] = 6
+modelled["topics"][0]["configuration"] = {
+    "partitions": 6,
+    "replication_factor": 3,
+    "entries": {
+        "cleanup.policy": {"value": "compact", "source": "dynamicTopicConfig",
+                           "portability": "portable"},
+    },
+    "owner": {"kind": "strimzi", "basis": "kafkaTopicResource", "reference": "kafka/orders"},
+}
+modelled["topics"][0]["config_coverage"] = {"coverage": "captured"}
+modelled_payload = json.dumps(modelled, indent=2).encode() + b"\n"
+(out / "modelled.json").write_bytes(modelled_payload)
+(out / "modelled.sig").write_text(sign(modelled_payload))
 PYEOF
 
 catalog_case() {
@@ -616,6 +677,7 @@ catalog_case good11 catalog-point 0 0
 catalog_case pinned catalog-point 0 0
 grep -q "manifest_version_id=fx7-manifest-version-0001" "$tmp/py.out" \
     || fail "verify_scorecard.py does not print the pinned manifest version a $CATALOG_PIN_VERSION catalog point carries (FX-7)"
+catalog_case modelled catalog-point 0 0
 
 # Claim 2 and claim 3, on the accepted case, one reader at a time.
 cat "$tmp/catalog/good.json" >/dev/null
