@@ -430,6 +430,18 @@ mod tests {
         ] {
             assert_ne!(other, base);
         }
+        // THE TLS SWITCH moves it too (fix round, review F4): the same SASL
+        // mode and username over TLS and in the clear are two endpoints, and
+        // a credential entered for the TLS one is not the clear one's.
+        let scram = |tls| AuthSpec::ScramSha256 {
+            username: "u".into(),
+            tls,
+        };
+        assert_ne!(
+            credential_binding("uid-1", &servers, &scram(true), None),
+            credential_binding("uid-1", &servers, &scram(false), None),
+            "the binding ignores the TLS switch"
+        );
     }
 
     #[test]

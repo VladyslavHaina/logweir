@@ -70,4 +70,50 @@ fn the_check_runner_refuses_an_unbound_credential_and_accepts_a_bound_one() {
     ] {
         std::env::remove_var(var);
     }
+
+    // THE TARGET SIDE (fix round, review F2): a Restore's Preflight resolves
+    // its target `KafkaCluster` as `ConnectionUse::PreflightTarget`, so its
+    // check Job carries the TARGET binding pair. A check runner that compared
+    // only the source side would let a Preflight on a Restore whose target
+    // names another connection's Secret dial the author's host with it.
+    let target = ConnectionPlan {
+        password_env: Some("LOGWEIR_TARGET_PASSWORD".into()),
+        ..plan()
+    };
+    std::env::set_var("LOGWEIR_TARGET_PASSWORD", "check-row-password-0b1d");
+    std::env::set_var(
+        "LOGWEIR_TARGET_CREDENTIAL_BINDING_EXPECTED",
+        "v1:uid-t:sha256:00",
+    );
+    std::env::remove_var("LOGWEIR_TARGET_CREDENTIAL_BINDING");
+    let failure = logweir::check::kafka::auth_config(&target).expect_err("unbound target");
+    assert_eq!(failure.code, CheckCode::AuthenticationFailed);
+    assert!(
+        failure.message.starts_with("CredentialBindingMismatch: "),
+        "{}",
+        failure.message
+    );
+    assert!(
+        failure
+            .message
+            .contains("LOGWEIR_TARGET_CREDENTIAL_BINDING"),
+        "the refusal names the target side's variable: {}",
+        failure.message
+    );
+    assert!(!failure.message.contains("check-row-password-0b1d"));
+    std::env::set_var("LOGWEIR_TARGET_CREDENTIAL_BINDING", "v1:uid-s:sha256:00");
+    let failure = logweir::check::kafka::auth_config(&target).expect_err("foreign target");
+    assert!(failure.message.starts_with("CredentialBindingMismatch: "));
+    // CONTROL: the target bound to its own connection builds.
+    std::env::set_var("LOGWEIR_TARGET_CREDENTIAL_BINDING", "v1:uid-t:sha256:00");
+    let auth = logweir::check::kafka::auth_config(&target).expect("a bound target builds");
+    assert!(format!("{auth:?}").contains("Plain"));
+
+    for var in [
+        "LOGWEIR_TARGET_PASSWORD",
+        "LOGWEIR_TARGET_CREDENTIAL_BINDING_EXPECTED",
+        "LOGWEIR_TARGET_CREDENTIAL_BINDING",
+    ] {
+        std::env::remove_var(var);
+    }
 }
