@@ -982,7 +982,9 @@ What changes on the upgrade:
   runs normally.
 - **A refused probe is re-probed.** Its finished Job now gets the usual
   five-minute TTL, so the next probe runs on the ordinary cadence and the
-  reason clears once the namespace admits the pod. Before, a podless probe Job
+  reason clears once the namespace admits the pod. A refusal never writes
+  `observedAt`, so an earlier `reachable` reading still ages and shows as
+  stale in the console. Before, a podless probe Job
   kept `NoExitCode` until someone deleted the Job.
 - **Retries stay bounded.** A refused delivery is a failed attempt, so it is
   retried by the ordinary backoff, three attempts in all. A refused retention

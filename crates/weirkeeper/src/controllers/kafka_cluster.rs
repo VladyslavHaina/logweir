@@ -53,8 +53,9 @@
 //! Event says why, the Job is cancelled and the status reads
 //! `Reachable=Unknown` / `PodCreationForbidden` with the admission's own
 //! words — never `ProbeRunning` for two minutes and then `NoExitCode`.
-//! `reachable` and `clusterId` keep their last values: a probe that never ran
-//! observed nothing. The Job then gets the usual TTL, so the next probe runs on
+//! `reachable`, `clusterId` and `observedAt` keep their last values: a probe
+//! that never ran observed nothing, so an earlier reading ages and goes stale
+//! exactly as it would with no probe at all. The Job then gets the usual TTL, so the next probe runs on
 //! the ordinary cadence and clears the reason once the namespace admits it.
 //!
 //! # It creates, it patches, and it deletes nothing
@@ -725,17 +726,25 @@ pub fn crashed_status_patch(
 /// known either way, and `reachable` and `clusterId` are left alone exactly as
 /// [`crashed_status_patch`] leaves them. The difference from that patch is the
 /// whole point: the operator reads the quota, not "no exit code".
+///
+/// **NO `observedAt`, AND THAT IS THE CONTRACT** (FX-11 review M1). The field
+/// is "when the probe above was performed", and a refused probe was never
+/// performed. The refusal loop re-probes every [`RE_PROBE_SECS`]; writing the
+/// refusal's instant there would keep an old `reachable: true` looking fresh in
+/// the console's freshness budget for as long as the quota stands. A merge
+/// patch that omits the key leaves the last real observation's instant in
+/// place, so that reading ages and goes stale on its own. `seen_at` is the
+/// condition's `lastTransitionTime` and nothing else.
 #[must_use]
 pub fn pod_refused_status_patch(
     cluster: &KafkaCluster,
     job_name: &str,
     refusal: &check::Waiting,
-    observed_at: DateTime<Utc>,
+    seen_at: DateTime<Utc>,
 ) -> Value {
     let reason = crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN;
     json!({
         "status": {
-            "observedAt": observed_at,
             "reason": reason,
             "conditions": [condition(
                 cluster,
@@ -747,7 +756,7 @@ pub fn pod_refused_status_patch(
                     refusal.message,
                     refusal.code.as_str()
                 ),
-                observed_at,
+                seen_at,
             )],
         }
     })
@@ -1299,7 +1308,9 @@ async fn reconcile_cluster_inner(
             None
         };
         if let Some(refusal) = refusal {
-            let observed = observed_at(&job, None, now);
+            // THE REFUSAL'S INSTANT, for the condition only: it is not an
+            // observation of the cluster, so it never reaches `observedAt`.
+            let seen = observed_at(&job, None, now);
             warn!(
                 cluster = %name,
                 namespace = %namespace,
@@ -1314,7 +1325,7 @@ async fn reconcile_cluster_inner(
                 &clusters,
                 cluster,
                 &name,
-                pod_refused_status_patch(cluster, &job_name, &refusal, observed),
+                pod_refused_status_patch(cluster, &job_name, &refusal, seen),
             )
             .await?;
             // ONLY NOW, as on the happy path: the status that names the

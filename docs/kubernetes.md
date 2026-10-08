@@ -5388,7 +5388,7 @@ ServiceAccount — the reason is `PodCreationForbidden`, quoting that event,
 rather than `NoExitCode`: on a `Backup` and a `Restore` through the
 diagnostics' fail-fast (*The runner's requests and limits*, §12), and on a
 `KafkaCluster` probe as `Reachable=Unknown` / `PodCreationForbidden` with
-`reachable` left alone and the usual TTL, so the next probe runs. With no such
+`reachable` and `observedAt` left alone and the usual TTL, so the next probe runs. With no such
 event the rows above stand. An absent `EXIT` column with
 `PHASE=Failed` is therefore a real, distinct state and not a rendering gap.
 
@@ -5935,7 +5935,7 @@ The same holds for a pod refused because its ServiceAccount does not exist
 | A `TopicDiscovery` | `Failed` / `PodCreateRejected` once the Job has had no pod for 30 seconds, quoting the admission, and the Job is cancelled |
 | A `RecoveryCatalog` sync | `Synced` names `PodCreateRejected` once the Job has had no pod for 30 seconds and the Job is cancelled; the harvest that follows is `Synced=False` / `PodCreateRejected` with `lastSyncJob.refusalReason: PodCreateRejected`, and the published view is kept |
 | A dynamic `Backup`'s topic discovery | Once the discovery Job has had no pod for 30 seconds the Job is cancelled and the `Backup` ends `Failed` / `PodCreationForbidden` (also on `TopicsResolved`), quoting the admission; no runner Job is created |
-| A `KafkaCluster` probe | `Reachable=Unknown` / `PodCreationForbidden` (also in `status.reason`) once the Job has had no pod for 30 seconds, quoting the admission; the Job is cancelled, `reachable` and `clusterId` keep their last values, and the finished Job gets the usual five-minute TTL, so the next probe runs on the ordinary cadence and clears the reason once the namespace admits the pod |
+| A `KafkaCluster` probe | `Reachable=Unknown` / `PodCreationForbidden` (also in `status.reason`) once the Job has had no pod for 30 seconds, quoting the admission; the Job is cancelled, `reachable`, `clusterId` and `observedAt` keep their last values (a refused probe observed nothing, so an earlier reading ages and goes stale as usual), and the finished Job gets the usual five-minute TTL, so the next probe runs on the ordinary cadence and clears the reason once the namespace admits the pod |
 | A `ProtectionPolicy` delivery | Once the delivery Job has had no pod for 30 seconds the Job is cancelled and the attempt is recorded `Failed`, `lastError` naming `PodCreationForbidden` and the admission, with `NotificationsDelivered=False` / `DeliveryFailed`; the ordinary backoff retries it, three attempts in all |
 | A `RetentionPolicy` enforcement run | Once the Job has had no pod for 30 seconds the Job is cancelled and the run is harvested at once: `Enforced=False` / `PodCreationForbidden`, quoting the admission, "nothing was deleted". It counts as a failed run, so three in a row turn `EnforcementDegraded=True` |
 

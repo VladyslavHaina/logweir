@@ -2297,3 +2297,80 @@ async fn fx11_a_young_or_counted_probe_job_costs_no_read() {
         assert!(job_patches(&seen).is_empty());
     }
 }
+
+/// **FX-11 review M1: A REFUSED PROBE NEVER REFRESHES `observedAt`.** The field
+/// is "when the probe above was performed", and the console's freshness budget
+/// (630 s) reads it. A cluster probed `reachable: true` last week, whose
+/// namespace now refuses every probe pod, is re-probed every cadence; had each
+/// refusal written its instant there, last week's reading would show as fresh
+/// for as long as the quota stood. Both refused passes — the fail-fast one and
+/// the finished one — leave `observedAt` (and `reachable`, `clusterId`) where
+/// the last real observation put it.
+///
+/// NEGATIVE CONTROL: the same finished, podless Job with NO `FailedCreate`
+/// Event takes the crashed-Job path, which does write `observedAt` (its own
+/// finish) — so the assertion reads a key the harness can see.
+///
+/// KILLS: `pod_refused_status_patch` writing `observedAt` again.
+#[tokio::test]
+async fn fx11_a_refused_probe_never_refreshes_observed_at() {
+    const LAST_WEEK: &str = "2026-09-03T12:00:00Z";
+    let observed_cluster: KafkaCluster = serde_json::from_str(&cluster_json(
+        NAME,
+        PLAINTEXT_AUTH,
+        &format!(
+            r#"{{"reachable": true, "clusterId": "{CLUSTER_ID}", "observedAt": "{LAST_WEEK}",
+                "reason": "Reachable",
+                "conditions": [{{"type": "Reachable", "status": "True", "reason": "Reachable",
+                                 "message": "a broker answered", "observedGeneration": 1,
+                                 "lastTransitionTime": "{LAST_WEEK}"}}]}}"#
+        ),
+    ))
+    .expect("an observed KafkaCluster");
+    let stored = serde_json::to_value(observed_cluster.status.as_ref().expect("a status"))
+        .expect("a status value");
+
+    for finished in [false, true] {
+        let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
+            podless_probe_job("2026-09-10T11:59:15Z", finished),
+            probe_events(Some(QUOTA_REFUSAL)),
+        ));
+        let outcome = reconcile_cluster(&observed_cluster, &client, now())
+            .await
+            .expect("the reconcile completes");
+        assert_eq!(outcome.reason.as_deref(), Some("PodCreationForbidden"));
+        let seen = bodies.lock().expect("readable").clone();
+        let patch = &patched_statuses(&seen)[0];
+        assert!(
+            patch.get("observedAt").is_none(),
+            "a refused probe performed nothing, so it writes no observedAt (finished: \
+             {finished}): {patch}"
+        );
+        let mut after = stored.clone();
+        apply_merge_patch(&mut after, patch);
+        assert_eq!(
+            after["observedAt"], LAST_WEEK,
+            "the last real observation's instant stays"
+        );
+        assert_eq!(after["reachable"], true, "and so does its reading");
+        assert_eq!(
+            after["reason"], "PodCreationForbidden",
+            "beside the newest reason"
+        );
+    }
+
+    // NEGATIVE CONTROL: no Event — the crashed path writes observedAt.
+    let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
+        podless_probe_job("2026-09-10T11:59:15Z", true),
+        probe_events(None),
+    ));
+    let outcome = reconcile_cluster(&observed_cluster, &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(outcome.reason.as_deref(), Some("NoExitCode"));
+    let seen = bodies.lock().expect("readable").clone();
+    assert!(
+        patched_statuses(&seen)[0].get("observedAt").is_some(),
+        "the crashed-Job patch carries observedAt, so the assertion above can fail"
+    );
+}
