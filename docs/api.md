@@ -1802,8 +1802,8 @@ costs the identity provider at most one request, so a client with many
 addresses gets many bounded budgets and nothing beyond what those addresses
 could send the provider directly. The counters are **per console process**
 (two replicas: up to twice the allowance) and track at most 65,536 clients
-per process (about 6 MiB at worst). Past that, while every tracked window is
-still live, a new client is served **without** a window rather than refused:
+per process (about 6 MiB, briefly 9 MiB as the table grows). Past that,
+while every tracked window is still live, a new client is served **without** a window rather than refused:
 its audit line notes `loginRateUntracked: tableFull`, and the console logs at
 most one warning a minute while it lasts. Only expired windows are ever dropped, so no
 amount of traffic resets another client's count. The threat model is written
