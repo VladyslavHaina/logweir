@@ -487,6 +487,21 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
             .take(MAX_LIST_ENTRIES)
             .collect(),
         queue: queue_view(operation.state, status.and_then(|s| s.queue.as_ref())),
+        // FX-8 (review M-2): the signed time basis, ALL OF IT OR NOTHING. A
+        // list past this view's bound is not truncated: a partial list would
+        // be a claim the signed document does not make, so the field is
+        // omitted, which reads as "not recorded" and never as "none".
+        time_basis: status
+            .and_then(|s| s.time_basis.as_ref())
+            .filter(|tb| {
+                tb.producer_time.len() <= MAX_LIST_ENTRIES
+                    && tb.not_recorded.len() <= MAX_LIST_ENTRIES
+            })
+            .map(|tb| crate::contract::RestoreTimeBasisView {
+                plan: tb.plan.clone(),
+                producer_time: tb.producer_time.clone(),
+                not_recorded: tb.not_recorded.clone(),
+            }),
         operation: summary(&operation),
     }
 }

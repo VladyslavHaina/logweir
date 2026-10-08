@@ -97,6 +97,66 @@ pub struct DrillSpec {
 pub struct RestoreSpecBlock {
     #[serde(default)]
     pub point_in_time: Option<DateTime<Utc>>,
+    /// **FX-8.** Which clock this plan accepts for its time selection over a
+    /// `LogAppendTime` source topic.
+    ///
+    /// The archive holds each record's PRODUCER timestamp — the pinned engine
+    /// reads a batch's first timestamp plus each record's delta and discards
+    /// the batch's max timestamp, which is the only place a broker writes
+    /// `LogAppendTime` (PROD-01.1 S3) — so every selection by time reads
+    /// producer time. For a `CreateTime` topic that IS the topic's own clock.
+    /// For a `LogAppendTime` topic it is not: PROD-01.1 restored six records
+    /// at a point in 2001 that the broker had appended in 2026, signed `pass`.
+    ///
+    /// ABSENT — every plan written before FX-8 — a time selection over a topic
+    /// whose recorded timestamp type is `LogAppendTime` is refused before any
+    /// target is created, `PointInTimeByProducerTime`
+    /// (`crate::time_basis::decide`). `producerTime` accepts it: the restore
+    /// runs and the signed scorecard says so (`source.time_basis`).
+    ///
+    /// INSIDE THE PLAN BYTES, so inside `plan_hash`: an approval minted over a
+    /// plan without it does not authorise the same plan with it, and the
+    /// opposite edit is caught the same way. Spelled `time_basis` because the
+    /// keys of this grammar are snake_case (`point_in_time`); the value is
+    /// camelCase like `target.mode`'s `newTopic`.
+    ///
+    /// `skip_serializing_if`, so a plan rendered from this type (a
+    /// `RehearsalSchedule` slot's, `weirkeeper::rehearsal::plan_bytes`) is
+    /// byte-identical to what it was before the field existed when it states
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_basis: Option<TimeBasis>,
+}
+
+/// **FX-8.** `restore.time_basis`'s closed value set: an unsupported spelling
+/// does not parse, so it can never be mistaken for an opt-in (the
+/// [`Anchor`] rule).
+///
+/// One value today. A future `appendTime` (selection by the broker's own
+/// clock) needs an archive that keeps it, which is PROD-00.3c, not a plan
+/// field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TimeBasis {
+    /// Select by the timestamp the archive holds — each producer's
+    /// `CreateTime` — knowingly, for a `LogAppendTime` topic.
+    ProducerTime,
+}
+
+impl TimeBasis {
+    /// The wire spelling, which is also what the signed scorecard's
+    /// `source.time_basis.plan` carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TimeBasis::ProducerTime => "producerTime",
+        }
+    }
+}
+
+impl std::fmt::Display for TimeBasis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Spec §13's notification shape. v0.1 POSTs one JSON summary per sink and

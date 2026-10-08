@@ -1238,8 +1238,31 @@ pub struct Restore {
     /// namespace's manual-restore pool (`operation.state: queued`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue: Option<RunQueueView>,
+    /// FX-8 (review M-2): the signed scorecard's `source.time_basis` as the
+    /// controller copied it onto `status.timeBasis` — which source topics the
+    /// restore selected by the producers' clocks, and which it selected by
+    /// time with no recorded timestamp type. A CLAIM until the evidence
+    /// verifies, like `operation.result.outcome`. ABSENT means not recorded
+    /// (a scorecard before format 1.3.0, a refused run, or one not read yet),
+    /// never "every selection used the topics' own clocks".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_basis: Option<RestoreTimeBasisView>,
     /// The normalized status summary.
     pub operation: OperationSummary,
+}
+
+/// `Restore.timeBasis` (FX-8): the signed time-basis label.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreTimeBasisView {
+    /// The approved plan's `restore.time_basis`: `producerTime`, or absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Source topics selected by producer time (recorded `LogAppendTime`,
+    /// accepted by the plan).
+    pub producer_time: Vec<String>,
+    /// Source topics selected by time whose timestamp type was not recorded.
+    pub not_recorded: Vec<String>,
 }
 
 // ======================================================================

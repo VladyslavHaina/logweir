@@ -394,5 +394,41 @@
   "python_exit": 1,
   "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `1`, expected a string",
   "python_reason": "topic_parity.unexpected_divergence is not an array of strings"
+ },
+ {
+  "id": "time_basis_not_an_object",
+  "file": "time_basis_not_an_object.json",
+  "check": "message:source.time_basis is not an object of an optional string plan",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"x\", expected struct TimeBasisLabel",
+  "python_reason": "source.time_basis is not an object of an optional string plan and two arrays of strings, producer_time and not_recorded"
+ },
+ {
+  "id": "time_basis_producer_time_absent",
+  "file": "time_basis_producer_time_absent.json",
+  "check": "message:source.time_basis is not an object of an optional string plan",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: missing field `producer_time`",
+  "python_reason": "source.time_basis is not an object of an optional string plan and two arrays of strings, producer_time and not_recorded"
+ },
+ {
+  "id": "time_basis_not_recorded_item_not_a_string",
+  "file": "time_basis_not_recorded_item_not_a_string.json",
+  "check": "message:source.time_basis is not an object of an optional string plan",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `1`, expected a string",
+  "python_reason": "source.time_basis is not an object of an optional string plan and two arrays of strings, producer_time and not_recorded"
+ },
+ {
+  "id": "time_basis_plan_not_a_string",
+  "file": "time_basis_plan_not_a_string.json",
+  "check": "message:source.time_basis is not an object of an optional string plan",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `1`, expected a string",
+  "python_reason": "source.time_basis is not an object of an optional string plan and two arrays of strings, producer_time and not_recorded"
  }
 ]

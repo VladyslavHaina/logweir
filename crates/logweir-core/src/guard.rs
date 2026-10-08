@@ -294,12 +294,21 @@ pub const TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE: &str = "CredentialNotRendera
 /// lives here so the three states are one list and a controller's mapping can
 /// be written against it before the third producer lands.
 pub const TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED: &str = "TargetTopicConfigRefused";
+/// [I9] **FX-8.** A time selection (a stated `restore.point_in_time`, or a
+/// `sample.window_end` that cuts the archive) over a source topic whose
+/// recorded timestamp type is `LogAppendTime`, in a plan that does not state
+/// `restore.time_basis: producerTime`. The archive holds producer time only,
+/// so the selection would read the producers' clocks instead of the broker's.
+/// Its call site is `crate::time_basis::decide`; refused after the archive is
+/// described and before any target topic is created.
+pub const TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME: &str = "PointInTimeByProducerTime";
 /// [I9] Every tag-1 terminal state a guard refusal can name. **Task 20**
 /// (Phase B) is the only consumer.
-pub const TERMINAL_STATES: [&str; 3] = [
+pub const TERMINAL_STATES: [&str; 4] = [
     TERMINAL_STATE_GUARD_REFUSED,
     TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
     TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
+    TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME,
 ];
 
 /// [I9] A refusal message MAY open with `<State>: `, naming one of

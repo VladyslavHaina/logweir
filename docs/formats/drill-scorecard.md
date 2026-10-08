@@ -3,11 +3,14 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-drill-scorecard-1.2.0.json`](../../schemas/logweir-drill-scorecard-1.2.0.json)
+[`schemas/logweir-drill-scorecard-1.3.0.json`](../../schemas/logweir-drill-scorecard-1.3.0.json)
 and CI diffs it against the code on every build, so this document and the
-schema cannot drift apart silently. [`schemas/logweir-drill-scorecard-1.1.0.json`](../../schemas/logweir-drill-scorecard-1.1.0.json)
+schema cannot drift apart silently. [`schemas/logweir-drill-scorecard-1.2.0.json`](../../schemas/logweir-drill-scorecard-1.2.0.json),
+[`schemas/logweir-drill-scorecard-1.1.0.json`](../../schemas/logweir-drill-scorecard-1.1.0.json)
 and [`schemas/logweir-drill-scorecard-1.0.0.json`](../../schemas/logweir-drill-scorecard-1.0.0.json)
-are frozen beside it. Format **1.1.0** (FX-4) added the nested optional
+are frozen beside it. Format **1.3.0** (FX-8) added the nested optional
+[`source.time_basis`](#sourcetime_basis-format-130); format **1.2.0** (FX-3) added
+`topic_parity.not_reconstructed`. Format **1.1.0** (FX-4) added the nested optional
 [`topic_parity.not_assessed` and `target_diff.not_assessed`](#topic_parity-and-what-its-silence-means),
 the first fields added after the v0.1 tags and therefore a MINOR bump with a new
 schema file
@@ -55,7 +58,7 @@ that reader and this one is a reference.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of this format. `1.0.0` in v0.1; `1.1.0` since FX-4; `1.2.0` since FX-3. |
+| `format_version` | string | Semver of this format. `1.0.0` in v0.1; `1.1.0` since FX-4; `1.2.0` since FX-3; `1.3.0` since FX-8. |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
 | `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../architecture.md#adr-0007-source-capture-scope) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
@@ -162,12 +165,75 @@ their refusal text, so the agreement is checked rather than asserted.
 | `source.manifest_sha256` | string | `sha256:` of the archive manifest as stored. Re-derivable by hand — [verify-a-scorecard.md](../verify-a-scorecard.md) shows how. |
 | `source.manifest_version_id` | string \| null | The store's version id for the manifest object, when the backend returned one. |
 | `source.captured_by_logweir` | bool | `true` **exactly when** phase −1 ran. `validate_invariants` enforces the pairing in **both** directions with `last_phase_completed` and the two `rpo_source_relative_*` fields, so it cannot be forged into a signed document. **Always `false` in v0.1.0.** |
+| `source.time_basis` | object, **optional** (1.3.0) | Which source topics the restore's time selection read by **producer time**, and which it selected by time with no recorded timestamp type. See [below](#sourcetime_basis-format-130). ABSENT means not recorded. |
 | `target.cluster_id` | string | The target cluster's own id, read from it. |
 | `target.mode` | string, optional | Which of the two target modes the run was in: `scratch` or `newTopic`. **Absent means `scratch`**, which is what every document written before this field existed carries, so the three checked-in signed fixtures keep their bytes. |
 | `target.marker_topic` | string, optional | The **scratch** segregation proof: the cluster is in `allowedClusterIds` **and** this topic exists, both verified at phase 0, whose failure refuses the drill with exit 3 before anything runs. **Absent in `newTopic` mode**, because that mode skips both checks — a reader that saw the field there would be reading a verification that never ran. Both readers REFUSE a document that is `scratch` and omits it. |
 | `target.topic_mapping_prefix` | string | Prefix applied to restored topic names. |
 | `target.topic_mapping_sha256` | string | `sha256:` of the mapping, so the mapping is attested rather than described. |
 | `target.topic_mapping_entries` | integer | How many mapping entries there were. |
+
+### `source.time_basis` (format 1.3.0)
+
+```json
+"time_basis": {
+  "plan": "producerTime",
+  "producer_time": ["orders"],
+  "not_recorded": []
+}
+```
+
+The pinned engine archives each record's **producer** timestamp, so every
+selection by time — a stated `restore.point_in_time`, or a `sample.window_end`
+earlier than the newest timestamp the archive manifest records for a topic —
+reads producer time. For a topic on `message.timestamp.type=LogAppendTime` that
+is not the topic's own clock, and phase 7 cannot notice: it compares the
+restored topic with the archive, and both carry producer time. Since FX-8 the
+runner refuses such a selection (`PointInTimeByProducerTime`, exit 3, no
+scorecard) unless the approved plan states `restore.time_basis: producerTime`
+([the plan field](drill-spec.md#restoretime_basis-fx-8)), and this block is what
+the signed document says about the selections it did make.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `plan` | string, optional | The approved plan's `restore.time_basis`, copied: `producerTime`, the one value. ABSENT when the plan stated none. |
+| `producer_time` | string[] | Source topics whose recorded timestamp type is `LogAppendTime` and which this restore selected by time — by the producers' clocks, as the plan accepted. Sorted. |
+| `not_recorded` | string[] | Source topics this restore selected by time while their timestamp type was NOT RECORDED: no `message.timestamp.type` override in the archive manifest and no effective value in a verified backup receipt (FX-4's `config_coverage`). The selection may have read producer time. Sorted. |
+
+A topic recorded as `CreateTime`, and a topic the restore did not select by
+time, is in neither list. **Absent means not recorded** — every document before
+1.3.0 — and is never read as "every selection used the topics' own clocks".
+Every 1.3.0 run that reaches the decision writes the block, so a 1.3.0 block
+with both lists empty is the claim that no topic was selected by producer time
+or with an unrecorded type **as far as the archive manifest's segment bounds
+show**. A plan with no point in time whose `sample.window_end` is at or after
+every segment's first and last timestamp is not counted as a selection; with
+out-of-order timestamps inside a segment the restore can still leave out a
+record later than both of its segment's ends, which is PROD-01.1b's
+([the limitation](../stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+
+Four arms, enforced by both readers in the same position (after `target.auth`,
+before `redactions`) and words, fire only on a document carrying the block:
+
+| Arm | Refuses |
+|---|---|
+| TB-1 | the block under a `format_version` before 1.3.0 |
+| TB-2 | `plan` other than `producerTime` |
+| TB-3 | a topic in `producer_time` when `plan` is not `producerTime`: a selection by producer time is one the approved plan accepted, never a default |
+| TB-4 | a topic in both lists: its type was either recorded as `LogAppendTime` or not recorded |
+
+Both readers print one `time basis:` line per non-empty list, or the one line
+saying it was not recorded for a document without the block; `logweir drill
+show` renders the same in its qualifiers footer (`source.time_basis`).
+
+**The number.** 1.3.0; 1.2.0 is FX-3's. A renumber moves
+`logweir_core::FORMAT_VERSION` and `scorecard::TIME_BASIS_SINCE_MINOR`
+together, the justfile's `scorecard_schema_version` and this schema file's
+name, `docs/verify_scorecard.py`'s `FORMAT_VERSION` and
+`SCORECARD_TIME_BASIS_SINCE_MINOR`, the parity script's
+`SCORECARD_TIME_BASIS_VERSION`, and the literal pins in
+`crates/logweir-core/src/lib.rs`, `docs/test_verify_scorecard.py` and the
+corpus cases `time_basis_*.json` (their `format_version` and TB-1's reason).
 
 ## `approval`
 

@@ -319,7 +319,8 @@ pub struct SharedConfig {
     /// The role bindings.
     pub roles: RolesConfig,
     /// Proxy ranges whose forwarded headers may be recorded in the transport
-    /// log. Never an identity input.
+    /// log, and whose `X-Forwarded-For` chooses the sign-in rate-limit bucket
+    /// (`crate::http::login_rate_key`, FX-13). Never an identity input.
     pub trusted_proxy_cidrs: Vec<Cidr>,
     /// Whether every request (the two probes excepted) must arrive from a
     /// trusted proxy peer that asserts `X-Forwarded-Proto: https`.
@@ -798,8 +799,12 @@ impl Config {
         // `requireTrustedProxy`, a range wider than /16 (IPv4) or /48 (IPv6)
         // would admit every pod of a typical cluster — which can dial the
         // console Service directly and send the proxy's header itself — so the
-        // gate would distinguish nothing (review M3). Logging-only ranges keep
-        // their old latitude: they decide nothing.
+        // gate would distinguish nothing (review M3). Without the gate a range
+        // keeps its old latitude, but it no longer decides nothing: a peer in it
+        // also chooses the sign-in rate-limit bucket by its `X-Forwarded-For`
+        // (FX-13), so a range wider than the ingress lets a client in it pick
+        // its own bucket or spend another client's. `docs/api.md` and the
+        // chart README say so; the floor stays a property of the gate.
         let require_trusted_proxy = file.require_trusted_proxy.unwrap_or(false);
         if require_trusted_proxy {
             if let Some(wide) = trusted_proxy_raw

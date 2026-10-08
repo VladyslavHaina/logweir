@@ -11636,6 +11636,11 @@
             "description": "Where it writes.",
             "$ref": "#/components/schemas/RestoreTargetView"
           },
+          "timeBasis": {
+            "description": "FX-8 (review M-2): the signed scorecard's `source.time_basis` as the controller copied it onto `status.timeBasis` — which source topics the restore selected by the producers' clocks, and which it selected by time with no recorded timestamp type. A CLAIM until the evidence verifies, like `operation.result.outcome`. ABSENT means not recorded (a scorecard before format 1.3.0, a refused run, or one not read yet), never \"every selection used the topics' own clocks\".",
+            "$ref": "#/components/schemas/RestoreTimeBasisView",
+            "nullable": true
+          },
           "uid": {
             "description": "The Kubernetes UID.",
             "type": "string"
@@ -11879,6 +11884,35 @@
           "topicPrefix": {
             "description": "The topic prefix.",
             "type": "string"
+          }
+        }
+      },
+      "RestoreTimeBasisView": {
+        "description": "`Restore.timeBasis` (FX-8): the signed time-basis label.",
+        "type": "object",
+        "required": [
+          "notRecorded",
+          "producerTime"
+        ],
+        "properties": {
+          "notRecorded": {
+            "description": "Source topics selected by time whose timestamp type was not recorded.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "plan": {
+            "description": "The approved plan's `restore.time_basis`: `producerTime`, or absent.",
+            "type": "string",
+            "nullable": true
+          },
+          "producerTime": {
+            "description": "Source topics selected by producer time (recorded `LogAppendTime`, accepted by the plan).",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },

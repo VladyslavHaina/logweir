@@ -3075,14 +3075,31 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
                 },
             );
         }
+        let reached = reachable_grants(render, &docs, RENDER_NAMESPACE, "weirkeeper");
         assert_grants(
             render,
             "weirkeeper",
             &want,
-            &reachable_grants(render, &docs, RENDER_NAMESPACE, "weirkeeper"),
+            &reached,
             "The controller holds `config/rbac/role.yaml`'s weirkeeper role — cluster-wide, or \
              per watched namespace when `controller.watchNamespaces` is set — and nothing else",
         );
+        // FX-11: EVERY JOB-OWNING RECONCILER READS ITS JOBS' `FailedCreate`
+        // EVENTS, so wherever the controller may create a Job it must also be
+        // able to list events — in both binding modes. A scope that could
+        // create a Job and not explain why its pod never started would put a
+        // refused pod back on its Job's deadline, silently: the read is best
+        // effort and a 403 reads as "no event".
+        for (scope, atoms) in &reached {
+            if atoms.contains("create batch/jobs") {
+                assert!(
+                    atoms.contains("list core/events"),
+                    "rendered/{render}.yaml: the controller may create Jobs in scope `{scope}` \
+                     but cannot list events there, so a pod refused at creation there is \
+                     reported only at its Job's deadline (FX-11)"
+                );
+            }
+        }
     }
     assert!(
         api_variants >= 4,

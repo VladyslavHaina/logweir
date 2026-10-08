@@ -790,3 +790,66 @@ fn drill_verify_names_what_a_new_topic_restore_did_not_reconstruct() {
         assert_eq!(got, want, "{name}: {stdout}");
     }
 }
+
+/// **FX-8.** `drill verify` prints what a scorecard's `source.time_basis`
+/// says — the topics selected by producer time and the ones selected with an
+/// unrecorded timestamp type — and, for a document without the block, that it
+/// was not recorded. Never silence for an absent block, never a line for an
+/// empty one. Exit 0 throughout: a label is not a refusal.
+///
+/// KILLS: deleting the `time:` lines from `print_report`; printing nothing for
+/// an absent block (reading it as "every selection used the topics' own
+/// clocks").
+#[test]
+fn drill_verify_prints_the_time_basis_a_scorecard_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc: Scorecard =
+        serde_json::from_slice(&std::fs::read(format!("{FIX}/scorecard.json")).unwrap()).unwrap();
+    sc.format_version = logweir_core::FORMAT_VERSION.into();
+    let cases: [(Option<logweir_core::scorecard::TimeBasisLabel>, &[&str]); 3] = [
+        (
+            None,
+            &[
+                "time basis: not recorded, so whether a time selection read a LogAppendTime \
+               topic's producer timestamps is unknown",
+            ],
+        ),
+        (
+            Some(logweir_core::scorecard::TimeBasisLabel::default()),
+            &[],
+        ),
+        (
+            Some(logweir_core::scorecard::TimeBasisLabel {
+                plan: Some("producerTime".into()),
+                producer_time: vec!["orders".into()],
+                not_recorded: vec!["payments".into()],
+            }),
+            &[
+                "time basis: SELECTED BY PRODUCER TIME for orders (recorded as LogAppendTime; \
+                 the approved plan states restore.time_basis: producerTime)",
+                "time basis: timestamp type NOT RECORDED for payments, so its time selection \
+                 may have read producer timestamps",
+            ],
+        ),
+    ];
+    for (label, want) in cases {
+        sc.source.time_basis = label.clone();
+        let (sc_path, sig_path) = sign_into(dir.path(), &sc);
+        let out = verify(&sc_path, &sig_path, format!("{FIX}/public.pem"));
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{label:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let got: Vec<&str> = stdout
+            .lines()
+            .filter_map(|l| {
+                l.split_once("time basis: ")
+                    .map(|_| l.trim_start_matches("time:      "))
+            })
+            .collect();
+        assert_eq!(got, want, "{label:?}:\n{stdout}");
+    }
+}
