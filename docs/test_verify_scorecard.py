@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.22.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.23.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -944,6 +944,12 @@ def test_the_version_line_names_the_current_invariant_set():
         assert (
             "sample.unsampled_topics only from 1.6.0, never empty, sorted, each topic once and "
             "not blank, and never beside a complete verification"
+        ) in r.stdout, r.stdout
+        # 1.23.0's addition (PROD-11.1): `source.selection`'s seven arms.
+        assert (
+            "source.selection only from 1.7.0, narrowing something, its start before its end, "
+            "its subsets in one spelling, at least one engine run, and a complete block over "
+            "its window that expects nothing from an unselected partition"
         ) in r.stdout, r.stdout
 
 
@@ -2244,9 +2250,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.22.0 (FX-23) adds the scorecard's three `sample.unsampled_topics` arms
     # (US-1 to US-3, format 1.6.0), its shape check and the `sample coverage:`
     # line. Map still five.
+    #
+    # 1.23.0 (PROD-11.1) adds the scorecard's seven `source.selection` arms
+    # (SEL-1 to SEL-7, format 1.7.0), its shape check and the `replay
+    # selection:` line. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.22.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.23.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -3681,3 +3691,127 @@ def test_a_sampled_pass_says_what_it_proves_at_its_version():
     assert mod._sampled_pass_lines(_not_a_pass(_scorecard_1_6(None))) == []
     rust = (ROOT / "crates/logweir/src/verify.rs").read_text()
     assert "sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition \\" in rust
+
+
+# ---- PROD-11.1: `source.selection` (scorecard 1.7.0), arms SEL-1 to SEL-7 ----
+
+SEL4_MESSAGE = (
+    "source.selection.partitions does not name each topic once, in order, with a non-empty, "
+    "sorted list of distinct partitions that are not negative")
+
+
+def _selection(start=1760000001000, end=1760000005000, subsets=None, runs=1):
+    block = {"window_end_ms": end, "partitions": subsets if subsets is not None else [
+        {"topic": "orders", "partitions": [0, 2]}], "engine_runs": runs}
+    if start is not None:
+        block["window_start_ms"] = start
+    return block
+
+
+def _scorecard_1_7(selection, version="1.7.0", block="sampled"):
+    doc = _scorecard_1_4(_sampled_block() if block == "sampled" else block, version)
+    doc["source"]["selection"] = selection
+    return doc
+
+
+def test_the_selection_minor_is_the_rust_readers():
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const SELECTION_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares SELECTION_SINCE_MINOR"
+    assert mod.SCORECARD_SELECTION_SINCE_MINOR == int(m.group(1))
+    m = re.search(r'pub const FORMAT_VERSION_WITH_SELECTION: &str = "1\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_SELECTION_SINCE_MINOR
+
+
+def test_a_selection_is_accepted_as_the_writer_writes_it():
+    mod = _verifier_module()
+    assert mod.check_invariants(_scorecard_1_7(_selection())) == ""
+    assert mod.check_invariants(_scorecard_1_7(_selection(start=None))) == ""
+    assert mod.check_invariants(_scorecard_1_7(_selection(subsets=[]))) == ""
+    # `null` is ABSENT, as `Option` reads it, in every version.
+    assert mod.check_invariants(_scorecard_1_7(None, version="1.4.0")) == ""
+    doc = _scorecard_1_7(_selection())
+    doc["source"]["selection"]["window_start_ms"] = None
+    assert mod.check_invariants(doc) == ""
+
+
+def test_sel1_to_sel5_refuse_with_the_rust_readers_words():
+    mod = _verifier_module()
+    for version in ("1.4.0", "1.5.0", "1.6.0"):
+        assert mod.check_invariants(_scorecard_1_7(_selection(), version=version)) == (
+            f'source.selection is present but format_version "{version}" predates it: '
+            "the block is defined from 1.7.0")
+    assert mod.check_invariants(_scorecard_1_7(_selection(start=None, subsets=[]))) == (
+        "source.selection states neither a window start nor a partition subset; a restore "
+        "that selects every partition from the archive's floor carries no selection block")
+    for start in (1760000005000, 1760000006000):
+        assert mod.check_invariants(_scorecard_1_7(_selection(start=start))) == (
+            "source.selection.window_start_ms is not before window_end_ms; a selection's "
+            "window holds at least one instant after its start")
+    for bad in (
+        [{"topic": "orders", "partitions": []}],
+        [{"topic": "orders", "partitions": [2, 0]}],
+        [{"topic": "orders", "partitions": [1, 1]}],
+        [{"topic": "orders", "partitions": [-1]}],
+        [{"topic": "\u2003", "partitions": [0]}],
+        [{"topic": "payments", "partitions": [0]}, {"topic": "orders", "partitions": [0]}],
+        [{"topic": "orders", "partitions": [0]}, {"topic": "orders", "partitions": [1]}],
+    ):
+        assert mod.check_invariants(_scorecard_1_7(_selection(subsets=bad))) == SEL4_MESSAGE, bad
+    assert mod.check_invariants(_scorecard_1_7(_selection(runs=0))) == (
+        "source.selection.engine_runs is 0; a restore is at least one engine run")
+
+
+def test_sel6_and_sel7_hold_the_complete_block_to_the_selection():
+    mod = _verifier_module()
+    block = _complete_block()
+    block["complete"]["window"] = {"start_ms": 1760000001000, "end_ms": 1760000005000}
+    subsets = [{"topic": p["topic"], "partitions": sorted(
+        {q["partition"] for q in block["complete"]["partitions"] if q["topic"] == p["topic"]})}
+        for p in block["complete"]["partitions"][:1]]
+    ok = _scorecard_1_7(_selection(subsets=subsets), block=block)
+    assert mod.check_invariants(ok) == "", mod.check_invariants(ok)
+    for window in ({"end_ms": 1760000005000}, {"start_ms": 1, "end_ms": 1760000005000},
+                   {"start_ms": 1760000001000, "end_ms": 1}):
+        b = json.loads(json.dumps(block))
+        b["complete"]["window"] = window
+        assert mod.check_invariants(_scorecard_1_7(_selection(subsets=subsets), block=b)) == (
+            "integrity.verification.complete.window is not source.selection's window; the "
+            "expected output is selected by the plan's own start and end"), window
+    narrowed = [{"topic": subsets[0]["topic"], "partitions": subsets[0]["partitions"][:1]}]
+    assert mod.check_invariants(_scorecard_1_7(_selection(subsets=narrowed), block=block)) == (
+        "integrity.verification.complete.partitions expects records from a partition "
+        "source.selection does not select")
+
+
+def test_the_selection_shape_is_refused_before_its_arms():
+    mod = _verifier_module()
+    message = (
+        "source.selection is not an object of the shape the writer gives it: an optional "
+        "window start, a window end, an array of topic subsets and an engine run count")
+    for bad in ("orders", [], {"window_end_ms": "1", "partitions": [], "engine_runs": 1},
+                {"partitions": [], "engine_runs": 1},
+                {"window_end_ms": 1, "partitions": [], "engine_runs": -1},
+                {"window_end_ms": 1, "partitions": [], "engine_runs": True},
+                {"window_end_ms": 1, "partitions": [{"topic": "a", "partitions": [2**31]}],
+                 "engine_runs": 1},
+                {"window_end_ms": 1, "partitions": "orders", "engine_runs": 1},
+                {"window_start_ms": "x", "window_end_ms": 1, "partitions": [], "engine_runs": 1}):
+        assert mod.check_invariants(_scorecard_1_7(bad, version="1.0.0")) == message, bad
+
+
+def test_the_selection_line_is_the_rust_readers():
+    mod = _verifier_module()
+    assert mod._selection_lines(None) == []
+    assert mod._selection_lines(_selection()) == [
+        "replay selection: ONLY orders partitions [0, 2] (every partition of any other restored "
+        "topic); no other partition of these topics was restored, from epoch-ms 1760000001000 "
+        "(the plan's restore.window_start, inclusive) to epoch-ms 1760000005000 (inclusive), in "
+        "1 engine run(s)"]
+    assert mod._selection_lines(_selection(subsets=[])) == [
+        "replay selection: every partition of every restored topic, from epoch-ms "
+        "1760000001000 (the plan's restore.window_start, inclusive) to epoch-ms 1760000005000 "
+        "(inclusive), in 1 engine run(s)"]
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    assert '"replay selection: {parts}, {start} to epoch-ms {} (inclusive), in {} engine run(s)"' in rust

@@ -475,7 +475,20 @@ FORMAT_VERSION = "1.4.0"
 # per-partition bound, every-topic sampling and the engine-report check;
 # before 1.6.0 only the canary and one count bound over every topic together,
 # because such a document is the same bytes whichever build signed it.
-SCRIPT_VERSION = "1.22.0"
+#
+# 1.23.0 (PROD-11.1) knows scorecard format 1.7.0 and its optional
+# `source.selection`: a narrowed restore's stated inclusive window start, its
+# per-topic partition subsets and its engine runs. Seven arms, SEL-1 to SEL-7,
+# mirrored byte for byte and in position from `Scorecard::validate_invariants`:
+# the block only under a version of at least 1.7.0, a block that narrows
+# something, a start before the end, the subsets' one spelling, at least one
+# engine run, and a complete block whose window is the selection's and that
+# expects nothing from an unselected partition. They fire only on a document
+# carrying the block, so every document without it is decided exactly as
+# before (OD-7 (a)). The shape layer refuses a block that is not the writer's
+# shape, and a `replay selection:` coverage line names the selection in the
+# Rust reader's words.
+SCRIPT_VERSION = "1.23.0"
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
 # `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
@@ -493,6 +506,12 @@ RECEIPT_AUTH_MODES_SINCE_MINOR = 4
 # `crates/logweir-core/src/connection.rs`, which they must equal.
 ORIGINAL_AUTH_MODES = ("plaintext", "scramSha512")
 PROD_01_3_AUTH_MODES = ("scramSha256", "plain", "mtls")
+
+# The first minor of SCORECARD format 1 that defines `source.selection` (arm
+# SEL-1, PROD-11.1) -- `SELECTION_SINCE_MINOR` in
+# `crates/logweir-core/src/scorecard.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_selection_minor_is_the_rust_readers`).
+SCORECARD_SELECTION_SINCE_MINOR = 7
 
 # The first minor of SCORECARD format 1 that defines `sample.unsampled_topics`
 # (arm US-1, FX-23) -- `UNSAMPLED_TOPICS_SINCE_MINOR` in
@@ -828,6 +847,34 @@ def _time_basis_shape_ok(block) -> bool:
     for name in ("producer_time", "not_recorded"):
         listed = block.get(name)
         if not isinstance(listed, list) or not all(isinstance(t, str) for t in listed):
+            return False
+    return True
+
+
+def _selection_shape_ok(block) -> bool:
+    """`source.selection` has the shape `SelectionLabel` deserialises
+    (PROD-11.1, format 1.7.0): an object whose `window_start_ms` is absent,
+    null or an i64, whose `window_end_ms` is an i64, whose `partitions` is an
+    array of `{topic: string, partitions: [i32]}` and whose `engine_runs` is a
+    u32. Unknown keys are ignored, as serde ignores them."""
+    if not isinstance(block, dict):
+        return False
+    start = block.get("window_start_ms")
+    if start is not None and not _int_in(start, 64):
+        return False
+    if not _int_in(block.get("window_end_ms"), 64):
+        return False
+    runs = block.get("engine_runs")
+    if not (isinstance(runs, int) and not isinstance(runs, bool) and 0 <= runs < 2**32):
+        return False
+    subsets = block.get("partitions")
+    if not isinstance(subsets, list):
+        return False
+    for tp in subsets:
+        if not isinstance(tp, dict) or not isinstance(tp.get("topic"), str):
+            return False
+        listed = tp.get("partitions")
+        if not isinstance(listed, list) or not all(_int_in(p, 32) for p in listed):
             return False
     return True
 
@@ -1333,6 +1380,18 @@ def check_invariants(doc) -> str:
         return (
             "source.time_basis is not an object of an optional string plan and two arrays "
             "of strings, producer_time and not_recorded"
+        )
+
+    # Also shape (PROD-11.1, scorecard 1.7.0): `source.selection` is an
+    # `Option<SelectionLabel>` over there, so `null` is ABSENT and anything
+    # that is not the writer's shape is refused at DESERIALISATION. Arms SEL-1
+    # to SEL-7 below compare its fields, so the shape is asserted first. The
+    # bad shapes are cases in `shape-index.json`.
+    selection = source.get("selection")
+    if selection is not None and not _selection_shape_ok(selection):
+        return (
+            "source.selection is not an object of the shape the writer gives it: an optional "
+            "window start, a window end, an array of topic subsets and an engine run count"
         )
 
     # Also shape, and also the Rust reader's type doing the work over there:
@@ -2014,6 +2073,86 @@ def check_invariants(doc) -> str:
                 "\"complete\"; a complete verification compares every restored partition and "
                 "leaves no topic unsampled"
             )
+
+    # `source.selection` (format 1.7.0, PROD-11.1): arms SEL-1 to SEL-7,
+    # mirrored ARM FOR ARM, IN THIS POSITION (after `sample.unsampled_topics`,
+    # before `redactions`) and with the same words from
+    # `Scorecard::validate_invariants`. They fire ONLY on a document carrying
+    # the block, so every document before 1.7.0 is decided exactly as before.
+    # Not interpolated except SEL-1's version: the block names topics. The
+    # shape layer above has proved its types. Python compares `str` by code
+    # point and Rust `String` by UTF-8 byte, which order alike.
+    if selection is not None:
+        # SEL-1. A version before 1.7.0 cannot carry the 1.7.0 block.
+        minor = _minor(version)
+        if not (
+            doc_major == 1
+            and minor is not None
+            and minor >= SCORECARD_SELECTION_SINCE_MINOR
+        ):
+            return (
+                f"source.selection is present but format_version "
+                f"{_rust_debug_str(version)} predates it: the block is defined from "
+                f"1.{SCORECARD_SELECTION_SINCE_MINOR}.0"
+            )
+        start = selection.get("window_start_ms")
+        end = selection["window_end_ms"]
+        subsets = selection["partitions"]
+        # SEL-2. A block that narrows nothing is not one this format writes.
+        if start is None and not subsets:
+            return (
+                "source.selection states neither a window start nor a partition subset; a "
+                "restore that selects every partition from the archive's floor carries no "
+                "selection block"
+            )
+        # SEL-3. A stated start is before the end.
+        if start is not None and start >= end:
+            return (
+                "source.selection.window_start_ms is not before window_end_ms; a selection's "
+                "window holds at least one instant after its start"
+            )
+        # SEL-4. Each topic once, in order, each list non-empty, ascending,
+        # distinct and not negative.
+        topics = [tp["topic"] for tp in subsets]
+        if any(a >= b for a, b in zip(topics, topics[1:])) or any(
+            not tp["topic"].strip(RUST_WHITESPACE)
+            or not tp["partitions"]
+            or any(p < 0 for p in tp["partitions"])
+            or any(a >= b for a, b in zip(tp["partitions"], tp["partitions"][1:]))
+            for tp in subsets
+        ):
+            return (
+                "source.selection.partitions does not name each topic once, in order, with a "
+                "non-empty, sorted list of distinct partitions that are not negative"
+            )
+        # SEL-5. A restore is at least one engine run.
+        if selection["engine_runs"] == 0:
+            return "source.selection.engine_runs is 0; a restore is at least one engine run"
+        complete = verification.get("complete") if verification is not None else None
+        if complete is not None:
+            # SEL-6. The complete block's window is the selection's.
+            window = complete["window"]
+            if window.get("start_ms") != start or window["end_ms"] != end:
+                return (
+                    "integrity.verification.complete.window is not source.selection's window; "
+                    "the expected output is selected by the plan's own start and end"
+                )
+
+            # SEL-7. Nothing is expected from an unselected partition.
+            def _selected(topic, partition):
+                for tp in subsets:
+                    if tp["topic"] == topic:
+                        return partition in tp["partitions"]
+                return True
+
+            if any(
+                p["replay"]["expected"] > 0 and not _selected(p["topic"], p["partition"])
+                for p in complete["partitions"]
+            ):
+                return (
+                    "integrity.verification.complete.partitions expects records from a "
+                    "partition source.selection does not select"
+                )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -2717,6 +2856,38 @@ def _sampled_pass_lines(doc):
     ]
 
 
+def _selection_lines(block):
+    """`source.selection` as lines -- the twin of `crates/logweir/src/
+    verify.rs::selection_lines` (PROD-11.1): the sentence the writer puts at
+    the head of `sample.coverage_note` (`SelectionLabel::coverage_note`), in
+    the same words. Absent prints nothing: the restore selected every
+    partition from the archive's floor."""
+    if block is None:
+        return []
+    start = block.get("window_start_ms")
+    start_words = (
+        f"from epoch-ms {start} (the plan's restore.window_start, inclusive)"
+        if start is not None
+        else "from the archive's floor"
+    )
+    subsets = block["partitions"]
+    if not subsets:
+        parts = "every partition of every restored topic"
+    else:
+        named = "; ".join(
+            f"{tp['topic']} partitions [{', '.join(str(p) for p in tp['partitions'])}]"
+            for tp in subsets
+        )
+        parts = (
+            f"ONLY {named} (every partition of any other restored topic); no other partition "
+            "of these topics was restored"
+        )
+    return [
+        f"replay selection: {parts}, {start_words} to epoch-ms {block['window_end_ms']} "
+        f"(inclusive), in {block['engine_runs']} engine run(s)"
+    ]
+
+
 def _unsampled_lines(topics):
     """`sample.unsampled_topics` as lines -- the twin of `crates/logweir/src/
     verify.rs::unsampled_lines` (FX-23), in the same words. Absent or empty
@@ -3057,6 +3228,10 @@ def main(
             doc["sample"].get("unsampled_topics")
         ):
             print(f"       coverage: {line}")
+        # PROD-11.1: the replay selection a narrowed restore restored, in the
+        # words `logweir drill verify` prints (`selection_lines`).
+        for line in _selection_lines(doc["source"].get("selection")):
+            print(f"       coverage: {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -3101,6 +3276,9 @@ def main(
             "partitions' sums; "
             "sample.unsampled_topics only from 1.6.0, never empty, sorted, each topic once and "
             "not blank, and never beside a complete verification; "
+            "source.selection only from 1.7.0, narrowing something, its start before its end, "
+            "its subsets in one spelling, at least one engine run, and a complete block over "
+            "its window that expects nothing from an unselected partition; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

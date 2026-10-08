@@ -157,6 +157,22 @@ pub struct VerifyReport {
     pub unsampled_topics: Option<Vec<String>>,
     /// The document's own `format_version`, for [`sampled_pass_lines`].
     pub format_version: String,
+    /// `source.selection` (scorecard 1.7.0, PROD-11.1), carried as read:
+    /// `None` is a restore of every partition from the archive's floor.
+    pub selection: Option<logweir_core::scorecard::SelectionLabel>,
+}
+
+/// The replay-selection line both readers print for a narrowed restore
+/// (PROD-11.1): the same sentence the writer puts at the head of
+/// `sample.coverage_note` (`SelectionLabel::coverage_note`), so what a reader
+/// of either kind sees is what was restored. Nothing for a document without
+/// `source.selection`: it restored every partition from the archive's floor.
+/// `docs/verify_scorecard.py::_selection_lines` prints the same line, and
+/// `scripts/check-verifier-parity.sh` compares every line starting
+/// `replay selection:` between the two readers.
+#[must_use]
+pub fn selection_lines(selection: Option<&logweir_core::scorecard::SelectionLabel>) -> Vec<String> {
+    selection.map(|s| s.coverage_note()).into_iter().collect()
 }
 
 /// The line both readers print for a SAMPLED `pass` (FX-23 review M2): what
@@ -793,6 +809,7 @@ pub fn verify_scorecard(
         time_basis: sc.source.time_basis.clone(),
         verification: sc.integrity.verification.clone().map(Box::new),
         unsampled_topics: sc.sample.unsampled_topics.clone(),
+        selection: sc.source.selection.clone(),
         format_version: sc.format_version.clone(),
     }))
 }
@@ -850,6 +867,11 @@ fn print_report(r: &VerifyReport) {
         .into_iter()
         .chain(unsampled_lines(r.unsampled_topics.as_deref()))
     {
+        println!("coverage:  {line}");
+    }
+    // PROD-11.1: nor a restore of the whole archive when it restored a
+    // selection.
+    for line in selection_lines(r.selection.as_ref()) {
         println!("coverage:  {line}");
     }
 }

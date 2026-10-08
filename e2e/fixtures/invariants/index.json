@@ -755,5 +755,129 @@
   "python_exit": 1,
   "reason": "sample.unsampled_topics is present but integrity.verification.coverage is \"complete\"; a complete verification compares every restored partition and leaves no topic unsampled",
   "arm": "sample.unsampled_topics is present but integrity.verification.coverage is "
+ },
+ {
+  "id": "selection_1_7_sampled",
+  "file": "selection_1_7_sampled.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "selection_1_7_subset_only",
+  "file": "selection_1_7_subset_only.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "selection_1_7_start_only",
+  "file": "selection_1_7_start_only.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "selection_1_7_complete_pass",
+  "file": "selection_1_7_complete_pass.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "selection_under_format_1_6_0",
+  "file": "selection_under_format_1_6_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection is present but format_version \"1.6.0\" predates it: the block is defined from 1.7.0",
+  "arm": "source.selection is present but format_version "
+ },
+ {
+  "id": "selection_narrows_nothing",
+  "file": "selection_narrows_nothing.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection states neither a window start nor a partition subset; a restore that selects every partition from the archive's floor carries no selection block",
+  "arm": "source.selection states neither a window start nor a partition subset; a "
+ },
+ {
+  "id": "selection_start_at_its_end",
+  "file": "selection_start_at_its_end.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.window_start_ms is not before window_end_ms; a selection's window holds at least one instant after its start",
+  "arm": "source.selection.window_start_ms is not before window_end_ms; a selection's "
+ },
+ {
+  "id": "selection_partitions_unsorted",
+  "file": "selection_partitions_unsorted.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative",
+  "arm": "source.selection.partitions does not name each topic once, in order, with a "
+ },
+ {
+  "id": "selection_partition_repeated",
+  "file": "selection_partition_repeated.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative",
+  "arm": "source.selection.partitions does not name each topic once, in order, with a "
+ },
+ {
+  "id": "selection_partition_negative",
+  "file": "selection_partition_negative.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative",
+  "arm": "source.selection.partitions does not name each topic once, in order, with a "
+ },
+ {
+  "id": "selection_subset_empty",
+  "file": "selection_subset_empty.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative",
+  "arm": "source.selection.partitions does not name each topic once, in order, with a "
+ },
+ {
+  "id": "selection_topic_blank",
+  "file": "selection_topic_blank.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative",
+  "arm": "source.selection.partitions does not name each topic once, in order, with a "
+ },
+ {
+  "id": "selection_topics_unordered",
+  "file": "selection_topics_unordered.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative",
+  "arm": "source.selection.partitions does not name each topic once, in order, with a "
+ },
+ {
+  "id": "selection_no_engine_run",
+  "file": "selection_no_engine_run.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.engine_runs is 0; a restore is at least one engine run",
+  "arm": "source.selection.engine_runs is 0; a restore is at least one engine run"
+ },
+ {
+  "id": "selection_complete_window_is_not_its_own",
+  "file": "selection_complete_window_is_not_its_own.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete.window is not source.selection's window; the expected output is selected by the plan's own start and end",
+  "arm": "integrity.verification.complete.window is not source.selection's window; "
+ },
+ {
+  "id": "selection_complete_expects_an_unselected_partition",
+  "file": "selection_complete_expects_an_unselected_partition.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete.partitions expects records from a partition source.selection does not select",
+  "arm": "integrity.verification.complete.partitions expects records from a "
  }
 ]

@@ -700,5 +700,14 @@
   "python_exit": 1,
   "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"orders\", expected a sequence",
   "python_reason": "sample.unsampled_topics is not an array of strings"
+ },
+ {
+  "id": "selection_not_an_object",
+  "file": "selection_not_an_object.json",
+  "check": "message:source.selection is not an object of the shape the writer gives it: an optional ",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"orders\", expected struct SelectionLabel",
+  "python_reason": "source.selection is not an object of the shape the writer gives it: an optional window start, a window end, an array of topic subsets and an engine run count"
  }
 ]
