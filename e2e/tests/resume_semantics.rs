@@ -29,7 +29,7 @@
 //! attempt of a scenario, so a kill lands at a predictable point:
 //! `produce_batch_size: 100` and `rate_limit_records_per_sec: 300` (per
 //! partition; the engine sleeps `batch / rate` before each produce request,
-//! `kafka-backup-core/src/restore/engine.rs:1824-1828` in 0.23.3). The engine
+//! `kafka-backup-core/src/restore/engine.rs:1846-1851` in 0.23.3). The engine
 //! is also run with `kafka_backup_core::kafka::produce=trace`, whose
 //! "Produced N records to T:P at offset O" line is written after the broker's
 //! acknowledgement is parsed (`kafka/produce.rs:181-196`), so the log names
