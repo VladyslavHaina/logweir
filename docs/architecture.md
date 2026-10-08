@@ -116,7 +116,8 @@ unmodified upstream image").
   as its oracle passes, with a one-line `Reason:`. It is dropped when an OSO
   release contains it, because it no longer applies. Upstream PRs are optional
   and come after shipping, for bug-class fixes only (C1, C4, C5, C6, C12, C14
-  to `kafka-backup`; C13 to `kafka-protocol-rs`). The policy is
+  to `kafka-backup`; C13 to `kafka-protocol-rs`), never the filter-rule or
+  SASL-plugin patches. The policy is
   `third_party/kafka-backup-patches/README.md`.
 - **A version identity of its own.** Logweir's build prints
   `kafka-backup <release>+logweir.<n>` (`third_party/kafka-backup-build.env`),
@@ -124,11 +125,16 @@ unmodified upstream image").
   over the tarball, the patches and the version. `doctor` pins exactly that
   version, and names OSO's release distinctly. The runner image declares its
   engine in `/etc/logweir/engine-identity`, and every scorecard and receipt
-  signs that declaration ahead of a Job's `LOGWEIR_ENGINE_VERSION` and
-  `LOGWEIR_ENGINE_DIGEST`.
+  signs that declaration. The controller states no engine identity in a Job,
+  and the runner refuses to sign a version its engine binary does not print
+  (`--version`, before the engine runs).
+- **One version, one engine.** A change to a patch or the tarball bumps `<n>`
+  and appends the build to `third_party/kafka-backup-builds.txt`; the recipe
+  and the test set refuse a reused version.
 - **Engine CVEs are Logweir's.** `cargo deny` checks the engine's own lockfile
-  after the patches (`scripts/ci-check.sh`, `third_party/kafka-backup-deny.toml`),
-  and `SECURITY.md` takes engine vulnerabilities into scope. The first run
+  after the patches (`scripts/ci-check.sh`, `third_party/kafka-backup-deny.toml`:
+  licences, advisories, bans, and sources limited to crates.io), and
+  `SECURITY.md` takes engine vulnerabilities into scope. The first run
   found RUSTSEC-2026-0285 (rustls) and RUSTSEC-2026-0258 (h2) in the shipped
   graph. They landed as patch `0001`, a lockfile bump.
 - **One-release rollback.** `docker build --build-arg ENGINE_SOURCE=oso` still

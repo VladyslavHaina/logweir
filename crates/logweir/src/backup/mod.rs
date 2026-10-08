@@ -552,7 +552,7 @@ pub fn execute_with(
     store: &Store,
     evidence: &Store,
 ) -> Result<BackupOutcome, BackupError> {
-    execute_with_signer(args, run_id, reader, engine, store, evidence, None)
+    execute_with_signer(args, run_id, reader, engine, None, store, evidence, None)
 }
 
 /// The common execution path. Production supplies the signer it validated
@@ -563,6 +563,9 @@ fn execute_with_signer(
     run_id: &str,
     reader: &dyn ClusterReader,
     engine: &dyn DataEngine,
+    // The binary `engine` executes, when it is a real one: `run` passes it, the
+    // in-process seam's doubles have none (PROD-00.2 review L3/L4).
+    engine_binary: Option<&std::path::Path>,
     store: &Store,
     evidence: &Store,
     validated_signer: Option<&crate::signer::ValidatedSigner>,
@@ -672,6 +675,13 @@ fn execute_with_signer(
                 path = crate::engine_identity::IMAGE_IDENTITY_PATH
             )));
         }
+    }
+    // ...and it must be the engine that runs: `<binary> --version` must print
+    // the version the receipt would sign (PROD-00.2 review L3/L4), before the
+    // execution claim and before the engine spawns.
+    if let Some(binary) = engine_binary {
+        crate::engine_identity::verify_engine_reports(binary, &engine_id.version)
+            .map_err(BackupError::Operational)?;
     }
 
     // **RECEIPT-DUP — ONE ENGINE RUN PER EXECUTION.** The last step before
@@ -1270,11 +1280,13 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
         Err(e) => return report(&run_id, Err(e)),
     };
 
+    let engine_binary = crate::engine_bin::engine_path();
     let outcome = execute_with_signer(
         args,
         &run_id,
         &reader,
         &engine,
+        Some(&engine_binary),
         &store,
         &evidence,
         Some(&signer),

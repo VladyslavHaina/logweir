@@ -1638,6 +1638,12 @@ pub struct Ctx {
     pub allowed: AllowedClusters,
     pub client: Box<dyn TargetClient>,
     pub engine: Box<dyn DataEngine>,
+    /// The engine binary `engine` executes, when it is a real one (`context`
+    /// sets it; a double has none). PROD-00.2 review L3/L4: right after phase 0
+    /// the drill runs it with `--version` and refuses unless it prints the
+    /// `engine.version` the scorecard would sign
+    /// (`crate::engine_identity::verify_engine_reports`).
+    pub engine_binary: Option<std::path::PathBuf>,
     /// Reads the OSO ARCHIVE. Phase 7 reads segment bytes back through this
     /// handle; `Store::read_only_from_url` builds one that physically cannot
     /// put, so Global Constraint 6 cannot be reached from the archive side.
@@ -1815,7 +1821,7 @@ fn context(
     std::fs::create_dir_all(&workdir)
         .map_err(|e| DrillError::Operational(format!("{}: {e}", workdir.display())))?;
     let engine = logweir_engine_oso::engine::OsoCliEngine::new(
-        binary,
+        binary.clone(),
         version,
         digest,
         workdir,
@@ -1828,6 +1834,7 @@ fn context(
         allowed,
         client: Box::new(reader),
         engine: Box::new(engine),
+        engine_binary: Some(binary),
         archive,
         store,
         target_tls_ca_file,
@@ -2798,6 +2805,10 @@ fn execute_with_validated_approval(
     let mut topic_preflight = admitted.topic_preflight.clone();
     sc.target = target_info(&c.spec, &admitted)?;
     assert_engine_identity(&c.engine.id())?;
+    if let Some(binary) = &c.engine_binary {
+        crate::engine_identity::verify_engine_reports(binary, &c.engine.id().version)
+            .map_err(DrillError::Operational)?;
+    }
 
     // 1
     let signing_pub = signer.verifying_key();

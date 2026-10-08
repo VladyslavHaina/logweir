@@ -131,13 +131,20 @@ helm upgrade logweir <chart> --reuse-values \
 ```
 
 The rollback image declares OSO's identity in `/etc/logweir/engine-identity`
-(`version=0.23.3`, the digest of OSO's image), and the runner signs that
-declaration ahead of the `LOGWEIR_ENGINE_VERSION`/`LOGWEIR_ENGINE_DIGEST` the
-controller puts in the Job, so every scorecard and receipt names the engine
-that ran; the runner prints a notice naming both. `logweir doctor` in that
-image names OSO's release as the declared rollback. Its runner Jobs need amd64
-nodes. To return, set `runnerImage` back to the published runner. The next
-release may drop the `ENGINE_SOURCE=oso` stage.
+(`version=0.23.3`, the digest of OSO's image), and that declaration is what
+every scorecard and receipt signs. The controller states no engine identity in
+a Job, and the runner asks the engine for its `--version` before it signs
+anything, refusing a version the binary does not print. `logweir doctor` in
+that image names OSO's release as the declared rollback. Its runner Jobs need
+amd64 nodes. To return, set `runnerImage` back to the published runner. The
+next release may drop the `ENGINE_SOURCE=oso` stage.
+
+**The rollback is this image, or the older controller and runner together —
+nothing else.** A runner image published before PROD-00.2 declares no engine,
+and this controller gives it none, so under this controller its runs are
+refused (exit 1, before the engine spawns, nothing signed) rather than
+mislabelled. Do not pair images across that line: roll the controller and the
+runner image together.
 
 ### (b) Local build — **author-only**
 

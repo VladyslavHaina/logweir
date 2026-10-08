@@ -10,7 +10,7 @@
 //! |---|---|---|
 //! | `logweir::doctor::ENGINE_PIN` | the build | `doctor` refuses the shipped engine, or accepts another build |
 //! | `third_party/kafka-backup-build.env` `ENGINE_VERSION` | the build | the image stamps a version `doctor` refuses |
-//! | `weirkeeper::job::ENGINE_VERSION` / `ENGINE_DIGEST` | the build | a runner image without its own declaration signs the wrong engine |
+//! | `crates/weirkeeper/src/job.rs` | nothing, since PROD-00.2's review | the controller becomes a source of the engine identity again, and a runner image it was not built with signs the wrong engine (review L3) |
 //! | PROD-01.1's `CONTRACT_ENGINE` (`record_semantics.rs`) | the build | every contract row on the shipped engine records its outcome, asserts NOTHING, and stays green (A-3f-1) |
 //! | `e2e/fixtures/fake-engine-ok.sh` | the build | `doctor`'s own tests stop exercising the accepting path |
 //! | `examples/cronjob-drill.yaml` and `docs/quickstart.md`'s `export` lines | the build | an adopter's standalone run signs an engine its image does not carry |
@@ -157,30 +157,23 @@ fn check_tarball_checksum(sha_file: &str, tarball: &str, bytes: &[u8]) -> Result
     }
 }
 
-/// `crates/weirkeeper/src/job.rs`: the version and digest every runner Job
-/// stamps into `LOGWEIR_ENGINE_VERSION` / `LOGWEIR_ENGINE_DIGEST`.
-fn check_job_constants(src: &str, pin: &str, digest: &str) -> Result<(), String> {
-    let version = quoted_after(src, "pub const ENGINE_VERSION: &str = ")
-        .ok_or("job.rs: no ENGINE_VERSION")?;
-    // `ENGINE_DIGEST` is formatted over two lines by rustfmt: take the first
-    // string literal after its name.
-    let at = src
-        .find("pub const ENGINE_DIGEST: &str =")
-        .ok_or("job.rs: no ENGINE_DIGEST")?;
-    let job_digest = src[at..]
-        .split('"')
-        .nth(1)
-        .ok_or("job.rs: ENGINE_DIGEST holds no literal")?
-        .to_string();
-    if version != pin {
-        return Err(format!(
-            "weirkeeper::job::ENGINE_VERSION is {version}, the pin is {pin}"
-        ));
-    }
-    if job_digest != digest {
-        return Err(format!(
-            "weirkeeper::job::ENGINE_DIGEST is {job_digest}, the build's digest is {digest}"
-        ));
+/// `crates/weirkeeper/src/job.rs` states NO engine identity (review L3): no
+/// version or digest constant, no literal of the build's version or digest.
+/// The runner image declares its engine and the runner holds that declaration
+/// to the binary; a controller constant would only ever be a second, wrong
+/// source for a runner image it was not built with.
+fn check_controller_states_no_identity(src: &str, pin: &str, digest: &str) -> Result<(), String> {
+    for needle in [
+        "pub const ENGINE_VERSION:",
+        "pub const ENGINE_DIGEST:",
+        pin,
+        digest,
+    ] {
+        if src.contains(needle) {
+            return Err(format!(
+                "job.rs names `{needle}`: the controller must not state the engine identity"
+            ));
+        }
     }
     Ok(())
 }
@@ -395,8 +388,8 @@ fn third_party_vendors_exactly_the_pinned_source() {
 }
 
 #[test]
-fn the_controllers_job_constants_name_the_build() {
-    check_job_constants(
+fn the_controller_states_no_engine_identity() {
+    check_controller_states_no_identity(
         &read("crates/weirkeeper/src/job.rs"),
         ENGINE_PIN,
         &build_digest(),
@@ -510,13 +503,13 @@ fn every_check_refuses_a_copy_that_lags() {
     );
 
     let job = read("crates/weirkeeper/src/job.rs");
-    let job_old_version = job.replace(
-        &format!("pub const ENGINE_VERSION: &str = \"{ENGINE_PIN}\";"),
-        &format!("pub const ENGINE_VERSION: &str = \"{OLD_PIN}\";"),
-    );
-    assert!(check_job_constants(&job_old_version, ENGINE_PIN, &digest).is_err());
-    let job_old_digest = job.replace(&digest, OSO_0_23_3_DIGEST);
-    assert!(check_job_constants(&job_old_digest, ENGINE_PIN, &digest).is_err());
+    for planted in [
+        format!("{job}\npub const ENGINE_VERSION: &str = \"{OLD_PIN}\";\n"),
+        format!("{job}\nconst X: &str = \"{ENGINE_PIN}\";\n"),
+        format!("{job}\nconst Y: &str = \"{digest}\";\n"),
+    ] {
+        assert!(check_controller_states_no_identity(&planted, ENGINE_PIN, &digest).is_err());
+    }
 
     let dockerfile = read("Dockerfile");
     let oso = digest_file();

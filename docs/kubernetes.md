@@ -124,7 +124,7 @@ The container image carries the engine; the environment does not carry itself:
 | Variable | Why |
 |---|---|
 | `LOGWEIR_ENGINE_BIN` | Set by the image to `/usr/local/bin/kafka-backup`. Override only if you mount an engine elsewhere. |
-| `LOGWEIR_ENGINE_VERSION`, `LOGWEIR_ENGINE_DIGEST` | **Mandatory.** An empty value is refused with exit 1: a signed scorecard must name the engine image that produced the restore. |
+| `LOGWEIR_ENGINE_VERSION`, `LOGWEIR_ENGINE_DIGEST` | **Not needed in the runner image** since PROD-00.2: the image declares its engine in `/etc/logweir/engine-identity`, which is what is signed, and the controller never sets these two. Outside such an image they are mandatory: an empty value is refused with exit 1, because a signed scorecard must name the engine that produced the restore. Either way the run asks the engine for its `--version` and refuses one that does not match the identity it would sign. |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`, or an IRSA / Pod Identity setup | `object_store`'s own credential chain — **not** the AWS SDK's. `~/.aws/credentials`, `AWS_PROFILE` and SSO are unsupported. See [stability.md](stability.md). |
 | `TMPDIR` | Where the rendered `restore.yaml` and the restore checkpoint land. Point it at a writable volume; the checkpoint is pod-local and is never uploaded, so a crashed restore is not resumable in v0.1. |
 

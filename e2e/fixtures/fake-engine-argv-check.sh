@@ -13,6 +13,16 @@
 # than silently passing.
 set -uo pipefail
 
+# `--version` (PROD-00.2): `logweir` asks the engine for its version before it
+# signs anything, and refuses unless it is the `engine.version` it would sign.
+# This stub stands in for whatever engine the suite names, so it answers with
+# that version. It is answered BEFORE the argv log, which records the engine
+# COMMANDS a run issued and nothing else.
+if [[ "${1:-}" == "--version" ]]; then
+  echo "kafka-backup ${LOGWEIR_ENGINE_VERSION:-unknown}"
+  exit 0
+fi
+
 # Task 4: the argv RECORDER. Every element, one per line, in order, appended to
 # the file named by LOGWEIR_ARGV_LOG when that variable is set — captured
 # BEFORE the `shift` below, so the subcommand is in the record too. This is how

@@ -36,7 +36,7 @@ use weirkeeper::controllers::backup::{
 };
 use weirkeeper::crds::backup::{Backup, BackupExecution, BackupStatus};
 use weirkeeper::crds::LocalRef;
-use weirkeeper::job::{self, ENGINE_DIGEST, ENGINE_VERSION, RUNNER_IMAGE};
+use weirkeeper::job::{self, RUNNER_IMAGE};
 use weirkeeper::testing::{mock_client_recording, mock_client_recording_bodies, Route, SeenBody};
 use weirkeeper::verification::unverified_evidence;
 
@@ -1316,57 +1316,23 @@ fn the_argv_is_derived_and_no_annotation_contributes_to_it() {
     }
 }
 
-/// The two mandatory engine variables are on the container, and they mirror
-/// the engine the `Dockerfile` builds: Logweir's build of the vendored source,
-/// named by `third_party/kafka-backup-build.env` (PROD-00.2).
+/// PROD-00.2 review L3: no Job states the engine identity. The runner image
+/// declares its engine (`/etc/logweir/engine-identity`) and the runner refuses
+/// to sign a version its binary does not print, so a runner image that
+/// declares none — one published before PROD-00.2 — refuses its run rather
+/// than signing whatever a controller compiled for another engine said. A
+/// caller's `env_literal` cannot put the two variables back either.
 #[test]
-fn the_engine_env_mirrors_the_dockerfile() {
-    let build = workspace_file("third_party/kafka-backup-build.env");
-    let value = |key: &str| {
-        build
-            .lines()
-            .find_map(|l| l.strip_prefix(&format!("{key}=")))
-            .unwrap_or_else(|| panic!("kafka-backup-build.env sets no {key}"))
-            .to_string()
-    };
-    assert_eq!(
-        value("ENGINE_VERSION"),
-        ENGINE_VERSION,
-        "`job::ENGINE_VERSION` must be Logweir's build identity, the version the \
-         `Dockerfile`'s `engine-logweir` stage stamps. Without these two variables a runner image \
-         that declares no engine of its own makes `logweir backup run` exit 1 BEFORE the engine \
-         spawns — no archive and no receipt — because a signed receipt must name the engine \
-         build that produced it"
-    );
-    assert_eq!(
-        value("ENGINE_DIGEST"),
-        ENGINE_DIGEST,
-        "`job::ENGINE_DIGEST` must be the build-input digest the `Dockerfile` builds from"
-    );
-    let dockerfile = workspace_file("Dockerfile");
-    assert!(
-        dockerfile.contains("COPY third_party/kafka-backup-build.env")
-            && dockerfile.contains("bash scripts/engine-source.sh prepare"),
-        "the Dockerfile's engine stage builds from third_party/kafka-backup-build.env"
-    );
-    let release = ENGINE_VERSION
-        .split_once("+logweir.")
-        .map(|(release, _)| release)
-        .expect("Logweir's build names its OSO release");
-    assert!(
-        workspace_root()
-            .join("third_party")
-            .join(format!("kafka-backup-v{release}.tar.gz"))
-            .exists(),
-        "`job::ENGINE_VERSION` must name the vendored engine's own release — the tarball \
-         `third_party/kafka-backup-v{release}.tar.gz` is what makes it checkable"
-    );
-
-    let spec = runner_job_spec(
+fn no_job_states_the_engine_identity() {
+    let mut spec = runner_job_spec(
         &backup(),
         &serde_json::from_str(&kafka_cluster_json()).unwrap(),
     )
     .expect("the fixture yields a spec");
+    spec.env_literal
+        .push(("LOGWEIR_ENGINE_VERSION".into(), "0.23.3+logweir.1".into()));
+    spec.env_literal
+        .push(("LOGWEIR_ENGINE_DIGEST".into(), "sha256:planted".into()));
     let job = job::build(&spec);
     let env = job
         .spec
@@ -1375,21 +1341,17 @@ fn the_engine_env_mirrors_the_dockerfile() {
         .and_then(|p| p.containers.first())
         .and_then(|c| c.env.clone())
         .expect("the container carries env");
+    for name in [job::ENGINE_VERSION_ENV, job::ENGINE_DIGEST_ENV] {
+        assert!(
+            env.iter().all(|e| e.name != name),
+            "the Job states {name}: the controller would be a source of the engine identity"
+        );
+    }
     let literal = |name: &str| {
         env.iter()
             .find(|e| e.name == name)
             .and_then(|e| e.value.clone())
     };
-    assert_eq!(
-        literal("LOGWEIR_ENGINE_VERSION").as_deref(),
-        Some(ENGINE_VERSION),
-        "the Job sets LOGWEIR_ENGINE_VERSION"
-    );
-    assert_eq!(
-        literal("LOGWEIR_ENGINE_DIGEST").as_deref(),
-        Some(ENGINE_DIGEST),
-        "the Job sets LOGWEIR_ENGINE_DIGEST"
-    );
     assert_eq!(
         literal("TMPDIR").as_deref(),
         Some("/work"),

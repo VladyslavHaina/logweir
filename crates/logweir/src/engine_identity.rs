@@ -5,13 +5,15 @@
 //! — Logweir's build of the vendored OSO source by default, or OSO's released
 //! binary under the documented one-release rollback — and the `Dockerfile`
 //! writes WHICH one into the image at [`IMAGE_IDENTITY_PATH`], copied from the
-//! same build stage as the binary. A Job also carries `LOGWEIR_ENGINE_VERSION`
-//! and `LOGWEIR_ENGINE_DIGEST`, which the controller stamps from its own
-//! constants and which a standalone binary on a host reads from whatever the
-//! operator exported. The environment describes what someone EXPECTED the
-//! image to hold; the file describes what the image DOES hold. So the file is
-//! read first, and the environment only where there is no file: a standalone
-//! `logweir` with an engine on `$PATH`, the e2e harness, `scripts/demo.sh`.
+//! same build stage as the binary. `LOGWEIR_ENGINE_VERSION` and
+//! `LOGWEIR_ENGINE_DIGEST` are what a standalone binary on a host reads from
+//! whatever the operator exported; since PROD-00.2's review the controller
+//! never puts them in a Job. The environment describes what someone EXPECTED
+//! the engine to be; the file describes what the image DOES hold. So the file
+//! is read first, and the environment only where there is no file: a
+//! standalone `logweir` with an engine on `$PATH`, the e2e harness,
+//! `scripts/demo.sh`. And either way the run asks the binary itself:
+//! [`verify_engine_reports`] refuses a version it does not print.
 //!
 //! The consequence is the property OD-3 asks for: a rollback image can never
 //! sign under the default build's name, and the default image can never sign
@@ -148,12 +150,109 @@ pub fn decide(
 
 /// Reads [`IMAGE_IDENTITY_PATH`]: `Ok(None)` when it does not exist.
 fn read_image_file() -> Result<Option<String>, String> {
-    match std::fs::read_to_string(IMAGE_IDENTITY_PATH) {
+    read_identity_file(std::path::Path::new(IMAGE_IDENTITY_PATH))
+}
+
+/// [`IMAGE_IDENTITY_PATH`], or another path for a test: `Ok(None)` when it
+/// does not exist, an error when it exists and cannot be read.
+fn read_identity_file(path: &std::path::Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!(
-            "{IMAGE_IDENTITY_PATH} exists but cannot be read: {e}"
-        )),
+        Err(e) => Err(format!("{} exists but cannot be read: {e}", path.display())),
+    }
+}
+
+/// How long the engine may take to print its version: a container shim starts
+/// a container for it.
+const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// **The identity is held to the binary that runs** (PROD-00.2 review L3/L4).
+/// Runs `<binary> --version` once — a flag that prints a string and acts on no
+/// cluster or bucket (ruling GR8) — and refuses unless one whitespace token of
+/// the output is exactly `version`, the `engine.version` this run would sign.
+/// So neither a Job's environment nor an image's declaration can name an
+/// engine other than the one executed: an older runner image under a newer
+/// controller, `LOGWEIR_ENGINE_BIN` pointed at another binary, or a rollback
+/// image whose declaration is wrong all refuse before anything is signed.
+///
+/// # Errors
+/// The binary cannot be run, does not finish within a minute, exits non-zero,
+/// or does not print `version` as a whole token.
+pub fn verify_engine_reports(binary: &std::path::Path, version: &str) -> Result<(), String> {
+    use std::io::Read;
+    let mut child = std::process::Command::new(binary)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "the engine at {} could not be run for --version: {e}",
+                binary.display()
+            )
+        })?;
+    let deadline = std::time::Instant::now() + VERSION_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "the engine at {} did not print its version within {}s",
+                    binary.display(),
+                    VERSION_PROBE_TIMEOUT.as_secs()
+                ));
+            }
+            Err(e) => {
+                return Err(format!("waiting for {} --version: {e}", binary.display()));
+            }
+        }
+    };
+    let mut out = String::new();
+    if let Some(mut s) = child.stdout.take() {
+        let _ = s.read_to_string(&mut out);
+    }
+    if let Some(mut s) = child.stderr.take() {
+        let _ = s.read_to_string(&mut out);
+    }
+    check_reported(binary, status.success(), &out, version)
+}
+
+/// The decision of [`verify_engine_reports`], pure.
+fn check_reported(
+    binary: &std::path::Path,
+    ran: bool,
+    output: &str,
+    version: &str,
+) -> Result<(), String> {
+    if !ran {
+        return Err(format!(
+            "the engine at {} failed to print its version: `{}`",
+            binary.display(),
+            output.trim()
+        ));
+    }
+    if output
+        .split_ascii_whitespace()
+        .any(|token| token == version)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "the engine at {} reports `{}`, but this run would sign engine.version `{version}`: \
+             refusing to sign a document that names an engine other than the one that runs. \
+             The runner image declares its engine in {IMAGE_IDENTITY_PATH}; roll the controller \
+             and the runner image together, and roll the engine back only with the rollback \
+             image (docs/install.md, \"Rolling the engine back\")",
+            binary.display(),
+            output.trim()
+        ))
     }
 }
 
@@ -262,6 +361,67 @@ mod tests {
         // Empty stays empty: the signing paths refuse it, exactly as before.
         let (id, _) = decide(Ok(None), None, None).unwrap();
         assert!(id.version.is_empty() && id.digest.is_empty());
+    }
+
+    /// REVIEW L6 (mutant R3): an identity file that EXISTS but cannot be read
+    /// is an error, never "no file" (which would fall back to the
+    /// environment). A directory at the path is unreadable as a file on every
+    /// platform and under any privilege.
+    #[test]
+    fn an_unreadable_identity_file_is_an_error_and_a_missing_one_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable = dir.path().join("engine-identity");
+        std::fs::create_dir(&unreadable).unwrap();
+        let e = read_identity_file(&unreadable).unwrap_err();
+        assert!(e.contains("exists but cannot be read"), "{e}");
+        assert_eq!(read_identity_file(&dir.path().join("absent")), Ok(None));
+        let present = dir.path().join("present");
+        std::fs::write(&present, "version=1\n").unwrap();
+        assert_eq!(read_identity_file(&present), Ok(Some("version=1\n".into())));
+    }
+
+    /// REVIEW L3/L4: the version signed must be one the engine prints.
+    #[test]
+    fn the_signed_version_must_be_the_one_the_engine_prints() {
+        let bin = std::path::Path::new("/usr/local/bin/kafka-backup");
+        check_reported(
+            bin,
+            true,
+            "kafka-backup 0.23.3+logweir.1\n",
+            "0.23.3+logweir.1",
+        )
+        .unwrap();
+        // An older runner image (OSO's 0.23.3) under a controller naming
+        // Logweir's build, the reverse, and a near miss.
+        for (prints, signs) in [
+            ("kafka-backup 0.23.3", "0.23.3+logweir.1"),
+            ("kafka-backup 0.23.3+logweir.1", "0.23.3"),
+            ("kafka-backup 0.23.3+logweir.10", "0.23.3+logweir.1"),
+        ] {
+            let e = check_reported(bin, true, prints, signs).unwrap_err();
+            assert!(e.contains("refusing to sign"), "{prints} as {signs}: {e}");
+        }
+        assert!(check_reported(
+            bin,
+            false,
+            "kafka-backup 0.23.3+logweir.1",
+            "0.23.3+logweir.1"
+        )
+        .is_err());
+    }
+
+    /// The probe runs a real process: a script that prints a version passes
+    /// when it is the signed one and refuses otherwise.
+    #[test]
+    fn verify_engine_reports_runs_the_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("kafka-backup");
+        std::fs::write(&exe, "#!/bin/sh\necho 'kafka-backup 0.23.3+logweir.1'\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        verify_engine_reports(&exe, "0.23.3+logweir.1").unwrap();
+        assert!(verify_engine_reports(&exe, "0.23.3").is_err());
+        assert!(verify_engine_reports(&dir.path().join("absent"), "0.23.3+logweir.1").is_err());
     }
 
     #[test]

@@ -249,8 +249,8 @@ fn evaluate_engine_version(
 /// no OSO release prints; PROD-00.3f had moved the OSO release from `0.21.0`
 /// to `0.23.3` (`docs/to-do/decisions/PROD-00-engine-route.md` section 12).
 ///
-/// It moves with the build and only with it: `third_party/kafka-backup-build.env`,
-/// `weirkeeper::job::ENGINE_VERSION`, PROD-01.1's `CONTRACT_ENGINE`, the fake
+/// It moves with the build and only with it: `third_party/kafka-backup-build.env`
+/// and its ledger, PROD-01.1's `CONTRACT_ENGINE`, the fake
 /// engine `doctor`'s tests run and the documented standalone identity must all
 /// name it, and `crates/logweir/tests/engine_pin.rs` fails when any does not.
 pub const ENGINE_PIN: &str = "0.23.3+logweir.1";

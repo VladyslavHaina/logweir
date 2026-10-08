@@ -367,36 +367,26 @@ pub struct RunnerImage {
     pub image_pull_policy: Option<String>,
 }
 
-/// The engine version the runner container declares, and the digest beside it.
+/// The two variables a runner reads its engine identity from where its image
+/// declares none: **this controller never sets them** (PROD-00.2 review L3).
 ///
-/// MANDATORY, AND THE RUN EXITS 1 WITHOUT THEM, BEFORE THE ENGINE SPAWNS: a
-/// signed receipt must name the engine build that produced the archive, so
-/// `logweir backup run` refuses an empty version or digest rather than signing
-/// a document that describes nothing. A Job template that omitted these two
-/// would produce a pod that fails at startup with no archive and no receipt —
-/// and an exit code (1) that says "operational" about a template bug.
-///
-/// PROD-00.2: THEY NAME LOGWEIR'S BUILD of the vendored OSO source, never OSO's
-/// release — `<release>+logweir.<n>` and the build-input digest, both read by
-/// `the_engine_env_mirrors_the_dockerfile` out of
-/// `third_party/kafka-backup-build.env`, the file the `Dockerfile`'s
-/// `engine-logweir` stage builds from. The runner image ALSO declares its
-/// engine, in `/etc/logweir/engine-identity`, and the runner signs that
-/// declaration ahead of these two variables (`logweir::engine_identity`): an
-/// image built with the one-release rollback (`ENGINE_SOURCE=oso`) signs as
-/// OSO's release whatever this controller was compiled with. These constants
-/// are what a runner image WITHOUT that file — one published before PROD-00.2
-/// — signs, and what a mismatch notice compares against.
-pub const ENGINE_VERSION: &str = "0.23.3+logweir.1";
-/// See [`ENGINE_VERSION`]. Logweir's build-input digest (the vendored tarball,
-/// the patch folder and the version), byte-identical to `ENGINE_DIGEST` in
-/// `third_party/kafka-backup-build.env`.
-pub const ENGINE_DIGEST: &str =
-    "sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3";
-
-/// `LOGWEIR_ENGINE_VERSION`, the env name.
+/// Until PROD-00.2 every Job carried them, stamped from constants compiled into
+/// the controller, and the runner signed them into every receipt and
+/// scorecard. That made the controller a source of the engine identity, and a
+/// controller paired with a runner image other than the one it was built with
+/// signed the wrong engine: an older, pre-PROD-00.2 runner (OSO's binary) under
+/// a newer controller would sign Logweir's build. Now the identity travels
+/// with the engine: the runner image declares it in
+/// `/etc/logweir/engine-identity`, copied from the same build stage as the
+/// binary, and the runner refuses to sign a version the binary does not print
+/// (`logweir::engine_identity::verify_engine_reports`). A runner image that
+/// declares no engine — one published before PROD-00.2 — gets NO identity from
+/// this controller, so it refuses its run (exit 1, before the engine spawns,
+/// nothing signed) instead of mislabelling it. [`build`] also drops either
+/// variable from a caller's `env_literal`. `tests/backup_controller.rs`
+/// `no_job_states_the_engine_identity` holds both.
 pub const ENGINE_VERSION_ENV: &str = "LOGWEIR_ENGINE_VERSION";
-/// `LOGWEIR_ENGINE_DIGEST`, the env name.
+/// See [`ENGINE_VERSION_ENV`].
 pub const ENGINE_DIGEST_ENV: &str = "LOGWEIR_ENGINE_DIGEST";
 /// `TMPDIR`, pointed at [`WORK_MOUNT_PATH`] so the engine's temporary files
 /// land on the writable volume and not on the read-only root.
@@ -558,9 +548,9 @@ pub struct RunnerJobSpec {
     pub config_map_mounts: Vec<ConfigMapMount>,
     /// Environment variables taken from Secret keys.
     pub env_from_secret: Vec<EnvFromSecret>,
-    /// Plain environment variables. [`ENGINE_VERSION_ENV`],
-    /// [`ENGINE_DIGEST_ENV`] and [`TMPDIR_ENV`] are added by [`build`] and
-    /// need not appear here.
+    /// Plain environment variables. [`TMPDIR_ENV`] is added by [`build`] and
+    /// need not appear here; [`ENGINE_VERSION_ENV`] and [`ENGINE_DIGEST_ENV`]
+    /// are dropped by it (the controller never states the engine identity).
     pub env_literal: Vec<(String, String)>,
     /// The ConfigMap carrying the rendered plan, mounted read-only at
     /// [`PLAN_MOUNT_PATH`].
@@ -709,25 +699,17 @@ pub fn failure_policy() -> PodFailurePolicy {
 #[must_use]
 pub fn build(spec: &RunnerJobSpec) -> Job {
     let mut env: Vec<EnvVar> = Vec::new();
-    // The two mandatory engine variables FIRST, so a caller's `env_literal`
-    // cannot be read as their source. `logweir backup run` exits 1 before the
-    // engine spawns if either is empty.
-    env.push(EnvVar {
-        name: ENGINE_VERSION_ENV.to_string(),
-        value: Some(ENGINE_VERSION.to_string()),
-        value_from: None,
-    });
-    env.push(EnvVar {
-        name: ENGINE_DIGEST_ENV.to_string(),
-        value: Some(ENGINE_DIGEST.to_string()),
-        value_from: None,
-    });
+    // NO ENGINE IDENTITY (PROD-00.2 review L3): the runner image states its own
+    // engine; see [`ENGINE_VERSION_ENV`].
     env.push(EnvVar {
         name: TMPDIR_ENV.to_string(),
         value: Some(WORK_MOUNT_PATH.to_string()),
         value_from: None,
     });
     for (name, value) in &spec.env_literal {
+        if name == ENGINE_VERSION_ENV || name == ENGINE_DIGEST_ENV {
+            continue;
+        }
         env.push(EnvVar {
             name: name.clone(),
             value: Some(value.clone()),
