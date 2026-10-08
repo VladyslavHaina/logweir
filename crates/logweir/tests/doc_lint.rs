@@ -1669,6 +1669,12 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// the notes at main's `a00ae659`, with twenty-eight items, fail the
 /// twenty-nine pin (PROD-16.1, item 25 when first written, renumbered
 /// after FX-13, FX-11, FX-8 and PROD-00.3f, 2026-10-08).
+///
+/// And back to twenty-seven (2026-10-08): `v0.2.0-rc.1` shipped items 1–27,
+/// and this entry carries its candidate record, so items 28 and 29 moved, with
+/// their numbers and tokens, into the entry after the tag, which
+/// `the_entry_after_the_rc1_record_carries_its_own_items` checks. The notes at
+/// `2fe8d907`, with items 28 and 29 here, fail the twenty-seven pin.
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1685,18 +1691,17 @@ fn the_release_notes_carry_every_owed_operator_action() {
     );
 
     // The entry these items belong to: the one headed `main` after `v0.1.5`,
-    // which since the tag holds the `v0.2.0-rc.1` record (items 1–27, and 28
-    // and 29 recorded there after it). PROD-08.1's item opens its own entry
-    // above it (review M-4), checked by
-    // `the_entry_after_the_rc1_record_carries_its_own_items`.
+    // which since the tag holds the `v0.2.0-rc.1` record and the twenty-seven
+    // items that candidate shipped. Everything after the tag is in the entry
+    // above it, checked by `the_entry_after_the_rc1_record_carries_its_own_items`.
     let entry = release_entry(&notes, "Unreleased — `main` after `v0.1.5`");
     let items = release_note_items(entry);
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=29).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-nine operator-facing changes, `#### 1.` \
-         to `#### 29.` in order; found {numbers:?}"
+        (1..=27).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-seven operator-facing changes, `#### 1.` \
+         to `#### 27.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1768,12 +1773,6 @@ fn the_release_notes_carry_every_owed_operator_action() {
             "a LogAppendTime point in time refused or labelled",
             "PointInTimeByProducerTime",
         ),
-        // PROD-00.3f (2026-10-08): the engine pin moved to 0.23.3; a
-        // standalone install changes its engine identity with it.
-        ("the engine pin is 0.23.3", "LOGWEIR_ENGINE_VERSION"),
-        // PROD-16.1 (2026-10-07): no approver key by default, and the marker
-        // an upgrade never reaches.
-        ("no approver key by default", "logweir.dev/approval-default"),
     ]) {
         assert!(
             body.contains(token),
@@ -1972,11 +1971,23 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         "the entry after v0.2.0-rc.1 must number its items on from {}: {numbers:?}",
         rc1_last + 1
     );
-    for ((number, body), (item, token)) in items.iter().zip([
+    let tokens = [
+        // PROD-00.3f (2026-10-08): the engine pin moved to 0.23.3; a
+        // standalone install changes its engine identity with it.
+        ("the engine pin is 0.23.3", "LOGWEIR_ENGINE_VERSION"),
+        // PROD-16.1 (2026-10-07): no approver key by default, and the marker
+        // an upgrade never reaches.
+        ("no approver key by default", "logweir.dev/approval-default"),
         // PROD-08.1 (2026-10-07): complete coverage, and what every 1.4.0
         // scorecard says its verdict covered.
         ("complete coverage", "coverage: complete"),
-    ]) {
+    ];
+    assert_eq!(
+        items.len(),
+        tokens.len(),
+        "every item of the entry after v0.2.0-rc.1 needs its token row here: {numbers:?}"
+    );
+    for ((number, body), (item, token)) in items.iter().zip(tokens) {
         assert!(
             body.contains(token),
             "docs/release-notes.md item {number} ({item}) no longer carries `{token}` in \
@@ -1998,13 +2009,22 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         .split(". ")
         .find(|s| s.contains("An upgrade from `v0.2.0-rc.1`"))
         .expect("the entry gives the upgrade from v0.2.0-rc.1");
-    for n in &numbers {
+    // A number is matched as a whole token, outside backticks, so a digest
+    // or a commit names nothing (the rule the rc.1 entry's check uses).
+    let names = |text: &str, n: u32| -> bool {
+        text.split('`')
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 0)
+            .flat_map(|(_, s)| s.split(|c: char| !c.is_ascii_alphanumeric()))
+            .any(|token| token == n.to_string())
+    };
+    for &n in &numbers {
         for (place, text) in [
             ("its opening paragraph", opening),
             ("its upgrade sentence", upgrade),
         ] {
             assert!(
-                text.contains(&format!("item {n}")) || text.contains(&format!(" {n} ")),
+                names(text, n),
                 "docs/release-notes.md item {n} is in the entry after v0.2.0-rc.1, and {place} \
                  does not name it: {text}"
             );
