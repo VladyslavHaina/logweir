@@ -51,6 +51,7 @@
 //! P-256 here is RFC 6979 deterministic, so re-running this program over an
 //! unchanged document reproduces both files byte for byte.
 
+#![forbid(unsafe_code)]
 use logweir_core::backup_receipt::{
     BackupReceipt, ReceiptArchive, ReceiptAuth, ReceiptCovered, ReceiptEngine, ReceiptSource,
 };

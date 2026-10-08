@@ -1,4 +1,5 @@
 // crates/logweir-core/examples/emit_fixture.rs
+#![forbid(unsafe_code)]
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use logweir_core::det_json::to_deterministic_json;
 use logweir_core::ids::sha256_prefixed;
