@@ -81,16 +81,32 @@ registry digests for the same commit.
 
 ## Versioned releases
 
-[release.yml](../.github/workflows/release.yml) runs from `v*` tags and refuses
-a manual branch release. It reuses CI, packages native CLI archives, and calls
-[release-drill.yml](../.github/workflows/release-drill.yml) to exercise the
-packaged Linux binary against a real archive. The release installs the
-independent verifier alongside the other downloadable assets.
+[release.yml](../.github/workflows/release.yml) publishes on a pushed
+`v<semver>` tag (`v0.2.0`, `v0.2.0-rc.1`) and on nothing else. Dispatching the
+same workflow by hand is a **dry run**: every job up to `assemble` runs, and it
+writes workflow artifacts only — no registry tag, chart, git tag, GitHub
+Release or draft. The two publishing jobs carry an `if:` that admits a tag push
+and nothing else, and `crates/logweir/tests/workflow_lint.rs` holds every job
+that holds a credential or `contents: write` to that gate.
 
-Versioned images use the shared image workflow, publishing the version tag
-without moving `main` or `latest`. Release publication waits for the required
-checks. [The release checklist](tag1-checklist.md) describes what to verify
-for each candidate; it is not a frozen claim that historical runs passed.
+| Job | What it does | Writes |
+|---|---|---|
+| `validate` | the tag (a dry run's `rehearsal_tag` input), its version and pre-release flag, and whether this run may publish: a tag push that did not delete the tag, whose tag origin still points at the run's commit | — |
+| `tests` | `ci.yml`: the same checks and Compose suite as `main` | — |
+| `plan` | `dist plan` must announce exactly the three CLI archives | artifact `dist-manifest` |
+| `build` (three) | [scripts/release-build.sh](../scripts/release-build.sh) on one native runner per target — Linux inside `rust:1.89-bookworm`, the runner image's own builder base, macOS on the runner; checks the archive's contents and notices, that no engine is inside, that the binary starts and performs `drill countersign`, and measures what it needs at run time | artifact `binary-<target>` |
+| `drill` | [release-drill.yml](../.github/workflows/release-drill.yml): a backup, an approved drill and both verifiers, driven by the packaged Linux x86-64 binary against Compose Kafka and MinIO | artifact `release-drill-evidence` |
+| `images` | finds the `sha-<commit>` publication the release ships, anonymously: the tagged commit's own, or its newest ancestor that differs from it only under `docs/`; checks each image's platforms and revision label | artifact `release-images` |
+| `assemble` | checks every asset again, packages the chart once with its four images pinned by digest, and writes `release.json`, `ui-files.sha256`, `SHA256SUMS` and the release notes | artifact `release-assets` |
+| `publish-images` | tag push only, after `tests`: the version tag on the publication's own digests (an existing tag is never moved), then the chart package pushed as those bytes (a published version is never replaced); "absent" is only the registry's own "not found", and a read that cannot tell refuses before any write | Docker Hub |
+| `github-release` | tag push only: the GitHub Release from the verified assets, downloaded back and verified | the GitHub Release |
+
+A version's images are therefore never rebuilt: the version tag and the
+`sha-<commit>` tag name the same digests, and `main` and `latest` do not move.
+A tag on a commit `main` CI has not published fails at `images`. The
+procedure, the asset list and how each asset is verified are in
+[the release checklist](tag1-checklist.md); it is not a frozen claim that
+historical runs passed.
 
 ## Deeper exercises
 

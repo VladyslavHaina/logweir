@@ -16,6 +16,11 @@ path = "src/lib.rs"
 name = "logweir"
 path = "src/main.rs"
 
+# THE ONE RELEASE ARCHIVE (PROD-14.0). The workspace sets `dist = false`, so
+# only the packages that opt in here ship as GitHub Release archives.
+[package.metadata.dist]
+dist = true
+
 # Task 5b. `logweir-kafka`, `logweir-engine-oso` and `e2e` already carried an
 # `e2e` feature; this crate did not, so the two tests here that can only get
 # their answer from a live dependency had nowhere to go but the default suite,

@@ -34,28 +34,67 @@ against your own archive.
 
 ## Install
 
-Start with [the installation guide](docs/install.md) for Kubernetes manifests,
-local images, or [Helm](charts/logweir/README.md). Kubernetes 1.29 or newer is
-required. Create the signing and approval keys, Secrets, runner ServiceAccount,
-and TrustRoster before creating workloads.
+Kubernetes 1.29 or newer is required. The supported path is the published Helm
+chart with its managed installation identity: [quickstart](docs/quickstart.md),
+*The supported path*, then [the installation guide](docs/install.md) and
+[the chart reference](charts/logweir/README.md). The low-level manifests and
+locally built images remain in the installation guide.
 
-Successful main CI publishes the controller, runner and optional UI images as
-`sha-<commit>`, `main` and `latest`. Version tags run the release pipeline and
-publish versioned images plus CLI archives. Check the
-[Actions runs](https://github.com/VladyslavHaina/logweir/actions) for the exact
-commit's result and image digests. Helm uses `latest` by default; the install
-guide explains how to pin a deployment for reproducibility.
+**What is published.** A push to `main` that changes something outside
+`docs/` and passes CI publishes the controller (`weirkeeper`), runner
+(`logweir`), console (`logweir-console`) and UI (`logweir-ui`) images under
+`sha-<commit>` (and moves `main` and `latest`), and the chart
+`oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version
+0.1.0-sha-<commit>`, whose image defaults are those four tags; a push that
+changes only `docs/` publishes nothing
+([gates.md](docs/gates.md#pull-requests-and-main)). A version tag
+(`v<X.Y.Z>`, or a pre-release such as `v0.2.0-rc.1`) runs
+[the release pipeline](docs/gates.md#versioned-releases), which does not
+rebuild the images: it gives the tagged commit's `sha-<commit>` images the
+version tag (the same digests), publishes the chart `--version <X.Y.Z>` with
+all four images pinned by digest, and creates a GitHub Release carrying the CLI
+archives, the independent verifier (`verify_scorecard.py`), `LICENSE`, `NOTICE`,
+`THIRD_PARTY_NOTICES.md`, the engine's licence, the chart package,
+`release.json` and `SHA256SUMS`. No tag has done so yet: the runs for
+`v0.1.1`–`v0.1.5` failed before publishing a release, and the pipeline was
+repaired after them. The image tags those runs pushed before failing —
+`logweir:v0.1.1`–`v0.1.5`, `weirkeeper:v0.1.2`–`v0.1.5` and
+`logweir-ui:v0.1.3`–`v0.1.5` on Docker Hub — are leftovers of failed runs, not
+releases: no chart, GitHub Release or release drill goes with them, so do not
+install or pin them. [UNVERIFIED — no version tag has run the repaired pipeline yet; the first is the owner-approved release candidate.]
 
-For a standalone CLI, install from the checkout:
+```bash
+helm upgrade --install logweir oci://registry-1.docker.io/vladyslavhaina/logweir-chart \
+  --version <X.Y.Z> -n logweir-system --create-namespace --wait --timeout 10m
+```
+
+From a checkout the chart's four image defaults are `:latest`; install a
+published chart, or pin the images as the installation guide describes.
+
+**The CLI** comes from a release's archives — check the download against the
+release's `SHA256SUMS` — or from the checkout:
 
 ```bash
 cargo install --path crates/logweir --locked
 ```
 
+| Archive | Runs on |
+|---|---|
+| `logweir-x86_64-unknown-linux-gnu.tar.xz` | Linux x86-64 with Debian 12's glibc or newer, `libssl.so.3`, `libcrypto.so.3`, `libsasl2.so.2` and `libz.so.1` (Debian and Ubuntu: `libssl3`, `libsasl2-2`, `zlib1g`) |
+| `logweir-aarch64-unknown-linux-gnu.tar.xz` | the same, on Linux arm64 |
+| `logweir-aarch64-apple-darwin.tar.xz` | macOS 11 or newer on Apple silicon, with Homebrew's `openssl@3` |
+
+The Linux archives are built in the runner image's own builder base, so they
+need what the runner image installs; a distribution whose SASL library has
+another soname (`libsasl2.so.3` on RHEL and Fedora) builds from the checkout.
+Each release's notes give the requirement measured on its own binaries. An
+approver countersigns a Governed restore with `logweir drill countersign` from
+the archive for their own machine; their key never leaves it.
+
 The standalone binary does not bundle the engine. Configure the pinned
 `kafka-backup` binary through `PATH` or `LOGWEIR_ENGINE_BIN`, together with
 `LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST`, as described in the
-[quickstart](docs/quickstart.md). The container bundles both binaries and
+[quickstart](docs/quickstart.md). The runner image bundles both binaries and
 requires `linux/amd64`; build instructions are in
 [the installation guide](docs/install.md).
 

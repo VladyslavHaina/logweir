@@ -101,15 +101,18 @@ frozen `1.0.0` one:
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
 only one the rule above does **not** cover. `info.version` is
-`1.0.0-alpha.1`, and it is still in the "internal edit" state the scorecard left
-behind at v0.1.0. **Its consumers now exist** — the `logweir-console` image
+`1.0.0-alpha.2`: still pre-release, the state the scorecard left behind at
+v0.1.0. **Its consumers now exist** — the `logweir-console` image
 (`Dockerfile.console`) carries `logweir-api`, the chart deploys it under
 `api.console.*`, and the static console's typed client (PLAT-18.1) reads it —
 but the binary is still `publish = false` and no client outside this repository
-is supported. Freezing the document at `1.0.0` (and from then on applying the
-MINOR/MAJOR rule below verbatim) is an owner decision owed before the next
-version tag; until it is taken, the console and the API ship and upgrade
-together, and [release-notes.md](release-notes.md) says so.
+is supported. The owner decided on 2026-10-07 not to freeze it before the first
+release candidate: the `-alpha.N` suffix moves once per release candidate, and
+that candidate's release notes list the changes since the previous one. The
+freeze at `1.0.0`, after which the MINOR/MAJOR rule below applies verbatim,
+belongs to PROD-14.2, once the approval simplification (PROD-16) and the rows
+that change the API have merged. Until then the console and the API ship and
+upgrade together, and [release-notes.md](release-notes.md) says so.
 
 While that holds, adding, retyping or removing a field is a pre-release bump of
 the `-alpha.N` suffix and needs no maintainer approval — but it is never a

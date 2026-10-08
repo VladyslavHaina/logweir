@@ -101,18 +101,25 @@ including a local `registry:2` fallback: it does not prove public pullability.
 ### (c) The Helm chart
 
 **The published chart.** Every publication of the images publishes the chart
-beside them, as an OCI artifact on Docker Hub, from the same run and after the
-images are public (`scripts/ci-images.sh chart`, in `images.yml`'s promote job):
+beside them, as an OCI artifact on Docker Hub, after the images are public:
+`main`'s from the same run (`scripts/ci-images.sh chart`, in `images.yml`'s
+promote job), a release's from the release run, which gives the tagged
+commit's `sha-<commit>` images the version tag without rebuilding them
+(`scripts/release.sh promote`, then `scripts/ci-images.sh chart-push`;
+[gates.md](gates.md#versioned-releases)):
 
 | images published as | chart | `appVersion` |
 |---|---|---|
 | `sha-<commit>` (every push to `main`) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version 0.1.0-sha-<commit>` | `sha-<commit>` |
-| `v<X.Y.Z>` (a release tag) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version <X.Y.Z>` | `v<X.Y.Z>` |
+| `v<X.Y.Z>` or a pre-release such as `v0.2.0-rc.1` (a release tag; the same digests as the tagged commit's `sha-` images) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version <X.Y.Z>` (`0.2.0-rc.1`) | `v<X.Y.Z>` |
 
 The packaged chart's four Logweir image defaults (`controllerImage`,
-`runnerImage`, `api.console.image`, `ui.image`) are that same tag, so installing
-it installs exactly the images of that commit — no `--set` for images and no
-checkout of the repository:
+`runnerImage`, `api.console.image`, `ui.image`) are that same tag — in a
+release's chart, that tag pinned by digest
+(`docker.io/vladyslavhaina/weirkeeper:v<X.Y.Z>@sha256:…`), so moving the tag
+later changes nothing an installation pulls — and installing it installs
+exactly the images of that commit, with no `--set` for images and no checkout
+of the repository:
 
 ```bash
 helm upgrade --install logweir oci://registry-1.docker.io/vladyslavhaina/logweir-chart \
@@ -124,7 +131,10 @@ A `main` version is a SemVer pre-release, so always pass `--version`. The
 package's name is `logweir-chart` (Docker Hub names a chart's repository after
 the chart, and `vladyslavhaina/logweir` is the runner image); everything it
 installs is named exactly as from the source chart. The publication step
-compares the bytes the registry serves back with the bytes it pushed. [UNVERIFIED — no chart has been pushed yet: the first publication is the first main push after this change merges.]
+compares the bytes the registry serves back with the bytes it pushed; every
+`main` publication since `86a554e6` has, and the PoC installs and upgrades
+from them ([release-handoff.md](release-handoff.md)). A release's chart
+package is also a GitHub Release asset, the same bytes.
 
 **On first publication, `vladyslavhaina/logweir-chart` must be Public in Docker Hub.** The publication step pulls the chart back anonymously; if Docker Hub creates the repository private (the namespace's default visibility decides), `main` CI's chart step fails closed until the repository is made Public (Repository → Settings → Visibility) and the job is re-run — the re-push overwrites the same version and is compared again.
 
