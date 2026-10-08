@@ -5,6 +5,7 @@
 - Date: 2026-09-28. Branch `claude/prod-00-1`, from main `adee0a16`.
 - Kind: research. Source first, then runs on the e2e compose stack. The row repaired `engine-matrix` and corrected the support docs; it changed no product code, no engine pin and nothing in `third_party/`.
 - **Addendum, 2026-10-07 (PROD-00.3f, branch `claude/prod-00-3f`):** the pin moved from 0.21.0 to **0.23.3**, the newest OSO release, not to 0.22.0 as §0 item 1 and §9 proposed (OD-3, decided 2026-10-07). §12 is the evaluation of 0.23.3 and the record of the move. Sections 0–11 are kept as written on 2026-09-28; where §12 changes one of their statements, §12 says so.
+- **Addendum, 2026-10-08 (PROD-00.2, branch `claude/prod-00-2`):** Logweir builds the engine from the vendored 0.23.3 source with its own patch folder (OD-3), for linux/amd64 and linux/arm64, as `kafka-backup 0.23.3+logweir.1`. C19 is delivered; §13 is the record, with the parity runs against OSO's binary.
 
 ## 0. Decision summary
 
@@ -1085,6 +1086,64 @@ Review H1 found the pin guard (then `e2e/tests/engine_pin.rs`) inside the packag
 | f1b | **Exit 0: 169 passed, 0 failed, 20 ignored** across 17 test targets (c1's 177 less the 8 pin-guard tests that left the package), `guards` 22, `full_drill` 15, `record_semantics` 8 with every outcome file naming engine 0.21.0 (recorded, not asserted, by design), `pitr_boundary` 1, `consumer_group_snapshot` 2, `backup_argv` 8, `topic_identity` 52. Retention deleted nothing |
 
 So the floor row's suites run and pass with the row's own engine in the digest file; the v0.22.0 row differs only in the digest. The re-dispatch at the fix tip is the orchestrator's (the report names the commit).
+
+## 13. PROD-00.2: Logweir builds the engine (2026-10-08)
+
+OD-3 (decided 2026-10-07) chose route F for C19: build the engine from the vendored source with Logweir's own patch folder, patch first. This section is PROD-00.2's record. Branch `claude/prod-00-2`, from main `2fe8d907`. Artifacts under `claude/artifacts/prod-00-2/`.
+
+### 13.1 The recipe
+
+- **Inputs** (`third_party/`): the v0.23.3 tarball and its `.sha256` (unchanged since PROD-00.3f), the patch folder `kafka-backup-patches/` (its `README.md` is the policy) and `kafka-backup-build.env`, which names the build: `ENGINE_VERSION=0.23.3+logweir.1` and `ENGINE_DIGEST`, the build-input digest. That digest is the sha256 of `logweir-engine-inputs/v1`, the tarball's name and sha256, each patch's name and sha256 in order, and the version.
+- **`scripts/engine-source.sh`** is the only implementation, and its refusals are the gate. `check` verifies the tarball against its checksum and the patch folder's format, and the version form (`<release>+logweir.<n>`, n from 1). It then refuses a recorded digest the inputs do not give. `prepare <dir>` extracts the source, applies each patch with `git apply` (exact context, no fuzz, with `GIT_CEILING_DIRECTORIES` so an enclosing repository is never used), and stamps the version: exactly one `#[command(version)]` becomes `#[command(version = "0.23.3+logweir.1")]`, and the result is asserted. `build [<out>]` compiles natively with `cargo build --locked --release` for CI's e2e job.
+- **The image.** The `Dockerfile`'s one `cross` stage runs on `$BUILDPLATFORM` and carries the toolchain for either `$TARGETARCH` (amd64 and arm64; anything else is refused). The `engine-logweir` stage copies only the engine's inputs, runs `prepare` and `cargo auditable build --locked --release --target <triple>`. The builder compiles Logweir the same way. The runtime copies the engine and `/out/engine-identity` from one stage. `ARG ENGINE_SOURCE=logweir`; `oso` selects the rollback (13.6).
+- **cargo-auditable** (0.7.7, `--locked`) embeds each binary's crate list. That is what lets an image scan list the Rust crates inside both binaries.
+- **Guards.** `crates/logweir/tests/engine_build.rs` restates the digest, the version rule and the patch-folder format in Rust. It runs the script over planted trees: 16 rules, each refused by both implementations, plus a positive control that applies a planted patch and checks the stamp. `engine_pin.rs` holds every place that names the build or the release to `doctor::ENGINE_PIN` or `ENGINE_UPSTREAM_RELEASE`, with lagging controls. Eleven mutants were killed (13.5).
+
+### 13.2 The version identity, and what is signed
+
+- `kafka-backup --version` prints `kafka-backup 0.23.3+logweir.1`, which no OSO release prints. `doctor`'s pin is exactly that token. OSO's own `0.23.3` is named as OSO's release and passes only when the image or the environment declares it, which is the rollback. A declared version the engine does not print is refused.
+- **The image declares its engine** in `/etc/logweir/engine-identity` (`version=`, `digest=`). The runner reads that file first and `LOGWEIR_ENGINE_VERSION`/`LOGWEIR_ENGINE_DIGEST` only where there is no file (`crates/logweir/src/engine_identity.rs`). A broken file is a refusal. A disagreement with the environment prints a notice naming both and signs the image's. So a rollback image never signs under the default build's name, whatever constants the controller that made the Job carries.
+- The controller's `job::ENGINE_VERSION`/`ENGINE_DIGEST` name Logweir's build. They are what a runner image without the file, published before this row, signs.
+- `engine.digest` for Logweir's build is the build-input digest, not an image digest. The verifiers judge neither field's content, so no reader's verdict moves. The format docs state both meanings.
+
+### 13.3 The first finding: the engine's own dependency graph
+
+`cargo deny` over the engine's lockfile had never run. Under `third_party/kafka-backup-deny.toml` (the two shipped targets, no dev-dependencies, Logweir's licence allow-list), the unpatched v0.23.3 lockfile fails advisories (artifact `deny/engine-unpatched-control.log`):
+
+| Finding | Crate | In the shipped graph through | Fix |
+|---|---|---|---|
+| RUSTSEC-2026-0285, TLS 1.3 handshake messages accepted across encryption levels | rustls 0.23.43 | Kafka and object-store TLS | 0.23.45 (with rustls-webpki 0.103.15) |
+| RUSTSEC-2026-0258, h2 unbounded empty DATA frames | h2 0.4.15 | hyper → reqwest → object_store | 0.4.19 |
+| yanked | spin 0.9.8 | flume → sqlx-sqlite | 0.9.9 |
+| RUSTSEC-2025-0134, unmaintained (no vulnerability) | rustls-pemfile 2.2.0 | a direct dependency of kafka-backup-core | none by version: a source change; ignored with its reason, proposed row PROD-00.3p |
+
+Licences pass with Logweir's allow-list. Under OD-3 rule 2 the three fixes landed as **patch `0001-lockfile-rustls-h2-spin.patch`**, a lockfile-only bump to the versions Logweir's own graph already carries. With it, the engine gate passes (`deny/engine-patched.log`). The image SBOM (syft 1.54.0, the version CI uses) lists `rustls` 0.23.45, `h2` 0.4.19 and `spin` 0.9.9 inside the engine (artifact `sbom/runner-arm64.spdx.json`).
+
+### 13.4 The images
+
+| | linux/arm64 (native on this host) | linux/amd64 (cross-compiled on this host) |
+|---|---|---|
+| `scripts/check-image.sh` 6, 1, 2, 3, 3b, 4, 5, 7, 8 | pass (`builds/check-image-arm64.log`) | pass (`builds/check-image-amd64.log`) |
+| `e2e/tests/check_image.rs` (`--ignored`) | 14 of 15; the one failure is pre-existing (13.7) | 14 of 15, the same one |
+| engine `ldd` | libc, libm, libgcc_s only | the same |
+| Uncompressed layers | 187.6 MB (the arm64 Debian base is 108 MB) | 169.4 MB; main's published runner at `5127af8a` is 171.0 MB (engine 37.7 MB → 36.0 MB) |
+
+Build times on the arm64 development host, 8 CPUs given to Docker, other workers' builds running: the engine stage alone took 767 s cold (arm64), and its `cargo build` 8 min 31 s. The full arm64 runner took 503 s with the toolchain cached. The full amd64 runner took 1006 s cross-compiled under load (engine 11 min 53 s and Logweir 14 min 07 s in parallel stages). ⟨TIMING⟩ In CI each architecture builds natively. The engine stage runs beside Logweir's compile and is cached by its inputs, so it is re-run only when the tarball, the patches, the build env or the recipe changes.
+
+### 13.5 Parity with OSO's binary
+
+⟨PARITY⟩
+
+### 13.6 The one-release rollback
+
+`docker build --platform linux/amd64 --build-arg ENGINE_SOURCE=oso` takes the engine from OSO's image at `third_party/kafka-backup-binary.digest`, and its identity file reads `version=0.23.3` and that digest. `check-image.sh` check 8 accepts it on amd64 only. The operator procedure is `docs/install.md`, "Rolling the engine back". Measured: ⟨ROLLBACK⟩
+
+### 13.7 Limits and owed rows
+
+- `e2e/tests/check_image.rs::check_image_rejects_an_image_that_cannot_mint_an_approval` fails before and after this row. Its overlay copies the engine over `logweir`, and since PLAT-02.1's check 3b (`identity bootstrap --help`) that image fails at 3b, not 4. Reproduced on main's published runner `sha-5127af8a` (artifact `smoke/check_image-main-published-approval.log`). This is not this row's defect and is listed under class sweep owed.
+- **engine-matrix runs OSO's releases only.** CI's e2e job now runs Logweir's build on every push, with PROD-01.1's contract asserted on it, and the matrix's `v0.23.3` rows run OSO's binary of the same source, recording record-semantics outcomes without asserting them. Proposed child row **PROD-00.2a**: two `logweir` rows (Kafka 3.7.1 and 4.3.1) that build the engine with `scripts/engine-source.sh build`, which needs `engine-matrix-rows.py` to accept a `+logweir.<n>` version and a row key beside the tag.
+- **Signing runs only on main.** Keyless signing, the SBOM attestation and the provenance run in `images.yml`'s `sign` job after a push to main; nothing here ran them. What the first run must show is in the report.
+- Proposed row **PROD-00.3p**: replace `rustls-pemfile` (unmaintained) in the engine. It is a source change, an upstream PR candidate under OD-3 rule 3.
 
 ---
 
