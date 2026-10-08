@@ -1040,6 +1040,11 @@ pub struct RunOpts<'a> {
     /// coverage at all. `false` keeps every existing caller on `drill run`
     /// byte for byte.
     pub restore_run: bool,
+    /// PROD-08.1a: the plan as EXACT BYTES, written verbatim instead of
+    /// `spec` re-serialised — for a plan another emitter produced (the
+    /// console's `ui/plan.js`), whose hash an approval binds as written. `None`
+    /// keeps every existing caller byte for byte.
+    pub spec_bytes: Option<&'a str>,
 }
 
 impl<'a> RunOpts<'a> {
@@ -1054,6 +1059,7 @@ impl<'a> RunOpts<'a> {
             pre_create: Vec::new(),
             env: Vec::new(),
             restore_run: false,
+            spec_bytes: None,
         }
     }
 }
@@ -1069,7 +1075,14 @@ pub fn run_with(o: RunOpts<'_>) -> Run {
         create_topic(topic, *partitions);
     }
 
-    let sp = write_spec(o.spec);
+    let sp = match o.spec_bytes {
+        Some(bytes) => {
+            let p = demo_dir().join(format!("drill-{}.yaml", std::process::id()));
+            std::fs::write(&p, bytes).unwrap();
+            p
+        }
+        None => write_spec(o.spec),
+    };
     let d = demo_dir();
     let signer = o
         .signing

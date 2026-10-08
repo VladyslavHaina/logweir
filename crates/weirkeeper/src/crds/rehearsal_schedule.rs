@@ -127,7 +127,7 @@ pub const SPEC_RULES: [SpecRule; 2] = [
     ),
 ];
 
-/// The rules attached below `.spec`. The second is PROD-08.1a's, shared with
+/// The rules attached below `.spec`. The second (complete coverage's record bound) is shared with
 /// `Restore`'s `.spec` (`super::restore::COMPLETE_MAX_RECORDS_RULE`).
 pub const NESTED_RULES: [(&[&str], &str, &str); 2] = [
     (&["point"], I3_POINT_SOURCE_RULE, I3_POINT_SOURCE_MESSAGE),
@@ -342,7 +342,7 @@ pub struct RehearsalBounds {
     /// defaults apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_resources: Option<RunnerResources>,
-    /// **PROD-08.1a.** How much of each rehearsal phase 7 verifies: `sampled`
+    /// How much of each rehearsal phase 7 verifies: `sampled`
     /// (absent means this) or `complete`, rendered into every slot's plan as
     /// `sample.coverage` and onto every slot's `Restore` as `spec.coverage`.
     /// Complete COSTS MORE: every slot then reads every archived record of the
@@ -366,7 +366,7 @@ pub struct RehearsalBounds {
     /// schedule's digest is what it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<super::restore::VerificationCoverage>,
-    /// **PROD-08.1a.** The bound on each complete verification — the plan's
+    /// The bound on each complete verification — the plan's
     /// `sample.complete_max_records`. Only with `coverage: complete` (CEL).
     /// A slot the bound stops signs `covered: false`, which is recorded as a
     /// failed rehearsal and never as a pass. Absent: no bound beyond

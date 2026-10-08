@@ -1822,14 +1822,17 @@ way: the sink URL reaches the pod as a `secretKeyRef` and the hatch is a literal
 `1`. **Production leaves it `false`**; it is a local-development setting, and an
 installation that turns it on logs one `WARN` at startup saying so.
 
-**`verificationScope` is `sampled`, `degraded` or `none` — never `complete`.**
-A `Restore` and a rehearsal compare a sample of records: neither can ask for
-the complete coverage a command-line plan can (`sample.coverage: complete`,
-[release notes](release-notes.md) item 30), and a complete run's scorecard is
-not reported through this field yet (proposed row PROD-08.1a). The value reaches a PagerDuty incident
-title and a Slack channel where someone decides, during an incident, whether an
-archive can be trusted, so the type has three variants and `logweir notify
-deliver` refuses a fourth at parse time. See
+**A protection event's `verificationScope` is `sampled`, `degraded` or `none` —
+never `complete`.** It describes the policy's newest available POINT (`sampled`
+when that point carries verified evidence), not a restore of it. A `Restore` and
+a rehearsal can ask for complete coverage (PROD-08.1a, §12 *Complete coverage*),
+and a complete run reports what it covered on the `Restore` itself
+(`status.integrity.coverage` and `.complete`), in the product API's
+`verificationScope.coverage`, in the runner's own notification body and in its
+metrics — never in this field. The value reaches a PagerDuty incident title and
+a Slack channel where someone decides, during an incident, whether an archive
+can be trusted, so the type has three variants and `logweir notify deliver`
+refuses a fourth at parse time. See
 [`docs/formats/protection-event.md`](formats/protection-event.md).
 
 **Reading the catalog, and what a field this build cannot find means.** The
@@ -2634,7 +2637,7 @@ skip with no `Restore`:
 | the target `KafkaCluster` reports `reachable: true` and a `clusterId`, and its saved connection resolves (the same `RestoreTarget` resolution the `Restore` admission makes — a SCRAM connection with no `secretRef`, say, is refused here by field) | `TargetUnavailable` |
 | the signed scope's `templateDigest`, `targetClusterId` and `deadlineSeconds` agree with the sealed spec | `AuthorizationInvalid` |
 | a point qualifies: covered by `spec.point.topics`, old enough, with a non-empty window, inside `maxPartitions`, not captured from the target cluster, not inside a retention lease | `NoQualifyingPoint`, `TargetUnavailable` or `PointRetentionInProgress` |
-| the RENDERED plan falls inside the signed scope | `AuthorizationInvalid` |
+| the RENDERED plan falls inside the signed scope — including its coverage, which must be the scope's own (`coverage`, absent = sampled) and, for a complete plan, inside the scope's `completeMaxRecords` (PROD-08.1a) | `AuthorizationInvalid` |
 
 **`spec.bounds.runnerResources` reaches the runner container.** It is copied
 verbatim onto each child `Restore`'s `spec.runnerResources`, and from there
@@ -2674,6 +2677,37 @@ for that digest; an authorization signed without it refuses every slot as
 existing schedule's digest and authorization are unchanged. To opt an
 existing schedule in, create a new `RehearsalSchedule` with the field and sign
 a new authorization for its `status.templateDigest`.
+
+**`spec.bounds.coverage: complete` makes every slot verify every record
+(PROD-08.1a).** Absent (or `sampled`), each slot runs today's sampled check. With
+`complete`, the slot's plan states `sample.coverage: complete` and **no**
+`sample.max_partitions` (a complete verification checks every partition, and
+phase 0 refuses the pair; `maxPartitions` still bounds which point a slot may
+select), plus `sample.complete_max_records` when `spec.bounds.completeMaxRecords`
+is set (CEL: only beside `complete`), and the child `Restore` declares the same
+on `spec.coverage`/`spec.completeMaxRecords`. **It costs more**: every slot
+reads every archived record of the restored topics and the whole restored
+output — about a minute per GiB of one-KiB records with an optimised build on a
+laptop, against about five seconds for the sampled check
+([the decision record](to-do/decisions/PROD-08.1-integrity-contract.md) §7) — so
+size `deadlineSeconds` and the cron for it. A slot whose bound stops it, or
+whose archive it cannot compare, signs `covered: false`: the run exits 2,
+`fail-integrity`, the `Restore`'s badge is `CompleteNotCovered`, and the
+schedule records `lastFailed` — never `lastSucceeded`.
+
+**The coverage is signed twice.** The field is inside `templateDigest` (the
+spec is sealed, so flipping sampled↔complete after signing changes the digest
+and every slot is `AuthorizationInvalid`), **and** the standing authorization's
+scope must itself say `coverage: complete` (document format 1.1.0, below):
+`plan_within_scope` — the controller's each-slot check and the runner's own,
+over the mounted bundle — requires the plan's coverage to equal the signed one.
+A scope that states no `coverage`, which is every scope signed before this
+field, authorises sampled rehearsals only, so a complete plan under it is
+refused by name; a scope that says `complete` refuses a sampled plan too. When
+the scope states `completeMaxRecords`, the plan's bound must be present and no
+larger. The runner cannot see `templateDigest`; it can see the signed scope, so
+an approver who signed sampled rehearsals never finds a complete one run in
+their name, whatever a controller renders.
 
 **A slot that came due before the `RehearsalSchedule` was created is not its
 slot.** The controller never rehearses a slot whose due time is before the
@@ -2978,8 +3012,16 @@ logweir drill approve --standing \
   --out standing-authorization.json
 ```
 
+`scope.json` is D3 §4.3's scope in camelCase — `templateDigest`,
+`targetClusterId`, `topicPrefix`, `topics`, `maxPartitions`,
+`recordsPerPartition`, `deadlineSeconds`, `modes` — and, for a schedule whose
+`spec.bounds.coverage` is `complete`, **`coverage: complete`** and optionally
+**`completeMaxRecords`** (PROD-08.1a): a scope carrying either is minted at
+`formatVersion` 1.1.0, every other one at 1.0.0 as before. A scope that states
+no `coverage` authorises sampled rehearsals only; `completeMaxRecords` without
+`coverage: complete`, or of 0, is refused before anything is signed.
 `--spec`, `--approver` and `--ticket` are refused: this document binds a SCOPE
-and covers every slot, and version 1.0.0 carries neither an approver nor a
+and covers every slot, and its versions carry neither an approver nor a
 ticket, so a value given for them would not be signed. The two files become the
 `Approval`'s `spec.approvalBytes` and `spec.sidecarBytes`, with
 `spec.subjectRef.kind: RehearsalSchedule` and `spec.planHash` set to the
@@ -6273,6 +6315,80 @@ Job from this build and from the controller before FX-2 alike). A Job whose
 `Restore` states the block prints it, for example
 `{"limits":{"memory":"512Mi"},"requests":{"cpu":"250m"}}`.
 
+### Complete coverage: `spec.coverage` and `spec.completeMaxRecords` (PROD-08.1a)
+
+**The field.** `spec.coverage` is `sampled` (absent means this) or `complete`;
+`spec.completeMaxRecords` (at least 1, CEL: only beside `complete`) bounds a
+complete verification. They **declare** what the plan's `sample.coverage` and
+`sample.complete_max_records` say, so a list, the `COVERAGE` printer column's
+neighbours and the console can read the requested coverage without parsing the
+plan. The plan is what the approver signs and what the runner executes; the
+controller compares the two before an approval is waited for or anything is
+created, and a `Restore` whose declaration the plan does not say — a complete
+declaration over a sampled plan, a complete plan with no declaration, or a
+different bound — ends `Failed` with reason **`ExecutionSpecInvalid`**, naming
+both, with no Job. Absent and a sampled plan is every `Restore` written before
+the fields existed, so they all agree, and their objects and plan hashes are
+unchanged. `spec` is immutable and the approval binds the plan bytes, so the
+coverage cannot change after approval: a different coverage is a different
+plan, a different hash and a new approval. The console's restore wizard and
+the product API's create route set both fields from the same choice
+([api.md](api.md#the-restores-coverage-prod-081a)); a plan written with the CLI
+needs `spec.coverage: complete` on the `Restore` too.
+
+**What complete costs.** It reads every archived segment of every partition of
+every restored topic, decodes every record, reads every restored record back
+and compares each one with the archive by its source offset — exact
+per-partition counts of missing, unexpected, duplicate, out-of-order and
+different records. Measured on one laptop with an optimised build: about a
+minute per GiB of one-KiB records, against about five seconds for the sampled
+check; a real archive pays more for object-store transfer
+([the decision record](to-do/decisions/PROD-08.1-integrity-contract.md) §7).
+Size `deadlineSeconds` for it; `completeMaxRecords` is the control that stops
+it early.
+
+**What `covered: false` means.** A complete verification that the bound stopped,
+or that met an archive it could not compare (records with no lineage header, a
+segment that would not decode), compares only part of the restore. It signs
+`integrity.verification.complete.covered: false` with the reason, its
+`integrity.result` is never `pass` (scorecard arm IV-6), its outcome is
+`fail-integrity` and the runner exits 2. **It is never a pass, anywhere:** the
+`Verified` condition's reason is `CompleteNotCovered` even over a status whose
+other fields said pass (§15.2), the product API's `verifiedSuccess` is `false`,
+the console's badge and list verdict say so, a rehearsal over it is
+`lastFailed`, the runner's notification body carries `integrity.covered: false`
+and its metrics `logweir_drill_integrity_complete_covered 0`.
+
+**What the status carries.** Beside `integrity.level`/`result`/`partialReason`,
+the controller copies from the signed scorecard: `integrity.coverage`
+(`sampled` or `complete`; ABSENT means not recorded — a scorecard before format
+1.4.0 — and is read as sampled, never as complete); `integrity.complete` —
+`covered`, `incompleteReason`, `maxRecords`, the archive counts
+(`segments`, `segmentsVerified`, `segmentsFailedCount`,
+`segmentsUnverifiedCount`, `recordsDecoded`, `offsetHoles`), the totals under
+`replay` and, up to 256 partitions, one row per partition with its own exact
+counts and `compared` (past 256 the rows are omitted and `partitionCount` says
+how many the scorecard holds — a truncated list would be a claim the signed
+document does not make); and FX-23's `integrity.unsampledTopics` for a sampled
+check (format 1.6.0). Each is all of it or nothing, like `timeBasis`.
+
+```bash
+kubectl --context docker-desktop get restore r1 \
+  -o jsonpath='{.spec.coverage}{"  "}{.status.integrity.coverage}{"  "}{.status.integrity.complete.covered}'
+# complete  complete  false
+```
+
+The `COVERAGE` printer column reads `status.integrity.coverage`: empty is not
+recorded, never complete.
+
+**Upgrade and rollback.** The fields are additive. An older controller ignores
+`spec.coverage` (the structural schema of an older CRD prunes it) and runs the
+plan as written — a complete plan still verifies completely, because the
+runner reads the plan — but it does not refuse a disagreeing declaration and
+does not copy `status.integrity.coverage`/`complete`; the console then reads
+"not recorded". Rolling the CRDs back prunes both spec fields from stored
+objects; their plans are untouched.
+
 ### The credential is validated by the RUNNER, and the controller checks nothing
 
 `weirkeeper` holds **no `get` on Secrets anywhere** (§9), so it never sees the
@@ -6338,7 +6454,8 @@ a recorded non-zero `exitCode` (§15.2). An older runner prints no keys at exit
 **copied verbatim** out of the signed scorecard, fetched with the controller's
 read-only archive credential: `outcome`, `lastPhaseCompleted`, `objectives`
 (`rtoSeconds`, `rpoSeconds`, `passRate`, `met`), `integrity`
-(`level`, `result`, `partialReason`) and `measured`. The controller **never
+(`level`, `result`, `partialReason`, and since PROD-08.1a `coverage`,
+`complete` and `unsampledTopics` — *Complete coverage* above) and `measured`. The controller **never
 parses the scorecard into a typed struct and re-emits it**: that type accepts
 unknown fields and defaults every one of its own, so a field the reader does
 not declare is silently dropped — and a re-emitted status block would quietly
@@ -6813,7 +6930,7 @@ each kind:
 | kind      | green when                                                       |
 |-----------|------------------------------------------------------------------|
 | `Backup`  | `status.evidence.verification.result == Valid` **and** `status.exitCode == 0` |
-| `Restore` | `status.evidence.verification.result == Valid` **and** `status.outcome == pass` **and** no recorded `status.exitCode` other than `0` |
+| `Restore` | `status.evidence.verification.result == Valid` **and** `status.outcome == pass` **and** no recorded `status.exitCode` other than `0` **and** no `status.integrity.complete.covered: false` (PROD-08.1a) |
 
 There is **no `outcome` on the `Backup` path at all** — `Backup.status` carries
 `exitCode` and no `outcome` — so a single shared rule would render every
@@ -6832,7 +6949,9 @@ is not green renders the literal word **`unverified`**, never `pass`.
 
 Both rules also appear on the object itself, as a `Verified` condition whose
 `reason` is `Verified`, `VerificationInvalid`, `VerificationNotAttempted`,
-`VerificationUntrusted`, `ExitCodeNotZero` or `OutcomeNotPass`, and whose
+`VerificationUntrusted`, `ExitCodeNotZero`, `OutcomeNotPass` or
+`CompleteNotCovered` (a complete verification that did not cover the restore,
+whatever else the status says — PROD-08.1a), and whose
 `message` is the badge label.
 
 Since PLAT-19.1 the green rule reads `result == Valid` **and**

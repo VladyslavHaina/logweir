@@ -53,7 +53,7 @@ pub const EXACTLY_ONE_AUTHORIZATION_RULE: &str = "has(self.approvalRef) != has(s
 pub const EXACTLY_ONE_AUTHORIZATION_MESSAGE: &str =
     "set exactly one of spec.approvalRef (a per-run Approval) or spec.authorization (a standing authorization); a Restore is never unauthorized";
 
-/// **PROD-08.1a.** The CEL rule that keeps a record bound beside the coverage
+/// The CEL rule that keeps a record bound beside the coverage
 /// it bounds: `completeMaxRecords` only with `coverage: complete`.
 ///
 /// The runner's phase 0 refuses the same pair in the plan
@@ -82,7 +82,7 @@ pub const SPEC_RULES: [SpecRule; 5] = [
     SpecRule::new(COMPLETE_MAX_RECORDS_RULE, COMPLETE_MAX_RECORDS_MESSAGE),
 ];
 
-/// **PROD-08.1a.** How much of a restore phase 7 verifies, as a `Restore` or
+/// How much of a restore phase 7 verifies, as a `Restore` or
 /// a `RehearsalSchedule` asks for it: the plan grammar's `sample.coverage`
 /// (`logweir_core::spec::Coverage`) in the CRDs' camelCase.
 ///
@@ -95,8 +95,8 @@ pub const SPEC_RULES: [SpecRule; 5] = [
 ///   counts. It reads the whole archive of the restored partitions and the
 ///   whole output, so it COSTS MORE — about a minute per GiB of one-KiB
 ///   records with an optimised build on a laptop, against about five seconds
-///   for the sampled check (`docs/to-do/decisions/PROD-08.1-integrity-contract.md`
-///   §7). A bound (`completeMaxRecords`) or an archive it cannot compare
+///   for the sampled check (the integrity contract's decision record, its
+///   section 7). A bound (`completeMaxRecords`) or an archive it cannot compare
 ///   signs `covered: false`, which is never a pass.
 ///
 /// ABSENT MEANS SAMPLED, and is not serialised, so every object written
@@ -237,7 +237,7 @@ pub struct Integrity {
     /// `partial` with no reason is a badge an auditor cannot act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_reason: Option<String>,
-    /// **PROD-08.1a.** The signed `integrity.verification.coverage` (scorecard
+    /// The signed `integrity.verification.coverage` (scorecard
     /// format 1.4.0): `sampled` or `complete`, what the run ACTUALLY verified.
     /// A CLAIM until `evidence.verification` says `Valid`, like `result`.
     ///
@@ -247,7 +247,7 @@ pub struct Integrity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 16))]
     pub coverage: Option<String>,
-    /// **PROD-08.1a.** A complete verification's result, copied from the
+    /// A complete verification's result, copied from the
     /// signed `integrity.verification.complete` — present exactly when
     /// `coverage` is `complete` and the document's block was well formed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,7 +272,7 @@ pub const UNSAMPLED_TOPICS_MAX: usize = 256;
 /// signed document does not make, and the rows stay in the scorecard.
 pub const COMPLETE_PARTITIONS_MAX: usize = 256;
 
-/// **PROD-08.1a.** A complete verification's result on a `Restore` — the
+/// A complete verification's result on a `Restore` — the
 /// signed `integrity.verification.complete` (format 1.4.0) in this
 /// resource's camelCase, COPIED and never recomputed.
 ///
@@ -550,7 +550,7 @@ pub struct RestoreSpec {
     /// resources come from here and never from the target mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_resources: Option<super::rehearsal_schedule::RunnerResources>,
-    /// **PROD-08.1a.** How much of the restore phase 7 verifies: `sampled`
+    /// How much of the restore phase 7 verifies: `sampled`
     /// (absent means this) or `complete` — every record of every restored
     /// partition, compared with the archive, with exact per-partition counts.
     /// Complete COSTS MORE: it reads every archived record of the restored
@@ -571,7 +571,7 @@ pub struct RestoreSpec {
     /// hash and a new approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<VerificationCoverage>,
-    /// **PROD-08.1a.** The bound on a complete verification — the plan's
+    /// The bound on a complete verification — the plan's
     /// `sample.complete_max_records`: the most archived records it decodes,
     /// summed over every restored partition. Only with `coverage: complete`
     /// (CEL), checked against the plan like `coverage`. A run the bound stops

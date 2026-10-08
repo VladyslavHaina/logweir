@@ -311,7 +311,8 @@ before upgrading the controller*), with the identity backed up beforehand.
 | *pending* | `result: Pending` | the evidence fetch has not answered yet |
 | *records verified in the sampled window* | `Restore.status.completion.recordsRestored` (`sample.records_restored`) | records read back from the new topics inside the sampled window — not the total written, and not the matching count |
 | *records sampled and matching* | `completion.recordsSampledMatching` | how many sampled records matched byte for byte |
-| verification scope `sampled` / `degraded` / `none` | `verificationScope.level` | how the records were compared; `complete` does not exist |
+| verification scope `sampled` / `degraded` / `none` | `verificationScope.level` | how the records were compared; `complete` is not a level |
+| *coverage: sampled* / *complete, covered* / *complete, NOT covered -- not a pass* | `Restore.status.integrity.coverage` and `.complete.covered` (`verificationScope.coverage`) | how MUCH was compared, as the signed scorecard says (PROD-08.1a); absent is not recorded, never complete, and `covered: false` is never a pass ([kubernetes.md](kubernetes.md) §12) |
 | *Visible user topics only — completeness not established* | `status.selection.coverage: VisibleUserTopicsOnly` | a dynamic run backed up what its principal could see; Kafka hides the rest silently |
 | *All user topics (attested complete)* | `AllUserTopicsAttested` | only with an administrator's attestation ([kubernetes.md](kubernetes.md) §22.2) |
 | catalog availability / verification | `Available`…`Partial` / `Verified`…`NotAttempted` | two separate axes; *selectable* needs both ([kubernetes.md](kubernetes.md) §7d) |

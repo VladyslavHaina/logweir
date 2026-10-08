@@ -27,9 +27,10 @@ binding), 34 (FX-16, a point-bound restore restores its point's set), 35
 (PROD-00.2, the engine built from the vendored source), 36 (FX-23, an
 early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
 one crate that may hold `unsafe` code, and the consumer-group and ACL reads
-behind it), 38 (FX-20, the binding for every other credential reference)
-and 39 (FX-18, a topic phase 0 creates is used only once the cluster serves
-it) so far. Items continue the next entry's
+behind it), 38 (FX-20, the binding for every other credential reference),
+39 (FX-18, a topic phase 0 creates is used only once the cluster serves it)
+and 41 (PROD-08.1a, complete coverage requested and shown through the CRDs,
+the API and the console) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -870,6 +871,76 @@ for an operator to remove, as a failed create in the same batch already did.
 
 **Rollback:** an older runner creates and uses the topics at once again. No
 document, archive or API object changes in either direction.
+
+#### 41. A `Restore`, a rehearsal and the console can ask for complete coverage, and every surface says sampled or complete (PROD-08.1a)
+
+**Added.** Item 30's complete verification can now be requested and read
+outside a plan file. A `Restore` declares `spec.coverage: complete` (and
+`spec.completeMaxRecords`) beside a plan that says the same — the controller
+refuses, `ExecutionSpecInvalid` before any approval is waited for, a
+declaration the plan bytes do not say, in either direction. A
+`RehearsalSchedule` asks with `spec.bounds.coverage`/`completeMaxRecords`
+(inside `templateDigest`; each slot's plan then states no `max_partitions`).
+The product API's create route carries both fields; every restore read carries
+`coverage {requested, recorded, covered, incompleteReason}`; the operation
+view's `verificationScope` adds `coverage`, a complete block with every
+partition's exact counts, and FX-23's `unsampledTopics`; the rehearsal view's
+`bounds` carry the coverage. The controller copies the signed coverage, the
+complete block and the unsampled topics onto `Restore.status.integrity`, and a
+`COVERAGE` printer column reads it. The console's restore wizard offers complete
+coverage as a closed advanced choice with its cost stated beside it, never as
+the default; the History list, the Restore detail and the operation view say
+sampled or complete and show a complete run's per-partition counts. The
+runner's notification body adds `integrity.coverage`/`covered` and its metrics
+`logweir_drill_integrity_coverage` and `logweir_drill_integrity_complete_covered`
+([kubernetes.md](kubernetes.md) §12 *Complete coverage* and §7g,
+[api.md](api.md#the-restores-coverage-prod-081a), [metrics.md](metrics.md)).
+
+**`covered: false` is never a pass, anywhere.** The `Restore` badge's
+`Verified` condition is `CompleteNotCovered` beside it even over a status whose
+other fields say pass, so the API's `verifiedSuccess`, the console's badge and
+list verdict and a rehearsal's `lastSucceeded` all refuse it; the notification
+and the metrics label carry `fail-integrity`.
+
+**The standing authorization signs the coverage (format 1.1.0).** A rehearsal
+scope gains optional `coverage` and `completeMaxRecords`; the plan's coverage
+must EQUAL the signed one (absent = sampled), and a signed record bound must be
+met. `logweir drill approve --standing` mints 1.1.0 only when the scope carries
+one of them. A scope signed before this field authorises sampled rehearsals
+only, so no existing authorization admits a complete plan
+([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)).
+
+**Do:** apply the CRDs (both new fields are additive and absent means sampled,
+so every existing `Restore`, `RehearsalSchedule`, template digest and plan hash
+is unchanged). To rehearse with complete coverage, create a NEW
+`RehearsalSchedule` with `spec.bounds.coverage: complete`, add `"coverage":
+"complete"` to its `scope.json`, and sign a new authorization for its
+`status.templateDigest`. Budget for the cost: complete coverage reads every
+archived record of the restored topics and the whole restored output — about a
+minute per GiB of one-KiB records with an optimised build on a laptop, against
+about five seconds for the sampled check. A plan written with the CLI that asks
+for complete coverage needs `spec.coverage: complete` on its `Restore`, or the
+controller refuses it.
+**Scope:** unit and mock-cluster rows in `logweir-core` (the scope predicate
+and the 1.1.0 admission, each arm with a control), `weirkeeper`
+(`restore_controller.rs`: the declaration refused both ways before the
+approval is read, admitted and reaching the plan ConfigMap byte for byte, the
+signed block copied all-or-nothing, `CompleteNotCovered`;
+`rehearsal_controller.rs`: the coverage inside `templateDigest`, a complete
+schedule firing only under a scope that signed complete, a sampled schedule's
+plan unchanged, a `covered: false` slot never a pass), `logweir-api`
+(`complete_coverage.rs`, over the console fixtures it writes), the runner
+(the standing document minted at 1.1.0 and admitted through the real binary,
+a `covered: false` run never a pass in the notification or the metrics), and
+`ui/tests/complete-coverage.spec.js`; planted mutants, each killed. Live: a
+plan built by the console's own emitter, run with complete coverage on the
+compose stack over real records and through the controller's and the API's
+projections. The k8s rows (the CRDs, a `Restore` and a rehearsal through the
+real controller, the console in a browser) run at the next PoC upgrade.
+**Rollback:** an older controller ignores the spec fields (an older CRD prunes
+them) and runs the plan as written; it does not copy the status fields, and
+the console then reads "not recorded". An older runner or controller ignores a
+1.1.0 scope's fields and refuses every complete plan (fail closed).
 
 ### Required operator actions after `v0.2.0-rc.1`
 

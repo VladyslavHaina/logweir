@@ -4783,11 +4783,11 @@ spec:
                 description: The bounds it runs inside.
                 properties:
                   completeMaxRecords:
-                    description: '**PROD-08.1a.** The bound on each complete verification
-                      — the plan''s `sample.complete_max_records`. Only with `coverage:
-                      complete` (CEL). A slot the bound stops signs `covered: false`,
-                      which is recorded as a failed rehearsal and never as a pass.
-                      Absent: no bound beyond `deadlineSeconds`.'
+                    description: 'The bound on each complete verification — the plan''s
+                      `sample.complete_max_records`. Only with `coverage: complete`
+                      (CEL). A slot the bound stops signs `covered: false`, which
+                      is recorded as a failed rehearsal and never as a pass. Absent:
+                      no bound beyond `deadlineSeconds`.'
                     format: int64
                     minimum: 1
                     nullable: true
@@ -4800,7 +4800,7 @@ spec:
                     type: string
                   coverage:
                     description: |-
-                      **PROD-08.1a.** How much of each rehearsal phase 7 verifies: `sampled` (absent means this) or `complete`, rendered into every slot's plan as `sample.coverage` and onto every slot's `Restore` as `spec.coverage`. Complete COSTS MORE: every slot then reads every archived record of the restored topics and the whole restored output — about a minute per GiB of one-KiB records with an optimised build on a laptop, against about five seconds for the sampled check — so choose the cron and `deadlineSeconds` with that in mind.
+                      How much of each rehearsal phase 7 verifies: `sampled` (absent means this) or `complete`, rendered into every slot's plan as `sample.coverage` and onto every slot's `Restore` as `spec.coverage`. Complete COSTS MORE: every slot then reads every archived record of the restored topics and the whole restored output — about a minute per GiB of one-KiB records with an optimised build on a laptop, against about five seconds for the sampled check — so choose the cron and `deadlineSeconds` with that in mind.
 
                       Under `complete`, the slot's plan states no `sample.max_partitions` (a complete verification checks every partition, and the runner refuses the pair); `maxPartitions` still bounds which point a slot may select, as it always has, and `recordsPerPartition` is unread.
 
@@ -5405,19 +5405,18 @@ spec:
                 description: The backup set inside `sourceArchive` — a `backupId`.
                 type: string
               completeMaxRecords:
-                description: '**PROD-08.1a.** The bound on a complete verification
-                  — the plan''s `sample.complete_max_records`: the most archived records
-                  it decodes, summed over every restored partition. Only with `coverage:
-                  complete` (CEL), checked against the plan like `coverage`. A run
-                  the bound stops signs `covered: false`, never a pass. Absent: no
-                  bound.'
+                description: 'The bound on a complete verification — the plan''s `sample.complete_max_records`:
+                  the most archived records it decodes, summed over every restored
+                  partition. Only with `coverage: complete` (CEL), checked against
+                  the plan like `coverage`. A run the bound stops signs `covered:
+                  false`, never a pass. Absent: no bound.'
                 format: int64
                 minimum: 1
                 nullable: true
                 type: integer
               coverage:
                 description: |-
-                  **PROD-08.1a.** How much of the restore phase 7 verifies: `sampled` (absent means this) or `complete` — every record of every restored partition, compared with the archive, with exact per-partition counts. Complete COSTS MORE: it reads every archived record of the restored topics and the whole restored output (about a minute per GiB of one-KiB records with an optimised build on a laptop, against about five seconds for the sampled check). A run its bound stops, or whose archive it cannot compare, signs `covered: false`, which is never a pass.
+                  How much of the restore phase 7 verifies: `sampled` (absent means this) or `complete` — every record of every restored partition, compared with the archive, with exact per-partition counts. Complete COSTS MORE: it reads every archived record of the restored topics and the whole restored output (about a minute per GiB of one-KiB records with an optimised build on a laptop, against about five seconds for the sampled check). A run its bound stops, or whose archive it cannot compare, signs `covered: false`, which is never a pass.
 
                   A DECLARATION OF WHAT `planBytes` SAYS, CHECKED AGAINST IT. The plan is what the approver signs and what the runner executes; this field states its `sample.coverage` where a list, a printer column and the console can read it without parsing the plan. The controller refuses a `Restore` whose plan says otherwise (absent here means the plan must be sampled) before an approval is waited for or anything is created: `Failed`, reason `ExecutionSpecInvalid`. `spec` is immutable and the approval binds the plan bytes, so coverage cannot change after the approval — a different coverage is a different plan, a different hash and a new approval.
                 enum:
@@ -5946,10 +5945,9 @@ spec:
                 nullable: true
                 properties:
                   complete:
-                    description: '**PROD-08.1a.** A complete verification''s result,
-                      copied from the signed `integrity.verification.complete` — present
-                      exactly when `coverage` is `complete` and the document''s block
-                      was well formed.'
+                    description: A complete verification's result, copied from the
+                      signed `integrity.verification.complete` — present exactly when
+                      `coverage` is `complete` and the document's block was well formed.
                     nullable: true
                     properties:
                       archive:
@@ -6155,7 +6153,7 @@ spec:
                     type: object
                   coverage:
                     description: |-
-                      **PROD-08.1a.** The signed `integrity.verification.coverage` (scorecard format 1.4.0): `sampled` or `complete`, what the run ACTUALLY verified. A CLAIM until `evidence.verification` says `Valid`, like `result`.
+                      The signed `integrity.verification.coverage` (scorecard format 1.4.0): `sampled` or `complete`, what the run ACTUALLY verified. A CLAIM until `evidence.verification` says `Valid`, like `result`.
 
                       ABSENT MEANS NOT RECORDED — a scorecard before 1.4.0, a run that signed none, or one not read yet — and is read as a sampled check, NEVER as a complete one: nothing re-reads old evidence as a stronger guarantee.
                     maxLength: 16

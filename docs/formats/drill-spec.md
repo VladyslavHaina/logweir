@@ -303,9 +303,15 @@ two verifications at once:
 **What it costs.** Complete verification reads the whole archive of the
 restored partitions and the whole restored output; measured on the compose
 stack in the decision record (about a minute per GiB of one-KiB records with
-an optimised build on a laptop, several times the sampled check). A
-`RehearsalSchedule`, a `Restore` object and the console cannot ask for it yet;
-`logweir drill run` and `logweir restore run` can.
+an optimised build on a laptop, several times the sampled check).
+`logweir drill run` and `logweir restore run` read it from the plan. A
+`Restore` declares the same value on `spec.coverage` (and
+`spec.completeMaxRecords`), and the controller refuses one whose declaration
+the plan does not say; a `RehearsalSchedule` asks for it with
+`spec.bounds.coverage`, under a standing authorization whose signed scope says
+`coverage: complete`; the console's restore wizard offers it as an advanced
+choice with this cost beside it (PROD-08.1a,
+[kubernetes.md](../kubernetes.md) §12 and §7g).
 
 **It is inside `plan_hash`.** The fields are part of the plan bytes an approver
 signs. Both are omitted from the serialised plan at their defaults, so a plan

@@ -207,6 +207,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/mcp-round3.spec.js` | **the human-like pass, round 3**: the wizard's focused status kept clear of its sticky footer, step texts that show names as code, "Restore this point" only for a role that can restore, and the no-role header -- each with the behaviour it replaced. |
 | `tests/check-deadline.spec.js` | **P15 and its class**: every follower reads its check until the check's own deadline, backs off while it does, and says so -- with *Run the check again* -- when the deadline passes without a result: the deadline pinned to the product's own numbers, the follow on node's mock timers, and each page (the readiness panel, the schedule form, *Test connection*, *Discover topics*, *Test access*) with a check that settles at 100 s and one that never does. Restore step 5's two rows are in `mutation.spec.js`. |
 | `tests/restore-semantics.spec.js` | **FX-6**: step 6 says what a restore copies, above Create -- the decision record's sentence word for word, its two identifiers as code, visible (a direct child of step 6, never folded into a wrapper) with each of the four approval-policy blocks, and on the step on screen -- each row with its negative control. |
+| `tests/complete-coverage.spec.js` | **PROD-08.1a**: complete coverage -- the wizard's closed advanced choice with its cost, unticked by default; the plan line exactly when ticked and the old bytes when not (the golden pair `plan-complete.golden.yaml`, which `ui_lint.rs` also parses into `RestoreSpec`); the review row and cost; the Restore's declaration; the draft; the mounted wizard; the API's coverage decoded and projected; the list row, the detail and the operation view saying sampled or complete with every partition's counts; and `covered: false` never green, even beside a forged pass -- each row with its negative control. |
 | `tests/time-basis.spec.js` | **FX-8**: the restore wizard's time-basis box -- unticked by default and never ticked by the page, the note under it (what it means, the refusal it avoids, and that the page cannot see each topic's timestamp type), the plan line `time_basis: "producerTime"` exactly when ticked and pre-FX-8 bytes when not (the golden pair `plan-time-basis.golden.yaml`, which `ui_lint.rs` also parses into the runner's `RestoreSpec`), the hash it moves, the review row, the draft, the mounted wizard, and the Restore detail's row read from the approved plan -- each row with its negative control. |
 | `tests/replication-factor.spec.js` | **FX-5**: the restore wizard's replication factor -- the default rule (the source's factor capped at the target's brokers, else the target's broker count at most 3, else the grammar's 1 said as such), the broker count read from a discovery of the target (a fresh one, or one past its freshness alone, which sets the default with its age and refuses nothing), the 4-broker boundary of the ceiling, the input, the `ReplicationFactorExceedsBrokers` refusal on step 4, in the stepper, on the review step and in the submit, the review row with where the factor came from, the sentence that the factor can differ from the source's (on both steps and in this README and the quickstart), the readiness warning that names the factor, the draft, and both mounts' reads (a Backup point and a catalog point) -- each row with its negative control. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
@@ -1342,6 +1343,57 @@ upgraded first, it is refused, and a retry builds a new plan where the box can
 be ticked. A draft kept before the upgrade carries no choice and comes back
 unticked. Rolling the console back removes the box; a plan already approved with
 the line keeps it. Rows: `ui/tests/time-basis.spec.js`.
+
+## Complete coverage: asked for as an advanced choice, shown wherever a result is (PROD-08.1a)
+
+**Step 4 offers it, closed, with its cost.** Under *What this recovery changes*
+sits a closed *Advanced: verify every record* section: a box, *Verify every
+record (complete coverage)*, unticked by default and never ticked by the page,
+the cost stated beside it whether or not it is ticked (`COMPLETE_COVERAGE_COST`
+in `render.js`: every archived record of the restored topics and every
+restored record compared -- about a minute per GiB of one-KiB records with an
+optimised build on a laptop, against about five seconds for the sampled check
+-- and `covered: false` is never a pass), and an optional record bound, enabled
+only beside the box. Ticked, the plan carries `coverage: "complete"` (and
+`complete_max_records`) under `sample:`, which moves the plan hash; the review
+step's **coverage** row names it and repeats the cost
+(`#review-coverage-cost`); the Restore declares the same on `spec.coverage` and
+`spec.completeMaxRecords` (the product API's create request carries both), so
+the controller -- which refuses a declaration the plan does not say -- admits
+it. Unticked, the plan and the object are byte-identical to what this page
+wrote before. A bound that is not a whole number is not guessed: the plan
+refuses to render and names `sample.completeMaxRecords`. The draft keeps the
+choice as text.
+
+**Every result says sampled or complete.** A History row's RESULT carries a
+coverage line -- *sampled*, *sampled (not recorded)*, *complete, covered* or
+*complete, NOT covered -- not a pass* -- from `status.integrity.coverage` and
+`.complete.covered` (in console mode, the product API's `Restore.coverage`).
+The Restore detail shows *coverage (asked for)* from `spec`, *coverage
+(signed)* from the scorecard (a claim until the evidence verifies), and a
+recorded complete verification in full (`#complete-coverage`): whether it
+covered, why not, the archive counts and one row per partition with its exact
+counts and whether it was compared. The operation view carries the same in a
+*Verification coverage* section for every Restore -- the completion panel is
+shown only for a run that succeeded, and a complete verification that did not
+cover is exactly the run that did not. A sampled run's sentence names FX-23's
+unsampled topics and never the word `complete`. An absent coverage reads "not
+recorded", never complete.
+
+**`covered: false` is never green.** The Restore badge and the console list
+verdict refuse green beside it (`notCovered`), even over a status whose other
+fields say pass, with the caption *complete coverage did not cover this
+restore -- not a pass* -- the controller's own `CompleteNotCovered` rule,
+applied here too.
+
+**Upgrade and rollback.** A console older than this ignores the API's coverage
+fields and shows a complete run's sampled-style sentence, which understates
+it; it cannot ask for complete coverage. Rows:
+`ui/tests/complete-coverage.spec.js`, over the API's own projections
+(`fixtures/console/restore-complete-uncovered.json`,
+`operation-restore-complete-uncovered.json`) and the golden pair
+`plan-complete-fields.json` / `plan-complete.golden.yaml`, which `ui_lint.rs`
+also parses into the runner's `RestoreSpec`.
 
 ## The readiness check holds the submit
 

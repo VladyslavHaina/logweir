@@ -1716,10 +1716,24 @@ a slot may run:
 | `targetClusterId` | The one cluster a rehearsal may restore into, compared with the id the cluster itself reports. |
 | `topicPrefix` | The prefix every restored topic name carries, rendered per schedule as `<prefix><schedule-uid-first-8>-`. |
 | `topics` | The source topics the authorization covers, by exact name. |
-| `maxPartitions` | The partition ceiling: each slot's plan carries the schedule's own bound as `sample.max_partitions`, which may not exceed it. |
+| `maxPartitions` | The partition ceiling: each slot's sampled plan carries the schedule's own bound as `sample.max_partitions`, which may not exceed it. A complete plan states none (it checks every partition); the controller still bounds the point it selects. |
 | `recordsPerPartition` | The most records per partition the plan may sample and verify. It does not bound how many records the restore writes, which is every archived record in the window. |
 | `deadlineSeconds` | The wall-clock bound on one run, the Job's `activeDeadlineSeconds`. The controller checks it; the runner does not. |
 | `modes` | The target modes permitted: `["scratch"]`, and nothing else in this build. A scope naming any other mode is refused. |
+| `coverage` (format 1.1.0, optional) | The verification coverage the signer authorises; the plan's `sample.coverage` must be exactly it (PROD-08.1a). **Absent means `sampled`** — every 1.0.0 scope — so a scope signed before the field authorises sampled rehearsals only, and a complete plan under it is refused by name. `complete` admits a complete plan (which states no `max_partitions`) and refuses a sampled one. |
+| `completeMaxRecords` (format 1.1.0, optional) | Only beside `coverage: complete`: the most archived records one complete verification may decode. The plan's `sample.complete_max_records` must be present and no larger. Absent: the work is bounded by `deadlineSeconds` alone. |
+
+**Format 1.1.0 (PROD-08.1a).** `coverage` and `completeMaxRecords` are optional scope fields
+defined from `formatVersion` 1.1.0. `logweir drill approve --standing` mints 1.1.0 exactly when the
+scope carries one of them, and 1.0.0 — byte for byte as before — otherwise; the DSSE payload type is
+unchanged. Every reader refuses either field under a document declaring 1.0.0, `completeMaxRecords`
+beside a scope that does not authorise complete coverage, and a bound of 0. MINOR, on the rule
+OD-7 states for scorecards applied to this signed document: the fields can only make a reader
+REFUSE a plan a 1.0.0 reader admitted, never admit one it refused — a 1.0.0 scope admits exactly
+the sampled plans it always did, and the complete plans it now refuses by name were refused by a
+1.0.0 reader as an unbounded sample. A reader built before 1.1.0 ignores the fields and refuses
+every complete plan, which is the fail-closed direction; so, as with every scope field, roll the
+controller and the runner out together.
 
 Unknown fields are ignored on read. They cannot widen authority: the standing format carries no
 approval-policy mode (PLAT-19.2 carries one end to end for per-run Restores only, through
