@@ -3431,3 +3431,65 @@ fn fx11_a_refused_discovery_pod_maps_to_pod_creation_forbidden() {
         TERMINAL_STATE_DISCOVERY_FAILED
     );
 }
+
+/// **FX-11, THE FINISHED END.** A discovery Job that died on its own deadline
+/// without ever having a pod — the pass that would have caught it at 30 s never
+/// ran, say across a controller restart — is still `PodCreationForbidden`,
+/// quoting the quota, when its `FailedCreate` Event says why: the finished
+/// path reads the Events through the same classifier row. Without the Event
+/// it is the `DiscoveryFailed` it always was.
+///
+/// KILLS: the Events read dropped on the finished path.
+#[tokio::test]
+async fn fx11_a_discovery_job_that_died_without_a_pod_names_the_refusal() {
+    let dead = |events: String| {
+        let mut routes = refused_routes("2026-09-16T01:58:30Z", events);
+        let job = {
+            let mut job: Value =
+                serde_json::from_str(&discovery_job_body(UID, UID, None, &source_sha(CLUSTER_ID)))
+                    .expect("JSON");
+            job["status"] = json!({"conditions": [{
+                "type": "Failed", "status": "True", "reason": "DeadlineExceeded",
+                "lastProbeTime": "2026-09-16T01:59:50Z",
+                "lastTransitionTime": "2026-09-16T01:59:50Z"
+            }]});
+            job.to_string()
+        };
+        for route in &mut routes {
+            if route.method == "GET" && route.path_suffix.ends_with(&discovery_job(UID)) {
+                route.body = job.clone();
+            }
+        }
+        routes
+    };
+    let refusal = event_list(&[("Job", &discovery_job(UID), DISCOVERY_JOB_UID, QUOTA_REFUSAL)]);
+    let (terminal, bodies) = reconcile_with(&visible_only(), dead(refusal)).await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_POD_CREATION_FORBIDDEN),
+        "{:?}",
+        calls(&bodies)
+    );
+    let status = patched_statuses(&bodies).pop().expect("a terminal status");
+    let failed = condition_of(&status, "Failed").expect("the Failed condition");
+    assert!(
+        failed["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("exceeded quota: compute"),
+        "{status}"
+    );
+    assert_eq!(
+        discovery_cancels(&bodies),
+        0,
+        "a finished Job is not cancelled"
+    );
+
+    let (terminal, bodies) = reconcile_with(&visible_only(), dead(event_list(&[]))).await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_DISCOVERY_FAILED),
+        "no Event, the old answer: {:?}",
+        calls(&bodies)
+    );
+}
