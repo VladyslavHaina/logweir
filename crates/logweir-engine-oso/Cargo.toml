@@ -47,6 +47,11 @@ thiserror.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+# `tests/offset_report_memory.rs` reads a child process's peak RSS through
+# `getrusage`, a safe API, because a counting global allocator needs `unsafe`
+# (forbidden here by the workspace lint). Already in the graph through
+# `object_store`; only the `resource` feature is added.
+nix = { version = "0.31", default-features = false, features = ["resource"] }
 
 [features]
 default = []
