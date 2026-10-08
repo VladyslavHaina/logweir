@@ -204,9 +204,11 @@ The refusal names every refused topic and the record that made it
 
 **It is inside `plan_hash`.** The field is part of the plan bytes an approver
 signs, so an approval minted over a plan without it does not authorise the same
-plan with it, and the reverse. A `RehearsalSchedule` has no field that states
-it, so a scheduled rehearsal over a `LogAppendTime` topic is refused every
-time; the schedule's plan states none and is byte-identical to before FX-8.
+plan with it, and the reverse. A `RehearsalSchedule` states it as
+`spec.point.timeBasis: producerTime`, rendered into every slot's plan and
+inside the standing authorization's `templateDigest`; a schedule that states
+none renders none, and its slots over a `LogAppendTime` topic are refused
+([kubernetes.md](../kubernetes.md) §7g).
 
 **Absent field, old plans, old runners.** Every plan written before FX-8 lacks
 the field and means "no time selection by producer time is accepted". A runner

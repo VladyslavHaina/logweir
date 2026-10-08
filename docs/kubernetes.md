@@ -2583,6 +2583,27 @@ message names the field — and no child is created; the spec is sealed, so the
 remedy is a new schedule under a new authorization. Before FX-2 the block was
 copied onto the child and then dropped at the Job.
 
+**`spec.point.timeBasis` lets a rehearsal of a `LogAppendTime` topic run
+(FX-8).** Every slot's plan states `restore.point_in_time`, and the archive
+holds each record's PRODUCER timestamp, so over a source topic recorded as
+`LogAppendTime` — the archive manifest's topic override, or the bound receipt's
+effective value, a broker default included — the runner refuses the slot with
+`PointInTimeByProducerTime`, exit 3, before any target topic exists. The
+schedule then records `lastFailed.reason: PointInTimeByProducerTime` and sets
+`RehearsalHealthy=False`; it is never a silent failure. A schedule that states
+`spec.point.timeBasis: producerTime` renders `restore.time_basis: producerTime`
+into every slot's plan, exactly as the chosen point becomes
+`restore.point_in_time`: the slot runs, by the producers' clocks, and its
+signed scorecard lists the topic under `source.time_basis.producer_time`
+([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)). The field has
+one value, is sealed like the rest of the spec, and is inside
+`templateDigest`, so a schedule that states it needs an authorization signed
+for that digest; an authorization signed without it refuses every slot as
+`AuthorizationInvalid`. A schedule that states none serialises none, so every
+existing schedule's digest and authorization are unchanged. To opt an
+existing schedule in, create a new `RehearsalSchedule` with the field and sign
+a new authorization for its `status.templateDigest`.
+
 **A slot that came due before the `RehearsalSchedule` was created is not its
 slot.** The controller never rehearses a slot whose due time is before the
 object's `metadata.creationTimestamp`, even inside
