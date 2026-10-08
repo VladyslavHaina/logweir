@@ -11,6 +11,9 @@
 # THE INPUTS, all under third_party/:
 #   kafka-backup-build.env            ENGINE_VERSION=<release>+logweir.<n> and
 #                                     ENGINE_DIGEST=sha256:<hex>
+#   kafka-backup-builds.txt           the append-only ledger of every build:
+#                                     `<version> <digest>` per line, the last
+#                                     line being the build env's pair
 #   kafka-backup-v<release>.tar.gz    the vendored OSO source, and its .sha256
 #   kafka-backup-patches/             NNNN-<slug>.patch, applied in name order
 #
@@ -32,6 +35,7 @@ set -euo pipefail
 cd "${LOGWEIR_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 BUILD_ENV="third_party/kafka-backup-build.env"
+LEDGER="third_party/kafka-backup-builds.txt"
 PATCH_DIR="third_party/kafka-backup-patches"
 
 die() {
@@ -74,6 +78,48 @@ TARBALL="third_party/kafka-backup-v${RELEASE}.tar.gz"
 TARBALL_SHA=$(sha256_file "$TARBALL")
 [ "$(cat "$TARBALL.sha256")" = "$TARBALL_SHA  $TARBALL" ] \
   || die "$TARBALL does not match $TARBALL.sha256 (the bytes give $TARBALL_SHA)"
+
+# THE LEDGER: ONE VERSION, ONE ENGINE (review M1). A change to the inputs gives
+# a new digest, and a new digest is a new build: it is APPENDED as
+# `<release>+logweir.<n+1> <digest>`. So the last line must be the build env's
+# pair, no version and no digest may appear twice, and `n` must rise within a
+# release. Re-recording the digest without bumping `n` leaves either a
+# duplicated version (appended) or a last line that disagrees with the env;
+# both are refused. Rewriting the last line in place is what
+# `crates/logweir/tests/engine_pin.rs` refuses: it pins every build that has
+# shipped, as a prefix of this file.
+[ -s "$LEDGER" ] || die "$LEDGER is missing: the ledger of Logweir's engine builds"
+ledger_versions=" "
+ledger_digests=" "
+last_version=""
+last_digest=""
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in ''|'#'*) continue ;; esac
+  [[ "$line" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\+logweir\.([1-9][0-9]*)\ (sha256:[0-9a-f]{64})$ ]] \
+    || die "$LEDGER: \`$line\` is not \`<release>+logweir.<n> sha256:<hex>\`"
+  l_release="${BASH_REMATCH[1]}"; l_n="${BASH_REMATCH[2]}"; l_digest="${BASH_REMATCH[3]}"
+  l_version="${l_release}+logweir.${l_n}"
+  case "$ledger_versions" in
+    *" $l_version "*) die "$LEDGER: version $l_version is recorded twice. Two engines would print one" \
+                          "version: bump the <n> of ENGINE_VERSION for a new build." ;;
+  esac
+  case "$ledger_digests" in
+    *" $l_digest "*) die "$LEDGER: digest $l_digest is recorded twice; one build has one version" ;;
+  esac
+  for prior in $ledger_versions; do
+    p_release="${prior%%+logweir.*}"; p_n="${prior##*+logweir.}"
+    if [ "$p_release" = "$l_release" ] && [ "$p_n" -ge "$l_n" ]; then
+      die "$LEDGER: $l_version follows $prior; <n> must rise within release $l_release"
+    fi
+  done
+  ledger_versions="$ledger_versions$l_version "
+  ledger_digests="$ledger_digests$l_digest "
+  last_version="$l_version"; last_digest="$l_digest"
+done < "$LEDGER"
+[ "$last_version $last_digest" = "$VERSION $RECORDED_DIGEST" ] \
+  || die "$LEDGER ends with \`$last_version $last_digest\`, but $BUILD_ENV builds" \
+         "\`$VERSION $RECORDED_DIGEST\`. A new build is a new LAST line: bump the <n> of" \
+         "ENGINE_VERSION and append \`<version> <digest>\`; never rewrite a recorded line."
 
 # THE PATCH FOLDER'S FORMAT (third_party/kafka-backup-patches/README.md).
 [ -d "$PATCH_DIR" ] || die "$PATCH_DIR is missing"
@@ -127,7 +173,8 @@ check_digest() {
   [ "$DIGEST" = "$RECORDED_DIGEST" ] \
     || die "the inputs give $DIGEST, but $BUILD_ENV records $RECORDED_DIGEST." \
            "A change to the tarball, the patch folder or ENGINE_VERSION is a new build:" \
-           "bump the <n> of ENGINE_VERSION, then record \`$0 digest\` as ENGINE_DIGEST."
+           "bump the <n> of ENGINE_VERSION, record \`$0 digest\` as ENGINE_DIGEST, and" \
+           "append the pair to $LEDGER."
 }
 
 prepare() {

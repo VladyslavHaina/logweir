@@ -12,7 +12,7 @@ mistakes it for OSO's binary.
 
 | Patch | What it fixes | Oracle |
 | --- | --- | --- |
-| `0001-lockfile-rustls-h2-spin.patch` | The engine's Cargo.lock only: rustls 0.23.43 → 0.23.45 (RUSTSEC-2026-0285) with rustls-webpki 0.103.13 → 0.103.15, h2 0.4.15 → 0.4.19 (RUSTSEC-2026-0258), and the yanked spin 0.9.8 → 0.9.9. The first run of the engine's `cargo deny` gate (PROD-00.2) found all three in the shipped graph; Logweir's own graph already carries these versions. | `scripts/ci-check.sh`'s engine `cargo deny` (fails on the unpatched lock), and PROD-00.2's parity suites |
+| `0001-lockfile-rustls-h2-spin.patch` | The engine's Cargo.lock only: rustls 0.23.43 → 0.23.45 (RUSTSEC-2026-0285) with rustls-webpki 0.103.13 → 0.103.15, h2 0.4.15 → 0.4.19 (RUSTSEC-2026-0258), and the yanked spin 0.9.8 → 0.9.9. The first run of the engine's `cargo deny` gate (PROD-00.2) found all three in the shipped graph. Logweir's own graph already carries rustls 0.23.45, rustls-webpki 0.103.15 and h2 0.4.19 (it has spin 0.10.1, not 0.9). | `scripts/ci-check.sh`'s engine `cargo deny` (fails on the unpatched lock), and PROD-00.2's parity suites |
 
 ## The policy: patch first
 
@@ -61,9 +61,30 @@ set, each with negative controls.
   sha256, every patch's name and sha256 in order, and `ENGINE_VERSION`.
   `scripts/engine-source.sh digest` prints it.
 
-**Any change to this folder bumps `<n>` and re-records `ENGINE_DIGEST`.** The
-build refuses a digest that does not describe the inputs, and so does the
-test set; the bump keeps two different engines from sharing one version.
+**Any change to a patch or to the tarball is a new build:** bump `<n>`,
+re-record `ENGINE_DIGEST` (`scripts/engine-source.sh digest`), and APPEND the
+pair to `third_party/kafka-backup-builds.txt`, the ledger of every build, and
+to `SHIPPED_BUILDS` in `crates/logweir/tests/engine_pin.rs`. That is enforced,
+not only asked:
+
+- the build and the test set refuse a digest that does not describe the
+  inputs;
+- `scripts/engine-source.sh` refuses a ledger whose last line is not the build
+  env's pair, a version or a digest recorded twice, and an `<n>` that does not
+  rise within a release;
+- `engine_pin.rs` refuses a ledger that does not begin with every shipped
+  build, unchanged, so a recorded line rewritten in place to describe new
+  inputs under an old version fails too.
+
+So two different engines never share one version. (An edit to this README
+changes no digest and needs no bump.)
+
+**The stamp is the CLI's `--version` only.** Inside the engine,
+`env!("CARGO_PKG_VERSION")` still reads the OSO release (`0.23.3`): for
+example the `tool_version` of the engine's own `validation run` evidence, which
+Logweir never runs, and the crate versions an SBOM of the image lists for
+`kafka-backup-cli` and `kafka-backup-core`. Logweir's identity is the CLI's
+`--version`, `/etc/logweir/engine-identity` and the build env, never those.
 `logweir doctor`, the controller's Job environment, the runner image and every
 signed scorecard and receipt name this identity, so they move together
 (`crates/logweir/tests/engine_pin.rs`).

@@ -179,8 +179,10 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
 # own source must not re-run the engine compile, and an edit to the engine's
 # inputs is exactly what must. `scripts/engine-source.sh prepare` is the
 # recipe and its refusals are the gate: the tarball must match its `.sha256`,
-# the patch folder must follow its README's format, the inputs must give the
-# `ENGINE_DIGEST` that `third_party/kafka-backup-build.env` records, every
+# the patch folder must follow its README's format, the build must be the last
+# line of the append-only ledger `third_party/kafka-backup-builds.txt` (one
+# version, one engine), the inputs must give the `ENGINE_DIGEST` that
+# `third_party/kafka-backup-build.env` records, every
 # patch must apply with exact context, and the version stamp must land. Then
 # `cargo build --locked`: the engine's own Cargo.lock, unchanged, is what
 # `cargo deny` checks in `scripts/ci-check.sh`.
@@ -191,7 +193,7 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
 FROM cross AS engine-logweir
 WORKDIR /engine
 COPY scripts/engine-source.sh scripts/
-COPY third_party/kafka-backup-build.env third_party/kafka-backup-v*.tar.gz third_party/kafka-backup-v*.tar.gz.sha256 third_party/
+COPY third_party/kafka-backup-build.env third_party/kafka-backup-builds.txt third_party/kafka-backup-v*.tar.gz third_party/kafka-backup-v*.tar.gz.sha256 third_party/
 COPY third_party/kafka-backup-patches third_party/kafka-backup-patches
 RUN bash scripts/engine-source.sh prepare /engine/src
 RUN set -eu; \

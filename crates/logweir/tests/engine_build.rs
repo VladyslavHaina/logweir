@@ -12,6 +12,11 @@
 //!   A change to any input without a new recorded digest is refused.
 //! - **The version.** `<release>+logweir.<n>`, `n` from 1, the release the one
 //!   vendored tarball's name gives.
+//! - **One version, one engine** (review M1). `third_party/kafka-backup-builds.txt`
+//!   is the append-only ledger of builds: the last line is the build env's
+//!   pair, no version and no digest appears twice, and `n` rises within a
+//!   release. A new digest under an old version is refused whichever way it is
+//!   written down; a rewritten shipped line is `engine_pin.rs`'s to refuse.
 //! - **The patch folder** (`third_party/kafka-backup-patches/README.md`):
 //!   `NNNN-<slug>.patch` files, uniquely numbered, line 1 `Reason: <one
 //!   line>`, line 2 blank or `Upstream: https://…`, then a unified diff; the
@@ -142,9 +147,54 @@ fn check_patch_folder(entries: &[(String, Vec<u8>)]) -> Result<Vec<String>, Stri
     Ok(names)
 }
 
+/// The ledger's rules, as `scripts/engine-source.sh` states them.
+fn check_ledger(ledger: &str, version: &str, digest: &str) -> Result<(), String> {
+    let mut seen: Vec<(String, u64, String)> = Vec::new();
+    for line in ledger.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (v, d) = line
+            .split_once(' ')
+            .ok_or_else(|| format!("`{line}` is not `<release>+logweir.<n> sha256:<hex>`"))?;
+        let release = release_of(v)?;
+        let n: u64 = v.rsplit_once('.').unwrap().1.parse().unwrap();
+        let digest_ok = d.strip_prefix("sha256:").is_some_and(|h| {
+            h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        });
+        if !digest_ok {
+            return Err(format!(
+                "`{line}` is not `<release>+logweir.<n> sha256:<hex>`"
+            ));
+        }
+        if seen.iter().any(|(sv, _, _)| sv == v) {
+            return Err(format!("version {v} is recorded twice: bump the <n>"));
+        }
+        if seen.iter().any(|(_, _, sd)| sd == d) {
+            return Err(format!("digest {d} is recorded twice"));
+        }
+        if seen
+            .iter()
+            .any(|(sv, sn, _)| release_of(sv).unwrap() == release && *sn >= n)
+        {
+            return Err(format!("{v}: <n> must rise within release {release}"));
+        }
+        seen.push((v.to_string(), n, d.to_string()));
+    }
+    match seen.last() {
+        Some((v, _, d)) if v == version && d == digest => Ok(()),
+        Some((v, _, d)) => Err(format!(
+            "the ledger ends with `{v} {d}`, the build env builds `{version} {digest}`: bump \
+             the <n> and append"
+        )),
+        None => Err("the ledger records no build".into()),
+    }
+}
+
 /// A tree with the build's inputs: `third_party/` as the script reads it.
 struct Inputs {
     env: String,
+    ledger: String,
     tarball_name: String,
     tarball: Vec<u8>,
     checksum: String,
@@ -171,6 +221,7 @@ impl Inputs {
             .collect();
         Inputs {
             env,
+            ledger: read("third_party/kafka-backup-builds.txt"),
             tarball_name,
             tarball,
             checksum,
@@ -212,6 +263,7 @@ impl Inputs {
             return Err(format!("ENGINE_VERSION {version} names another release"));
         }
         let recorded = env_value(&self.env, "ENGINE_DIGEST")?;
+        check_ledger(&self.ledger, &version, &recorded)?;
         let digest = self.digest()?;
         if digest != recorded {
             return Err(format!(
@@ -221,11 +273,32 @@ impl Inputs {
         Ok(())
     }
 
-    fn with_digest_recorded(mut self) -> Self {
-        let digest = self.digest().expect("a digest");
+    /// A NEW BUILD, the way the README says to make one: bump `n`, record
+    /// the digest the inputs then give, and append the pair to the ledger.
+    fn with_new_build(self) -> Self {
+        let version = env_value(&self.env, "ENGINE_VERSION").unwrap();
+        let (release, n) = version.split_once("+logweir.").unwrap();
+        let bumped = format!("{release}+logweir.{}", n.parse::<u64>().unwrap() + 1);
+        let mut next = self.with_env_line("ENGINE_VERSION", &bumped);
+        let digest = next.digest().expect("a digest");
+        next = next.with_env_line("ENGINE_DIGEST", &digest);
+        next.ledger.push_str(&format!("{bumped} {digest}\n"));
+        next
+    }
+
+    /// Re-records the digest WITHOUT bumping `n` (review M1's mistake), and
+    /// writes the ledger one of three ways.
+    fn with_digest_rerecorded_unbumped(self, ledger: LedgerEdit) -> Self {
+        let version = env_value(&self.env, "ENGINE_VERSION").unwrap();
         let old = env_value(&self.env, "ENGINE_DIGEST").unwrap();
-        self.env = self.env.replace(&old, &digest);
-        self
+        let digest = self.digest().expect("a digest");
+        let mut next = self.with_env_line("ENGINE_DIGEST", &digest);
+        match ledger {
+            LedgerEdit::Untouched => {}
+            LedgerEdit::Appended => next.ledger.push_str(&format!("{version} {digest}\n")),
+            LedgerEdit::RewrittenInPlace => next.ledger = next.ledger.replace(&old, &digest),
+        }
+        next
     }
 
     fn with_patch(mut self, name: &str, content: &str) -> Self {
@@ -240,6 +313,7 @@ impl Inputs {
         let patches = tp.join("kafka-backup-patches");
         std::fs::create_dir_all(&patches).unwrap();
         std::fs::write(tp.join("kafka-backup-build.env"), &self.env).unwrap();
+        std::fs::write(tp.join("kafka-backup-builds.txt"), &self.ledger).unwrap();
         std::fs::write(tp.join(&self.tarball_name), &self.tarball).unwrap();
         std::fs::write(
             tp.join(format!("{}.sha256", self.tarball_name)),
@@ -250,6 +324,13 @@ impl Inputs {
             std::fs::write(patches.join(name), bytes).unwrap();
         }
     }
+}
+
+/// How a re-recorded digest is written into the ledger.
+enum LedgerEdit {
+    Untouched,
+    Appended,
+    RewrittenInPlace,
 }
 
 /// Runs `scripts/engine-source.sh <args>` over a planted tree.
@@ -344,8 +425,14 @@ fn the_shipped_patch_folder_follows_its_policy() {
 fn a_well_formed_patch_is_accepted_and_applied_by_both() {
     let inputs = Inputs::real()
         .with_patch("0901-planted-fix.patch", &good_patch())
-        .with_digest_recorded();
+        .with_new_build();
     inputs.check().unwrap();
+    let version = env_value(&inputs.env, "ENGINE_VERSION").unwrap();
+    assert_ne!(
+        version,
+        logweir::doctor::ENGINE_PIN,
+        "a new build has a new version"
+    );
     let dir = tempfile::tempdir().unwrap();
     inputs.plant(dir.path());
     let out = script(dir.path(), &["check"]);
@@ -364,19 +451,13 @@ fn a_well_formed_patch_is_accepted_and_applied_by_both() {
     assert!(fetch.contains("(planted by engine_build.rs)"));
     let main = std::fs::read_to_string(src.join("crates/kafka-backup-cli/src/main.rs")).unwrap();
     assert!(
-        main.contains(&format!(
-            "#[command(version = \"{}\")]",
-            logweir::doctor::ENGINE_PIN
-        )) && !main.contains("#[command(version)]"),
+        main.contains(&format!("#[command(version = \"{version}\")]"))
+            && !main.contains("#[command(version)]"),
         "the version stamp landed exactly"
     );
     assert_eq!(
         std::fs::read_to_string(src.join("LOGWEIR-ENGINE-IDENTITY")).unwrap(),
-        format!(
-            "version={}\ndigest={}\n",
-            logweir::doctor::ENGINE_PIN,
-            inputs.digest().unwrap()
-        )
+        format!("version={version}\ndigest={}\n", inputs.digest().unwrap())
     );
 }
 
@@ -473,7 +554,7 @@ fn every_rule_is_refused_by_both_implementations() {
         (
             "a patch added without re-recording the digest",
             Inputs::real().with_patch("0901-fix.patch", &good),
-            "bump the <n> of ENGINE_VERSION",
+            "bump the <n>",
         ),
         (
             "OSO's release as the version",
@@ -488,7 +569,7 @@ fn every_rule_is_refused_by_both_implementations() {
         (
             "a version bump without re-recording the digest",
             Inputs::real().with_env_line("ENGINE_VERSION", "0.23.3+logweir.2"),
-            "bump the <n> of ENGINE_VERSION",
+            "bump the <n>",
         ),
         (
             "a tarball that does not match its checksum",
@@ -499,6 +580,63 @@ fn every_rule_is_refused_by_both_implementations() {
             "no README stating the policy",
             Inputs::real().without_readme(),
             "README.md",
+        ),
+        // REVIEW M1: ONE VERSION, ONE ENGINE. A patch lands and its digest is
+        // re-recorded, but `n` is not bumped; whichever way the ledger is then
+        // written, the gate refuses (a line rewritten in place is
+        // `engine_pin.rs`'s, below).
+        (
+            "a new digest under the same version, appended to the ledger",
+            Inputs::real()
+                .with_patch("0901-fix.patch", &good)
+                .with_digest_rerecorded_unbumped(LedgerEdit::Appended),
+            "is recorded twice",
+        ),
+        (
+            "a new digest under the same version, the ledger untouched",
+            Inputs::real()
+                .with_patch("0901-fix.patch", &good)
+                .with_digest_rerecorded_unbumped(LedgerEdit::Untouched),
+            "bump the <n>",
+        ),
+        (
+            "a bumped version the ledger does not record",
+            Inputs::real()
+                .with_patch("0901-fix.patch", &good)
+                .with_new_build()
+                .with_ledger(&read("third_party/kafka-backup-builds.txt")),
+            "bump the <n>",
+        ),
+        (
+            "an <n> that falls",
+            Inputs::real().with_ledger(&format!(
+                "0.23.3+logweir.2 sha256:{}\n0.23.3+logweir.1 {}\n",
+                "a".repeat(64),
+                env_value(&read("third_party/kafka-backup-build.env"), "ENGINE_DIGEST").unwrap()
+            )),
+            "must rise",
+        ),
+        (
+            "one digest under two versions",
+            Inputs::real()
+                .with_env_line("ENGINE_VERSION", "0.23.3+logweir.2")
+                .with_ledger(&format!(
+                    "{}\n0.23.3+logweir.2 {}\n",
+                    read("third_party/kafka-backup-builds.txt").trim_end(),
+                    env_value(&read("third_party/kafka-backup-build.env"), "ENGINE_DIGEST")
+                        .unwrap()
+                )),
+            "is recorded twice",
+        ),
+        (
+            "a malformed ledger line",
+            Inputs::real().with_ledger("0.23.3+logweir.1 not-a-digest\n"),
+            "is not `<release>+logweir.<n> sha256:<hex>`",
+        ),
+        (
+            "no ledger",
+            Inputs::real().with_ledger(""),
+            "kafka-backup-builds.txt is missing",
         ),
     ];
     for (why, inputs, needle) in cases {
@@ -520,6 +658,25 @@ fn every_rule_is_refused_by_both_implementations() {
     }
 }
 
+/// REVIEW L8: `prepare` — the only mode the Dockerfile runs — refuses a stale
+/// digest itself, before it extracts anything. (Mutant R4 deleted that check
+/// from the `prepare` arm and survived every case above, which all run
+/// `check`.)
+#[test]
+fn prepare_refuses_a_stale_digest_before_it_extracts() {
+    let inputs = Inputs::real().with_patch("0901-fix.patch", &good_patch());
+    let dir = tempfile::tempdir().unwrap();
+    inputs.plant(dir.path());
+    let dest = dir.path().join("prepared");
+    let out = script(dir.path(), &["prepare", dest.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("bump the <n>"), "{}", text(&out));
+    assert!(
+        !dest.join("Cargo.toml").exists(),
+        "nothing is extracted from a build whose digest is stale"
+    );
+}
+
 /// A patch that no longer applies — the release now contains it, or it was
 /// written against another release — stops the build (README, rule 4).
 #[test]
@@ -530,7 +687,7 @@ fn a_patch_that_does_not_apply_stops_prepare() {
     );
     let inputs = Inputs::real()
         .with_patch("0901-stale.patch", &stale)
-        .with_digest_recorded();
+        .with_new_build();
     let dir = tempfile::tempdir().unwrap();
     inputs.plant(dir.path());
     let out = script(
@@ -576,10 +733,15 @@ impl Inputs {
     /// case exists for must be the policy's, not the digest's.
     fn with_digest_recorded_unchecked(self) -> Self {
         if self.digest().is_ok() {
-            self.with_digest_recorded()
+            self.with_new_build()
         } else {
             self
         }
+    }
+
+    fn with_ledger(mut self, ledger: &str) -> Self {
+        self.ledger = ledger.to_string();
+        self
     }
 
     fn with_env_line(mut self, key: &str, value: &str) -> Self {

@@ -269,6 +269,41 @@ fn check_documented_identity(src: &str, pin: &str, digest: &str) -> Result<(), S
     }
 }
 
+/// EVERY BUILD OF THE ENGINE THAT HAS LANDED, in order (review M1). The ledger
+/// `third_party/kafka-backup-builds.txt` must begin with exactly these lines:
+/// a recorded build is never rewritten. `scripts/engine-source.sh` refuses a
+/// repeated version, a repeated digest, an `n` that does not rise and a last
+/// line that is not the build env's; this list is what refuses the one change
+/// the script cannot see, a recorded line edited in place to describe new
+/// inputs under an old version. A new build appends a line here AND there.
+const SHIPPED_BUILDS: &[(&str, &str)] = &[(
+    "0.23.3+logweir.1",
+    "sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3",
+)];
+
+fn check_ledger_keeps_shipped(ledger: &str, shipped: &[(&str, &str)]) -> Result<(), String> {
+    let lines: Vec<&str> = ledger
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    for (i, (version, digest)) in shipped.iter().enumerate() {
+        let want = format!("{version} {digest}");
+        match lines.get(i) {
+            Some(line) if *line == want => {}
+            Some(line) => {
+                return Err(format!(
+                    "kafka-backup-builds.txt line {} reads `{line}`, but the build that landed \
+                     as {version} is `{want}`. A recorded build is never rewritten: bump the <n> \
+                     of ENGINE_VERSION and append the new build",
+                    i + 1
+                ))
+            }
+            None => return Err(format!("kafka-backup-builds.txt lost the build `{want}`")),
+        }
+    }
+    Ok(())
+}
+
 fn digest_file() -> String {
     read("third_party/kafka-backup-binary.digest")
         .trim()
@@ -301,6 +336,38 @@ fn the_pin_is_logweirs_build_of_the_release_prod_00_3f_evaluated() {
         OSO_0_23_3_DIGEST,
         "the digest PROD-00.3f resolved for v0.23.3 (revision afb160e7): the rollback's image"
     );
+}
+
+#[test]
+fn the_ledger_keeps_every_shipped_build() {
+    check_ledger_keeps_shipped(&read("third_party/kafka-backup-builds.txt"), SHIPPED_BUILDS)
+        .unwrap();
+    // The shipped list itself names the pin last-or-earlier: doctor's pin is a
+    // build that landed.
+    assert!(
+        SHIPPED_BUILDS.iter().any(|(v, _)| *v == ENGINE_PIN),
+        "doctor's pin {ENGINE_PIN} is not a recorded build"
+    );
+}
+
+/// REVIEW M1's negative controls: the shipped line rewritten in place under
+/// the same version (the change `engine-source.sh` cannot see), and the line
+/// dropped, are both refused, naming the bump.
+#[test]
+fn a_rewritten_or_dropped_shipped_build_is_refused() {
+    let ledger = read("third_party/kafka-backup-builds.txt");
+    let rewritten = ledger.replace(SHIPPED_BUILDS[0].1, &format!("sha256:{}", "b".repeat(64)));
+    let e = check_ledger_keeps_shipped(&rewritten, SHIPPED_BUILDS).unwrap_err();
+    assert!(e.contains("bump the <n>"), "{e}");
+    let dropped: String = ledger
+        .lines()
+        .filter(|l| !l.starts_with(SHIPPED_BUILDS[0].0))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert!(check_ledger_keeps_shipped(&dropped, SHIPPED_BUILDS).is_err());
+    // And an appended new build keeps the shipped prefix.
+    let appended = format!("{ledger}0.23.3+logweir.2 sha256:{}\n", "c".repeat(64));
+    check_ledger_keeps_shipped(&appended, SHIPPED_BUILDS).unwrap();
 }
 
 #[test]

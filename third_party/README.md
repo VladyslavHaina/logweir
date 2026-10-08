@@ -7,6 +7,7 @@ Logweir builds the engine with (OD-3, PROD-00.2).
 | File | What it is |
 | --- | --- |
 | `kafka-backup-build.env` | **Logweir's build** of the engine: `ENGINE_VERSION` (`<release>+logweir.<n>`, what `kafka-backup --version` prints) and `ENGINE_DIGEST` (the build-input digest over the tarball, the patches and the version). `scripts/engine-source.sh` builds from it, and the runner image declares it in `/etc/logweir/engine-identity`. |
+| `kafka-backup-builds.txt` | The append-only ledger of Logweir's engine builds, `<version> <digest>` per line, the last being the build env's pair. One version names one engine: a new build bumps `<n>` and appends (`scripts/engine-source.sh` and `crates/logweir/tests/engine_pin.rs` hold it). |
 | `kafka-backup-patches/` | The ordered patches Logweir carries on the vendored source, and the patch-first policy (its `README.md`). |
 | `kafka-backup-deny.toml` | `cargo deny`'s policy for the engine's own lockfile, after the patches (`scripts/ci-check.sh`). |
 | `kafka-backup-binary.digest` | The immutable `sha256:` digest of OSO's released image of the same tag. Never a tag — Docker Hub tags are mutable (Global Constraint 7). It pins the one-release rollback (`ENGINE_SOURCE=oso`) and the compose stack's seeding engine; what ships is Logweir's build. |
