@@ -20,10 +20,11 @@ mark without one). The supported path these notes assume is
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
-published image. Items 21 (FX-2), 22 (FX-5) and 23 (FX-13), from the
-product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do FX-7's additions to
-item 11 (the execution-claim set check, receipt and catalog format 1.2.0, the
-pin's read by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
+published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10) and 24 (FX-13), from the
+product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do
+FX-7's additions to item 11 (the execution-claim set check, receipt and
+catalog format 1.2.0, the pin's read by version id) and FX-4's format 1.1.0,
+which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
@@ -178,16 +179,20 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-three operator-facing changes
+### The twenty-four operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
 PLAT-20.2 from merged changes; the defect names are the platform tracker's.
 Items 17–20 were found by the PoC rounds and landed after its first
 publication (`86a554e6`); each was proven on the running install by the
-in-place upgrade that carried it. Items 21–23 are the product-expansion
-tracker's fix-now rows FX-2, FX-5 and FX-13 and are not proven live yet: the
-PoC upgrade that carries each runs its rows.
+in-place upgrade that carried it. Items 21 and 22 are the product-expansion
+tracker's fix-now rows FX-2 and FX-5 and are not proven live yet: the PoC
+upgrade that carries each runs its rows. Item 23 is fix-now row FX-10, proven
+offline; the PoC upgrade that carries it checks that the PoC's policy
+document and its digest are unchanged (the PoC sets neither withdrawn key).
+Item 24 is fix-now row FX-13 and is not proven live yet: the PoC upgrade that
+carries it runs two clients through Traefik.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -875,7 +880,74 @@ the fixed, read-only 1 and the draft that drops the subset, and an older
 product API omits `brokerCount`. Nothing stored changes: a `Restore` created
 with a factor above 1 keeps it.
 
-#### 23. The sign-in limit counts each client behind the trusted ingress, not the ingress (FX-13)
+#### 23. Two policy values that changed nothing are withdrawn (FX-10)
+
+**Changed.** `checks.discovery.defaultMaxTopics` and
+`checks.preflight.defaultTimeoutSeconds` were documented as the default a
+request that names none gets. They never reached anything. Both CRDs default
+the request field at admission (`maxTopics` 20 000, `timeoutSeconds` 120) and
+the console writes both, so an operator who set either changed nothing.
+
+- They are gone from `values.yaml` and the chart README.
+- The controller's policy parser accepts both keys, or neither, and reads
+  neither. It applies no range rule, only the type: any whole number from 0
+  to 4 294 967 295 is accepted. A hand-written document that puts `null`, a
+  negative, a fraction, a quoted number or a larger number there is refused
+  whole, as before.
+- The chart renders both at fixed values: 20 000 (or `hardMaxTopics`, if that
+  is lower) and 120. A controller older than this one requires both keys, and
+  this keeps the document readable to it.
+- Nothing that runs changes: every install has always used the request's own
+  values.
+
+**Also changed: the retention worker refuses a cap it cannot read.**
+`logweir-retention` now refuses a run whose `LOGWEIR_RETENTION_MAX_DELETIONS`
+or `LOGWEIR_RETENTION_MAX_OBJECTS` is absent, or is not a whole number of at
+least 1. It exits 3 and deletes nothing. Before, it silently used 50 and
+20 000. Every controller that creates an enforcement Job sets both from
+`spec.enforcement`, so a supported controller and runner never hit the
+refusal.
+
+**Do:**
+
+- Remove either key from your values file.
+- A `helm upgrade` that still carries one succeeds, because the schema still
+  accepts both. It renders exactly what it would render without them, and its
+  notes print `WITHDRAWN VALUES ARE SET AND IGNORED`.
+- An upgrade with `--reuse-values` carries an older chart's defaults forward
+  and prints the same warning. Upgrade once with `--reset-then-reuse-values`.
+- To bound a discovery, name `maxTopics` on it; `checks.discovery.hardMaxTopics`
+  still caps it. To give a slow cluster longer, name `timeoutSeconds` (30–600)
+  on the `Preflight`.
+
+**Scope:**
+
+- `crates/weirkeeper/tests/chart_policy.rs`;
+- `crates/logweir/tests/chart_lint.rs`;
+- `scripts/check-chart.sh`, its withdrawn-values arm;
+- `scripts/check-chart-values.sh`, one render per chart value;
+- `crates/logweir-retention/tests/worker.rs`, the caps below the old
+  defaults (7 and 1234), above them (75 and 30 000, through execution), and
+  the refusals;
+- `crates/weirkeeper/tests/retention_policy_controller.rs`, raised ceilings
+  (55 and 30 000) reaching the plan and the Job;
+- the mutants in the FX-10 report.
+
+**What an operator sees after the upgrade.** An install that never set either
+key keeps a byte-identical policy document, so its policy digest does not move
+and no retained `Preflight` reads `policyChanged`. An install that had set
+either key to a value other than the one the chart now renders (20 000, or
+`hardMaxTopics` if lower, and 120) gets a changed document once: the chart
+renders the fixed value in place of its own. Its policy digest changes, and
+every retained `Preflight` whose `ready` verdict has not expired yet reads
+`unknown`, its message naming `policyChanged`. Run the check again. Nothing
+else changes, because the controller never read either value.
+
+**Rollback:** `helm rollback` restores the previous chart's values and
+document. Rolling back only the controller image is also safe, because the
+document still carries both keys at values an older controller accepts.
+
+#### 24. The sign-in limit counts each client behind the trusted ingress, not the ingress (FX-13)
 
 **Changed.** `/auth/login` and `/auth/callback` allow 20 requests a minute.
 The count was kept per **socket peer**, and behind the shared console's
@@ -1035,10 +1107,10 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21 and 22 and item 11's FX-7 additions: grant
-`s3:GetObjectVersion` before the upgrade, or a pinned point whose current version
-differs fails closed at the binding, and let in-flight Backups finish before
-rolling the runner back.
+from `fdb48cd8` crosses items 21, 22, 23 and 24, and item 11's FX-7 additions:
+grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
+version differs fails closed at the binding, and let in-flight Backups finish
+before rolling the runner back.
 
 **The chart and the images move together.** This chart's controller probes run
 `weirkeeper --probe`, and its console configuration can carry

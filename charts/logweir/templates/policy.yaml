@@ -21,8 +21,10 @@ FAIL-CLOSED ON ITS OWN MALFORMEDNESS. `check::policy::parse` uses
 produces `Policy::fail_closed()` (no attestations, no evidence allowlist) plus
 the advisory `configuration.policy notReady PolicyUnreadable` row. That is why
 `values.schema.json` REQUIRES every field of `checks`, `checks.discovery` and
-`checks.preflight`: a half-written block would render a document the controller
-refuses, and the refusal is silent unless someone reads a Preflight.
+`checks.preflight` that this template reads: a half-written block would render a
+document the controller refuses, and the refusal is silent unless someone reads
+a Preflight. (The two withdrawn keys are optional there and read by nothing
+here; see below.)
 
 THE `runs` BLOCK (P10) is how many MANUAL runs one namespace may have ACTIVE
 at once — `runs.maxManualBackupsActivePerNamespace` "Back up now" runner Jobs
@@ -53,15 +55,16 @@ is D-SEAMS S5 (transport security is never derived) failing in the one
 direction that matters.
 */ -}}
 {{- /*
-THE TWO RULES `values.schema.json` CANNOT CARRY, REFUSED HERE INSTEAD.
+THE ONE RULE `values.schema.json` CANNOT CARRY, REFUSED HERE INSTEAD.
 
-`Policy::validate` enforces `maxActiveTotal >= maxActivePerNamespace` and
-`discovery.defaultMaxTopics <= discovery.hardMaxTopics`. Both compare two
-SIBLING values, and JSON Schema draft-07 — which is what Helm evaluates — has
-no way to express that; `additionalProperties`, `minimum` and `maximum` are
-per-field or nothing.
+`Policy::validate` enforces `maxActiveTotal >= maxActivePerNamespace`. It
+compares two SIBLING values, and JSON Schema draft-07 — which is what Helm
+evaluates — has no way to express that; `additionalProperties`, `minimum` and
+`maximum` are per-field or nothing. (There were two until FX-10 withdrew
+`checks.discovery.defaultMaxTopics`, whose `<= hardMaxTopics` rule went with
+it: see the compatibility fields below.)
 
-WHY THEY MUST BE REFUSED AT RENDER TIME AND NOT LEFT TO THE CONTROLLER. A
+WHY IT MUST BE REFUSED AT RENDER TIME AND NOT LEFT TO THE CONTROLLER. A
 document the parser refuses fails CLOSED and SILENTLY: `Policy::fail_closed()`
 discards EVERY `visibilityAttestation` and EVERY `controllerIdentityLocation`
 the administrator configured, `attestedComplete` becomes unreachable, retention
@@ -76,11 +79,31 @@ both values.
 {{- if lt $maxTotal $maxNs -}}
 {{- fail (printf "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace (%d). weirkeeper::check::policy::Policy::validate refuses the rendered document otherwise, and a refused policy fails CLOSED: every visibilityAttestation and every controllerIdentityLocation is discarded and the install still looks healthy." $maxTotal $maxNs) -}}
 {{- end -}}
-{{- $defaultMax := int .Values.checks.discovery.defaultMaxTopics -}}
-{{- $hardMax := int .Values.checks.discovery.hardMaxTopics -}}
-{{- if gt $defaultMax $hardMax -}}
-{{- fail (printf "checks.discovery.defaultMaxTopics (%d) must be at most checks.discovery.hardMaxTopics (%d). weirkeeper::check::policy::Policy::validate refuses the rendered document otherwise, and a refused policy fails CLOSED: every visibilityAttestation and every controllerIdentityLocation is discarded and the install still looks healthy." $defaultMax $hardMax) -}}
-{{- end -}}
+{{- /*
+THE TWO WITHDRAWN FIELDS ARE RENDERED AS FIXED COMPATIBILITY VALUES, NEVER
+FROM A VALUE (FX-10, 2026-10-05).
+
+`checks.discovery.defaultMaxTopics` and `checks.preflight.defaultTimeoutSeconds`
+were documented as the default a request that names none gets. No request ever
+names none — both CRDs default the field at admission and the console API
+writes it — so the two knobs changed nothing, and they are gone from
+`values.yaml`. `values.schema.json` still ACCEPTS them, so an older values file
+or a `--reuse-values` upgrade does not fail on the closed schema, and NOTES.txt
+says that a set one is ignored.
+
+The document still CARRIES both keys, at `WITHDRAWN_DEFAULT_MAX_TOPICS`
+(clamped to `hardMaxTopics`) and `WITHDRAWN_DEFAULT_TIMEOUT_SECONDS`, because a
+controller older than FX-10 parses `discovery` and `preflight` with both keys
+REQUIRED and range-checked (`1 <= defaultMaxTopics <= hardMaxTopics`,
+`1..=600`) and refuses — fails closed — a document without them. Rendering
+them keeps a DEFAULT install readable by such a controller (an image-only
+rollback, and the old pod during a rolling upgrade), which is the rule the
+`runs` block below follows too. This controller parses them and reads neither
+(`weirkeeper::check::policy`). Drop them when no supported controller
+requires them; `weirkeeper/tests/chart_policy.rs` pins both numbers to the
+parser's constants.
+*/ -}}
+{{- $compatMaxTopics := min 20000 (int .Values.checks.discovery.hardMaxTopics) -}}
 {{- $endpoint := include "logweir.archive.endpoint" . -}}
 {{- $region := include "logweir.archive.region" . -}}
 {{- $explicit := ne .Values.archive.s3.endpoint "" -}}
@@ -96,7 +119,7 @@ both values.
       "freshSeconds" (.Values.checks.discovery.freshSeconds | int)
       "retentionSeconds" (.Values.checks.discovery.retentionSeconds | int)
       "keepPerConnection" (.Values.checks.discovery.keepPerConnection | int)
-      "defaultMaxTopics" (.Values.checks.discovery.defaultMaxTopics | int)
+      "defaultMaxTopics" $compatMaxTopics
       "hardMaxTopics" (.Values.checks.discovery.hardMaxTopics | int)
       "visibilityAttestations" .Values.checks.discovery.visibilityAttestations -}}
 {{- $policy := dict
@@ -108,7 +131,7 @@ both values.
         "maxEvidenceFetchActivePerNamespace" (.Values.checks.maxEvidenceFetchActivePerNamespace | int))
       "discovery" $discovery
       "preflight" (dict
-        "defaultTimeoutSeconds" (.Values.checks.preflight.defaultTimeoutSeconds | int)
+        "defaultTimeoutSeconds" 120
         "retentionSeconds" (.Values.checks.preflight.retentionSeconds | int))
       "engine" (dict "allowUnverifiedCustomCa" .Values.engine.allowUnverifiedCustomCa)
       "evidence" (dict "controllerIdentityLocations" .Values.evidence.controllerIdentityLocations)
