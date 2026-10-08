@@ -136,8 +136,8 @@ anything not listed is `404`.
 |---|---|
 | `GET /api/v1/session` | The actor, the explicit namespace grants and the capability flags. |
 | `GET /api/v1/namespaces` | The configured grants. It never lists core `Namespace` objects. |
-| `GET /api/v1/namespaces/{ns}/connections[/{name}]` | `KafkaCluster` projections: role, bootstrap addresses, auth mode, username, TLS, the credential Secret's **name**, and the controller's reachability observation. |
-| `POST /api/v1/namespaces/{ns}/connections` | Create a `KafkaCluster` that references an existing credential Secret by name. The body has no name member: the object is named `conn-<26 base32>` from the idempotency scope, and the response carries that name. |
+| `GET /api/v1/namespaces/{ns}/connections[/{name}]` | `KafkaCluster` projections: role, bootstrap addresses, auth mode (`plaintext`, `scramSha512`, `scramSha256`, `plain`, `mtls`), username, TLS, the credential and mTLS client-certificate Secrets' **names**, the CA reference, and the controller's reachability observation. Never a password or a key. |
+| `POST /api/v1/namespaces/{ns}/connections` | Create a `KafkaCluster`. A SASL password, or an mTLS client certificate and key, is entered ONCE in `auth.credential` and becomes a Secret this service creates — owned by and bound to the connection — and never reads back; an existing Secret is never named (`auth.credentialRef` is refused, `existing_credential_refused`). The body has no name member: the object is named `conn-<26 base32>` from the idempotency scope, and the response carries that name. |
 | `GET /api/v1/cadence-previews` | What a cron expression — or a preset — will actually do in a time zone, before anything is saved. No namespace, no Kubernetes call. |
 | `GET /api/v1/namespaces/{ns}/schedules[/{name}]` | `BackupSchedule` projections, with the cadence policy, the revision and the controller's own next runs. |
 | `POST /api/v1/namespaces/{ns}/schedules` | Create a `BackupSchedule` from the whole policy: cadence and zone, a named or dynamic selection, an inline archive **or** a saved destination, deadlines, catch-up, retries and retention. |
@@ -174,7 +174,7 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/catalogs` | Recovery catalogs: ten verdict counts, the signer list, and whether the Kubernetes view is a window over a larger archive. |
 | `POST /api/v1/namespaces/{ns}/catalogs` | Connect an existing archive: create a `RecoveryCatalog` **under the name in the body**, because every protection, rehearsal and retention policy references it by that name. |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}` | One catalog. |
-| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns, and, for an `Available` point recorded from receipt format 1.3.0, its topics' recorded partition count, replication factor, configuration coverage, owner kind and apply route (`topics[]`; absent is not published, never "no topics"), beside `ownerDetection`, where the backup run looked for declarative owners: an un-owned topic's `applyRoute` is `adminApi` only where it looked, and `unknown` where it did not (every controller-run `Backup` today). |
+| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns, and, for an `Available` point recorded from receipt format 1.3.0 or later, its topics' recorded partition count, replication factor, configuration coverage, owner kind and apply route (`topics[]`; absent is not published, never "no topics"), beside `ownerDetection`, where the backup run looked for declarative owners: an un-owned topic's `applyRoute` is `adminApi` only where it looked, and `unknown` where it did not (every controller-run `Backup` today). |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}/signers` | The untrusted-signer panel: key ids, point counts, whether the bound policy accepts each one, and the out-of-band fingerprint command. |
 | `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` | Retention: what the last evaluation would remove, what is **actually** enforcing it, which guarantees are in force and by whom, where the approved-plan gate stands, and whether enforcement has degraded. |
 | `GET /api/v1/trust-policies[/{name}]` | The installation's trust policies. **Cluster-scoped** and administrator-only; `unknown` is not `valid`. |
@@ -998,6 +998,24 @@ installation config arrives with W11**, and `addressingSource` — the field tha
 will say which source a derived location came from — is deliberately absent from
 the response until a route can fill it honestly.
 
+**Connection credentials are entered, never named (PROD-01.3).** A connection
+create carries its credential in `auth.credential` — `password` for
+`scramSha512`, `scramSha256` and `plain` (which needs `tls: true`; otherwise
+`422 plain_requires_tls`, `PlainWithoutTls`), or `certificatePem` and
+`privateKeyPem` (unencrypted) for `mtls` (`tls: true`). It needs
+`credential.write` as well as `connection.create`. The service checks the
+deterministic Secret name `<connection>-credential` free with a dry-run create,
+creates the `KafkaCluster` naming it, then creates the Secret — type
+`logweir.dev/kafka-sasl-password` or `logweir.dev/kafka-client-certificate`,
+owned by the connection, carrying its `logweir-binding` — and never reads it
+back. Naming an existing Secret (`auth.credentialRef`) is refused,
+`422 existing_credential_refused`: a connection that could name any Secret
+could make Logweir present another team's credential to brokers of its
+author's choosing, and the runner enforces the same rule on every
+`KafkaCluster` however it was written ([kubernetes.md](kubernetes.md) §20.9).
+A private CA is a reference to a **ConfigMap** key (`auth.tlsCa.configMapKeyRef`):
+a CA certificate is public and is only ever a local trust anchor.
+
 **Write-only credential entry.** A grant may carry a value once, in
 `access.<role>.secret.new`. It becomes a Secret named
 `lwd-<destination>-<role>`, of type `logweir.dev/object-store-credential`,
@@ -1051,14 +1069,30 @@ the check and the write. The write then refuses, and because an earlier role may
 already be live the message names the Secrets that **were** created and says
 they must be deleted before a retry, rather than claiming nothing changed.
 
-**The request hash on the object is salted.** Every durable create records
-`api.logweir.dev/request-sha256`. For a destination that request contained an
-entered credential, so the hash is taken over the idempotency scope as well as
-the body: the scope is derived from your `Idempotency-Key`, which is never
-stored or published, and without it the annotation cannot be recomputed from the
-object's public projection. (An object created by an API build older than this
-one carries the unsalted hash and will replay as `409 idempotency_conflict`;
-nothing is deployed yet, so no such object exists outside a test.)
+**No digest covers a credential value.** Every durable create records
+`api.logweir.dev/request-sha256` and `api.logweir.dev/idempotency-scope-sha256`
+on the object, and the same two hashes in its audit record and its `created`
+log line. Both are readable by anyone who may `get` the object — the chart's
+`logweir-viewer` included — and the scope digest is one of them, so it is no
+salt: a hash taken over an entered credential would let such a reader confirm a
+guessed password or secret key offline. So the request is hashed **without**
+its credential values: every write-only field (`auth.credential.*` on a
+connection, `access.<role>.secret.new.*` on a destination) is replaced by the
+constant `<write-only>` before hashing, and two requests that differ only in a
+credential value have identical digests
+(`crates/logweir-api/tests/credential_digests.rs`).
+
+The consequence for retries: **a credential value is not part of a create's
+identity.** A retry under the same `Idempotency-Key` that changes only the
+value replays the first create, with the credential the first attempt wrote; a
+different credential is a new connection or destination, under a new key. An
+object created by an older API build carries a request hash taken over the
+value and replays as `409 idempotency_conflict` (retry with a new key). For a
+destination created with `secret.new` before this build, the old
+`api.logweir.dev/request-sha256` is still a verifier of its secret access key:
+remove it (`kubectl annotate backupdestination <name>
+api.logweir.dev/request-sha256-`), which costs nothing but the replay of that one
+create, or rotate the key.
 
 ### Bounded, honest topic inventory
 

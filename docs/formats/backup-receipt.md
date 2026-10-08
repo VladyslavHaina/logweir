@@ -94,8 +94,8 @@ no report file, so its start, finish and exit code are ours to time.
 |---|---|---|
 | `source.cluster_id` | string | **Read from the broker**, never from the spec. The fourth rail of the backup guard records this value and re-asserts it is not the restore target; this is where the recorded value is attested. |
 | `source.bootstrap_servers` | array of string | The bootstrap list the source client was given. |
-| `source.auth.mode` | string | **A closed set of two: `plaintext` or `scramSha512`.** These are `AuthSpec`'s serde tag values, the `KafkaCluster` CRD's `auth.mode` enum byte for byte, and the only two strings `AuthSpec::mode_str()` returns — so the spec an adopter writes, the CRD they apply and this signed document all spell the mechanism the same way. **Any other value is refused by both readers** (arm 5). |
-| `source.auth.username` | string \| null | The SASL username, when there is one. `null` under `plaintext` — which is not the same as an empty username. |
+| `source.auth.mode` | string | **A closed set, versioned (PROD-01.3): `plaintext` or `scramSha512` in every format, and from format `1.4.0` also `scramSha256`, `plain` (SASL/PLAIN, only ever over TLS) or `mtls` (a TLS client certificate).** These are `AuthSpec`'s serde tag values, the `KafkaCluster` CRD's `auth.mode` enum byte for byte, and the only strings `AuthSpec::mode_str()` returns — so the spec an adopter writes, the CRD they apply and this signed document all spell the mechanism the same way. A receipt naming one of the three new values is written as `1.4.0`; **any other value, or a new value under a version that predates it, is refused by both readers** (arm 5). |
+| `source.auth.username` | string \| null | The SASL username, when there is one. `null` under `plaintext` — which is not the same as an empty username — and under `mtls`, whose identity is the client certificate (no Logweir process reads it). |
 | `source.topics` | array of string | The named topic allowlist. A **named set with no glob metacharacter**, so this is the exact set of topics and not a pattern a reader would have to re-expand against a cluster it cannot see. |
 
 **`auth` never carries a password, and has no field that could hold one.** The
@@ -327,11 +327,13 @@ these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
 them ARM FOR ARM, IN ORDER. The messages below are the **exact** refusal text of
 BOTH readers — compared byte-for-byte by
 `crates/logweir-core/tests/backup_receipt.rs` (`backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message`
-over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` over arm 5,
-one `arm_N_…` test per arm 6–21, and
-`validate_invariants_has_exactly_twenty_one_return_err_statements` over the total),
-by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
-over the forty-five documents in `e2e/fixtures/invariants/backup-receipt-index.json`
+over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` and
+`arm_5_is_versioned_by_the_prod_01_3_modes` over arm 5, one `arm_N_…` test per
+arm 6–21, and
+`validate_invariants_has_exactly_twenty_three_return_err_statements` over the
+total — twenty-one arms, twenty-three statements, because arm 5 is three since
+1.4.0), by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
+over the documents in `e2e/fixtures/invariants/backup-receipt-index.json`
 (a refusing case for each half of arms 15–19, not only for each arm),
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
@@ -382,7 +384,8 @@ key order, then 18 and 19. Arms 20 and 21 run last, over `owner_detection`.
 
    > `covered.from_ms 2 is not before covered.to_ms 1: the covered window's end is EXCLUSIVE, so an empty range covers no record`
 
-5. **`source.auth.mode` is `plaintext` or `scramSha512`, and nothing else.** The
+5. **`source.auth.mode` is `plaintext` or `scramSha512` (and from 1.4.0 also
+   `scramSha256`, `plain` or `mtls`), and nothing else.** The
    only arm that is not a claim the document makes against itself: the receipt
    does not contradict itself, it names a mechanism this format has no spelling
    for. It is last for that reason — a document that contradicts itself should
@@ -393,6 +396,17 @@ key order, then 18 and 19. Arms 20 and 21 run last, over `owner_detection`.
    field — promises the same two in its own CRD description.
 
    > `source.auth.mode "scram-sha-512" is not one of the two values this format defines: "plaintext" or "scramSha512"`
+
+   **Versioned since 1.4.0 (PROD-01.3), as three statements.** Below 1.4.0 the
+   closed set is the two above, judged exactly as before (5a). `scramSha256`,
+   `plain` or `mtls` under a version before 1.4.0 is a value no writer of that
+   version produced (5b); from 1.4.0 the closed set is five (5c). An older
+   reader refuses a 1.4.0 receipt that names a new mode through 5a — the safer
+   verdict, which is what makes the change MINOR (OD-7, third case).
+
+   > `source.auth.mode "plain" is defined from 1.4.0 and format_version "1.0.0" predates it`
+
+   > `source.auth.mode "oauthbearer" is not one of the five values this format defines: "plaintext", "scramSha512", "scramSha256", "plain" or "mtls"`
 
 6. **`config_coverage` is present only under a minor of at least 1.** A document
    that declares 1.0.x cannot carry a 1.1 field.
@@ -829,11 +843,12 @@ just schema
 
 Regenerates the checked-in schemas from their Rust types. The CI drift arm
 fails on any difference, so `just schema` is the only sanctioned way to change
-the current receipt schema, `schemas/logweir-backup-receipt-1.2.0.json`. The
-1.0.0 and FX-4's 1.1.0 files beside it are frozen and are not regenerated;
-`crates/logweir-core/tests/schema_drift.rs::
-the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema` and
-`::the_frozen_1_1_0_receipt_schema_is_still_fx4s` keep them what they were.
+the current receipt schema, `schemas/logweir-backup-receipt-1.3.0.json`. The
+1.0.0, FX-4's 1.1.0 and FX-7's 1.2.0 files beside it are frozen and are not
+regenerated; `crates/logweir-core/tests/schema_drift.rs::
+the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
+`::the_frozen_1_1_0_receipt_schema_is_still_fx4s` and
+`::the_frozen_1_2_0_receipt_schema_is_still_fx7s` keep them what they were.
 
 ## Upgrade, rollback and old receipts (format 1.1.0)
 
@@ -916,6 +931,29 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema` and
   a pin. The 1.2.0 receipts already written stay valid and verifiable under
   every major-1 reader. Before rolling the runner back past the execution
   claim, read [what it still does not cover](#the-execution-claim-one-engine-run-per-backup_id).
+
+## Upgrade, rollback and old receipts (format 1.4.0)
+
+- **A receipt is 1.4.0 exactly when its `source.auth.mode` is `scramSha256`,
+  `plain` or `mtls`** (PROD-01.3), whatever else it carries — 1.4.0 includes
+  PROD-05.1's 1.3.0 `topic_configuration` and FX-7's optional
+  `archive.manifest_version_id`. Every receipt of a `plaintext` or
+  `scramSha512` backup is the 1.3.0 document this build writes for it (or the
+  1.1.0/1.2.0 document an earlier build wrote), byte for byte.
+  `schemas/logweir-backup-receipt-1.4.0.json` differs from the frozen 1.3.0
+  file in the `source.auth.mode` and `username` descriptions only: no
+  property, type or required field moved. The payload type keeps
+  `version=1.0.0`.
+- **Readers built before PROD-01.3 refuse a 1.4.0 receipt naming a new mode**
+  (arm 5a: a value outside the two they know) and accept every other receipt.
+  Refusal is the safe direction — a reader that cannot say what a mode means
+  does not vouch for the document — so the bump is MINOR (OD-7, third case),
+  and an auditor verifying such a receipt uses script 1.21.0 or a `logweir`
+  built from PROD-01.3 on.
+- **Rollback.** A build from before PROD-01.3 cannot take a backup over
+  `scramSha256`, `plain` or `mtls` at all (its `AuthSpec` has no such arm, so
+  the spec does not parse), and writes no 1.4.0 receipt. The 1.4.0 receipts
+  already written stay valid for every reader from PROD-01.3 on.
 
 ---
 

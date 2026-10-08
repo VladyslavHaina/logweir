@@ -115,6 +115,16 @@ pub const PLACEHOLDER_TARGET_PASSWORD: &str = "${LOGWEIR_TARGET_PASSWORD}";
 /// about `time_window_start`.
 pub const ENGINE_SCRAM_SHA_512: &str = "SCRAM-SHA512";
 
+/// **PROD-01.3.** The engine's spelling of SASL/SCRAM-SHA-256 — the same
+/// `SCREAMING-KEBAB-CASE` rule as [`ENGINE_SCRAM_SHA_512`], so ONE hyphen
+/// (`SCRAM-SHA256`), where librdkafka says `SCRAM-SHA-256`. The variant list in
+/// the measured parse error above names it.
+pub const ENGINE_SCRAM_SHA_256: &str = "SCRAM-SHA256";
+
+/// **PROD-01.3.** The engine's spelling of SASL/PLAIN, `PLAIN` — the one
+/// mechanism both clients spell alike.
+pub const ENGINE_PLAIN: &str = "PLAIN";
+
 /// The `security:` block, as all THREE rendered documents carry it — the
 /// engine's `KafkaConfig.security` under a `source:` or a `target:` key.
 ///
@@ -168,62 +178,131 @@ pub(crate) fn render_security_block(
     password_placeholder: &str,
 ) -> Result<String, RenderError> {
     use logweir_core::engine::AuthRender;
-    match auth {
+    let (mechanism, username, tls, tls_ca_file) = match auth {
         // NOTHING AT ALL — see `AuthRender`'s doc comment. This is also what
         // keeps every golden that predates SCRAM byte-identical.
-        AuthRender::Plaintext => Ok(String::new()),
+        AuthRender::Plaintext => return Ok(String::new()),
         AuthRender::ScramSha512 {
             username,
             tls,
             tls_ca_file,
+        } => (ENGINE_SCRAM_SHA_512, username, *tls, tls_ca_file),
+        // PROD-01.3: the same three keys and the same placeholder with
+        // another mechanism.
+        AuthRender::ScramSha256 {
+            username,
+            tls,
+            tls_ca_file,
+        } => (ENGINE_SCRAM_SHA_256, username, *tls, tls_ca_file),
+        AuthRender::Plain {
+            username,
+            tls,
+            tls_ca_file,
         } => {
-            // A CA with no TLS transport is refused, never dropped: see
-            // `logweir_core::connection::TlsCaWithoutTls`. `with_tls_ca_file`
-            // is the constructor that already refuses it; this is the backstop
-            // for a plan whose fields were set directly.
-            if tls_ca_file.is_some() && !*tls {
-                return Err(RenderError::TlsCaWithoutTls);
+            // PLAIN WITHOUT TLS IS REFUSED, never rendered: the engine would
+            // send the password itself in the clear. The runner's guard
+            // (`AuthSpec::transport_refusal`) refuses the same spec before a
+            // plan exists; this is the backstop for a plan whose fields were
+            // set directly.
+            if !*tls {
+                return Err(RenderError::PlainWithoutTls);
             }
-            let mut s = String::from("  security:\n");
-            // SCREAMING_SNAKE_CASE over Plaintext|Ssl|SaslPlaintext|SaslSsl
-            // [U:config.rs:261-269]. `tls` is separate from the mechanism
-            // because SASL/SCRAM over PLAINTEXT and over SSL are two
-            // `security.protocol` values for ONE mechanism.
-            s.push_str(&format!(
-                "    security_protocol: {}\n",
-                yaml_scalar_checked(if *tls { "SASL_SSL" } else { "SASL_PLAINTEXT" })?
-            ));
-            s.push_str(&format!(
-                "    sasl_mechanism: {}\n",
-                yaml_scalar_checked(ENGINE_SCRAM_SHA_512)?
-            ));
-            // **G-ID.** FROM THE PLAN BYTES, never from a cluster object read
-            // at run time — `plan.<source|target>_auth` is the only source
-            // this line has, and `plan_hash` covers it.
-            s.push_str(&format!(
-                "    sasl_username: {}\n",
-                yaml_scalar_checked(username)?
-            ));
-            // The raw placeholder literal. See this function's doc comment.
-            s.push_str(&format!("    sasl_password: {password_placeholder}\n"));
-            // PLAT-07.1, Global Constraint 29's engine half. `SecurityConfig`
-            // declares `ssl_ca_location: Option<PathBuf>` and, when it is set,
-            // builds the rustls root store from that file ALONE instead of the
-            // bundled webpki roots [U:crates/kafka-backup-core/src/config.rs:210-212,
-            // U:crates/kafka-backup-core/src/kafka/tls.rs:97-127, tag v0.21.0].
-            // A pod-local path the runner took from the projected CA volume,
-            // checked like every other interpolation (a `${` in it is refused).
-            // Emitted only when set, so every document without a private CA is
-            // byte-identical to one rendered before this key existed.
-            if let Some(ca) = tls_ca_file {
-                s.push_str(&format!(
-                    "    ssl_ca_location: {}\n",
-                    yaml_scalar_checked(ca)?
-                ));
-            }
-            Ok(s)
+            (ENGINE_PLAIN, username, *tls, tls_ca_file)
         }
+        AuthRender::Mtls {
+            tls,
+            tls_ca_file,
+            client_certificate,
+        } => return render_mtls_block(*tls, tls_ca_file.as_deref(), client_certificate.as_ref()),
+    };
+    // A CA with no TLS transport is refused, never dropped: see
+    // `logweir_core::connection::TlsCaWithoutTls`. `with_tls_ca_file` is the
+    // constructor that already refuses it; this is the backstop for a plan
+    // whose fields were set directly.
+    if tls_ca_file.is_some() && !tls {
+        return Err(RenderError::TlsCaWithoutTls);
     }
+    let mut s = String::from("  security:\n");
+    // SCREAMING_SNAKE_CASE over Plaintext|Ssl|SaslPlaintext|SaslSsl
+    // [U:config.rs:261-269]. `tls` is separate from the mechanism because
+    // SASL/SCRAM over PLAINTEXT and over SSL are two `security.protocol`
+    // values for ONE mechanism.
+    s.push_str(&format!(
+        "    security_protocol: {}\n",
+        yaml_scalar_checked(if tls { "SASL_SSL" } else { "SASL_PLAINTEXT" })?
+    ));
+    s.push_str(&format!(
+        "    sasl_mechanism: {}\n",
+        yaml_scalar_checked(mechanism)?
+    ));
+    // **G-ID.** FROM THE PLAN BYTES, never from a cluster object read at run
+    // time — `plan.<source|target>_auth` is the only source this line has,
+    // and `plan_hash` covers it.
+    s.push_str(&format!(
+        "    sasl_username: {}\n",
+        yaml_scalar_checked(username)?
+    ));
+    // The raw placeholder literal. See this function's doc comment.
+    s.push_str(&format!("    sasl_password: {password_placeholder}\n"));
+    push_ca_location(&mut s, tls_ca_file.as_deref())?;
+    Ok(s)
+}
+
+/// PLAT-07.1, Global Constraint 29's engine half. `SecurityConfig` declares
+/// `ssl_ca_location: Option<PathBuf>` and, when it is set, builds the rustls
+/// root store from that file ALONE instead of the bundled webpki roots
+/// [U:crates/kafka-backup-core/src/config.rs:210-212,
+/// U:crates/kafka-backup-core/src/kafka/tls.rs:97-127, tag v0.21.0; unchanged
+/// at v0.23.3]. A pod-local path the runner took from the projected CA volume,
+/// checked like every other interpolation (a `${` in it is refused). Emitted
+/// only when set, so every document without a private CA is byte-identical to
+/// one rendered before this key existed.
+fn push_ca_location(s: &mut String, tls_ca_file: Option<&str>) -> Result<(), RenderError> {
+    if let Some(ca) = tls_ca_file {
+        s.push_str(&format!(
+            "    ssl_ca_location: {}\n",
+            yaml_scalar_checked(ca)?
+        ));
+    }
+    Ok(())
+}
+
+/// **PROD-01.3: the `mtls` block.** `security_protocol: SSL`, the optional CA,
+/// and the client certificate and key as the engine's
+/// `ssl_certificate_location` / `ssl_key_location` — POD-LOCAL PATHS to the
+/// projected files, checked like every other interpolation, and never PEM
+/// text. The engine loads both with `rustls_pemfile` and presents the pair in
+/// its TLS handshake [C23/kafka/tls.rs:25-90, `build_tls_config`]; with only
+/// one of the two set it fails config load, so the pair is required here as a
+/// pair. No `sasl_*` key and no password placeholder: there is no SASL
+/// exchange, and the private key is a file, so nothing secret is in the bytes
+/// Logweir hashes.
+fn render_mtls_block(
+    tls: bool,
+    tls_ca_file: Option<&str>,
+    client_certificate: Option<&logweir_core::connection::ClientCertificateFiles>,
+) -> Result<String, RenderError> {
+    if !tls {
+        return Err(RenderError::MtlsWithoutTls);
+    }
+    let Some(files) = client_certificate else {
+        return Err(RenderError::ClientCertificateMissing);
+    };
+    let mut s = String::from("  security:\n");
+    s.push_str(&format!(
+        "    security_protocol: {}\n",
+        yaml_scalar_checked("SSL")?
+    ));
+    push_ca_location(&mut s, tls_ca_file)?;
+    s.push_str(&format!(
+        "    ssl_certificate_location: {}\n",
+        yaml_scalar_checked(&files.cert_file)?
+    ));
+    s.push_str(&format!(
+        "    ssl_key_location: {}\n",
+        yaml_scalar_checked(&files.key_file)?
+    ));
+    Ok(s)
 }
 
 /// Guard **G-EXP**, first leg: `yaml_scalar` plus a pre-check that REFUSES any

@@ -164,17 +164,31 @@ pub fn identity(
     push_field(&mut scope, &key.0);
     let scope_digest = Sha256::digest(&scope);
 
-    // THE SCOPE DIGEST IS MIXED IN, AND THAT IS WHAT MAKES THE PUBLISHED HASH
-    // USELESS AS AN ORACLE. A destination create's canonical request contains
-    // an ENTERED CREDENTIAL (`access.<role>.secret.new`), and the resulting
-    // hash is written onto the object as `api.logweir.dev/request-sha256` —
-    // which anyone who may `get backupdestinations` can read, while every
-    // other field of that request is published by `GET /destinations/{name}`.
-    // Unsalted, that is an offline confirmation oracle: rebuild the request
-    // from the public projection, guess the key pair, hash, compare. The scope
-    // digest is derived from the client-chosen `Idempotency-Key`, which is
-    // never stored or published in any form, so the hash cannot be recomputed
-    // from the object alone.
+    // NO SECRET ENTERS THESE BYTES, AND THAT — NOT THE SCOPE — IS WHAT KEEPS
+    // THE PUBLISHED HASH FROM BEING AN ORACLE (PROD-01.3 fix round, review
+    // F1). This hash is written onto the object as
+    // `api.logweir.dev/request-sha256` and into the audit record, readable by
+    // anyone who may `get` the object (the chart's `logweir-viewer` included).
+    // An earlier version of this comment claimed the scope digest, derived
+    // from the never-published `Idempotency-Key`, made the hash unrecomputable;
+    // it does not, because the scope digest itself is published as
+    // `api.logweir.dev/idempotency-scope-sha256`, so a reader holding the
+    // public spec could rebuild the request with a guessed credential, hash
+    // and compare. The fix is at the source: the write-only credential DTOs
+    // (`crate::contract::NewConnectionCredentialRequest`,
+    // `crate::contract::NewCredentialRequest`) serialize every value as
+    // `crate::contract::WRITE_ONLY_PLACEHOLDER`, so `canonical_request` never
+    // holds one, and two requests that differ only in a credential value hash
+    // identically. A keyed MAC was the alternative and was not chosen: it
+    // needs a key shared by every replica and stable across restarts, i.e. a
+    // Secret this service would have to READ (it holds `create` on Secrets and
+    // nothing else), and a leaked key would reopen the oracle for every object
+    // ever written.
+    //
+    // THE CONSEQUENCE, stated: a credential value is not part of a create's
+    // identity. A retry under the same key that changes ONLY the value replays
+    // the first create (and its first credential); a different credential is
+    // a new connection or destination, under a new key.
     //
     // THE REPLAY SEMANTICS ARE UNCHANGED. Both the name and this hash are
     // taken under the SAME scope, so two requests being compared always share
@@ -348,37 +362,23 @@ mod tests {
         );
     }
 
-    /// **The published request hash is not reconstructable from the object.**
+    /// **The scope is mixed in, and the replay semantics hold.**
     ///
-    /// A destination create's canonical request carries an ENTERED CREDENTIAL,
-    /// and the hash of it is written onto the object as
-    /// `api.logweir.dev/request-sha256` — readable by anyone who may `get
-    /// backupdestinations`, while every other field of that request is
-    /// published by `GET /destinations/{name}`. Unsalted, that is an offline
-    /// confirmation oracle for the credential: rebuild the request from the
-    /// public projection, guess the key pair, hash, compare. Mixing the scope
-    /// digest in defeats it, because the scope is derived from the
-    /// client-chosen `Idempotency-Key`, which is never stored or published in
-    /// any form.
+    /// The request hash is taken under the scope, so a different key gives a
+    /// different hash and both sides of a comparison always share it: the same
+    /// key with the same request replays, and the same key with a different
+    /// request is `idempotency_conflict`. THIS IS NOT THE ORACLE DEFENCE: the
+    /// scope digest is published (`idempotency-scope-sha256`). That defence is
+    /// that no credential value reaches `canonical_request` at all — the
+    /// write-only DTOs serialize a placeholder — proven route by route in
+    /// `tests/credential_digests.rs::no_stored_or_logged_digest_moves_when_only_the_credential_moves`.
     #[test]
-    fn the_request_hash_cannot_be_recomputed_from_the_published_body() {
-        let body = br#"{"name":"primary","access":{"secretAccessKey":"guessed"}}"#;
+    fn the_scope_is_mixed_in_and_the_replay_semantics_hold() {
+        let body = br#"{"name":"primary","access":{"secretAccessKey":"<write-only>"}}"#;
         let route = "POST /api/v1/namespaces/{ns}/destinations";
         let published = identity(&actor("a"), "ns", route, "", &key("key-00001"), body);
-
-        // THE ORACLE, ATTEMPTED. Everything an attacker holds — the actor, the
-        // namespace, the route and the whole body — reproduces nothing,
-        // because the key is the one input the object does not carry.
-        let guessed = identity(&actor("a"), "ns", route, "", &key("key-99999"), body);
-        assert_ne!(
-            guessed.request_hash, published.request_hash,
-            "the request hash is a function of the body alone, so the published annotation \
-             confirms a guessed credential"
-        );
-
-        // AND THE REPLAY SEMANTICS ARE UNCHANGED, because both sides of a
-        // comparison always share the scope: the name and the hash are taken
-        // under the same one.
+        let other_key = identity(&actor("a"), "ns", route, "", &key("key-99999"), body);
+        assert_ne!(other_key.request_hash, published.request_hash);
         assert_eq!(
             identity(&actor("a"), "ns", route, "", &key("key-00001"), body).request_hash,
             published.request_hash
@@ -389,7 +389,7 @@ mod tests {
             route,
             "",
             &key("key-00001"),
-            br#"{"name":"primary","access":{"secretAccessKey":"other"}}"#,
+            br#"{"name":"secondary","access":{"secretAccessKey":"<write-only>"}}"#,
         );
         assert_eq!(
             changed.name, published.name,

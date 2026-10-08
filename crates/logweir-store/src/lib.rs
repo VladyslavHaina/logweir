@@ -1035,6 +1035,23 @@ impl Store {
         }
     }
 
+    /// **FX-16 (review M-1).** The bucket-absolute key the ENGINE reads backup
+    /// set `backup_id`'s manifest at, for a plan whose storage is this
+    /// store's: `<prefix>/<backup_id>/manifest.json`, normalised as an
+    /// `object_store` path, in the form [`Store::list_keys`] returns keys.
+    ///
+    /// That is exactly what the pinned engine resolves: its restore loads
+    /// `format!("{}/manifest.json", backup_id)` (kafka-backup 0.23.3
+    /// `restore/engine.rs:1086`) through `S3Backend::full_path`, which is
+    /// `Path::from(format!("{}/{}", prefix.trim_end_matches('/'), key))`
+    /// (`storage/s3.rs:121-126`), or `base_path.join(key)` on a filesystem.
+    /// The engine is never told any other key, so a listing's choice of a
+    /// same-id manifest elsewhere under the prefix is not what it restores.
+    #[must_use]
+    pub fn engine_manifest_key(&self, backup_id: &str) -> String {
+        OPath::from(self.qualify(&format!("{backup_id}/manifest.json"))).to_string()
+    }
+
     /// Resolves `topic`/`partition` against ONE manifest's body and returns
     /// its (qualified key, start_timestamp, end_timestamp) triples,
     /// unfiltered by any time window. Shared by `segment_keys_for` (scans

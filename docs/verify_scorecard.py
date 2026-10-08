@@ -444,7 +444,39 @@ FORMAT_VERSION = "1.4.0"
 # where it stripped Python's wider one (U+001C..U+001F too). A renumber moves
 # this line, the literal pins in docs/test_verify_scorecard.py and the guide's
 # table together.
-SCRIPT_VERSION = "1.20.0"
+#
+# 1.20.0 (PROD-05.1) knows receipt format 1.3.0 and its `topic_configuration`
+# and `owner_detection` (arms 12 to 20), and prints the configuration model,
+# one line per topic, in the Rust reader's words.
+#
+# 1.21.0 (PROD-01.3) knows the three auth modes PROD-01.3 adds --
+# `scramSha256`, `plain` (SASL/PLAIN, over TLS only) and `mtls` (a TLS client
+# certificate) -- as VERSIONED values of the two existing auth-mode fields:
+# the backup receipt's `source.auth.mode` from receipt format 1.4.0, and the
+# scorecard's `target.auth.mode` from scorecard format 1.5.0. Each field's one
+# arm becomes three statements, mirrored byte for byte and in position: the
+# closed two below the new version (unchanged), a new value under a version
+# that predates it, and the closed five from the new version. Every document
+# that predates PROD-01.3 is decided exactly as before; an older script refuses
+# a document naming a new mode, which is the safer verdict (OD-7, third case).
+SCRIPT_VERSION = "1.21.0"
+
+# The first minor of SCORECARD format 1 whose `target.auth.mode` may be
+# `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
+# `crates/logweir-core/src/scorecard.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_auth_modes_minors_are_the_rust_readers`).
+SCORECARD_AUTH_MODES_SINCE_MINOR = 5
+
+# The first minor of the BACKUP RECEIPT's format 1 whose `source.auth.mode` may
+# be `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
+# `crates/logweir-core/src/backup_receipt.rs`, which it must equal.
+RECEIPT_AUTH_MODES_SINCE_MINOR = 4
+
+# The two auth modes every format defines, and the three PROD-01.3 adds --
+# `ORIGINAL_AUTH_MODES` / `PROD_01_3_AUTH_MODES` in
+# `crates/logweir-core/src/connection.rs`, which they must equal.
+ORIGINAL_AUTH_MODES = ("plaintext", "scramSha512")
+PROD_01_3_AUTH_MODES = ("scramSha256", "plain", "mtls")
 
 # The first minor of SCORECARD format 1 that defines `integrity.verification`
 # (arm IV-1) -- `VERIFICATION_SINCE_MINOR` in
@@ -1682,7 +1714,31 @@ def check_invariants(doc) -> str:
         # return. The EXACT value, not a stripped one — the blank arm above
         # has already refused a whitespace-only mode, and the receipt's arm 5
         # does not strip either, so one spelling means one comparison.
-        if str(target_auth.get("mode")) not in ("plaintext", "scramSha512"):
+        #
+        # PROD-01.3 (scorecard format 1.5.0) splits the arm by version, in the
+        # Rust reader's order: a PROD-01.3 mode under a version before 1.5.0
+        # (the message names the version, never the mode), the closed five from
+        # 1.5.0, and the unchanged closed two below it.
+        target_mode = str(target_auth.get("mode"))
+        version = doc.get("format_version")
+        five_defined = (
+            _major(version) == 1
+            and (_minor(version) or 0) >= SCORECARD_AUTH_MODES_SINCE_MINOR
+        )
+        if target_mode in PROD_01_3_AUTH_MODES:
+            if not five_defined:
+                return (
+                    "target.auth.mode is a value defined from "
+                    f"1.{SCORECARD_AUTH_MODES_SINCE_MINOR}.0 and format_version "
+                    f"{_rust_debug_str(version)} predates it"
+                )
+        elif target_mode not in ORIGINAL_AUTH_MODES:
+            if five_defined:
+                return (
+                    "target.auth.mode is not one of the five values this format defines; it "
+                    "is \"plaintext\", \"scramSha512\", \"scramSha256\", \"plain\" or "
+                    "\"mtls\" and nothing else"
+                )
             return (
                 "target.auth.mode is not one of the two values this format defines; it "
                 "is \"plaintext\" or \"scramSha512\" and nothing else"
@@ -2116,7 +2172,8 @@ def check_backup_receipt_invariants(doc) -> str:
     2. `exit_code == 0` **iff** `archive.manifest_key` is non-blank.
     3. `records` covers exactly `source.topics`.
     4. `covered.from_ms < covered.to_ms` — the end is EXCLUSIVE.
-    5. `source.auth.mode` is `plaintext` or `scramSha512` and nothing else.
+    5. `source.auth.mode` is `plaintext` or `scramSha512`, and from format
+       1.4.0 (PROD-01.3) also `scramSha256`, `plain` or `mtls`.
     """
     # ARM 1. GC12 for this document: a reader refuses a major it has never
     # seen rather than guessing at a shape. FIRST, so a document from a future
@@ -2180,8 +2237,27 @@ def check_backup_receipt_invariants(doc) -> str:
     # The value IS interpolated, unlike the scorecard's `target.auth` arms:
     # every arm of this document already echoes an adopter-supplied string,
     # and `_rust_debug_str` is what makes `{:?}`'s rendering reproducible here.
+    #
+    # PROD-01.3 (receipt format 1.4.0) splits the arm into three statements,
+    # mirrored in the Rust reader's order: 5b, a PROD-01.3 mode under a version
+    # that predates it; 5c, the closed five from 1.4.0; 5a, the closed two
+    # below it, unchanged.
     mode = doc["source"]["auth"]["mode"]
-    if mode not in ("plaintext", "scramSha512"):
+    five_defined = parsed[1] >= RECEIPT_AUTH_MODES_SINCE_MINOR
+    if mode in PROD_01_3_AUTH_MODES:
+        if not five_defined:
+            return (
+                f"source.auth.mode {_rust_debug_str(mode)} is defined from "
+                f"1.{RECEIPT_AUTH_MODES_SINCE_MINOR}.0 and format_version "
+                f"{_rust_debug_str(version)} predates it"
+            )
+    elif mode not in ORIGINAL_AUTH_MODES:
+        if five_defined:
+            return (
+                f"source.auth.mode {_rust_debug_str(mode)} is not one of the five values this "
+                "format defines: \"plaintext\", \"scramSha512\", \"scramSha256\", \"plain\" "
+                "or \"mtls\""
+            )
         return (
             f"source.auth.mode {_rust_debug_str(mode)} is not one of the two values this "
             "format defines: \"plaintext\" or \"scramSha512\""
@@ -2883,7 +2959,7 @@ def main(
             "the six required non-block fields present and of the type their Rust type "
             "implies, u64 domain with null refused where Rust has no Option, "
             "target.auth's mode present, not blank, and one of the two values the "
-            "format defines when the block is; "
+            "format defines when the block is, or from 1.5.0 one of the five; "
             "evidence.offset_report_key and its sha256 present or absent together; "
             "target.marker_topic present unless target.mode is newTopic; "
             "target.mode absent or one of the two values the format defines; "

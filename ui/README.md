@@ -529,7 +529,7 @@ the adapter records what it cannot supply on every object it projects, under
 
 | kind | absent in console mode |
 |---|---|
-| `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` and `spec.auth.tlsCa` (connection contract v1's two references, which `ConnectionAuthView` does not carry) |
+| `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` (connection contract v1's data-key reference, which `ConnectionAuthView` does not carry; the CA reference and the mTLS Secret name it does, since PROD-01.3) |
 | `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**, which the retention panel prints with where the keys are, beside a line when the API cut a list at 100 entries); `status.pendingRun` and `status.history`. `status.lastSlot` and `status.missedSlots` ARE projected since console-ux-1 (MCP-13), so an absent one means the controller has recorded nothing yet |
 | `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.evidence` -- the detail view reads it from the operation route. A list row's `status.exitCode` comes from the summary's `exitCode` since console-ux-1 (MCP-17) |
 | `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.evidence`, and `status.outcome` when an older API omits the summary's `outcome` (MCP-17). A DETAIL carries the operation route's `verificationScope` under `status.verificationScope`, which is what the History detail's scope sentence reads first |
@@ -696,8 +696,9 @@ is exactly this, and it is the same in every form:
   private-key PEM -- in any case, across any run of whitespace including a line
   break, and so for the PKCS#8, PKCS#1, SEC1, encrypted and OpenSSH labels
   alike -- whichever field it was pasted into, and for any field a form does
-  not name in its own allowlist. The forms have no field a password goes in: a
-  credential is always a **Secret's name**, which is also why `private-key`
+  not name in its own allowlist. No form KEEPS a password: a kept credential
+  is always a **Secret's name** (the console connection form's write-only
+  inputs, PROD-01.3, are on no draft list at all), which is also why `private-key`
   joined by a dash or an underscore counts only inside a PEM `BEGIN` line: a
   Secret may honestly be called `minio-private-key`. That test reads words, so
   a renamed, headerless blob spells none and is beyond it -- which is why the
@@ -961,7 +962,9 @@ window is `[coveredFrom + 1 ms, coveredTo - 1 ms]` -- the same rule as a Backup'
 (WIZARD-DEFAULT-PIT-EXCLUSIVE). The plan carries `source.backup` pinned to the point's set and
 `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`; the
 runner re-reads that receipt and manifest before it contacts a broker and
-refuses a mismatch (exit 3 `PointBindingMismatch`). A plan built from a
+refuses a mismatch (exit 3 `PointBindingMismatch`), and refuses a plan or a
+restored set that is not the point's own set (exit 3 `PointBindingSetMismatch`,
+FX-16); this plan pins `source.backup` to the point's set for that reason. A plan built from a
 `Backup` carries no `point` block and is byte-identical to before
 (`ui/tests/fixtures/plan-point.golden.yaml` beside `plan.golden.yaml`). Step 5
 sends `restore.catalogPoint {catalog, pointId}` and nothing else, so the
@@ -1581,10 +1584,42 @@ The create form takes contract v1's two references, and neither is a value:
   resolver rather than dialled in the clear, and the form says so beside the
   box before a request is made.
 
-**There is no field a password could be typed into**, `CLUSTER_DRAFT_FIELDS`
-names none, and `FORBIDDEN_CLUSTER_FIELDS` holds the names that are forbidden as
-data so the guard is an exact list rather than a regex that cannot tell
-`passwordKey` -- the name of a data key -- from a credential.
+**In LEGACY (kubectl proxy) mode there is no field a password could be typed
+into**, `CLUSTER_DRAFT_FIELDS` names none, and `FORBIDDEN_CLUSTER_FIELDS` holds
+the names that are forbidden as data so the guard is an exact list rather than
+a regex that cannot tell `passwordKey` -- the name of a data key -- from a
+credential. That mode names Secrets, and since PROD-01.3 the Secret must carry
+the connection's `logweir-binding` (its `status.credentialBinding`): a Secret
+without it is refused by every run (`CredentialBindingMismatch`), which is what
+the form's note says. For `mtls` it names the client-certificate Secret
+(`spec.auth.clientCertificate`, `tls.crt`/`tls.key`).
+
+### Five auth modes, and the credential typed once in console mode (PROD-01.3)
+
+The mode control offers `plaintext`, `scramSha512`, `scramSha256`, `plain`
+(SASL/PLAIN, accepted only with TLS on -- the page says `PlainWithoutTls`
+beside the box before any request) and `mtls` (a client certificate, TLS on).
+
+**In CONSOLE mode the credential is TYPED, never NAMED.** The product API no
+longer accepts the name of an existing Secret for a connection's credential: a
+connection that could name any Secret could make Logweir present another
+team's credential to brokers of its author's choosing. So the console form has
+three WRITE-ONLY inputs -- a `type="password"` field (`autocomplete=
+"new-password"`) for the SASL password and two text areas for the mTLS
+certificate and unencrypted key -- listed in `WRITE_ONLY_CLUSTER_FIELDS`:
+
+* they render **empty**, always; no draft list names them, so a refusal or a
+  trip to another route means typing the value again;
+* the value travels off the custom resource's own fields (a non-enumerable
+  `__credential` on the body `clusterBody` builds), so no JSON of the object,
+  no draft and no legacy-mode request can carry it; `ui/client.js`'s console
+  `requestBody` is its one reader and moves it into `auth.credential`;
+* the product API creates a Secret owned by and bound to the connection, and
+  never returns the value; the list and detail views show the Secret's name.
+
+A console CA comes from a **ConfigMap** only (`none` / `configMap`); a
+Secret-held CA or a `passwordKey` is refused by name and never sent. The rows
+are `ui/tests/connection-auth-modes.spec.js`.
 
 ## Addressing style never enables plaintext transport
 

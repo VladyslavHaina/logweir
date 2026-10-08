@@ -166,7 +166,8 @@ pub enum ConnectionRole {
     Target,
 }
 
-/// The SASL mechanism, or `plaintext` for none.
+/// The SASL mechanism, `mtls` for a TLS client certificate, or `plaintext`
+/// for none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionAuthMode {
@@ -174,25 +175,147 @@ pub enum ConnectionAuthMode {
     Plaintext,
     /// SASL/SCRAM-SHA-512.
     ScramSha512,
+    /// SASL/SCRAM-SHA-256 (PROD-01.3).
+    ScramSha256,
+    /// SASL/PLAIN (PROD-01.3), accepted only with `tls: true`.
+    Plain,
+    /// A TLS client certificate and no SASL (PROD-01.3), with `tls: true`.
+    Mtls,
 }
 
-/// Authentication for a new connection. Existing credentials only: this
-/// request names a Secret; it never carries a password.
+/// One key of a ConfigMap in this namespace.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ObjectKeyRefRequest {
+    /// The object's name, in the same namespace.
+    pub name: String,
+    /// The data key.
+    pub key: String,
+}
+
+/// The CA that signs the brokers' certificates, when the runner image does
+/// not already trust it (PROD-01.3): one key of a ConfigMap. Requires
+/// `tls: true`.
+///
+/// A REFERENCE, AND ONLY TO A CONFIGMAP. A CA certificate is public, and the
+/// runner uses it only as a local trust anchor — its bytes are never sent
+/// anywhere — so naming one cannot exfiltrate anything. Restricting this
+/// request to a ConfigMap keeps every Secret this service's connections use one
+/// it created itself (the credential, below); a CA that lives in a Secret is
+/// still set with `kubectl` on the `KafkaCluster` (`auth.tlsCa.secretKeyRef`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TlsCaRequest {
+    /// The ConfigMap key holding the PEM CA certificate(s).
+    pub config_map_key_ref: ObjectKeyRefRequest,
+}
+
+/// **PROD-01.3 security follow-up: the credential, typed ONCE.**
+///
+/// WRITE-ONLY. The value becomes a Secret this service creates — owned by the
+/// connection, bound to it (`logweir-binding`) — and is never echoed in any
+/// response, log line, status, annotation or audit record; the only thing that
+/// comes out of it is the Secret's NAME. This replaces naming an existing
+/// Secret: a connection that could name any Secret in the namespace could make
+/// Logweir present another team's credential to a broker of its author's
+/// choosing.
+///
+/// **IT SERIALIZES WITHOUT ITS VALUES.** `Serialize` is hand-written: every present field becomes
+/// [`WRITE_ONLY_PLACEHOLDER`]. The request DTO is serialized to compute the
+/// idempotency digests this service publishes on the object
+/// (`api.logweir.dev/request-sha256`) and writes into the audit record, and a
+/// digest over a password is an offline confirmation oracle for anyone who
+/// can read the object. With the placeholder, no serialization of this type
+/// — a digest, an audit field, a future debug dump — can carry a value.
+#[derive(Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NewConnectionCredentialRequest {
+    /// The SASL password — `scramSha512`, `scramSha256` and `plain`.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// The PEM client certificate (chain) — `mtls`.
+    #[serde(default)]
+    pub certificate_pem: Option<String>,
+    /// The PEM private key, unencrypted — `mtls`.
+    #[serde(default)]
+    pub private_key_pem: Option<String>,
+}
+
+// `Debug` is HAND-WRITTEN so that a `dbg!`, a `tracing` field or a panic
+// message can never print a credential. The type has no `Display`.
+impl std::fmt::Debug for NewConnectionCredentialRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NewConnectionCredentialRequest(<redacted>)")
+    }
+}
+
+/// What every write-only credential field serializes as (PROD-01.3 fix round,
+/// review F1). A constant, so a digest over a serialized request says WHICH
+/// credential fields were entered and nothing about their values: two
+/// requests that differ only in a credential value serialize — and hash —
+/// identically.
+pub const WRITE_ONLY_PLACEHOLDER: &str = "<write-only>";
+
+/// A present write-only field as the placeholder, an absent one as `null` —
+/// the shape the derived `Serialize` gave it, without the value.
+fn write_only(value: Option<&String>) -> Option<&'static str> {
+    value.map(|_| WRITE_ONLY_PLACEHOLDER)
+}
+
+impl Serialize for NewConnectionCredentialRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("NewConnectionCredentialRequest", 3)?;
+        out.serialize_field("password", &write_only(self.password.as_ref()))?;
+        out.serialize_field("certificatePem", &write_only(self.certificate_pem.as_ref()))?;
+        out.serialize_field("privateKeyPem", &write_only(self.private_key_pem.as_ref()))?;
+        out.end()
+    }
+}
+
+/// Authentication for a new connection. The credential is TYPED, never
+/// named: this request carries a password or a client certificate and key
+/// once (`credential`), and no response ever returns either.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ConnectionAuthRequest {
-    /// `plaintext` or `scramSha512`.
+    /// `plaintext`, `scramSha512`, `scramSha256`, `plain` (with `tls: true`
+    /// only) or `mtls` (with `tls: true`).
     pub mode: ConnectionAuthMode,
-    /// The SASL principal; required for `scramSha512`, refused for
-    /// `plaintext`.
+    /// The SASL principal; required for `scramSha512`, `scramSha256` and
+    /// `plain`, refused for `plaintext` and `mtls`.
     #[serde(default)]
     pub username: Option<String>,
-    /// An existing Secret in this namespace holding the SASL password;
-    /// required for `scramSha512`, refused for `plaintext`.
+    /// **NO LONGER ACCEPTED** (PROD-01.3 security follow-up). It named an
+    /// existing Secret, and a connection that may name any Secret can make the
+    /// runner present a credential its author could not read. A request that
+    /// sets it is refused (`existing_credential_refused`); enter the credential
+    /// in `credential` instead. Kept in the grammar only so the refusal can say
+    /// that, rather than an unknown-field error.
     #[serde(default)]
     pub credential_ref: Option<NameRef>,
     /// Whether the transport is TLS.
     pub tls: bool,
+    /// The credential, typed once: `password` for the three SASL modes,
+    /// `certificatePem` and `privateKeyPem` for `mtls`; refused for
+    /// `plaintext`.
+    #[serde(default)]
+    pub credential: Option<NewConnectionCredentialRequest>,
+    /// A private CA for a TLS connection, from a ConfigMap. Refused without
+    /// `tls: true`.
+    #[serde(default)]
+    pub tls_ca: Option<TlsCaRequest>,
+}
+
+impl ConnectionAuthRequest {
+    /// Whether this request carries a credential VALUE — the case that needs
+    /// `credential.write` as well as `connection.create`.
+    #[must_use]
+    pub fn carries_a_value(&self) -> bool {
+        self.credential.as_ref().is_some_and(|c| {
+            c.password.is_some() || c.certificate_pem.is_some() || c.private_key_pem.is_some()
+        })
+    }
 }
 
 /// `POST /api/v1/namespaces/{ns}/connections`.
@@ -210,11 +333,26 @@ pub struct CreateConnectionRequest {
     pub marker_topic: Option<String>,
 }
 
-/// Authentication settings of a stored connection.
+/// Where a stored connection's CA certificate is — a reference, never the
+/// certificate.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsCaView {
+    /// `configMap` or `secret`.
+    pub kind: String,
+    /// The object's name.
+    pub name: String,
+    /// The data key.
+    pub key: String,
+}
+
+/// Authentication settings of a stored connection. **Write-only credentials:**
+/// a password or a private key is never readable back through this view or any
+/// other — it carries Secret NAMES, which are public references.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionAuthView {
-    /// `plaintext` or `scramSha512`.
+    /// `plaintext`, `scramSha512`, `scramSha256`, `plain` or `mtls`.
     pub mode: ConnectionAuthMode,
     /// The SASL principal.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -224,6 +362,14 @@ pub struct ConnectionAuthView {
     pub credential_ref: Option<NameRef>,
     /// Whether the transport is TLS.
     pub tls: bool,
+    /// The `mtls` client-certificate Secret's NAME (PROD-01.3) — the one this
+    /// service created from the entered certificate and key. Never its data:
+    /// neither the certificate nor the key is ever returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_certificate_ref: Option<NameRef>,
+    /// The private CA reference, when the connection names one (PROD-01.3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_ca: Option<TlsCaView>,
 }
 
 /// The controller's last reachability observation.
@@ -1520,7 +1666,11 @@ pub struct TransportRequest {
 /// any response, log line, status, annotation or audit record. The Secret is
 /// created and never read back; the only thing that comes out of this field is
 /// a Secret NAME.
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+///
+/// **IT SERIALIZES WITHOUT ITS VALUES**, for the reason
+/// [`NewConnectionCredentialRequest`] gives: the destination create's published
+/// `request-sha256` was the same oracle for an entered secret access key.
+#[derive(Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NewCredentialRequest {
     /// The access key id.
@@ -1537,6 +1687,17 @@ pub struct NewCredentialRequest {
 impl std::fmt::Debug for NewCredentialRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("NewCredentialRequest(<redacted>)")
+    }
+}
+
+impl Serialize for NewCredentialRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("NewCredentialRequest", 3)?;
+        out.serialize_field("accessKeyId", WRITE_ONLY_PLACEHOLDER)?;
+        out.serialize_field("secretAccessKey", WRITE_ONLY_PLACEHOLDER)?;
+        out.serialize_field("sessionToken", &write_only(self.session_token.as_ref()))?;
+        out.end()
     }
 }
 

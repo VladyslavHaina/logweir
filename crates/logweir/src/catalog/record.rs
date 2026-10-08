@@ -39,6 +39,17 @@ pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 /// would have had (reading rule 2: an older reader ignores the fields).
 pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
 
+/// **PROD-01.3.** The format of a record whose `source.auth_mode` is one of the
+/// modes PROD-01.3 added (`scramSha256`, `plain`, `mtls`) — copied from a
+/// receipt that is itself 1.4.0 (`logweir_core::backup_receipt::
+/// FORMAT_VERSION_WITH_AUTH_MODES`). A MINOR bump over
+/// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`]: the field's set of values
+/// grows and nothing else changes, and a 1.4.0 record carries PROD-05.1's
+/// topic configuration and may pin a manifest version (1.4.0 includes every
+/// earlier minor). Written only for those modes, so every other record is the
+/// document it was.
+pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
+
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
 /// It is part of the id and not metadata beside it, so a future scheme cannot
@@ -149,7 +160,9 @@ pub struct CatalogPoint {
     /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] (`1.2.0`) for a record that
     /// carries `archive.manifest_version_id` (FX-7), or
     /// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] (`1.3.0`) for one whose
-    /// topics carry the receipt's configuration model (PROD-05.1). Major `1`; a higher major is
+    /// topics carry the receipt's configuration model (PROD-05.1), or
+    /// [`FORMAT_VERSION_WITH_AUTH_MODES`] (`1.4.0`) for one whose
+    /// `source.auth_mode` is a mode PROD-01.3 added. Major `1`; a higher major is
     /// [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry,
     /// never fatal for the sync (D3 §5.2 rule 1).
     #[schemars(regex(pattern = r"^1\.[0-9]+\.[0-9]+$"))]
@@ -315,8 +328,10 @@ pub struct RecordSource {
     /// from a spec.
     pub cluster_id: String,
     pub bootstrap_servers: Vec<String>,
-    /// `plaintext` or `scramSha512` — the receipt's closed two-value set, one
-    /// spelling in this product.
+    /// The receipt's `source.auth.mode`, copied: `plaintext` or `scramSha512`
+    /// in every format, and from 1.4.0 also `scramSha256`, `plain` or `mtls`
+    /// (PROD-01.3) — the receipt's versioned closed set, one spelling in this
+    /// product.
     pub auth_mode: String,
 }
 

@@ -106,15 +106,23 @@ golden:
 # (`the_frozen_1_2_0_receipt_schema_is_still_fx7s`,
 # `the_frozen_1_2_0_catalog_point_schema_is_still_fx7s`).
 #
+# PROD-01.3 moved all three to their next minor (scorecard 1.4.0, receipt and
+# catalog point 1.3.0): the closed set of auth-mode values grows by three
+# (`scramSha256`, `plain`, `mtls`), and a document naming one declares the new
+# version. The scorecard's `-1.3.0.json`, the receipt's and the catalog point's
+# `-1.2.0.json` are frozen beside the new files; this build still writes those
+# versions for every `plaintext` and `scramSha512` run.
+#
 # The CURRENT version of each document, in ONE place for these two recipes:
-# each must equal its writer's constant (`logweir_core::FORMAT_VERSION`,
-# `backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`,
-# `catalog::record::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`), which also builds
-# the schema's `$id`. A renumber moves the constant and this line, and keeps
-# the old file frozen beside the new.
-scorecard_schema_version := "1.4.0"
-receipt_schema_version := "1.3.0"
-catalog_schema_version := "1.3.0"
+# each must equal its writer's newest constant
+# (`scorecard::FORMAT_VERSION_WITH_AUTH_MODES`,
+# `backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES`,
+# `catalog::record::FORMAT_VERSION_WITH_AUTH_MODES`), which also builds the
+# schema's `$id`. A renumber moves the constant and this line, and keeps the old
+# file frozen beside the new.
+scorecard_schema_version := "1.5.0"
+receipt_schema_version := "1.4.0"
+catalog_schema_version := "1.4.0"
 
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json

@@ -96,19 +96,26 @@ pub fn from_receipt(
             }
         })
         .collect();
-    // The record's minor says what it carries: PROD-05.1's
+    // The record's minor says what it carries: PROD-01.3's
+    // `FORMAT_VERSION_WITH_AUTH_MODES` (1.4.0) when it copies a receipt whose
+    // `source.auth.mode` is one of the modes PROD-01.3 added — its
+    // `source.auth_mode` carries a value the older schemas do not list, and
+    // 1.4.0 defines every earlier minor's fields — else PROD-05.1's
     // `FORMAT_VERSION_WITH_TOPIC_CONFIGURATION` (1.3.0) when the receipt's
     // configuration model travels into the topics — every receipt this build
     // signs — else FX-7's `FORMAT_VERSION_WITH_MANIFEST_VERSION` (1.2.0) when
     // the pin does, else FX-4's `FORMAT_VERSION` (1.1.0).
     let manifest_version_id = receipt.archive.manifest_version_id.clone();
-    let format_version = if receipt.topic_configuration.is_some() {
-        FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
-    } else if manifest_version_id.is_some() {
-        FORMAT_VERSION_WITH_MANIFEST_VERSION
-    } else {
-        FORMAT_VERSION
-    };
+    let format_version =
+        if logweir_core::connection::is_prod_01_3_auth_mode(&receipt.source.auth.mode) {
+            crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES
+        } else if receipt.topic_configuration.is_some() {
+            FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
+        } else if manifest_version_id.is_some() {
+            FORMAT_VERSION_WITH_MANIFEST_VERSION
+        } else {
+            FORMAT_VERSION
+        };
     Ok(CatalogPoint {
         format_version: format_version.to_string(),
         point_id: point_id(receipt_bytes),

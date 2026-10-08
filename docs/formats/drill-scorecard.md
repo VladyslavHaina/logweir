@@ -3,9 +3,14 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-drill-scorecard-1.4.0.json`](../../schemas/logweir-drill-scorecard-1.4.0.json)
+[`schemas/logweir-drill-scorecard-1.5.0.json`](../../schemas/logweir-drill-scorecard-1.5.0.json)
 and CI diffs it against the code on every build, so this document and the
-schema cannot drift apart silently. [`schemas/logweir-drill-scorecard-1.3.0.json`](../../schemas/logweir-drill-scorecard-1.3.0.json),
+schema cannot drift apart silently. Format **1.5.0** (PROD-01.3) adds no field:
+it widens `target.auth.mode` by three values (`scramSha256`, `plain`, `mtls`),
+and only a scorecard of a restore into such a target declares it — every other
+scorecard is the 1.4.0 document, described by the frozen
+[`schemas/logweir-drill-scorecard-1.4.0.json`](../../schemas/logweir-drill-scorecard-1.4.0.json).
+[`schemas/logweir-drill-scorecard-1.3.0.json`](../../schemas/logweir-drill-scorecard-1.3.0.json),
 [`schemas/logweir-drill-scorecard-1.2.0.json`](../../schemas/logweir-drill-scorecard-1.2.0.json),
 [`schemas/logweir-drill-scorecard-1.1.0.json`](../../schemas/logweir-drill-scorecard-1.1.0.json)
 and [`schemas/logweir-drill-scorecard-1.0.0.json`](../../schemas/logweir-drill-scorecard-1.0.0.json)
@@ -62,7 +67,7 @@ that reader and this one is a reference.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of this format. `1.0.0` in v0.1; `1.1.0` since FX-4; `1.2.0` since FX-3; `1.3.0` since FX-8; `1.4.0` since PROD-08.1. |
+| `format_version` | string | Semver of this format. `1.0.0` in v0.1; `1.1.0` since FX-4; `1.2.0` since FX-3; `1.3.0` since FX-8; `1.4.0` since PROD-08.1; `1.5.0` (PROD-01.3) for a restore into a target whose `target.auth.mode` is `scramSha256`, `plain` or `mtls`. |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
 | `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../architecture.md#adr-0007-source-capture-scope) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
@@ -176,6 +181,7 @@ their refusal text, so the agreement is checked rather than asserted.
 | `target.topic_mapping_prefix` | string | Prefix applied to restored topic names. |
 | `target.topic_mapping_sha256` | string | `sha256:` of the mapping, so the mapping is attested rather than described. |
 | `target.topic_mapping_entries` | integer | How many mapping entries there were. |
+| `target.auth` | object, optional | How the target client authenticated: `mode` and, for a SASL mode, `username` — never a password. `mode` is `plaintext` or `scramSha512` in every format and from **1.5.0** also `scramSha256`, `plain` or `mtls` (PROD-01.3); a new value under an older version, or any other value, is refused by both readers. `mtls` has no `username` (the identity is the client certificate). Absent means plaintext. |
 
 ### `source.time_basis` (format 1.3.0)
 

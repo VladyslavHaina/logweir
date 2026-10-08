@@ -484,16 +484,18 @@ pub struct ReceiptSource {
 /// interpolated into a document we then sign and publish.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReceiptAuth {
-    /// **A CLOSED SET OF TWO: `"plaintext"` or `"scramSha512"`.** Any other
-    /// value is refused by BOTH readers (arm 5 below, and
+    /// **A CLOSED SET, VERSIONED: `"plaintext"` or `"scramSha512"` in every
+    /// format, and from 1.4.0 also `"scramSha256"`, `"plain"` or `"mtls"`
+    /// (PROD-01.3).** Any other value — or a new value under a format that
+    /// predates it — is refused by BOTH readers (arm 5 below, and
     /// `docs/verify_scorecard.py::check_backup_receipt_invariants`'s mirror),
-    /// so a receipt naming a third spelling is never signed and never
+    /// so a receipt naming an undefined spelling is never signed and never
     /// verifies.
     ///
     /// These are `logweir_core::spec::AuthSpec`'s serde tag values, which is
     /// what makes ONE spelling possible at all: they are the strings an
     /// adopter writes in a spec, `KafkaCluster.spec.auth.mode`'s CRD enum
-    /// byte for byte, the only two values `AuthSpec::mode_str()` can return,
+    /// byte for byte, the only values `AuthSpec::mode_str()` can return,
     /// and — since Task 17 copies this field — what
     /// `Backup.status.auth.mode`'s CRD description promises. A `String` and
     /// not an enum on the wire because a reader must be able to REPORT a
@@ -501,7 +503,8 @@ pub struct ReceiptAuth {
     /// readers can state it in the same words.
     pub mode: String,
     /// The SASL username, when there is one. `null` under `plaintext` —
-    /// which is not the same as an empty username.
+    /// which is not the same as an empty username — and under `mtls`, whose
+    /// identity is the client certificate.
     #[serde(default)]
     pub username: Option<String>,
 }
@@ -565,6 +568,23 @@ pub struct ReceiptArchive {
 /// document.
 pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 
+/// **PROD-01.3.** The `format_version` of a receipt whose `source.auth.mode`
+/// is one of the modes PROD-01.3 added (`scramSha256`, `plain`, `mtls`) — a
+/// MINOR bump over [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] (PROD-05.1's
+/// 1.3.0, which merged first), because the change is new content in an
+/// existing field that an older reader can only refuse (arm 5a), never accept
+/// as something stronger (OD-7, third case). Written only for those modes, so
+/// a receipt for a `plaintext` or `scramSha512` backup is byte-for-byte the
+/// document it was before. It includes every earlier minor: a 1.4.0 receipt
+/// carries `topic_configuration` and may carry `archive.manifest_version_id`.
+pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
+
+/// The first minor of format 1 whose `source.auth.mode` may be one of
+/// `crate::connection::PROD_01_3_AUTH_MODES` (arm 5b). **A renumber changes
+/// this and [`FORMAT_VERSION_WITH_AUTH_MODES`] together**, and
+/// `docs/verify_scorecard.py`'s `RECEIPT_AUTH_MODES_SINCE_MINOR` follows it.
+pub const AUTH_MODES_SINCE_MINOR: u64 = 4;
+
 /// The version id a reader may PIN, out of what a store answered.
 ///
 /// `None` for no answer, for a blank one, and for S3's literal `"null"` — the
@@ -578,15 +598,25 @@ pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
     }
 }
 
-/// The `format_version` a receipt is written with:
-/// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] when it carries
-/// `topic_configuration` (PROD-05.1 — every receipt this build signs), else
+/// The `format_version` a receipt is written with — the NEWEST minor whose
+/// fields it uses, so a receipt carrying both features names the version that
+/// defines both: [`FORMAT_VERSION_WITH_AUTH_MODES`] when the auth mode is one
+/// PROD-01.3 added (it also defines PROD-05.1's `topic_configuration` and
+/// FX-7's pin), else [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] when it
+/// carries `topic_configuration` (PROD-05.1 — every receipt this build signs),
+/// else
 /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] when it pins the manifest's
 /// version, else [`RECEIPT_FORMAT_VERSION`] — FX-4's 1.1.0. The ONE place a
 /// writer decides it.
 #[must_use]
-pub fn format_version_for(archive: &ReceiptArchive, topic_configuration: bool) -> &'static str {
-    if topic_configuration {
+pub fn format_version_for(
+    archive: &ReceiptArchive,
+    topic_configuration: bool,
+    auth: &ReceiptAuth,
+) -> &'static str {
+    if crate::connection::is_prod_01_3_auth_mode(&auth.mode) {
+        FORMAT_VERSION_WITH_AUTH_MODES
+    } else if topic_configuration {
         FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
     } else if archive.manifest_version_id.is_some() {
         FORMAT_VERSION_WITH_MANIFEST_VERSION
@@ -673,13 +703,15 @@ impl BackupReceipt {
     /// 3. `records` covers exactly `source.topics`.
     /// 4. `covered.from_ms < covered.to_ms` STRICTLY — the end is EXCLUSIVE
     ///    (I22, and Task 5's review finding F3).
-    /// 5. `source.auth.mode` is one of the two values this format defines.
+    /// 5. `source.auth.mode` is one of the values this format defines.
     ///    The first arm that is not a self-contradiction check: the document
     ///    does not disagree with itself, it names a mechanism the format has
     ///    no spelling for. LAST of the 1.0.0 arms on purpose — the four
     ///    consistency arms are what an auditor reads first, and a receipt that
     ///    contradicts itself should say so before it is told its auth mode is
-    ///    unknown.
+    ///    unknown. Since 1.4.0 (PROD-01.3) it is three statements: 5a, the
+    ///    closed two below 1.4.0 (unchanged); 5b, a PROD-01.3 mode under a
+    ///    version that predates it; 5c, the closed five from 1.4.0.
     ///
     /// Arms 6-11 (format 1.1.0, FX-4) read `config_coverage` and NOTHING ELSE,
     /// and run only when it is present — so every document without it, which
@@ -835,7 +867,40 @@ impl BackupReceipt {
         // reader that refuses a value without naming it makes the refusal
         // unactionable, and `{:?}` is the same rendering
         // `docs/verify_scorecard.py::_rust_debug_str` reproduces.
-        if !matches!(self.source.auth.mode.as_str(), "plaintext" | "scramSha512") {
+        //
+        // PROD-01.3 (format 1.4.0) SPLITS THE ARM BY VERSION, and leaves every
+        // document below 1.4.0 judged exactly as before. The three new modes
+        // (`crate::connection::PROD_01_3_AUTH_MODES`) are values of 1.4.0 and
+        // later only: a document declaring an older minor that names one is
+        // refused (arm 5b) — no writer of that version could have produced
+        // it — and a 1.4.0 document is held to the closed set of five (arm
+        // 5c). An older reader refuses a 1.4.0 receipt that names a new mode
+        // through arm 5a, which is the SAFER verdict (OD-7, third case): so
+        // the change is MINOR, and a receipt for a `plaintext` or
+        // `scramSha512` backup is still written as the 1.1.0/1.2.0/1.3.0 document
+        // it always was (`format_version_for`).
+        let mode = self.source.auth.mode.as_str();
+        let five_defined = parse_semver(&self.format_version)
+            .is_some_and(|(_, minor, _)| minor >= AUTH_MODES_SINCE_MINOR);
+        if crate::connection::is_prod_01_3_auth_mode(mode) {
+            if !five_defined {
+                // ARM 5b.
+                return Err(format!(
+                    "source.auth.mode {:?} is defined from 1.{AUTH_MODES_SINCE_MINOR}.0 and \
+                     format_version {:?} predates it",
+                    self.source.auth.mode, self.format_version
+                ));
+            }
+        } else if !crate::connection::ORIGINAL_AUTH_MODES.contains(&mode) {
+            if five_defined {
+                // ARM 5c.
+                return Err(format!(
+                    "source.auth.mode {:?} is not one of the five values this format defines: \
+                     \"plaintext\", \"scramSha512\", \"scramSha256\", \"plain\" or \"mtls\"",
+                    self.source.auth.mode
+                ));
+            }
+            // ARM 5a, unchanged since 1.0.0.
             return Err(format!(
                 "source.auth.mode {:?} is not one of the two values this format defines: \
                  \"plaintext\" or \"scramSha512\"",

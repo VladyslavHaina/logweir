@@ -72,6 +72,18 @@ pub const AUTH_MODE_PLAINTEXT: &str = "plaintext";
 /// read straight onto this argv.
 pub const AUTH_MODE_SCRAM_SHA_512: &str = "scramSha512";
 
+/// `--auth-mode scramSha256` (PROD-01.3).
+pub const AUTH_MODE_SCRAM_SHA_256: &str = logweir_core::connection::AUTH_MODE_SCRAM_SHA_256;
+
+/// `--auth-mode plain` (PROD-01.3) — SASL/PLAIN, and only with `--tls`.
+pub const AUTH_MODE_PLAIN: &str = logweir_core::connection::AUTH_MODE_PLAIN;
+
+/// `--auth-mode mtls` (PROD-01.3) — a TLS client certificate, with `--tls`.
+/// The certificate and key reach the probe as projected files named by
+/// `LOGWEIR_SOURCE_TLS_CERT_FILE` / `LOGWEIR_SOURCE_TLS_KEY_FILE`, never as
+/// flags.
+pub const AUTH_MODE_MTLS: &str = logweir_core::connection::AUTH_MODE_MTLS;
+
 /// The environment variable the SASL password is read from, and the only place
 /// it is read from.
 ///
@@ -112,7 +124,7 @@ pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct ProbeArgs {
     /// `--bootstrap <csv>`.
     pub bootstrap: String,
-    /// `--auth-mode plaintext|scramSha512`.
+    /// `--auth-mode plaintext|scramSha512|scramSha256|plain|mtls`.
     pub auth_mode: String,
     /// `--username <u>`. Required in practice at `scramSha512` and ignored
     /// otherwise.
@@ -177,6 +189,25 @@ pub fn outcome(observed: &Result<String, KafkaError>) -> ProbeOutcome {
             code: ExitCode::Operational,
         },
     }
+}
+
+/// The outcome of a probe whose credential binding was refused (PROD-01.3
+/// security follow-up): interface **I14**'s unreachable lines on stdout,
+/// unchanged, and on stderr the diagnostic followed by
+/// `refusal-reason=CredentialBindingMismatch` — the line the `KafkaCluster`
+/// controller reads off the pod log into the `Reachable` condition's reason.
+/// Nothing was dialled.
+#[must_use]
+pub fn refused_by_binding(
+    refusal: &logweir_core::connection::CredentialBindingRefusal,
+) -> ProbeOutcome {
+    let mut o = outcome(&Err(KafkaError::Client(refusal.to_string())));
+    o.diagnostic = Some(format!(
+        "{}\n{}",
+        o.diagnostic.unwrap_or_default(),
+        logweir_core::guard::refusal_reason_line(&refusal.to_string())
+    ));
+    o
 }
 
 /// One `cluster_id()` read, turned into an outcome — the seam a
@@ -269,8 +300,9 @@ pub fn bootstrap_servers(csv: &str) -> Vec<String> {
 ///
 /// # Errors
 ///
-/// A mode this build does not know (anything but the two constants above), or
-/// `scramSha512` with no `--username`. Both are reported as an unreachable
+/// A mode this build does not know (anything but the constants above), a SASL
+/// mode (`scramSha512`, `scramSha256`, `plain`) with no `--username`, or
+/// `plain`/`mtls` without `--tls` (PROD-01.3). Both are reported as an unreachable
 /// probe by [`run`] rather than as a usage error, so the two contract lines
 /// exist for every command line clap accepted.
 pub fn auth_spec(
@@ -278,34 +310,56 @@ pub fn auth_spec(
     username: Option<&str>,
     tls: bool,
 ) -> Result<logweir_core::spec::AuthSpec, KafkaError> {
-    match mode {
+    let sasl_username = || match username {
+        Some(u) if !u.trim().is_empty() => Ok(u.to_string()),
+        _ => Err(KafkaError::Client(format!(
+            "--auth-mode {mode} needs --username: SASL authenticates as a named principal, and \
+             a probe that dialled as nobody would report a configuration mistake as an \
+             unreachable broker"
+        ))),
+    };
+    let spec = match mode {
         // TLS WITHOUT SASL IS REFUSED, NOT DOWNGRADED (PLAT-07.1). This arm used
         // to ignore `--tls` and dial PLAINTEXT, so an object that said TLS was
         // probed in the clear. `AuthSpec::Plaintext` has no TLS field for a
         // restore plan to carry either, so the controller refuses the same
         // shape before any Job exists; this is the runner's half.
-        AUTH_MODE_PLAINTEXT if tls => Err(KafkaError::Client(format!(
-            "--auth-mode {AUTH_MODE_PLAINTEXT} with --tls (TLS without SASL) is not supported; it \
-             is refused rather than dialled without TLS. Use --auth-mode \
-             {AUTH_MODE_SCRAM_SHA_512} over TLS, or drop --tls for a plaintext listener"
-        ))),
-        AUTH_MODE_PLAINTEXT => Ok(logweir_core::spec::AuthSpec::Plaintext),
-        AUTH_MODE_SCRAM_SHA_512 => match username {
-            Some(u) if !u.trim().is_empty() => Ok(logweir_core::spec::AuthSpec::ScramSha512 {
-                username: u.to_string(),
-                tls,
-            }),
-            _ => Err(KafkaError::Client(format!(
-                "--auth-mode {AUTH_MODE_SCRAM_SHA_512} needs --username: SASL/SCRAM authenticates \
-                 as a named principal, and a probe that dialled as nobody would report a \
-                 configuration mistake as an unreachable broker"
-            ))),
+        AUTH_MODE_PLAINTEXT if tls => {
+            return Err(KafkaError::Client(format!(
+                "--auth-mode {AUTH_MODE_PLAINTEXT} with --tls (TLS without SASL) is not \
+                 supported; it is refused rather than dialled without TLS. Use --auth-mode \
+                 {AUTH_MODE_SCRAM_SHA_512} over TLS, --auth-mode {AUTH_MODE_MTLS} for a client \
+                 certificate, or drop --tls for a plaintext listener"
+            )))
+        }
+        AUTH_MODE_PLAINTEXT => logweir_core::spec::AuthSpec::Plaintext,
+        AUTH_MODE_SCRAM_SHA_512 => logweir_core::spec::AuthSpec::ScramSha512 {
+            username: sasl_username()?,
+            tls,
         },
-        other => Err(KafkaError::Client(format!(
-            "--auth-mode {other} is not a mode this build knows; it accepts \
-             {AUTH_MODE_PLAINTEXT} and {AUTH_MODE_SCRAM_SHA_512}"
-        ))),
+        AUTH_MODE_SCRAM_SHA_256 => logweir_core::spec::AuthSpec::ScramSha256 {
+            username: sasl_username()?,
+            tls,
+        },
+        AUTH_MODE_PLAIN => logweir_core::spec::AuthSpec::Plain {
+            username: sasl_username()?,
+            tls,
+        },
+        AUTH_MODE_MTLS => logweir_core::spec::AuthSpec::Mtls { tls },
+        other => {
+            return Err(KafkaError::Client(format!(
+                "--auth-mode {other} is not a mode this build knows; it accepts {}",
+                logweir_core::connection::AUTH_MODES.join(", ")
+            )))
+        }
+    };
+    // PROD-01.3: `plain` (PlainWithoutTls) and `mtls` without `--tls` are
+    // refused here, before any client exists — the probe's half of the rule
+    // the controller and the CRD state.
+    if let Some(refusal) = spec.transport_refusal() {
+        return Err(KafkaError::Client(refusal));
     }
+    Ok(spec)
 }
 
 /// Install this subcommand's diagnostics — **on stderr, and nowhere else**.
@@ -387,6 +441,15 @@ fn dial(args: &ProbeArgs) -> ProbeOutcome {
         Ok(s) => s,
         Err(e) => return outcome(&Err(e)),
     };
+    // PROD-01.3 security follow-up: a credential whose binding does not name
+    // this `KafkaCluster` is refused before the password or key is read and
+    // before any client exists. The probe's two stdout lines stay its
+    // contract (`reachable=false`); the named reason travels on STDERR as
+    // `refusal-reason=CredentialBindingMismatch`, which the controller reads
+    // off the pod log into the `Reachable` condition.
+    if let Err(refusal) = crate::credential_binding::check_side(crate::tls_ca::Side::Source) {
+        return refused_by_binding(&refusal);
+    }
     // The password is read from the environment HERE and handed to the one
     // construction site as a value, so nothing below this line has to know
     // which variable it came from. An EMPTY value is treated as unset: a
@@ -403,11 +466,19 @@ fn dial(args: &ProbeArgs) -> ProbeOutcome {
         Ok(c) => c,
         Err(e) => return outcome(&Err(KafkaError::Client(e))),
     };
-    let auth =
-        match AuthConfig::from_spec(&spec, password).and_then(|a| a.with_tls_ca_file(ca_file)) {
-            Ok(a) => a,
-            Err(e) => return outcome(&Err(e)),
+    // PROD-01.3: the `mtls` pair, from the source side's two variables.
+    let client_certificate =
+        match crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Source) {
+            Ok(files) => files,
+            Err(e) => return outcome(&Err(KafkaError::Client(e))),
         };
+    let auth = match AuthConfig::from_spec(&spec, password)
+        .and_then(|a| a.with_tls_ca_file(ca_file))
+        .and_then(|a| a.with_client_certificate(client_certificate))
+    {
+        Ok(a) => a,
+        Err(e) => return outcome(&Err(e)),
+    };
 
     let (tx, rx) = mpsc::channel();
     let marker_topic = args.marker_topic.clone();
