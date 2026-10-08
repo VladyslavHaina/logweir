@@ -20,6 +20,9 @@
         "old"
       ]
     },
+    "coverage": {
+      "requested": "sampled"
+    },
     "operation": {
       "state": "succeeded",
       "stateReason": "Ok",

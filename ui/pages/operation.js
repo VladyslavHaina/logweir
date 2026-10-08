@@ -64,6 +64,9 @@ import {
   unverifiedCaption,
   unverifiedTrustCaption,
   verificationScopeSentence,
+  coverageWords,
+  notCovered,
+  renderCompleteCoverage,
   flagBadge,
   when,
 } from "../render.js";
@@ -172,6 +175,7 @@ export function operationFacts(document, console_) {
       evidenceVerification: null,
       verifiedSuccess: o.verifiedSuccess === true,
       verificationScope: o.verificationScope || null,
+      integrity: null,
       capture: o.capture || null,
       completion: o.completion || null,
       teardown: o.teardown || null,
@@ -217,6 +221,9 @@ export function operationFacts(document, console_) {
     evidenceVerification: (status.evidence || {}).verification || null,
     verifiedSuccess: false,
     verificationScope: status.verificationScope || null,
+    // PROD-08.1a: the custom resource's copy of the signed coverage, read by
+    // [`renderCoverage`] where the console reads `verificationScope`.
+    integrity: status.integrity || null,
     completion: status.completion || null,
     teardown: status.teardown || null,
     targetMode: (spec.target || {}).mode || null,
@@ -567,6 +574,32 @@ export function renderTargetMode(v) {
   );
 }
 
+/** PROD-08.1a: HOW MUCH OF THIS RESTORE WAS VERIFIED, for every Restore and
+ *  whatever its outcome -- the completion panel below is shown only for a run
+ *  that succeeded, and a complete verification that did NOT cover the restore
+ *  is exactly the run that did not. The signed coverage in words, and a
+ *  recorded complete verification in full: covered or not, its reason, and
+ *  every partition's exact counts. A claim until the evidence is green. */
+export function renderCoverage(v) {
+  if (v.kind !== "restore") {
+    return "";
+  }
+  const scope = v.verificationScope || {};
+  const integrity = v.integrity || {};
+  const recorded = typeof scope.coverage === "string" ? scope.coverage : integrity.coverage;
+  const complete = scope.complete || integrity.complete || null;
+  const green = evidenceGreen(v);
+  const claim = (value) => scorecardClaim(cell(value), green);
+  const known = recorded === "sampled" || recorded === "complete" ? recorded : null;
+  return (
+    "<section class=\"coverage\" id=\"operation-coverage\"" +
+      (notCovered(complete) ? " data-covered=\"false\"" : "") + "><h3>Verification coverage</h3>" +
+    facts([["coverage (signed)", claim(coverageWords(known, null, complete))]]) +
+    (known === "complete" ? renderCompleteCoverage(complete, claim) : "") +
+    "</section>"
+  );
+}
+
 /** THE COMPLETION PANEL (D3 section 3.5): what a terminal Restore actually produced,
  *  the sampled counts labelled exactly, and the fixed guidance for the target
  *  mode this restore used.
@@ -726,6 +759,7 @@ export function renderOperation(view) {
     renderResult(f) +
     renderRetryAction(f, String(v.ns || "")) +
     renderEvidence(f) +
+    renderCoverage(f) +
     renderCompletion(f) +
     renderTeardown(f)
   );

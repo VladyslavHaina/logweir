@@ -240,5 +240,35 @@ $diff_rc). Regenerate with: node ui/tests/emit-plan.js plan-time-basis-fields.js
 fi
 echo "== plan golden: $tb_golden is byte-identical to node ui/tests/emit-plan.js plan-time-basis-fields.json =="
 
+# THE COMPLETE-COVERAGE GOLDEN (PROD-08.1a): the same three arms for a plan
+# that asks for complete coverage with a record bound. `ui_lint.rs` asserts
+# both values ARRIVE in `RestoreSpec` -- a misspelt key would parse and be
+# dropped, and the run would verify a sample under a plan that asked for all.
+cc_golden="ui/tests/fixtures/plan-complete.golden.yaml"
+[ -f "$cc_golden" ] || {
+  echo "check-ui-behaviour: $cc_golden is missing. Regenerate with: node ui/tests/emit-plan.js \
+plan-complete-fields.json > $cc_golden" >&2; exit 1; }
+tmp="$(mktemp "${TMPDIR:-/tmp}/logweir-plan-complete-golden.XXXXXX")"
+set +e
+node ui/tests/emit-plan.js plan-complete-fields.json > "$tmp"
+emit_rc=$?
+set -e
+if [ "$emit_rc" -ne 0 ]; then
+  rm -f "$tmp"
+  echo "check-ui-behaviour: node ui/tests/emit-plan.js plan-complete-fields.json exited $emit_rc." >&2
+  exit "$emit_rc"
+fi
+set +e
+diff -u "$cc_golden" "$tmp"
+diff_rc=$?
+set -e
+rm -f "$tmp"
+if [ "$diff_rc" -ne 0 ]; then
+  echo "check-ui-behaviour: the committed complete-coverage golden and the emitter disagree (diff \
+exited $diff_rc). Regenerate with: node ui/tests/emit-plan.js plan-complete-fields.json > $cc_golden" >&2
+  exit "$diff_rc"
+fi
+echo "== plan golden: $cc_golden is byte-identical to node ui/tests/emit-plan.js plan-complete-fields.json =="
+
 echo "== ui behaviour gate: $count test(s) under ui/tests/, node $v, LOGWEIR_BIN=$LOGWEIR_BIN =="
 exit 0
