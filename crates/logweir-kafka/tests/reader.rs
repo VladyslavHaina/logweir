@@ -421,3 +421,167 @@ fn the_default_describe_topic_configs_reports_that_it_cannot_answer() {
         Err(KafkaError::Client(_))
     ));
 }
+
+// --- FX-18: a topic read right after it was created -----------------------
+
+use logweir_kafka::reader::{settle, Settling};
+use std::time::{Duration, Instant};
+
+/// A just-created topic as a reader sees it while the creation propagates:
+/// its configuration read answers `TopicNotFound` for the first `lag` calls,
+/// then the configuration. `refused` makes every call answer `NotAuthorized`
+/// instead — a principal that may create the topic but not describe it.
+struct JustCreated {
+    lag: std::sync::atomic::AtomicUsize,
+    calls: std::sync::atomic::AtomicUsize,
+    refused: bool,
+}
+
+impl JustCreated {
+    fn lagging(lag: usize) -> Self {
+        Self {
+            lag: lag.into(),
+            calls: 0.into(),
+            refused: false,
+        }
+    }
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ClusterReader for JustCreated {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        Ok("c1".into())
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        Ok(vec![])
+    }
+    fn end_offsets(&self, _t: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        Ok(vec![])
+    }
+    fn topic_configs(
+        &self,
+        topic: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, KafkaError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.calls.fetch_add(1, SeqCst);
+        if self.refused {
+            return Err(KafkaError::NotAuthorized(topic.to_string()));
+        }
+        if self
+            .lag
+            .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(KafkaError::TopicNotFound(topic.to_string()));
+        }
+        Ok([(
+            "message.timestamp.type".to_string(),
+            "CreateTime".to_string(),
+        )]
+        .into())
+    }
+    fn broker_configs(&self) -> Result<std::collections::BTreeMap<String, String>, KafkaError> {
+        Ok(Default::default())
+    }
+    fn consume_range(
+        &self,
+        _t: &str,
+        _p: i32,
+        _from: i64,
+        _max: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        Ok(vec![])
+    }
+}
+
+/// **FX-18.** The read after a create waits for the topic, and the plain read
+/// does not.
+///
+/// NEGATIVE CONTROL, in the same row: the plain `topic_configs` on a topic
+/// whose creation has not propagated fails with `TopicNotFound` — the shape of
+/// CI run 37753000930 and of PROD-00.3f's matrix failure — and
+/// `created_topic_configs` on the same state answers. Take the wait out of
+/// `created_topic_configs` (read once) and the second half fails.
+#[test]
+fn a_read_after_a_create_waits_for_the_topic_and_a_plain_read_does_not() {
+    let plain = JustCreated::lagging(3);
+    assert!(
+        matches!(plain.topic_configs("t"), Err(KafkaError::TopicNotFound(_))),
+        "the double must reproduce the race, or this row proves nothing"
+    );
+
+    let waited = JustCreated::lagging(3);
+    let configs = waited
+        .created_topic_configs("t", 1, Duration::from_secs(10))
+        .expect("the wait outlasts the propagation");
+    assert_eq!(configs["message.timestamp.type"], "CreateTime");
+    assert_eq!(waited.calls(), 4, "three answers waited out, then the read");
+}
+
+/// **FX-18.** A refusal is not propagation: the default
+/// `created_topic_configs` returns `NotAuthorized` on the first answer, and
+/// does not spend `CREATED_TOPIC_SETTLE` on it. (`RdKafkaReader` waits it out
+/// too, because there it is T13's inference from an empty answer; its exact
+/// set is pinned by the unit row
+/// `the_created_topic_configuration_read_waits_out_only_propagation`, and its
+/// reason is PROD-00.3f's recorded failure, "DescribeConfigs answered this
+/// visible topic with no configuration". No broker row reproduces that race.)
+#[test]
+fn a_refusal_after_a_create_is_returned_at_once() {
+    let refused = JustCreated {
+        refused: true,
+        ..JustCreated::lagging(0)
+    };
+    let started = Instant::now();
+    let err = refused
+        .created_topic_configs("t", 1, Duration::from_secs(30))
+        .unwrap_err();
+    assert!(matches!(err, KafkaError::NotAuthorized(_)), "{err:?}");
+    assert_eq!(refused.calls(), 1);
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// **FX-18.** `settle` is a bounded poll: it returns the answer as soon as
+/// there is one, a failure at once, and the last "not yet" at the deadline,
+/// unchanged so the caller can still classify it.
+#[test]
+fn settle_returns_the_answer_a_failure_at_once_and_the_last_not_yet_at_the_deadline() {
+    let mut attempts = 0;
+    let answered = settle(Duration::from_secs(10), || {
+        attempts += 1;
+        if attempts < 3 {
+            Settling::NotYet(KafkaError::TopicNotFound("t".into()))
+        } else {
+            Settling::Done(attempts)
+        }
+    });
+    assert_eq!(answered.unwrap(), 3);
+
+    let mut attempts = 0;
+    let failed: Result<(), _> = settle(Duration::from_secs(10), || {
+        attempts += 1;
+        Settling::Failed(KafkaError::NotAuthorized("t".into()))
+    });
+    assert!(matches!(failed, Err(KafkaError::NotAuthorized(_))));
+    assert_eq!(attempts, 1, "a failure is never retried");
+
+    let started = Instant::now();
+    let mut attempts = 0;
+    let expired: Result<(), _> = settle(Duration::from_millis(300), || {
+        attempts += 1;
+        Settling::NotYet(KafkaError::TopicNotFound(format!("t{attempts}")))
+    });
+    let elapsed = started.elapsed();
+    match expired {
+        Err(KafkaError::TopicNotFound(t)) => assert_eq!(t, format!("t{attempts}"), "the LAST one"),
+        other => panic!("{other:?}"),
+    }
+    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    assert!(
+        attempts >= 2,
+        "it polled, it did not sleep once: {attempts}"
+    );
+}

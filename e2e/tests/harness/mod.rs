@@ -66,7 +66,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use logweir_kafka::rdkafka_reader::RdKafkaReader;
-use logweir_kafka::reader::{AuthConfig, ClusterReader, TopicDeleter};
+use logweir_kafka::reader::{AuthConfig, ClusterReader, TopicDeleter, CREATED_TOPIC_SETTLE};
 
 pub mod stack;
 // `bootstrap()` — the EXTERNAL listener, `localhost:9092` on the default stack.
@@ -445,6 +445,36 @@ pub fn count_partitions(topic: &str) -> i32 {
         .unwrap_or_else(|| panic!("topic {topic} not found"))
 }
 
+/// **FX-18.** Wait until `topic`, which this row has just CREATED with
+/// `partitions` partitions on the broker at `bootstrap` (PLAINTEXT, a super
+/// user on every profile), is SERVED: every partition led, every leader
+/// answering ListOffsets. It is the product's own
+/// `ClusterReader::await_served`, bounded by `CREATED_TOPIC_SETTLE`.
+///
+/// LISTED IS NOT SERVED. `topic_identity.rs` c02 read watermarks once the
+/// metadata listed its recreated topic, and main CI run 37753000930 failed with
+/// `NotLeaderForPartition`; PROD-00.3f's matrix row read a new topic's
+/// configuration and got the empty answer of a broker that did not hold it
+/// yet. A Java CLI or a producer retries those answers itself; an rdkafka
+/// watermark read, a DescribeConfigs and the engine's first metadata read do
+/// not. `e2e/tests/created_topics.rs` fails a row file whose function creates
+/// a topic and does not wait.
+pub fn await_created_on(bootstrap: &str, topic: &str, partitions: i32) {
+    let r = RdKafkaReader::connect(&[bootstrap.to_string()], AuthConfig::Plaintext)
+        .unwrap_or_else(|e| panic!("a reader for {bootstrap}: {e}"));
+    ClusterReader::await_served(&r, topic, partitions, CREATED_TOPIC_SETTLE).unwrap_or_else(|e| {
+        panic!(
+            "{topic} was created on {bootstrap} but not served within {}s: {e}",
+            CREATED_TOPIC_SETTLE.as_secs()
+        )
+    });
+}
+
+/// [`await_created_on`] on the default broker.
+pub fn await_created(topic: &str, partitions: i32) {
+    await_created_on(&bootstrap(), topic, partitions);
+}
+
 pub fn topic_exists(topic: &str) -> bool {
     let r = reader();
     ClusterReader::list_topics(&r)
@@ -526,13 +556,7 @@ pub fn create_topic(topic: &str, partitions: i32) {
         ]),
         "create topic",
     );
-    for _ in 0..60 {
-        if topic_exists(topic) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    panic!("topic {topic} still absent 15s after --create");
+    await_created(topic, partitions);
 }
 
 /// `create_topic` with topic-level config entries — the only way to seed a
@@ -572,13 +596,7 @@ pub fn create_topic_with_configs(topic: &str, partitions: i32, configs: &[(&str,
     }
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     ok(kafka_topics(&borrowed), "create topic with configs");
-    for _ in 0..60 {
-        if topic_exists(topic) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    panic!("topic {topic} still absent 15s after --create");
+    await_created(topic, partitions);
 }
 
 /// [`create_topic_with_configs`] for records stamped at a FIXED past instant
@@ -740,13 +758,7 @@ pub fn recreate_marker_topic() {
         ]),
         "recreate marker topic",
     );
-    for _ in 0..60 {
-        if topic_exists(MARKER_TOPIC) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    panic!("marker topic still absent 15s after --create");
+    await_created(MARKER_TOPIC, 1);
 }
 
 /// The newest record timestamp across the SOURCE topics, read the same way

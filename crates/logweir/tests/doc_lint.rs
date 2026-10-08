@@ -2026,6 +2026,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "every other credential reference is bound",
             "scripts/bind-credential.py",
         ),
+        // FX-18 (2026-10-08): phase 0 uses a topic it created only once the
+        // cluster serves it.
+        (
+            "a created topic is used only once served",
+            "until every partition of each topic it created has a",
+        ),
         // FX-21 (2026-10-08): an unrecorded replication factor is not
         // assessed, never matching; the engine's first patch, build 2.
         (

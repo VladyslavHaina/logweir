@@ -1452,6 +1452,9 @@ mod live {
             &format!("{topic} to report {partitions} partitions"),
             || partition_count(topic) == Some(partitions),
         );
+        // FX-18: the ADDED partitions are created partitions, with the same
+        // window between "listed" and "served" as a created topic.
+        await_created_on(&broker_address(Side::Host), topic, partitions);
     }
 
     fn alter_config(topic: &str, entry: &str) {
@@ -2000,6 +2003,11 @@ mod live {
             &format!("{topic} to report {partitions} partitions"),
             || partition_count(topic) == Some(partitions),
         );
+        // FX-18: listed with a leader is not yet SERVED. c02 read watermarks
+        // here, after recreating its topic, and main CI run 37753000930 failed
+        // with `NotLeaderForPartition`: the broker named as leader had not yet
+        // become it.
+        await_created_on(&broker_address(Side::Host), topic, partitions);
     }
 
     fn delete_topic(topic: &str) {

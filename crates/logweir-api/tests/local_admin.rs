@@ -55,7 +55,7 @@
 //! rather than from the port
 //! ([`a_non_loopback_listener_is_refused_before_anything_is_bound`]).
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
@@ -978,6 +978,40 @@ fn an_oversized_request_head_is_refused() {
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
 }
 
+/// How many of [`the_connection_ceiling_holds_and_then_releases`]'s connections
+/// may be waiting in the kernel's listen queue, not yet accepted, at any one
+/// time.
+///
+/// THE LISTEN QUEUE IS SMALLER THAN THE CEILING. `kern.ipc.somaxconn` is 128
+/// on macOS, and the kernel caps the listener's backlog to it whatever the
+/// server asks for; when the queue overflows, XNU resets a queued connection.
+/// Opening all 256 connections back to back therefore assumed the server's
+/// accept loop would keep pace with the client, which is a statement about the
+/// scheduler, not about the server. On a host at load average 20-40 the loop
+/// fell behind by more than 128 and the test failed with `connection N:
+/// Connection reset by peer`, N between 129 and 213 (FX-3, FX-8, FX-13 and
+/// FX-16's workspace runs, 2026-10-07/08; FX-18). A quarter of the queue
+/// leaves room for whatever else this host is connecting to the same port.
+const UNACCEPTED_AT_ONCE: usize = 32;
+
+/// GET `/healthz` on a fresh connection, retried until [`SERVE_LIMIT`], and
+/// how long it took to be answered.
+///
+/// Used as a FIFO PROBE: the kernel hands connections to `accept` in the order
+/// their handshakes completed, so an answer on a connection opened after
+/// `ahead` others proves the server has accepted every one of them. That is
+/// the condition [`the_connection_ceiling_holds_and_then_releases`] waits on,
+/// instead of sleeping and hoping.
+fn answered_after(port: u16, ahead: usize) -> Duration {
+    let started = Instant::now();
+    let answer = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(
+        answer.starts_with("HTTP/1.1 200"),
+        "the probe behind {ahead} held connections was answered with: {answer}"
+    );
+    started.elapsed()
+}
+
 /// **At the connection ceiling the server stops accepting, and recovers the
 /// moment a connection closes.**
 ///
@@ -986,25 +1020,60 @@ fn an_oversized_request_head_is_refused() {
 /// becoming a task — which is the difference between a bounded server and one
 /// that runs out of memory politely.
 ///
-/// The test is deterministic rather than timing-based in the part that matters:
-/// the pending request is unanswered while every permit is held, and answered
-/// after exactly one connection is dropped.
+/// NOTHING HERE WAITS ON THE SCHEDULER (FX-18). The connections that hold the
+/// permits are opened [`UNACCEPTED_AT_ONCE`] at a time, and after each batch a
+/// probe request ([`answered_after`]) must be answered before another batch is
+/// opened, so the listen queue never holds more than one batch however slowly
+/// the server runs. The fixed 500 ms sleep that used to stand in for "the
+/// accept loop has taken them all" is gone; the probe IS that condition.
+///
+/// The held connections send nothing, and that is what keeps them holding.
+/// hyper-util's `auto` builder reads the first bytes to choose HTTP/1 or
+/// HTTP/2, and the header-read deadline (`main::HEADER_READ_TIMEOUT`) belongs
+/// to the HTTP/1 connection that exists only after them: on 2026-10-08 a
+/// silent connection was still open after 16 s while a partial head was closed
+/// at 10.0 s. A connection that had been answered and gone back to keep-alive
+/// WOULD be closed by that deadline after ten seconds, ending the window. If
+/// the server ever bounds the wait for the first byte, every held connection
+/// here has to finish inside that bound instead.
+///
+/// The two assertions:
+///
+/// - **Held.** The pending request is not answered while every permit is
+///   held. Absence of an answer can only be shown over a window, so the window
+///   is MEASURED: four times the slowest probe answer, and never less than the
+///   two seconds it used to be. A server without a ceiling answers within
+///   about one probe's time, so on a slow host a fixed two seconds could have
+///   expired before a broken server answered, and passed it.
+/// - **Released.** After one accepted connection is dropped, the pending
+///   request is answered. The wait is bounded by [`SERVE_LIMIT`]; a permit that
+///   never came back fails there.
 #[test]
 fn the_connection_ceiling_holds_and_then_releases() {
     const CEILING: usize = 256;
     let fixture = Fixture::new("ceiling");
     let (_server, port) = start_server(&fixture);
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let connect = |i: usize| {
+        TcpStream::connect_timeout(&address, Duration::from_secs(5))
+            .unwrap_or_else(|e| panic!("connection {i}: {e}"))
+    };
 
-    // Fill every permit with connections that are accepted and then idle.
+    // Every permit but one, a batch at a time, each batch proven accepted by a
+    // probe. A probe needs a free permit to be answered, which is why the last
+    // permit is taken separately below.
     let mut held = Vec::with_capacity(CEILING);
-    for i in 0..CEILING {
-        let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
-            .unwrap_or_else(|e| panic!("connection {i}: {e}"));
-        held.push(stream);
+    let mut slowest_answer = Duration::ZERO;
+    while held.len() < CEILING - 1 {
+        let batch = (CEILING - 1 - held.len()).min(UNACCEPTED_AT_ONCE);
+        for _ in 0..batch {
+            held.push(connect(held.len()));
+        }
+        slowest_answer = slowest_answer.max(answered_after(port, held.len()));
     }
-    // Give the accept loop time to take all of them.
-    std::thread::sleep(Duration::from_millis(500));
+    // The last permit. Nothing proves this one accepted, and nothing needs to:
+    // the pending request below is queued behind it either way.
+    held.push(connect(held.len()));
 
     // A further request connects (the backlog accepts the TCP handshake) but is
     // not served, because no permit is free.
@@ -1017,23 +1086,27 @@ fn the_connection_ceiling_holds_and_then_releases() {
         "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
     )
     .unwrap();
-    pending
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    let window = (slowest_answer * 4).clamp(Duration::from_secs(2), Duration::from_secs(20));
+    pending.set_read_timeout(Some(window)).unwrap();
     let mut buffer = [0u8; 64];
-    assert!(
-        pending.read(&mut buffer).is_err(),
-        "the server answered past its connection ceiling"
-    );
+    // Only an expired read timeout is "unanswered". A reset or an EOF is the
+    // server (or the kernel) doing something with the connection, which is not
+    // what a held ceiling does.
+    match pending.read(&mut buffer) {
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+        other => panic!(
+            "the server answered past its connection ceiling within {window:?} (slowest probe \
+             {slowest_answer:?}): {other:?} {:?}",
+            String::from_utf8_lossy(&buffer)
+        ),
+    }
 
-    // Free exactly one permit.
-    drop(held.pop().expect("one to drop"));
+    // Free exactly one permit: the FIRST connection, which the first probe
+    // proved accepted.
+    drop(held.swap_remove(0));
 
-    // Now it is served. The read timeout is the assertion: a permit that never
-    // came back would fail here.
-    pending
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    // Now it is served. A permit that never came back fails here.
+    pending.set_read_timeout(Some(SERVE_LIMIT)).unwrap();
     let mut response = Vec::new();
     pending
         .read_to_end(&mut response)
@@ -1041,6 +1114,7 @@ fn the_connection_ceiling_holds_and_then_releases() {
     let text = String::from_utf8_lossy(&response);
     assert!(text.starts_with("HTTP/1.1 200"), "{text}");
     assert!(text.contains("\"status\":\"ok\""), "{text}");
+    drop(held);
 }
 
 /// **A client holding a connection open cannot hold the shutdown open.**

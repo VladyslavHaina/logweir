@@ -234,6 +234,9 @@ fn create_topic(topic: &str, configs: &[(&str, &str)]) {
     }
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     broker_cli_ok(&borrowed, &format!("create topic {topic}"));
+    // FX-18: rows read the new topic's configuration at once (the fx4 control
+    // must answer non-empty); a broker that does not hold it yet answers empty.
+    harness::await_created_on(&s.plaintext, topic, 1);
 }
 
 fn delete_topic(topic: &str) {

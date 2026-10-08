@@ -9,7 +9,7 @@
 // OS trust store; TLS itself is proven by curl --cacert against that CA (the report says so).
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { WIZARD_STEPS, wizardAt, wizardStep, openDestinationCreate } from "../../console-steps.mjs";
@@ -18,6 +18,21 @@ export { WIZARD_STEPS, wizardAt, wizardStep, openDestinationCreate };
 
 const require = createRequire(import.meta.url);
 export const { chromium } = require("playwright");
+
+// THE BROWSER EVERY JOURNEY HERE LAUNCHES (FX-18). A bare `chromium.launch()` runs the headless
+// shell the installed Playwright pins, and fails on a host whose browser cache lacks that build.
+// Either install it (`npx playwright install chromium-headless-shell`, README.md beside this file)
+// or point LOGWEIR_POC_CHROMIUM at a Chromium or Chrome executable; UI_E2E_CHROMIUM, the
+// scripts/*-ui-e2e.mjs harnesses' name for the same override, is read when it is not set.
+export const CHROMIUM = process.env.LOGWEIR_POC_CHROMIUM || process.env.UI_E2E_CHROMIUM || "";
+
+export async function launchBrowser(options = {}) {
+  if (!CHROMIUM) return chromium.launch(options);
+  if (!existsSync(CHROMIUM)) {
+    throw new Error(`LOGWEIR_POC_CHROMIUM names ${CHROMIUM}, which does not exist`);
+  }
+  return chromium.launch({ ...options, executablePath: CHROMIUM });
+}
 
 export const HOST = process.env.CONSOLE_HOST || "logweir.localtest.me";
 export const BASE = `https://${HOST}`;
@@ -65,7 +80,7 @@ export async function gotoHash(page, hash) {
 }
 
 async function explore(role, hash, outdir) {
-  const browser = await chromium.launch();
+  const browser = await launchBrowser();
   try {
     const { page } = await newSession(browser, role);
     await gotoHash(page, hash);
