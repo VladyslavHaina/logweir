@@ -12,11 +12,17 @@
 //! moment the first restored record of the FIRST topic lands, the row sends
 //! the engine container a SIGTERM (`docker kill --signal TERM`).
 //!
-//! The archive is two topics of three partitions, `PER_PARTITION` records
-//! each, one segment per partition, and the point in time three quarters into
-//! every segment — so every segment STRADDLES it, the aggregate count bound's
-//! `lower` is 0 and it can never fire (PROD-07.1 review H1, hole A). Two
-//! restores, each stopped the same way:
+//! The archive is two topics of three partitions. The FIRST (`a`, first by
+//! name, which is the order the backup engine selects topics in) is large —
+//! `A_PER_PARTITION` records a millisecond apart, so its window takes the
+//! engine seconds to restore and the signal lands inside it (a first attempt
+//! with 60,000 records saw the engine restore the whole topic in 0.36 s,
+//! before `docker kill` arrived). The SECOND (`b`) is small, `B_PER_PARTITION`
+//! records `B_STEP` ms apart, ONE segment per partition, and the point in time
+//! lies inside every one of them — so the second topic's segments STRADDLE it,
+//! they add nothing to the aggregate count bound's `lower`, and the first
+//! topic's exact restore is inside that bound (PROD-07.1 review H1, hole A).
+//! Two restores, each stopped the same way:
 //!
 //! - **`max3`**: `sample.max_partitions: 3`. The old first-N truncation kept
 //!   the three partitions of the first topic — exactly the topic that
@@ -55,15 +61,20 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PARTS: i32 = 3;
-const PER_PARTITION: i64 = 20_000;
+/// The first topic: `T + i` for `i` below this, per partition.
+const A_PER_PARTITION: i64 = 200_000;
+/// The second topic: `T + i * B_STEP` for `i` below this, per partition, so
+/// its one segment per partition spans the point in time.
+const B_PER_PARTITION: i64 = 1_000;
+const B_STEP: i64 = 200;
 /// The fixture's CreateTime base, `2025-10-09T08:53:20Z` — the record-semantics
 /// epoch, past the broker's default retention, so every topic this file
 /// creates carries `retention.ms=-1`.
 const T: i64 = 1_760_000_000_000;
-/// Three quarters into every segment: each straddles it.
-const PIT: i64 = T + PER_PARTITION * 3 / 4;
-/// Records of each partition at or before the point in time.
-const IN_WINDOW: i64 = PER_PARTITION * 3 / 4 + 1;
+/// Three quarters into the first topic; inside every segment of the second.
+const PIT: i64 = T + 150_000;
+/// Records of each partition of the FIRST topic at or before the point in time.
+const IN_WINDOW: i64 = 150_001;
 const ID_PREFIX: &str = "fx23-";
 const RESTORE_DEADLINE_SECS: u64 = 900;
 
@@ -156,18 +167,18 @@ impl Drop for Lab {
     }
 }
 
-/// `n` records per partition, `T + i`, with a padded value so a restore of one
-/// topic takes long enough to signal inside it.
-fn fixture(tag: &str) -> Vec<Out> {
+/// `n` records per partition at `T + i * step`, with a padded value so a
+/// restore of the first topic takes long enough to signal inside it.
+fn fixture(tag: &str, n: i64, step: i64) -> Vec<Out> {
     let pad = "z".repeat(200);
     (0..PARTS)
         .flat_map(|p| {
             let pad = pad.clone();
             let tag = tag.to_string();
-            (0..PER_PARTITION).map(move |i| {
+            (0..n).map(move |i| {
                 Out::kv(
                     p,
-                    Some(T + i),
+                    Some(T + i * step),
                     &format!("{tag}-p{p}-{i}"),
                     &format!("{i} {pad}"),
                 )
@@ -315,11 +326,12 @@ fn a_sigterm_stopped_restore_is_signed_fail_never_pass() {
     let mut lab = Lab::new();
     let a = lab.source_topic("a");
     let b = lab.source_topic("b");
-    kafka::produce_plain(&a, &fixture("a")).expect("produce the first topic");
-    kafka::produce_plain(&b, &fixture("b")).expect("produce the second topic");
+    kafka::produce_plain(&a, &fixture("a", A_PER_PARTITION, 1)).expect("produce the first topic");
+    kafka::produce_plain(&b, &fixture("b", B_PER_PARTITION, B_STEP))
+        .expect("produce the second topic");
     let backup_id = lab.name("arch");
     lab.archives.push(backup_id.clone());
-    let o = kafka::backup_run(&backup_id, &[&a, &b], PER_PARTITION as u64);
+    let o = kafka::backup_run(&backup_id, &[&a, &b], A_PER_PARTITION as u64);
     assert_eq!(
         o.status.code(),
         Some(0),
@@ -336,21 +348,25 @@ fn a_sigterm_stopped_restore_is_signed_fail_never_pass() {
         .iter()
         .filter_map(|t| t["name"].as_str().map(str::to_string))
         .collect();
-    assert_eq!(order.len(), 2, "{order:?}");
-    for t in [&a, &b] {
-        let arc = kafka::read_archive(&backup_id, t).expect("archive");
-        assert_eq!(arc.records.len() as i64, PER_PARTITION * i64::from(PARTS));
-        assert_eq!(
-            arc.segments.len(),
-            PARTS as usize,
-            "{t}: one segment per partition, so every segment straddles the point in time"
+    assert_eq!(
+        order,
+        vec![a.clone(), b.clone()],
+        "the precondition: the large topic is the one the engine restores first"
+    );
+    let arc = kafka::read_archive(&backup_id, &a).expect("archive");
+    assert_eq!(arc.records.len() as i64, A_PER_PARTITION * i64::from(PARTS));
+    let arc = kafka::read_archive(&backup_id, &b).expect("archive");
+    assert_eq!(arc.records.len() as i64, B_PER_PARTITION * i64::from(PARTS));
+    assert_eq!(
+        arc.segments.len(),
+        PARTS as usize,
+        "{b}: one segment per partition, so each straddles the point in time"
+    );
+    for s in &arc.segments {
+        assert!(
+            s.start_timestamp <= PIT && s.end_timestamp > PIT,
+            "{b}: {s:?} must straddle the point in time"
         );
-        for s in &arc.segments {
-            assert!(
-                s.start_timestamp <= PIT && s.end_timestamp > PIT,
-                "{t}: {s:?} must straddle the point in time"
-            );
-        }
     }
 
     let out_dir = demo_dir().join("stopped-restore");
