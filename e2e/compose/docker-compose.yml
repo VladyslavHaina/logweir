@@ -90,10 +90,14 @@ services:
       # `__share_group_state` is never created (INVALID_REPLICATION_FACTOR on
       # every attempt) and share groups get members but no share-partition
       # state: no start offsets to read (PROD-04.0 §3.8, measured on 4.3.1).
-      # A 3.x broker does not know either key and ignores it: measured on 3.7.1
-      # and 3.9.2, both reach server.properties, the broker starts and serves
-      # as before, and its log never names them. Every
-      # single-node broker below carries the same two lines
+      # A 3.x broker does not USE either key, but it does not hide them:
+      # measured on 3.7.1 and 3.9.2, both reach server.properties, the broker
+      # starts and serves as before and its log never names them, and
+      # DescribeConfigs on the broker reports both as STATIC entries,
+      # `sensitive=true` with a null value — a key the broker cannot type is
+      # withheld (PROD-04.0 §3.9's mechanism, as for `super.users`). So a 3.x
+      # broker's configuration reads two more "set, value withheld" keys.
+      # Every single-node broker below carries the same two lines
       # (e2e/tests/stack_params.rs checks it).
       KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
@@ -726,16 +730,17 @@ services:
     depends_on:
       kafka-broker-1: { condition: service_healthy }
     entrypoint: ["/bin/bash", "-c"]
-    # `--if-not-exists` and then a describe: the `streams` profile's
-    # streams-topics creates the same input topic and may run at the same
-    # moment, so "already exists" is success here.
+    # The `streams` profile's streams-topics creates the same input topic and
+    # may run at the same moment; with `--if-not-exists` the loser of that
+    # race still exits 0 (measured by PROD-04.0d's review on 4.3.1 and 3.7.1:
+    # 20 and 10 concurrent creates, every one rc 0; without the flag a loser
+    # exits 1).
     command:
       - >-
-        for t in streams-plaintext-input streams-wordcount-processor-output; do
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-broker-1:9094 --create
-        --if-not-exists --topic $$t --partitions 1 --replication-factor 1
-        || /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-broker-1:9094 --describe
-        --topic $$t || exit 1; done
+        --if-not-exists --topic streams-plaintext-input --partitions 1 --replication-factor 1
+        && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-broker-1:9094 --create
+        --if-not-exists --topic streams-wordcount-processor-output --partitions 1 --replication-factor 1
 
   streams-protocol-wordcount:
     image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}

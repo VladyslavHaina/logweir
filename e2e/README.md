@@ -15,9 +15,10 @@ five listeners on host ports 9092 (plaintext), 9095 (pods) and 9097 (SCRAM),
 MinIO on 9000 and 9001, and `just e2e-up` / `just e2e` / `just e2e-down`.
 `docker compose config` renders byte for byte what it rendered before these
 parameters existed, except for two broker settings PROD-04.0d added for share
-groups (`KAFKA_SHARE_COORDINATOR_STATE_TOPIC_*`, below), which the 3.7 broker
-does not know and ignores (measured: it starts and serves as before, and its
-log never names them). The default stack is shared: on the
+groups (`KAFKA_SHARE_COORDINATOR_STATE_TOPIC_*`, below). The 3.7 broker does
+not use them: it starts and serves as before and never logs them, but its
+DescribeConfigs now reports both as sensitive entries with no value (below).
+The default stack is shared: on the
 orchestrated run, hold `claude/compose-lock.sh` while you use it.
 
 ## Parallel stacks: slots
@@ -150,7 +151,7 @@ container with `timeout` or `gtimeout` when present (this host's
 | `objectstore` | `objectstore` (+ setup) | SeaweedFS 4.48 beside MinIO: `kafka-backups`, `logweir-evidence`, `kafka-backups-locked` (Object Lock) and `kafka-backups-2`, credentials `minioadmin`/`minioadmin` | 9130 | PROD-09.1 (PROD-09.2, REPLACE-MINIO) |
 | `registry` | `registry` | Karapace 6.2.3, Schema-Registry-compatible, schemas in `_schemas` on `kafka-broker-1`, BACKWARD compatibility | 9141 | PROD-03.0 (PROD-03.1, 03.2) |
 | `streams` | `streams-wordcount` (+ topics) | Apache Kafka's WordCountDemo from the broker line's own image, group `logweir-e2e-wordcount`, in-memory state stores | none | PROD-06.1 (PROD-04.x, 06.2) |
-| `streams-protocol` | `streams-protocol-wordcount` (+ topics) | The same idea on the STREAMS rebalance protocol (KIP-1071, `group.protocol=streams`): Apache Kafka's WordCountProcessorDemo, group `logweir-e2e-streams-protocol`, a Streams group that `kafka-groups.sh --list` types `Streams` and the consumer-group tools do not show. It reads `streams-plaintext-input` and writes `streams-wordcount-processor-output`, so it runs beside `streams` (two WordCountDemos would share one output topic). In-memory store, changelog-backed, no repartition topic; counts are forwarded on stream-time punctuation, i.e. once a later record arrives. **4.x lines only** (measured on 4.3.1): on 3.x the application exits and `up --wait` fails. The groups fixture's streams member | none | PROD-04.0d, for PROD-06.1 (PROD-04.1, 04.2, 06.x) |
+| `streams-protocol` | `streams-protocol-wordcount` (+ topics) | The same idea on the STREAMS rebalance protocol (KIP-1071, `group.protocol=streams`): Apache Kafka's WordCountProcessorDemo, group `logweir-e2e-streams-protocol`, a Streams group that `kafka-groups.sh --list` types `Streams` and the consumer-group tools do not show. It reads `streams-plaintext-input` and writes `streams-wordcount-processor-output`, so it runs beside `streams` (two WordCountDemos would share one output topic). In-memory store, changelog-backed, no repartition topic; counts are forwarded on stream-time punctuation, i.e. once a later record arrives. **4.x lines only** (measured on 4.3.1): on 3.x the application exits and `up --wait` fails. The groups fixture's streams member | none | PROD-04.0d (PROD-04.1, 04.2, 06.1, 06.x) |
 | `acl` | `kafka-acl` (+ setup) | A single-node cluster that ENFORCES ACLs (KRaft's StandardAuthorizer, `super.users=User:ANONYMOUS`, `allow.everyone.if.no.acl.found=true`). Every PLAINTEXT client, in-network on `kafka-acl:9094` or host-side on 9150, is `User:ANONYMOUS`, a super user; the SCRAM-SHA-512 user `logweir` (password `logweir-e2e-not-a-secret`) on 9151 is the restricted principal a row's ACLs name. The marker topic exists. PROD-04.0 §3.9's visibility state is opt-in: `e2e/compose/groups.sh visibility apply` / `remove` (below). Harness: `bootstrap_acl()`, `bootstrap_acl_sasl()` | 9150-9151 | FX-4 (PROD-04.0d extends it; PROD-04.1, 04.2, 05.3) |
 | `txn` | reserved | The transactional producer PROD-01.1 builds | — | PROD-01.1 |
 
@@ -195,7 +196,9 @@ just e2e-down
 describe`): classic groups always, consumer groups with `group.version` ≥ 1,
 share groups with `share.version` ≥ 1, streams groups with `streams.version`
 ≥ 1. That is every type on the 4.3 line and classic only on 3.9 (measured on
-4.3.1 and 3.9.2).
+4.3.1 and 3.9.2). `list` prints the type the BROKER reports (`kafka-groups.sh`
+on 4.x, `kafka-consumer-groups.sh --list --type` on 3.9); 3.7.1's tools cannot
+report one, and `list` prints `-` there.
 
 | Group | Type | State | How |
 |---|---|---|---|
@@ -230,8 +233,13 @@ on.
 `share.coordinator.state.topic.replication.factor=1` and `…min.isr=1`, as the
 offsets and transaction topics already were. With the defaults (3 and 2)
 `__share_group_state` is never created on one broker, so share groups get
-members but no share-partition state (§3.8). 3.x brokers ignore both keys
-(measured on 3.7.1 and 3.9.2).
+members but no share-partition state (§3.8). A 3.x broker does not use either
+key, but it does not hide them: DescribeConfigs on the broker reports both as
+STATIC entries, `sensitive=true` with a null value, because a key the broker
+cannot type is withheld (§3.9's mechanism, the same as `super.users` on `acl`).
+Measured on 3.7.1 and 3.9.2, where the broker starts, serves as before and
+never logs them. A row that reads a 3.x single-node broker's configuration
+(PROD-05.3) therefore sees two more "set, value withheld" keys.
 
 **Groups a principal cannot see (§3.9), on `acl`.** `visibility apply`, as the
 super user on `kafka-acl`: topic `pa-orders`; groups `pa-visible` and

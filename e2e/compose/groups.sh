@@ -19,7 +19,8 @@
 #   start MEMBER...    start them again, each waited on until Stable
 #   down               stop every live member (the groups and commits stay)
 #   list               every fixture group of this line, with the type and
-#                      state the broker reports
+#                      state the broker reports ('-' where its tools cannot
+#                      report a type: 3.7.1)
 #   visibility apply   §3.9's setup on the `acl` profile's kafka-acl (below)
 #   visibility remove  undo it
 #
@@ -300,16 +301,20 @@ EOF
 cmd_list() {
   [ -n "$FEATURES" ] || load_types
   local types="" g kind want m t
+  # The TYPE is always the broker's answer (ListGroups v5), never this
+  # script's: kafka-groups.sh on 4.x (GROUP TYPE PROTOCOL), else
+  # kafka-consumer-groups.sh --list --type (GROUP TYPE; 3.9.2 has it). A line
+  # whose tools cannot say (3.7.1 has no --type) prints '-'.
   if kexec "test -x $T/kafka-groups.sh" >/dev/null 2>&1; then
     types=$(kexec "$T/kafka-groups.sh --bootstrap-server $B --list" 2>/dev/null)
+  else
+    types=$(kexec "$T/kafka-consumer-groups.sh --bootstrap-server $B --list --type 2>/dev/null" 2>/dev/null)
   fi
   printf '%-32s %-9s %s\n' GROUP TYPE STATE
   while read -r g kind want m; do
     has_kind "$kind" || continue
-    # The broker's own TYPE where it has kafka-groups.sh (4.x); a 3.x
-    # broker has classic groups only.
     t=$(printf '%s\n' "$types" | awk -v g="$g" '$1 == g { print $2 }')
-    printf '%-32s %-9s %s\n' "$g" "${t:-Classic}" "$(state_of "$g" "$kind")"
+    printf '%-32s %-9s %s\n' "$g" "${t:--}" "$(state_of "$g" "$kind")"
   done <<EOF
 $(set_rows)
 EOF

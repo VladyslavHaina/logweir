@@ -358,8 +358,13 @@ smoke_groups() {
   [ "$(lvl group.version)" -ge 1 ] 2>/dev/null && has_c=1
   [ "$(lvl share.version)" -ge 1 ] 2>/dev/null && has_s=1
   [ "$(lvl streams.version)" -ge 1 ] 2>/dev/null && has_t=1
-  rows="pa-classic-empty Classic Empty
-pa-classic-live Classic Stable"
+  # The classic rows' TYPE must be the BROKER's answer: a line whose tools
+  # cannot report one (3.7.1's kafka-consumer-groups.sh has no --type) must
+  # show '-', never a type the helper made up.
+  local ct=Classic
+  innet "$T/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --list --type" | grep -q '^GROUP  *TYPE' || ct=-
+  rows="pa-classic-empty $ct Empty
+pa-classic-live $ct Stable"
   [ $has_c = 1 ] && rows="$rows
 pa-consumer-empty Consumer Empty
 pa-consumer-live Consumer Stable"
