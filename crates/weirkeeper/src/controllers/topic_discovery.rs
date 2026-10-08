@@ -61,14 +61,17 @@
 //!   collected `TopicDiscovery` leaves nothing behind. The grant is
 //!   `config/rbac/role.yaml`'s one `delete` rule, on `topicdiscoveries` and
 //!   `preflights` and nothing else.
-//! * **It builds no `Api<Event>`.** D2 §4.3's event-sourced waiting codes
-//!   (`RunnerServiceAccountMissing`, `PodCreateRejected`, `SigningKeyMissing`,
-//!   `VolumeMountFailed`) need `events: list`, which the role now grants for
-//!   `controllers/preflight.rs`. Wiring them HERE is a change to what this
-//!   reconciler observes rather than to what it may do, and it stays W8's
-//!   file: the classifier is still handed an EMPTY fact slice, every
-//!   pod-status-sourced code still works, and the four event-sourced ones
-//!   report as the more general state rather than as a fabricated one.
+//! * **It reads Events only to explain a pod that has not started** (FX-11).
+//!   D2 §4.3's event-sourced waiting codes (`RunnerServiceAccountMissing`,
+//!   `PodCreateRejected`, `SigningKeyMissing`, `VolumeMountFailed`) come from
+//!   the Job's and the pod's Events, which the role's `events: list` grant
+//!   covers. They are read through [`crate::check::job_events`] — by
+//!   `involvedObject.uid`, and only while the classifier could use one — so a
+//!   pod a `ResourceQuota` or a `LimitRange` refused at creation ends
+//!   `PodCreateRejected` with the admission's own words 30 seconds after the
+//!   Job, and the Job is cancelled, instead of reading `PodNotStarted` until
+//!   its deadline. A failed list is an empty one: the classification is then
+//!   the more general state it was before, never a fabricated one.
 
 use std::sync::Arc;
 
@@ -1767,13 +1770,14 @@ async fn observe(
         }
     };
 
+    // FX-11: the Events that explain a pod that never started, read only when
+    // the classifier could use one (no pod after 30 s, a mount still pending
+    // after 60 s) — a running or finished pod costs no request here.
+    let events = check::job_events(&ctx.client, namespace, job, pod.as_ref(), now).await;
     let observation = check::classify(&check::Input {
         job,
         pod: pod.as_ref(),
-        // EMPTY, AND SAID SO IN THE MODULE HEADER: `events: list` is W11's
-        // grant, and `manifest_lint::every_call_site_has_a_grant` fails the
-        // moment an `Api<Event>` appears here without it.
-        events: &[],
+        events: &events,
         log: log.as_deref(),
         expect: &expect,
         now,

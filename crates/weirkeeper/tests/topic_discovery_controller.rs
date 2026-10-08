@@ -3108,9 +3108,12 @@ fn code_only(src: &str) -> String {
 /// TRANSIENT check kinds, D2 §4.3's `gc.rs` and §5.8's retention — so the
 /// claim this test can honestly make changed shape: not "there is no delete"
 /// but "there is exactly one, it is `Api<TopicDiscovery>`'s, it carries a UID
-/// precondition, and it is inside `collect_expired`". The three things still
-/// absent — `Api<Secret>`, `Api<Event>`, `replace_status` — are unchanged
-/// grants this role does not hold.
+/// precondition, and it is inside `collect_expired`". `Api<Secret>` and
+/// `replace_status` are still absent because the role grants neither.
+/// `Api<Event>` is absent for a different reason since FX-11: the role grants
+/// `events: list`, and this reconciler reads them through
+/// `check::job_events` — the shared, bounded read — rather than a handle of
+/// its own.
 ///
 /// MUTANT: delete the `preconditions:` line, or move the `.delete(` call out
 /// of `collect_expired`, or add a second one. Each fails an assertion below.

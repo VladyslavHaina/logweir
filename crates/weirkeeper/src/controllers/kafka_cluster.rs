@@ -44,6 +44,19 @@
 //! `reachable: false` from it would report a control-plane mistake as a fact
 //! about somebody's cluster.
 //!
+//! # A probe whose pod is refused at creation says so (FX-11)
+//!
+//! A `ResourceQuota`, a `LimitRange` or an admission webhook can refuse the
+//! probe Job's pod outright, and the Job controller's only trace is a
+//! `FailedCreate` Event on the Job. Once the Job has had no pod for
+//! [`check::waiting::POD_CREATE_GRACE`] (30 s, the `Preflight` grace) and that
+//! Event says why, the Job is cancelled and the status reads
+//! `Reachable=Unknown` / `PodCreationForbidden` with the admission's own
+//! words — never `ProbeRunning` for two minutes and then `NoExitCode`.
+//! `reachable` and `clusterId` keep their last values: a probe that never ran
+//! observed nothing. The Job then gets the usual TTL, so the next probe runs on
+//! the ordinary cadence and clears the reason once the namespace admits it.
+//!
 //! # It creates, it patches, and it deletes nothing
 //!
 //! The re-probe cadence is the Job's own [`PROBE_TTL_SECONDS`]: the API server
@@ -163,6 +176,9 @@ pub const PROBE_CONDITION_REASONS: &[&str] = &[
     crate::conditions::TERMINAL_STATE_CONNECTION_REFERENCE_INVALID,
     crate::conditions::TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED,
     crate::conditions::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+    // FX-11: the probe Job's pod was refused at creation. The shared terminal
+    // state a `Backup`'s or a `Restore`'s runner reaches for the same refusal.
+    crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN,
 ];
 
 /// `spec.activeDeadlineSeconds` on a probe Job.
@@ -700,6 +716,43 @@ pub fn crashed_status_patch(
     })
 }
 
+/// The `/status` merge patch for a probe Job whose pod the namespace REFUSED
+/// at creation — FX-11.
+///
+/// `PodCreationForbidden` and the admission's own words (`refusal` is
+/// [`check::waiting::pod_create_refusal`]'s, already redacted), with the
+/// condition `Unknown`: the probe never ran, so nothing about the cluster is
+/// known either way, and `reachable` and `clusterId` are left alone exactly as
+/// [`crashed_status_patch`] leaves them. The difference from that patch is the
+/// whole point: the operator reads the quota, not "no exit code".
+#[must_use]
+pub fn pod_refused_status_patch(
+    cluster: &KafkaCluster,
+    job_name: &str,
+    refusal: &check::Waiting,
+    observed_at: DateTime<Utc>,
+) -> Value {
+    let reason = crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN;
+    json!({
+        "status": {
+            "observedAt": observed_at,
+            "reason": reason,
+            "conditions": [condition(
+                cluster,
+                "Unknown",
+                reason,
+                &format!(
+                    "probe Job {job_name} never ran, so `reachable` is left unset rather than \
+                     invented: {} ({})",
+                    refusal.message,
+                    refusal.code.as_str()
+                ),
+                observed_at,
+            )],
+        }
+    })
+}
+
 /// The `/status` merge patch for a refusal this controller made ITSELF, before
 /// any `POST`.
 #[must_use]
@@ -908,7 +961,13 @@ async fn find_pod(
 ///    re-probe timer.
 /// 4. **Job finished, no terminated state for `runner`** → the crashed-Job
 ///    case, classified by [`backup::crash_terminal_state`], with `reachable`
-///    left alone.
+///    left alone — unless the Job never had a pod and its `FailedCreate` Event
+///    says why, which is `PodCreationForbidden` with the admission's words and
+///    the usual TTL (FX-11).
+///
+/// Step 2 also fails fast: a Job with no pod after 30 seconds and a
+/// `FailedCreate` Event naming it is cancelled, and the same
+/// `PodCreationForbidden` status is written then.
 ///
 /// # No clock read in this function
 ///
@@ -1160,6 +1219,47 @@ async fn reconcile_cluster_inner(
 
     // STEP 2. Running.
     if !backup::job_finished(&job) {
+        // FX-11: A POD THE NAMESPACE REFUSED IS FAILED FAST. No request at all
+        // while the Job's own status counts a pod or the Job is younger than
+        // the 30-second grace; otherwise one pod list and, when it finds none,
+        // one events list by the Job's UID.
+        if let Some(refusal) = check::refused_pod_creation(client, &namespace, &job, now)
+            .await
+            .map_err(KafkaClusterError::Api)?
+        {
+            let cancelled =
+                check::cancel(client, &namespace, &job, &cluster.uid().unwrap_or_default())
+                    .await
+                    .map_err(KafkaClusterError::Api)?;
+            warn!(
+                cluster = %name,
+                namespace = %namespace,
+                job = %job_name,
+                code = refusal.code.as_str(),
+                cancelled,
+                reason = %refusal.message,
+                "the probe Job's pod was refused at creation; the Job is cancelled and the \
+                 status names the refusal, `reachable` is left unset"
+            );
+            patch_status_if_changed(
+                &clusters,
+                cluster,
+                &name,
+                pod_refused_status_patch(cluster, &job_name, &refusal, now),
+            )
+            .await?;
+            return Ok(ProbeOutcome {
+                job_name,
+                created: false,
+                reachable: None,
+                cluster_id: None,
+                reason: Some(crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN.to_string()),
+                ttl_patched: false,
+                // The cancelled Job finishes within a second; the pass that
+                // sees it finished gives it the TTL (step 4).
+                requeue: Requeue::After(REQUEUE_SECS),
+            });
+        }
         patch_status_if_changed(
             &clusters,
             cluster,
@@ -1191,6 +1291,57 @@ async fn reconcile_cluster_inner(
     // path needs a pod whose container terminated and this branch is "there is
     // none".
     let Some((pod, exit_code)) = terminated else {
+        // FX-11: A JOB THAT NEVER HAD A POD, AND WAS TOLD WHY. Read before the
+        // crash classification, which can only say `NoExitCode` for "no pod".
+        let refusal = if found.pod.is_none() && found.contested.is_empty() {
+            check::finished_without_pod(client, &namespace, &job, now).await
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            let observed = observed_at(&job, None, now);
+            warn!(
+                cluster = %name,
+                namespace = %namespace,
+                job = %job_name,
+                code = refusal.code.as_str(),
+                reason = %refusal.message,
+                "the probe Job finished without ever having a pod, because its pod was refused \
+                 at creation; `reachable` is left unset and the Job gets the usual TTL, so the \
+                 next probe runs on the ordinary cadence"
+            );
+            patch_status_if_changed(
+                &clusters,
+                cluster,
+                &name,
+                pod_refused_status_patch(cluster, &job_name, &refusal, observed),
+            )
+            .await?;
+            // ONLY NOW, as on the happy path: the status that names the
+            // refusal is on the server before the Job (and the Event's
+            // subject) can be collected. The TTL is also the re-probe timer,
+            // so a quota that is lifted is noticed within one cadence, and a
+            // quota that is not costs one refused Job per cadence — never a
+            // retry storm.
+            jobs.patch(
+                &job_name,
+                &PatchParams::default(),
+                &Patch::Merge(json!({
+                    "spec": { "ttlSecondsAfterFinished": PROBE_TTL_SECONDS }
+                })),
+            )
+            .await
+            .map_err(KafkaClusterError::Api)?;
+            return Ok(ProbeOutcome {
+                job_name,
+                created: false,
+                reachable: None,
+                cluster_id: None,
+                reason: Some(crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN.to_string()),
+                ttl_patched: true,
+                requeue: Requeue::After(RE_PROBE_SECS),
+            });
+        }
         let terminal_state = if found.contested.is_empty() {
             backup::crash_terminal_state(found.pod.as_ref())
         } else {

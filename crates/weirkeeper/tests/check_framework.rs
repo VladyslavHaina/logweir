@@ -1479,15 +1479,14 @@ fn no_check_module_names_the_legacy_pod_label_or_the_two_selector_helper() {
 
 /// **The check framework builds no `Api<Event>` handle.**
 ///
-/// The weirkeeper `ClusterRole` grants no verb on `events`, and
-/// `crates/logweir/tests/manifest_lint.rs`'s `every_call_site_has_a_grant`
-/// panics on an `Api<T>` whose resource it cannot map — so a handle added here
-/// before W11's rule lands breaks that gate rather than 403ing in production.
+/// The weirkeeper `ClusterRole` now grants `list` on `events` (D2 §7.1), and
+/// every Job-owning controller reads them (FX-11) — but not from here.
 /// [`weirkeeper::check::EventFact`] is the seam: the classifier takes the facts
-/// as values, and the one handle belongs to the controller that will have the
-/// grant. When W11 lands `events: [list, watch]` and the lint learns the type,
-/// this test is what has to be deleted in the same commit — deliberately, so
-/// the grant and the call arrive together.
+/// as values and stays pure, and `check::job_events` delegates the one read to
+/// `diagnostics::events_for`, the bounded, UID-selected, best-effort list the
+/// `Backup` and `Restore` diagnostics already make. A second `Api<Event>` in
+/// this directory would be a second events read with its own bound to review;
+/// this test is what keeps there being one.
 #[test]
 fn the_check_framework_builds_no_event_handle_before_its_grant_exists() {
     for (name, src) in check_sources() {

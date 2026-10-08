@@ -86,8 +86,9 @@ use crate::conditions::{
     REASON_DISCOVERY_RUNNING, REASON_RESOLVED, TERMINAL_STATE_DISCOVERY_FAILED,
     TERMINAL_STATE_DISCOVERY_INCOMPLETE, TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE,
     TERMINAL_STATE_INVALID_TOPIC_SELECTION, TERMINAL_STATE_JOB_NAME_CONFLICT,
-    TERMINAL_STATE_REFERENT_NOT_FOUND, TERMINAL_STATE_SELECTION_EMPTY,
-    TERMINAL_STATE_SELECTION_TOO_LARGE, TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
+    TERMINAL_STATE_POD_CREATION_FORBIDDEN, TERMINAL_STATE_REFERENT_NOT_FOUND,
+    TERMINAL_STATE_SELECTION_EMPTY, TERMINAL_STATE_SELECTION_TOO_LARGE,
+    TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
 };
 use crate::connection::{self, ConnectionUse, ResolvedConnection};
 use crate::controllers::backup::{
@@ -1417,14 +1418,17 @@ async fn observe(
     };
 
     let expect = expectations_for(client, namespace, job_name, uid).await?;
+    // FX-11: the Events that explain a pod that never started, read only when
+    // the classifier could use one. A discovery pod a `ResourceQuota` or a
+    // `LimitRange` refused at creation used to read `Resolving` until the
+    // Job's deadline and then end `DiscoveryFailed` without the admission's
+    // words; it now ends `PodCreationForbidden`, saying them, 30 seconds after
+    // the Job.
+    let events = check::job_events(client, namespace, job, pod.as_ref(), now).await;
     let observation = check::classify(&check::Input {
         job,
         pod: pod.as_ref(),
-        // EMPTY: `events: list` is a grant this controller does not hold, and
-        // `manifest_lint::every_call_site_has_a_grant` fails the moment an
-        // `Api<Event>` appears here without it. Every pod-status-sourced
-        // waiting code still works.
-        events: &[],
+        events: &events,
         log: log.as_deref(),
         expect: &expect,
         now,
@@ -1439,6 +1443,16 @@ async fn observe(
             return Ok(Inner::Pending);
         }
         check::CheckPhase::Failed => {
+            // EARLY CANCEL, as every other check does (FX-11). A terminal
+            // waiting state — a refused pod, a missing Secret — cannot
+            // succeed, and this refusal ends the `Backup`; leaving the Job to
+            // its own `activeDeadlineSeconds` would keep the Job controller
+            // retrying a pod nobody will read.
+            if observation.cancel_now {
+                check::cancel(client, namespace, job, uid)
+                    .await
+                    .map_err(BackupError::Api)?;
+            }
             return Err(BackupError::Refused(
                 discovery_failure_state(observation.reason),
                 format!(
@@ -1447,7 +1461,7 @@ async fn observe(
                     observation.reason,
                     redact(&observation.message)
                 ),
-            ))
+            ));
         }
         check::CheckPhase::Succeeded => {}
     }
@@ -1592,7 +1606,10 @@ async fn observe(
 /// retryable — a runner that printed something unverifiable will print it
 /// again. Everything else is operational (an unreachable broker, a pod that
 /// never started, a deadline) and a retry — which is a NEW `Backup`, and
-/// therefore a fresh discovery — can succeed.
+/// therefore a fresh discovery — can succeed. A pod the namespace refused at
+/// creation is that class too, named `PodCreationForbidden` — the state a
+/// `Backup`'s runner reaches for the same refusal — rather than
+/// `DiscoveryFailed`, which reads as a broker problem (FX-11).
 ///
 /// Both are terminal for THIS run: `Backup.spec` is CEL-immutable, so a requeue
 /// could never resolve differently, and D1 §7.7 says a refused dynamic run is
@@ -1603,6 +1620,16 @@ pub fn discovery_failure_state(code: CheckCode) -> &'static str {
         CheckCode::ResultUnreadable
         | CheckCode::CheckContractMismatch
         | CheckCode::RunnerContractUnsupported => TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE,
+        // FX-11: THE RUNNER KIND'S OWN WORD FOR A REFUSED POD. A `Backup`'s
+        // runner Job whose pod is refused at creation ends
+        // `PodCreationForbidden` (`diagnostics::Code::runner_ready_reason`);
+        // its discovery Job's pod, refused by the same `ResourceQuota`, ends
+        // the same `Backup` with the same terminal state, and the message
+        // carries the admission's words. `DiscoveryFailed` would send an
+        // operator to the broker.
+        CheckCode::PodCreateRejected | CheckCode::RunnerServiceAccountMissing => {
+            TERMINAL_STATE_POD_CREATION_FORBIDDEN
+        }
         _ => TERMINAL_STATE_DISCOVERY_FAILED,
     }
 }
