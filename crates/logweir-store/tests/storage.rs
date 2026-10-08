@@ -492,3 +492,37 @@ fn the_backup_id_derivation_is_one_function() {
     assert_eq!(facts.backup_id, backup_id_from_manifest_key(key));
     assert_eq!(facts.backup_id, "manifest-archive");
 }
+
+/// **FX-16 (review M-1): the key the engine reads a set's manifest at.** For a
+/// store over the plan's location, `engine_manifest_key(id)` is the key
+/// kafka-backup's restore loads (`<prefix>/<id>/manifest.json` through
+/// `S3Backend::full_path`), spelled as the listing spells keys — so a set the
+/// engine wrote under any prefix spelling is found under exactly that key, and
+/// a same-id manifest elsewhere under the prefix is not.
+///
+/// Negative controls: the nested same-id manifest the listing also returns is
+/// never the engine's key; a trailing or doubled slash in the prefix does not
+/// change the key.
+#[test]
+fn the_engine_manifest_key_is_the_one_the_engine_reads() {
+    let s = Store::in_memory("logweir/archive");
+    s.put_create_only("logweir/archive/nightly-7/manifest.json", b"{}")
+        .unwrap();
+    s.put_create_only("logweir/archive/a/nightly-7/manifest.json", b"{}")
+        .unwrap();
+    let listed = s.list_manifest_keys("logweir/archive").unwrap();
+    assert!(
+        listed.contains(&"logweir/archive/a/nightly-7/manifest.json".to_string()),
+        "the nested same-id set is listed too: {listed:?}"
+    );
+    for prefix in ["logweir/archive", "logweir/archive/", "logweir//archive/"] {
+        let key = Store::in_memory(prefix).engine_manifest_key("nightly-7");
+        assert_eq!(key, "logweir/archive/nightly-7/manifest.json", "{prefix:?}");
+        assert!(listed.contains(&key), "{prefix:?}: {listed:?}");
+    }
+    assert_eq!(
+        Store::in_memory("").engine_manifest_key("nightly-7"),
+        "nightly-7/manifest.json",
+        "an empty prefix is the bucket root, as the engine's `prefix: None`"
+    );
+}

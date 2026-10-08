@@ -381,6 +381,13 @@ impl std::fmt::Display for ContractVersion {
 /// (`source.backup`, `latestCompleted` or a pinned id) and the runner performs
 /// no binding check. That is not a weaker mode for the same run — it is the
 /// only mode a pre-catalog plan can express.
+///
+/// # Present, `source.backup` names the point's own set (FX-16)
+///
+/// The receipt describes ONE backup set, so a plan carrying the block names
+/// that set in `source.backup` — never `latestCompleted`, never another id —
+/// and the runner refuses any other plan (`PointBindingSetMismatch`, exit 3),
+/// and any run whose restored set is not the one the binding verified.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PointBinding {
     /// `lwp1-` + 32 lowercase hex characters, content-derived from the signed
