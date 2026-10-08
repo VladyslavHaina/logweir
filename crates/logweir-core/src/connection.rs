@@ -320,6 +320,51 @@ pub struct CredentialBindingRefusal {
 
 impl std::fmt::Display for CredentialBindingRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // FX-20: the same refusal guards object-store and notification
+        // credentials; their wording names what they are bound to. A Kafka
+        // connection's text is PROD-01.3's, byte for byte.
+        let other = if self.binding_env.starts_with("NOTIFY_") {
+            Some((
+                "notification route",
+                "sink",
+                "Set the key to the route's entry in the ProtectionPolicy's \
+                 status.credentialBindings.",
+            ))
+        } else if self.binding_env.starts_with("LOGWEIR_ARCHIVE_")
+            || self.binding_env.starts_with("LOGWEIR_EVIDENCE_")
+        {
+            Some((
+                "destination or archive location",
+                "object store",
+                "Enter the credential through the console, or add the key with the value in \
+                 the BackupDestination's or RetentionPolicy's status.credentialBinding (an \
+                 inline archive's location binding: docs/kubernetes.md §20.10).",
+            ))
+        } else {
+            None
+        };
+        if let Some((object, endpoint, remedy)) = other {
+            return if self.absent {
+                write!(
+                    f,
+                    "{CREDENTIAL_BINDING_MISMATCH}: the credential Secret projected for this \
+                     {object} carries no `{CREDENTIAL_BINDING_KEY}` key (`{}` is unset), so \
+                     nothing shows it was entered for it; it is refused rather than presented \
+                     to the {endpoint}. {remedy} Nothing was dialled",
+                    self.binding_env
+                )
+            } else {
+                write!(
+                    f,
+                    "{CREDENTIAL_BINDING_MISMATCH}: the credential Secret projected for this \
+                     {object} is bound to a different object or endpoint (`{}` does not equal \
+                     the expected binding), so it is refused rather than presented to this \
+                     {object}'s {endpoint}. A changed endpoint needs the credential bound again. \
+                     Nothing was dialled",
+                    self.binding_env
+                )
+            };
+        }
         if self.absent {
             write!(
                 f,
@@ -365,6 +410,15 @@ pub fn check_credential_binding(
     let Some(expected) = expected.map(str::trim).filter(|e| !e.is_empty()) else {
         return Ok(());
     };
+    // FX-20: A FAIL-CLOSED EXPECTATION IS NEVER SATISFIED. A controller that
+    // could not compute a binding (no UID) projects `unbound:…`; a Secret that
+    // happens to carry the same string must not turn that into an accept.
+    if expected.starts_with("unbound:") {
+        return Err(CredentialBindingRefusal {
+            binding_env,
+            absent: projected.map(str::trim).is_none_or(str::is_empty),
+        });
+    }
     match projected.map(str::trim).filter(|p| !p.is_empty()) {
         None => Err(CredentialBindingRefusal {
             binding_env,
@@ -467,6 +521,17 @@ mod tests {
         assert!(!foreign.absent);
         // The message names neither binding.
         assert!(!foreign.to_string().contains("v1:a") && !foreign.to_string().contains("v1:b"));
+        // FX-20: the fail-closed expectation is refused even when a Secret
+        // carries the very same string.
+        assert!(
+            check_credential_binding(env, Some("unbound:no-uid"), Some("unbound:no-uid")).is_err(),
+            "a Secret spelling the fail-closed value must not satisfy it"
+        );
+        assert!(
+            check_credential_binding(env, Some("unbound:no-uid"), None)
+                .unwrap_err()
+                .absent
+        );
     }
 
     #[test]

@@ -191,9 +191,14 @@ pub enum NotifyCmd {
     /// PagerDuty service region. A variable that is present and blank is not a
     /// configured sink.
     ///
-    /// Prints `notify-result=<sink>:<ok|failed>` for each configured sink as
-    /// its final stdout lines. Exits 0 when every configured sink accepted
-    /// (including when none was configured), 1 when one did not, and 3 when
+    /// A controller-built Job also carries each sink Secret's
+    /// `logweir-binding` and the expected value; a sink whose two differ is
+    /// refused before anything is dialled (FX-20).
+    ///
+    /// Prints `notify-result=<sink>:<ok|failed|refused>` for each configured
+    /// sink as its final stdout lines. Exits 0 when every configured sink
+    /// accepted (including when none was configured), 1 when one did not or
+    /// was refused, and 3 when
     /// the event document itself was refused — in which case nothing was
     /// posted and no `notify-result=` line is printed.
     Deliver {

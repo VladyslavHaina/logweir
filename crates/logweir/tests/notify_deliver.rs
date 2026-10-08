@@ -2119,3 +2119,253 @@ fn a_usage_error_is_not_a_delivery_result() {
     assert_eq!(run.code, Some(0));
     assert!(run.stdout.contains("notify-result="));
 }
+
+// ------------------------------------------- FX-20: the credential binding
+
+use logweir_core::credential_binding::{
+    notification_binding, NotificationSink, NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV,
+    NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV, NOTIFY_SLACK_CREDENTIAL_BINDING_ENV,
+    NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV, NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV,
+    NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV,
+};
+
+/// Another policy's UID: the owner of the Secret a thief's route names.
+const VICTIM_UID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+fn bound(sink: NotificationSink, uid: &str, endpoint: Option<&str>) -> String {
+    notification_binding(uid, sink, endpoint)
+}
+
+/// **A sink whose Secret is not bound to this policy is refused before a
+/// request exists; the bound sink beside it still delivers.**
+///
+/// The confused deputy FX-20 closes: a `ProtectionPolicy` author who cannot
+/// read Secrets names ANOTHER policy's routing-key Secret (foreign binding) or
+/// a hand-made one nobody bound (absent), and the deliverer would have posted
+/// that credential. Each refused sink prints `<sink>:refused`, the process
+/// exits 1, and NOTHING is posted to it.
+///
+/// KILLS: the gate dropped; the gate after the POST; one refusal stopping the
+/// other sinks; `refused` reported as `ok`.
+#[test]
+fn fx20_an_unbound_or_foreign_sink_secret_is_refused_before_anything_is_posted() {
+    let pd_expected = bound(NotificationSink::PagerDuty, POLICY_UID, None);
+    let wh_expected = bound(NotificationSink::Webhook, POLICY_UID, None);
+    let sl_expected = bound(NotificationSink::Slack, POLICY_UID, None);
+    let foreign = bound(NotificationSink::PagerDuty, VICTIM_UID, None);
+    let r = routes(&[
+        (ROUTING_KEY_ENV, TEST_ROUTING_KEY),
+        (WEBHOOK_URL_ENV, TEST_WEBHOOK_URL),
+        (SLACK_WEBHOOK_URL_ENV, TEST_SLACK_URL),
+        (
+            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV,
+            &pd_expected,
+        ),
+        (NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV, &foreign),
+        (NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV, &wh_expected),
+        // the webhook Secret carries no binding at all
+        (NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV, &sl_expected),
+        (NOTIFY_SLACK_CREDENTIAL_BINDING_ENV, &sl_expected),
+    ]);
+    let sink = RecordingSink::default();
+    let out = deliver_with(&stale_event(), &r, &sink);
+    assert_eq!(
+        out.stdout,
+        "notify-result=pagerduty:refused\n\
+         notify-result=webhook:refused\n\
+         notify-result=slack:ok\n"
+    );
+    assert_eq!(out.code as u8, 1, "a refused sink is not a delivery");
+    let posted: Vec<String> = sink.posts().into_iter().map(|(u, _)| u).collect();
+    assert_eq!(
+        posted,
+        vec![TEST_SLACK_URL.to_string()],
+        "NOTHING may be posted to a refused sink, and the bound one still goes"
+    );
+    let all = everything(&out);
+    assert!(
+        all.contains(&format!(
+            "pagerduty: CredentialBindingMismatch: the credential Secret projected for this \
+             notification route is bound to a different object or endpoint \
+             (`{NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV}`"
+        )),
+        "the foreign refusal names its variable:\n{all}"
+    );
+    assert!(
+        all.contains(&format!(
+            "(`{NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV}` is unset)"
+        )),
+        "the absent refusal names its variable:\n{all}"
+    );
+    for secret in [TEST_ROUTING_KEY, "WEBHOOKSECRET", &foreign, &pd_expected] {
+        assert!(
+            !all.contains(secret),
+            "`{secret}` reached the output:\n{all}"
+        );
+    }
+}
+
+/// **CONTROL: every sink bound to this policy delivers; a hand-run deliverer
+/// with no expectation checks nothing.** Without this row the refusal above
+/// could be a deliverer that refuses everything.
+#[test]
+fn fx20_bound_sinks_deliver_and_a_hand_run_deliverer_checks_nothing() {
+    let pd = bound(NotificationSink::PagerDuty, POLICY_UID, None);
+    let wh = bound(NotificationSink::Webhook, POLICY_UID, None);
+    let sl = bound(NotificationSink::Slack, POLICY_UID, None);
+    let r = routes(&[
+        (ROUTING_KEY_ENV, TEST_ROUTING_KEY),
+        (WEBHOOK_URL_ENV, TEST_WEBHOOK_URL),
+        (SLACK_WEBHOOK_URL_ENV, TEST_SLACK_URL),
+        (NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV, &pd),
+        (NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV, &pd),
+        (NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV, &wh),
+        (NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV, &wh),
+        (NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV, &sl),
+        (NOTIFY_SLACK_CREDENTIAL_BINDING_ENV, &sl),
+    ]);
+    let sink = RecordingSink::default();
+    let out = deliver_with(&stale_event(), &r, &sink);
+    assert_eq!(
+        out.stdout,
+        "notify-result=pagerduty:ok\nnotify-result=webhook:ok\nnotify-result=slack:ok\n"
+    );
+    assert_eq!(sink.posts().len(), 3);
+    // A Secret bound for the WEBHOOK sink is not the PagerDuty routing key:
+    // the sink kind is in the binding.
+    let r = routes(&[
+        (ROUTING_KEY_ENV, TEST_ROUTING_KEY),
+        (NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV, &pd),
+        (NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV, &wh),
+    ]);
+    let sink = RecordingSink::default();
+    let out = deliver_with(&stale_event(), &r, &sink);
+    assert_eq!(out.stdout, "notify-result=pagerduty:refused\n");
+    assert!(sink.posts().is_empty());
+    // Hand-run: no EXPECTED variable, so no check (the operator supplies
+    // their own environment and is the only party whose key it can send).
+    let sink = RecordingSink::default();
+    let out = deliver_with(&stale_event(), &all_three(), &sink);
+    assert_eq!(out.code as u8, 0, "{}", everything(&out));
+    assert_eq!(sink.posts().len(), 3);
+}
+
+/// **An edited PagerDuty endpoint cannot receive the routing key.** The
+/// policy's spec is MUTABLE, so "keep the key, change the endpoint" is one
+/// `kubectl edit` away; the controller's expectation covers the endpoint and
+/// the Secret's binding was written for the old one.
+///
+/// KILLS: the endpoint dropped from the binding.
+#[test]
+fn fx20_an_edited_pagerduty_endpoint_cannot_receive_the_routing_key() {
+    let evil = "https://evil.example/v2/enqueue";
+    let bound_for_default = bound(NotificationSink::PagerDuty, POLICY_UID, None);
+    let expected_now = bound(NotificationSink::PagerDuty, POLICY_UID, Some(evil));
+    let r = routes(&[
+        (ROUTING_KEY_ENV, TEST_ROUTING_KEY),
+        (PAGERDUTY_ENDPOINT_ENV, evil),
+        (
+            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV,
+            &expected_now,
+        ),
+        (NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV, &bound_for_default),
+    ]);
+    let sink = RecordingSink::default();
+    let out = deliver_with(&stale_event(), &r, &sink);
+    assert_eq!(out.stdout, "notify-result=pagerduty:refused\n");
+    assert!(
+        sink.posts().is_empty(),
+        "the routing key must not reach the edited endpoint: {:?}",
+        sink.posts()
+    );
+    // CONTROL: rebound for the new endpoint, it goes there.
+    let r = routes(&[
+        (ROUTING_KEY_ENV, TEST_ROUTING_KEY),
+        (PAGERDUTY_ENDPOINT_ENV, evil),
+        (
+            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV,
+            &expected_now,
+        ),
+        (NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV, &expected_now),
+    ]);
+    let sink = RecordingSink::default();
+    let out = deliver_with(&stale_event(), &r, &sink);
+    assert_eq!(out.stdout, "notify-result=pagerduty:ok\n");
+    assert_eq!(sink.posts()[0].0, evil);
+}
+
+/// **The shipped process, against a loopback SENTINEL: a foreign routing-key
+/// Secret is refused and the sentinel receives zero bytes; bound, the same
+/// process does connect.**
+///
+/// The sentinel stands in for the endpoint a thief's route points at. The
+/// PagerDuty endpoint must be `https://`, so the CONTROL arm's connection ends
+/// in a TLS failure (`pagerduty:failed`) — which is the point: its ClientHello
+/// bytes prove the sentinel observes a connection, so the refused arm's empty
+/// capture means "never dialled" and not "could not see".
+#[test]
+fn fx20_the_shipped_deliverer_never_dials_a_sentinel_with_a_foreign_routing_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let event = write_event(dir.path(), &decision_example_json());
+    let deadline = std::time::Duration::from_secs(60);
+    let (http_url, seen) = listener("202 Accepted");
+    let endpoint = http_url.replacen("http://", "https://", 1);
+    let expected = bound(NotificationSink::PagerDuty, POLICY_UID, Some(&endpoint));
+    let foreign = bound(NotificationSink::PagerDuty, VICTIM_UID, None);
+    let run = bounded_output(
+        bin()
+            .args(["notify", "deliver", "--event"])
+            .arg(&event)
+            .env_remove(WEBHOOK_URL_ENV)
+            .env_remove(SLACK_WEBHOOK_URL_ENV)
+            .env(ROUTING_KEY_ENV, TEST_ROUTING_KEY)
+            .env(PAGERDUTY_ENDPOINT_ENV, &endpoint)
+            .env(NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV, &expected)
+            .env(NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV, &foreign),
+        deadline,
+    );
+    assert_eq!(run.code, Some(1), "stderr:\n{}", run.stderr);
+    assert_eq!(run.stdout, "notify-result=pagerduty:refused\n");
+    assert!(
+        run.stderr.contains("CredentialBindingMismatch"),
+        "stderr:\n{}",
+        run.stderr
+    );
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "the sentinel received bytes: the routing key's request was dialled"
+    );
+    for stream in [&run.stdout, &run.stderr] {
+        assert!(!stream.contains(TEST_ROUTING_KEY), "{stream}");
+    }
+
+    // CONTROL: the same process with the Secret bound to this policy and this
+    // endpoint dials the sentinel.
+    let run = bounded_output(
+        bin()
+            .args(["notify", "deliver", "--event"])
+            .arg(&event)
+            .env_remove(WEBHOOK_URL_ENV)
+            .env_remove(SLACK_WEBHOOK_URL_ENV)
+            .env(ROUTING_KEY_ENV, TEST_ROUTING_KEY)
+            .env(PAGERDUTY_ENDPOINT_ENV, &endpoint)
+            .env(NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV, &expected)
+            .env(NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV, &expected),
+        deadline,
+    );
+    assert_eq!(
+        run.stdout, "notify-result=pagerduty:failed\n",
+        "bound, the deliverer dials (and fails TLS against a plain listener):\n{}",
+        run.stderr
+    );
+    let mut waited = 0;
+    while seen.lock().unwrap().is_empty() && waited < 30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        waited += 1;
+    }
+    assert!(
+        !seen.lock().unwrap().is_empty(),
+        "the sentinel must observe the bound arm's connection, or the refused arm proves nothing"
+    );
+}
