@@ -35,7 +35,7 @@ Either fix works:
    `$(npm root -g)/playwright`):
 
    ```bash
-   npx playwright install chromium-headless-shell
+   npx --no-install playwright install chromium-headless-shell
    ```
 
 2. Point the journeys at a Chromium or Chrome you already have:

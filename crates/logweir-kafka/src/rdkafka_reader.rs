@@ -484,6 +484,27 @@ fn creation_in_progress(code: rdkafka::error::RDKafkaErrorCode) -> bool {
     )
 }
 
+/// **FX-18.** How [`RdKafkaReader::created_topic_configs`] reads one answer of
+/// the configuration read it repeats: the configuration is done;
+/// `TopicNotFound` and `NotAuthorized` are a creation still propagating
+/// (`NotAuthorized` here is T13's inference from an EMPTY DescribeConfigs
+/// answer, never a code the broker sent); anything else (unreachable, a
+/// timeout, a client error) is final. A pure function so a unit row pins the
+/// exact set: dropping `NotAuthorized` brings PROD-00.3f's empty-answer
+/// failure back, and widening it makes a transport failure or a refused read
+/// cost `within` before the same exit.
+fn created_topic_config_settling(
+    answer: Result<BTreeMap<String, String>, KafkaError>,
+) -> Settling<BTreeMap<String, String>> {
+    match answer {
+        Ok(configs) => Settling::Done(configs),
+        Err(e @ (KafkaError::TopicNotFound(_) | KafkaError::NotAuthorized(_))) => {
+            Settling::NotYet(e)
+        }
+        Err(e) => Settling::Failed(e),
+    }
+}
+
 /// [`Settling::NotYet`] for a code [`creation_in_progress`] names,
 /// [`Settling::Failed`] for any other, with the same error either way.
 fn settling_on<T>(code: rdkafka::error::RDKafkaErrorCode, error: KafkaError) -> Settling<T> {
@@ -677,13 +698,7 @@ impl ClusterReader for RdKafkaReader {
         let started = std::time::Instant::now();
         self.await_served(topic, partitions, within)?;
         settle(within.saturating_sub(started.elapsed()), || {
-            match self.topic_configs(topic) {
-                Ok(configs) => Settling::Done(configs),
-                Err(e @ (KafkaError::TopicNotFound(_) | KafkaError::NotAuthorized(_))) => {
-                    Settling::NotYet(e)
-                }
-                Err(e) => Settling::Failed(e),
-            }
+            created_topic_config_settling(self.topic_configs(topic))
         })
     }
 
@@ -1473,6 +1488,31 @@ mod tests {
             Code::InvalidTopic,
         ] {
             assert!(!super::creation_in_progress(code), "{code:?} is final");
+        }
+    }
+
+    /// **FX-18 review LOW-1.** The configuration read after a create waits out
+    /// exactly `TopicNotFound` and `NotAuthorized` (an empty answer while the
+    /// topic propagates), and returns every other error at once.
+    #[test]
+    fn the_created_topic_configuration_read_waits_out_only_propagation() {
+        use crate::reader::{KafkaError, Settling};
+        let done = super::created_topic_config_settling(Ok(Default::default()));
+        assert!(matches!(done, Settling::Done(_)), "{done:?}");
+        for waits in [
+            KafkaError::TopicNotFound("t".into()),
+            KafkaError::NotAuthorized("t".into()),
+        ] {
+            let s = super::created_topic_config_settling(Err(waits));
+            assert!(matches!(s, Settling::NotYet(_)), "{s:?} is propagation");
+        }
+        for fails in [
+            KafkaError::Unreachable("down".into()),
+            KafkaError::Client("bad".into()),
+            KafkaError::Timeout(std::time::Duration::from_secs(1)),
+        ] {
+            let s = super::created_topic_config_settling(Err(fails));
+            assert!(matches!(s, Settling::Failed(_)), "{s:?} is final");
         }
     }
 

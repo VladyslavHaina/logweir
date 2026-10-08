@@ -677,7 +677,9 @@ fn every_created_target_topic_is_served_before_the_restore_runs() {
 
 /// **FX-18.** A created target topic the cluster never serves is an
 /// operational failure (exit 1) naming the topic, and `topics_created` still
-/// names every topic this run created, so the teardown can find them.
+/// names every topic this run created. Nothing tears them down on this error:
+/// the run returns before phase 9, as it does for a failed create in the same
+/// batch, so the record is for whoever removes them by hand.
 #[test]
 fn a_created_target_topic_that_is_never_served_is_operational() {
     let spec = a_recent_spec();
