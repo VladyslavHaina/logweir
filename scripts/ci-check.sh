@@ -49,15 +49,16 @@ just links
 mkdir -p target
 bash scripts/gen-third-party-notices.sh > target/tpn.check
 diff -u THIRD_PARTY_NOTICES.md target/tpn.check
-cargo deny check licenses advisories
+cargo deny check licenses advisories sources bans
 
 # PROD-00.2 (OD-3): the ENGINE's graph too. Logweir builds kafka-backup from
 # the vendored source, so its lockfile — after the patch folder, exactly as
 # the image build prepares it — is Logweir's to check, under its own policy
-# (third_party/kafka-backup-deny.toml). A finding is fixed by a patch in
-# third_party/kafka-backup-patches/, not by an ignore.
+# (third_party/kafka-backup-deny.toml), sources included: crates.io only. A
+# finding is fixed by a patch in third_party/kafka-backup-patches/, not by an
+# ignore.
 engine_src="target/engine-deny-src"
 rm -rf "$engine_src"
 bash scripts/engine-source.sh prepare "$engine_src" >/dev/null
 cp third_party/kafka-backup-deny.toml "$engine_src/deny.toml"
-cargo deny --locked --manifest-path "$engine_src/Cargo.toml" check licenses advisories
+cargo deny --locked --manifest-path "$engine_src/Cargo.toml" check licenses advisories sources bans

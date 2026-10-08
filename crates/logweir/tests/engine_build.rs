@@ -763,3 +763,104 @@ impl Inputs {
         self
     }
 }
+
+/// The `[sources]` table of a cargo-deny policy, as `key = value` pairs with
+/// whitespace removed. Pure text: the workspace carries no TOML parser.
+fn sources_table(policy: &str) -> Vec<(String, String)> {
+    let mut inside = false;
+    let mut out = Vec::new();
+    for line in policy.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            inside = line == "[sources]";
+            continue;
+        }
+        if inside {
+            if let Some((k, v)) = line.split_once('=') {
+                out.push((k.trim().to_string(), v.split_whitespace().collect()));
+            }
+        }
+    }
+    out
+}
+
+/// Crates.io only, or refused: the policy and the gate that runs it.
+fn check_sources_policy(policy: &str, gate_line: &str) -> Result<(), String> {
+    let table = sources_table(policy);
+    for (key, want) in [
+        ("unknown-registry", "\"deny\""),
+        ("unknown-git", "\"deny\""),
+        (
+            "allow-registry",
+            "[\"https://github.com/rust-lang/crates.io-index\"]",
+        ),
+        ("allow-git", "[]"),
+    ] {
+        match table.iter().find(|(k, _)| k == key) {
+            Some((_, v)) if v == want => {}
+            Some((_, v)) => return Err(format!("[sources] {key} is {v}, must be {want}")),
+            None => return Err(format!("[sources] sets no {key}")),
+        }
+    }
+    if !gate_line.split_whitespace().any(|w| w == "sources") {
+        return Err(format!("the gate does not check sources: `{gate_line}`"));
+    }
+    Ok(())
+}
+
+/// REVIEW M2: both graphs — the engine's own lockfile and Logweir's — admit
+/// crates from crates.io only, and `scripts/ci-check.sh` checks `sources` for
+/// both. The live negative control (a planted `git+file://` source for `spin`
+/// in a prepared engine tree) exits 8 with `source-not-allowed` under this
+/// policy and 0 with `unknown-git = "warn"`
+/// (`claude/artifacts/prod-00-2/deny/engine-git-source-*.log`).
+#[test]
+fn both_graphs_admit_crates_io_only_and_the_gate_checks_it() {
+    let ci = read("scripts/ci-check.sh");
+    let engine_gate = ci
+        .lines()
+        .find(|l| l.contains("cargo deny --locked --manifest-path \"$engine_src/Cargo.toml\""))
+        .expect("ci-check.sh runs cargo deny over the engine");
+    let own_gate = ci
+        .lines()
+        .find(|l| l.trim_start().starts_with("cargo deny check"))
+        .expect("ci-check.sh runs cargo deny over Logweir's graph");
+    let engine_policy = read("third_party/kafka-backup-deny.toml");
+    check_sources_policy(&engine_policy, engine_gate).unwrap();
+    check_sources_policy(&read("deny.toml"), own_gate).unwrap();
+
+    // Negative controls: each loosening is refused.
+    for (loosened, why) in [
+        (
+            engine_policy.replace("unknown-git = \"deny\"", "unknown-git = \"warn\""),
+            "a git source only warned about",
+        ),
+        (
+            engine_policy.replace(
+                "unknown-registry = \"deny\"",
+                "unknown-registry = \"allow\"",
+            ),
+            "any registry",
+        ),
+        (
+            engine_policy.replace(
+                "allow-git = []",
+                "allow-git = [\"https://github.com/someone/kafka-protocol-rs\"]",
+            ),
+            "an unrecorded git exception",
+        ),
+        (
+            engine_policy.replace("[sources]", "[not-sources]"),
+            "no table",
+        ),
+    ] {
+        assert!(
+            check_sources_policy(&loosened, engine_gate).is_err(),
+            "{why}"
+        );
+    }
+    assert!(
+        check_sources_policy(&engine_policy, &engine_gate.replace(" sources", "")).is_err(),
+        "a gate that skips sources"
+    );
+}
