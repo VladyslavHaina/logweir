@@ -23,8 +23,10 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
 key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
 32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the credential
-binding), 34 (FX-16, a point-bound restore restores its point's set) and 35
-(PROD-00.2, the engine built from the vendored source) so far. Items continue the next entry's
+binding), 34 (FX-16, a point-bound restore restores its point's set), 35
+(PROD-00.2, the engine built from the vendored source) and 36 (PROD-04.0b, the
+one crate that may hold `unsafe` code, and the consumer-group and ACL reads
+behind it) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -745,7 +747,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34 and 35, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35 and 36, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -755,7 +757,8 @@ controller), the product API and the console; item 33 changes the controller,
 the runner, the console and the `KafkaCluster` CRD, and needs each credentialed
 connection's Secret bound; item 34 changes the runner only; item 35 changes the
 runner image (its engine and its platforms) and the controller's Job
-environment together. To roll back to
+environment together; item 36 changes no behaviour any binary shows (it adds
+library calls no command uses yet) and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
