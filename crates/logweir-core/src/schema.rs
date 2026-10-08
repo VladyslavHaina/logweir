@@ -36,12 +36,20 @@ pub fn scorecard_schema() -> String {
 /// eye and a reviewer reading one drift diff has learnt to read the other.
 ///
 /// `$id` pins the published URL, and the CI drift arm at
-/// `.github/workflows/ci.yml` regenerates this and `diff -u`s it against
-/// `schemas/logweir-backup-receipt-1.1.0.json` on every build — so the
-/// checked-in file cannot silently stop describing the type.
+/// `.github/workflows/ci.yml` regenerates this and `diff -u`s it against the
+/// CURRENT schema file on every build — so the checked-in file cannot silently
+/// stop describing the type.
 ///
-/// **1.1.0 since FX-4** (`config_coverage`). The 1.0.0 file is FROZEN beside
-/// it and describes every receipt written before the bump.
+/// **The current file is the newest MINOR** (FX-7 fix round, review M-2):
+/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_MANIFEST_VERSION>.json`
+/// (`1.2.0`, FX-7's `archive.manifest_version_id`), its `$id` built from that
+/// ONE constant, so a renumber is the constant and a file name
+/// (`docs/stability.md`: a MINOR bump is "a new schema file beside the old
+/// one"). The older files are FROZEN beside it and never regenerated:
+/// `schemas/logweir-backup-receipt-1.0.0.json` describes every receipt written
+/// before FX-4 (`the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`),
+/// and FX-4's `-1.1.0.json` (`config_coverage`) every receipt written without
+/// a pin (`the_frozen_1_1_0_receipt_schema_is_still_fx4s`).
 pub fn backup_receipt_schema() -> String {
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
         s.option_nullable = true;
@@ -52,7 +60,7 @@ pub fn backup_receipt_schema() -> String {
         .into_root_schema_for::<BackupReceipt>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-        crate::backup_receipt::RECEIPT_FORMAT_VERSION
+        crate::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

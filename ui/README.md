@@ -207,6 +207,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/mcp-round3.spec.js` | **the human-like pass, round 3**: the wizard's focused status kept clear of its sticky footer, step texts that show names as code, "Restore this point" only for a role that can restore, and the no-role header -- each with the behaviour it replaced. |
 | `tests/check-deadline.spec.js` | **P15 and its class**: every follower reads its check until the check's own deadline, backs off while it does, and says so -- with *Run the check again* -- when the deadline passes without a result: the deadline pinned to the product's own numbers, the follow on node's mock timers, and each page (the readiness panel, the schedule form, *Test connection*, *Discover topics*, *Test access*) with a check that settles at 100 s and one that never does. Restore step 5's two rows are in `mutation.spec.js`. |
 | `tests/restore-semantics.spec.js` | **FX-6**: step 6 says what a restore copies, above Create -- the decision record's sentence word for word, its two identifiers as code, visible (a direct child of step 6, never folded into a wrapper) with each of the four approval-policy blocks, and on the step on screen -- each row with its negative control. |
+| `tests/replication-factor.spec.js` | **FX-5**: the restore wizard's replication factor -- the default rule (the source's factor capped at the target's brokers, else the target's broker count at most 3, else the grammar's 1 said as such), the broker count read from a discovery of the target (a fresh one, or one past its freshness alone, which sets the default with its age and refuses nothing), the 4-broker boundary of the ceiling, the input, the `ReplicationFactorExceedsBrokers` refusal on step 4, in the stepper, on the review step and in the submit, the review row with where the factor came from, the sentence that the factor can differ from the source's (on both steps and in this README and the quickstart), the readiness warning that names the factor, the draft, and both mounts' reads (a Backup point and a catalog point) -- each row with its negative control. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is VMware
@@ -701,7 +702,16 @@ is exactly this, and it is the same in every form:
   a renamed, headerless blob spells none and is beyond it -- which is why the
   approvals form refuses a key by its **file name** as well (`.pem`, `.key`,
   `.p8`, `.p12`, `.pfx`, `.jks`, `.ppk`, or a name beginning `id_`) and why the
-  controller, not the page, is the gate.
+  controller, not the page, is the gate;
+* **is text and ticks only**: the store keeps strings and booleans and drops
+  any other value without a word, so a form keeps a list or a number as text.
+  The restore wizard keeps its topic subset and a catalog point's typed topic
+  list one name per line, and a replication factor the operator set as its
+  digits (FX-5). Until FX-5's sweep the wizard handed the store two arrays,
+  both were dropped, and a trip to another route and back restored every
+  frozen topic under "your unsubmitted edits ... are back";
+  `ui/tests/replication-factor.spec.js` holds every value the wizard keeps to
+  the store's two types.
 
 **One click makes one object.** Every create the page issues names its object:
 a name you typed, or a name minted from the plan bytes. So a second click, a
@@ -1044,7 +1054,9 @@ caller's object.
 a contract constant or a plan field and never from prose this page invented:
 
 * the **target replication factor**, from the plan's own
-  `target.default_replication_factor`;
+  `target.default_replication_factor`, with where its value came from (see
+  *The replication factor: a default with its basis, an input, and a refusal
+  before Create*);
 * the **partition count**, which is *not shown and said not to be*: this build
   publishes a per-topic count only after a run
   (`Restore.status.completion.newTopics[].partitions`, from the target diff),
@@ -1097,6 +1109,152 @@ timestamps. The long form, with the evidence rows, is
 [stability.md](../docs/stability.md), *Known limitations*, and
 [verify-a-scorecard.md](../docs/verify-a-scorecard.md), *What the scorecard does
 not claim*. Rows: `ui/tests/restore-semantics.spec.js`.
+
+## The replication factor: a default with its basis, an input, and a refusal before Create
+
+**Every console restore used to create replication-factor-1 topics** (FX-5).
+The wizard wrote `replicationFactor: 1` into every plan and step 4 printed it
+read-only, so a topic restored into a three-broker cluster came back on one
+broker, and nothing on screen said that was a choice. Step 4 now carries a
+**replication factor** input whose default is worked out from what the page
+can read, and both step 4 and the review step say where the value came from.
+
+**One value, for every topic the plan creates.** The runner's grammar has one
+`target.default_replication_factor`, and the runner creates every mapped topic
+with it, after phase 5 and just before the restore (`create_target_topics`). A factor per topic would extend the signed plan's grammar, which is
+the runner's versioned contract; this page does not. When the source's factors
+are known and differ across the selected topics, the default is the
+**largest**: no topic comes back on fewer replicas than its source had unless
+the target cannot hold them, and what a topic that gains replicas costs is
+storage, never durability.
+
+**The default, and the words it is shown with** (`replicationDefault`):
+
+| what is known | the default | step 4 and step 6 say |
+|---|---|---|
+| the source's factor, and the target has room | the source's | `3 (the source's)` |
+| the source's factor, above the target's broker count | the broker count | `2 (capped at the target's 2 brokers; the source's is 3)` |
+| only the target's broker count, at most 3 | the broker count | `2 (the target's 2 brokers; the source's replication factor is not published to this console)` |
+| only the target's broker count, above 3 | 3 | `3 (at most 3 by default, of the target's 5 brokers; ...)` |
+| nothing | the grammar's 1 | `1 (the plan grammar's default: neither the source's replication factor nor the target's broker count is known to this console)`, and a warning beside the input |
+| a value the operator typed | that value | `4 (set by you; the target has 5 brokers)` |
+
+**The factor can differ from the source's, and both steps say what that
+costs** (FX-5 review M1). A default worked out from the target's brokers knows
+nothing of the source's factor. So unless the source's factor is known and the
+plan asks for exactly it (never, in this build), step 4 prints this beside the
+basis, and the review step prints it under its row:
+
+> This factor can differ from the source's, and the target's storage follows
+> it: a topic the source kept at replication factor 1, restored at 3, takes
+> three times the storage it took there, with the replication traffic on top; a
+> factor below the source's keeps fewer copies than the source had.
+
+The sentence is `REPLICATION_DIFFERS_NOTE` and the rule is
+`replicationMayDiffer`; the quickstart (section 7) carries the same sentence,
+and one row holds the page and both documents to it.
+
+**The source's factor is not readable in this build, and the page says so.**
+The backup engine records it per topic in the archive manifest
+(`topics[].source_replication_factor`), and only the restore Job reads the
+manifest. The backup receipt counts records per topic and nothing else, a
+catalog point's topics carry a name, a record count and an always-absent
+partition count, `Backup.status` has no per-topic block, and the product API
+holds no object-store credential. So the first two rows of the table are
+reached by the rule's own test rows and by nothing a cluster says; projecting
+the factor into the receipt, the catalog and the API is PROD-05.1's (capture
+topic configuration with coverage), and `sourceReplicationFactorsOf` is the
+one function that changes when it lands. A topic discovery of the SOURCE is
+not a substitute: it lists the cluster as it is now, not the recovery point.
+
+**The target's broker count comes from a topic discovery of the target
+connection.** It is `TopicDiscovery.status.result.brokerCount`, which the
+product API publishes as `brokerCount` (see [api.md](../docs/api.md), *Bounded,
+honest topic inventory*). The wizard reads the target connection's two slots
+(`GET .../connections/<target>/topic-discoveries?latest=true`) before the first
+paint and again whenever the target changes, and uses the newest successful
+discovery only when it was taken of this connection; an answer for a target
+the operator has since left is dropped. A `KafkaCluster`'s status carries no
+count (`clusterId`, `conditions`, `observedAt`, `reachable`, `reason`), the
+probe's `Reachable` message names the cluster id and no count, and the
+readiness check's `target.authenticated` count reaches its status only inside a
+message, so a discovery is the one record of it.
+
+**A count past its freshness still sets the default, and refuses nothing**
+(FX-5 review L5). An inventory goes `stale` after `checks.discovery.freshSeconds`
+(900 s by default) because topics come and go, and the first build used the
+count only inside those fifteen minutes, so on most installs the default was
+the grammar's 1. A cluster's broker count rarely changes, so a discovery whose
+ONLY stale reason is `expired` -- the same connection object, generation and
+principal -- still sets the default, and both steps say when it was read:
+`2 (the target's 2 brokers as of 2026-10-05 09:12:00 UTC; ...)`. It lasts as
+long as the controller keeps the discovery: `checks.discovery.retentionSeconds`
+after its observation (86400 s, a day, by default), collected on the
+controller's hourly pass. That bound is the server's; the page never compares an
+instant with the browser's clock. Any other stale reason (`connectionReplaced`,
+`connectionChanged`, `principalChanged`, alone or beside `expired`) is about
+another connection or another identity, and its count is not used. When no
+count is usable, step 4 says why -- no discovery has succeeded, the newest is
+stale for another connection or identity, or (legacy mode) there is no
+discovery route at all -- and links the target connection's page, where
+*Discover topics* reads one; the page reads the count the next time it opens,
+and a draft keeps everything else.
+
+**Why at most 3 when only the broker count is known.** Apache Kafka's
+operations guide recommends "a replication factor of 2 or 3 so that you can
+transparently bounce machines without interrupting data consumption"
+([Basic Kafka Operations](https://kafka.apache.org/40/operations/basic-kafka-operations/)).
+Three is the top of that advice, and the factor a `min.insync.replicas` of 2
+keeps writable through the loss of one broker; defaulting to every broker of a
+large cluster would multiply each restored topic's storage on a guess. A source
+factor is never capped by it, only by the target's brokers.
+
+**The input.** Any value the operator commits is theirs and stops following the
+default: a later target change keeps it and says `set by you`. Emptying the
+input puts the default back, as an emptied prefix does. A draft keeps a factor
+the operator set (as text: the draft store keeps strings and booleans only) and
+never keeps a default, so the next mount works the default out again from what
+it reads.
+
+**What refuses a factor, before anything is sent:**
+
+* a value that is not a whole number from 1 to 32767 (the grammar's `i16`):
+  `ui/plan.js` renders no document with one, so there is no hash and nothing
+  to submit;
+* a value above the broker count a FRESH discovery of the target read: the page
+  refuses it with the readiness check's own code, `ReplicationFactorExceedsBrokers`,
+  on step 4 as the value is committed, in the stepper (step 4 *needs
+  attention*), on the review step above Create with a way back to step 4, and in
+  the submit itself, which sends nothing and opens step 4 with the message
+  beside the input. A count past its freshness refuses nothing, because a
+  cluster grown since would hold the factor: the basis then reads `set by you;
+  the target had 2 brokers as of ...`, and step 4 links the connection's page
+  for a fresh count.
+
+The readiness check's `target.topicCreate` row (a validate-only `CreateTopics`
+at the plan's factor) stays the check against the target as it is when the
+check runs, and Create stays refused while it says `ReplicationFactorExceedsBrokers`
+(*The readiness check holds the submit*). The page does not refuse a factor
+below the broker count -- fewer replicas is the operator's choice, and the
+review step says what was chosen.
+
+**With no fresh count and no readiness check, nothing checks the factor before
+the run** (FX-5 review L4). The check is advisory, so Create stays enabled
+without one, and step 6's warning beside it (`READINESS_NOT_RUN_WARNING`) names
+the factor among what nothing has looked at. A factor the target's brokers
+cannot hold is then refused by the broker when the runner creates the topics,
+after the approval and phases 0-5: the Restore ends `Failed` with `exitCode 1` /
+`operational`, no signed result and nothing restored, and the runner's log
+names `InvalidReplicationFactor`. Before FX-5 every plan asked for 1, which any
+broker holds, so this path could not fail this way.
+
+**Upgrade and rollback.** A Restore created before this keeps its plan bytes
+(`Restore.spec` is immutable), and its factor is the 1 that plan carries; a
+retry or an edit builds a NEW plan, whose factor is worked out as above. A draft
+kept before the upgrade carries no factor and gets the default. The
+`brokerCount` field is additive: an older API omits it, and the wizard then
+reads no count and says so. Rolling the console back restores the old fixed 1.
+Rows: `ui/tests/replication-factor.spec.js`.
 
 ## The readiness check holds the submit
 

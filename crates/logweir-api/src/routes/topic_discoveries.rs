@@ -250,6 +250,7 @@ pub fn project(
         stale,
         stale_reasons,
         cluster_id: result.and_then(|r| r.cluster_id.clone()),
+        broker_count: result.and_then(|r| r.broker_count),
         counts: result.map(|r| DiscoveryCountsView {
             listed: r.counts.listed,
             returned: r.counts.returned,

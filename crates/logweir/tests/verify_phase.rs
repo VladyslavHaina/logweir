@@ -3801,13 +3801,16 @@ fn fx3_stale_wording(flat_lowercase: &str) -> Vec<&'static str> {
 /// the existing `unexpected_divergence` is new content in two existing
 /// fields; the owner ruled it MINOR on 2026-10-07 as OD-7's third, general
 /// case (it can only move a reader's verdict to the safer side).
-/// `docs/stability.md`'s FX-3 section states that ruling, and no document or
-/// FX-3 source comment still says the classification awaits it.
+/// `docs/stability.md`'s rule states that case and names FX-3's move (the
+/// text integration batch 3 landed), its FX-3 section states the ruling, and
+/// no document or FX-3 source comment still says the classification awaits
+/// it.
 ///
 /// Negative controls: [`FX3_PENDING_BULLET_OF_2026_10_05`] must trip
 /// [`fx3_stale_wording`] (asserted first, so the check cannot go blind), and
-/// restoring that bullet in `docs/stability.md`, or a "pending" sentence in
-/// any listed file, fails here.
+/// restoring that bullet in `docs/stability.md`, a rule without the third
+/// case's FX-3 sentence, or a "pending" sentence in any listed file, fails
+/// here.
 #[test]
 fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pending() {
     assert_eq!(
@@ -3824,6 +3827,25 @@ fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pend
             .join(" ")
     };
     let stability = flat("docs/stability.md");
+    // The rule itself carries the third case and names FX-3's move, so the
+    // section's "the rule above" points at a ruling that is there.
+    let rule = stability
+        .split("### The first post-tag addition")
+        .next()
+        .expect("docs/stability.md states the rule before FX-4's section");
+    for ruled in [
+        "On 2026-10-07 the owner added a third, general case",
+        "**A new cause for an existing value, or new content in an existing field, is MINOR \
+         when it can only move a reader's verdict to the safer side**: not restorable, not \
+         trusted, not intended. It is never MINOR when it can make any verdict stronger.",
+        "So is FX-3's move of the new-topic deviations from `intentionally_deviated` to \
+         `unexpected_divergence`.",
+    ] {
+        assert!(
+            rule.contains(ruled),
+            "docs/stability.md's MINOR/MAJOR rule no longer says: {ruled}"
+        );
+    }
     let section = stability
         .split("### Format 1.2.0 (FX-3)")
         .nth(1)

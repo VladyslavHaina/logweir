@@ -171,6 +171,10 @@ const CONSOLE_FIXTURES = [
   ["discovery-stale.json", "TopicDiscoveryResponse"],
   ["discovery-truncated.json", "TopicDiscoveryResponse"],
   ["discovery-latest.json", "DiscoveryLatestResponse"],
+  // FX-5: the TARGET connection's latest discovery, with the broker count the
+  // restore wizard caps its replication factor at. Read by both sides:
+  // `crates/logweir-api/tests/topic_discoveries.rs` holds the projection to it.
+  ["discovery-target-latest.json", "DiscoveryLatestResponse"],
   ["topics-page.json", "TopicPageResponse"],
   ["topics-page-last.json", "TopicPageResponse"],
   ["preflight-ready.json", "PreflightResponse"],
@@ -233,7 +237,7 @@ test("console_fixtures_are_instances_of_the_published_schema", () => {
   // AN EQUALITY, NOT A FLOOR (review F8). A floor stays green when a fixture is
   // deleted together with the row that used it, which is exactly the change
   // this arm exists to notice.
-  assert.equal(CONSOLE_FIXTURES.length, 71,
+  assert.equal(CONSOLE_FIXTURES.length, 72,
     "the console fixture set covers PLAT-17.1, D1, D2 and D3");
   for (const [name, schema] of CONSOLE_FIXTURES) {
     assert.ok(DEFINITIONS[schema] !== undefined, schema + " is published");

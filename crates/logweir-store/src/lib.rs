@@ -179,6 +179,13 @@ pub struct Store {
     /// store that errors where it should have refused. The backup runner's
     /// exclusivity probe must not read that error as proof (RECEIPT-DUP).
     errors_on_existing_key: bool,
+    /// TEST DOUBLE ONLY — `Some` for [`Store::in_memory_versioned`] and `None`
+    /// for every production constructor, which read version ids from the
+    /// backend itself. `object_store`'s `InMemory` reports no version id and
+    /// IGNORES a request for one, so a versioned bucket (FX-7: the backup
+    /// runner pins the manifest's version id, and readers read by it) has to
+    /// be modelled beside it. See [`VersionedBucket`].
+    versions: Option<Arc<VersionLog>>,
 }
 
 impl Store {
@@ -279,6 +286,7 @@ impl Store {
             read_only: false,
             ignores_create_mode: false,
             errors_on_existing_key: false,
+            versions: None,
         })
     }
 
@@ -306,6 +314,7 @@ impl Store {
             read_only: true,
             ignores_create_mode: false,
             errors_on_existing_key: false,
+            versions: None,
         })
     }
 
@@ -326,6 +335,7 @@ impl Store {
             read_only: false,
             ignores_create_mode: false,
             errors_on_existing_key: false,
+            versions: None,
         })
     }
 
@@ -348,6 +358,7 @@ impl Store {
             read_only: true,
             ignores_create_mode: false,
             errors_on_existing_key: false,
+            versions: None,
         })
     }
 
@@ -543,6 +554,7 @@ impl Store {
             read_only: false,
             ignores_create_mode: false,
             errors_on_existing_key: false,
+            versions: None,
         }
     }
 
@@ -575,6 +587,35 @@ impl Store {
             errors_on_existing_key: true,
             ..Self::in_memory(prefix)
         }
+    }
+
+    /// A TEST DOUBLE of a VERSIONED bucket (FX-7), and the handle a test uses
+    /// to act on it the way a writer OTHER than this store would: overwrite a
+    /// key unconditionally, as the engine's own manifest put does. No
+    /// production path builds it, and it offers no delete (G-RET: this crate
+    /// names no object-store delete).
+    ///
+    /// Every successful put through the STORE, and every write through the
+    /// handle, becomes a new version with a fresh id; [`Store::get`] reports
+    /// the current one, and [`Store::get_version`] reads any retained one —
+    /// which is what S3, MinIO and SeaweedFS do for a bucket with versioning
+    /// enabled.
+    #[doc(hidden)]
+    pub fn in_memory_versioned(prefix: &str) -> (Self, VersionedBucket) {
+        let backend = Arc::new(object_store::memory::InMemory::new());
+        let log = Arc::new(VersionLog::default());
+        let rt = Self::new_rt();
+        let store = Self {
+            inner: backend.clone(),
+            prefix: prefix.to_string(),
+            conditional_put: true,
+            rt: rt.clone(),
+            read_only: false,
+            ignores_create_mode: false,
+            errors_on_existing_key: false,
+            versions: Some(log.clone()),
+        };
+        (store, VersionedBucket { backend, log, rt })
     }
 
     /// ONE runtime for the life of the store, built in every constructor and
@@ -613,12 +654,77 @@ impl Store {
                     object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
                     other => StoreError::Io(format!("{key}: {other}")),
                 })?;
-            let vid = r.meta.version.clone();
+            let vid = match &self.versions {
+                // The test double's version log: see `versions`.
+                Some(log) => log.current(key),
+                None => r.meta.version.clone(),
+            };
             let b = r
                 .bytes()
                 .await
                 .map_err(|e| StoreError::Io(format!("{key}: {e}")))?;
             Ok((b.to_vec(), vid))
+        })
+    }
+
+    /// **FX-7 — read ONE VERSION of an object**, by the version id a signed
+    /// document pinned. Returns the bytes and the version id the store
+    /// answered with.
+    ///
+    /// `NotFound` when the store holds no such version of the key: never
+    /// written, that version expired, or an id this bucket never issued at all
+    /// — which is what a pin taken in ANOTHER bucket is, and the reason the
+    /// last case is `NotFound` and not `Io` (see [`version_read_error`]).
+    ///
+    /// **A store that does not read by version is an ERROR here, never an
+    /// answer**: `object_store` 0.14 sends
+    /// `?versionId=` to S3 and S3-compatible stores, but its in-memory and
+    /// local-filesystem backends ignore the option and return the CURRENT
+    /// object — so a reply whose version id is not the one asked for is
+    /// refused as [`StoreError::Backend`] rather than handed back as the
+    /// pinned bytes. A reader that took the current object for the pinned one
+    /// would verify exactly the rewrite the pin exists to detect.
+    pub fn get_version(
+        &self,
+        key: &str,
+        version: &str,
+    ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        if let Some(log) = &self.versions {
+            // The test double's version log: see `versions`.
+            if let Some(fault) = log.version_read_fault() {
+                return Err(StoreError::Io(format!(
+                    "{key}?versionId={version}: {fault}"
+                )));
+            }
+            return log
+                .read(key, version)
+                .map(|bytes| (bytes, Some(version.to_string())))
+                .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version}")));
+        }
+        let rt = &self.rt;
+        rt.block_on(async {
+            let options = object_store::GetOptions {
+                version: Some(version.to_string()),
+                ..Default::default()
+            };
+            let r = self
+                .inner
+                .get_opts(&OPath::from(key), options)
+                .await
+                .map_err(|e| version_read_error(key, version, e))?;
+            let answered = r.meta.version.clone();
+            if answered.as_deref() != Some(version) {
+                return Err(StoreError::Backend(format!(
+                    "a read of version {version} of {key} was answered with version {}; this \
+                     store does not read objects by version",
+                    answered.as_deref().unwrap_or("none")
+                )));
+            }
+            let b = r
+                .bytes()
+                .await
+                .map_err(|e| StoreError::Io(format!("{key}?versionId={version}: {e}")))?;
+            Ok((b.to_vec(), answered))
         })
     }
 
@@ -1086,10 +1192,15 @@ impl Store {
                 };
                 match self.inner.put_opts(&p, payload.clone(), opts).await {
                     Ok(r) => {
+                        let version_id = match &self.versions {
+                            // The test double's version log: see `versions`.
+                            Some(log) => Some(log.record(key, bytes)),
+                            None => r.version,
+                        };
                         return Ok(PutOutcome {
-                            version_id: r.version,
+                            version_id,
                             create_only_enforced: true,
-                        })
+                        });
                     }
                     Err(object_store::Error::AlreadyExists { .. }) => {
                         if self.errors_on_existing_key {
@@ -1137,6 +1248,136 @@ impl Store {
                 create_only_enforced: false,
             })
         })
+    }
+}
+
+/// One key's history in a [`VersionLog`]: `(version id, bytes)`, oldest first.
+type VersionHistory = Vec<(String, Vec<u8>)>;
+
+/// TEST DOUBLE ONLY (FX-7): the version history of [`Store::in_memory_versioned`].
+///
+/// Every write appends `(version id, bytes)` to its key's history, and the
+/// current version is the last entry — S3's model of a versioned bucket, less
+/// the delete marker, which this crate does not model because it names no
+/// object-store delete at all (G-RET, `scripts/check-no-archive-write.sh`).
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct VersionLog {
+    /// Every key's history.
+    state: std::sync::Mutex<std::collections::BTreeMap<String, VersionHistory>>,
+    /// When set, every read BY VERSION fails with this text as `Io` — a
+    /// principal without `s3:GetObjectVersion`, or a transport failure on the
+    /// one extra read a reader makes (FX-7 fix round). Never set by a
+    /// production path.
+    version_read_fault: std::sync::Mutex<Option<String>>,
+}
+
+/// The id counter EVERY [`VersionLog`] in this process draws from.
+///
+/// **A version id is a property of one object in ONE bucket** (FX-7 fix round,
+/// review H-1), and a real store never issues an id another bucket issued. A
+/// per-bucket counter would: two doubles written in the same order hand out
+/// the same ids, and a byte-for-byte COPY of a pinned point would then find
+/// its pin among the copy's own versions by coincidence — a test of "the pin
+/// is not this bucket's" that could not fail.
+static NEXT_VERSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl VersionLog {
+    fn record(&self, key: &str, bytes: &[u8]) -> String {
+        let n = NEXT_VERSION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let id = format!("fx7v{n:06}");
+        self.state
+            .lock()
+            .expect("the version log is never poisoned")
+            .entry(key.to_string())
+            .or_default()
+            .push((id.clone(), bytes.to_vec()));
+        id
+    }
+
+    fn version_read_fault(&self) -> Option<String> {
+        self.version_read_fault
+            .lock()
+            .expect("the version log is never poisoned")
+            .clone()
+    }
+
+    fn current(&self, key: &str) -> Option<String> {
+        self.state
+            .lock()
+            .expect("the version log is never poisoned")
+            .get(key)
+            .and_then(|h| h.last())
+            .map(|(id, _)| id.clone())
+    }
+
+    fn read(&self, key: &str, version: &str) -> Option<Vec<u8>> {
+        self.state
+            .lock()
+            .expect("the version log is never poisoned")
+            .get(key)?
+            .iter()
+            .find(|(id, _)| id == version)
+            .map(|(_, bytes)| bytes.clone())
+    }
+
+    fn history(&self, key: &str) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("the version log is never poisoned")
+            .get(key)
+            .map(|h| h.iter().map(|(id, _)| id.clone()).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// TEST DOUBLE ONLY (FX-7): a second writer on a [`Store::in_memory_versioned`]
+/// bucket — the engine's unconditional manifest put — which the `Store`
+/// itself, being create-only, cannot be.
+#[doc(hidden)]
+pub struct VersionedBucket {
+    backend: Arc<object_store::memory::InMemory>,
+    log: Arc<VersionLog>,
+    rt: Arc<tokio::runtime::Runtime>,
+}
+
+impl VersionedBucket {
+    /// An unconditional put: a NEW current version of `key`. Returns its id.
+    ///
+    /// Held to Global Constraint 6's root like every write this crate makes:
+    /// a key outside `logweir/` panics here, as it does in `put_create_only`,
+    /// so the double cannot become a way to model writes anywhere else.
+    pub fn overwrite(&self, key: &str, bytes: &[u8]) -> String {
+        assert!(
+            key.starts_with(LOGWEIR_ROOT),
+            "Global Constraint 6: the versioned double writes only under `{LOGWEIR_ROOT}`, got \
+             `{key}`"
+        );
+        self.rt
+            .block_on(self.backend.put(
+                &OPath::from(key),
+                object_store::PutPayload::from(bytes.to_vec()),
+            ))
+            .expect("the in-memory backend accepts every put");
+        self.log.record(key, bytes)
+    }
+
+    /// Every version id `key` has had, oldest first.
+    #[must_use]
+    pub fn versions(&self, key: &str) -> Vec<String> {
+        self.log.history(key)
+    }
+
+    /// From now on every read BY VERSION through the store fails as
+    /// `StoreError::Io` carrying `text` (a real `object_store` message shape):
+    /// the "could not tell" answer a reader must not take for "this bucket
+    /// does not hold the version". Plain reads are untouched.
+    pub fn fail_version_reads(&self, text: &str) {
+        *self
+            .log
+            .version_read_fault
+            .lock()
+            .expect("the version log is never poisoned") = Some(text.to_string());
     }
 }
 
@@ -1699,6 +1940,50 @@ fn backend_name(u: &StorageUrl) -> &'static str {
     }
 }
 
+/// **FX-7 — what a failed read of ONE VERSION means.** [`Store::get_version`]'s
+/// error mapping, kept beside the classifier because it reads the same text.
+///
+/// A store says "I hold no such version" in TWO ways, and both are measured on
+/// the e2e stack (`artifacts/fx-7/fix-round/live/foreign-id-probe/answers.txt`
+/// in the FX-7 fix round):
+///
+/// * `404 NoSuchVersion` for an id it could have issued — SeaweedFS for every
+///   foreign id, MinIO for a UUID-shaped one. `object_store` already answers
+///   it as `Error::NotFound`.
+/// * `400 InvalidArgument` ("Invalid version id specified") for an id whose
+///   SHAPE it could never have issued — MinIO for anything that is not a UUID,
+///   and AWS S3 for an id that is not in its own format. `object_store` 0.14
+///   maps a 400 to `Error::Generic`, with the status and the S3 XML body in
+///   its text.
+///
+/// Both are [`StoreError::NotFound`] here. A reader holding a pin taken in
+/// ANOTHER bucket — the receipt of an archive copied byte for byte, the design's
+/// "one point in two places" — meets the second as often as the first, and
+/// reporting it as `Io` ("could not tell") would refuse every such copy. The
+/// request carries no argument but the version id (no range, no conditional),
+/// so an `InvalidArgument` on it can only be about that id. Every other failure
+/// stays `Io`: a 403 is a grant to fix, not an absence.
+fn version_read_error(key: &str, version: &str, error: object_store::Error) -> StoreError {
+    let at = format!("{key}?versionId={version}");
+    match error {
+        object_store::Error::NotFound { .. } => StoreError::NotFound(at),
+        object_store::Error::Generic { ref source, .. }
+            if names_a_version_never_issued(&source.to_string()) =>
+        {
+            StoreError::NotFound(at)
+        }
+        other => StoreError::Io(format!("{at}: {other}")),
+    }
+}
+
+/// The `400 InvalidArgument` half of [`version_read_error`], as a token scan of
+/// `object_store`'s text — the status line `RequestError::Status` prints
+/// (`400 Bad Request`) and the S3 error code of the XML body.
+fn names_a_version_never_issued(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("400 bad request") && lower.contains("<code>invalidargument</code>")
+}
+
 // ------------------------------------------------------- error classification
 
 /// The CLOSED store-side code vocabulary of D2 §4.2, so a caller can map a
@@ -1953,4 +2238,91 @@ pub fn s3_builder_config(
 #[must_use]
 pub fn is_workload_identity_not_injected(e: &StoreError) -> bool {
     matches!(e, StoreError::Backend(m) if m.starts_with(WORKLOAD_IDENTITY_NOT_INJECTED))
+}
+
+#[cfg(test)]
+mod version_read_tests {
+    //! FX-7 fix round: [`version_read_error`] over the answers the e2e stack
+    //! MEASURED (`artifacts/fx-7/fix-round/live/foreign-id-probe/answers.txt`).
+    //! The text is the shape `object_store` 0.14.1 prints for a non-2xx answer:
+    //! `RetryError`'s "Error performing GET … - " and then
+    //! `RequestError::Status`'s "Server returned non-2xx status code: …".
+    use super::*;
+
+    const KEY: &str = "fx7/set-1/manifest.json";
+
+    fn answered(status_and_body: &str) -> object_store::Error {
+        object_store::Error::Generic {
+            store: "S3",
+            source: format!(
+                "Error performing GET http://minio:9000/kafka-backups/{KEY}?versionId=x in \
+                 3.1ms - Server returned non-2xx status code: {status_and_body}"
+            )
+            .into(),
+        }
+    }
+
+    /// MinIO's answer to an id that is not a UUID, verbatim from the probe.
+    const MINIO_400: &str = "400 Bad Request: <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+        <Error><Code>InvalidArgument</Code><Message>Invalid version id specified</Message>\
+        <Key>fx7/set-1/manifest.json</Key><BucketName>kafka-backups</BucketName></Error>";
+
+    #[test]
+    fn an_id_the_bucket_could_never_have_issued_is_not_found() {
+        assert!(
+            matches!(
+                version_read_error(KEY, "fx7v000001", answered(MINIO_400)),
+                StoreError::NotFound(_)
+            ),
+            "MinIO's 400 InvalidArgument for a foreign id says the bucket holds no such \
+             version, exactly as a 404 NoSuchVersion does"
+        );
+    }
+
+    #[test]
+    fn a_404_is_not_found() {
+        let e = object_store::Error::NotFound {
+            path: KEY.to_string(),
+            source: "Server returned non-2xx status code: 404 Not Found: <Error><Code>\
+                     NoSuchVersion</Code></Error>"
+                .into(),
+        };
+        assert!(matches!(
+            version_read_error(KEY, "v", e),
+            StoreError::NotFound(_)
+        ));
+    }
+
+    /// Every other failure is "could not tell", never "not here".
+    #[test]
+    fn a_denial_an_outage_or_another_bad_request_is_io() {
+        let denied = object_store::Error::PermissionDenied {
+            path: KEY.to_string(),
+            source: "Server returned non-2xx status code: 403 Forbidden: <Error><Code>\
+                     AccessDenied</Code></Error>"
+                .into(),
+        };
+        for (what, error) in [
+            ("a 403 (no s3:GetObjectVersion)", denied),
+            (
+                "a 503",
+                answered("503 Service Unavailable: <Error><Code>SlowDown</Code></Error>"),
+            ),
+            (
+                "a 400 with another code",
+                answered("400 Bad Request: <Error><Code>InvalidRequest</Code></Error>"),
+            ),
+            (
+                "InvalidArgument on a status that is not 400",
+                answered("500 Internal Server Error: <Error><Code>InvalidArgument</Code></Error>"),
+            ),
+        ] {
+            match version_read_error(KEY, "v", error) {
+                StoreError::Io(message) => {
+                    assert!(message.contains("?versionId=v"), "{what}: {message}");
+                }
+                other => panic!("{what} must be Io, got {other:?}"),
+            }
+        }
+    }
 }

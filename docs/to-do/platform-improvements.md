@@ -1,9 +1,10 @@
-/# Platform improvements tracker
+# Platform improvements tracker
 
 Status: **all 41 tasks Done (2026-09-25)**, each with its completion record.
 Follow-up rows stay open in the defect ledger: POC-P17 (low),
 CONSOLE-MCP-ROUND3's low rows R3-4/R3-5 and REPLACE-MINIO. POC-P15 and POC-P16
-are closed live. Product expansion has not started, by the user's decision. Only tasks with explicit completion evidence
+are closed live. Product expansion started on 2026-09-28 and is tracked in
+[product-expansion.md](product-expansion.md). Only tasks with explicit completion evidence
 are Done.
 Reviewed against main commit `92e02097540c39ff8565283a38ee592499b95020` on
 2026-09-14. This tracker consolidates the operator, product, UI and architecture

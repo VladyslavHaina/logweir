@@ -531,6 +531,123 @@ async fn a_failed_attempt_never_hides_the_last_successful_inventory() {
     app.fake.assert_strict();
 }
 
+/// FX-5: a discovery publishes the broker count its result recorded, under the
+/// name and with the value the console's shared fixture carries -- and a result
+/// that recorded none publishes NO count, never a zero.
+///
+/// BOTH SIDES READ ONE FIXTURE. `ui/tests/fixtures/console/
+/// discovery-target-latest.json` is what `ui/tests/replication-factor.spec.js`
+/// hands the restore wizard as the target connection's latest discovery, and
+/// the wizard caps its default replication factor at `brokerCount`. This row
+/// seeds the custom resource with the fixture's count and asserts the
+/// projection sends exactly that value under exactly that key, and that every
+/// field the fixture's `lastSuccessful` carries is one this projection sends,
+/// so a rename on either side fails here rather than as a default nobody can
+/// see.
+///
+/// KILLS: dropping the projection line (the key is absent); reading another
+/// result field into it; projecting a default (`unwrap_or(0)` or `Some(0)`)
+/// for a result that recorded no count; a fixture key the API never sends.
+#[tokio::test]
+async fn a_discovery_publishes_the_broker_count_its_result_recorded() {
+    let fixture = support::fixture("console/discovery-target-latest.json");
+    let expected = fixture["lastSuccessful"]["brokerCount"].clone();
+    assert!(
+        expected.as_i64().is_some_and(|n| n > 1),
+        "the shared fixture carries a count a default could be capped at: {fixture}"
+    );
+
+    let app = TestApp::new();
+    seed_connection(&app);
+    seed_discovery(
+        &app.fake,
+        NS_A,
+        "td-counted",
+        "source",
+        Some(LOCAL_ADMIN_ACTOR),
+        &[lines("counted", 0, 2)],
+    );
+    let mut counted = app
+        .fake
+        .object("topicdiscoveries", NS_A, "td-counted")
+        .unwrap();
+    counted["status"]["result"]["brokerCount"] = expected.clone();
+    app.fake.seed("topicdiscoveries", NS_A, counted);
+
+    let latest = app
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/connections/source/topic-discoveries?latest=true"
+        ))
+        .await;
+    assert_eq!(latest.status.as_u16(), 200, "{}", latest.text());
+    let v = latest.json();
+    assert_eq!(v["lastSuccessful"]["id"], "td-counted");
+    assert_eq!(
+        v["lastSuccessful"]["brokerCount"], expected,
+        "the count the result recorded, under the fixture's key: {v}"
+    );
+    assert_eq!(v["latestAttempt"]["brokerCount"], expected, "{v}");
+    let one = app
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-counted"
+        ))
+        .await
+        .json();
+    assert_eq!(
+        one["item"]["brokerCount"], expected,
+        "the single read too: {one}"
+    );
+
+    // EVERY FIELD THE CONSOLE'S FIXTURE CARRIES IS ONE THIS PROJECTION SENDS.
+    let sent = v["lastSuccessful"].as_object().unwrap();
+    for key in fixture["lastSuccessful"].as_object().unwrap().keys() {
+        assert!(
+            sent.contains_key(key),
+            "ui/tests/fixtures/console/discovery-target-latest.json carries `{key}`, which the \
+             product API does not send: {v}"
+        );
+    }
+
+    // A RESULT THAT RECORDED NO COUNT PUBLISHES NONE, and a failed attempt with
+    // no result at all publishes none either: absent is "unknown", and a zero
+    // would read as a cluster with no brokers.
+    let mut uncounted = app
+        .fake
+        .object("topicdiscoveries", NS_A, "td-counted")
+        .unwrap();
+    uncounted["status"]["result"]
+        .as_object_mut()
+        .unwrap()
+        .remove("brokerCount");
+    app.fake.seed("topicdiscoveries", NS_A, uncounted);
+    app.fake.seed(
+        "topicdiscoveries",
+        NS_A,
+        json!({
+            "metadata": {"name": "td-failed", "labels": {"logweir.dev/connection": "source"}, "creationTimestamp": "2026-09-15T11:59:00Z"},
+            "spec": {"request": {"connectionRef": {"name": "source"}, "includeInternal": false, "maxTopics": 20000, "timeoutSeconds": 60}, "cancelRequested": false},
+            "status": {"phase": "Failed", "reason": "BrokerUnreachable", "message": "no broker answered"}
+        }),
+    );
+    let v = app
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/connections/source/topic-discoveries?latest=true"
+        ))
+        .await
+        .json();
+    assert_eq!(v["lastSuccessful"]["id"], "td-counted");
+    assert!(
+        v["lastSuccessful"].get("brokerCount").is_none(),
+        "no recorded count, no published count: {v}"
+    );
+    assert_eq!(v["latestAttempt"]["id"], "td-failed");
+    assert!(
+        v["latestAttempt"].get("brokerCount").is_none(),
+        "a failed attempt with no result publishes no count: {v}"
+    );
+    app.fake.assert_strict();
+}
+
 #[tokio::test]
 async fn cancel_is_idempotent_and_exact_owner() {
     let app = TestApp::new();
