@@ -21,8 +21,8 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10), 24 (FX-3), 25
-(FX-13), 26 (FX-11) and 27 (FX-8), from the product-expansion tracker's fix-now
-rows, land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
+(FX-13), 26 (FX-11), 27 (FX-8) and 28 (FX-17), from the product-expansion
+tracker's fix-now rows, land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
 execution-claim set check, receipt and catalog format 1.2.0, the pin's read
 by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
@@ -179,7 +179,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-seven operator-facing changes
+### The twenty-eight operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -199,6 +199,9 @@ FX-11 and is not proven live yet: the PoC upgrade that carries it runs its
 rows.
 Item 27 is fix-now row FX-8, proven on the compose stack; the PoC upgrade that
 carries it runs its refusal and opt-in rows.
+Item 28 is fix-now row FX-17, proven on the compose stack with the console on
+the host; the PoC upgrade that carries it re-syncs the PoC's catalog and checks
+its first page.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -1235,6 +1238,62 @@ Not yet proven on the PoC: the upgrade that carries FX-8 runs those rows.
 selections this build refuses, unlabelled, signing format 1.1.0 again. The 1.3.0
 scorecards already written stay valid under both readers.
 
+#### 28. Every scheduled run's recovery point is offered from the Catalog view (FX-17)
+
+**Changed.** The catalog sync publishes each point's backup set id, receipt key
+and manifest key through the product's redactor, which read a manual run's
+set id (a UUID) as an identity but not a scheduled run's
+`<schedule uid>-<yyyymmdd>-<hhmmss>`, or `…-r<k>` for a retry: 52 to 55
+lower-case characters, over the length at which the redactor treats an
+unrecognised run as material. A catalog synced by a runner up to
+`v0.2.0-rc.1` therefore published every SCHEDULED point as
+`backupId: "[redacted]"`, `receiptKey: "[redacted].receipt.json"` and
+`manifestKey: "[redacted].json"`, and the console's Catalog view offered none of
+them ("not offered: … `[redacted].receipt.json` …"): on the PoC, 84 of 370
+points, the whole first page. The redactor now reads exactly the shape the
+controller mints — a lower-case UID, a slot that is a real instant, at most a
+one-digit retry suffix — as an identity, as it does a UUID, so those three
+fields are published whole and the points are offered. Nothing else is
+exempted: a near miss (an impossible date, an upper-case UID, a two-digit
+retry, anything after the slot) is still withheld. The same set id now also
+survives in check details and remedies, where a scheduled set's segment key
+used to read `[redacted]`. When a set id or receipt key does come back
+redacted, the console says so in ONE reason naming the field and its cause
+(an older runner, or a set id chosen for `logweir backup run` that is not a UUID
+or a lower-case name under 40 characters), instead of the old "keeps a ULID
+run id" advice or "no usable backup set id".
+
+What changes on the upgrade:
+
+- **A catalog's published view does not change until its next sync** with the
+  new runner image. Until then its scheduled points stay "not offered", now
+  with the reason above.
+- **A set id chosen for `logweir backup run`** (`--backup-id-override`, or a
+  plan's `backup_id`) that is neither a UUID nor lower-case letters, digits,
+  `.`, `-`, `_` and `=` under 40 characters still has its receipt key withheld:
+  the run id already spends the key's one free component. Its points are listed
+  and not offered, and the row says why.
+
+**Do:** after the runner image rolls, sync each `RecoveryCatalog` once — set
+`spec.syncRequest` to a new value — rather than wait for its interval.
+**Scope:** `crates/logweir-core/tests/check_contract.rs` (the PoC's set ids
+kept bare and in receipt, manifest and segment keys; thirteen near misses
+withheld; F1's credential probes with the scheduled id as the anchor; the
+fixture `ui/tests/fixtures/set-ids.json` the console's rows read too),
+`crates/logweir/tests/check_cli.rs` (a real catalog sync publishes a scheduled
+point whole, and withholds a forged one), `crates/weirkeeper/tests/cadence.rs`
+(every set id the schedule controller mints survives), the console rows in
+`ui/tests/restore-catalog.spec.js` and `ui/tests/d3.spec.js`, and planted
+mutants, each killed but one equivalent (FX-17). Live, on compose slot 3 with
+the console on the host: seven real backups (four scheduled set ids, one a
+retry) synced by this build's runner were all offered and each opened the
+restore wizard on its point; the same archive synced by the `v0.2.0-rc.1`
+runner image reproduced the PoC's "not offered" rows. Not yet proven on the
+PoC: the upgrade that carries FX-17 re-syncs its catalog.
+**Rollback:** an older runner withholds the scheduled set ids again at the
+catalog's next sync, and the view returns to "not offered" for those points.
+Nothing in the archive changes in either direction.
+
 ### Verification scope: what "verified" means in this release
 
 - **A green badge** means the signed document's signature verified under a key
@@ -1343,7 +1402,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26 and 27, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26, 27 and 28, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.
