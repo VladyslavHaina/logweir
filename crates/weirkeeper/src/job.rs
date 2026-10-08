@@ -376,25 +376,23 @@ pub struct RunnerImage {
 /// would produce a pod that fails at startup with no archive and no receipt —
 /// and an exit code (1) that says "operational" about a template bug.
 ///
-/// THE VALUES MIRROR THE `Dockerfile`, AND A TEST HOLDS THE MIRROR.
-/// `the_engine_env_mirrors_the_dockerfile` reads the `Dockerfile`'s
-/// digest-pinned engine stage and `third_party/kafka-backup-binary.digest`
-/// and asserts both against [`ENGINE_DIGEST`]; the version is asserted
-/// against the vendored tarball's own name. (The upstream image reference is
-/// deliberately NOT quoted here: `tests/crd_shape.rs`'s
-/// `no_vendor_crd_group_is_named_anywhere` forbids a vendor registry
-/// namespace anywhere under `crates/weirkeeper/src`, and reading the value
-/// out of the `Dockerfile` in a test is strictly better than restating it.)
-/// The `Dockerfile` sets `LOGWEIR_ENGINE_BIN` and neither of these two,
-/// deliberately — the CLI path reads them off the binary that will actually
-/// run (`scripts/demo.sh:128-129`) — so the Job template is where they have
-/// to be stated, and the test is what keeps the statement true.
-pub const ENGINE_VERSION: &str = "0.23.3";
-/// See [`ENGINE_VERSION`]. The digest of the image the engine binary was
-/// extracted from, byte-identical to
-/// `third_party/kafka-backup-binary.digest`.
+/// PROD-00.2: THEY NAME LOGWEIR'S BUILD of the vendored OSO source, never OSO's
+/// release — `<release>+logweir.<n>` and the build-input digest, both read by
+/// `the_engine_env_mirrors_the_dockerfile` out of
+/// `third_party/kafka-backup-build.env`, the file the `Dockerfile`'s
+/// `engine-logweir` stage builds from. The runner image ALSO declares its
+/// engine, in `/etc/logweir/engine-identity`, and the runner signs that
+/// declaration ahead of these two variables (`logweir::engine_identity`): an
+/// image built with the one-release rollback (`ENGINE_SOURCE=oso`) signs as
+/// OSO's release whatever this controller was compiled with. These constants
+/// are what a runner image WITHOUT that file — one published before PROD-00.2
+/// — signs, and what a mismatch notice compares against.
+pub const ENGINE_VERSION: &str = "0.23.3+logweir.1";
+/// See [`ENGINE_VERSION`]. Logweir's build-input digest (the vendored tarball,
+/// the patch folder and the version), byte-identical to `ENGINE_DIGEST` in
+/// `third_party/kafka-backup-build.env`.
 pub const ENGINE_DIGEST: &str =
-    "sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db";
+    "sha256:fb04aa95f2a09085018044f2a498b12b8eda6d1762d47ea3e2e61d077b908def";
 
 /// `LOGWEIR_ENGINE_VERSION`, the env name.
 pub const ENGINE_VERSION_ENV: &str = "LOGWEIR_ENGINE_VERSION";

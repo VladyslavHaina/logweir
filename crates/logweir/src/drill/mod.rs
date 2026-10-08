@@ -1761,10 +1761,13 @@ fn context(
         )
     };
 
-    // Engine identity. The binary is extracted at image build time from the
-    // digest-pinned image; the version and digest describe THAT image and end
-    // up in the signed scorecard, so they are read from the environment the
-    // image sets rather than guessed here. `execute_with` refuses an empty
+    // Engine identity. The binary is built into the runner image (Logweir's
+    // build of the vendored source, or OSO's release under the rollback); the
+    // version and digest describe THAT engine and end up in the signed
+    // scorecard, so they are read from what the image declares, or from the
+    // environment where there is no image, rather than guessed here. A
+    // malformed image declaration is refused here, before phase 0: it is a
+    // defect of the image, not of the plan. `execute_with` refuses an empty
     // version or digest immediately after phase 0 — see `assert_engine_identity`
     // — rather than here, so a plan the guard would REFUSE still exits 3 on a
     // host with no engine environment at all.
@@ -1780,8 +1783,14 @@ fn context(
     // phases 0-4 and died at phase 5 the first time it tried to execute the
     // engine. One resolution now, for both commands.
     let binary = crate::engine_bin::engine_path();
-    let version = std::env::var("LOGWEIR_ENGINE_VERSION").unwrap_or_default();
-    let digest = std::env::var("LOGWEIR_ENGINE_DIGEST").unwrap_or_default();
+    // PROD-00.2: the image's own declaration of its engine wins over the two
+    // variables a Job carries (`crate::engine_identity`); a host with no image
+    // file reads the variables exactly as before. A broken identity file is a
+    // broken image, refused here rather than signed under the environment's
+    // claim.
+    let crate::engine_identity::EngineIdentity {
+        version, digest, ..
+    } = crate::engine_identity::resolve().map_err(DrillError::Operational)?;
     // Pod-local scratch for the rendered restore.yaml / validation.yaml. Never
     // uploaded: a crashed restore is not resumable in v0.1 (spec §11).
     let workdir = std::env::temp_dir().join(format!("logweir-{}", std::process::id()));
@@ -2603,9 +2612,11 @@ fn assert_engine_identity(id: &logweir_core::engine::EngineId) -> Result<(), Dri
     ] {
         if value.trim().is_empty() {
             return Err(DrillError::Operational(format!(
-                "{field} is empty; a signed scorecard must name the engine image it ran. \
-                 Set {var} to the value of the digest-pinned image this binary was \
-                 extracted from."
+                "{field} is empty; a signed scorecard must name the engine it ran. Run in \
+                 the runner image, which declares its engine in {path}, or set {var} to the \
+                 engine's identity: its `kafka-backup --version` version and its digest \
+                 (Logweir's build: third_party/kafka-backup-build.env).",
+                path = crate::engine_identity::IMAGE_IDENTITY_PATH
             )));
         }
     }

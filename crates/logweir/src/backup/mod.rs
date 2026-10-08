@@ -560,7 +560,12 @@ fn execute_with_signer(
     ] {
         if value.trim().is_empty() {
             return Err(BackupError::Operational(format!(
-                "{field} is empty; a signed backup receipt must name the engine image it                  ran. Set {var} to the value of the digest-pinned image this binary was                  extracted from. NO backup was taken: this is refused before the engine is                  spawned."
+                "{field} is empty; a signed backup receipt must name the engine it ran. Run \
+                 in the runner image, which declares its engine in {path}, or set {var} to \
+                 the engine's identity: its `kafka-backup --version` version and its digest \
+                 (Logweir's build: third_party/kafka-backup-build.env). NO backup was taken: \
+                 this is refused before the engine is spawned.",
+                path = crate::engine_identity::IMAGE_IDENTITY_PATH
             )));
         }
     }
@@ -1457,8 +1462,9 @@ pub fn evidence_location(
 
 /// The engine handle, built exactly as `drill::context` builds it: the ONE
 /// resolution `doctor` and both run commands consult
-/// (`crate::engine_bin::engine_path`), the identity read from the environment
-/// the image sets, and a pod-local workdir for the rendered document.
+/// (`crate::engine_bin::engine_path`), the identity the image declares (or
+/// the environment, without an image; `crate::engine_identity`), and a
+/// pod-local workdir for the rendered document.
 ///
 /// The identity is NOT refused when empty, unlike the drill's
 /// `assert_engine_identity`: that refusal exists because an empty
@@ -1467,8 +1473,11 @@ pub fn evidence_location(
 /// for the receipt.
 fn build_engine(archive: Store) -> Result<logweir_engine_oso::engine::OsoCliEngine, BackupError> {
     let binary = crate::engine_bin::engine_path();
-    let version = std::env::var("LOGWEIR_ENGINE_VERSION").unwrap_or_default();
-    let digest = std::env::var("LOGWEIR_ENGINE_DIGEST").unwrap_or_default();
+    // PROD-00.2: the image's declaration first, the variables where there is
+    // none (`crate::engine_identity`), exactly as the drill reads it.
+    let crate::engine_identity::EngineIdentity {
+        version, digest, ..
+    } = crate::engine_identity::resolve().map_err(BackupError::Operational)?;
     let workdir = std::env::temp_dir().join(format!("logweir-{}", std::process::id()));
     std::fs::create_dir_all(&workdir)
         .map_err(|e| BackupError::Operational(format!("{}: {e}", workdir.display())))?;

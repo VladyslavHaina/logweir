@@ -1317,34 +1317,49 @@ fn the_argv_is_derived_and_no_annotation_contributes_to_it() {
 }
 
 /// The two mandatory engine variables are on the container, and they mirror
-/// what the `Dockerfile` pins.
+/// the engine the `Dockerfile` builds: Logweir's build of the vendored source,
+/// named by `third_party/kafka-backup-build.env` (PROD-00.2).
 #[test]
 fn the_engine_env_mirrors_the_dockerfile() {
+    let build = workspace_file("third_party/kafka-backup-build.env");
+    let value = |key: &str| {
+        build
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("kafka-backup-build.env sets no {key}"))
+            .to_string()
+    };
+    assert_eq!(
+        value("ENGINE_VERSION"),
+        ENGINE_VERSION,
+        "`job::ENGINE_VERSION` must be Logweir's build identity, the version the \
+         `Dockerfile`'s `engine-logweir` stage stamps. Without these two variables a runner image \
+         that declares no engine of its own makes `logweir backup run` exit 1 BEFORE the engine \
+         spawns — no archive and no receipt — because a signed receipt must name the engine \
+         build that produced it"
+    );
+    assert_eq!(
+        value("ENGINE_DIGEST"),
+        ENGINE_DIGEST,
+        "`job::ENGINE_DIGEST` must be the build-input digest the `Dockerfile` builds from"
+    );
     let dockerfile = workspace_file("Dockerfile");
     assert!(
-        dockerfile.contains(ENGINE_DIGEST),
-        "`job::ENGINE_DIGEST` must be the digest the `Dockerfile`'s engine stage pins. Without \
-         these two variables `logweir backup run` exits 1 BEFORE the engine spawns — no archive \
-         and no receipt — because a signed receipt must name the engine build that produced it. \
-         The Dockerfile sets `LOGWEIR_ENGINE_BIN` and neither of these, so the Job template is \
-         where they have to be stated and this assertion is what keeps the statement true."
+        dockerfile.contains("COPY third_party/kafka-backup-build.env")
+            && dockerfile.contains("bash scripts/engine-source.sh prepare"),
+        "the Dockerfile's engine stage builds from third_party/kafka-backup-build.env"
     );
-    let pinned = workspace_file("third_party/kafka-backup-binary.digest");
-    assert_eq!(
-        pinned.trim(),
-        ENGINE_DIGEST,
-        "`third_party/kafka-backup-binary.digest` and the Dockerfile's `FROM …@sha256:` are \
-         updated together, never separately; this constant is the third place that value has to \
-         agree with"
-    );
+    let release = ENGINE_VERSION
+        .split_once("+logweir.")
+        .map(|(release, _)| release)
+        .expect("Logweir's build names its OSO release");
     assert!(
         workspace_root()
             .join("third_party")
-            .join(format!("kafka-backup-v{ENGINE_VERSION}.tar.gz"))
+            .join(format!("kafka-backup-v{release}.tar.gz"))
             .exists(),
-        "`job::ENGINE_VERSION` must be the vendored engine's own version — the tarball \
-         `third_party/kafka-backup-v{ENGINE_VERSION}.tar.gz` is what makes it checkable, and \
-         Global Constraint 8 fixes the floor at that value"
+        "`job::ENGINE_VERSION` must name the vendored engine's own release — the tarball \
+         `third_party/kafka-backup-v{release}.tar.gz` is what makes it checkable"
     );
 
     let spec = runner_job_spec(
