@@ -1918,6 +1918,23 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
             "poc/{set}/topics/payments-EU/partition=2/segment-00000000000000000000.bin.zst"
         );
         assert_eq!(redact(&segment), segment, "the segment path went");
+        // The set id ANCHORS a run exactly as a UUID does, so a run with no
+        // archive word in it still reads as a key: the set's own prefix under
+        // one adopter-chosen component (what retention names), and an
+        // adopter-prefixed key whose run id needs the anchor for its ULID
+        // exemption (the shape of the lab's `archive/<uuid>/<run id>`).
+        let set_prefix = format!("Team-Prod/{set}");
+        assert_eq!(redact(&set_prefix), set_prefix, "the set prefix went");
+        let prefixed = format!("poc/{set}/{RUN}");
+        assert!(
+            is_object_key_shaped(&prefixed),
+            "the set id did not anchor `{prefixed}`"
+        );
+        assert_eq!(
+            redact(&format!("{prefixed}.receipt.json")),
+            format!("{prefixed}.receipt.json"),
+            "…and `redact`'s anchored branch disagrees"
+        );
         // In the sentence a remedy really is, through the controller's second
         // pass.
         let prose = format!("the evidence object {receipt} is not in the archive");

@@ -8518,6 +8518,90 @@ fn the_receipt_key_a_restore_binds_to_survives_a_sync_for_a_real_run_id() {
     );
 }
 
+/// **FX-17, end to end.** A SCHEDULED run's point is published with its set
+/// id, its receipt key and its manifest key whole.
+///
+/// REGRESSION REASON. The row above, and every catalog fixture in this file,
+/// spells the backup set id as a UUID — a manual run's. A scheduled run's set
+/// id is `<schedule uid>-<yyyymmdd>-<hhmmss>` (`weirkeeper::slot::
+/// backup_id_for_attempt`), 52 characters, which the redactor read as neither a
+/// UUID nor a public name. So on the PoC every nightly point reached the
+/// console as `backupId: "[redacted]"`, `receiptKey: "[redacted].receipt.json"`
+/// and `manifestKey: "[redacted].json"` — 84 of 370 points, the whole first
+/// page of the Catalog view — and the console offered none of them, because a
+/// plan binding cannot be built from the redactor's output.
+///
+/// The second half is the negative control: a set id with the same shape but
+/// a slot that is not a real instant was never minted, and it is still
+/// withheld from all three fields.
+#[test]
+fn a_scheduled_runs_point_is_published_with_its_set_id_and_keys_whole() {
+    /// The PoC's own nightly schedule UID and one of its run ids.
+    const SCHEDULE_UID: &str = "89b585c5-5498-48dc-ae32-090809457ec8";
+    const RUN: &str = "01M4CKTADX268PREVHJAAYXEMZ";
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let entry_for = |set: &str| -> (serde_json::Value, CatalogFixture) {
+        let f = catalog_fixture(
+            // The day every other catalog row here is captured on: the
+            // fixture's index walk reads that shard.
+            &catalog_receipt(set, RUN, "2026-09-16T03:00:00Z"),
+            "s3://kafka-backups/poc",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        let run = drive_sync(
+            sync_request(),
+            &FakeWiring::default()
+                .with_role(DestinationRole::ArchiveRead, place(FakeObjects::new(), &f)),
+        );
+        let mut entries = entries_of(&body_of(&run));
+        assert_eq!(entries.len(), 1, "one receipt, one point");
+        (entries.remove(0), f)
+    };
+
+    // --- the set ids the schedule controller mints: attempt 0 and a retry ---
+    for set in [
+        format!("{SCHEDULE_UID}-20260916-030000"),
+        format!("{SCHEDULE_UID}-20260916-030000-r2"),
+    ] {
+        let (entry, f) = entry_for(&set);
+        assert_eq!(
+            f.point.receipt.key,
+            format!("logweir/backups/{set}/{RUN}.receipt.json"),
+            "the fixture is not the key `backup run` writes"
+        );
+        assert_eq!(entry["backupId"], set, "the set id was withheld");
+        assert_eq!(
+            entry["receiptKey"], f.point.receipt.key,
+            "the plan binding was not published whole"
+        );
+        assert_eq!(
+            entry["manifestKey"], f.point.archive.manifest_key,
+            "the manifest key was withheld"
+        );
+        assert_eq!(entry["runId"], RUN);
+        let line = serde_json::to_string(&entry).expect("the entry serialises");
+        assert!(
+            !line.contains(logweir_core::check_contract::REDACTED),
+            "the PoC symptom is back: {line}"
+        );
+    }
+
+    // --- the negative control: the shape, but not a slot anything minted ---
+    let forged = format!("{SCHEDULE_UID}-20261309-031700");
+    let (entry, _) = entry_for(&forged);
+    let line = serde_json::to_string(&entry).expect("the entry serialises");
+    assert!(
+        !line.contains(&forged),
+        "a set id no schedule mints rode out on the scheduled shape: {line}"
+    );
+    assert_eq!(entry["backupId"], logweir_core::check_contract::REDACTED);
+    assert_eq!(
+        entry["receiptKey"],
+        format!("{}.receipt.json", logweir_core::check_contract::REDACTED)
+    );
+}
+
 /// **THE CROSS-CRATE GUARD, half one.** Every prefix and every cap this runner
 /// writes is the controller's own constant, read out of its source.
 #[test]
