@@ -13,11 +13,13 @@ are GA at 1.29. The `ValidatingAdmissionPolicy` example is 1.30+ and ships
 commented out.
 
 **Minimum `kafka-backup` engine: 0.21.0.** That is the floor for the drill as
-shipped, and it is the version the pinned digest in
+shipped. The engine the images carry, and the one the pinned digest in
 [../third_party/kafka-backup-binary.digest](../third_party/kafka-backup-binary.digest)
-names. Engines below it, such as `v0.19.1` (the default of
-`strimzi-backup-operator` v0.2.22–v0.2.25; its v0.3.x defaults to v0.22.0),
-are reported `unsupported (lever-absent)`, never as a fault.
+names, is **0.23.3** (since PROD-00.3f); a standalone CLI install needs that
+binary, because `logweir doctor` accepts exactly the pinned version. Engines
+below the floor, such as `v0.19.1` (the default of `strimzi-backup-operator`
+v0.2.22–v0.2.25; its v0.3.x and v0.4.0 default to v0.22.0), are reported
+`unsupported (lever-absent)`, never as a fault.
 [support-matrix.md](support-matrix.md) is the row-by-row version.
 
 ---

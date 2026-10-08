@@ -6,6 +6,9 @@ Decision record for **PROD-01.1** ("Prove record and transaction behaviour") in 
 - Date: 2026-09-28. Base: main `adee0a16`. Branch `claude/prod-01-1`.
 - Kind: research row (source first, then measured on the compose stack). It ships no product
   feature; the rails it decides are proposed ledger rows (§6, §9).
+- **Addendum, 2026-10-07 (PROD-00.3f):** the pin moved to `kafka-backup` **0.23.3** and every live
+  row here was re-run on it with the contract asserted (`CONTRACT_ENGINE`). **No contract change:**
+  §11 records the runs. The rest of this record is as measured on 0.21.0.
 - Engine: `kafka-backup` v0.21.0, the pinned source `third_party/kafka-backup-v0.21.0.tar.gz`
   (sha256 `0252a83735148331c16d7c4e737a41f099c0f52eda5d7a66db75b8848ddc405b`) and the pinned image
   `osodevops/kafka-backup@sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`.
@@ -363,6 +366,7 @@ response timeout — and thawed. Samples (outcomes under
 | 3 | 5,000 / 60,000 | three produce requests "timed out after 60s waiting for broker response" and were resent; after the thaw, NOT_LEADER on all three partitions, then "Unknown broker ID: -1" and "Restore completed with 1 error(s)", exit 1 | exit 1, "logweir could not do its job; NO scorecard was written" | 44,000 records: **3,000 `duplicate`** and 19,000 `missing` |
 | 4 (final pass, at the tip) | 57,000 / 60,000 | logged no warning; it had returned before Logweir's next read | exit 1 at phase 6: Logweir's own post-restore `end_offsets` read timed out after 20 s during the freeze ("Meta data fetch error: OperationTimedOut"), no scorecard | 60,000 records, exact |
 | 5 (fix-round pass, `44838f31`) | 9,000 / 60,000 | two produce requests failed with "Connection error during read response length" and were resent; then **exit 0** (phase 6 went on to its own read) | exit 1 at phase 6: Logweir's own post-restore `end_offsets` read met "NotLeaderForPartition" just after the thaw, no scorecard | 62,000 records: **2,000 `duplicate`** (p1@19000–19999, p2@17000–17999), nothing missing |
+| 6 (engine **0.23.3**, PROD-00.3f, 2026-10-08) | 7,000 / 60,000 | one produce request "timed out after 60s waiting for broker response" and was resent ("Connection error on Produce request, reconnecting and retrying"); the restore completed | **exit 2, signed `fail-integrity`**: phase 7's count bound refused "restored 61000 records but the manifest bounds the window … at [60000, 60000]"; the 75 sampled records all matched | 61,000 records: **1,000 `duplicate`** (p0@19000–19999), nothing missing |
 
 What this establishes, and what it does not:
 
@@ -395,11 +399,12 @@ What this establishes, and what it does not:
   time (a fault proxy that drops produce responses; a broker stop past the engine's retry budget; a
   pause at the engine's exit; a synthetic duplicated target), and PROD-07 builds them with
   PROD-01.5's profiles. The samples here are evidence that the conditions occur, not a rate.
-- Not established: a duplicate that survives into a run Logweir completes. A full restore with
-  duplicates would fail the count bound (restored above the manifest's upper bound); a
-  point-in-time restore whose bound includes straddling segments may not (PROD-08.1's exact counts
-  close this). Sample 5 came one read short of it: the engine exited 0 with 2,000 duplicates in the
-  target, and Logweir's own read failed before phase 7 could count them.
+- **Measured since (sample 6, engine 0.23.3): a duplicate that reaches a run Logweir completes
+  fails a full restore's count bound.** The engine resent one timed-out batch, Logweir's phase 6
+  read succeeded, and phase 7 signed `fail-integrity` (exit 2) because 61,000 restored records lie
+  above the manifest's bound of 60,000. The fingerprint sample (75/75 matching) could not see the
+  duplicate; the count bound did. Still not established: a point-in-time restore whose bound
+  includes straddling segments may admit a duplicate (PROD-08.1's exact counts close this).
 
 ### 5.2 Termination before or after an acknowledgement — blocked on subprocess cancellation
 
@@ -413,6 +418,7 @@ engine container and the target are read at once and every second for 20 s.
 | 2 | 8,000 / 60,000 | **running** (`d28844703f68`) | 60,000 within about a second; unchanged for 20 s; the container had exited | killed during phase 6, no scorecard |
 | 3 (final pass, tip) | 3,000 / 60,000 | **running** (`88f03be3707f`) | 60,000 within about a second; unchanged for 20 s; the container had exited | killed, no scorecard |
 | 4 (fix-round pass, `44838f31`) | 3,000 / 60,000 | **running** (`d6a6ba783675`) | 60,000 at the first read, 1.3 s after the kill; unchanged for 22 s; the container had exited | killed, no scorecard |
+| 5 (engine **0.23.3**, PROD-00.3f) | 5,000 / 60,000 | **running** (`5a1086018dab`) | 60,000 at the first read, 1.3 s after the kill; unchanged for 22.5 s; the container had exited | killed, no scorecard |
 
 The row asserts it (review L5d): an engine container of this worktree is running right after the
 kill, and the target's last sample equals the whole archive. The engine outlives the process that
@@ -806,11 +812,38 @@ PROD-00.1's to propose and OD-3's to decide — this record supplies each one's 
   by offset, so C1's "in offset order" rests on the replay comparison and on each segment's own
   offset range, not on the archive's physical order. A tampered later copy of a duplicate is now
   field-checked (`a_tampered_later_copy_is_reported_beside_the_duplicate`).
-- **Contract gating** (review L4): the rows assert this record's contract only on engine 0.21.0
-  (`CONTRACT_ENGINE`); `engine-matrix` runs of other releases record outcome files and assert
-  nothing (on v0.19.2 the manifest carries no `configurations`, which arrived in 0.20.0).
+- **Contract gating** (review L4): the rows assert this record's contract only on the pinned
+  engine (`CONTRACT_ENGINE`, 0.21.0 until PROD-00.3f, 0.23.3 since); `engine-matrix` runs of other
+  releases record outcome files and assert nothing (on v0.19.2 the manifest carries no
+  `configurations`, which arrived in 0.20.0). `e2e/tests/engine_pin.rs` fails when the constant
+  and the pin disagree (PROD-00 decision record, A-3f-1).
 - **Routes are not decided here.** Which of PROD-00.3a–d is an upstream PR, a fork patch or a
   Logweir-native path is PROD-00.1's proposal and OD-3's decision.
+
+## 11. Re-measured on engine 0.23.3 (PROD-00.3f, 2026-10-08)
+
+The pin moved from 0.21.0 to 0.23.3 ([PROD-00 decision record](PROD-00-engine-route.md) §12). From
+source, nothing this record measures could change: `kafka/fetch.rs`, `kafka/produce.rs`,
+`segment/`, `restore/filter.rs` and `kafka-protocol` 0.18.0 are byte-identical from 0.21.0 to
+0.23.3, and the produce router still re-sends a timed-out batch with no producer id. 0.23.0's
+restore changes batch the offset-mapping updates (the offset report's `first_timestamp` may now be
+a segment's minimum where timestamps are not monotonic; Logweir hashes that report and parses
+none of it) and scope the router's connection-pool eviction.
+
+**Runs.** Compose slot 4, Apache Kafka 3.7.1 (read back from the running container), engine image
+`sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`, branch
+`claude/prod-00-3f`; outcome files under `artifacts/prod-00-3f/runs/c1-full/record-semantics-v0.23.3/`
+and `runs/c2-*/`.
+
+| Row | On 0.23.3 |
+|---|---|
+| The eight live rows (TXN, which also writes txn-late; ts-pit; ts-floor; ts-bound; LAT; shapes; compaction; recreate) | **8 passed with the contract asserted** (no row printed "contract not asserted"); every outcome file names engine 0.23.3. The broker's time retention deleted no segment during the run (A-C20-2 holds) |
+| Ack fault (§5.1) | sample 6: one resent batch, 1,000 duplicates, and for the first time a completed run, which Logweir signed `fail-integrity` on the count bound |
+| Kill (§5.2) | sample 5: the engine outlived `logweir` and finished the restore, as on 0.21.0 |
+
+**Contract change: none.** The capture, replay and verification statements of §3, the
+counterexamples of §2 and the routes of §9 hold on 0.23.3 unchanged. The one new fact (sample 6)
+is about Logweir's verdict on a duplicate it can count, not about the engine: C5 is as it was.
 
 ---
 

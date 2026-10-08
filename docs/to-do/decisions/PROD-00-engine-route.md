@@ -4,6 +4,7 @@
 - Status: **proposed**. The routes below are a recommendation. [OD-3](../product-expansion.md#owner-decisions) is the owner's, and nothing here decides it.
 - Date: 2026-09-28. Branch `claude/prod-00-1`, from main `adee0a16`.
 - Kind: research. Source first, then runs on the e2e compose stack. The row repaired `engine-matrix` and corrected the support docs; it changed no product code, no engine pin and nothing in `third_party/`.
+- **Addendum, 2026-10-07 (PROD-00.3f, branch `claude/prod-00-3f`):** the pin moved from 0.21.0 to **0.23.3**, the newest OSO release, not to 0.22.0 as §0 item 1 and §9 proposed (OD-3, decided 2026-10-07). §12 is the evaluation of 0.23.3 and the record of the move. Sections 0–11 are kept as written on 2026-09-28; where §12 changes one of their statements, §12 says so.
 
 ## 0. Decision summary
 
@@ -44,7 +45,7 @@
 | Broker probe | `apache/kafka:4.3.1` (the `latest` tag on 2026-09-28), `kafka-broker-api-versions.sh` against a private container |
 | Operators | `strimzi-backup-operator` HEAD `cf5b1ecf` (2026-09-07), tags v0.2.21–v0.3.1; `kafka-backup-operator` HEAD `b287418f` = v1.3.0 (2026-08-30) |
 
-**Citation form.** `C/<path>:<line>` is `crates/kafka-backup-core/src/<path>` in the pinned tarball. A file 0.22.0 did not touch has the same line in v0.22.0. For the four touched files that are cited below (`backup/engine.rs`, `config.rs`, `manifest.rs`, `storage/s3.rs`), the v0.22.0 line follows `→`. `KP/records.rs` is `src/records.rs` in `kafka-protocol` 0.18.0. `L/<path>` is this repository at `adee0a16`.
+**Citation form.** `C/<path>:<line>` is `crates/kafka-backup-core/src/<path>` in the pinned tarball of this record's date, v0.21.0 (since PROD-00.3f the tree vendors v0.23.3 instead; §12 cites that tarball as `C23/`). A file 0.22.0 did not touch has the same line in v0.22.0. For the four touched files that are cited below (`backup/engine.rs`, `config.rs`, `manifest.rs`, `storage/s3.rs`), the v0.22.0 line follows `→`. `KP/records.rs` is `src/records.rs` in `kafka-protocol` 0.18.0. `L/<path>` is this repository at `adee0a16`.
 
 The run artifacts are under `/tmp/logweir-roadmap-run/claude/artifacts/prod-00-1/` on the worker host: the upstream diff, image digests, the 4.3.1 probe, the engine-matrix run logs and every compose cycle.
 

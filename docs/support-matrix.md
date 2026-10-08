@@ -18,7 +18,8 @@ floor below. This file is the row-by-row evidence behind it.
 | Floor | Version | What it gates |
 |---|---|---|
 | **Warning-mechanism floor** | `kafka-backup` **0.16.0** | The `Ignoring unknown config key ...` message Logweir parses off the engine's streams. Below it, a rendered key the engine dropped fails **silently** instead of surfacing in `engine.levers.unknown_key_warnings`. |
-| **Full-drill floor** | `kafka-backup` **0.21.0** | The full drill as shipped. This is the version every vendored struct and CLI behaviour was verified against, and the version pinned by digest in `third_party/kafka-backup-binary.digest`. |
+| **Full-drill floor** | `kafka-backup` **0.21.0** | The full drill as shipped. This is the version every vendored struct and CLI behaviour was first verified against. |
+| **The pin** | `kafka-backup` **0.23.3** | Not a floor: the engine the runner image carries and `third_party/kafka-backup-binary.digest` pins (since PROD-00.3f, 2026-10-07; it was 0.21.0 before). `logweir doctor` accepts exactly this version. The vendored structs are drift-gated against its source. |
 
 Anything below the full-drill floor is reported **`unsupported (lever-absent)`**
 — an engine that predates a lever Logweir needs. **That is never a fault Logweir
@@ -50,16 +51,19 @@ so nobody quotes a projected verdict as a tested one.
 
 | Engine version | Status | Note |
 |---|---|---|
-| **0.22.0** | **evaluated, not the shipped pin; no weekly row recorded yet** | Upstream's current release (2026-09-07). PROD-00.1 ran it against the compose stack (Kafka 3.7.1, the `linux/amd64` image `sha256:1c3432c9399dbdd59fea7b6cf386135656a73bb6dd60841212ddbfe5ba26b1fe` under emulation, 2026-09-29). The demo drill scored `outcome: pass` and `integrity: byte-fingerprint/pass` (150/150), and both verifiers returned VALID. `just pitr` passed (six of nine records, boundary included). The `.kbak` fixture tests passed on 0.22.0 bytes. `doctor` refuses it, because it accepts exactly 0.21.0. Moving the pin is proposed as PROD-00.3f, subject to OD-3 ([decision record](to-do/decisions/PROD-00-engine-route.md) §4). Its `path_style` change does **not** make VirtualHosted addressing with a custom endpoint possible, so that refusal stays. It also newly treats an `http://` endpoint as `allow_http: true`. |
+| **0.23.0 – 0.23.2** | **not run; superseded within the minor** | Released 2026-09-29 and 2026-10-06. PROD-00.3f read them from source on the way to 0.23.3 ([decision record](to-do/decisions/PROD-00-engine-route.md) §12) and ran only 0.23.3. `doctor` refuses them. `kafka-backup-operator` 1.4.0 and 1.4.1 link 0.23.0 and 0.23.1. |
+| **0.22.0** | **evaluated, not the shipped pin; a weekly row is declared** | Released 2026-09-07; the default of `strimzi-backup-operator` v0.3.0–v0.4.0. PROD-00.1 ran it against the compose stack (Kafka 3.7.1, the `linux/amd64` image `sha256:1c3432c9399dbdd59fea7b6cf386135656a73bb6dd60841212ddbfe5ba26b1fe` under emulation, 2026-09-29). The demo drill scored `outcome: pass` and `integrity: byte-fingerprint/pass` (150/150), and both verifiers returned VALID. `just pitr` passed (six of nine records, boundary included). The `.kbak` fixture tests passed on 0.22.0 bytes. `doctor` refuses it, because it accepts exactly the pin. The pin moved past it to 0.23.3 (PROD-00.3f; OD-3). Its `path_style` change does **not** make VirtualHosted addressing with a custom endpoint possible, so that refusal stays. It also newly treats an `http://` endpoint as `allow_http: true`, which Logweir refuses before an engine document is rendered. |
 | 0.20.x | **unsupported by the full-drill floor** | Matrix compatibility probes do not override the 0.21.0 runtime floor. The weekly job runs v0.20.0 as a below-floor row. |
 | 0.19.x | **unsupported by the full-drill floor** | Same floor as 0.20.x. v0.19.2 is the `kafka-backup-core` that `kafka-backup-operator` 1.3.0 links as a library (its `Cargo.lock`). v0.19.1 is the default of `strimzi-backup-operator` v0.2.22–v0.2.25; v0.2.21 defaulted to v0.19.0. Engines before 0.21 write no segment sha256, so a drill over an archive one of them wrote reports `integrity.result: partial`, never `pass`. Measured on 2026-09-29 over a v0.19.2 archive, drilled with the pinned engine: `outcome: fail-integrity`, `integrity: byte-fingerprint/partial`, exit 2, and both verifiers VALID. Logweir refuses to drive a below-floor engine itself: v0.19.2 as the restore engine exits 1 with "ignored the config key `restore.header_preflight` that logweir rendered; this tag is below the declared floor". The weekly job runs v0.19.2 and v0.19.1 as below-floor rows, which record `unsupported (lever-absent)` and are never a fault. |
 | 0.16.0 – 0.18.x | **unsupported**, by floor | Below the full-drill floor; only the unknown-key warning mechanism works. |
 | < 0.16.0 | **unsupported (lever-absent)**, by floor | The warning mechanism this project depends on does not exist. |
 
 `strimzi-backup-operator` has defaulted to engine **v0.22.0** since its v0.3.0
-(2026-09-07, `DEFAULT_BACKUP_IMAGE` in its `src/engine.rs`). An earlier
-revision of this page said its default was v0.19.1, which is true only of its
-v0.2.22–v0.2.25 releases.
+(2026-09-07, `DEFAULT_BACKUP_IMAGE` in its `src/engine.rs`), through v0.4.0
+(2026-10-06). An earlier revision of this page said its default was v0.19.1,
+which is true only of its v0.2.22–v0.2.25 releases. `kafka-backup-operator`
+1.3.0 links `kafka-backup-core` 0.19.2; its 1.4.0, 1.4.1 and 1.4.2 (2026-10-06
+and 07) link 0.23.0, 0.23.1 and 0.23.3.
 
 ## Authentication modes, and what each one has actually been run against
 
@@ -90,7 +94,7 @@ claims above are deliberately about rendered bytes and not about a handshake.
 The engine rows above were run against Apache Kafka **3.7.1**, a line Apache
 no longer supports and MSK stopped supporting on 2026-09-01. Each row below
 names its broker line. All were run on 2026-09-29 against the compose stack's
-single-node KRaft broker, engine 0.21.0 (the pinned digest), plaintext, MinIO,
+single-node KRaft broker, engine 0.21.0 (the pin on that date), plaintext, MinIO,
 each line on its own compose slot (`e2e/compose/stack-env.sh --slot N --kafka
 LINE`, [`e2e/README.md`](../e2e/README.md)). Three paths per line: the demo
 drill (`scripts/demo.sh`), `just pitr` (the G-PITR boundary row) and the
@@ -116,7 +120,9 @@ their rows belong to the tasks that use them.
 **The engine does not negotiate protocol versions, and 4.x accepts what it
 sends.** `kafka-backup` 0.21.0 sends every request at a fixed version and never
 sends ApiVersions (`crates/kafka-backup-core/src/kafka/client.rs:588-611` in the
-pinned source tarball; any API not in that table goes out at version 0). Kafka
+v0.21.0 source; any API not in that table goes out at version 0). The 0.23.3 pin
+sends the same versions: the table is byte-identical at `client.rs:625-648` of
+the tarball now vendored. Kafka
 4.0 removed old versions (KIP-896). Measured on each line with
 `kafka-broker-api-versions.sh`, every version the engine can send is inside the
 broker's range; 4.x raised the floors below them:
@@ -192,10 +198,13 @@ checked by its digest and says the pin could not be checked there
 ## The weekly engine-matrix job
 
 `.github/workflows/engine-matrix.yml` runs every Monday, and on demand, over a
-declared set of rows: the newest four engine minors (`v0.22.0`, `v0.21.0`,
-`v0.20.0`, `v0.19.2`), `v0.19.1` (the default of `strimzi-backup-operator`
-v0.2.22–v0.2.25), and the pinned engine once more on the newest supported
-Apache Kafka line (`KAFKA_VERSION`). Each row does the following:
+declared set of seven rows: the newest four engine minors (`v0.23.3`, the pin;
+`v0.22.0`; `v0.21.0`, the full-drill floor; `v0.20.0`), `v0.19.2` (the library
+version of `kafka-backup-operator` 1.3.0), `v0.19.1` (the default of
+`strimzi-backup-operator` v0.2.22–v0.2.25), and the pin once more on the newest
+supported Apache Kafka line (`KAFKA_VERSION`), where its fixed protocol versions
+meet the highest floors. That last row ran `v0.21.0` until PROD-00.3f moved the
+pin; the engine's protocol-version table is byte-identical in the two. Each row does the following:
 
 - pins the tag to a digest whose revision label is the tag's commit;
 - sets the stack up and runs the suite exactly as the CI e2e job does
