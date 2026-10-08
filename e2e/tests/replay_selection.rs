@@ -348,7 +348,13 @@ impl Restored {
             "selection": self.scorecard["source"]["selection"],
             "sample": self.scorecard["sample"],
             "integrity": self.scorecard["integrity"],
-            "phase6_notes": phase(&self.scorecard, 6)["notes"],
+            "phase6_notes": self.scorecard["phases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|p| p["phase"] == 6)
+                .map(|p| p["notes"].clone())
+                .unwrap_or(Value::Null),
             "refusal": self.refusal(),
             "stderr_tail": self.stderr.lines().rev().take(15).collect::<Vec<_>>(),
         })

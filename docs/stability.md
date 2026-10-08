@@ -1181,7 +1181,9 @@ offers `[from_ms + 1 ms, to_ms - 1 ms]` and defaults to its end (WIZARD-DEFAULT-
 while treating `point_in_time` as exclusive would silently drop the boundary record. Both
 documents' floors are the minimum segment start over the topics that document names, so a
 receipt's `covered.from_ms` and a restore's `time_window_start` agree for the same archive and the
-same topics. Both rules apply to the records the engine reads: it selects segments by their first
+same topics — unless the plan states its own inclusive start, `restore.window_start` (PROD-11.1),
+which must be at or after that floor (a start before it is refused, never moved to it) and is
+signed in `source.selection`. Both rules apply to the records the engine reads: it selects segments by their first
 and last record timestamps, and a segment's start is its first record's timestamp, not its
 minimum, so with out-of-order timestamps a record at or before the point can sit in a segment that
 is never read, and a record older than every segment's first record is below every floor — see

@@ -266,7 +266,8 @@ Optional. **How much of the restore phase 7 verifies.**
   topic is read, its sha256 checked against the manifest and its records
   decoded; the expected output is every archived record whose OWN timestamp
   is at or before the restore window's end (no lower bound: the window starts
-  at the archive); every restored record is read back and compared with it by
+  at the archive, unless the plan states `restore.window_start`, which is then
+  the lower bound); every restored record is read back and compared with it by
   its `x-original-offset` — content with headers in order, exact counts,
   duplicates and order. The manifest's first/last-timestamp count bound is not
   consulted. The contract is
