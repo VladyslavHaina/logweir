@@ -769,6 +769,17 @@ fn print_report(r: &VerifyReport) {
 /// of the `SignatureOnly` line beside it is that the two exit-0s do not mean
 /// the same thing. A reader who cannot tell them apart is back where the
 /// honest-line work started.
+/// The two receipt blocks the verdict prints per topic, beside the identity
+/// fields `print_backup_receipt` takes one by one.
+struct ReceiptBlocks<'a> {
+    /// FX-4's 1.1.0 block; `None` is UNKNOWN coverage.
+    config_coverage:
+        Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
+    /// PROD-05.1's 1.3.0 block; `None` is NOT RECORDED.
+    topic_configuration:
+        Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>>,
+}
+
 fn print_backup_receipt(
     payload_type: &str,
     key_id: &str,
@@ -776,11 +787,10 @@ fn print_backup_receipt(
     run_id: &str,
     manifest_key: &str,
     manifest_version_id: Option<&str>,
-    config_coverage: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
-    topic_configuration: Option<
-        &BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>,
-    >,
+    blocks: &ReceiptBlocks<'_>,
 ) {
+    let config_coverage = blocks.config_coverage;
+    let topic_configuration = blocks.topic_configuration;
     println!("signature: VALID  key {key_id}");
     println!("payload:   {payload_type}");
     println!("run_id:    {run_id}");
@@ -875,8 +885,10 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
                 &run_id,
                 &manifest_key,
                 manifest_version_id.as_deref(),
-                config_coverage.as_ref(),
-                topic_configuration.as_ref(),
+                &ReceiptBlocks {
+                    config_coverage: config_coverage.as_ref(),
+                    topic_configuration: topic_configuration.as_ref(),
+                },
             );
             ExitCode::Ok
         }

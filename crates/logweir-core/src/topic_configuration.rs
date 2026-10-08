@@ -401,7 +401,7 @@ pub struct DeclaredOwner {
 /// enforces on the recorded owner, plus "the topic is one the plan names".
 #[must_use]
 pub fn refuse_declared(owner: &DeclaredOwner, named: &[String]) -> Option<String> {
-    if !named.iter().any(|t| *t == owner.topic) {
+    if !named.contains(&owner.topic) {
         return Some(format!(
             "source.topic_owners names topic {:?}, which is not one of source.topics",
             owner.topic
@@ -466,7 +466,7 @@ pub fn strimzi_owners(
         let Some((topic, reference)) = strimzi_topic_of(resource, cluster) else {
             continue;
         };
-        if !topics.iter().any(|t| *t == topic) || !reference_fits(&reference) {
+        if !topics.contains(&topic) || !reference_fits(&reference) {
             continue;
         }
         let candidate = TopicOwner {
