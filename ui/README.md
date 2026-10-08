@@ -962,7 +962,9 @@ window is `[coveredFrom + 1 ms, coveredTo - 1 ms]` -- the same rule as a Backup'
 (WIZARD-DEFAULT-PIT-EXCLUSIVE). The plan carries `source.backup` pinned to the point's set and
 `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`; the
 runner re-reads that receipt and manifest before it contacts a broker and
-refuses a mismatch (exit 3 `PointBindingMismatch`). A plan built from a
+refuses a mismatch (exit 3 `PointBindingMismatch`), and refuses a plan or a
+restored set that is not the point's own set (exit 3 `PointBindingSetMismatch`,
+FX-16); this plan pins `source.backup` to the point's set for that reason. A plan built from a
 `Backup` carries no `point` block and is byte-identical to before
 (`ui/tests/fixtures/plan-point.golden.yaml` beside `plan.golden.yaml`). Step 5
 sends `restore.catalogPoint {catalog, pointId}` and nothing else, so the

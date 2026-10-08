@@ -1999,6 +1999,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a connection presents only its own credential",
             "logweir-binding",
         ),
+        // FX-16 (2026-10-08): a point-bound restore restores its point's own
+        // set or is refused; a standalone plan naming `latestCompleted` is.
+        (
+            "a bound restore restores its point's set",
+            "PointBindingSetMismatch",
+        ),
         // FX-20 (2026-10-08): every other credential reference is bound, and
         // the one-Secret-one-object upgrade tool binds the existing ones.
         (

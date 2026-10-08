@@ -1609,7 +1609,17 @@ no configuration is reconstructed by hand.**
    trust refuses (revoked for compromise, retired before the receipt was
    written, not an `EvidenceSigning` key) is exit 3 `PointUntrusted`. Either
    way no data moves and no target topic is created. The source cluster is
-   never contacted.
+   never contacted. **The run then restores the point's own set or nothing
+   (FX-16):** a plan whose `source.backup` is not the receipt's set
+   (`latestCompleted` included), or under whose storage the engine would
+   read another manifest than the one the receipt attests, is refused before
+   any broker is contacted; the set is then selected by the point's manifest
+   key, and once it is described the runner refuses one whose set id,
+   manifest digest or manifest version is not the one the binding verified — both exit 3 `PointBindingSetMismatch`, before any target
+   topic of the restore exists. The `Restore` this step creates names the
+   point's set (`backupSetRef`), so it is never refused for that; the
+   readiness check above refuses the same plan as
+   `CatalogPointBindingMismatch`.
 
 **A run the controller could not verify is restored the same way
 (CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW).** A destination-backed `Backup` whose
@@ -6269,7 +6279,14 @@ recorded as `LogAppendTime`, in a plan that does not state
 `restore.time_basis: producerTime`
 ([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)) — are all
 exit 3, and the only thing that tells them apart is the runner's
-`refusal-reason=` line.
+`refusal-reason=` line. The recovery-point binding's refusals —
+`PointBindingMismatch`, `PointUntrusted` and (since FX-16)
+`PointBindingSetMismatch`, a point-bound plan or restored set that is not the
+point's own set ([the plan field](formats/drill-spec.md#sourcepoint-execution-contract-v2))
+— are exit 3 too, but they are not terminal states: the line reads
+`refusal-reason=GuardRefused`, so the `Restore` records `exitReason:
+GuardRefused`, and the name is the first token of the refusal message in the
+pod log.
 **Read §10's note on `refusal-reason=` before writing any reader of it**
 (plan erratum **E4**): the line is the last line of the runner's *stdout*, but
 a pod log is stdout and stderr merged in nondeterministic order, and the pod
