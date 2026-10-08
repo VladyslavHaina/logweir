@@ -53,7 +53,9 @@ pub struct SharedMode {
     pub provider: Provider,
     /// The session/CSRF key and its version.
     pub keys: Arc<CookieKeys>,
-    /// The per-peer limit on the unauthenticated login surface.
+    /// The per-client limit on the unauthenticated login surface: the
+    /// forwarded client behind a trusted proxy, else the peer
+    /// (`crate::http::login_rate_key`, FX-13).
     pub login_limiter: RateLimiter,
     /// Per-actor, per-namespace concurrent stream slots, taken by the
     /// operation event stream; see `crate::auth::ratelimit`.

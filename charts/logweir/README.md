@@ -567,6 +567,24 @@ remains the network boundary. There are two ways to say who the proxy is:
 
 Both may be set; a peer trusted by either is trusted.
 
+**The trusted proxy also decides whose sign-in budget a request spends**
+(FX-13). `/auth/login` and `/auth/callback` allow 20 requests a minute per
+client, per console replica. From a trusted proxy, the client is the
+rightmost `X-Forwarded-For` hop that is not itself a trusted proxy — the
+address Traefik received the request from, which Traefik appends after
+deleting whatever `X-Forwarded-*` the client sent (`forwardedHeaders.trustedIPs:
+[]`, the default and the PoC profile's setting). From any other peer it is the
+peer, and an RFC 7239 `Forwarded` header is never read. This holds whether or
+not `requireTrustedProxy` is on, so two things follow. Without a trusted proxy
+configured, every sign-in through the ingress shares the ingress's one budget,
+about ten sign-ins a minute for everyone. And an ingress controller that
+passes a client's `X-Forwarded-For` through unchanged (Traefik with
+`forwardedHeaders.insecure: true` or the client's range in `trustedIPs`), or a
+`trustedProxyCidrs` range wider than the ingress's own pods, lets a client
+choose its budget: keep both as tight as the gate needs them. The whole rule,
+and why there is no global sign-in budget, is in
+[docs/api.md](../../docs/api.md), *Rate limits*.
+
 ### The identity provider inside the cluster: a private CA, a name, a path
 
 Three values exist for an issuer the console cannot reach with the defaults —

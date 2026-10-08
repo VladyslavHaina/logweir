@@ -1661,10 +1661,13 @@ is a property of the request. `Impersonate-*` is not ignored — it is refused
 outright with `400 header_not_allowed` naming the header.
 
 No callback URL and no authorization decision derives from `Host`, `Forwarded`
-or `X-Forwarded-*`. A forwarded client address reaches exactly one audit field,
-`forwardedFor`, and only when the immediate socket peer falls inside a
-`trustedProxyCidrs` range; it is the rightmost hop none of those proxies
-added, because everything to its left was sent by the client.
+or `X-Forwarded-*`. A forwarded client address reaches two places, and only
+when the immediate socket peer is a trusted proxy (`trustedProxyCidrs` or
+`trustedProxyService`): the audit field `forwardedFor`, and the bucket of the
+sign-in rate limit (*Rate limits* below). Both take the rightmost
+`X-Forwarded-For` hop none of those proxies added, because everything to its
+left was sent by the client. A bucket can only refuse; it is never an
+identity, a grant or an audit actor.
 
 There is no CORS layer: no response carries `Access-Control-Allow-Origin` or
 `Access-Control-Allow-Credentials`.
@@ -1765,11 +1768,46 @@ this service redacts before logging it.
 ### Rate limits
 
 `/auth/login` and `/auth/callback` are the only routes an unauthenticated caller
-can reach that do work, so they carry a per-peer limit of 20 requests a minute
-(`429` with `Retry-After`). The key is the **immediate socket peer**, never a
-forwarded header: behind one ingress that makes it a global limit, which is the
-correct conservative behaviour for a service whose per-user limits live behind
-authentication.
+can reach that do work, so they carry a limit of 20 requests a minute **per
+client** (`429 rate_limited` with `Retry-After`; a sign-in is two requests).
+The client is:
+
+* **behind a trusted proxy** — the socket peer is in `trustedProxyCidrs` or is
+  a serving endpoint of `trustedProxyService`, under the same check as the
+  entry point, so a Service set that is not read yet or is stale trusts nobody
+  — the rightmost `X-Forwarded-For` hop that is not itself a trusted proxy:
+  the address the ingress received the request from;
+* **otherwise** the socket peer, and also when that header is absent, ends in a
+  hop that is not an IP address, or names only trusted proxies.
+
+Only `X-Forwarded-For` is read. Traefik deletes a client's `X-Forwarded-*` and
+appends the client's socket address, but copies an RFC 7239 `Forwarded` header
+through as the client wrote it, so `Forwarded` is never read; an ingress that
+passes a client's `X-Forwarded-For` through unchanged must not be a trusted
+proxy. An IPv6 client is counted by its `/64` (a host may use any address in
+it), an IPv4 one (IPv4-mapped included) by its address, so hosts behind one
+NAT address or one `/64` share a budget. The audit line notes which key was
+used, `loginRateKey: forwardedClient` or `peer`, never as an actor.
+
+Before FX-13 the key was always the socket peer, which behind an ingress made
+the limit one global budget: about ten sign-ins a minute for everyone, and one
+client could block every sign-in for a minute.
+
+There is **no budget over all clients**, deliberately: a global budget, however
+high, lets whoever holds enough addresses lock every operator out, and being
+able to sign in during an incident outranks a tighter bound. The limit bounds
+load, not credentials (there is no password here, and authorization codes are
+single-use and bound to the login's PKCE verifier), and each sign-in request
+costs the identity provider at most one request, so a client with many
+addresses gets many bounded budgets and nothing beyond what those addresses
+could send the provider directly. The counters are **per console process**
+(two replicas: up to twice the allowance) and track at most 65,536 clients
+per process (about 6 MiB at worst). Past that, while every tracked window is
+still live, a new client is served **without** a window rather than refused:
+its audit line notes `loginRateUntracked: tableFull`, and the console logs at
+most one warning a minute while it lasts. Only expired windows are ever dropped, so no
+amount of traffic resets another client's count. The threat model is written
+out in `crates/logweir-api/src/auth/ratelimit.rs`.
 
 Starting a transient check is bounded per actor and namespace: six discoveries
 and twenty preflights a minute, `429` with `Retry-After`. The window is **per

@@ -20,8 +20,8 @@ mark without one). The supported path these notes assume is
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
-published image. Items 21 (FX-2) and 22 (FX-5), from the product-expansion
-tracker's fix-now rows, land after `fdb48cd8`, and so do FX-7's additions to
+published image. Items 21 (FX-2), 22 (FX-5) and 23 (FX-13), from the
+product-expansion tracker's fix-now rows, land after `fdb48cd8`, and so do FX-7's additions to
 item 11 (the execution-claim set check, receipt and catalog format 1.2.0, the
 pin's read by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
@@ -178,16 +178,16 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-two operator-facing changes
+### The twenty-three operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
 PLAT-20.2 from merged changes; the defect names are the platform tracker's.
 Items 17–20 were found by the PoC rounds and landed after its first
 publication (`86a554e6`); each was proven on the running install by the
-in-place upgrade that carried it. Items 21 and 22 are the product-expansion
-tracker's fix-now rows FX-2 and FX-5 and are not proven live yet: the PoC
-upgrade that carries each runs its rows.
+in-place upgrade that carried it. Items 21–23 are the product-expansion
+tracker's fix-now rows FX-2, FX-5 and FX-13 and are not proven live yet: the
+PoC upgrade that carries each runs its rows.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -874,6 +874,58 @@ stopping before Create. **Rollback:** rolling the console image back restores
 the fixed, read-only 1 and the draft that drops the subset, and an older
 product API omits `brokerCount`. Nothing stored changes: a `Restore` created
 with a factor above 1 keeps it.
+
+#### 23. The sign-in limit counts each client behind the trusted ingress, not the ingress (FX-13)
+
+**Changed.** `/auth/login` and `/auth/callback` allow 20 requests a minute.
+The count was kept per **socket peer**, and behind the shared console's
+ingress every request has the ingress as its peer, so the limit was one budget
+for everyone: about ten sign-ins a minute across all users, and one
+unauthenticated client could block every sign-in for a minute at a time. The
+count is now kept per **client**: when the socket peer is a trusted proxy
+(`api.console.trustedProxyService` or `trustedProxyCidrs`, the same check the
+`requireTrustedProxy` gate makes), the client is the rightmost
+`X-Forwarded-For` hop that is not itself a trusted proxy; from any other peer,
+or with no usable hop, it is the peer, as before. Only `X-Forwarded-For` is
+read, never `Forwarded`. An IPv6 client is counted by its `/64`. There is no
+budget over all clients, on purpose — a global one, at any height, is a
+lockout for whoever holds enough addresses — and when 65,536 clients hold live
+windows in one console process, a new client is served without a window
+instead of refused. The forwarded address chooses a counter only; it is never
+an identity, a grant or an audit actor ([api.md](api.md), *Rate limits*;
+D0's amendment of 2026-10-07).
+
+What an operator sees after the console image is upgraded:
+
+- **Through the ingress, with a trusted proxy configured** (the PoC profile:
+  `trustedProxyService: {namespace: traefik, name: traefik}`): one person's
+  failed or repeated sign-ins no longer refuse anyone else's.
+- **New audit notes** on sign-in requests: `loginRateKey` (`forwardedClient`
+  or `peer`, which counter the request spent) and, only when the table is
+  full, `loginRateUntracked: tableFull`, with at most one warning a minute in
+  the console log.
+- **No trusted proxy configured:** nothing changes; the ingress is the peer,
+  and its one budget is still everyone's.
+
+**Do:** if sign-ins are refused `429` behind the ingress after the upgrade,
+check that the ingress is a trusted proxy (`trustedProxyService` naming the
+ingress controller's Service) — the audit's `loginRateKey: peer` on a request
+that came through it says it is not. Keep the ingress from passing a client's
+own `X-Forwarded-For` through: Traefik's `forwardedHeaders.trustedIPs: []`
+with `insecure: false` (its default, and `deploy/poc/traefik.values.yaml`)
+deletes it.
+**Scope:** `crates/logweir-api/src/http.rs` (`login_rate_key`, five unit rows),
+`crates/logweir-api/src/auth/ratelimit.rs` (the `/64` fold, no global budget,
+the 65,536-key bound with its memory, the sweep rate and the once-a-window
+warning), and eight rows through the real router in
+`crates/logweir-api/tests/entry_point.rs` (two clients, one client through two
+proxies, a forged header from an untrusted peer, an unread and a stale proxy
+Service, a chain with no client hop, an IPv6 `/64`, a spray past the table,
+and 40 clients × 20 requests all served), with twelve mutants killed. Not
+yet proven live: the PoC upgrade that carries FX-13 runs two clients through
+Traefik. **Rollback:** an older console image keys the limit on the socket
+peer again — one budget behind the ingress — and writes neither audit note.
+Nothing is stored; the counters are in memory.
 
 ### Verification scope: what "verified" means in this release
 

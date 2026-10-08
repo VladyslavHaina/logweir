@@ -1614,6 +1614,12 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// a larger factor costs, and the read that audits a Restore made from a
 /// resumed draft. The notes at main's `b8b9263f`, with twenty-one items, fail
 /// the twenty-two pin (FX-5 fix round, 2026-10-05).
+///
+/// Then to twenty-three: item 23 is FX-13's sign-in limit, counted per client
+/// behind the trusted ingress instead of per socket peer. Its token is the
+/// audit note an operator reads to tell which counter a refused sign-in
+/// spent. The notes at main's `ea9788cf`, with twenty-two items, fail the
+/// twenty-three pin (FX-13, 2026-10-07).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1639,9 +1645,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=22).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-two operator-facing changes, `#### 1.` \
-         to `#### 22.` in order; found {numbers:?}"
+        (1..=23).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-three operator-facing changes, `#### 1.` \
+         to `#### 23.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1687,6 +1693,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
             "a console restore's replication factor and topic subset",
             "*Discover topics*",
         ),
+        // FX-13 (2026-10-07): the sign-in limit per client behind the
+        // trusted ingress, and the audit note that says which counter.
+        ("the sign-in limit per client", "loginRateKey"),
     ]) {
         assert!(
             body.contains(token),
