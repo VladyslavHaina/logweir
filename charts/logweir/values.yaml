@@ -33,11 +33,11 @@ imagePullSecrets: []            # [{name: regcred}] — on both ServiceAccounts 
 # retained objects once. It never renders private material into a Helm manifest.
 identity:
   enabled: true
-  bootstrapImage: docker.io/vladyslavhaina/logweir@sha256:2d20f4bdb2bd8b9f2fb9fa298371740eb9a368d42cf031a7ebe1272542477e19 # rev 4956785, amd64
+  bootstrapImage: docker.io/vladyslavhaina/logweir@sha256:ea106328eb5f9364a4682e640ba258242c6fc949b5d2198140c57bf719a13968 # rev 2fe8d907, amd64
   bootstrapImagePullPolicy: IfNotPresent
   allowMutableBootstrapImageForDevelopment: false
   bootstrapFeatures:            # what bootstrapImage can run; flipped only WITH its re-pin
-    consoleKey: false           # PROD-16.1: console key, fresh-install trust and marker, revocation
+    consoleKey: true            # PROD-16.1: console key, fresh-install trust and marker, revocation
   publicConfigMapName: logweir-signing-trust
   authorizedRunnerNamespaces: [] # release namespace implicit; same signer copied to each
   kubernetesApiCIDRs: []          # exact API /32 or /128 endpoints; TCP 443/6443 only

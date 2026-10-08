@@ -690,8 +690,9 @@ echo "== 8. the console's refusals, run =="
 CONSOLE_ON=(--set api.enabled=true --set api.console.enabled=true)
 CONSOLE_KEY=(--set api.console.keySecret=logweir-console-keys)
 CONSOLE_LOCAL=(--set api.console.mode=localAdmin)
-# PROD-16.1 fix round: the bootstrap image's PROD-16.1 features, which the
-# default leaves OFF until the release coordinator re-pins the image.
+# PROD-16.1: the bootstrap image's PROD-16.1 features. The default turned ON
+# with the re-pin to a runner that carries them (rev 2fe8d907); the rows below
+# still state it, so they keep their meaning if the default ever moves again.
 FEATURE=(--set identity.bootstrapFeatures.consoleKey=true)
 # PLAT-17.2 (D0 stage 5): a shared console renders only beside a controller
 # scoped AWAY from the release namespace, so the base shared shape binds its
@@ -766,11 +767,13 @@ console_refuses "default: confirm with no confirmation key" \
   --set identity.enabled=false \
   --set approvalPolicy.allowOrdinaryConfirmation=true \
   --set approvalPolicy.default=confirm
-# PROD-16.1 fix round: WITH THE BOOTSTRAP FEATURE OFF (the default until the
-# re-pin) a console render passes the hook NONE of the PROD-16.1 flags and
-# renders none of their objects — the chart works with the pinned image it names.
+# PROD-16.1: WITH THE BOOTSTRAP FEATURE OFF (set explicitly: an operator pinning
+# an older bootstrap image turns it off) a console render passes the hook NONE
+# of the PROD-16.1 flags and renders none of their objects — the chart works
+# with a pinned image that predates them.
 helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" > "$tmp/feature-off.yaml" 2> "$tmp/feature-off.err"
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
+  --set identity.bootstrapFeatures.consoleKey=false > "$tmp/feature-off.yaml" 2> "$tmp/feature-off.err"
 rc=$?
 if [ "$rc" -ne 0 ] || grep -q -E -- "--console-secret-name|--console-public-configmap-name|--installation-trust-policy|--allowed-target-cluster-id|--mark-fresh-install-confirm|--revoke-trust-binding" "$tmp/feature-off.yaml" \
   || grep -q "name: $RELEASE-identity-trust$" "$tmp/feature-off.yaml" \

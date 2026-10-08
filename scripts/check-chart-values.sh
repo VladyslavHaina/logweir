@@ -247,7 +247,7 @@ identity.authorizedRunnerNamespaces|default|-|--set-json|["team-x"]
 identity.kubernetesApiCIDRs|default|-|--set-json|["10.96.0.1/32"]
 identity.externalSecret.name|default|-|--set-string|fx10-signer
 identity.externalSecret.key|identity-external|-|--set-string|fx10.pem
-identity.bootstrapFeatures.consoleKey|default|-|--set|true
+identity.bootstrapFeatures.consoleKey|default|-|--set|false
 identity.installationTrust.enabled|console-fresh-install|-|--set|false
 identity.installationTrust.policyName|console-fresh-install|-|--set-string|fx10-installation
 identity.installationTrust.allowedTargetClusterIds|console-fresh-install|-|--set-json|["fx10-target"]
