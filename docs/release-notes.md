@@ -1319,7 +1319,12 @@ a hand-made Secret gets no policy, no marker and no grant: no approver key by
 default only where the console's one click needs it. The `localAdmin` console
 confirms too, as `urn:logweir:local-admin#admin`. `approvalPolicy.default`
 (`confirm` with `allowOrdinaryConfirmation`, or `strict`) overrides the marker;
-`policies[].mode` accepts `confirm`/`strict`. The console's configuration gains
+`policies[].mode` accepts `confirm`/`strict`. The policy name
+`default-confirm-v1` is now RESERVED beside `legacy-governed-v1`: an
+approval-policy document that declares a policy of that name is refused by the
+chart at render and by the controller and the console at start (which stops
+the controller), so rename such a policy before upgrading; `mode: two-person`
+and a `defaultMode` other than `confirm`/`strict` are refused the same way. The console's configuration gains
 `confirmationKeyManaged` (the managed key may arrive after the console starts;
 an operator-named key file that is missing still refuses to start). The API's
 policy view gains `operatorMode` and `basis`, the create's `authorization` gains
@@ -1338,7 +1343,7 @@ console key, or ADOPTS the one a PLAT-19.2 install made by hand under that name.
 One thing does change on upgrade: a `localAdmin` console now confirms
 namespaces ALREADY bound to an `Ordinary` policy (it refused them before), so
 whoever can port-forward to it can authorise a restore there alone.
-**Do:** nothing, to keep today's approval. To opt an older install into
+**Do:** nothing, to keep today's approval (first rename any policy named `default-confirm-v1`). To opt an older install into
 confirm: a trust administrator adds the key from `logweir-console-trust` to the
 `TrustPolicy` governing those namespaces (`ConsoleConfirmation`), then set
 `approvalPolicy.allowOrdinaryConfirmation: true` and `approvalPolicy.default:
