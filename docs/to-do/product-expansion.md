@@ -212,7 +212,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 3 | PROD-00.3c | Keep `LogAppendTime` through capture | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
 | 3 | PROD-00.3d | Idempotent (or sequence-checked) restore produce | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
 | 3 | PROD-00.3e | Keep repeated header keys through capture and replay | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
-| 1 | PROD-00.3f | Move the pin to the newest OSO release (0.23.x), with the C15/C16 guards and `doctor`'s pin | P1 | M1 | infra | 00.1 | — | compose | A | Proposed |
+| 1 | PROD-00.3f | Move the pin to the newest OSO release (0.23.x), with the C15/C16 guards and `doctor`'s pin | P1 | M1 | infra | 00.1 | — | compose | A | In progress |
 | 3 | PROD-00.3g | Engine restore checkpoint: honour `checkpoint_interval_secs`, hash without file paths (C4) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
 | 3 | PROD-00.3h | Enforce the byte-rate limit (C12) | P2 | M3 | impl | 00.1, 00.2 | — | compose | B | Proposed |
 | 3 | PROD-00.3i | YAML record-filter rules: erasure, offset ranges, resume point (C10, C11) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
