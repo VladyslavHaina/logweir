@@ -1655,12 +1655,6 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// with twenty-six items, fail the twenty-seven pin (FX-8 fix round,
 /// 2026-10-07; item 23 when first written, renumbered after FX-10, FX-3,
 /// FX-13 and FX-11).
-///
-/// Then to twenty-eight: item 28 is PROD-08.1's — a plan may ask phase 7 to
-/// verify every record, and every 1.4.0 scorecard says what its verdict
-/// covered. Its token is the plan value an operator adds. The notes at main's
-/// `2c277dc1`, with twenty-seven items, fail the twenty-eight pin (PROD-08.1,
-/// 2026-10-07).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1676,19 +1670,19 @@ fn the_release_notes_carry_every_owed_operator_action() {
          source; it reads: {row9}"
     );
 
-    // Only the newest entry's items are the owed ten: the first `## ` entry.
-    let entry = notes
-        .split_once("\n## ")
-        .map(|(_, rest)| rest)
-        .expect("docs/release-notes.md carries at least one `## ` release entry");
-    let entry = entry.split("\n## ").next().unwrap_or(entry);
+    // The entry these items belong to: the one headed `main` after `v0.1.5`,
+    // which since the tag holds the `v0.2.0-rc.1` record and stays at its
+    // twenty-seven items. Changes after the tag open their own entry above
+    // it (PROD-08.1 review M-4), checked by
+    // `the_entry_after_the_rc1_record_carries_its_own_items`.
+    let entry = release_entry(&notes, "Unreleased — `main` after `v0.1.5`");
     let items = release_note_items(entry);
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=28).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-eight operator-facing changes, `#### 1.` \
-         to `#### 28.` in order; found {numbers:?}"
+        (1..=27).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-seven operator-facing changes, `#### 1.` \
+         to `#### 27.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1760,9 +1754,6 @@ fn the_release_notes_carry_every_owed_operator_action() {
             "a LogAppendTime point in time refused or labelled",
             "PointInTimeByProducerTime",
         ),
-        // PROD-08.1 (2026-10-07): complete coverage, and what every 1.4.0
-        // scorecard says its verdict covered.
-        ("complete coverage", "coverage: complete"),
     ]) {
         assert!(
             body.contains(token),
@@ -1911,6 +1902,93 @@ fn the_release_notes_carry_every_owed_operator_action() {
             notes.contains(heading),
             "docs/release-notes.md is missing its `{heading}` section"
         );
+    }
+}
+
+/// The body of the release entry whose `## ` heading is `heading`, up to the
+/// next `## ` heading.
+fn release_entry<'a>(notes: &'a str, heading: &str) -> &'a str {
+    let at = notes
+        .find(&format!("\n## {heading}\n"))
+        .unwrap_or_else(|| panic!("docs/release-notes.md has no `## {heading}` entry"));
+    let body = &notes[at + 1..];
+    let body = body.split_once('\n').map_or(body, |(_, rest)| rest);
+    body.split("\n## ").next().unwrap_or(body)
+}
+
+/// **The changes after `v0.2.0-rc.1` have their own entry** (PROD-08.1 review
+/// M-4). The tag froze the entry below it at twenty-seven items with its
+/// candidate record; an item that lands on `main` afterwards is not in the
+/// rc.1 binaries, so listing it there would claim it shipped. The newest entry
+/// is headed `main` after `v0.2.0-rc.1`, it is the FIRST `## ` entry, its
+/// items continue the numbering from 28 without a gap, each in its own section
+/// with its token, a scope and a rollback, and its opening paragraph and its
+/// upgrade sentence name every one of them.
+///
+/// NEGATIVE CONTROLS: the notes at `2c277dc1` (item 28 listed under the rc.1
+/// record, no entry of its own) fail the heading lookup; deleting item 28's
+/// section fails the numbering; dropping `coverage: complete` from it fails
+/// the token.
+#[test]
+fn the_entry_after_the_rc1_record_carries_its_own_items() {
+    let notes = read("docs/release-notes.md");
+    let heading = "Unreleased — `main` after `v0.2.0-rc.1`";
+    let first = notes
+        .split_once("\n## ")
+        .and_then(|(_, rest)| rest.split_once('\n'))
+        .map(|(h, _)| h)
+        .expect("docs/release-notes.md carries a `## ` entry");
+    assert_eq!(first, heading, "the newest entry must come first");
+    let entry = release_entry(&notes, heading);
+    let items = release_note_items(entry);
+    let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
+    let rc1_last = release_note_items(release_entry(&notes, "Unreleased — `main` after `v0.1.5`"))
+        .last()
+        .map(|(n, _)| *n)
+        .expect("the rc.1 entry carries items");
+    assert_eq!(
+        numbers,
+        (rc1_last + 1..=rc1_last + items.len() as u32).collect::<Vec<u32>>(),
+        "the entry after v0.2.0-rc.1 must number its items on from {}: {numbers:?}",
+        rc1_last + 1
+    );
+    for ((number, body), (item, token)) in items.iter().zip([
+        // PROD-08.1 (2026-10-07): complete coverage, and what every 1.4.0
+        // scorecard says its verdict covered.
+        ("complete coverage", "coverage: complete"),
+    ]) {
+        assert!(
+            body.contains(token),
+            "docs/release-notes.md item {number} ({item}) no longer carries `{token}` in \
+             its own section"
+        );
+        for owed in ["**Scope:**", "**Rollback:**"] {
+            assert!(
+                body.contains(owed),
+                "docs/release-notes.md item {number} ({item}) has no `{owed}` paragraph"
+            );
+        }
+    }
+    let squeezed = entry.split_whitespace().collect::<Vec<_>>().join(" ");
+    let opening = squeezed
+        .split(". ")
+        .find(|s| s.contains("collects what lands on `main` after that publication"))
+        .expect("the entry says what it collects");
+    let upgrade = squeezed
+        .split(". ")
+        .find(|s| s.contains("An upgrade from `v0.2.0-rc.1`"))
+        .expect("the entry gives the upgrade from v0.2.0-rc.1");
+    for n in &numbers {
+        for (place, text) in [
+            ("its opening paragraph", opening),
+            ("its upgrade sentence", upgrade),
+        ] {
+            assert!(
+                text.contains(&format!("item {n}")) || text.contains(&format!(" {n} ")),
+                "docs/release-notes.md item {n} is in the entry after v0.2.0-rc.1, and {place} \
+                 does not name it: {text}"
+            );
+        }
     }
 }
 
