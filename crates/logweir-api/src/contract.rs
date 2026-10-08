@@ -1420,8 +1420,36 @@ pub struct Restore {
     /// never "every selection used the topics' own clocks".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_basis: Option<RestoreTimeBasisView>,
+    /// **PROD-08.1a.** The coverage this restore asks for and the coverage its
+    /// signed scorecard says it verified — on the list too, so a row says
+    /// sampled or complete without a second read.
+    pub coverage: RestoreCoverageView,
     /// The normalized status summary.
     pub operation: OperationSummary,
+}
+
+/// **PROD-08.1a.** `Restore.coverage`: asked for, and signed.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreCoverageView {
+    /// What the Restore asks for: `spec.coverage`, absent read as `sampled`.
+    /// The controller has held it to the plan's own `sample.coverage`.
+    pub requested: RestoreCoverage,
+    /// `spec.completeMaxRecords`, the bound on a complete verification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complete_max_records: Option<i64>,
+    /// What the signed scorecard says it verified — a CLAIM until the evidence
+    /// verifies. ABSENT MEANS NOT RECORDED (a scorecard before format 1.4.0, a
+    /// refused run, or one not read yet), never complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded: Option<RestoreCoverage>,
+    /// For a recorded complete verification: whether it covered every
+    /// partition. `false` is NEVER a pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered: Option<bool>,
+    /// Why `covered` is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
 }
 
 /// `Restore.timeBasis` (FX-8): the signed time-basis label.
