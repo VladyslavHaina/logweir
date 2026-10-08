@@ -1028,6 +1028,14 @@ pub struct RunOpts<'a> {
     /// coverage at all. `false` keeps every existing caller on `drill run`
     /// byte for byte.
     pub restore_run: bool,
+    /// The `logweir` binary to spawn instead of [`bin`] (PROD-11.1's fix
+    /// round, M2).
+    ///
+    /// `None` for every row but the one that runs an OLDER build — main's
+    /// `logweir` from before PROD-11.1 — against a plan stating a window start,
+    /// to show that a runner which predates the grammar refuses the plan
+    /// rather than restoring more than the plan says.
+    pub bin: Option<PathBuf>,
 }
 
 impl<'a> RunOpts<'a> {
@@ -1042,6 +1050,7 @@ impl<'a> RunOpts<'a> {
             pre_create: Vec::new(),
             env: Vec::new(),
             restore_run: false,
+            bin: None,
         }
     }
 }
@@ -1117,7 +1126,7 @@ pub fn run_with(o: RunOpts<'_>) -> Run {
     let _ = std::fs::remove_file(&out_json);
     let _ = std::fs::remove_file(out_json.with_extension("sig"));
 
-    let mut cmd = Command::new(bin());
+    let mut cmd = Command::new(o.bin.clone().unwrap_or_else(bin));
     // `restore run` is the canonical name (interface I20); `drill run` is the
     // tag-0 alias, which prints one deprecation line and does nothing else
     // differently. Both flatten the SAME clap struct, so the flags below are

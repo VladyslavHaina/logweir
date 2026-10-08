@@ -4,40 +4,49 @@
 //! Every row produces a deterministic fixture into its own source topics,
 //! takes a backup with the SHIPPED `logweir backup run` and the pinned engine,
 //! and restores it with `logweir restore run` (`target.mode: newTopic`) under
-//! a plan that states a replay selection: an inclusive `restore.window_start`,
-//! per-topic `restore.partitions`, or both. The outcome is decided by THIS
-//! file's oracle, never by Logweir's exit status: the archive is read with
-//! Logweir's own `kbak` decoder, the expected output is every archived record
-//! whose OWN timestamp is in `[start, end]` on a selected partition — computed
-//! here, independently of `logweir_core::replay_selection` — and the restored
-//! topic is read back and mapped to source offsets by its last
-//! `x-original-offset` header. Logweir's signed verdict and its
-//! `source.selection` block are then asserted as part of the contract.
+//! a plan that states a replay selection: an inclusive window START, written
+//! as the interval form of `restore.point_in_time` (`"<start>/<end>"`). A
+//! partition subset (`restore.partitions`) is REFUSED by name until the owner
+//! decides OD-9 (`PartitionSubsetsAwaitOwnerDecision`). The outcome is decided
+//! by THIS file's oracle, never by Logweir's exit status: the archive is read
+//! with Logweir's own `kbak` decoder, the expected output is every archived
+//! record whose OWN timestamp is in `[start, end]` — computed here,
+//! independently of `logweir_core::replay_selection` — and the restored topic
+//! is read back and mapped to source offsets by its last `x-original-offset`
+//! header. Logweir's signed verdict and its `source.selection` block are then
+//! asserted as part of the contract.
 //!
 //! | row | what it proves |
 //! |---|---|
 //! | `the_start_is_inclusive_…` | inclusive vs exclusive at the start; equal timestamps at it; non-monotonic timestamps across it inside one segment |
 //! | `a_segment_whose_bounds_hide_…` | the engine's segment rule skips an in-window record whose segment's last record is before the start (PROD-01.1 S7 at the start): complete coverage fails it, never `pass` |
-//! | `partition_subsets_on_two_topics_…` | a topic subset and DIFFERENT partition subsets on two topics: two engine runs, every unselected partition empty |
-//! | `refusals_before_anything_runs` | a start before coverage, an empty selection and an existing target name are exit 3 with no target topic and no signed scorecard |
+//! | `a_topic_subset_from_a_start_…` | a topic subset (C not restored) from a start, under BOTH coverages: the start-only block signed, both readers accept it, the scorecards kept for the older-reader rows |
+//! | `refusals_before_anything_runs` | a start before coverage, an empty selection, an existing target name and a partition subset are exit 3 with no target topic and no signed scorecard |
 //! | `a_compaction_hole_inside_a_sub_window_…` | a compacted source restored from a stated start: exact, the hole disclosed |
 //! | `a_new_point_does_not_change_…` | a newer backup arriving after the plan was approved does not change what the plan restores |
+//! | `an_older_runner_refuses_…` (ignored; needs `LOGWEIR_E2E_OLDER_RUNNER`) | main's runner from BEFORE PROD-11.1 refuses a plan stating a start (it cannot parse the interval), creates nothing and signs nothing; the same binary restores the same plan without the start (the control); and it IGNORES a hand-written `restore.partitions` (the residual the current runner closes by refusing it) |
 //!
 //! Each row's own check is shown able to fail: the observed output is mutated
-//! (a record dropped, a record from an unselected partition added) and the
+//! (a record dropped, a record from outside the selection added) and the
 //! oracle must reject it (`oracle_rejects_mutants`).
 //!
-//! # Running it (PROD-01.5 slot, e.g. 3)
+//! # Running it (PROD-01.5 slot, e.g. 2, with the CI profile)
 //!
 //! ```text
-//! eval "$(e2e/compose/stack-env.sh --slot 3)"
+//! eval "$(e2e/compose/stack-env.sh --slot 2 --profiles auth)"
 //! just e2e-up
 //! cargo build -p logweir
 //! AWS_EC2_METADATA_DISABLED=true cargo test -p e2e --features e2e \
 //!     --test replay_selection -- --test-threads=1 --nocapture
+//! # the older-runner row, with a `logweir` built from main before PROD-11.1:
+//! LOGWEIR_E2E_OLDER_RUNNER=/path/to/older/logweir AWS_EC2_METADATA_DISABLED=true \
+//!     cargo test -p e2e --features e2e --test replay_selection \
+//!     an_older_runner -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
-//! Each row writes `.e2e/<project>/replay-selection/<row>.json`.
+//! Each row writes `.e2e/<project>/replay-selection/<row>.json`; the
+//! topic-subset row also keeps its two signed scorecards there
+//! (`scorecard-<coverage>.json` and `.sig`).
 mod harness;
 mod record_semantics_support;
 
@@ -256,25 +265,27 @@ fn backup_ok(backup_id: &str, topics: &[&str], segment_max_records: u64) {
 struct Selection {
     start: Option<i64>,
     end: i64,
-    /// `topic -> partitions`; a topic not named restores every partition.
+    /// `topic -> partitions`, written as `restore.partitions`. Only the
+    /// refusal rows set it: the current runner refuses any subset
+    /// (`PartitionSubsetsAwaitOwnerDecision`, OD-9 open), and an older runner
+    /// ignores the key. The oracle therefore never narrows by it.
     partitions: BTreeMap<String, Vec<i32>>,
 }
 
 impl Selection {
-    fn selects(&self, topic: &str, partition: i32, ts: i64) -> bool {
-        ts <= self.end
-            && self.start.is_none_or(|s| ts >= s)
-            && self
-                .partitions
-                .get(topic)
-                .is_none_or(|ps| ps.contains(&partition))
+    fn selects(&self, ts: i64) -> bool {
+        ts <= self.end && self.start.is_none_or(|s| ts >= s)
     }
 
+    /// The plan's `restore:` block: a stated start is the INTERVAL form of
+    /// `point_in_time`, `"<start>/<end>"` — the one grammar for it, which an
+    /// older runner cannot parse and so refuses.
     fn restore_block(&self) -> String {
-        let mut b = format!("restore:\n  point_in_time: \"{}\"\n", rfc3339(self.end));
-        if let Some(s) = self.start {
-            b.push_str(&format!("  window_start: \"{}\"\n", rfc3339(s)));
-        }
+        let point = match self.start {
+            Some(s) => format!("{}/{}", rfc3339(s), rfc3339(self.end)),
+            None => rfc3339(self.end),
+        };
+        let mut b = format!("restore:\n  point_in_time: \"{point}\"\n");
         if !self.partitions.is_empty() {
             b.push_str("  partitions:\n");
             for (t, ps) in &self.partitions {
@@ -325,6 +336,9 @@ fn restore_spec(
 struct Restored {
     exit: Option<i32>,
     scorecard: Value,
+    /// The signed bytes and their DSSE envelope, empty when nothing was
+    /// signed: the topic-subset row keeps them for the older-reader rows.
+    signed: (Vec<u8>, Vec<u8>),
     stdout: String,
     stderr: String,
 }
@@ -362,10 +376,20 @@ impl Restored {
 }
 
 fn restore_run(spec: serde_yaml::Value, pre_create: Vec<(String, i32)>) -> Restored {
+    restore_run_by(spec, pre_create, None)
+}
+
+/// [`restore_run`] with the `logweir` binary named: `None` is this tree's.
+fn restore_run_by(
+    spec: serde_yaml::Value,
+    pre_create: Vec<(String, i32)>,
+    bin: Option<std::path::PathBuf>,
+) -> Restored {
     let h = std::thread::spawn(move || {
         let mut o = RunOpts::new(&spec);
         o.restore_run = true;
         o.pre_create = pre_create;
+        o.bin = bin;
         run_with(o)
     });
     let deadline = Instant::now() + Duration::from_secs(RESTORE_DEADLINE_SECS);
@@ -377,13 +401,12 @@ fn restore_run(spec: serde_yaml::Value, pre_create: Vec<(String, i32)>) -> Resto
         std::thread::sleep(Duration::from_millis(200));
     }
     let run = h.join().expect("the restore thread");
-    let scorecard = std::fs::read(&run.scorecard)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or(Value::Null);
+    let bytes = std::fs::read(&run.scorecard).unwrap_or_default();
+    let scorecard = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     Restored {
         exit: run.out.status.code(),
         scorecard,
+        signed: (bytes, std::fs::read(&run.sig).unwrap_or_default()),
         stdout: run.out.stdout_utf8(),
         stderr: run.out.stderr_utf8(),
     }
@@ -398,12 +421,12 @@ type Cell = (i64, i64, Option<Vec<u8>>, Option<Vec<u8>>);
 type Output = BTreeMap<i32, Vec<Cell>>;
 
 /// Every archived record the selection selects, by its OWN timestamp, per
-/// partition in source-offset order. Every partition of the topic appears,
-/// selected or not, so an unselected partition must be EMPTY.
-fn expected(archive: &Archive, topic: &str, sel: &Selection) -> Output {
+/// partition in source-offset order. Every partition of the topic appears, so
+/// a partition with nothing in the window must be EMPTY.
+fn expected(archive: &Archive, sel: &Selection) -> Output {
     let mut out: Output = (0..PARTS).map(|p| (p, Vec::new())).collect();
     for r in &archive.records {
-        if sel.selects(topic, r.partition, r.timestamp) {
+        if sel.selects(r.timestamp) {
             out.entry(r.partition).or_default().push((
                 r.offset,
                 r.timestamp,
@@ -556,7 +579,7 @@ fn the_start_is_inclusive_and_selects_equal_and_non_monotonic_timestamps() {
             ),
             Vec::new(),
         );
-        let want = expected(&archive, &topic, &sel);
+        let want = expected(&archive, &sel);
         let got = observed(&format!("{prefix}{topic}"));
         let d = diff(&want, &got);
         runs.push(json!({"label": label, "start": start, "verdict": r.summary(), "diff": d}));
@@ -634,7 +657,7 @@ fn a_segment_whose_bounds_hide_an_in_window_record_is_never_signed_pass() {
         restore_spec(&backup_id, &[&topic], &prefix, &sel, (s, s + 5_000), true),
         Vec::new(),
     );
-    let want = expected(&archive, &topic, &sel);
+    let want = expected(&archive, &sel);
     let got = observed(&format!("{prefix}{topic}"));
     let d = diff(&want, &got);
     write_outcome("hidden", &json!({"verdict": r.summary(), "diff": d}));
@@ -667,24 +690,65 @@ fn a_segment_whose_bounds_hide_an_in_window_record_is_never_signed_pass() {
     );
 }
 
-/// **A topic subset, and different partition subsets on two topics.** The
-/// archive holds topics A, B and C; the plan restores A and B, with
-/// `A: [0, 2]` and `B: [1]`. The engine's partition filter applies to every
-/// topic of a run, so this is TWO engine runs. The target holds exactly the
-/// selected partitions' records and every unselected partition is empty; C
-/// is not restored. Signed: `source.selection` names both subsets and two
-/// engine runs. Run under both coverages: the sampled lane must reach the
-/// same verdict over the same selection.
+/// Both readers on one signed scorecard this file kept: exit codes and the
+/// lines each prints, `(rust exit, python exit, rust output, python output)`.
+fn read_with_both(doc: &std::path::Path, sig: &std::path::Path) -> (i32, i32, String, String) {
+    let key = root().join("e2e/fixtures/signed/public.pem");
+    let rust = std::process::Command::new(bin())
+        .args(["drill", "verify", "--scorecard"])
+        .arg(doc)
+        .arg("--signature")
+        .arg(sig)
+        .arg("--public-key")
+        .arg(&key)
+        .output()
+        .expect("logweir drill verify");
+    let py = std::process::Command::new(auditor_python())
+        .arg(root().join("docs/verify_scorecard.py"))
+        .arg(doc)
+        .arg(sig)
+        .arg(&key)
+        .output()
+        .expect("docs/verify_scorecard.py");
+    (
+        rust.status.code().unwrap_or(-1),
+        py.status.code().unwrap_or(-1),
+        format!("{}{}", rust.stdout_utf8(), rust.stderr_utf8()),
+        format!("{}{}", py.stdout_utf8(), py.stderr_utf8()),
+    )
+}
+
+/// The lines starting `replay selection:` or `sample coverage:`, in order.
+fn selection_lines(out: &str) -> Vec<String> {
+    out.lines()
+        .filter_map(|l| {
+            ["replay selection: ", "sample coverage: "]
+                .iter()
+                .find_map(|p| l.find(p).map(|i| l[i..].to_string()))
+        })
+        .collect()
+}
+
+/// **A topic subset from a stated start, under both coverages.** The archive
+/// holds topics A, B and C; the plan restores A and B from `S = T + 30`, a
+/// start inside every partition's span. The target holds exactly the records
+/// at or after `S` on every partition of A and B; C is not restored. Signed:
+/// `format_version` 1.7.0 and `source.selection` = exactly the plan's window
+/// (`window_start_ms`, `window_end_ms`, nothing else). Both readers accept each
+/// scorecard and print the same `replay selection:` line, and the sampled one
+/// prints the QUALIFIED sampled-pass line (review H1). The two signed
+/// scorecards are kept as `scorecard-<coverage>.json` for the older-reader
+/// rows (`docs/decisions/prod-11-1-replay-selection.md` §10).
 #[test]
-fn partition_subsets_on_two_topics_are_two_engine_runs() {
-    let mut row = Row::new("subsets");
-    let s = T;
+fn a_topic_subset_from_a_start_is_restored_and_signed_under_both_coverages() {
+    let mut row = Row::new("topics");
+    let base = T;
     let a = row.source_topic("a", &[]);
     let b = row.source_topic("b", &[]);
     let c = row.source_topic("c", &[]);
     for t in [&a, &b, &c] {
         let recs = layout(
-            s,
+            base,
             t,
             &[
                 (0, &[10, 20, 30, 40, 50]),
@@ -705,36 +769,44 @@ fn partition_subsets_on_two_topics_are_two_engine_runs() {
             )
         })
         .collect();
+    let (start, end) = (base + 30, base + 10_000);
     let sel = Selection {
-        start: None,
-        end: s + 10_000,
-        partitions: [(a.clone(), vec![0, 2]), (b.clone(), vec![1])]
-            .into_iter()
-            .collect(),
+        start: Some(start),
+        end,
+        ..Selection::default()
     };
     let mut runs = Vec::new();
     for (label, complete) in [("complete", true), ("sampled", false)] {
         let prefix = row.prefix(label, &[&a, &b, &c]);
         let r = restore_run(
-            restore_spec(
-                &backup_id,
-                &[&a, &b],
-                &prefix,
-                &sel,
-                (s, s + 10_000),
-                complete,
-            ),
+            restore_spec(&backup_id, &[&a, &b], &prefix, &sel, (start, end), complete),
             Vec::new(),
         );
         let mut diffs = BTreeMap::new();
         for t in [&a, &b] {
-            let want = expected(&archives[t.as_str()], t, &sel);
+            let want = expected(&archives[t.as_str()], &sel);
             let got = observed(&format!("{prefix}{t}"));
             diffs.insert(t.clone(), diff(&want, &got));
-            oracle_rejects_mutants(&want, &got, (0, s + 11, None, None), 1);
+            oracle_rejects_mutants(&want, &got, (0, base + 10, None, None), 0);
         }
-        runs.push(json!({"label": label, "verdict": r.summary(), "diffs": diffs}));
-        write_outcome("subsets", &json!({ "runs": runs }));
+        let dir = demo_dir().join("replay-selection");
+        std::fs::create_dir_all(&dir).expect("the outcome directory");
+        let (doc, sig) = (
+            dir.join(format!("scorecard-{label}.json")),
+            dir.join(format!("scorecard-{label}.sig")),
+        );
+        std::fs::write(&doc, &r.signed.0).expect("keep the scorecard");
+        std::fs::write(&sig, &r.signed.1).expect("keep the signature");
+        let (rust_rc, py_rc, rust_out, py_out) = read_with_both(&doc, &sig);
+        runs.push(json!({
+            "label": label,
+            "verdict": r.summary(),
+            "diffs": diffs,
+            "readers": {"rust": rust_rc, "python": py_rc,
+                        "rust_lines": selection_lines(&rust_out),
+                        "python_lines": selection_lines(&py_out)},
+        }));
+        write_outcome("topics", &json!({ "runs": runs }));
         assert!(
             diffs.values().all(Vec::is_empty),
             "{label}: the restored output is not the selection: {diffs:#?}"
@@ -749,22 +821,33 @@ fn partition_subsets_on_two_topics_are_two_engine_runs() {
             "{label}: {}",
             r.summary()
         );
-        let block = signed_selection(&r);
-        assert_eq!(block["engine_runs"], json!(2), "{label}: {block}");
-        let mut named = vec![
-            json!({"topic": a, "partitions": [0, 2]}),
-            json!({"topic": b, "partitions": [1]}),
-        ];
-        named.sort_by_key(|v| v["topic"].as_str().unwrap().to_string());
-        assert_eq!(block["partitions"], json!(named), "{label}");
-        assert!(block.get("window_start_ms").is_none_or(Value::is_null));
+        assert_eq!(r.scorecard["format_version"], json!("1.7.0"), "{label}");
+        assert_eq!(
+            signed_selection(&r),
+            &json!({"window_start_ms": start, "window_end_ms": end}),
+            "{label}: the block is the plan's window and nothing else"
+        );
+        assert_eq!((rust_rc, py_rc), (0, 0), "{label}: {rust_out}\n{py_out}");
+        let lines = selection_lines(&rust_out);
+        assert_eq!(lines, selection_lines(&py_out), "{label}: the readers differ");
+        let selection_line = format!(
+            "replay selection: every partition of every restored topic, from epoch-ms {start} \
+             (the plan's stated window start, inclusive) to epoch-ms {end} (inclusive); no record \
+             before the start was restored or expected"
+        );
+        assert!(lines.contains(&selection_line), "{label}: {lines:#?}");
+        let qualified = lines
+            .iter()
+            .any(|l| l.starts_with("sample coverage: a sampled pass over a replay selection"));
+        assert_eq!(qualified, !complete, "{label}: {lines:#?}");
     }
 }
 
 /// **Refused before anything runs.** A start a millisecond before the
-/// archive's floor (never moved to it), a selection no segment overlaps, and
-/// a target name that already exists: each exit 3, with no target topic
-/// created and no scorecard signed. The control is the same plan with a start
+/// archive's floor (never moved to it), a selection no segment overlaps, a
+/// target name that already exists, and a partition subset with and without
+/// a start (`PartitionSubsetsAwaitOwnerDecision`, OD-9 open): each exit 3,
+/// with no target topic created and no scorecard signed. The control is the same plan with a start
 /// AT the floor, which restores.
 #[test]
 fn refusals_before_anything_runs() {
@@ -830,11 +913,25 @@ fn refusals_before_anything_runs() {
         Selection {
             start: Some(s),
             end: s + 1_000,
-            partitions: [(topic.clone(), vec![0])].into_iter().collect(),
+            ..Selection::default()
         },
         true,
         "already exist",
     );
+    // A partition subset, with and without a start: refused by name until the
+    // owner decides OD-9 (review H1), before any target exists.
+    for (label, start) in [("subset", None), ("subset-start", Some(s))] {
+        check(
+            label,
+            Selection {
+                start,
+                end: s + 1_000,
+                partitions: [(topic.clone(), vec![0])].into_iter().collect(),
+            },
+            false,
+            "PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition subset",
+        );
+    }
 
     // The control: a start AT the floor restores.
     let sel = Selection {
@@ -925,7 +1022,7 @@ fn a_compaction_hole_inside_a_sub_window_is_restored_and_disclosed() {
         ),
         Vec::new(),
     );
-    let want = expected(&archive, &topic, &sel);
+    let want = expected(&archive, &sel);
     let got = observed(&format!("{prefix}{topic}"));
     let d = diff(&want, &got);
     write_outcome("compaction", &json!({"verdict": r.summary(), "diff": d}));
@@ -951,8 +1048,8 @@ fn a_compaction_hole_inside_a_sub_window_is_restored_and_disclosed() {
 }
 
 /// **A new point arriving does not change an approved plan.** The plan is
-/// bound to backup set B1 (`source.backup`) and selects partition 0 from a
-/// start. More records arrive and a second backup B2 — a newer recovery point
+/// bound to backup set B1 (`source.backup`) and selects every partition from
+/// a start. More records arrive and a second backup B2 — a newer recovery point
 /// — is taken before the plan runs. The run restores B1's selection exactly
 /// (the oracle reads B1's archive) and signs B1; nothing of B2 is restored.
 #[test]
@@ -967,7 +1064,7 @@ fn a_new_point_does_not_change_an_approved_selection() {
     let sel = Selection {
         start: Some(T + 10),
         end: T + 60_000,
-        partitions: [(topic.clone(), vec![0])].into_iter().collect(),
+        ..Selection::default()
     };
     let prefix = row.prefix("np", &[&topic]);
     let spec = restore_spec(&b1, &[&topic], &prefix, &sel, (T + 10, T + 60_000), true);
@@ -996,7 +1093,7 @@ fn a_new_point_does_not_change_an_approved_selection() {
     );
 
     let r = restore_run(spec, Vec::new());
-    let want = expected(&archive, &topic, &sel);
+    let want = expected(&archive, &sel);
     let got = observed(&format!("{prefix}{topic}"));
     let d = diff(&want, &got);
     write_outcome("newpoint", &json!({"verdict": r.summary(), "diff": d}));
@@ -1010,4 +1107,125 @@ fn a_new_point_does_not_change_an_approved_selection() {
     assert_eq!(r.scorecard["source"]["backup_id"], json!(b1));
     assert_eq!(got[&0].len(), 2, "B1's records at or after the start only");
     oracle_rejects_mutants(&want, &got, (3, T + 30, None, None), 0);
+}
+
+/// **An older runner refuses a plan stating a start (review M2).** Run with
+/// `LOGWEIR_E2E_OLDER_RUNNER` naming a `logweir` built from main BEFORE
+/// PROD-11.1 (the fix round used main at the merge base it names in the
+/// report). Three plans over one archive:
+///
+/// 1. a start, written `point_in_time: "<start>/<end>"`: the older runner
+///    parses `point_in_time` as one RFC 3339 instant, so the plan does not
+///    parse — exit 1, `drill spec does not parse`, no target topic, nothing
+///    signed. It cannot restore from the floor what the plan said to restore
+///    from a start.
+/// 2. the control: the same plan with `point_in_time: "<end>"` — the older
+///    runner restores it, `pass`, every record up to the end.
+/// 3. the RESIDUAL: a hand-written `restore.partitions` with an instant
+///    `point_in_time`. The older runner ignores a key it does not know and
+///    restores EVERY partition, signed `pass`. No Logweir writer emits that
+///    key (the current runner refuses it, `refusals_before_anything_runs`);
+///    this row keeps the older runner's behaviour on record.
+///
+/// IGNORED by default: the older binary is built outside this tree, and an
+/// unset variable is a PANIC here, never a silent pass.
+#[test]
+#[ignore = "needs LOGWEIR_E2E_OLDER_RUNNER: a logweir built from main before PROD-11.1"]
+fn an_older_runner_refuses_a_plan_stating_a_start() {
+    let older = std::path::PathBuf::from(std::env::var("LOGWEIR_E2E_OLDER_RUNNER").expect(
+        "LOGWEIR_E2E_OLDER_RUNNER names the older logweir binary; this row never passes without it",
+    ));
+    assert!(older.is_file(), "{} is not a file", older.display());
+    let version = std::process::Command::new(&older)
+        .arg("--version")
+        .output()
+        .expect("the older logweir runs");
+    let mut row = Row::new("older");
+    let s = T;
+    let topic = row.source_topic("old", &[]);
+    let recs = layout(s, "old", &[(0, &[0, 10, 20]), (1, &[5, 15]), (2, &[7, 17])]);
+    kafka::produce_plain(&topic, &recs).expect("produce");
+    let backup_id = row.backup_id("old");
+    backup_ok(&backup_id, &[&topic], 1000);
+    let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
+    let end = s + 1_000;
+
+    let mut cases = Vec::new();
+    let mut run = |label: &str, sel: &Selection| {
+        let prefix = row.prefix(label, &[&topic]);
+        let target = format!("{prefix}{topic}");
+        let r = restore_run_by(
+            restore_spec(&backup_id, &[&topic], &prefix, sel, (s, end), true),
+            Vec::new(),
+            Some(older.clone()),
+        );
+        let got = observed(&target);
+        cases.push(json!({
+            "label": label,
+            "older_runner": older.display().to_string(),
+            "older_version": version.stdout_utf8().trim(),
+            "plan_restore_block": sel.restore_block(),
+            "target_exists": topic_exists(&target),
+            "restored": got.values().map(Vec::len).sum::<usize>(),
+            "verdict": r.summary(),
+        }));
+        write_outcome("older-runner", &json!({ "cases": cases }));
+        (r, target, got)
+    };
+
+    // 1. A stated start: refused before anything runs.
+    let start = Selection {
+        start: Some(s + 10),
+        end,
+        ..Selection::default()
+    };
+    let (r, target, _) = run("start", &start);
+    let both = format!("{}\n{}", r.stdout, r.stderr);
+    assert_eq!(r.exit, Some(1), "{}", r.summary());
+    assert!(both.contains("drill spec does not parse"), "{}", r.summary());
+    assert!(r.scorecard.is_null(), "the older runner signed a scorecard");
+    assert!(
+        !topic_exists(&target),
+        "the older runner created a target topic"
+    );
+
+    // 2. The control: the same plan without the start restores.
+    let full = Selection {
+        start: None,
+        end,
+        ..Selection::default()
+    };
+    let (r, _, got) = run("control", &full);
+    let want = expected(&archive, &full);
+    assert!(diff(&want, &got).is_empty(), "{:#?}", diff(&want, &got));
+    assert_eq!(
+        (r.exit, r.outcome()),
+        (Some(0), Some("pass")),
+        "{}",
+        r.summary()
+    );
+    assert!(
+        r.scorecard["source"].get("selection").is_none(),
+        "the older runner writes no selection block"
+    );
+
+    // 3. The residual: a hand-written `restore.partitions` is IGNORED by the
+    // older runner, which restores every partition.
+    let subset = Selection {
+        start: None,
+        end,
+        partitions: [(topic.clone(), vec![0])].into_iter().collect(),
+    };
+    let (r, _, got) = run("partitions-residual", &subset);
+    assert!(
+        diff(&want, &got).is_empty(),
+        "the older runner restored every partition: {:#?}",
+        diff(&want, &got)
+    );
+    assert_eq!(
+        (r.exit, r.outcome()),
+        (Some(0), Some("pass")),
+        "{}",
+        r.summary()
+    );
 }
