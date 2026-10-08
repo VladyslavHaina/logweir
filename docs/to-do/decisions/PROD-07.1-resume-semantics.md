@@ -18,7 +18,7 @@
    - restore produces without idempotence and re-sends a request whose response was lost.
 2. **Measured on slot 1** (§4; 10 rows, 52 predictions held), running the engine's own next attempt the way a naive resume would:
    - a kill before the first commit duplicates every landed record (1,500), and after a commit the landed part of the next topic (1,200);
-   - SIGTERM exits 0 with a whole topic unrestored;
+   - SIGTERM exits 0 with a whole topic unrestored. The complete lane fails that restore; the default sampled lane can sign `pass` over it (T2; review H1, filed as FX-23);
    - a stale file over a recreated target exits 0 having restored nothing;
    - a truncated file stops the engine (exit 1);
    - two writers duplicate the whole archive;
@@ -31,7 +31,7 @@
    - Its partial targets are listed with PROD-08.1's complete-verification counts.
    - A retry is a new execution into fresh targets.
    - Logweir stops rendering `checkpoint_state` and `checkpoint_interval_secs`, so the engine keeps no file to be stale, corrupt or carried.
-   - An engine exit 0 after a cancel is never completion.
+   - An engine exit 0 after a cancel is never completion. For the sampled lane this depends on FX-23.
    - A cancel is SIGTERM, then SIGKILL, and the attempt ends only when the writer is proved gone.
 5. **Resume, for PROD-07.3: the target is the checkpoint** (§5.3).
    - Under six preconditions (same execution; the old writer gone and the target quiet; target identity unchanged per PROD-01.4; a clean prefix under PROD-08.1's model; one writer; selection by offset), a resume continues each partition after its last `x-original-offset`, through PROD-00.3i's per-partition offset floor (C11).
@@ -138,7 +138,12 @@ Nothing. A skipped segment `continue`s before the offset-mapping update, the rec
 - **Every attempt is a new run.** It renders a new per-run checkpoint path and a new per-run offset-report path (2.2), so the engine never resumes. Measured: H1 shows a carried checkpoint discarded on the hash.
 - **The checkpoint is lost with the pod:** `emptyDir`, never uploaded, one pod per Job (2.2).
 - **A retry of the same spec is refused before anything runs.** Phase 0 refuses any mapped target topic that already exists, in both modes, exit 3 (`L/crates/logweir/src/drill/phase0_admit.rs:579-600`). A retry therefore needs fresh target names, which is PLAT-12.2's "fresh-target retry".
-- **Logweir's verdict never reads the engine's exit code as completeness.** Phase 7 compares the target with the archive, sampled or complete (PROD-08.1). That matters, because a SIGTERM-stopped engine exits 0 over a partial restore (T1).
+- **Logweir never reads an engine exit 0 as completeness: phase 7 decides.** That matters, because a SIGTERM-stopped engine exits 0 over a partial restore (T1). **But only the complete lane (PROD-08.1) is certain to see a topic the engine never started.** The default sampled lane can sign `pass` over such a restore (review H1, filed as **FX-23**; measured live by T2, §4):
+  - phase 6 accepts the target once any one partition is above 0 (`L/crates/logweir/src/drill/phase6_restore.rs:82-92`);
+  - phase 4 keeps the first `max_partitions` candidates in manifest order, which is the engine's restore order, so a truncated sample can cover only the topics that finished (`L/crates/logweir/src/drill/phase4_sample.rs:180-186`);
+  - phase 7's one aggregate count bound has slack whenever the missing topic's in-window segments straddle the point (`L/crates/logweir/src/drill/phase7_verify.rs:1638-1652`).
+
+  Until FX-23 lands, "phase 7 decides" holds for the complete lane, and for the sampled lane only when every mapped partition is sampled or the bound has no slack. Logweir runs the engine with `RUST_LOG=warn`, so the INFO line "Shutdown signal received" never reaches it (`L/crates/logweir-engine-oso/src/subprocess.rs:220`). Today the signal can reach the engine alone only on a CLI host or in docker-engine mode; in-cluster, `logweir` is PID 1 with no handler. PROD-07.2's SIGTERM-first cancel would make the case routine, which is why its row 07.1-I3 depends on FX-23.
 - **A cancel does not reach the engine** (2.6, Later #13).
 
 So a crashed restore is not resumable today, by three independent mechanisms (per-run paths, a pod-local file, the existing-target refusal). Two of them are also what keep it safe: §4 shows what the engine's checkpoint does when it IS carried with a stable path.
@@ -206,7 +211,7 @@ In the table, "first" and "second" are the topics in the engine's restore order 
    - Within one attempt the file does nothing: the engine reads it only at start (2.1).
    - This supersedes PROD-00's A-C4-1 (stable per-execution paths) and absorbs A-C4-3 (§8).
    - Until it lands, per-attempt paths keep the same property (2.2, H1).
-5. **An engine exit 0 is not completion.** A SIGTERM-stopped engine exits 0 with the remaining topics unrestored (T1). Once PROD-07.2 sends cancels, an attempt that was cancelled is Interrupted whatever the engine's exit, unless the complete verification passes. Phase 7 already decides the verdict from the target (§3).
+5. **An engine exit 0 is not completion.** A SIGTERM-stopped engine exits 0 with the remaining topics unrestored (T1). Once PROD-07.2 sends cancels, an attempt that was cancelled is Interrupted whatever the engine's exit, unless the complete verification passes. Phase 7 decides the verdict from the target, but only the complete lane is certain to see a never-started topic. The default sampled lane can sign `pass` over one (T2) until **FX-23** lands (§3), so this item and row 07.1-I3 depend on FX-23.
 6. **A cancel stops the writer, then the attempt ends.**
    - SIGTERM reaches the engine only between topics (2.6). So PROD-07.2's cancel is SIGTERM, then SIGKILL after a bounded grace.
    - The attempt is not Interrupted, and its point not released for a retry, until the engine process or container is proved gone and the targets have stopped growing (PROD-01.1's 07-4).
@@ -236,7 +241,7 @@ Preconditions. All six must hold; any one that fails gives "resume blocked: <rea
 - **R6 Selection by offset, never by time.**
   - Per partition, the resume offset is the tail + 1, or the first archived offset in the window when the partition is empty (PROD-01.1's 07-2).
   - The tail may be a transaction marker's lineage: markers are archived and restored as records (PROD-01.1's 07-3).
-  - The window, the mapping and every other key of the approved document are unchanged. Only the offset-floor rule block is added; it is derived mechanically from the reconciliation, and its digest goes into the attempt record.
+  - The window, the mapping and every other key of the approved document are unchanged, except two things. The offset-floor rule block is added; it is derived mechanically from the reconciliation, and its digest goes into the attempt record. And `offset_report` names this attempt's own report path: each attempt writes its own report, which is never the mapping of record (2.7), and the attempt record holds its path and digest.
 
 **After the resume:**
 
@@ -335,7 +340,7 @@ Every event is a row of §6. In short:
 | F1 | Runner or engine killed (SIGKILL, OOM, pod deleted) inside the first topic, before any checkpoint commit | No file was saved, so it starts over. Duplicates = every record already landed (K1: 1,500) | Killed `logweir`: the engine finishes unrecorded (PROD-01.1 §5.2). Killed pod: no scorecard; a retry of the same spec is refused at phase 0 | Interrupted; reconcile; fresh-target retry | Resume after R2: 0 added duplicates, nothing missing |
 | F2 | Killed after a topic's checkpoint commit, inside a later topic | If the hash matches, it skips the committed topic's segments: duplicates = the later topic's landed records (K2: 1,200), and its offset report omits the skipped topic. For two or more topics the hash matches only by chance (D1); otherwise as F3 (T1) | As F1 | As F1 | As F1 |
 | F3 | As F2, with Logweir's per-attempt path and the file carried | Discards it on the hash ("config hash mismatch") and starts over; duplicates = everything landed (H1: 3,600 + 1,000) | Not carried: as F1 | As F1 | As F1 (the engine file is irrelevant) |
-| F4 | Graceful stop (SIGTERM) mid-topic | Finishes the topic, saves, stops before the next and **exits 0** with later topics absent (T1) | No cancel reaches the engine (Later #13) | SIGTERM then SIGKILL; Interrupted whatever the exit (5.2 items 5–6) | As F1 |
+| F4 | Graceful stop (SIGTERM) mid-topic | Finishes the topic, saves, stops before the next and **exits 0** with later topics absent (T1) | No cancel reaches the engine (Later #13). A signal aimed at the engine alone (a CLI host, docker-engine mode) gives exit 0; the complete lane fails it, but the default sampled lane can sign `pass` (T2; **FX-23**) | SIGTERM then SIGKILL; Interrupted whatever the exit (5.2 items 5–6); depends on FX-23 for the sampled lane | As F1 |
 | F5 | Killed with produce requests in flight (the ambiguity window) | Re-produces the in-flight batches with everything else (no file) | As F1 | As F1; the reconciliation counts what landed, acknowledged or not | Tail scan after the quiet period: 0 duplicates (K3: `pass`, 0 duplicates, 0 missing) |
 | F6 | A response lost inside an attempt (C5) | Re-sends: one batch appended twice; can exit 0 (PROD-01.1 §5.1 samples 3, 5, 6) | Count bound or complete verification fails the run (PROD-01.1 §5.1 sample 6; PROD-08.1) | Same; the reconciliation names the duplicates | R4 lets them through, disclosed; the final verdict fails on them; 00.3d removes them |
 | F7 | Broker outage past the retry budget: the engine exits 1 with a partial target | Errored topics are still checkpointed (2.4); the next attempt skips their completed segments | Exit 1, no scorecard; the partial target stays (PROD-01.1 §5.1 sample 3) | Interrupted, partial targets listed (07-1b) | Resume after R2–R4 |
@@ -362,7 +367,7 @@ Each row has a pass predicate, a negative control that must make it fail, and a 
 |---|---|---|---|
 | 07.1-I1 | A restore whose runner is killed inside the first topic ends Interrupted. The signed list names every partial target, and per partition its tail and its missing/duplicate/unexpected counts, equal to a complete verification of the same target. Extends 07-1b. | A state that reads as a generic failure, or a list without per-partition coverage, fails. So does a list whose counts differ from the complete verification's. | resume_semantics k1 steps through the runner; 07-1b's broker-stop fixture |
 | 07.1-I2 | A cancel stops the writer: SIGTERM, then SIGKILL after the grace. After the grace no engine process or container of the attempt remains, the target's end offsets stop moving, and only then is the state Interrupted. | Today's `a_killed_restore_leaves_its_engine_writing` (PROD-01.1 07-4): the engine outlives the cancel and the target reaches the whole archive. That must fail the new "writer stopped" assertion. | the kill row, flipped |
-| 07.1-I3 | A restore cancelled inside the first of two topics is never Succeeded or `pass`, whatever the engine's exit code. | T1: the engine exits 0 with topic b absent. An implementation that reads exit 0 as "restore finished" fails. | resume_semantics t1 steps |
+| 07.1-I3 | A restore whose engine stopped inside the first of two topics is never Succeeded or `pass`, under **either** coverage and whatever the engine's exit code. That covers a PROD-07.2 cancel and a signal to the engine alone. **Depends on FX-23.** | T1: the engine exits 0 with the second topic absent. T2: the default sampled lane with `max_partitions` equal to one topic's partitions, over an archive whose in-window segments straddle the point, signs `pass` today (FX-23 open). An implementation that reads exit 0 as "restore finished", or that leaves the sampled lane as it is, fails. | resume_semantics t1 and t2 steps through the product path; FX-23's probe holes A and B (review H1) |
 | 07.1-I4 | The rendered restore document carries neither `checkpoint_state` nor `checkpoint_interval_secs`. A test over the render fails if either key comes back (absorbs A-C4-3). | A mutant that renders a stable path. Its consequence is S1 (a stale file trusted: exit 0, every record missing), which the test cites. | render snapshot test; resume_semantics s1 |
 | 07.1-I5 | A retry of an Interrupted execution is a new execution into fresh targets. A second execution naming the old partial target is still refused at phase 0. | A retry that reuses the old target name. | PLAT-12.2's retry journey |
 | 07.1-I6 | A Logweir-side read failure after the engine exited 0 is "restore finished, verification not completed", and re-verifying needs no re-restore (PROD-01.1 07-1c). | As 07-1c. | 07-1c's pause-at-exit fixture |
@@ -381,7 +386,7 @@ Each row has a pass predicate, a negative control that must make it fail, and a 
 | 07.1-R7 | A resume is refused while the previous attempt's engine or pod is running or unknown, or while any target end moved within the quiet period. | W1: two writers duplicate the whole archive. The orphaned engine of the kill row keeps writing. | resume_semantics w1; the kill row |
 | 07.1-R8 | After a resume, the mapping rebuilt from the target's lineage covers every restored record, equal to the complete verification's restored set. The engine's offset report is not used. | K2: the engine's report after a checkpoint resume has no entry for the skipped topic. | resume_semantics k2 |
 | 07.1-R9 | Duplicates inside an attempt stay within the re-sent requests (PROD-01.1 07-1). R4 lets them through disclosed, and the final verdict fails on them. | 07-1's fault proxy. | the fault-proxy profile (§8) |
-| 07.1-R10 | The resumed attempt's document differs from the approved one only by the offset-floor block, whose digest is in its attempt record. The final verification uses the plan's expected set, with no `excluded` and no `complete.filter`. | A resume that changes the window, the mapping or any other key is refused. A verification that treats the floor as a filter passes a target missing its prefix. | render diff over two attempts; a complete verification with the prefix deleted |
+| 07.1-R10 | The resumed attempt's document differs from the approved one in exactly two places: the added offset-floor block, and `offset_report`, which names the attempt's own report path. The floor block's digest and the report's path and digest are in the attempt record. The final verification uses the plan's expected set, with no `excluded` and no `complete.filter`. | A resume that changes the window, the mapping or any other key, `target:` and `storage:` included, is refused. So is one whose floor block's digest differs from the attempt record's. A verification that treats the floor as a filter passes a target missing its prefix. A diff that also allowed any key besides these two would pass a changed window. | render diff over two attempts with different run ids (the allowed set is `{offset_report, the floor block}`); a complete verification with the prefix deleted |
 
 ### 7.3 PROD-00.3g, if the orchestrator keeps it
 
@@ -401,11 +406,15 @@ A-C4-4 stays. The rows below are added. None is a PROD-07.3 dependency.
 
 ## 8. Ledger changes proposed (the orchestrator's to record)
 
-1. **PROD-07.2** takes the default contract (5.2) and rows 07.1-I1 to I7. It also takes A-C4-3, as I4, and the `docs/kubernetes.md` `TMPDIR` row, which says the checkpoint lands there and must change with I4.
+1. **PROD-07.2** takes the default contract (5.2) and rows 07.1-I1 to I7. Its 5.2 item 5 and row I3 depend on **FX-23** (filed from this record's review), which closes the sampled lane's `pass` over an early-stopped restore. It also takes A-C4-3, as I4, and the `docs/kubernetes.md` `TMPDIR` row, which says the checkpoint lands there and must change with I4.
 2. **PROD-07.3's dependency "00.3 per OD-3" becomes "00.3i"** (C11's offset floor, 07.1-F1), plus PROD-01.4's target identity:
    - `topic_id` needs OD-6's FFI crate; the creation-marks and fingerprint fallback is available now;
    - PROD-00.3d is recommended (it removes C5's duplicates inside an attempt), not required;
    - not 00.3g.
+
+   **Proposed approach-text changes for PROD-07.3** (route C contradicts two sentences of today's text):
+   - "Keep rendered options byte-identical across attempts" becomes "Keep rendered options identical across attempts except the attempt's own `offset_report` path and the offset-floor block (07.1-R10)".
+   - "Label up to one segment of duplicates per partition as bounded" becomes "A resume adds no duplicate at the interruption (07.1-R1). Duplicates inside an attempt (C5's re-sends) are disclosed and fail the verdict until PROD-00.3d (07.1-R9)".
 3. **PROD-00.3g** leaves PROD-07.3's path. Keep it as a bug-class patch at lower priority (A-C4-4 and 07.1-G1 to G3), or drop it; the orchestrator decides. PROD-00's A-C4-1 (stable per-execution paths) is superseded by 07.1-I4, and A-C4-2 by 07.1-R2.
 4. **Proposed child row PROD-01.5d — a produce-response fault proxy profile** (compose, Tier B). It is a listener whose advertised address is a proxy that forwards produce requests and can drop or hold a response deterministically.
    - Two rows wait on it: PROD-01.1's 07-1 (here 07.1-R9) and PROD-00.3d's oracle A-C5-1. PROD-01.1 §5.1 names it and PROD-01.1 §7 assigns it to PROD-07, but neither task owns a compose profile.
