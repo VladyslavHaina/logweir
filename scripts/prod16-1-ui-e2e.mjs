@@ -86,6 +86,15 @@ const DEFAULT_CONFIRM_SNAPSHOT =
 const SOURCE_PORT = process.env.LOGWEIR_E2E_KAFKA_PORT;
 const TARGET_PORT = process.env.LOGWEIR_E2E_CLUSTER2_PORT;
 const S3_PORT = process.env.LOGWEIR_E2E_S3_PORT;
+const TARGET_CLUSTER_ID = (() => {
+  try {
+    const env = require("node:fs").readFileSync(join(REPO, "e2e", "compose", "slots",
+      String(process.env.COMPOSE_PROJECT_NAME), "kafka-cluster2.env"), "utf8");
+    return (/^CLUSTER_ID=(.+)$/m.exec(env) || [])[1] || "";
+  } catch (absent) {
+    return "";
+  }
+})();
 
 const result = {
   harness: "scripts/prod16-1-ui-e2e.mjs", stamp: stamp, namespace: NS, context: KUBE_CONTEXT,
@@ -178,8 +187,40 @@ function chartIdentityRender() {
     "--show-only", "templates/identity.yaml"], { encoding: "utf8", timeout: 60000 });
   check(helm.status === 0, "helm template failed: " + helm.stderr);
   const asJson = kube(["create", "--dry-run=client", "-o", "json", "-f", "-"], { input: helm.stdout });
-  const parsed = JSON.parse(asJson.stdout);
-  return parsed.items || [parsed];
+  // One JSON object per document, concatenated: split on the top-level braces.
+  const objects = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  const text = asJson.stdout;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (c === "\\") {
+        escaped = true;
+      } else if (c === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (c === "\"") {
+      inString = true;
+    } else if (c === "{") {
+      if (depth === 0) {
+        start = i;
+      }
+      depth += 1;
+    } else if (c === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        objects.push(JSON.parse(text.slice(start, i + 1)));
+      }
+    }
+  }
+  return objects.flatMap((o) => o.items || [o]);
 }
 
 function bootstrapEnv(dir) {
@@ -277,26 +318,35 @@ async function seed() {
   const target = cluster("slot3-target", "target", TARGET_PORT);
   kube(["-n", NS, "create", "secret", "generic", "slot3-store",
     "--from-literal=access-key-id=minioadmin", "--from-literal=secret-access-key=minioadmin"]);
-  const name = "slot3-backup-" + stamp;
-  const backup = create({
-    apiVersion: "logweir.dev/v1alpha1", kind: "Backup",
-    metadata: { name: name, namespace: NS, labels: LABELS },
-    spec: { archive: { url: "s3://kafka-backups/" + NS, secretRef: { name: "slot3-store" } },
-      deadlineSeconds: 3600, sourceRef: { name: "slot3-source" }, topics: ["orders"],
-      triggeredBy: "manual" },
-  });
-  const status = {
-    phase: "Succeeded", backupId: "01JB7Z000000000000000P1610", records: 10, exitCode: 0,
-    exitReason: "ok", reason: "Ok", manifestKey: NS + "/01JB7Z000000000000000P1610/manifest.json",
-    windowCovered: { fromMs: 1760000000000, toMs: 1760000060000 },
-    conditions: [{ type: "Complete", status: "True", reason: "Ok", message: "fixture",
-      lastTransitionTime: "2025-10-09T08:54:20Z" }],
+  // TWO points, so the unmarked journey and the confirm journey create two
+  // different Restores (a Restore's name is minted from its plan bytes, and the
+  // same plan submitted again is a replay of the same object).
+  const point = (suffix, backupId, fromMs) => {
+    const name = "slot3-backup-" + suffix + "-" + stamp;
+    const backup = create({
+      apiVersion: "logweir.dev/v1alpha1", kind: "Backup",
+      metadata: { name: name, namespace: NS, labels: LABELS },
+      spec: { archive: { url: "s3://kafka-backups/" + NS, secretRef: { name: "slot3-store" } },
+        deadlineSeconds: 3600, sourceRef: { name: "slot3-source" }, topics: ["orders"],
+        triggeredBy: "manual" },
+    });
+    const status = {
+      phase: "Succeeded", backupId: backupId, records: 10, exitCode: 0,
+      exitReason: "ok", reason: "Ok", manifestKey: NS + "/" + backupId + "/manifest.json",
+      windowCovered: { fromMs: fromMs, toMs: fromMs + 60000 },
+      conditions: [{ type: "Complete", status: "True", reason: "Ok", message: "fixture",
+        lastTransitionTime: new Date(fromMs + 60000).toISOString().replace(".000Z", "Z") }],
+    };
+    kube(["-n", NS, "patch", "backup", name, "--subresource=status", "--type=merge",
+      "-p", JSON.stringify({ status: status })]);
+    return { name: name, uid: backup.metadata.uid };
   };
-  kube(["-n", NS, "patch", "backup", name, "--subresource=status", "--type=merge",
-    "-p", JSON.stringify({ status: status })]);
-  result.fixtures = { backup: name, note: "a Succeeded fixture Backup over slot 3's MinIO; no archive was written for it",
+  const legacyPoint = point("a", "01JB7Z000000000000000P161A", 1760000000000);
+  const confirmPoint = point("b", "01JB7Z000000000000000P161B", 1760000600000);
+  result.fixtures = { backups: [legacyPoint.name, confirmPoint.name],
+    note: "two Succeeded fixture Backups over slot 3's MinIO; no archive was written for them",
     source: "127.0.0.1:" + SOURCE_PORT, target: "127.0.0.1:" + TARGET_PORT };
-  return { point: { name: name, uid: backup.metadata.uid }, targetUid: target.metadata.uid };
+  return { legacyPoint: legacyPoint, confirmPoint: confirmPoint, targetUid: target.metadata.uid };
 }
 
 // ------------------------------------------------------------ the run
@@ -373,7 +423,11 @@ async function main() {
   });
 
   // ---------------------------------------------------------------- 1
-  const browser = await chromium.launch();
+  // UI_E2E_CHROMIUM: an explicit Chromium when the global Playwright's own
+  // download is missing (this host carries a newer headless shell).
+  const browser = await chromium.launch(process.env.UI_E2E_CHROMIUM
+    ? { executablePath: process.env.UI_E2E_CHROMIUM } : {});
+  result.browser = { executable: process.env.UI_E2E_CHROMIUM || "playwright default", version: browser.version() };
   const page = await (await browser.newContext()).newPage();
   const bodies = [];
   page.on("response", async (r) => {
@@ -386,9 +440,9 @@ async function main() {
       // body gone
     }
   });
-  async function toPlanStep(base) {
-    await page.goto(base + "/ui/#/restore?ns=" + NS + "&backup=" + seeded.point.name + "&uid=" +
-      seeded.point.uid, { waitUntil: "load", timeout: 30000 });
+  async function toPlanStep(base, point) {
+    await page.goto(base + "/ui/#/restore?ns=" + NS + "&backup=" + point.name + "&uid=" +
+      point.uid, { waitUntil: "load", timeout: 30000 });
     await page.waitForSelector("#wizard-position", { timeout: 30000 });
     await wizardAt(page, 1, 60);
     await wizardStep(page, 4);
@@ -427,7 +481,7 @@ async function main() {
   check(apiLog.join("").includes("NOT honoured"), "the console logs the refused marker as a WARN");
   save("01-console-warn.txt", apiLog.join("").split("\n").filter((l) => l.includes("NOT honoured")).join("\n"));
   kube(["-n", NS, "annotate", "configmap", "logweir-signing-trust", "logweir.dev/approval-default-"]);
-  const legacyStep = await toPlanStep(base);
+  const legacyStep = await toPlanStep(base, seeded.legacyPoint);
   check(legacyStep.toLowerCase().includes("approve it out of band"), "the strict step: " + legacyStep.slice(0, 600));
   await shot("01-unmarked-strict-step");
   const since = bodies.length;
@@ -461,7 +515,7 @@ async function main() {
   check(view.body.item.name === "default-confirm-v1" && view.body.item.operatorMode === "confirm" &&
     view.body.item.basis === "configured" && view.body.item.ordinaryConfirmationAvailable === false,
   "the opt-in before the key exists: " + JSON.stringify(view.body.item));
-  const pendingStep = await toPlanStep(base);
+  const pendingStep = await toPlanStep(base, seeded.confirmPoint);
   check(pendingStep.toLowerCase().includes("not available yet"), "the key-pending step: " + pendingStep.slice(0, 600));
   check(await page.evaluate(() => document.querySelector("#create-restore").disabled), "Create is withheld");
   await shot("02-confirm-key-pending");
@@ -479,7 +533,7 @@ async function main() {
     "the console read the hook's key on first use: " + JSON.stringify(view.body.item));
   check(view.body.item.digest === sha256(Buffer.from(DEFAULT_CONFIRM_SNAPSHOT)),
     "the policy digest is default-confirm-v1's snapshot");
-  const confirmStep = await toPlanStep(base);
+  const confirmStep = await toPlanStep(base, seeded.confirmPoint);
   check(confirmStep.toLowerCase().includes("no key needed"), "the confirm step: " + confirmStep.slice(0, 600));
   check(!confirmStep.includes("logweir drill"), "and no command for a key holder");
   await shot("03-confirm-step");
@@ -542,7 +596,8 @@ async function main() {
     approverKey: write("approver.pub.pem", consoleTrust.data["confirmation.pub.pem"]),
     confirmationKey: write("confirmation.pub.pem", consoleTrust.data["confirmation.pub.pem"]),
     snapshot: write("approval-policy.json", DEFAULT_CONFIRM_SNAPSHOT),
-    allowed: write("allowed-clusters.json", "{\"allowed_cluster_ids\":[]}"),
+    // The slot's cluster2 broker, the plan's target: the id stack-env.sh gave it.
+    allowed: write("allowed-clusters.json", JSON.stringify({ allowed_cluster_ids: [TARGET_CLUSTER_ID] })),
   };
   // The runner Job mounts the installation identity; the "kubelet" again.
   const signing = kubeJson(["-n", NS, "get", "secret", "logweir-signing-key"]);
@@ -566,6 +621,10 @@ async function main() {
     LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256: digest(files.confirmationKey),
     AWS_ACCESS_KEY_ID: "minioadmin", AWS_SECRET_ACCESS_KEY: "minioadmin",
     AWS_ENDPOINT_URL: "http://127.0.0.1:" + S3_PORT, AWS_ALLOW_HTTP: "true", AWS_REGION: "us-east-1",
+    // The runner Job's image names its engine; a host run says what it is.
+    LOGWEIR_ENGINE_VERSION: "host-proof:prod-16-1",
+    LOGWEIR_ENGINE_DIGEST: "sha256:" + "0".repeat(64),
+    LOGWEIR_ENGINE_BIN: join(REPO, ".engine", "kafka-backup"),
   };
   const runRunner = (snapshotPath, env) => {
     const done = spawnSync(LOGWEIR_BIN, ["restore", "run", "--spec", files.plan, "--approval", files.approval,
@@ -585,10 +644,14 @@ async function main() {
       "the runner refused the console's bundle on " + refusal + " (exit " + run.status + "):\n" +
         run.transcript.slice(0, 3000));
   }
+  check(run.transcript.includes("progress-phase=1:approval") && !run.transcript.includes("no data operation"),
+    "the runner admitted the plan against slot 3's target (phase 0) and passed the approval (phase 1)");
   check(run.status !== 0, "no archive was written for the fixture point, so the run must fail later");
-  record("the real runner accepts the console-confirmed default-confirm-v1 bundle and fails later, " +
-    "for a reason that is not the authorization", { exit: run.status,
-    tail: run.transcript.trim().split("\n").slice(-4) });
+  const failure = (/"error":"([^"]*)"/.exec(run.transcript) || [])[1] || "";
+  check(failure.startsWith("engine:"), "the run fails in the engine (no archive), not before: " + failure);
+  record("the real runner admits the console-confirmed default-confirm-v1 bundle against slot 3 (phase 0), " +
+    "verifies it (phase 1), and fails only in the engine, for which no archive exists", { exit: run.status,
+    phases: run.transcript.split("\n").filter((l) => l.startsWith("progress-phase=")), failure: failure });
   // CONTROL: the same bundle beside ANOTHER policy's snapshot.
   const other = write("other-policy.json", DEFAULT_CONFIRM_SNAPSHOT.replace("default-confirm-v1", "other-v1"));
   const otherEnv = Object.assign({}, contract, { LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256: digest(other) });
