@@ -152,6 +152,29 @@ pub struct VerifyReport {
     /// SAMPLED verdict and never as a complete one. Boxed: the block is the
     /// largest thing a report carries, and `Verdict` holds a report by value.
     pub verification: Option<Box<logweir_core::scorecard::Verification>>,
+    /// `sample.unsampled_topics` (scorecard 1.6.0, FX-23), carried as read:
+    /// `None` names no unsampled topic (and, before 1.6.0, says nothing).
+    pub unsampled_topics: Option<Vec<String>>,
+}
+
+/// The line both readers print for a scorecard whose sample left topics
+/// unsampled (FX-23), or nothing when it names none.
+/// `docs/verify_scorecard.py::_unsampled_lines` prints the same line, and
+/// `scripts/check-verifier-parity.sh` compares every line starting
+/// `sample coverage:` between the two readers.
+#[must_use]
+pub fn unsampled_lines(unsampled: Option<&[String]>) -> Vec<String> {
+    match unsampled {
+        Some(topics) if !topics.is_empty() => vec![format!(
+            "sample coverage: no partition of {} topic(s) was sampled, because \
+             sample.max_partitions is below the number of topics with records in the window: \
+             {}; their partitions were held to the count bound only, never reconciled record by \
+             record",
+            topics.len(),
+            topics.join(", ")
+        )],
+        _ => Vec::new(),
+    }
 }
 
 /// The verification-coverage lines both readers print for a scorecard
@@ -731,6 +754,7 @@ pub fn verify_scorecard(
         not_reconstructed: sc.topic_parity.not_reconstructed.clone(),
         time_basis: sc.source.time_basis.clone(),
         verification: sc.integrity.verification.clone().map(Box::new),
+        unsampled_topics: sc.sample.unsampled_topics.clone(),
     }))
 }
 
@@ -779,6 +803,10 @@ fn print_report(r: &VerifyReport) {
     }
     // PROD-08.1: nor a verdict over every record when it covered a sample.
     for line in verification_lines(r.verification.as_deref()) {
+        println!("coverage:  {line}");
+    }
+    // FX-23: nor a sample of every topic when the cap left some out.
+    for line in unsampled_lines(r.unsampled_topics.as_deref()) {
         println!("coverage:  {line}");
     }
 }

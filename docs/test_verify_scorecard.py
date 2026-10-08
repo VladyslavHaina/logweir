@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.21.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.22.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -939,6 +939,11 @@ def test_the_version_line_names_the_current_invariant_set():
             "with complete coverage, an incomplete reason exactly when not covered, a pass "
             "only over a covered and clean complete block, and totals that are its "
             "partitions' sums"
+        ) in r.stdout, r.stdout
+        # 1.22.0's addition (FX-23): `sample.unsampled_topics`'s three arms.
+        assert (
+            "sample.unsampled_topics only from 1.6.0, never empty, sorted, each topic once and "
+            "not blank, and never beside a complete verification"
         ) in r.stdout, r.stdout
 
 
@@ -2235,9 +2240,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.21.0 (PROD-01.3) versions the two auth-mode arms: three statements
     # each, the new modes defined from receipt 1.4.0 and scorecard 1.5.0. Map
     # still five.
+    #
+    # 1.22.0 (FX-23) adds the scorecard's three `sample.unsampled_topics` arms
+    # (US-1 to US-3, format 1.6.0), its shape check and the `sample coverage:`
+    # line. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.21.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.22.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -3581,3 +3590,74 @@ def test_the_blank_set_is_the_rust_readers():
     b["complete"]["incomplete_reason"] = "\x1f"
     assert mod.check_invariants(_scorecard_1_4(b)).startswith(
         "integrity.verification.complete.incomplete_reason is required")
+
+
+# ---- FX-23: `sample.unsampled_topics` (scorecard 1.6.0), arms US-1 to US-3 ----
+
+US2_MESSAGE = (
+    "sample.unsampled_topics is empty, names a blank topic, or is not sorted and free of "
+    "repeats; it names each topic max_partitions left unsampled once, in order, and is absent "
+    "when there is none")
+
+
+def _scorecard_1_6(topics, version="1.6.0", block="sampled"):
+    doc = _scorecard_1_4(_sampled_block() if block == "sampled" else block, version)
+    if topics is not None:
+        doc["sample"]["unsampled_topics"] = topics
+    return doc
+
+
+def test_the_unsampled_topics_minor_is_the_rust_readers():
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const UNSAMPLED_TOPICS_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares UNSAMPLED_TOPICS_SINCE_MINOR"
+    assert mod.SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR == int(m.group(1))
+    m = re.search(r'pub const FORMAT_VERSION_WITH_UNSAMPLED_TOPICS: &str = "1\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR
+
+
+def test_unsampled_topics_are_accepted_as_the_writer_writes_them():
+    mod = _verifier_module()
+    assert mod.check_invariants(_scorecard_1_6(["audit", "orders"])) == ""
+    assert mod.check_invariants(_scorecard_1_6(None)) == ""
+    # `null` is ABSENT, as `Option` reads it.
+    assert mod.check_invariants(_scorecard_1_6(None, version="1.5.0")) == ""
+    doc = _scorecard_1_6(None)
+    doc["sample"]["unsampled_topics"] = None
+    assert mod.check_invariants(doc) == ""
+
+
+def test_us1_to_us3_refuse_with_the_rust_readers_words():
+    mod = _verifier_module()
+    for version in ("1.4.0", "1.5.0"):
+        assert mod.check_invariants(_scorecard_1_6(["orders"], version=version)) == (
+            f'sample.unsampled_topics is present but format_version "{version}" predates it: '
+            "the field is defined from 1.6.0")
+    for bad in ([], ["  "], ["audit", "\u2003"], ["orders", "audit"], ["orders", "orders"]):
+        assert mod.check_invariants(_scorecard_1_6(bad)) == US2_MESSAGE, bad
+    # U+001F is not blank to either reader.
+    assert mod.check_invariants(_scorecard_1_6(["\u001f"])) == ""
+    assert mod.check_invariants(_scorecard_1_6(["orders"], block=_complete_block())) == (
+        'sample.unsampled_topics is present but integrity.verification.coverage is "complete"; '
+        "a complete verification compares every restored partition and leaves no topic "
+        "unsampled")
+
+
+def test_the_unsampled_topics_shape_is_refused_before_its_arms():
+    mod = _verifier_module()
+    for bad in ("orders", [1], {"orders": 1}, ["orders", None]):
+        assert mod.check_invariants(_scorecard_1_6(bad, version="1.0.0")) == (
+            "sample.unsampled_topics is not an array of strings"), bad
+
+
+def test_the_unsampled_line_is_the_rust_readers():
+    mod = _verifier_module()
+    assert mod._unsampled_lines(None) == []
+    assert mod._unsampled_lines(["audit", "orders"]) == [
+        "sample coverage: no partition of 2 topic(s) was sampled, because "
+        "sample.max_partitions is below the number of topics with records in the window: "
+        "audit, orders; their partitions were held to the count bound only, never reconciled "
+        "record by record"]
+    rust = (ROOT / "crates/logweir/src/verify.rs").read_text()
+    assert "sample coverage: no partition of {} topic(s) was sampled, because \\" in rust
