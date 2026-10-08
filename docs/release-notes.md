@@ -22,8 +22,9 @@ its record is in the next entry, whose twenty-seven items are what that
 candidate shipped. This entry collects what lands on `main` after that
 publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
 key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
-32 (PROD-05.1) and 33 (PROD-01.3, client authentication modes and the
-credential binding) so far. Items continue the next entry's
+32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the
+credential binding) and 34 (FX-23, an early-stopped restore is never signed
+`pass`) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -50,6 +51,10 @@ Item 33 is PROD-01.3 and its security follow-up, proven on a compose stack
 (both clients, every mode); it changes the controller, the runner, the
 console and the `KafkaCluster` CRD, and the PoC upgrade that carries it runs
 the live `KafkaCluster` rows.
+Item 34 is fix-now row FX-23, proven on a compose stack by a SIGTERM to the
+engine mid-restore; it changes the runner's sampled verification and its
+signed scorecard, and the PoC upgrade that carries it runs its sampled
+rehearsal and restore rows unchanged.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -475,6 +480,49 @@ a spec naming a new mode, and an older reader refuses a 1.4.0/1.5.0 document
 that names one (the safe direction). An older console would send
 `credentialRef` again; roll the console with the controller.
 
+#### 34. An early-stopped restore is never signed `pass`; `max_partitions` samples every topic first (FX-23)
+
+**Changed.** A restore the engine stopped early — a SIGTERM to the engine
+(`pkill kafka-backup` on a CLI host, `docker stop` of its container) finishes
+the topic it is on, exits 0 and never starts the rest — could be signed `pass`
+by the default sampled verification when `sample.max_partitions` was below the
+number of partitions with records in the window: the cap kept the first
+partitions in manifest order, which is the order the engine restores in, and
+the one count bound over all topics had slack. The sampled verification now
+(a) holds every mapped partition to its own count bound — a segment the
+point in time cuts across proves the one record whose timestamp opens or
+closes it inside the window — so an empty partition the archive proves holds
+records in the window fails, by name; (b) keeps one partition of every topic
+before a second of any under `max_partitions`, and names the topics it could
+not reach in the scorecard's new optional `sample.unsampled_topics` (format
+**1.6.0**, only for a scorecard that names one; MINOR,
+[stability.md](stability.md#scorecard-format-160-sampleunsampled_topics-and-a-stricter-sampled-check-fx-23));
+and (c) fails a restore whose engine offset report has no entry for such a
+partition. All three are new causes for the existing `fail-integrity`, exit 2.
+The in-cluster runner was not exposed (`logweir` is PID 1 there and no
+pod signal reaches the engine), and a scheduled rehearsal never truncated (it
+drops points larger than its cap). `verify_scorecard.py` is 1.22.0.
+**Do:** nothing. A correct restore cannot fail the new checks; a sampled
+`pass` from an earlier build over a plan with `max_partitions` below the
+partitions in the window is worth re-checking
+([verify-a-scorecard.md](verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
+One fixture moved: a target holding exactly the wholly-inside count when a
+straddling segment opens inside the window was a pass and is a fail, because
+that segment's first record is missing.
+**Scope:** on compose slot 1 (Kafka 3.7.1, engine 0.23.3 under emulation), a
+two-topic `logweir restore run` whose engine was sent SIGTERM while the first
+topic was landing: the engine finished the first topic, exited 0 and wrote
+nothing to the second. The build before FX-23 signed `pass` (exit 0) at
+`max_partitions` 3 and 1; this build signs `fail-integrity` (exit 2) at both,
+naming every partition of the second topic and the engine report's finding,
+with `sample.unsampled_topics` at `max_partitions: 1`, and both readers accept
+the signed documents (`e2e/tests/stopped_restore.rs`). The review's probe
+holes and controls, one row per fix deciding alone, and 25 mutants (all
+killed) are unit rows (`crates/logweir/tests/stopped_restore.rs`).
+**Rollback:** an older runner samples the first N partitions again, judges one
+aggregate bound and ignores the engine report; the 1.6.0 scorecards already
+written stay valid under both readers, and an older reader ignores the field.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -522,7 +570,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32 and 33, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33 and 34, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -530,7 +578,8 @@ console's text), and item 31 takes effect at each catalog's next sync; item 32
 changes the runner's receipts and records, the catalog's view (runner and
 controller), the product API and the console; item 33 changes the controller,
 the runner, the console and the `KafkaCluster` CRD, and needs each credentialed
-connection's Secret bound. To roll back to
+connection's Secret bound; item 34 changes the runner's sampled verification
+and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

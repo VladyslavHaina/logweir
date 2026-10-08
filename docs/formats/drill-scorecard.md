@@ -3,12 +3,17 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-drill-scorecard-1.5.0.json`](../../schemas/logweir-drill-scorecard-1.5.0.json)
+[`schemas/logweir-drill-scorecard-1.6.0.json`](../../schemas/logweir-drill-scorecard-1.6.0.json)
 and CI diffs it against the code on every build, so this document and the
-schema cannot drift apart silently. Format **1.5.0** (PROD-01.3) adds no field:
-it widens `target.auth.mode` by three values (`scramSha256`, `plain`, `mtls`),
-and only a scorecard of a restore into such a target declares it — every other
-scorecard is the 1.4.0 document, described by the frozen
+schema cannot drift apart silently. Format **1.6.0** (FX-23) adds the nested
+optional [`sample.unsampled_topics`](#sampleunsampled_topics-format-160): the
+topics a sampled drill's `max_partitions` left without a sampled partition.
+Only a scorecard that names one declares it. Format **1.5.0** (PROD-01.3) adds
+no field: it widens `target.auth.mode` by three values (`scramSha256`,
+`plain`, `mtls`), and only a scorecard of a restore into such a target declares
+it, described by the frozen
+[`schemas/logweir-drill-scorecard-1.5.0.json`](../../schemas/logweir-drill-scorecard-1.5.0.json);
+every other scorecard is the 1.4.0 document, described by the frozen
 [`schemas/logweir-drill-scorecard-1.4.0.json`](../../schemas/logweir-drill-scorecard-1.4.0.json).
 [`schemas/logweir-drill-scorecard-1.3.0.json`](../../schemas/logweir-drill-scorecard-1.3.0.json),
 [`schemas/logweir-drill-scorecard-1.2.0.json`](../../schemas/logweir-drill-scorecard-1.2.0.json),
@@ -336,6 +341,7 @@ Copied verbatim from your spec, plus the verdict.
 | `records_restored` | integer | How many were restored. |
 | `anchor` | string | The vocabulary is `head`, `tail`, `random`; **v0.1 implements only `head`** and REFUSES the other two at phase 0 with exit 3 rather than silently substituting. The scorecard field is a plain string (the closed enum lives on the input spec, `logweir_core::spec::Anchor`, which is where a bad value has to be caught); a v0.1.0 scorecard therefore always reads `head`. See [stability.md](../stability.md). |
 | `coverage_note` | string | What the drill itself says about how representative the window is. Read it. |
+| `unsampled_topics` | array of strings, **optional** (format 1.6.0) | The restored topics with records in the window that `sample.max_partitions` left without a sampled partition: sorted, each once, never empty. **Absent** names none — and in a document before 1.6.0 says nothing, because its writer's cap kept the first partitions in manifest order and recorded nothing about the rest. See [below](#sampleunsampled_topics-format-160). |
 
 ### The block is REQUIRED, and both readers now enforce that
 
@@ -355,6 +361,55 @@ block; it is not a drill scorecard`, and refuses a `records_expected` that is
 not an integer with `INVALID: sample.records_expected is not an integer`. The
 pair is walked by both readers in
 `crates/logweir/tests/two_reader_parity.rs::two_reader_parity_on_documents_refused_before_the_invariants`.
+
+### `sample.unsampled_topics` (format 1.6.0)
+
+```json
+"sample": {
+  "topics": 1, "partitions": 1, "records_expected": 25, "...": "...",
+  "unsampled_topics": ["payments"]
+}
+```
+
+A sampled verification reconciles the first `records_per_partition` records of
+the partitions phase 4 selects, and `sample.max_partitions` caps how many. Since
+FX-23 the cap keeps one partition of every restored topic with records in the
+window first — round-robin across topics in manifest order — and only then a
+second of any; the kept partitions are listed in manifest order. When the cap
+is below the number of such topics, the topics it could not reach are named
+here. Their partitions were not reconciled record by record; every one of them
+was still held to its own count bound and, after an engine restore, to the
+engine's offset report (see
+[what a sampled `pass` guarantees](../verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
+Before FX-23 the cap kept the FIRST partitions in manifest order — the order the
+engine restores topics in — which is how an engine stopped early by a SIGTERM
+could be sampled only over the topics it had finished.
+
+Three arms, enforced by both readers in the same position (after
+`integrity.verification`, before `redactions`) and words, fire only on a
+document carrying the field:
+
+| Arm | Refuses |
+|---|---|
+| US-1 | the field under a `format_version` before 1.6.0 |
+| US-2 | an empty list, a blank name, or a list not sorted or with a repeat (absent is the one spelling of none) |
+| US-3 | the field beside `integrity.verification.coverage: complete` (a complete verification compares every restored partition; phase 0 refuses it beside `max_partitions`) |
+
+Both readers print one `sample coverage:` line naming the topics; nothing is
+printed when the field is absent. A reader that predates 1.6.0 ignores the
+field and applies every other check: it is a MINOR bump under
+[OD-7](../to-do/product-expansion.md#owner-decisions) (a), arms that read only
+a new optional field.
+
+**The number.** 1.6.0; 1.5.0 is PROD-01.3's. Written only for a document that
+names an unsampled topic (`scorecard::format_version_with_sample`), so every
+other scorecard is the 1.4.0 or 1.5.0 document it was. A renumber moves
+`scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS` and
+`UNSAMPLED_TOPICS_SINCE_MINOR` together, the justfile's
+`scorecard_schema_version` and this schema file's name,
+`docs/verify_scorecard.py`'s `SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR`, the
+parity script's `SCORECARD_UNSAMPLED_VERSION`, and the corpus cases
+`unsampled_topics_*.json` (their `format_version` and US-1's reason).
 
 ### EVERY required block, and the `u64` domain (`1.6.0`)
 
