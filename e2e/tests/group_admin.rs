@@ -10,18 +10,19 @@
 //!
 //! | row | proves | negative control |
 //! |---|---|---|
-//! | `every_fixture_group_gets_the_verdict_its_type_calls_for` | one verdict per id; classic and consumer groups captured with the broker's state and member count; share and streams groups `GroupTypeNotCaptured`; an absent id `GroupNotFound` and still absent after | the typed listing ALONE omits the share and streams groups the name listing shows (T3): classifying from it would drop them |
+//! | `every_fixture_group_gets_the_verdict_its_type_calls_for` | one verdict per id; classic and consumer groups captured with the broker's state and member count; share and streams groups `GroupTypeNotCaptured`; an absent id `GroupNotFound` and still absent after. On a line below ListGroups v5 (3.7.1, the default stack CI runs), where the broker's own tool prints TYPE `-`: every typed entry carries type 0, every fixture group is `GroupTypeNotCaptured { UnknownType }` (T4), and no description is taken | the typed listing ALONE omits the share and streams groups the name listing shows (T3): classifying from it would drop them |
 //! | `a_group_hidden_from_the_principal_is_never_absent` (`acl`) | with §3.9's visibility setup the restricted principal's listing is not complete, its hidden group is `NotVisibleToPrincipal`, a describable absent id `GroupNotFound` by targeted describe, and the visible group captured | the super user's complete listing captures the hidden group; granting the principal Describe on the cluster makes the listing complete and the group listed, and its description then `NotAuthorized` |
 //! | `acls_without_an_authorizer_are_not_applicable` | on the broker with no authorizer, coverage is `AuthorizerDisabled` with no binding | `kafka-acls.sh --list` says SecurityDisabledException there, and DescribeAcls alone reads "0 bindings" |
 //! | `acls_round_trip_and_what_librdkafka_cannot_name_is_counted` (`acl`) | literal, prefixed, wildcard-name, wildcard-principal, ALLOW and DENY bindings on TOPIC, GROUP, TRANSACTIONAL_ID and CLUSTER equal `kafka-acls.sh --list`; CLUSTER is named CLUSTER; USER, DELEGATION_TOKEN and TwoPhaseCommit bindings are counted not-representable, never exported | the CLI lists the unnameable bindings as distinct, and none of them appears among the exported ones |
 //! | `a_principal_denied_on_the_cluster_is_capture_denied` (`acl`) | the restricted principal without cluster operations gets `CaptureDenied`, never "captured, 0 bindings" | granting Describe alone gives `Unverified` (its DescribeConfigs is refused, T13); granting DescribeConfigs too gives `Captured` with the super user's bindings |
-//! | `thousands_of_admin_calls_keep_the_resident_set_bounded` | the soak of PROD-04.0 §7.2 over every call, against the broker | the measured growth is printed and bounded |
+//! | `thousands_of_admin_calls_keep_the_resident_set_bounded` | the soak of PROD-04.0 §7.2 over every call, against the broker, under 1 MiB of growth | one leaked name listing per round grows it by about 3 MiB (review L2's mutant R2) |
+//! | `on_three_brokers_an_existing_group_is_never_excluded_while_one_is_down` (`cluster3`) | twelve classic groups over two or more coordinators, captured with the listings complete; with one broker stopped for a minute no existing group is ever excluded, and a listing called complete captures all; restarted, complete again | the existence of every group (made by its own commit) is what an exclusion would contradict |
 //!
 //! # Running them
 //!
 //! ```text
 //! bash scripts/extract-engine.sh
-//! eval "$(e2e/compose/stack-env.sh --slot N --kafka 4.3 --profiles acl,streams-protocol)"
+//! eval "$(e2e/compose/stack-env.sh --slot N --kafka 4.3 --profiles acl,streams-protocol,cluster3)"
 //! just e2e-up
 //! cargo test -p e2e --features e2e --test group_admin -- --include-ignored --test-threads=1 --nocapture
 //! just e2e-down
@@ -364,6 +365,17 @@ fn every_fixture_group_gets_the_verdict_its_type_calls_for() {
     let version = c.version();
     let fixture = fixture_groups();
     assert!(!fixture.is_empty(), "groups.sh listed no group");
+    // THE LINE (review H1). A broker that serves ListGroups below v5 (3.7.1,
+    // the default stack CI's e2e job runs) types no group: its own tool prints
+    // TYPE `-`, and the typed listing carries type 0 for every entry. T4 then
+    // excludes every group as `GroupTypeNotCaptured { UnknownType { raw: 0 } }`
+    // (decision record §14). The row asserts that outcome; it never skips.
+    let untyped = fixture.iter().filter(|(_, ty, _)| ty == "-").count();
+    assert!(
+        untyped == 0 || untyped == fixture.len(),
+        "the broker typed some fixture groups and not others: {fixture:?}"
+    );
+    let legacy = untyped > 0;
     let absent = format!("pa-absent-{}", nonce());
     let mut selected: Vec<String> = fixture.iter().map(|(g, _, _)| g.clone()).collect();
     selected.push(absent.clone());
@@ -380,7 +392,8 @@ fn every_fixture_group_gets_the_verdict_its_type_calls_for() {
             names.contains(g.as_str()),
             "{g}: the name listing shows every type"
         );
-        let typed_expected = matches!(ty.as_str(), "Classic" | "Consumer");
+        // `-`: a legacy line's classic group, listed with type 0.
+        let typed_expected = matches!(ty.as_str(), "Classic" | "Consumer" | "-");
         assert_eq!(
             typed.contains(g.as_str()),
             typed_expected,
@@ -393,6 +406,20 @@ fn every_fixture_group_gets_the_verdict_its_type_calls_for() {
         "{:?}",
         listings.access
     );
+    if legacy {
+        for t in listings
+            .typed
+            .iter()
+            .filter(|t| selected.contains(&t.group_id))
+        {
+            assert_eq!(
+                t.group_type,
+                logweir_kafka::groups::code::TYPE_UNKNOWN,
+                "{}: a broker below ListGroups v5 types nothing",
+                t.group_id
+            );
+        }
+    }
 
     let started = Instant::now();
     let classification = r.classify_groups(&selected).expect("valid ids");
@@ -434,6 +461,15 @@ fn every_fixture_group_gets_the_verdict_its_type_calls_for() {
                 );
                 captured.push(cg.clone());
             }
+            "-" => assert_eq!(
+                v,
+                &GroupVerdict::Excluded(Excluded::GroupTypeNotCaptured {
+                    why: OtherType::UnknownType {
+                        raw: logweir_kafka::groups::code::TYPE_UNKNOWN
+                    }
+                }),
+                "{g}: untyped on this line (T4)"
+            ),
             "Share" | "Streams" => assert_eq!(
                 v,
                 &GroupVerdict::Excluded(Excluded::GroupTypeNotCaptured {
@@ -474,13 +510,20 @@ fn every_fixture_group_gets_the_verdict_its_type_calls_for() {
             "cli": { "state": cli_state, "members": cli_members }
         }));
     }
+    // On the legacy line nothing is captured, so no description is taken.
+    assert_eq!(
+        (captured.is_empty(), described.is_empty()),
+        (legacy, legacy),
+        "captured {captured:?}"
+    );
     // Reading does not create the absent id.
     assert!(!c.cli_lists(&absent), "{absent}: classification created it");
     write_evidence(
         &format!("every-fixture-group-{version}"),
         &json!({
-            "broker": version, "classifyMs": took.as_millis() as u64,
-            "typedListing": typed, "nameListing": names,
+            "broker": version, "legacyUntyped": legacy, "classifyMs": took.as_millis() as u64,
+            "typedListing": listings.typed.iter().map(|t| json!({"group": t.group_id, "type": t.group_type, "state": t.state})).collect::<Vec<_>>(),
+            "nameListing": names,
             "verdicts": rows, "absent": { "id": absent, "verdict": format!("{:?}", verdicts[&absent]) },
             "descriptions": described,
         }),
@@ -972,10 +1015,11 @@ fn thousands_of_admin_calls_keep_the_resident_set_bounded() {
         }
         assert_eq!(r.capture_acls().coverage, AclCoverage::AuthorizerDisabled);
         // DescribeCluster, the name listing, the typed listing, one
-        // description call, DescribeConfigs, DescribeCluster, DescribeAcls.
-        7
+        // description call (none on a legacy line, where nothing is
+        // captured), DescribeConfigs, DescribeCluster, DescribeAcls.
+        6 + usize::from(!captured.is_empty())
     };
-    for _ in 0..50 {
+    for _ in 0..100 {
         round();
     }
     let before = rss_kib();
@@ -992,8 +1036,205 @@ fn thousands_of_admin_calls_keep_the_resident_set_bounded() {
         &format!("soak-{version}"),
         &json!({ "broker": version, "calls": calls, "ms": took.as_millis() as u64, "rssBeforeKiB": before, "rssAfterKiB": after, "grewKiB": grew }),
     );
+    // 1 MiB (review L2). Measured growth was 0 KiB on 4.3.1 and 3.9.2; ONE
+    // leaked name listing per round is at least 32 group infos plus strings
+    // (rd_kafka_list_groups allocates 32 slots, rdkafka.c:5162-5165), about
+    // 3 KiB, so a leak of it grows the set by 3,120 KiB over these rounds
+    // (the review's mutant R2), and of any other object of a call by more.
     assert!(
-        grew < 16 * 1024,
-        "{calls} calls grew the resident set by {grew} KiB ({before} -> {after})"
+        grew < 1024,
+        "{calls} calls grew the resident set by {grew} KiB ({before} -> {after}): a leak"
+    );
+}
+
+// ============================================================ three brokers
+
+/// `docker compose … --profile cluster3 ARGS` on this stack; bounded.
+fn compose_c3(args: &[&str]) -> Output {
+    harness::stack::ensure_coherent();
+    let mut c = Command::new("docker");
+    c.args([
+        "compose",
+        "-p",
+        &harness::stack::project(),
+        "-f",
+        "e2e/compose/docker-compose.yml",
+        "--profile",
+        "cluster3",
+    ])
+    .args(args)
+    .current_dir(root());
+    output_within(c, 300)
+}
+
+/// Restarts the stopped broker on every exit path.
+struct Restart(&'static str);
+
+impl Drop for Restart {
+    fn drop(&mut self) {
+        let _ = compose_c3(&["start", self.0]);
+    }
+}
+
+/// **Review L4: three brokers, one stopped.** Twelve classic groups spread
+/// over the three coordinators are captured with the listings complete (T6:
+/// one verdict per id whatever the typed listing repeats). Then one broker
+/// stops, and for a minute no group that exists is ever EXCLUDED (absent or
+/// "other type"): each is captured or failed, and a listing called complete
+/// captures every one (T19's and L1's protection, live). Restarted, the
+/// listings are complete again.
+#[test]
+#[ignore = "needs the `cluster3` profile"]
+fn on_three_brokers_an_existing_group_is_never_excluded_while_one_is_down() {
+    use logweir_kafka::positions::{CommittedPosition, TopicPartition};
+    let c = Cluster {
+        service: "kafka-c3-1",
+        profile: Some("cluster3"),
+        in_network: "kafka-c3-1:9094",
+        plaintext: harness::bootstrap_c3(),
+    };
+    let version = c.version();
+    let n = nonce();
+    let topic = format!("lw-c3-{n}");
+    c.cli_ok(
+        &[
+            "/opt/kafka/bin/kafka-topics.sh",
+            "--bootstrap-server",
+            c.in_network,
+            "--create",
+            "--topic",
+            &topic,
+            "--partitions",
+            "3",
+            "--replication-factor",
+            "3",
+        ],
+        "create the topic",
+    );
+    let r = c.reader();
+    let groups: Vec<String> = (0..12).map(|i| format!("lw-c3-g{i:02}-{n}")).collect();
+    for g in &groups {
+        let at = [(
+            TopicPartition::new(&topic, 0),
+            CommittedPosition {
+                offset: 1,
+                leader_epoch: None,
+                metadata: None,
+            },
+        )];
+        let mut last = None;
+        for _ in 0..40 {
+            match r.commit_positions(g, &at) {
+                Ok(()) => {
+                    last = None;
+                    break;
+                }
+                Err(e) => last = Some(e),
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        assert!(last.is_none(), "{g}: the creating commit failed: {last:?}");
+    }
+
+    // All three up: complete, every group captured, one verdict each (T6).
+    let mut up = r.classify_groups(&groups).expect("valid");
+    for _ in 0..40 {
+        if up.completeness == ListingCompleteness::Complete
+            && up
+                .verdicts
+                .iter()
+                .all(|(_, v)| matches!(v, GroupVerdict::Capture(_)))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        up = r.classify_groups(&groups).expect("valid");
+    }
+    assert_eq!(up.completeness, ListingCompleteness::Complete);
+    assert_eq!(up.verdicts.len(), groups.len());
+    let captured: Vec<CapturableGroup> = up
+        .verdicts
+        .iter()
+        .map(|(_, v)| capture_of(v).clone())
+        .collect();
+    let typed_entries = r
+        .group_listings()
+        .typed
+        .iter()
+        .filter(|t| groups.contains(&t.group_id))
+        .count();
+    let coordinators: BTreeSet<i32> = r
+        .describe_groups(&captured)
+        .into_iter()
+        .filter_map(|(_, d)| d.ok().and_then(|d| d.coordinator))
+        .collect();
+    assert!(
+        coordinators.len() >= 2,
+        "the twelve groups should spread over the coordinators: {coordinators:?}"
+    );
+
+    // One broker down.
+    let stopped = "kafka-c3-2";
+    let restart = Restart(stopped);
+    let o = compose_c3(&["stop", stopped]);
+    assert!(o.status.success(), "stop {stopped}:\n{}", text(&o));
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut rounds = 0;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        let cl = r.classify_groups(&groups).expect("valid");
+        rounds += 1;
+        let complete = cl.completeness == ListingCompleteness::Complete;
+        *seen
+            .entry(format!("completeness: {:?}", cl.completeness))
+            .or_default() += 1;
+        for (g, v) in &cl.verdicts {
+            assert!(
+                !matches!(v, GroupVerdict::Excluded(_)),
+                "{g} exists, and was excluded while {stopped} was down: {v:?} ({:?})",
+                cl.completeness
+            );
+            if complete {
+                assert!(
+                    matches!(v, GroupVerdict::Capture(_)),
+                    "{g}: a complete listing captures every existing group: {v:?}"
+                );
+            }
+            let kind = match v {
+                GroupVerdict::Capture(_) => "capture".to_string(),
+                GroupVerdict::Failed(f) => format!(
+                    "failed: {}",
+                    format!("{f:?}").split(['(', ' ']).next().unwrap_or("?")
+                ),
+                GroupVerdict::Excluded(e) => format!("excluded: {e:?}"),
+            };
+            *seen.entry(kind).or_default() += 1;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    // Back up: complete and captured again.
+    drop(restart);
+    let mut back = r.classify_groups(&groups).expect("valid");
+    for _ in 0..120 {
+        if back.completeness == ListingCompleteness::Complete
+            && back
+                .verdicts
+                .iter()
+                .all(|(_, v)| matches!(v, GroupVerdict::Capture(_)))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        back = r.classify_groups(&groups).expect("valid");
+    }
+    assert_eq!(back.completeness, ListingCompleteness::Complete);
+    write_evidence(
+        &format!("three-brokers-{version}"),
+        &json!({
+            "broker": version, "groups": groups.len(), "typedEntriesForThem": typed_entries,
+            "coordinators": coordinators, "stopped": stopped, "roundsWhileDown": rounds,
+            "seenWhileDown": seen,
+        }),
     );
 }
