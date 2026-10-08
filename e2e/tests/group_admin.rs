@@ -167,6 +167,7 @@ fn acl_cluster() -> Cluster {
 impl Cluster {
     /// One of the broker's own CLIs inside its RUNNING container; bounded.
     fn cli(&self, args: &[&str]) -> Output {
+        harness::stack::ensure_coherent();
         let mut c = Command::new("docker");
         c.args([
             "compose",
