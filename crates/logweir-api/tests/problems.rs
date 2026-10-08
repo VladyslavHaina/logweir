@@ -539,7 +539,8 @@ async fn a_rejected_rotation_is_reported_as_an_immutable_location() {
             None,
             &serde_json::json!({
                 "expectedGeneration": 3,
-                "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "s"}}}}
+                // FX-20: a Secret the seeded destination already names.
+                "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}}}
             })
             .to_string(),
         )

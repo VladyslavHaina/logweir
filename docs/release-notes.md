@@ -25,9 +25,10 @@ key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
 32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the credential
 binding), 34 (FX-16, a point-bound restore restores its point's set), 35
 (PROD-00.2, the engine built from the vendored source), 36 (FX-23, an
-early-stopped restore is never signed `pass`) and 37 (PROD-04.0b, the
+early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
 one crate that may hold `unsafe` code, and the consumer-group and ACL reads
-behind it) so far. Items continue the next entry's
+behind it) and 38 (FX-20, the binding for every other credential reference)
+so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -66,6 +67,12 @@ Item 36 is fix-now row FX-23, proven on a compose stack by a SIGTERM to the
 engine mid-restore; it changes the runner's sampled verification and its
 signed scorecard, and the PoC upgrade that carries it runs its sampled
 rehearsal and restore rows unchanged.
+Item 38 is fix-now row FX-20, proven by unit, controller, API, console and
+real-binary rows and on the compose stack (a foreign archive binding writes no
+object to MinIO; a bound one backs up); it changes the controller, every
+runner, the retention worker, the product API, the console and three CRDs'
+status, and the PoC upgrade that carries it binds the `primary` destination's
+Secrets and runs the refusal rows against a sentinel.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -754,6 +761,79 @@ item.
 **Rollback:** an older build has no FFI crate and no workspace lint table. No
 archive, catalog, evidence or API object changes in either direction.
 
+#### 38. Every other credential reference presents only a credential bound to it (FX-20) — required action
+
+**Changed.** PROD-01.3's binding (item 33) now guards every place a writable
+object names a credential Secret beside an endpoint its author chooses. A
+`BackupDestination`'s `SecretKeys` grants are bound to the destination (its UID
+and its archive route), a `RetentionPolicy`'s delete-capable key to the policy,
+its destination's route and its scope, each `ProtectionPolicy` route's Secret
+to the policy, the sink kind and the PagerDuty endpoint, and an inline
+`archive.secretRef` (a `Backup`, a schedule, a `Restore`'s `sourceArchive`) to
+the location the runner dials — every field that shapes its URL: scheme,
+bucket, endpoint, region, addressing style and `allowHttp`. An S3 region that
+is not a region name (`^[a-z0-9-]{1,32}$`) is refused by name,
+`StorageRegionInvalid` (`refusal-reason=GuardRefused`), by every runner before
+any client exists, by the engine renderers and by every object-store client:
+without an endpoint the region is part of the host. Every runner
+(`backup run`, `restore run`, the check runner, the catalog sync and evidence
+fetch, `logweir-retention`, `logweir notify deliver`) refuses an unbound or
+foreign Secret with `CredentialBindingMismatch` **before it builds a store or
+composes a request**: exit 3 and the terminal state on a `Backup` or `Restore`,
+the check code on a `Preflight` row, `Enforced=False/CredentialBindingMismatch`
+on a `RetentionPolicy` (nothing is deleted), and
+`notify-result=<sink>:refused` with `NotificationsDelivered=False/
+CredentialBindingMismatch` on a `ProtectionPolicy` (the other sinks are still
+delivered). Editing a PagerDuty route's endpoint changes its binding, so the
+routing key never follows an edit. The values are published on
+`BackupDestination.status.credentialBinding`,
+`RetentionPolicy.status.credentialBinding` and
+`ProtectionPolicy.status.credentialBindings` (additive CRD fields). A Secret
+may carry several bindings (whitespace- or comma-separated); one that matches
+is enough. The product API no longer lets a destination name an existing
+Secret: a create (and `:from-legacy`) refuses `secret.existing`
+(`existing_credential_refused`), `:update-access` accepts only a Secret the
+destination already names, and a rotation's `secret.new` is written to a new
+bound Secret `lwd-<destination>-<role>-<suffix>`. The console's create form
+offers no existing Secret and starts on a new credential. The chart's
+`archive.s3.region` and `evidence.controllerIdentityLocations[].region` refuse a non-region
+spelling, and the API's `region_invalid` message no longer repeats the value.
+**Do:** suspend the schedules that use a credential Secret, apply the CRDs,
+roll the controller, the runner and the console together, then bind every
+existing credential Secret **one at a time with `scripts/bind-credential.py`**
+— dry first, then `--apply --confirm-endpoint` once the credential's owner has
+confirmed the endpoint it prints ([install.md](install.md), *Bind every
+existing credential Secret after the upgrade*). The tool computes the binding
+from the object's UID and the spec it prints, and refuses when the published
+status says otherwise (a status that lags an edit); an `s3://` location states
+its region, path style and `allowHttp`. It refuses a Secret any other object
+also names (an incident), a Secret owned by or minted for another object, and
+a Secret already bound elsewhere, and writes one key under a
+`resourceVersion` precondition. Remove the pre-PROD-01.3
+`api.logweir.dev/request-sha256` from a console-made destination, and rotate a
+guessable key (its create's audit record keeps the hash). Resume the
+schedules. Until a Secret is bound its runs are refused, closed.
+**Scope:** unit and mock-cluster rows per site, each with its negative control
+(`crates/weirkeeper/tests/{protection_controller,destination_controller,retention_policy_controller,backup_controller,restore_controller,preflight_controller,credential_backstop}.rs`,
+`crates/logweir-api/tests/destinations.rs`), the shipped binaries against a
+loopback sentinel that is never dialled (`notify deliver`, `backup run`,
+`drill run`, `catalog list`; `crates/logweir/tests/{notify_deliver,credential_binding,guard_cli}.rs`),
+the review's region-injection probe refused twice beside a store that does
+dial its control (`crates/weirkeeper/tests/fx20_region_binding.rs`,
+`crates/logweir-store/tests/region_backstop.rs`), one binding fixture the
+product and the upgrade tool both check
+(`e2e/fixtures/credential-binding/bindings.json`),
+the real runner driven by the controller's rendered Job
+(`schedule_controller.rs`), the retention worker binary
+(`crates/logweir-retention/tests/worker.rs`), and the upgrade tool's offline
+rows (`scripts/test_bind_credential_rows.py`). The live journey on
+docker-desktop (the PoC's `primary` destination, a thief destination and policy
+against a sentinel) is the next PoC upgrade's.
+**Rollback:** an older controller and runner ignore every binding variable and
+the new status fields; bound Secrets keep working with them. An older console
+offers `existing` again, which this API refuses — roll the console with the
+controller.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -788,7 +868,8 @@ In addition to the next entry's six, in its order:
   (`plaintext`, or TLS with no client certificate) needs nothing.
 - **Remove `api.logweir.dev/request-sha256` from each `BackupDestination` an
   earlier build created with `secret.new`** (item 33), or rotate its key: that
-  hash was taken over the secret access key.
+  hash was taken over the secret access key, and the create's audit record
+  keeps it, so only a rotation retires that copy.
 - **Before the runner image rolls, name the point's set in every standalone
   point-bound plan that says `backup: latestCompleted`**, and approve it again
   (item 34).
@@ -796,6 +877,12 @@ In addition to the next entry's six, in its order:
   [install.md](install.md#verify-the-images) (item 35); a standalone CLI
   install replaces its engine with Logweir's build and exports
   `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1` and its digest.
+- **Bind every destination, retention, notification and inline-archive
+  credential Secret, one at a time, with `scripts/bind-credential.py`**
+  (item 38), after suspending the schedules that use them and rolling the
+  controller, the runner and the console together; never in a loop. The tool's
+  refusal of a Secret another object also names is an incident to investigate
+  ([install.md](install.md); [kubernetes.md](kubernetes.md) §20.10).
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -808,7 +895,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36 and 37, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37 and 38, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -820,7 +907,10 @@ connection's Secret bound; item 34 changes the runner only; item 35 changes the
 runner image (its engine and its platforms) and the controller's Job
 environment together; item 36 changes the runner's sampled verification and
 needs nothing; item 37 changes no behaviour any binary shows (it adds
-library calls no command uses yet) and needs nothing. To roll back to
+library calls no command uses yet) and needs nothing; item 38 changes the
+controller, every runner, the retention worker, the product API, the
+console and the status of three CRDs, and needs each destination,
+retention, notification and inline-archive credential Secret bound. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -843,6 +933,11 @@ library calls no command uses yet) and needs nothing. To roll back to
    (`ENGINE_SOURCE=oso`, linux/amd64; [install.md](install.md#rolling-the-engine-back))
    rather than an older runner; it declares OSO's 0.23.3, so its documents say
    which engine ran.
+5. Item 38 needs no rollback step of its own (nor does item 34, a runner
+   change): an older controller and runner ignore the binding variables and
+   the new status fields, and the bound Secrets keep working. Roll the console
+   back with them (an older console offers `existing` on a create again,
+   which only this API refuses).
 
 ---
 

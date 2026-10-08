@@ -144,6 +144,23 @@ export const GRANT_SOURCES = Object.freeze([
   "absent", "existing", "new", "workloadIdentity", "controllerIdentity", "archiveReadGrant",
 ]);
 
+/** FX-20: the sources the CREATE form offers -- every one but `existing`.
+ *  A new destination never names an existing Secret: none can carry the
+ *  binding of a destination that does not exist yet, and the product API
+ *  refuses one (`existing_credential_refused`). The credential is entered
+ *  once (`new`) and becomes a Secret owned by and bound to the destination.
+ *  The ROTATION form still offers `existing`, for a Secret this destination
+ *  already names. */
+export const CREATE_GRANT_SOURCES = Object.freeze(
+  GRANT_SOURCES.filter((s) => s !== "existing"),
+);
+
+/** What `existing` means on the rotation form (FX-20). */
+export const EXISTING_ON_ROTATION =
+  "existing: only a Secret this destination already names. To change a credential, enter the " +
+  "new value: it is written to a NEW Secret bound to this destination, and the old one is left " +
+  "for you to delete.";
+
 /** The two `evidenceRead`-only modes, which the form offers for that role and
  *  refuses for the other three -- as the product API does. */
 export const EVIDENCE_READ_ONLY_SOURCES = Object.freeze([
@@ -158,7 +175,7 @@ export const DESTINATION_DEFAULTS = Object.freeze({
   name: "", description: "", bucket: "", prefix: "", region: "", endpoint: "",
   addressing: "pathStyle", security: "tls", caName: "", caKey: "",
   writeProbe: "createOnlyMarker", isDefault: false,
-  archiveWriteSource: "existing", archiveWriteSecret: "", archiveWriteServiceAccount: "",
+  archiveWriteSource: "new", archiveWriteSecret: "", archiveWriteServiceAccount: "",
   archiveReadSource: "absent", archiveReadSecret: "", archiveReadServiceAccount: "",
   evidenceWriteSource: "absent", evidenceWriteSecret: "", evidenceWriteServiceAccount: "",
   evidenceReadSource: "absent", evidenceReadSecret: "", evidenceReadServiceAccount: "",
@@ -609,6 +626,15 @@ export function validateDestination(values) {
     }
   }
   Object.assign(problems, validateGrants(v));
+  // FX-20: a NEW destination names no existing Secret (the API refuses it as
+  // `existing_credential_refused`); this says so beside the control.
+  for (const role of GRANT_ROLES) {
+    if (String(v[role + "Source"] || "absent") === "existing") {
+      problems[role + "Source"] = "a new destination does not name an existing Secret: no " +
+        "Secret can be bound to a destination that does not exist yet. Enter the credential " +
+        "(new) -- it becomes a Secret owned by and bound to this destination";
+    }
+  }
   return problems;
 }
 
@@ -813,10 +839,11 @@ export function sourceShows(source, group) {
   return Array.isArray(shown) && shown.indexOf(group) !== -1;
 }
 
-function grantFieldset(role, d, field, line, prefixId) {
+function grantFieldset(role, d, field, line, prefixId, sources) {
   const source = String(d[role + "Source"] || "absent");
   const hide = (group) => (sourceShows(source, group) ? "" : " hidden");
-  const options = GRANT_SOURCES.filter(
+  const offered = sources || GRANT_SOURCES;
+  const options = offered.filter(
     (s) => EVIDENCE_READ_ONLY_SOURCES.indexOf(s) === -1 || role === "evidenceRead",
   ).filter((s) => !(role === "archiveWrite" && s === "absent"));
   const id = (suffix) => prefixId + "-" + role + "-" + suffix;
@@ -835,7 +862,8 @@ function grantFieldset(role, d, field, line, prefixId) {
     esc(id("secret")) + "\">existing Secret name</label>" +
     "<input id=\"" + esc(id("secret")) + "\" name=\"" + esc(role + "Secret") + "\" value=\"" +
     esc(String(d[role + "Secret"] || "")) + "\"" + field(id("secret"), role + "Secret") + ">" +
-    "<p class=\"help\">The NAME only. This page never reads a Secret's contents.</p>" +
+    "<p class=\"help\">The NAME only. This page never reads a Secret's contents." +
+    (offered.indexOf("existing") !== -1 ? " " + esc(EXISTING_ON_ROTATION) : "") + "</p>" +
     line(id("secret"), role + "Secret") + "</div>" +
     "<div class=\"field\" data-grant-inputs=\"sa\"" + hide("sa") + "><label for=\"" + esc(id("sa")) +
     "\">ServiceAccount (workloadIdentity)</label>" +
@@ -951,7 +979,8 @@ export function renderDestinationForm(view) {
     "</div></fieldset>" +
     "<fieldset class=\"access\"><legend>access</legend>" +
     "<p class=\"help\">" + esc(WRITE_ONLY_SENTENCE) + "</p>" +
-    GRANT_ROLES.map((role) => grantFieldset(role, d, field, line, "destination")).join("") +
+    GRANT_ROLES.map((role) =>
+      grantFieldset(role, d, field, line, "destination", CREATE_GRANT_SOURCES)).join("") +
     "</fieldset>" +
     "<div class=\"field\"><label for=\"destination-write-probe\">write probe</label>" +
     "<select id=\"destination-write-probe\" name=\"writeProbe\">" +
@@ -1005,7 +1034,8 @@ export function renderRotateForm(item, view) {
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
     "<input type=\"hidden\" name=\"expectedGeneration\" id=\"rotate-expected-generation\" value=\"" +
     esc(String(d.generation === undefined || d.generation === null ? "" : d.generation)) + "\">" +
-    GRANT_ROLES.map((role) => grantFieldset(role, draft, field, line, "rotate")).join("") +
+    GRANT_ROLES.map((role) =>
+      grantFieldset(role, draft, field, line, "rotate", GRANT_SOURCES)).join("") +
     "<div class=\"field\"><label for=\"rotate-ca-change\">private CA</label>" +
     "<select id=\"rotate-ca-change\" name=\"caChange\">" +
     "<option value=\"keep\"" + (draft.caChange === "keep" || draft.caChange === undefined
@@ -1060,9 +1090,10 @@ export function renderLegacyForm(view) {
     "<div class=\"field\"><label for=\"legacy-secret\">archiveWrite: existing Secret name</label>" +
     "<input id=\"legacy-secret\" name=\"archiveWriteSecret\" value=\"" +
     esc(String(d.archiveWriteSecret || "")) + "\">" +
-    "<p class=\"help\">Adoption derives the LOCATION from facts; the credential is still named " +
-    "here, because a legacy object references a Secret and this service cannot read it to " +
-    "confirm which keys it holds.</p></div>" +
+    "<p class=\"help\">Adoption derives the LOCATION from facts. Leave this blank: a " +
+    "destination never names an existing Secret (it would be a Secret written for something " +
+    "else, and the service refuses it). The credential is entered when the destination is " +
+    "created with the form above, and becomes a Secret bound to it.</p></div>" +
     "<div class=\"actions\"><button type=\"submit\">Adopt</button></div>" +
     "</fieldset>" +
     "<div class=\"form-status\" id=\"destination-legacy-status\" tabindex=\"-1\">" +
@@ -1135,12 +1166,17 @@ export const DESTINATION_FIELD_PATHS = Object.freeze({
   "access.archiveWrite": "archiveWriteSource",
   "access.archiveWrite.mode": "archiveWriteSource",
   "access.archiveWrite.secret.existing.name": "archiveWriteSecret",
+  // FX-20: `existing_credential_refused` names the `existing` object itself.
+  "access.archiveWrite.secret.existing": "archiveWriteSecret",
   "access.archiveRead.mode": "archiveReadSource",
   "access.archiveRead.secret.existing.name": "archiveReadSecret",
+  "access.archiveRead.secret.existing": "archiveReadSecret",
   "access.evidenceWrite.mode": "evidenceWriteSource",
   "access.evidenceWrite.secret.existing.name": "evidenceWriteSecret",
+  "access.evidenceWrite.secret.existing": "evidenceWriteSecret",
   "access.evidenceRead.mode": "evidenceReadSource",
   "access.evidenceRead.secret.existing.name": "evidenceReadSecret",
+  "access.evidenceRead.secret.existing": "evidenceReadSecret",
   "readiness.writeProbe": "writeProbe",
   default: "isDefault",
 });

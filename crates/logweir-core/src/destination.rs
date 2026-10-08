@@ -301,16 +301,18 @@ pub fn validate(loc: &DestinationLocation) -> Result<(), Vec<FieldError>> {
     }
 
     if let Some(region) = &loc.region {
-        let ok = !region.is_empty()
-            && region.chars().count() <= 32
-            && region
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-        if !ok {
+        if !crate::engine::is_valid_s3_region(region) {
             errs.push(FieldError::new(
                 "spec.storage.region",
                 "region",
-                format!("storage.region `{region}` must match ^[a-z0-9-]{{1,32}}$"),
+                // Never the value (FX-20 fix round, review F1): a region is
+                // part of an endpoint-less request's host, and one spelled as
+                // a userinfo could carry a credential into a condition, an
+                // audit record or a log.
+                format!(
+                    "storage.region must match {}; the value is not repeated here",
+                    crate::engine::S3_REGION_PATTERN
+                ),
             ));
         }
     }

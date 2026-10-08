@@ -218,9 +218,35 @@ pub enum Refusal {
          unattributable deletion is not performed."
     )]
     NoRecordCredential,
+    /// FX-20: a projected credential — the delete-capable `AWS_*` key or the
+    /// `LOGWEIR_EVIDENCE_AWS_*` record key — whose Secret's `logweir-binding`
+    /// is absent or names another policy, destination route or scope. The
+    /// message opens with `CredentialBindingMismatch` and names variables,
+    /// never a value.
+    #[error("{0}; nothing is deleted")]
+    CredentialBinding(String),
     /// A port could not be built.
     #[error("{0}; nothing is deleted")]
     Port(String),
+}
+
+/// FX-20: the key line a refused run prints for a refusal the controller names
+/// on the policy's status — `retention-refusal=<code>`, read by key name from a
+/// closed table (`weirkeeper::controllers::retention_policy::RETENTION_REFUSALS`).
+pub const REFUSAL_LINE: &str = "retention-refusal=";
+
+impl Refusal {
+    /// The closed code a controller may publish for this refusal, or `None`
+    /// for one it reports by exit code alone.
+    #[must_use]
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::CredentialBinding(_) => {
+                Some(logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Refusal {
@@ -470,6 +496,15 @@ pub fn admit(
     read_plan: impl FnOnce(&str) -> std::io::Result<Vec<u8>>,
 ) -> Result<Admitted, Refusal> {
     let args = parse_args(argv)?;
+
+    // FX-20: THE BINDINGS FIRST. A delete-capable key, or a record key, from
+    // a Secret that was not bound to this policy, this destination route and
+    // this scope is refused before anything else is read — no handle exists
+    // yet, so nothing has been signed or sent.
+    for (projected, expected) in logweir_core::credential_binding::STORE_BINDING_PAIRS {
+        logweir_core::credential_binding::check_pair(projected, expected, &|k| env.get(k))
+            .map_err(|e| Refusal::CredentialBinding(e.to_string()))?;
+    }
 
     for name in REQUIRED {
         if env.get(name).is_none() {

@@ -2020,6 +2020,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         // PROD-04.0b (2026-10-08): one crate may hold `unsafe` code, and
         // rustc forbids it everywhere else through the workspace lint table.
         ("one crate holds all unsafe code", "[workspace.lints.rust]"),
+        // FX-20 (2026-10-08): every other credential reference is bound, and
+        // the one-Secret-one-object upgrade tool binds the existing ones.
+        (
+            "every other credential reference is bound",
+            "scripts/bind-credential.py",
+        ),
     ];
     assert_eq!(
         items.len(),

@@ -67,18 +67,49 @@ pub fn check_side(side: Side) -> Result<(), CredentialBindingRefusal> {
     check_credential_binding(projected_var, expected.as_deref(), projected.as_deref())
 }
 
-/// Check BOTH sides — what `backup run`, `drill run`/`restore run` and a check
-/// runner call at start-up, beside `drill::check_projected_credentials`, so no
-/// client of any kind is constructed on the refusal path.
+/// FX-20: check every OBJECT-STORE pair this process carries —
+/// [`logweir_core::credential_binding::STORE_BINDING_PAIRS`]: the
+/// `AWS_*` credential's (a destination's archive grant, an inline archive's
+/// `secretRef`, a retention Job's delete-capable key) and the
+/// `LOGWEIR_EVIDENCE_AWS_*` one's. A pair with no expectation is a hand-run
+/// process's and is not checked.
 ///
 /// # Errors
 ///
-/// The first side's [`CredentialBindingRefusal`], as a `GuardRefusal` whose
+/// The first pair's [`CredentialBindingRefusal`].
+pub fn check_store_bindings() -> Result<(), CredentialBindingRefusal> {
+    check_store_bindings_with(&|k| std::env::var(k).ok())
+}
+
+/// [`check_store_bindings`] through a lookup, so a caller can test it without
+/// the process environment.
+///
+/// # Errors
+///
+/// The first pair's [`CredentialBindingRefusal`].
+pub fn check_store_bindings_with(
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), CredentialBindingRefusal> {
+    for (projected, expected) in logweir_core::credential_binding::STORE_BINDING_PAIRS {
+        logweir_core::credential_binding::check_pair(projected, expected, get)?;
+    }
+    Ok(())
+}
+
+/// Check BOTH Kafka sides and every object-store pair (FX-20) — what
+/// `backup run`, `drill run`/`restore run`, `catalog sync` and a check runner
+/// call at start-up, beside `drill::check_projected_credentials`, so no client
+/// of any kind is constructed on the refusal path.
+///
+/// # Errors
+///
+/// The first pair's [`CredentialBindingRefusal`], as a `GuardRefusal` whose
 /// message opens with `CredentialBindingMismatch: ` (so
 /// `refusal-reason=CredentialBindingMismatch`).
 pub fn check_projected_bindings() -> Result<(), logweir_core::guard::GuardRefusal> {
     for side in [Side::Source, Side::Target] {
         check_side(side).map_err(|e| logweir_core::guard::GuardRefusal(e.to_string()))?;
     }
+    check_store_bindings().map_err(|e| logweir_core::guard::GuardRefusal(e.to_string()))?;
     Ok(())
 }

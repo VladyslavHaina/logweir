@@ -41,6 +41,9 @@ pub mod approval_policy;
 pub mod backup_receipt;
 pub mod check_contract;
 pub mod connection;
+/// FX-20: the credential binding for every credential reference — object
+/// stores, retention and notification sinks — beside PROD-01.3's Kafka one.
+pub mod credential_binding;
 pub mod destination;
 pub mod det_json;
 pub mod engine;

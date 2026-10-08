@@ -13,6 +13,40 @@ fn body(name: &str) -> String {
     support::destination_body(name).to_string()
 }
 
+/// One data key of a stored Secret, decoded.
+fn decoded(secret: &Value, key: &str) -> String {
+    use base64::Engine as _;
+    let raw = secret["data"][key]
+        .as_str()
+        .unwrap_or_else(|| panic!("the Secret has no `{key}`: {secret}"));
+    String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(raw)
+            .expect("base64"),
+    )
+    .expect("utf-8")
+}
+
+/// FX-20: the binding a stored destination's Secrets must carry, computed by
+/// the CONTROLLER's own code — `status_for`, which publishes
+/// `status.credentialBinding` — so the value the API writes and the value the
+/// controller expects are compared across the two crates, not each against a
+/// copy of the formula.
+fn destination_binding(destination: &Value) -> String {
+    let mut object = destination.clone();
+    object["apiVersion"] = json!("logweir.dev/v1alpha1");
+    object["kind"] = json!("BackupDestination");
+    let dest: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(object).expect("a BackupDestination");
+    let verdict = weirkeeper::destination::evaluate(
+        &dest,
+        &weirkeeper::destination::CaObservation::NotDeclared,
+    );
+    weirkeeper::controllers::backup_destination::status_for(&dest, &verdict, chrono::Utc::now())
+        .credential_binding
+        .expect("the controller publishes a binding for an object with a UID")
+}
+
 #[tokio::test]
 async fn a_destination_is_created_under_its_own_name_with_references_only() {
     let app = TestApp::new();
@@ -32,12 +66,10 @@ async fn a_destination_is_created_under_its_own_name_with_references_only() {
     assert_eq!(item["storage"]["addressing"], "pathStyle");
     assert_eq!(item["transport"]["security"], "tls");
     assert_eq!(item["transport"]["caBundle"]["key"], "ca.crt");
-    assert_eq!(item["access"]["archiveWrite"]["mode"], "secretKeys");
-    assert_eq!(item["access"]["archiveWrite"]["secretName"], "logweir-s3");
-    assert_eq!(
-        item["access"]["archiveWrite"]["keys"],
-        json!(["access-key-id", "secret-access-key"])
-    );
+    // FX-20: the shared fixture's grants are workload identities; the
+    // credential rows below build their own.
+    assert_eq!(item["access"]["archiveWrite"]["mode"], "workloadIdentity");
+    assert!(item["access"]["archiveWrite"].get("secretName").is_none());
     // ABSENT IS A STATED ANSWER, not a blank field.
     assert_eq!(
         item["access"]["evidenceWrite"]["mode"],
@@ -456,11 +488,13 @@ async fn update_access_rotates_the_grants_under_a_generation_precondition() {
     let app = TestApp::new();
     seed_destination(&app.fake, NS_A, "primary");
     let path = format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access");
+    // FX-20: a rotation may re-arrange the Secrets this destination already
+    // names (here the two roles swap), and names no other existing Secret.
     let rotation = json!({
         "expectedGeneration": 3,
         "access": {
-            "archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3-new"}}},
-            "archiveRead": {"mode": "secretKeys", "secret": {"existing": {"name": "archive-reader"}}},
+            "archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "archive-reader"}}},
+            "archiveRead": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}},
             "evidenceRead": {"mode": "archiveReadGrant"}
         }
     });
@@ -468,7 +502,7 @@ async fn update_access_rotates_the_grants_under_a_generation_precondition() {
     assert_eq!(response.status.as_u16(), 200, "{}", response.text());
     assert_eq!(
         response.json()["item"]["access"]["archiveWrite"]["secretName"],
-        "logweir-s3-new"
+        "archive-reader"
     );
 
     // THE PATCH NAMES ONLY THE MUTABLE HALF. The fake refuses anything else,
@@ -707,7 +741,7 @@ async fn a_legacy_location_is_refused_until_a_source_that_records_it_is_readable
     let request = json!({
         "name": "adopted",
         "sourceSchedule": "nightly",
-        "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}}}
+        "access": {"archiveWrite": {"mode": "workloadIdentity"}}
     });
     let response = app
         .post(
@@ -789,7 +823,7 @@ async fn a_legacy_archive_that_is_not_s3_is_refused_by_scheme() {
             &json!({
                 "name": "adopted-file",
                 "sourceSchedule": "filey",
-                "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}}}
+                "access": {"archiveWrite": {"mode": "workloadIdentity"}}
             })
             .to_string(),
         )
@@ -827,13 +861,16 @@ async fn from_legacy_still_requires_an_idempotency_key() {
 // H1: a rotation that cannot write the value changes nothing
 // ======================================================================
 
-/// **`:update-access` fails closed when the deterministic Secret exists.**
+/// **`:update-access` fails closed when the value's Secret name is taken.**
 ///
-/// The Secret name is a function of the destination and the role, so a SECOND
-/// `secret.new` for the same role can never be written: this service holds
-/// `create` on Secrets and nothing else. The previous shape answered 200 with
+/// This service holds `create` on Secrets and nothing else, so a value whose
+/// name is taken can never be written. The previous shape answered 200 with
 /// the name in `credentialSecrets`, which let an operator responding to a
 /// leaked key record a rotation while the leaked value stayed live.
+///
+/// FX-20: a rotation writes under a NEW name (`lwd-<d>-<role>-<suffix>`), so
+/// the deterministic name being held by the old value no longer blocks it; the
+/// taken case is now a race, injected here as the API server's answer.
 #[tokio::test]
 async fn a_rotation_that_cannot_write_the_value_changes_nothing() {
     let app = TestApp::new();
@@ -850,16 +887,25 @@ async fn a_rotation_that_cannot_write_the_value_changes_nothing() {
         .unwrap();
     let generation = before["metadata"]["generation"].as_i64().unwrap();
 
-    // A fresh value for the SAME role: the Secret is already there.
+    // A fresh value for the SAME role, whose new name the API server reports
+    // taken (the dry-run probe answers 409).
     let rotation = json!({
         "expectedGeneration": generation,
         "access": {
-            "archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}},
+            "archiveWrite": {"mode": "workloadIdentity", "workloadIdentity": {"serviceAccountName": "logweir-s3"}},
             "archiveRead": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "AKIAROTATED", "secretAccessKey": "a-brand-new-value-that-was-not-written"}}},
             "evidenceRead": {"mode": "archiveReadGrant"}
         }
     });
     app.fake.clear_requests();
+    app.fake.inject(support::Fault {
+        method: "POST",
+        path_contains: "/secrets".to_string(),
+        status: 409,
+        reason: "AlreadyExists",
+        delay: None,
+        remaining: 1,
+    });
     let response = app
         .post(
             &format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access"),
@@ -869,9 +915,9 @@ async fn a_rotation_that_cannot_write_the_value_changes_nothing() {
         .await;
     response.assert_problem(409, "state_conflict");
     let detail = response.json()["detail"].as_str().unwrap().to_string();
-    assert!(detail.contains("lwd-primary-archive-read"), "{detail}");
+    assert!(detail.contains("lwd-primary-archive-read-"), "{detail}");
     assert!(detail.contains("NOT written"), "{detail}");
-    assert!(detail.contains("secret.existing"), "{detail}");
+    assert!(detail.contains(":update-access"), "{detail}");
     // The refusal does not echo the value it declined to write.
     assert!(!response
         .text()
@@ -912,13 +958,25 @@ async fn a_rotation_into_a_role_with_no_secret_yet_is_written_and_lands() {
         )
         .await;
     assert_eq!(response.status.as_u16(), 200, "{}", response.text());
-    assert!(app
+    // FX-20: a rotation's value lands under `lwd-<d>-<role>-<suffix>`, bound
+    // to this destination.
+    let name = response.json()["item"]["access"]["evidenceWrite"]["secretName"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(name.starts_with("lwd-primary-evidence-write-"), "{name}");
+    let secret = app
         .fake
-        .object("secrets", NS_A, "lwd-primary-evidence-write")
-        .is_some());
+        .object("secrets", NS_A, &name)
+        .expect("the rotated value's Secret was written");
+    let destination = app
+        .fake
+        .object("backupdestinations", NS_A, "primary")
+        .unwrap();
     assert_eq!(
-        response.json()["item"]["access"]["evidenceWrite"]["secretName"],
-        "lwd-primary-evidence-write"
+        decoded(&secret, "logweir-binding"),
+        destination_binding(&destination),
+        "the rotated Secret is bound to this destination"
     );
     assert!(!response
         .text()
@@ -1001,28 +1059,25 @@ async fn a_planted_credential_secret_is_refused_on_the_first_attempt_and_on_the_
 #[tokio::test]
 async fn a_taken_name_for_a_later_role_leaves_the_earlier_role_unwritten() {
     let app = TestApp::new();
-    seed_destination(&app.fake, NS_A, "primary");
-    // `archiveWrite` has no Secret; `archiveRead` does.
+    // `archiveWrite`'s name is free; `archiveRead`'s is taken. On the CREATE
+    // path, whose names are deterministic (a rotation's are fresh: FX-20).
     app.fake.seed(
         "secrets",
         NS_A,
         json!({"metadata": {"name": "lwd-primary-archive-read"}, "type": "Opaque"}),
     );
-    let rotation = json!({
-        "expectedGeneration": 3,
-        "access": {
-            "archiveWrite": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "AKIAFIRST", "secretAccessKey": "the-earlier-role-value"}}},
-            "archiveRead": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "AKIASECOND", "secretAccessKey": "the-later-role-value"}}}
-        }
-    });
+    let mut request = support::destination_body("primary");
+    request["access"]["archiveWrite"] = json!({"mode": "secretKeys", "secret": {"new": {"accessKeyId": "AKIAFIRST", "secretAccessKey": "the-earlier-role-value"}}});
+    request["access"]["archiveRead"] = json!({"mode": "secretKeys", "secret": {"new": {"accessKeyId": "AKIASECOND", "secretAccessKey": "the-later-role-value"}}});
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access"),
-            None,
-            &rotation.to_string(),
+            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            Some("taken-later-role-01"),
+            &request.to_string(),
         )
         .await;
     response.assert_problem(409, "state_conflict");
+    assert_eq!(app.fake.count("backupdestinations", NS_A), 0);
 
     // THE EARLIER ROLE WAS NOT WRITTEN, and the message says so truthfully.
     assert!(
@@ -1044,7 +1099,6 @@ async fn a_taken_name_for_a_later_role_leaves_the_earlier_role_unwritten() {
 #[tokio::test]
 async fn the_refusal_names_every_credential_name_that_is_already_taken() {
     let app = TestApp::new();
-    seed_destination(&app.fake, NS_A, "primary");
     for role in ["archive-write", "archive-read"] {
         app.fake.seed(
             "secrets",
@@ -1052,18 +1106,14 @@ async fn the_refusal_names_every_credential_name_that_is_already_taken() {
             json!({"metadata": {"name": format!("lwd-primary-{role}")}, "type": "Opaque"}),
         );
     }
-    let rotation = json!({
-        "expectedGeneration": 3,
-        "access": {
-            "archiveWrite": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "A1", "secretAccessKey": "v1"}}},
-            "archiveRead": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "A2", "secretAccessKey": "v2"}}}
-        }
-    });
+    let mut request = support::destination_body("primary");
+    request["access"]["archiveWrite"] = json!({"mode": "secretKeys", "secret": {"new": {"accessKeyId": "A1", "secretAccessKey": "v1"}}});
+    request["access"]["archiveRead"] = json!({"mode": "secretKeys", "secret": {"new": {"accessKeyId": "A2", "secretAccessKey": "v2"}}});
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access"),
-            None,
-            &rotation.to_string(),
+            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            Some("taken-every-name-1"),
+            &request.to_string(),
         )
         .await;
     response.assert_problem(409, "state_conflict");
@@ -1282,4 +1332,217 @@ async fn the_default_check_selects_on_a_label_rather_than_scanning() {
         .unwrap();
     assert_eq!(by_hand["default"], true);
     app.fake.assert_strict();
+}
+
+// ======================================================================
+// FX-20: a destination's credential is entered, never named
+// ======================================================================
+
+/// **A new destination that names an existing Secret is refused, and nothing
+/// is written; the same destination with the credential ENTERED is created,
+/// and its Secret is bound to it.**
+///
+/// The confused deputy: a console user who cannot read Secrets names another
+/// destination's Secret (`lwd-victim-archive-write`) beside an endpoint they
+/// control, and every runner then signs requests with it and sends the access
+/// key id and a replayable signature there. No existing Secret can carry the
+/// binding of a destination that does not exist yet, so a create names none.
+///
+/// KILLS: `secret.existing` accepted on create (or on `:from-legacy`); the
+/// binding omitted from the written Secret; the binding computed over anything
+/// but this destination's UID and route.
+#[tokio::test]
+async fn fx20_a_new_destination_naming_an_existing_secret_is_refused_and_writes_nothing() {
+    let app = TestApp::new();
+    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let mut thief = support::destination_body("thief");
+    thief["storage"]["endpoint"] = json!("https://attacker.example:9000");
+    thief["access"]["archiveWrite"] =
+        json!({"mode": "secretKeys", "secret": {"existing": {"name": "lwd-victim-archive-write"}}});
+    let refused = app
+        .post(&path, Some("fx20-thief-create-01"), &thief.to_string())
+        .await;
+    refused.assert_problem(422, "destination_invalid");
+    let error = &refused.json()["errors"][0];
+    assert_eq!(error["field"], "access.archiveWrite.secret.existing");
+    assert_eq!(error["code"], "existing_credential_refused");
+    assert_eq!(app.fake.count("backupdestinations", NS_A), 0);
+    assert!(
+        !app.fake.requests().iter().any(|r| r.method == "POST"),
+        "a refused create wrote something: {:?}",
+        app.fake.requests()
+    );
+
+    // `:from-legacy` takes a grant block too, and refuses the same way.
+    let legacy = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/destinations:from-legacy"),
+            Some("fx20-thief-legacy-1"),
+            &json!({
+                "name": "adopted",
+                "sourceSchedule": "nightly",
+                "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "lwd-victim-archive-write"}}}}
+            })
+            .to_string(),
+        )
+        .await;
+    legacy.assert_problem(422, "destination_invalid");
+    assert_eq!(
+        legacy.json()["errors"][0]["code"],
+        "existing_credential_refused"
+    );
+
+    // CONTROL: the credential entered once becomes a Secret bound to this
+    // destination — its UID and its route — and owned by it.
+    let mut entered = support::destination_body("primary");
+    entered["access"]["archiveWrite"] = json!({
+        "mode": "secretKeys",
+        "secret": {"new": {"accessKeyId": ACCESS_KEY_ID, "secretAccessKey": SECRET_ACCESS_KEY}}
+    });
+    let created = app
+        .post(&path, Some("fx20-entered-create"), &entered.to_string())
+        .await;
+    assert_eq!(created.status.as_u16(), 201, "{}", created.text());
+    let destination = app
+        .fake
+        .object("backupdestinations", NS_A, "primary")
+        .unwrap();
+    let secret = app
+        .fake
+        .object("secrets", NS_A, "lwd-primary-archive-write")
+        .expect("the entered value's Secret");
+    let binding = decoded(&secret, "logweir-binding");
+    assert_eq!(binding, destination_binding(&destination));
+    assert!(
+        binding.starts_with(&format!(
+            "v1:{}:sha256:",
+            destination["metadata"]["uid"].as_str().unwrap()
+        )),
+        "{binding}"
+    );
+    assert_eq!(
+        secret["metadata"]["ownerReferences"][0]["uid"],
+        destination["metadata"]["uid"]
+    );
+    // The binding is a function of public values, never of the credential.
+    assert!(!binding.contains(SECRET_ACCESS_KEY) && !binding.contains(ACCESS_KEY_ID));
+    // And the thief's route would have produced a different one.
+    let mut moved = destination.clone();
+    moved["spec"]["storage"]["endpoint"] = json!("https://attacker.example:9000");
+    assert_ne!(destination_binding(&moved), binding);
+    app.fake.assert_strict();
+}
+
+/// **A rotation keeps or re-arranges this destination's own Secrets and
+/// refuses anyone else's.**
+///
+/// KILLS: `:update-access` accepting a Secret the destination does not already
+/// name; the allowed set computed from the REQUEST rather than the stored
+/// object (which would let a request allow itself).
+#[tokio::test]
+async fn fx20_a_rotation_refuses_a_secret_the_destination_does_not_already_name() {
+    let app = TestApp::new();
+    seed_destination(&app.fake, NS_A, "primary");
+    let path = format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access");
+    let before = app
+        .fake
+        .object("backupdestinations", NS_A, "primary")
+        .unwrap();
+    for foreign in [
+        // Named once…
+        json!({
+            "expectedGeneration": 3,
+            "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "lwd-victim-archive-write"}}}}
+        }),
+        // …and named twice in one request, so the request cannot vouch for
+        // its own reference.
+        json!({
+            "expectedGeneration": 3,
+            "access": {
+                "archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "lwd-victim-archive-write"}}},
+                "archiveRead": {"mode": "secretKeys", "secret": {"existing": {"name": "lwd-victim-archive-write"}}}
+            }
+        }),
+    ] {
+        app.fake.clear_requests();
+        let response = app.post(&path, None, &foreign.to_string()).await;
+        response.assert_problem(422, "destination_invalid");
+        assert_eq!(
+            response.json()["errors"][0]["code"],
+            "existing_credential_refused"
+        );
+        assert!(
+            !app.fake
+                .requests()
+                .iter()
+                .any(|r| r.method == "PATCH" || r.method == "POST"),
+            "a refused rotation wrote something"
+        );
+    }
+    assert_eq!(
+        app.fake
+            .object("backupdestinations", NS_A, "primary")
+            .unwrap(),
+        before
+    );
+
+    // CONTROL: its own Secrets, kept as they are.
+    let keep = json!({
+        "expectedGeneration": 3,
+        "access": {
+            "archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}},
+            "archiveRead": {"mode": "secretKeys", "secret": {"existing": {"name": "archive-reader"}}},
+            "evidenceRead": {"mode": "archiveReadGrant"}
+        }
+    });
+    let response = app.post(&path, None, &keep.to_string()).await;
+    assert_eq!(response.status.as_u16(), 200, "{}", response.text());
+    app.fake.assert_strict();
+}
+
+/// **FX-20 fix round (review F1), at the API.** A region is part of the host
+/// an endpoint-less S3 request is sent to, so a create whose `storage.region`
+/// is not a region name is refused, `422 region_invalid`, and nothing is
+/// written; the value is never echoed. CONTROL: the same request with a real
+/// region and no endpoint is created.
+#[tokio::test]
+async fn fx20_a_destination_region_that_is_not_a_region_name_is_refused() {
+    let app = TestApp::new();
+    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    for (i, region) in [
+        "x@attacker.example/",
+        "us-east-1.attacker.example#",
+        "US-EAST-1",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut body = support::destination_body("aws-archive");
+        body["storage"]["region"] = json!(region);
+        body["storage"].as_object_mut().unwrap().remove("endpoint");
+        body["transport"] = json!({"security": "tls"});
+        let refused = app
+            .post(&path, Some(&format!("fx20-region-{i}")), &body.to_string())
+            .await;
+        refused.assert_problem(422, "destination_invalid");
+        let errors = refused.json()["errors"].clone();
+        assert!(
+            errors
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["field"] == "storage.region" && e["code"] == "region_invalid"),
+            "{region}: {errors}"
+        );
+        assert!(!refused.text().contains("attacker"), "{}", refused.text());
+        assert_eq!(app.fake.count("backupdestinations", NS_A), 0);
+    }
+    let mut body = support::destination_body("aws-archive");
+    body["storage"]["region"] = json!("eu-west-1");
+    body["storage"].as_object_mut().unwrap().remove("endpoint");
+    body["transport"] = json!({"security": "tls"});
+    let created = app
+        .post(&path, Some("fx20-region-control"), &body.to_string())
+        .await;
+    assert_eq!(created.status.as_u16(), 201, "{}", created.text());
 }

@@ -188,6 +188,15 @@ pub const REASON_RUN_IN_PROGRESS: &str = "RunInProgress";
 pub const REASON_RUN_COMPLETE: &str = "RunComplete";
 /// `Enforced=False`: the last run did not complete.
 pub const REASON_RUN_FAILED: &str = "RunFailed";
+/// `Enforced=False` — FX-20: the worker refused a credential whose Secret is
+/// not bound to this policy, its destination's route and its scope
+/// (`retention-refusal=CredentialBindingMismatch`). Nothing was deleted.
+pub const REASON_CREDENTIAL_BINDING_MISMATCH: &str =
+    logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH;
+
+/// FX-20: every `retention-refusal=` code this build publishes — a CLOSED
+/// table, so no byte of a pod log reaches the status except one of these.
+pub const RETENTION_REFUSALS: [&str; 1] = [REASON_CREDENTIAL_BINDING_MISMATCH];
 /// `Enforced=False`: the last run never started, because the namespace refused
 /// its pod at creation — a `ResourceQuota`, a `LimitRange`, an admission
 /// webhook or a missing ServiceAccount (FX-11). The shared terminal state a
@@ -1206,8 +1215,12 @@ impl Pass<'_> {
             0
         };
         let degraded = failures >= DEGRADED_AFTER_FAILURES;
+        let binding_refused =
+            exit_code == Some(3) && report.refusal_code == Some(REASON_CREDENTIAL_BINDING_MISMATCH);
         let reason = if report.refused.is_some() {
             REASON_POD_CREATION_FORBIDDEN
+        } else if binding_refused {
+            REASON_CREDENTIAL_BINDING_MISMATCH
         } else if failed {
             REASON_RUN_FAILED
         } else {
@@ -1218,6 +1231,14 @@ impl Pass<'_> {
                 "retention run {run_id} never started ({REASON_POD_CREATION_FORBIDDEN}), so \
                  nothing was deleted: {}",
                 report.refused.as_deref().unwrap_or_default()
+            ),
+            Some(3) if binding_refused => format!(
+                "retention run {run_id} REFUSED a credential before building any handle \
+                 ({REASON_CREDENTIAL_BINDING_MISMATCH}): the Secret \
+                 spec.enforcement.credentialSecretRef names, or the destination's \
+                 evidenceWrite Secret, carries no `logweir-binding` or one written for another \
+                 policy, destination route or scope. Set it to status.credentialBinding (the \
+                 record Secret: the destination's status.credentialBinding). Nothing was deleted"
             ),
             Some(0) => format!("retention run {run_id} completed"),
             Some(3) => format!(
@@ -1545,8 +1566,19 @@ impl Pass<'_> {
         // catalog view carries no segment keys, so every candidate's `objects`
         // is `None` — "not observed" — rather than the misleading `1` the first
         // landing published, and the `Evaluated` condition says so.
-        self.publish_evaluation(&evaluation, &plan_sha256, &window, &decision, &points)
-            .await?;
+        self.publish_evaluation(
+            &evaluation,
+            &plan_sha256,
+            &window,
+            &decision,
+            &points,
+            self.policy
+                .spec
+                .enforcement
+                .as_ref()
+                .map(|_| self.retention_credential_binding(&resolved)),
+        )
+        .await?;
 
         if decision.start {
             // The slot the decision already validated; `start_run` names the
@@ -2424,8 +2456,39 @@ impl Pass<'_> {
             ("RUST_LOG".to_string(), "warn".to_string()),
         ];
         // The destination's addressing, complete and explicit (D-SEAMS S5).
+        // FX-20: WITHOUT the destination grant's binding EXPECTATION — the
+        // `AWS_*` credential in this pod is the delete-capable one, and its
+        // expectation is the policy's own (below).
         let dest_env = resolved.job_env();
-        env_literal.extend(dest_env.literals.iter().cloned());
+        env_literal.extend(
+            dest_env
+                .literals
+                .iter()
+                .filter(|(name, _)| {
+                    name
+                        != logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV
+                })
+                .cloned(),
+        );
+        if enforcement.is_some() {
+            env_literal.push((
+                logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV
+                    .to_string(),
+                self.retention_credential_binding(resolved),
+            ));
+        }
+        // The record credential is the SAME destination's `evidenceWrite`
+        // grant, so its expectation is that destination's binding.
+        if evidence_env
+            .iter()
+            .any(|e| e.name == logweir_core::credential_binding::EVIDENCE_CREDENTIAL_BINDING_ENV)
+        {
+            env_literal.push((
+                logweir_core::credential_binding::EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV
+                    .to_string(),
+                resolved.credential_binding(),
+            ));
+        }
         env_literal.sort_by(|a, b| a.0.cmp(&b.0));
         env_literal.dedup_by(|a, b| a.0 == b.0);
 
@@ -2441,9 +2504,18 @@ impl Pass<'_> {
             });
             env_from_secret.push(crate::job::EnvFromSecret {
                 name: destination::AWS_SECRET_ACCESS_KEY_ENV.to_string(),
-                secret_name: secret,
+                secret_name: secret.clone(),
                 optional: false,
                 key: crate::crds::backup_destination::DEFAULT_SECRET_ACCESS_KEY_KEY.to_string(),
+            });
+            // FX-20: AND ITS BINDING, optional, beside it. The worker refuses
+            // a delete key whose Secret is not bound to this policy, its
+            // destination's route and its scope before it builds a handle.
+            env_from_secret.push(crate::job::EnvFromSecret {
+                name: logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_ENV.to_string(),
+                secret_name: secret,
+                optional: true,
+                key: logweir_core::credential_binding::CREDENTIAL_BINDING_KEY.to_string(),
             });
         }
         env_from_secret.extend(
@@ -2470,6 +2542,10 @@ impl Pass<'_> {
                     e.name != destination::AWS_ACCESS_KEY_ID_ENV
                         && e.name != destination::AWS_SECRET_ACCESS_KEY_ENV
                         && e.name != destination::AWS_SESSION_TOKEN_ENV
+                        // FX-20: and the destination grant's binding with
+                        // them — its Secret is not the one in this pod.
+                        && e.name
+                            != logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_ENV
                 })
                 .cloned(),
         );
@@ -2744,6 +2820,7 @@ impl Pass<'_> {
         window: &PlanWindow,
         decision: &EnforcementDecision,
         points: &[PointFacts],
+        credential_binding: Option<String>,
     ) -> Result<PatchOutcome, ReconcileError> {
         let candidates: Vec<Value> = evaluation
             .candidates
@@ -2941,10 +3018,28 @@ impl Pass<'_> {
                 "planRef": { "name": plan::plan_config_map_name(&self.uid, plan_sha256) },
                 "planExpiresAt": window.expires_at,
             },
+            // FX-20: what `spec.enforcement.credentialSecretRef` must carry
+            // under `logweir-binding`; `null` clears it when enforcement is
+            // removed.
+            "credentialBinding": credential_binding,
             "conditions": conditions,
         });
         self.adopt_generation(&mut status);
         self.patch_status(status).await
+    }
+
+    /// FX-20: the binding the delete-capable credential's Secret must carry —
+    /// this policy's UID, the archive route of the destination it resolves to
+    /// NOW, and its scope prefix
+    /// ([`logweir_core::credential_binding::retention_binding`]). A destination
+    /// deleted and re-created under the same name at another endpoint changes
+    /// it, so the delete key never follows the name to a new route.
+    fn retention_credential_binding(&self, resolved: &ResolvedDestination) -> String {
+        logweir_core::credential_binding::retention_binding(
+            &self.uid,
+            &resolved.plan_storage(),
+            &self.policy.spec.scope.prefix,
+        )
     }
 
     /// Rewrite `Enforced` alone, after the evaluation has already been
@@ -3440,6 +3535,10 @@ pub struct RunReport {
     /// the `FailedCreate` row of [`crate::check::waiting`], redacted (FX-11).
     /// `Some` only for a run with no pod at all, so `exit_code` is `None`.
     pub refused: Option<String>,
+    /// FX-20: the worker's `retention-refusal=` code, from the closed
+    /// [`RETENTION_REFUSALS`] table — `Some` only for a run that exited 3 on a
+    /// refusal the status names.
+    pub refusal_code: Option<&'static str>,
 }
 
 impl RunReport {
@@ -3496,6 +3595,13 @@ pub fn parse_run_lines(log: &str, exit_code: Option<i32>) -> RunReport {
                 )),
                 None => {}
             }
+        } else if let Some(rest) = line.strip_prefix("retention-refusal=") {
+            // A CLOSED TABLE: the code is one this build knows, as a
+            // `'static`, or nothing at all is read from the line.
+            report.refusal_code = RETENTION_REFUSALS
+                .iter()
+                .copied()
+                .find(|known| *known == rest.trim());
         } else if let Some(rest) = line.strip_prefix("retention-record=") {
             let mut fields = rest.split_whitespace();
             report.record_key = fields.next().map(str::to_string);
@@ -3701,6 +3807,14 @@ pub fn evidence_credential(
                     key: token.clone(),
                 });
             }
+            // FX-20: the record Secret's binding, optional, beside it; the Job
+            // builder adds the destination's expectation.
+            out.push(crate::job::EnvFromSecret {
+                name: logweir_core::credential_binding::EVIDENCE_CREDENTIAL_BINDING_ENV.to_string(),
+                secret_name: secret.clone(),
+                optional: true,
+                key: logweir_core::credential_binding::CREDENTIAL_BINDING_KEY.to_string(),
+            });
             Ok(out)
         }
         other => Err(format!(

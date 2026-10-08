@@ -9889,3 +9889,128 @@ fn the_relay_facts_carry_the_signed_time_basis() {
     let (_, facts) = weirkeeper::controllers::restore::scorecard_facts(&without, &result, None);
     assert!(facts.get("timeBasis").is_none(), "{facts:?}");
 }
+
+// ===========================================================================
+// FX-20: an inline source archive's Secret is bound to where the plan reads
+// and writes with it
+// ===========================================================================
+
+/// **An inline `sourceArchive.secretRef` is bound to the LOCATIONS the approved
+/// plan dials with it — `source.storage` and, when it is elsewhere,
+/// `evidence:` (both reached with this one credential, D2 G6) — with an
+/// endpoint the plan leaves out filled from the forwarded `AWS_ENDPOINT_URL`.**
+/// A plan author who points either block at a host they control therefore
+/// cannot have a Secret bound to the real location presented there.
+///
+/// KILLS: the pair dropped; the evidence location left unbound (the scorecard
+/// upload is a signed PUT with the same key); the binding over the CR's URL
+/// instead of the plan's storage; the env endpoint fallback ignored.
+#[test]
+fn fx20_an_inline_source_secret_is_bound_to_the_plans_locations() {
+    use logweir_core::credential_binding as cb;
+    use weirkeeper::controllers::restore::inline_restore_binding_env;
+    let plan: logweir_core::spec::RestoreSpec = serde_yaml::from_str(PLAN_BYTES).unwrap();
+
+    // The fixture's evidence bucket is another location: two pairs.
+    let env = inline_restore_binding_env("logweir-s3", PLAN_BYTES, &[]);
+    let expect = |name: &str| {
+        env.literals
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(
+        expect(cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        Some(cb::archive_location_binding(&plan.source.storage))
+    );
+    assert_eq!(
+        expect(cb::EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV),
+        Some(cb::archive_location_binding(&plan.evidence))
+    );
+    assert!(env
+        .from_secret
+        .iter()
+        .all(|e| e.secret_name == "logweir-s3" && e.optional));
+    assert_eq!(env.from_secret.len(), 2);
+
+    // Evidence in the SAME bucket and endpoint: one location, one pair.
+    let same = PLAN_BYTES.replace("bucket: logweir-evidence", "bucket: kafka-backups");
+    let env = inline_restore_binding_env("logweir-s3", &same, &[]);
+    assert_eq!(env.from_secret.len(), 1, "{env:?}");
+
+    // A plan author moving the SOURCE endpoint moves the expectation.
+    let moved = PLAN_BYTES.replacen(
+        "endpoint: http://minio.logweir-t20:9000",
+        "endpoint: http://attacker.example:9000",
+        1,
+    );
+    assert_ne!(
+        inline_restore_binding_env("logweir-s3", &moved, &[]).literals,
+        inline_restore_binding_env("logweir-s3", PLAN_BYTES, &[]).literals
+    );
+
+    // No endpoint in the plan: the forwarded AWS_ENDPOINT_URL is where the
+    // request goes, so it is what is bound.
+    let bare = PLAN_BYTES.replace("    endpoint: http://minio.logweir-t20:9000\n", "");
+    let forwarded = [(
+        "AWS_ENDPOINT_URL".to_string(),
+        "http://minio.logweir-t20:9000".to_string(),
+    )];
+    assert_eq!(
+        inline_restore_binding_env("logweir-s3", &bare, &forwarded).literals,
+        inline_restore_binding_env("logweir-s3", PLAN_BYTES, &[]).literals,
+        "the env endpoint fills the plan's absent one"
+    );
+
+    // Unparseable plan bytes: the fail-closed expectation and nothing else.
+    let env = inline_restore_binding_env("logweir-s3", "}{", &[]);
+    assert_eq!(
+        env.literals,
+        vec![(
+            cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV.to_string(),
+            cb::UNBOUND_NO_UID.to_string()
+        )]
+    );
+}
+
+/// **The posted Job carries the inline pair**, from the reconcile that builds
+/// it (the pure row above is the function; this is the Job).
+#[tokio::test]
+async fn fx20_the_inline_restore_job_carries_the_location_binding() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("admitted");
+    let container = only_container(&posted_job(&bodies.lock().expect("readable")));
+    let env = container["env"].as_array().expect("env");
+    let plan: logweir_core::spec::RestoreSpec = serde_yaml::from_str(PLAN_BYTES).unwrap();
+    let expected = env
+        .iter()
+        .find(|e| e["name"] == "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED")
+        .expect("the expectation");
+    assert_eq!(
+        expected["value"],
+        serde_json::json!(logweir_core::credential_binding::archive_location_binding(
+            &plan.source.storage
+        ))
+    );
+    let projected = env
+        .iter()
+        .find(|e| e["name"] == "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING")
+        .expect("the projected binding");
+    assert_eq!(
+        projected["valueFrom"]["secretKeyRef"],
+        serde_json::json!({"name": "logweir-s3", "key": "logweir-binding", "optional": true})
+    );
+}

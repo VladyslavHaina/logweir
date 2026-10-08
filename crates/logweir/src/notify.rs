@@ -48,6 +48,10 @@
 use std::time::Duration;
 
 use crate::exit::ExitCode;
+use logweir_core::credential_binding::{
+    check_credential_binding, CredentialBindingRefusal, NotificationSink,
+    CREDENTIAL_BINDING_MISMATCH,
+};
 use logweir_core::scorecard::Scorecard;
 use logweir_core::spec::Notifications;
 
@@ -600,8 +604,10 @@ pub const PAGERDUTY_ENDPOINT_ENV: &str = "PAGERDUTY_ENDPOINT";
 
 /// The prefix of `logweir notify deliver`'s per-sink stdout contract line.
 ///
-/// One line per CONFIGURED sink, `notify-result=<sink>:<ok|failed>`, and they
-/// are the LAST thing the process writes. A pod log has no stream selector —
+/// One line per CONFIGURED sink, `notify-result=<sink>:<ok|failed|refused>`,
+/// and they are the LAST thing the process writes. `refused` (FX-20) means the
+/// sink's credential Secret was not bound to this policy, sink and endpoint,
+/// so nothing was built or dialled for it. A pod log has no stream selector —
 /// `GET …/pods/{pod}/log` interleaves stdout and stderr with no marker saying
 /// which byte came from which (spec §7 amendment 4) — so a controller reads
 /// these BY KEY NAME from a bounded tail, never by position, exactly as it
@@ -661,6 +667,14 @@ pub const RESULT_OK: &str = "ok";
 /// The sink did not accept, for any reason at all — refused endpoint, non-2xx,
 /// transport error, timeout.
 pub const RESULT_FAILED: &str = "failed";
+
+/// FX-20: the sink's credential was REFUSED before anything was built or
+/// dialled, because the Secret it came from does not carry the binding the
+/// controller expected for this policy, sink and endpoint
+/// ([`logweir_core::credential_binding::notification_binding`]). Distinct from
+/// [`RESULT_FAILED`] because the fix is a Secret's `logweir-binding`, not the
+/// sink.
+pub const RESULT_REFUSED: &str = "refused";
 
 /// D3 §3.3's alert vocabulary. Five kinds and no sixth.
 ///
@@ -1501,6 +1515,31 @@ pub struct SinkRoutes {
     /// [`ALLOW_INSECURE_SINKS_ENV`] parsed as a flag. Not a credential and not
     /// a URL, so it is the one field this struct's `Debug` prints in full.
     pub allow_insecure_sinks: bool,
+    /// FX-20: each sink's binding pair, `(expected, projected)`, as the
+    /// controller projected them ([`NotificationSink::binding_env`]). Public
+    /// values (a UID and a digest), never a credential. `expected` absent means
+    /// no controller asked for a binding — a hand-run deliverer whose operator
+    /// supplies their own environment — and nothing is checked.
+    pub bindings: [(Option<String>, Option<String>); 3],
+}
+
+/// The index of a sink in [`SinkRoutes::bindings`].
+const fn binding_index(sink: NotificationSink) -> usize {
+    match sink {
+        NotificationSink::PagerDuty => 0,
+        NotificationSink::Webhook => 1,
+        NotificationSink::Slack => 2,
+    }
+}
+
+/// A sink NAME back to its binding kind.
+fn sink_of(name: &str) -> Option<NotificationSink> {
+    match name {
+        SINK_PAGERDUTY => Some(NotificationSink::PagerDuty),
+        SINK_WEBHOOK => Some(NotificationSink::Webhook),
+        SINK_SLACK => Some(NotificationSink::Slack),
+        _ => None,
+    }
 }
 
 /// HAND-WRITTEN for the reason `logweir_core::spec::Notifications`' is: three
@@ -1525,6 +1564,7 @@ impl std::fmt::Debug for SinkRoutes {
                 &self.slack_webhook_url.as_deref().map(redact_url),
             )
             .field("allow_insecure_sinks", &self.allow_insecure_sinks)
+            .field("bindings", &self.bindings)
             .finish()
     }
 }
@@ -1561,7 +1601,31 @@ impl SinkRoutes {
             // switches the value off does not discover it was still on.
             allow_insecure_sinks: read(ALLOW_INSECURE_SINKS_ENV)
                 .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
+            bindings: [
+                NotificationSink::PagerDuty,
+                NotificationSink::Webhook,
+                NotificationSink::Slack,
+            ]
+            .map(|sink| {
+                let (projected, expected) = sink.binding_env();
+                (get(expected), get(projected))
+            }),
         }
+    }
+
+    /// FX-20: compare one sink's projected binding with the controller's
+    /// expectation — BEFORE any body is composed or any socket opened.
+    ///
+    /// # Errors
+    ///
+    /// [`CredentialBindingRefusal`] naming the sink's projected variable.
+    pub fn check_binding(&self, sink: NotificationSink) -> Result<(), CredentialBindingRefusal> {
+        let (expected, projected) = &self.bindings[binding_index(sink)];
+        check_credential_binding(
+            sink.binding_env().0,
+            expected.as_deref(),
+            projected.as_deref(),
+        )
     }
 
     /// Which sinks are configured FOR THIS EVENT, in the fixed contract order.
@@ -1665,23 +1729,52 @@ pub fn deliver_with(
 
     // One writer for every contract line, so the shape is decided once.
     // `SINK_NONE` is the one name whose value is neither `ok` nor `failed`.
-    let mut record = |name: &str, ok: bool| {
+    // FX-20 adds a third value, `refused`, written by the binding gate below.
+    let mut write_line = |name: &str, value: &str| {
         stdout.push_str(NOTIFY_RESULT_LINE);
         stdout.push_str(name);
         stdout.push(':');
-        stdout.push_str(if name == SINK_NONE {
+        stdout.push_str(value);
+        stdout.push('\n');
+    };
+    let result = |name: &str, ok: bool| {
+        if name == SINK_NONE {
             RESULT_UNCONFIGURED
         } else if ok {
             RESULT_OK
         } else {
             RESULT_FAILED
-        });
-        stdout.push('\n');
+        }
     };
 
     let configured = routes.configured_for(ev.alert.kind);
     let nothing_configured = configured.is_empty();
+    // FX-20: THE BINDING GATE, FIRST AND PER SINK. A sink whose credential
+    // Secret does not carry the binding the controller computed for this
+    // policy, sink and endpoint is refused before its body is composed and
+    // before anything is dialled: a route that names another policy's Secret,
+    // or a PagerDuty endpoint edited after its key was bound, posts nothing.
+    // The other sinks are still attempted — a responder reachable by one of
+    // three channels must be.
+    let mut refused_sinks: Vec<&'static str> = Vec::new();
+    for name in &configured {
+        let Some(sink) = sink_of(name) else { continue };
+        if let Err(refusal) = routes.check_binding(sink) {
+            diagnostics.push(format!("{name}: {refusal}"));
+            tracing::warn!(target: "logweir::notify", sink = %name,
+                           dedup_key = %ev.alert.key,
+                           reason = CREDENTIAL_BINDING_MISMATCH,
+                           "protection event NOT delivered: the sink's credential is not \
+                            bound to this policy, sink and endpoint");
+            refused_sinks.push(name);
+        }
+    }
     for name in configured {
+        if refused_sinks.contains(&name) {
+            all_ok = false;
+            write_line(name, RESULT_REFUSED);
+            continue;
+        }
         let (url, body) = match name {
             SINK_PAGERDUTY => {
                 // `pagerduty_endpoint` is reused rather than re-implemented,
@@ -1709,7 +1802,7 @@ pub fn deliver_with(
                                        dedup_key = %ev.alert.key, reason = %reason,
                                        silenced = true, "{PAGERDUTY_SILENCED}");
                         all_ok = false;
-                        record(name, false);
+                        write_line(name, result(name, false));
                         continue;
                     }
                 }
@@ -1728,7 +1821,7 @@ pub fn deliver_with(
             other => {
                 diagnostics.push(format!("no body is defined for sink `{other}`"));
                 all_ok = false;
-                record(other, false);
+                write_line(other, result(other, false));
                 continue;
             }
         };
@@ -1746,7 +1839,7 @@ pub fn deliver_with(
                            endpoint = %redact_url(&url), reason = %reason,
                            "protection event NOT delivered");
             all_ok = false;
-            record(name, false);
+            write_line(name, result(name, false));
             continue;
         }
 
@@ -1768,7 +1861,7 @@ pub fn deliver_with(
                             offences = ?offences,
                             "refusing to post a body whose verification scope is not one of the three");
             all_ok = false;
-            record(name, false);
+            write_line(name, result(name, false));
             continue;
         }
 
@@ -1778,7 +1871,7 @@ pub fn deliver_with(
                 tracing::info!(target: "logweir::notify", sink = %name,
                                endpoint = %shown, dedup_key = %ev.alert.key,
                                "protection event delivered");
-                record(name, true);
+                write_line(name, result(name, true));
             }
             Err(e) => {
                 // `e` is ALREADY redacted: `EventSink::post`'s contract is that
@@ -1795,7 +1888,7 @@ pub fn deliver_with(
                                    error = %e, "protection event NOT delivered");
                 }
                 all_ok = false;
-                record(name, false);
+                write_line(name, result(name, false));
             }
         }
     }
@@ -1833,7 +1926,7 @@ pub fn deliver_with(
         diagnostics.push(why.clone());
         tracing::warn!(target: "logweir::notify", event_id = %ev.event_id,
                        dedup_key = %ev.alert.key, "{why}");
-        record(SINK_NONE, false);
+        write_line(SINK_NONE, result(SINK_NONE, false));
         all_ok = false;
     }
 
@@ -1919,16 +2012,18 @@ pub fn write_outcome<O: std::io::Write, E: std::io::Write>(
 /// | [`WEBHOOK_URL_ENV`] | `webhook` — one POST of the event document |
 /// | [`SLACK_WEBHOOK_URL_ENV`] | `slack` — one POST of `{"text": …}` |
 /// | [`PAGERDUTY_ENDPOINT_ENV`] | not a sink; the PagerDuty service region, `https://` only |
+/// | `NOTIFY_<SINK>_CREDENTIAL_BINDING[_EXPECTED]` | FX-20: the sink Secret's `logweir-binding` and the controller's expectation ([`NotificationSink::binding_env`]); when an expectation is set and the two differ, the sink is `refused` before anything is dialled |
 ///
-/// **Stdout.** One `notify-result=<sink>:<ok|failed>` line per configured
-/// sink, in the order `pagerduty`, `webhook`, `slack`, as the FINAL lines the
-/// process writes. No configured sink ⇒ no lines.
+/// **Stdout.** One `notify-result=<sink>:<ok|failed|refused>` line per
+/// configured sink, in the order `pagerduty`, `webhook`, `slack`, as the FINAL
+/// lines the process writes. No configured sink ⇒ no lines.
 ///
 /// **Exit codes.**
 ///
 /// * **0** — every configured sink accepted, or none was configured.
-/// * **1** — at least one configured sink did not accept. The
-///   `notify-result=…:failed` line says which. (`ExitCode::Operational`:
+/// * **1** — at least one configured sink did not accept, or was refused for
+///   its credential binding. The `notify-result=…:failed` or `…:refused` line
+///   says which. (`ExitCode::Operational`:
 ///   nothing about an archive is being reported, and no artifact is written.)
 /// * **3** — the event document is missing, unreadable, too large, of another
 ///   `format_version` major, or malformed. **Nothing was posted**, which is

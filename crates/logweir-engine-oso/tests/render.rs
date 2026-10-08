@@ -295,13 +295,32 @@ fn forbidden_keys_survive_adversarial_string_content() {
     p.checkpoint_state = PAYLOAD.into();
     cases.push(("checkpoint_state", p, "run-id", None));
 
-    // every S3 field
-    for field in ["bucket", "prefix", "region", "endpoint"] {
+    // every S3 field. The REGION is no longer interpolated at all when it is
+    // not a region name (FX-20 fix round, review F1): such a document is
+    // refused before rendering (`RenderError::StorageRegionInvalid`, asserted
+    // in `transport_c15.rs`), which is stronger than escaping it, so its
+    // adversarial case is the refusal below rather than a rendered document.
+    {
+        let mut p = plan();
+        p.storage = StorageUrl::S3 {
+            bucket: "b".into(),
+            prefix: "p".into(),
+            region: Some(PAYLOAD.into()),
+            endpoint: Some("e".into()),
+            path_style: false,
+            allow_http: false,
+        };
+        assert_eq!(
+            render_restore::render(&p).unwrap_err(),
+            logweir_engine_oso::render_backup::RenderError::StorageRegionInvalid
+        );
+    }
+    for field in ["bucket", "prefix", "endpoint"] {
         let mut p = plan();
         p.storage = StorageUrl::S3 {
             bucket: if field == "bucket" { PAYLOAD } else { "b" }.into(),
             prefix: if field == "prefix" { PAYLOAD } else { "p" }.into(),
-            region: Some(if field == "region" { PAYLOAD } else { "r" }.into()),
+            region: Some("r".into()),
             endpoint: Some(if field == "endpoint" { PAYLOAD } else { "e" }.into()),
             path_style: false,
             allow_http: false,

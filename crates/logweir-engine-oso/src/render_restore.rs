@@ -270,6 +270,9 @@ pub(crate) fn render_storage_block(storage: &StorageUrl) -> Result<String, Rende
     if storage.plaintext_endpoint_without_allow_http() {
         return Err(RenderError::PlaintextEndpointWithoutAllowHttp);
     }
+    if storage.has_invalid_region() {
+        return Err(RenderError::StorageRegionInvalid);
+    }
     Ok(match storage {
         StorageUrl::S3 {
             bucket,

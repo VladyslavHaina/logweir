@@ -831,6 +831,17 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              credentialBinding:
+                description: 'FX-20: the binding every `SecretKeys` Secret this destination
+                  names must carry under its `logweir-binding` key — `v1:<uid>:sha256:<digest
+                  of the archive route>` — for any runner to present the credential
+                  at all. Public (a UID and a digest, never a credential). The console
+                  writes it into the Secrets it creates; an operator who creates a
+                  Secret with `kubectl` copies it from here. A Secret without it,
+                  or with another destination''s, is refused (`CredentialBindingMismatch`)
+                  before any request is signed. Absent only on an object with no UID.'
+                nullable: true
+                type: string
               locationDigest:
                 description: '`sha256:<lowercase hex>` over the canonical location,
                   as `logweir_core::destination::DestinationLocation::location_digest`
@@ -4034,6 +4045,42 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              credentialBindings:
+                description: 'FX-20: the binding each notification route''s credential
+                  Secret must carry under `logweir-binding`, one entry per channel
+                  a route names. Absent when no route is configured. An edit to a
+                  PagerDuty route''s `endpoint` changes its binding, so the old Secret
+                  is refused until it is bound again: the routing key never follows
+                  an endpoint edit silently.'
+                items:
+                  description: |-
+                    One notification route's credential binding (FX-20).
+
+                    What the route's Secret must carry under its `logweir-binding` key for the delivery Job to use it at all: `v1:<policy uid>:sha256:<digest>` over the sink kind and, for PagerDuty, the endpoint. Public — a UID and a digest of public values, never a credential. A Secret without it, or with another policy's, route's or endpoint's, is refused before anything is posted (`notify-result=<sink>:refused`, `CredentialBindingMismatch`).
+                  properties:
+                    binding:
+                      description: The value its `logweir-binding` key must hold.
+                      type: string
+                    route:
+                      description: The route's `name`.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    secretName:
+                      description: The Secret the route names.
+                      type: string
+                    sink:
+                      description: '`pagerduty`, `webhook` or `slack`.'
+                      type: string
+                  required:
+                  - binding
+                  - route
+                  - secretName
+                  - sink
+                  type: object
+                maxItems: 12
+                nullable: true
+                type: array
               evaluatedAt:
                 description: When. Rewritten only on change, or when older than half
                   the interval.
@@ -6601,6 +6648,17 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              credentialBinding:
+                description: 'FX-20: the binding `spec.enforcement.credentialSecretRef`''s
+                  Secret must carry under its `logweir-binding` key — `v1:<policy
+                  uid>:sha256:<digest of the destination''s route and the scope>`
+                  — for the worker to use the delete-capable key at all. Public (a
+                  UID and a digest, never a credential). A Secret without it, or with
+                  another policy''s, or bound before the destination of this name
+                  was re-created at another route, is refused before any handle is
+                  built (`CredentialBindingMismatch`). Absent without `spec.enforcement`.'
+                nullable: true
+                type: string
               enforcement:
                 description: '`RecommendationOnly`, `LogweirWorker` or `ExternalLifecycleDeclared`
                   — what is actually happening, as opposed to what `spec.mode` asks

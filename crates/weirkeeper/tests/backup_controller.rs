@@ -12833,6 +12833,8 @@ mod evidence_fetch_job {
                         || [
                             "LOGWEIR_STORE_CONTRACT_VERSION",
                             "LOGWEIR_ARCHIVE_CREDENTIALS",
+                            // FX-20: the evidenceRead grant's expected binding.
+                            "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED",
                             "TMPDIR"
                         ]
                         .contains(&name),
@@ -12857,6 +12859,12 @@ mod evidence_fetch_job {
                     "AWS_SECRET_ACCESS_KEY".to_string(),
                     "lw-b-archive-reader".to_string(),
                     "rkey".to_string()
+                ),
+                // FX-20: the same Secret's binding, beside it.
+                (
+                    "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING".to_string(),
+                    "lw-b-archive-reader".to_string(),
+                    "logweir-binding".to_string()
                 ),
             ],
             "EXACTLY the evidenceRead grant — ArchiveReadGrant is archiveRead's Secret, never \
@@ -14706,4 +14714,72 @@ fn a_backups_own_deadline_reaches_its_runner_job() {
         spec.resources.is_none(),
         "`Backup.spec` has no resources field, so its Job states none (FX-2)"
     );
+}
+
+// ===========================================================================
+// FX-20: an inline archive's Secret is bound to the LOCATION it is used at
+// ===========================================================================
+
+/// **A Backup's inline `archive.secretRef` travels with its binding pair: the
+/// Secret's own `logweir-binding` (optional) beside an expectation over the
+/// frozen storage block's scheme, bucket and endpoint** — not over any object
+/// UID (a `Backup` is one-shot and a schedule mints them), and not over the
+/// prefix (the key space, not where the credential goes).
+///
+/// KILLS: the inline pair dropped; the binding computed over the URL as typed
+/// rather than the frozen storage the runner dials.
+#[test]
+fn fx20_an_inline_archive_secret_is_bound_to_the_location_the_backup_writes() {
+    use logweir_core::credential_binding as cb;
+    let backup = backup();
+    let cluster: KafkaCluster = serde_json::from_str(&kafka_cluster_json()).unwrap();
+    let inputs = weirkeeper::controllers::backup::desired_execution_inputs(&backup, &cluster)
+        .expect("the fixture freezes");
+    let spec =
+        weirkeeper::controllers::backup::runner_job_spec_from_inputs(&backup, &cluster, &inputs)
+            .expect("a spec");
+    let expected = cb::archive_location_binding(&inputs.inputs.archive.storage);
+    assert!(expected.starts_with("v1:location:sha256:"), "{expected}");
+    assert_eq!(
+        spec.env_literal
+            .iter()
+            .find(|(n, _)| n == cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV)
+            .map(|(_, v)| v.as_str()),
+        Some(expected.as_str())
+    );
+    let pair = spec
+        .env_from_secret
+        .iter()
+        .find(|e| e.name == cb::ARCHIVE_CREDENTIAL_BINDING_ENV)
+        .expect("the projected binding");
+    assert_eq!(
+        pair.secret_name, "logweir-s3",
+        "from the Secret spec.archive.secretRef names"
+    );
+    assert_eq!(pair.key, cb::CREDENTIAL_BINDING_KEY);
+    assert!(pair.optional);
+    assert!(
+        spec.env_from_secret
+            .iter()
+            .all(|e| e.name != cb::EVIDENCE_CREDENTIAL_BINDING_ENV),
+        "a Backup's receipt goes to the same bucket's logweir/, one location"
+    );
+
+    // CONTROL: no `secretRef`, no pair (an ambient or workload credential is
+    // not a Secret anyone could name).
+    let mut bare: serde_json::Value = serde_json::from_str(&backup_json()).unwrap();
+    bare["spec"]["archive"]
+        .as_object_mut()
+        .expect("archive")
+        .remove("secretRef");
+    let bare: Backup = serde_json::from_value(bare).unwrap();
+    let inputs = weirkeeper::controllers::backup::desired_execution_inputs(&bare, &cluster)
+        .expect("freezes");
+    let spec =
+        weirkeeper::controllers::backup::runner_job_spec_from_inputs(&bare, &cluster, &inputs)
+            .expect("a spec");
+    assert!(spec
+        .env_literal
+        .iter()
+        .all(|(n, _)| n != cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV));
 }

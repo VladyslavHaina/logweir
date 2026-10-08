@@ -152,9 +152,9 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/approval-policy` | PLAT-19.2: the namespace's effective approval policy, the installation document's digest and the console confirmation key id. PROD-16.1: `operatorMode` (`confirm` \| `two-person` \| `strict`) and `basis` (`binding` \| `configured` \| `freshInstall` \| `legacy`) — why an unbound namespace resolves as it does; the create's `authorization` carries `operatorMode` too. |
 | `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
 | `GET /api/v1/namespaces/{ns}/destinations` | `BackupDestination` rows: the canonical URL, the endpoint, the transport, the addressing and the controller's `Valid` verdict. |
-| `POST /api/v1/namespaces/{ns}/destinations` | Create a destination **under the name in the body**, because every schedule, backup and restore references it by that name. |
+| `POST /api/v1/namespaces/{ns}/destinations` | Create a destination **under the name in the body**, because every schedule, backup and restore references it by that name. A credential is entered once (`secret.new`) and becomes a Secret owned by and bound to the destination; an existing Secret is never named (`existing_credential_refused`, FX-20). |
 | `GET /api/v1/namespaces/{ns}/destinations/{name}` | One destination, with the four grants as **references** and the last explicit access test. `lastTest.truncated` says the search for it hit its page bound. |
-| `POST /api/v1/namespaces/{ns}/destinations/{name}:update-access` | Rotate the four grants and the CA reference under `expectedGeneration`. It cannot name the location or the transport. |
+| `POST /api/v1/namespaces/{ns}/destinations/{name}:update-access` | Rotate the four grants and the CA reference under `expectedGeneration`. It cannot name the location or the transport. A new value is written to a new bound Secret; `secret.existing` may name only a Secret the destination already names (FX-20). |
 | `POST /api/v1/namespaces/{ns}/destinations/{name}:test` | Start a `DestinationAccess` `Preflight` for every configured grant; `202` with it. On a destination with `writeProbe: createOnlyMarker` the test creates the one readiness marker `logweir/readiness/<uid>.json` **as the `evidenceWrite` grant**, and `destination.evidenceWritable` is that principal's answer (its fact `grant` says `evidenceWrite` or `destination`); with `disabled` nothing is written and the row is `WriteNotProbed`. `destination.evidenceReadable` is likewise the `evidenceRead` grant's answer (`grant=evidenceRead`), or `unknown` for a grant no check pod holds. `destination.archivePrefixWritable` is never probed and never green. |
 | `POST /api/v1/namespaces/{ns}/destinations:from-legacy` | Adopt a legacy `BackupSchedule` or `Backup`'s location. **This build always refuses** — see below. |
 | `GET /api/v1/namespaces/{ns}/destinations/{name}/usage` | Schedules and backups labelled for this destination, at most 100 each, with the `basis` stated. |
@@ -1016,22 +1016,44 @@ author's choosing, and the runner enforces the same rule on every
 A private CA is a reference to a **ConfigMap** key (`auth.tlsCa.configMapKeyRef`):
 a CA certificate is public and is only ever a local trust anchor.
 
+**Destination credentials are entered, never named (FX-20).** A create
+refuses `access.<role>.secret.existing` with `422 destination_invalid`, code
+`existing_credential_refused` on `access.<role>.secret.existing` (so does
+`:from-legacy`): no existing Secret can carry the binding of a destination that
+does not exist yet, and a destination that could name any Secret could make
+Logweir sign requests with another team's key and send them — the access key
+id, a replayable signature and any session token — to an endpoint of its
+author's choosing. `:update-access` accepts `secret.existing` only for a Secret
+the stored destination **already names** (keeping a grant, or moving one of its
+own Secrets to another role), and refuses any other name the same way. Every
+runner enforces the same rule on every `BackupDestination` however it was
+written: a grant's Secret must carry the destination's `logweir-binding`
+(`status.credentialBinding`; [kubernetes.md](kubernetes.md) §20.10).
+
 **Write-only credential entry.** A grant may carry a value once, in
 `access.<role>.secret.new`. It becomes a Secret named
-`lwd-<destination>-<role>`, of type `logweir.dev/object-store-credential`,
-labelled `logweir.dev/credential-for`, owned by the destination — and it is
-never read back. This service has no Secret read verb at all; the create
+`lwd-<destination>-<role>` (on a create) or `lwd-<destination>-<role>-<8 hex>`
+(on `:update-access`, below), of type `logweir.dev/object-store-credential`,
+labelled `logweir.dev/credential-for`, owned by the destination, carrying the
+destination's `logweir-binding` — and it is never read back. This service has no Secret read verb at all; the create
 response's `data` is dropped by the parser before anything can see it, and every
 response, log line and stored projection carries the Secret's **name** and the
 **key names** inside it, both of which are public references.
 
-**Entering a value twice for the same role is `409 state_conflict`, and
-nothing at all is written.** The Secret's name is a function of the destination
-and the role, so a second `secret.new` names an object that already exists —
-and this service holds `create` and nothing else: it cannot read the existing
-value to compare it, and it cannot overwrite it. Answering `200` there would
-let an operator responding to a leaked key record a rotation that did not
-happen while the leaked value stayed live.
+**A rotation writes the new value under a NEW name (FX-20).** On
+`:update-access` a `secret.new` becomes `lwd-<destination>-<role>-<suffix>`,
+the suffix eight hex characters of a digest of the request id, so the value
+being rotated (which holds the create's deterministic name) neither blocks the
+rotation nor is overwritten: this service holds `create` on Secrets and nothing
+else. The grant then names the new Secret. The superseded Secret is left in
+place — owned by the destination, so it is collected with it — for you to
+delete once nothing runs with it.
+
+**A name that is taken is `409 state_conflict`, and nothing at all is
+written.** This service cannot read the existing value to compare it, and it
+cannot overwrite it. Answering `200` there would let an operator responding to
+a leaked key record a rotation that did not happen while the leaked value
+stayed live.
 
 So **every credential name a request would write is checked before anything is
 written** — before the Secrets, and before the `BackupDestination` itself. The
@@ -1041,9 +1063,9 @@ nothing about the object holding it. The probe carries an empty `data`, so the
 value you typed does not travel to the API server before the decision to write
 it has been made. The refusal names **every** taken name, not the first, and
 nothing is created: not the destination, and not the credential of some other
-role that happened to come earlier. To rotate, change the Secret's content out
-of band with `kubectl` or your secret manager, or point the grant at a
-different existing Secret with `secret.existing`.
+role that happened to come earlier. To rotate, use `:update-access` with
+`secret.new`, or change the Secret's content out of band with `kubectl` or your
+secret manager, keeping its `logweir-binding` key.
 
 That ordering is what makes the retry below safe. A first attempt that refuses
 leaves no destination behind, so the retry cannot look like a replay of one —

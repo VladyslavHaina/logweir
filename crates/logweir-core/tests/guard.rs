@@ -399,3 +399,79 @@ fn an_http_endpoint_without_allow_http_is_refused_and_nothing_else_is() {
         assert!(reject_plaintext_endpoint_without_allow_http("storage", &admitted).is_ok());
     }
 }
+
+/// **FX-20 fix round (review F1).** An S3 region that is not a region name is
+/// refused before any client, by name (`StorageRegionInvalid`), and never
+/// echoed — the review's probe spelled it `x@127.0.0.1:<port>/`, a host
+/// injection on an endpoint-less location. Every real region spelling, and no
+/// region at all, is admitted (the negative control).
+#[test]
+fn fx20_a_region_that_is_not_a_region_name_is_refused_and_every_region_is_not() {
+    use logweir_core::engine::{is_valid_s3_region, StorageUrl};
+    use logweir_core::guard::{
+        refusal_reason_line, reject_invalid_storage_region, STORAGE_REGION_INVALID,
+    };
+    let s3 = |region: Option<&str>| StorageUrl::S3 {
+        bucket: "victim-backups".into(),
+        prefix: "team-a".into(),
+        region: region.map(str::to_string),
+        endpoint: None,
+        path_style: true,
+        allow_http: false,
+    };
+    let long = "a".repeat(33);
+    for refused in [
+        "x@127.0.0.1:9/",
+        "us-east-1.attacker.example#",
+        "us-east-1/",
+        "us-east-1:443",
+        "US-EAST-1",
+        "us east 1",
+        "us_east_1",
+        "",
+        long.as_str(),
+    ] {
+        assert!(!is_valid_s3_region(refused), "{refused:?}");
+        let storage = s3(Some(refused));
+        assert!(storage.has_invalid_region(), "{refused:?}");
+        let refusal = reject_invalid_storage_region("source.storage", &storage).unwrap_err();
+        assert!(
+            refusal
+                .0
+                .starts_with(&format!("{STORAGE_REGION_INVALID}: source.storage.region ")),
+            "{}",
+            refusal.0
+        );
+        if !refused.is_empty() {
+            assert!(
+                !refusal.0.contains(refused),
+                "never the value: {}",
+                refusal.0
+            );
+        }
+        // A named reason in the message; the exit-3 line stays GuardRefused.
+        assert_eq!(
+            refusal_reason_line(&refusal.0),
+            "refusal-reason=GuardRefused"
+        );
+    }
+    for admitted in [
+        "us-east-1",
+        "eu-west-2",
+        "me-central-1",
+        "us-gov-west-1",
+        "cn-north-1",
+    ] {
+        assert!(is_valid_s3_region(admitted), "{admitted}");
+        assert!(reject_invalid_storage_region("evidence", &s3(Some(admitted))).is_ok());
+    }
+    assert!(reject_invalid_storage_region("evidence", &s3(None)).is_ok());
+    assert!(reject_invalid_storage_region(
+        "evidence",
+        &StorageUrl::Gcs {
+            bucket: "b".into(),
+            prefix: String::new(),
+        }
+    )
+    .is_ok());
+}
