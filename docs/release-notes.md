@@ -1419,7 +1419,25 @@ its engine with Logweir's build (copy it out of the runner image, or
 ([quickstart.md](quickstart.md), step 4). On arm64 nodes, runner Jobs now run
 natively. The identity bootstrap image pinned in the chart predates this
 change and stays amd64-only until it is re-pinned.
-**Scope:** ⟨PARITY⟩
+**Scope:** on one compose stack (Kafka 3.7.1), the demo drill, the full-drill
+suite, G-PITR and PROD-01.1's record-semantics rows ran with OSO's 0.23.3 binary
+(linux/amd64, emulated) and with Logweir's build on linux/arm64 (native) and
+linux/amd64 (emulated). Both builds compared SAME against OSO's binary: the
+signed scorecard minus identity and timing, 24 test verdicts, and the nine
+record-semantics outcome files, with the contract asserted on Logweir's build.
+A negative control, the same inputs plus a scratch patch that flips one byte
+of every restored value, failed the comparison: the drill `fail-integrity`,
+13 of 15 full-drill rows, G-PITR and all eight record-semantics rows
+([decision record](to-do/decisions/PROD-00-engine-route.md) §13.5).
+`scripts/check-image.sh`, including the new check 8 (the declared engine is
+the engine), passed on both platforms' runner images and on the rollback
+image. The engine's `cargo deny` fails on the unpatched lockfile and passes
+with patch 0001. Guard tests (`engine_build.rs`, `engine_pin.rs`, the engine
+identity and `doctor` rows, `scripts/test-check-cosign-verify.py`) carry
+negative controls, and fourteen mutants were killed. Not run: keyless signing,
+the SBOM attestation and the provenance, which happen only in `images.yml` on
+`main` (the first publication is their first run). The runner's identity file
+reaches a live Job at the next PoC refresh.
 **Rollback:** for one release, OSO's released binary stays buildable:
 `docker build --platform linux/amd64 --build-arg ENGINE_SOURCE=oso` produces a
 runner that carries it and declares OSO's identity, so its scorecards and
