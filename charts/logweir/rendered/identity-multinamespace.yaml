@@ -7243,8 +7243,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
-  # D2 §7.1: `FailedCreate` and `FailedMount` for the check Jobs and pods the
-  # preflight controller owns, by `involvedObject.uid`. `list` and nothing else.
+  # D2 §7.1: `FailedCreate` and `FailedMount` for the Jobs and pods the
+  # controller owns, by `involvedObject.uid` and only while a pod has not
+  # started — every Job-owning reconciler reads them (FX-11). `list` and
+  # nothing else.
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list"]

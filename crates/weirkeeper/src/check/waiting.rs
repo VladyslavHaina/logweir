@@ -95,13 +95,13 @@ impl Waiting {
 
 /// One cluster Event, reduced to the four fields the table reads.
 ///
-/// A SEPARATE TYPE, and the reason is RBAC rather than taste: the weirkeeper
-/// `ClusterRole` grants no verb on `events` today (D2 §7.1 adds it with W11),
-/// and `crates/logweir/tests/manifest_lint.rs`'s `every_call_site_has_a_grant`
-/// refuses a call whose grant is missing. Taking the facts as a VALUE keeps
-/// this classifier complete and testable now, and leaves the one `Api<Event>`
-/// handle to the controller that will have the grant — W8 and W9, with W11's
-/// rule. [`EventFact::from_event`] is the converter, and it names the
+/// A SEPARATE TYPE, so this classifier stays pure: it takes the facts as a
+/// VALUE and never builds an `Api<Event>`. The read is the callers' — the
+/// `weirkeeper` `ClusterRole` grants `list` on `events` (D2 §7.1), and every
+/// Job-owning controller reads them, by `involvedObject.uid`, through
+/// [`crate::check::job_events`] or its own equivalent (`Preflight`, evidence
+/// fetch and the `Backup`/`Restore` diagnostics predate it; FX-11 wired the
+/// rest). [`EventFact::from_event`] is the converter, and it names the
 /// `k8s_openapi` type without ever building an `Api` for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventFact {
@@ -203,6 +203,74 @@ pub fn classify(observed: &Observed<'_>) -> Option<Waiting> {
         ));
     }
     None
+}
+
+/// Whether [`classify`] could read an Event at all for this Job and pod at
+/// `now` — **the bound on every events list** (FX-11).
+///
+/// Exactly the two rows that read `events`, with their grace periods: NO POD
+/// once the Job is [`POD_CREATE_GRACE`] old (the `FailedCreate` row), and a
+/// `runner` container still `ContainerCreating` after [`MOUNT_GRACE`] (the
+/// `FailedMount` row). Everywhere else the classifier never looks at an Event,
+/// so a list made then is a request whose answer cannot change the verdict —
+/// and a healthy Job, whose pod exists and runs, never pays for one.
+#[must_use]
+pub fn reads_events(job: &Job, pod: Option<&Pod>, now: DateTime<Utc>) -> bool {
+    match pod {
+        None => age(job.creation_timestamp_utc(), now) >= Some(POD_CREATE_GRACE),
+        Some(pod) => creating_for(pod, now) >= Some(MOUNT_GRACE),
+    }
+}
+
+/// Whether a Job has had no pod for [`POD_CREATE_GRACE`] **by its own
+/// status** — the pre-filter that lets a runner kind with no pod read of its
+/// own (the `KafkaCluster` probe, a `ProtectionPolicy` delivery, a retention
+/// run) look for a refused pod without paying a pod list on every pass of a
+/// healthy run (FX-11).
+///
+/// The Job controller counts every pod it created in `status.active`,
+/// `status.succeeded` and `status.failed`. While all three are zero (or
+/// absent), the Job may have no pod — a quota-refused one stays here for its
+/// whole life — and the caller proves it with a pod list. The moment the Job
+/// controller counts one, nothing a `FailedCreate` says can be this Job's
+/// answer, and no request is made. The counts can lag a just-created pod, in
+/// which case the pod list finds it: the filter only ever SAVES calls, never
+/// decides.
+#[must_use]
+pub fn no_pod_counted(job: &Job, now: DateTime<Utc>) -> bool {
+    let status = job.status.as_ref();
+    let counted = |n: Option<i32>| n.unwrap_or(0) > 0;
+    age(job.creation_timestamp_utc(), now) >= Some(POD_CREATE_GRACE)
+        && !counted(status.and_then(|s| s.active))
+        && !counted(status.and_then(|s| s.succeeded))
+        && !counted(status.and_then(|s| s.failed))
+}
+
+/// The `FailedCreate` row ALONE, for the runner kinds whose outcome vocabulary
+/// has no waiting table: the Job has had no pod for [`POD_CREATE_GRACE`] and
+/// the Job controller said why (FX-11).
+///
+/// The SAME row [`classify`] uses — one matcher, so a `KafkaCluster` probe, a
+/// delivery and a retention run name exactly the refusal a `Preflight` would,
+/// with the same involved-object rule (a `FailedCreate` naming another Job is
+/// never this one's). `None` while the Job has a pod, inside the grace period,
+/// or with no matching Event: those keep the kind's own path.
+///
+/// The code is [`CheckCode::PodCreateRejected`], or
+/// [`CheckCode::RunnerServiceAccountMissing`] when the ServiceAccount is the
+/// cause; a runner kind projects either onto its own
+/// `PodCreationForbidden` (`crate::diagnostics::Code::runner_ready_reason`).
+#[must_use]
+pub fn pod_create_refusal(
+    job: &Job,
+    pod: Option<&Pod>,
+    events: &[EventFact],
+    now: DateTime<Utc>,
+) -> Option<Waiting> {
+    if pod.is_some() || age(job.creation_timestamp_utc(), now) < Some(POD_CREATE_GRACE) {
+        return None;
+    }
+    from_failed_create(events, &job.name_any())
 }
 
 // ---------------------------------------------------------------------------

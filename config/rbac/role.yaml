@@ -403,19 +403,24 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
-  # THE EVENTS BEHIND A CHECK POD THAT NEVER STARTED — D2 §7.1, §4.3's waiting
-  # table, added by W9 and USED by `controllers/preflight.rs`.
-  # `controllers/topic_discovery.rs` still passes the classifier an empty fact
-  # slice; W11 may switch it over now that the grant exists.
+  # THE EVENTS BEHIND A JOB POD THAT NEVER STARTED — D2 §7.1, §4.3's waiting
+  # table, added by W9 for `controllers/preflight.rs` and now read by EVERY
+  # controller that owns a Job (FX-11): `Preflight`, evidence fetch, the
+  # `Backup` and `Restore` diagnostics, `TopicDiscovery`, the `RecoveryCatalog`
+  # sync, a dynamic `Backup`'s discovery, the `KafkaCluster` probe, the
+  # `ProtectionPolicy` delivery and the `RetentionPolicy` run.
   #
-  # `FailedCreate` on the Job says the ServiceAccount does not exist;
+  # `FailedCreate` on the Job says the ServiceAccount does not exist, or that a
+  # `ResourceQuota`, a `LimitRange` or an admission webhook refused the pod;
   # `FailedMount` on the pod says the signing key volume did not mount. Neither
-  # fact is anywhere else, and without them `runner.pod` could report only two
-  # of its four refusals and `signer.privateKeyUsable` could never report
+  # fact is anywhere else, and without them a refused pod reads as a Job
+  # waiting out its own deadline, `runner.pod` could report only two of its
+  # four refusals and `signer.privateKeyUsable` could never report
   # `SigningKeyMissing` at all.
   #
   # `list` AND NOTHING ELSE, and every call carries an
-  # `involvedObject.uid=<uid>` field selector for a Job or pod this check owns:
+  # `involvedObject.uid=<uid>` field selector for a Job or pod the caller owns,
+  # and is made only while that pod has not started:
   # `FailedCreate` is a common event in a namespace with a ResourceQuota, and a
   # classifier handed somebody else's event would CANCEL a healthy check Job.
   # A field selector is not an RBAC boundary and this comment does not claim it

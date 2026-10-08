@@ -353,9 +353,22 @@ fn finished_routes(log: String, extra: Vec<Route>) -> Vec<Route> {
             status: 200,
             body: job_object(Some("Complete"), UID).to_string(),
         },
+        no_events(),
     ];
     routes.extend(extra);
     routes
+}
+
+/// An events list with nothing in it — FX-11's read of a Job with no provable
+/// pod, answered "no Event says why", so the classification is the one it was
+/// before Events were read.
+fn no_events() -> Route {
+    Route {
+        method: "GET",
+        path_suffix: "/events",
+        status: 200,
+        body: r#"{"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]}"#.to_string(),
+    }
 }
 
 /// The body of the first request matching `method` and a path containing
@@ -1684,6 +1697,7 @@ async fn a_job_that_hit_its_deadline_is_a_failed_discovery() {
             status: 200,
             body: pod_list(vec![]),
         },
+        no_events(),
         Route {
             method: "GET",
             path_suffix: PLAN_PATH,
@@ -3253,6 +3267,7 @@ async fn a_failed_status_conflict_never_patches_the_ttl() {
             status: 200,
             body: pod_list(vec![]),
         },
+        no_events(),
         Route {
             method: "GET",
             path_suffix: PLAN_PATH,
@@ -3560,9 +3575,12 @@ fn code_only(src: &str) -> String {
 /// TRANSIENT check kinds, D2 §4.3's `gc.rs` and §5.8's retention — so the
 /// claim this test can honestly make changed shape: not "there is no delete"
 /// but "there is exactly one, it is `Api<TopicDiscovery>`'s, it carries a UID
-/// precondition, and it is inside `collect_expired`". The three things still
-/// absent — `Api<Secret>`, `Api<Event>`, `replace_status` — are unchanged
-/// grants this role does not hold.
+/// precondition, and it is inside `collect_expired`". `Api<Secret>` and
+/// `replace_status` are still absent because the role grants neither.
+/// `Api<Event>` is absent for a different reason since FX-11: the role grants
+/// `events: list`, and this reconciler reads them through
+/// `check::job_events` — the shared, bounded read — rather than a handle of
+/// its own.
 ///
 /// MUTANT: delete the `preconditions:` line, or move the `.delete(` call out
 /// of `collect_expired`, or add a second one. Each fails an assertion below.
@@ -3735,5 +3753,323 @@ async fn a_discoverys_own_topic_selection_reaches_its_plan() {
         inventory.expected_topics,
         vec!["orders".to_string(), "payments".to_string()],
         "the runner reports against the request's own expected set"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FX-11 — a check pod the namespace refuses at creation
+// ---------------------------------------------------------------------------
+
+/// The admission's words for a quota-refused check pod.
+const QUOTA_REFUSAL: &str = "Error creating: pods \"lwc-td-288fecc03251c1c31851-q8z4m\" is \
+     forbidden: exceeded quota: compute, requested: limits.memory=256Mi, used: \
+     limits.memory=8Gi, limited: limits.memory=8Gi";
+
+/// The admission's words for a `LimitRange` maximum.
+const LIMIT_RANGE_REFUSAL: &str = "Error creating: pods \"lwc-td-288fecc03251c1c31851-q8z4m\" is \
+     forbidden: maximum memory usage per Container is 128Mi, but limit is 256Mi";
+
+/// A core `EventList` holding one `FailedCreate` per `(involved name, uid,
+/// message)`, all on Jobs.
+fn failed_create(events: &[(&str, &str, &str)]) -> String {
+    let items: Vec<Value> = events
+        .iter()
+        .enumerate()
+        .map(|(i, (name, uid, message))| {
+            json!({
+                "apiVersion": "v1", "kind": "Event",
+                "metadata": {"name": format!("{name}.{i}"), "namespace": NS},
+                "involvedObject": {"apiVersion": "batch/v1", "kind": "Job", "name": name,
+                                   "namespace": NS, "uid": uid},
+                "reason": "FailedCreate", "type": "Warning", "message": message
+            })
+        })
+        .collect();
+    json!({"apiVersion": "v1", "kind": "EventList", "metadata": {}, "items": items}).to_string()
+}
+
+/// A running pass over an UNFINISHED check Job with no pod at all, whose
+/// events list answers `events`.
+fn refused_routes(events: String) -> Vec<Route> {
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: JOB_PATH,
+            status: 200,
+            body: job_object(None, UID).to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/pods",
+            status: 200,
+            body: pod_list(vec![]),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/events",
+            status: 200,
+            body: events,
+        },
+        Route {
+            method: "GET",
+            path_suffix: PLAN_PATH,
+            status: 200,
+            body: plan_config_map(UID, true, PLAN_SHA),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: STATUS_PATH,
+            status: 200,
+            body: discovery_body(&running()),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: JOB_PATH,
+            status: 200,
+            body: job_object(None, UID).to_string(),
+        },
+    ]
+}
+
+/// Every events-list URI the double saw, with the field selector decoded.
+fn event_lists(recorder: &Recorder) -> Vec<String> {
+    recorder
+        .lock()
+        .expect("the recorder")
+        .iter()
+        .filter(|r| r.method == "GET" && r.uri.split('?').next().unwrap_or("").ends_with("/events"))
+        .map(|r| r.uri.replace("%3D", "="))
+        .collect()
+}
+
+/// **FX-11: A QUOTA-REFUSED CHECK POD IS `PodCreateRejected` AT ONCE, WITH THE
+/// QUOTA'S WORDS, AND THE JOB IS CANCELLED.** The check Job has no pod and the
+/// Job controller's `FailedCreate` Event says the `ResourceQuota` refused it.
+/// Before FX-11 this reconciler handed the classifier `events: &[]` and the
+/// object read `PodNotStarted` until the Job's deadline, then
+/// `DeadlineExceeded`.
+///
+/// KILLS: the Events read dropped; the message not propagated; the early
+/// cancel dropped; a list by name instead of by UID.
+#[tokio::test]
+async fn fx11_a_check_pod_the_quota_refuses_fails_fast_naming_the_quota() {
+    let (client, recorder, bodies) = mock_client_recording_bodies(refused_routes(failed_create(
+        &[(JOB, JOB_UID, QUOTA_REFUSAL)],
+    )));
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+
+    assert_eq!(outcome.phase, PHASE_FAILED, "{:?}", calls(&recorder));
+    assert_eq!(outcome.reason, CheckCode::PodCreateRejected.as_str());
+    let status = status_of(&bodies);
+    assert_eq!(status["phase"], json!(PHASE_FAILED), "{status}");
+    assert_eq!(
+        status["conditions"][0]["reason"],
+        json!("PodCreateRejected")
+    );
+    let said = status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        said.contains("exceeded quota: compute") && said.contains("limits.memory=256Mi"),
+        "the admission's own words reach the object: {said}"
+    );
+    let cancels = bodies_of(&bodies, "PATCH", JOB_PATH);
+    assert_eq!(cancels.len(), 1, "{:?}", calls(&recorder));
+    assert_eq!(
+        cancels[0]["spec"]["activeDeadlineSeconds"],
+        json!(1),
+        "the Job's deadline is collapsed, never left to run out"
+    );
+    let lists = event_lists(&recorder);
+    assert_eq!(lists.len(), 1, "one events list: {lists:?}");
+    assert!(
+        lists[0].contains(&format!("involvedObject.uid={JOB_UID}")),
+        "by the Job's UID: {lists:?}"
+    );
+}
+
+/// **FX-11, THE `LimitRange` VARIANT.** A `LimitRange` maximum refuses the pod
+/// the same way, and its words — not a quota's — are what the object carries.
+#[tokio::test]
+async fn fx11_a_check_pod_a_limit_range_refuses_names_the_limit_range() {
+    let (client, recorder, bodies) = mock_client_recording_bodies(refused_routes(failed_create(
+        &[(JOB, JOB_UID, LIMIT_RANGE_REFUSAL)],
+    )));
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.reason, CheckCode::PodCreateRejected.as_str());
+    let said = status_of(&bodies)["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        said.contains("maximum memory usage per Container is 128Mi"),
+        "the LimitRange's own words: {said}"
+    );
+    assert_eq!(
+        bodies_of(&bodies, "PATCH", JOB_PATH).len(),
+        1,
+        "{:?}",
+        calls(&recorder)
+    );
+}
+
+/// **FX-11 NEGATIVE CONTROL.** The same Job with no pod and no `FailedCreate`
+/// Event — or one naming ANOTHER Job — is still `Running` /
+/// `PodNotStarted`, nothing is cancelled, and the Job's own deadline remains
+/// the only clock, exactly as before FX-11.
+#[tokio::test]
+async fn fx11_control_no_event_or_a_foreign_one_leaves_the_check_running() {
+    for events in [
+        failed_create(&[]),
+        failed_create(&[("someone-elses-job", OTHER_JOB_UID, QUOTA_REFUSAL)]),
+    ] {
+        let (client, recorder, bodies) = mock_client_recording_bodies(refused_routes(events));
+        let outcome = td::reconcile_discovery(&running(), &context(client, None))
+            .await
+            .expect("the reconcile answers");
+        assert_eq!(outcome.phase, PHASE_RUNNING, "{:?}", calls(&recorder));
+        assert_eq!(outcome.reason, CheckCode::PodNotStarted.as_str());
+        assert!(
+            bodies_of(&bodies, "PATCH", JOB_PATH).is_empty(),
+            "nothing is cancelled: {:?}",
+            calls(&recorder)
+        );
+        assert_eq!(event_lists(&recorder).len(), 1, "the Events were read");
+    }
+}
+
+/// **FX-11, THE COST BOUND.** A pod that exists and runs is the healthy case,
+/// and it costs no events list at all.
+#[tokio::test]
+async fn fx11_a_running_pod_costs_no_events_list() {
+    let mut routes = refused_routes(failed_create(&[(JOB, JOB_UID, QUOTA_REFUSAL)]));
+    routes[1].body = pod_list(vec![pod_object(
+        POD,
+        Some(JOB_UID),
+        json!({"phase": "Running", "containerStatuses": [{
+            "name": "runner", "image": "x", "imageID": "x", "ready": true, "restartCount": 0,
+            "state": {"running": {"startedAt": "2026-09-16T11:58:45Z"}}
+        }]}),
+    )]);
+    let (client, recorder, _bodies) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.phase, PHASE_RUNNING);
+    assert!(
+        event_lists(&recorder).is_empty(),
+        "no events list for a running pod: {:?}",
+        calls(&recorder)
+    );
+}
+
+/// **FX-11 review L4: once the pod exists, its OWN Events are read — by the
+/// POD's UID.** A check pod whose `runner` container has sat in
+/// `ContainerCreating` past the 60 s mount grace, with a `FailedMount` Event
+/// on the pod, is `VolumeMountFailed`, naming the volume — the `FailedMount`
+/// row the module header and `docs/kubernetes.md` §12 say these check paths
+/// read. The one events list carries `involvedObject.uid=<pod uid>`, never the
+/// Job's: a `FailedMount` is recorded against the pod, so a list by the Job's
+/// UID would come back without it on a real API server.
+///
+/// KILLS: `check::job_events` listing by the Job's UID while a pod exists
+/// (review mutant RM4).
+#[tokio::test]
+async fn fx11_a_pending_mount_is_read_from_the_pods_own_events() {
+    const POD_UID: &str = "5e5e5e5e-0000-4000-8000-0000000000e5";
+    let creating: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {
+            "name": POD, "namespace": NS, "uid": POD_UID,
+            "creationTimestamp": "2026-09-16T11:58:40Z",
+            "ownerReferences": [{
+                "apiVersion": "batch/v1", "kind": "Job", "name": JOB,
+                "uid": JOB_UID, "controller": true, "blockOwnerDeletion": true
+            }],
+            "labels": {"batch.kubernetes.io/job-name": JOB}
+        },
+        "spec": {"containers": []},
+        "status": {"phase": "Pending", "containerStatuses": [{
+            "name": "runner", "image": "x", "imageID": "", "ready": false,
+            "restartCount": 0, "state": {"waiting": {"reason": "ContainerCreating"}}
+        }]}
+    }))
+    .expect("a Pod");
+    let mount = json!({
+        "apiVersion": "v1", "kind": "EventList", "metadata": {},
+        "items": [{
+            "apiVersion": "v1", "kind": "Event",
+            "metadata": {"name": format!("{POD}.1"), "namespace": NS},
+            "involvedObject": {"apiVersion": "v1", "kind": "Pod", "name": POD,
+                               "namespace": NS, "uid": POD_UID},
+            "reason": "FailedMount", "type": "Warning",
+            "message": "MountVolume.SetUp failed for volume \"archive-ca\" : configmap \
+                        \"archive-ca\" not found"
+        }]
+    })
+    .to_string();
+    let mut routes = refused_routes(mount);
+    routes[1].body = pod_list(vec![creating]);
+    let (client, recorder, bodies) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+
+    assert_eq!(
+        outcome.reason,
+        CheckCode::VolumeMountFailed.as_str(),
+        "{:?}",
+        calls(&recorder)
+    );
+    let said = status_of(&bodies)["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(said.contains("archive-ca"), "the volume is named: {said}");
+    let lists = event_lists(&recorder);
+    assert_eq!(lists.len(), 1, "{lists:?}");
+    assert!(
+        lists[0].contains(&format!("involvedObject.uid={POD_UID}")),
+        "the pod's own Events, by the POD's UID: {lists:?}"
+    );
+    assert!(
+        !lists[0].contains(JOB_UID),
+        "never the Job's UID once there is a pod: {lists:?}"
+    );
+
+    // NEGATIVE CONTROL: the same pending pod with no `FailedMount` Event is
+    // not `VolumeMountFailed` — the code comes from the pod's Event.
+    let mut routes = refused_routes(failed_create(&[]));
+    routes[1].body = pod_list(vec![serde_json::from_value::<Pod>(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {
+            "name": POD, "namespace": NS, "uid": POD_UID,
+            "creationTimestamp": "2026-09-16T11:58:40Z",
+            "ownerReferences": [{
+                "apiVersion": "batch/v1", "kind": "Job", "name": JOB,
+                "uid": JOB_UID, "controller": true, "blockOwnerDeletion": true
+            }],
+            "labels": {"batch.kubernetes.io/job-name": JOB}
+        },
+        "spec": {"containers": []},
+        "status": {"phase": "Pending", "containerStatuses": [{
+            "name": "runner", "image": "x", "imageID": "", "ready": false,
+            "restartCount": 0, "state": {"waiting": {"reason": "ContainerCreating"}}
+        }]}
+    }))
+    .expect("a Pod")]);
+    let (client, recorder, _bodies) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(
+        outcome.reason,
+        CheckCode::PodNotStarted.as_str(),
+        "{:?}",
+        calls(&recorder)
     );
 }
