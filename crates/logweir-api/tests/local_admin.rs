@@ -1290,10 +1290,14 @@ const HEADER_DEADLINE: Duration = Duration::from_secs(10);
 const RELEASE_MARGIN: Duration = Duration::from_secs(2);
 
 /// How long past [`HEADER_DEADLINE`] the FX-24 rows wait for the server to act
-/// before calling it a hang: the same 15 s of slack the R4 row
-/// ([`a_connection_that_never_sends_its_headers_is_closed`]) gives its
-/// 25-second read.
-const DEADLINE_SLACK: Duration = Duration::from_secs(15);
+/// before calling it a failure.
+///
+/// FIVE SECONDS, NOT THE R4 ROW'S FIFTEEN (FX-24 review L1). The server's own
+/// timer fires on time under load (10.0 s measured at load 15-42), and the
+/// slack is what tells the documented ten seconds from a deadline doubled at
+/// the call site: with fifteen, a twenty-second deadline passed every row. Half
+/// the deadline is still several hundred times what closing a socket takes.
+const DEADLINE_SLACK: Duration = Duration::from_secs(5);
 
 /// `count` connections to `port` that send nothing, every one proven ACCEPTED
 /// but the last, plus how long the slowest FIFO probe took and when the first
@@ -1352,7 +1356,15 @@ fn closed_by_the_server(stream: &mut TcpStream, limit: Duration) -> Result<Durat
     }
 }
 
-/// The deadline the rows below measure is the one `src/main.rs` configures.
+/// The deadline the rows below measure is the one `src/main.rs` configures,
+/// and the one its connection builder is handed.
+///
+/// BOTH HALVES (FX-24 review L1). Pinning only the constant's text let
+/// `.header_read_timeout(HEADER_READ_TIMEOUT * 2)` through: the constant still
+/// read ten seconds while the server waited twenty. The call site must hand
+/// the builder the constant itself, once, and nothing else may set a header
+/// deadline. ([`DEADLINE_SLACK`] makes the behavioural rows catch the same
+/// mutant.)
 #[test]
 fn the_header_deadline_these_rows_measure_is_mains() {
     let main =
@@ -1364,6 +1376,23 @@ fn the_header_deadline_these_rows_measure_is_mains() {
         )),
         "src/main.rs no longer sets HEADER_READ_TIMEOUT to {HEADER_DEADLINE:?}; update \
          HEADER_DEADLINE in this file with it"
+    );
+    let code: String = main
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        code.matches(".header_read_timeout(").count(),
+        1,
+        "src/main.rs must configure the header deadline in exactly one place"
+    );
+    assert_eq!(
+        code.matches(".header_read_timeout(HEADER_READ_TIMEOUT)")
+            .count(),
+        1,
+        "the connection builder must be handed HEADER_READ_TIMEOUT itself, not a value \
+         derived from it"
     );
 }
 
