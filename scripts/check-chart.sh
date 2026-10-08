@@ -747,12 +747,53 @@ console_refuses "a namespace bound to an undeclared approval policy" \
   --set approvalPolicy.policies[0].name=prod-governed \
   --set approvalPolicy.policies[0].mode=Governed \
   --set "approvalPolicy.namespaces.$NAMESPACE=nothing"
+# PROD-16.1: with the managed identity the hook GENERATES the console key, so
+# the refusal is for an install with neither the managed identity nor a named
+# key Secret; the same values with the identity render (the managed key).
 console_refuses "a console-served namespace bound to a policy with no confirmation key" \
   "approvalPolicy.confirmationKeySecret is empty" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
+  --set identity.enabled=false \
   --set approvalPolicy.policies[0].name=prod-governed \
   --set approvalPolicy.policies[0].mode=Governed \
   --set "approvalPolicy.namespaces.$NAMESPACE=prod-governed"
+console_refuses "default: confirm with no confirmation key" \
+  "approvalPolicy.default is confirm and there is no console confirmation key" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
+  --set identity.enabled=false \
+  --set approvalPolicy.allowOrdinaryConfirmation=true \
+  --set approvalPolicy.default=confirm
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
+  --set approvalPolicy.policies[0].name=prod-governed \
+  --set approvalPolicy.policies[0].mode=strict \
+  --set "approvalPolicy.namespaces.$NAMESPACE=prod-governed" \
+  > "$tmp/managed-key.yaml" 2> "$tmp/managed-key.err"
+rc=$?
+if [ "$rc" -ne 0 ] || ! grep -q "secretName: logweir-console-confirmation" "$tmp/managed-key.yaml"; then
+  echo "FAIL: a console-served binding with the managed identity did not render the managed console key" >&2
+  sed 's/^/      /' "$tmp/managed-key.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (a console-served binding with the managed identity renders the generated key)"
+fi
+# PROD-16.1: the operator's mode names render as the internal ones, and an
+# explicit unbound default renders as defaultMode.
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set approvalPolicy.allowOrdinaryConfirmation=true \
+  --set approvalPolicy.default=confirm \
+  --set approvalPolicy.policies[0].name=team --set approvalPolicy.policies[0].mode=confirm \
+  --set approvalPolicy.policies[1].name=prod --set approvalPolicy.policies[1].mode=strict \
+  --show-only templates/approval-policy.yaml > "$tmp/modes.yaml" 2> "$tmp/modes.err"
+rc=$?
+if [ "$rc" -ne 0 ] || ! grep -q "mode: Ordinary" "$tmp/modes.yaml" || ! grep -q "mode: Governed" "$tmp/modes.yaml" \
+  || grep -q "mode: confirm" "$tmp/modes.yaml" || ! grep -q "defaultMode: confirm" "$tmp/modes.yaml"; then
+  echo "FAIL: the operator mode names render as the internal ones (confirm -> Ordinary, strict -> Governed, default -> defaultMode)" >&2
+  sed 's/^/      /' "$tmp/modes.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (the operator mode names render as the internal ones)"
+fi
 console_refuses "shared mode over plain HTTP" "publicBaseUrl" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=http://console.example.com

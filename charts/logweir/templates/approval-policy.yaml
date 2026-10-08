@@ -25,6 +25,20 @@ no bindings renders no ConfigMap, no env and no mount, so the default render is
 byte-identical to what it was, and every namespace resolves to
 `legacy-governed-v1` — today's governed approval, unchanged.
 
+PROD-16.1 — THE THREE MODES THE OPERATOR SEES, AND THE UNBOUND DEFAULT.
+`approvalPolicy.policies[].mode` may be written `confirm` (one-person
+confirmation in the console) or `strict` (a personal-key approval) beside the
+internal `Ordinary` and `Governed`; this template RENDERS THE INTERNAL NAMES
+(`logweir.approvalPolicy.internalMode`, the chart's half of the one mapping
+`logweir_core::approval_policy::OperatorMode` holds), so an image-only
+rollback reads the same document it always did. `two-person` is PROD-16.2 and
+refused. `approvalPolicy.default` (`confirm` | `strict` | empty) is rendered
+as `defaultMode` ONLY when set: empty leaves the decision to the fresh-install
+marker, which the identity hook writes only on a fresh install with a console
+(`logweir.freshInstallConfirm`), so an upgraded install's unbound namespaces
+stay `legacy-governed-v1`. A set `default` is a field an older binary refuses
+at start — fail closed on rollback.
+
 THE REFUSALS HERE ARE THE BINARY'S, MADE EARLIER. `logweir_core::approval_policy`
 refuses the same documents at controller and console start, and a document the
 binary refuses stops the WHOLE controller -- every reconciler, backups included
@@ -36,15 +50,60 @@ document to `ApprovalPolicySet::parse` and requires a refusal there too, so a
 rule added to one side and not the other is a red row.
 */}}
 {{- define "logweir.approvalPolicy.configured" -}}
-{{- if or .Values.approvalPolicy.policies .Values.approvalPolicy.namespaces -}}true{{- end -}}
+{{- if or .Values.approvalPolicy.policies .Values.approvalPolicy.namespaces .Values.approvalPolicy.default -}}true{{- end -}}
+{{- end -}}
+
+{{- /* PROD-16.1: an operator mode name, or an internal one, as the internal one. */ -}}
+{{- define "logweir.approvalPolicy.internalMode" -}}
+{{- $m := . | default "" -}}
+{{- if or (eq $m "confirm") (eq $m "Ordinary") -}}Ordinary
+{{- else if or (eq $m "strict") (eq $m "Governed") -}}Governed
+{{- else -}}{{ $m }}
+{{- end -}}
 {{- end -}}
 
 {{- define "logweir.approvalPolicy.document" -}}
 allowOrdinaryConfirmation: {{ .Values.approvalPolicy.allowOrdinaryConfirmation }}
+{{- with .Values.approvalPolicy.default }}
+defaultMode: {{ . }}
+{{- end }}
+{{- $policies := list -}}
+{{- range $policy := (.Values.approvalPolicy.policies | default list) -}}
+{{- $policies = append $policies (merge (dict "mode" (include "logweir.approvalPolicy.internalMode" $policy.mode)) (omit $policy "mode")) -}}
+{{- end }}
 policies:
-{{ toYaml (.Values.approvalPolicy.policies | default list) | indent 2 }}
+{{ toYaml $policies | indent 2 }}
 namespaces:
 {{ toYaml (.Values.approvalPolicy.namespaces | default dict) | indent 2 }}
+{{- end -}}
+
+{{- /*
+PROD-16.1: the console's ConsoleConfirmation key the identity hook manages —
+when the identity is managed, a console runs, and the operator named no other
+Secret (`approvalPolicy.confirmationKeySecret` empty, or the managed name
+itself, which is how every PLAT-19.2 install named the Secret it made by hand:
+the hook ADOPTS that key).
+*/ -}}
+{{- define "logweir.consoleKey.managedName" -}}logweir-console-confirmation{{- end -}}
+{{- define "logweir.consoleKey.publicName" -}}logweir-console-trust{{- end -}}
+{{- define "logweir.consoleKey.managed" -}}
+{{- $named := .Values.approvalPolicy.confirmationKeySecret | default "" -}}
+{{- if and .Values.identity.enabled .Values.api.console.enabled (or (eq $named "") (eq $named (include "logweir.consoleKey.managedName" .))) -}}true{{- end -}}
+{{- end -}}
+{{- /* The Secret the console reads its key from, managed or named; empty: none. */ -}}
+{{- define "logweir.consoleKey.secret" -}}
+{{- if include "logweir.consoleKey.managed" . -}}{{ include "logweir.consoleKey.managedName" . }}
+{{- else -}}{{ .Values.approvalPolicy.confirmationKeySecret | default "" }}
+{{- end -}}
+{{- end -}}
+{{- /*
+PROD-16.1: a fresh install of THIS release starts in `confirm` only when a
+console runs (without one, nothing could confirm) and the identity is managed
+(the marker lives on it). The identity hook marks the installation only in
+the run that GENERATES the identity, so an upgrade never reaches it.
+*/ -}}
+{{- define "logweir.freshInstallConfirm" -}}
+{{- if and .Values.identity.enabled .Values.api.enabled .Values.api.console.enabled -}}true{{- end -}}
 {{- end -}}
 
 {{- define "logweir.approvalPolicy.name" -}}
@@ -59,27 +118,42 @@ namespaces:
 {{- define "logweir.approvalPolicy.checks" -}}
 {{- $p := .Values.approvalPolicy -}}
 {{- $names := list -}}
+{{- if $p.default -}}
+{{- if eq $p.default "two-person" -}}
+{{- fail "approvalPolicy.default is two-person, which is PROD-16.2 and not in this chart. Use confirm or strict, or leave it empty: a fresh install with a console then starts in confirm, and an upgraded one keeps legacy-governed-v1." -}}
+{{- end -}}
+{{- if not (has $p.default (list "confirm" "strict")) -}}
+{{- fail (printf "approvalPolicy.default is %q; it is `confirm`, `strict`, or empty (the fresh-install marker decides)." $p.default) -}}
+{{- end -}}
+{{- if and (eq $p.default "confirm") (not $p.allowOrdinaryConfirmation) -}}
+{{- fail "approvalPolicy.default is confirm (one-person confirmation for every unbound namespace) but approvalPolicy.allowOrdinaryConfirmation is not true. Ordinary confirmation is an explicit installation decision (D0) and is never enabled by one field alone: set the floor too. An older install opting in also needs the console key on the TrustPolicy that governs those namespaces (docs/install.md §5f)." -}}
+{{- end -}}
+{{- end -}}
 {{- range $i, $policy := ($p.policies | default list) -}}
 {{- if not (and $policy.name (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $policy.name)) -}}
 {{- fail (printf "approvalPolicy.policies[%d].name %q must be a DNS label." $i ($policy.name | default "")) -}}
 {{- end -}}
-{{- if eq $policy.name "legacy-governed-v1" -}}
-{{- fail "approvalPolicy.policies names `legacy-governed-v1`, which is reserved for the policy an unbound namespace resolves to. Leave the namespace unbound instead." -}}
+{{- if has $policy.name (list "legacy-governed-v1" "default-confirm-v1") -}}
+{{- fail (printf "approvalPolicy.policies names %q, which is reserved for the policy an unbound namespace resolves to. Leave the namespace unbound instead." $policy.name) -}}
 {{- end -}}
 {{- if has $policy.name $names -}}
 {{- fail (printf "approvalPolicy.policies declares %q twice." $policy.name) -}}
 {{- end -}}
 {{- $names = append $names $policy.name -}}
-{{- if not (has $policy.mode (list "Governed" "Ordinary")) -}}
-{{- fail (printf "approvalPolicy.policies[%d].mode is %q; it is `Governed` or `Ordinary`." $i ($policy.mode | default "")) -}}
+{{- if eq ($policy.mode | default "") "two-person" -}}
+{{- fail (printf "approvalPolicy.policies[%d] (%s) is two-person, which is PROD-16.2 and not in this chart; use confirm (Ordinary) or strict (Governed)." $i $policy.name) -}}
 {{- end -}}
-{{- if and (eq $policy.mode "Ordinary") (not $p.allowOrdinaryConfirmation) -}}
+{{- if not (has $policy.mode (list "Governed" "Ordinary" "confirm" "strict")) -}}
+{{- fail (printf "approvalPolicy.policies[%d].mode is %q; it is `confirm` (Ordinary) or `strict` (Governed)." $i ($policy.mode | default "")) -}}
+{{- end -}}
+{{- $mode := include "logweir.approvalPolicy.internalMode" $policy.mode -}}
+{{- if and (eq $mode "Ordinary") (not $p.allowOrdinaryConfirmation) -}}
 {{- fail (printf "approvalPolicy.policies[%d] (%s) is Ordinary but approvalPolicy.allowOrdinaryConfirmation is not true. Ordinary confirmation is an explicit installation decision (D0): set the floor, or use a Governed policy." $i $policy.name) -}}
 {{- end -}}
-{{- if and (eq $policy.mode "Governed") (hasKey $policy "requireDistinctPrincipal") (not $policy.requireDistinctPrincipal) -}}
+{{- if and (eq $mode "Governed") (hasKey $policy "requireDistinctPrincipal") (not $policy.requireDistinctPrincipal) -}}
 {{- fail (printf "approvalPolicy.policies[%d].requireDistinctPrincipal is false on a Governed policy; the supported baseline requires the approver's principal to differ from the requester's." $i) -}}
 {{- end -}}
-{{- if and (eq $policy.mode "Ordinary") $policy.requireDistinctPrincipal -}}
+{{- if and (eq $mode "Ordinary") $policy.requireDistinctPrincipal -}}
 {{- fail (printf "approvalPolicy.policies[%d].requireDistinctPrincipal is true on an Ordinary policy, which has no approver to compare; use a Governed policy." $i) -}}
 {{- end -}}
 {{- if hasKey $policy "maxAgeSeconds" -}}

@@ -311,6 +311,47 @@ subjects:
     name: {{ $name }}
     namespace: {{ $.Release.Namespace }}
 {{- end }}
+{{- if and .Values.api.console.enabled .Values.identity.enabled }}
+---
+{{/*
+PROD-16.1 — THE FRESH-INSTALL MARKER READ: `get` on the ONE public identity
+ConfigMap, by name, in the release namespace (`installationIdentity` in the
+console's configuration). It carries a key id, an algorithm and a public key —
+no credential — and the console reads only its annotations and `key-id`. The
+claim on it is honoured only beside the TrustPolicy it names, which the
+console reads with the `get` `-trustpolicies` already grants.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-installation
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ .Values.identity.publicConfigMapName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-installation
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-installation
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- if and .Values.api.console.enabled (include "logweir.api.proxyServiceConfigured" .) }}
 {{- $svc := .Values.api.console.trustedProxyService }}
 ---

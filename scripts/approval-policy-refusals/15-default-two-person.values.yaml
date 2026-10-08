@@ -1,0 +1,6 @@
+# expect: PROD-16.2
+approvalPolicy:
+  default: two-person
+  allowOrdinaryConfirmation: true
+  policies: []
+  namespaces: {}

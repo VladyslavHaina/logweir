@@ -256,10 +256,14 @@ needs the console's ConsoleConfirmation key -- both modes carry its signature --
 and `logweir-api` refuses to start without it. Refused here first, by name.
 */ -}}
 {{- $served := (include "logweir.api.namespaces" . | fromJsonArray) -}}
+{{- $consoleKeySecret := include "logweir.consoleKey.secret" . -}}
 {{- range $ns, $policy := (.Values.approvalPolicy.namespaces | default dict) -}}
-{{- if and (has $ns $served) (not $.Values.approvalPolicy.confirmationKeySecret) -}}
-{{- fail (printf "approvalPolicy.namespaces binds %s, which the console serves, to policy %q and approvalPolicy.confirmationKeySecret is empty. Both ordinary and governed requests carry the console's ConsoleConfirmation signature (D0): create a Secret with key `confirmation.key` (a PKCS#8 PEM private key whose PUBLIC half is on the namespace's TrustPolicy with usage ConsoleConfirmation) and name it, or unbind the namespace." $ns $policy) -}}
+{{- if and (has $ns $served) (not $consoleKeySecret) -}}
+{{- fail (printf "approvalPolicy.namespaces binds %s, which the console serves, to policy %q and there is no console confirmation key: identity.enabled is false and approvalPolicy.confirmationKeySecret is empty. Both ordinary and governed requests carry the console's ConsoleConfirmation signature (D0): enable the managed identity (the hook then generates the key), or create a Secret with key `confirmation.key` (a PKCS#8 PEM private key whose PUBLIC half is on the namespace's TrustPolicy with usage ConsoleConfirmation) and name it, or unbind the namespace." $ns $policy) -}}
 {{- end -}}
+{{- end -}}
+{{- if and (eq (.Values.approvalPolicy.default | default "") "confirm") (not $consoleKeySecret) -}}
+{{- fail "approvalPolicy.default is confirm and there is no console confirmation key: identity.enabled is false and approvalPolicy.confirmationKeySecret is empty. Every unbound namespace would be created and then never authorisable; enable the managed identity or name the key's Secret." -}}
 {{- end -}}
 {{- range $peer := ($c.networkPolicy.oidcPeers | default list) -}}
 {{- if or (not $peer.namespace) (not $peer.podLabels) (lt (int $peer.port) 1) -}}
@@ -409,8 +413,19 @@ this ConfigMap carries no credential). Both rendered only when configured.
 {{- if include "logweir.approvalPolicy.configured" . }}
 approvalPolicyFile: {{ include "logweir.approvalPolicy.file" . }}
 {{- end }}
-{{- if .Values.approvalPolicy.confirmationKeySecret }}
+{{- if include "logweir.consoleKey.secret" . }}
 confirmationKeyFile: {{ printf "%s/confirmation.key" (include "logweir.approvalPolicy.confirmationDir" .) }}
+{{- end }}
+{{- /*
+PROD-16.1 — where the fresh-install marker is read: the public identity
+ConfigMap, by name, in the release namespace (`<release>-api-installation`
+grants `get` on that one object). With the managed identity only: without it
+nothing ever writes a marker.
+*/ -}}
+{{- if .Values.identity.enabled }}
+installationIdentity:
+  namespace: {{ .Release.Namespace }}
+  publicConfigMap: {{ .Values.identity.publicConfigMapName }}
 {{- end }}
 {{- end -}}
 

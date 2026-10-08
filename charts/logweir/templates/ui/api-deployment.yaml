@@ -254,7 +254,7 @@ spec:
               mountPath: {{ include "logweir.approvalPolicy.dir" . }}
               readOnly: true
             {{- end }}
-            {{- if .Values.approvalPolicy.confirmationKeySecret }}
+            {{- if include "logweir.consoleKey.secret" . }}
             - name: confirmation
               mountPath: {{ include "logweir.approvalPolicy.confirmationDir" . }}
               readOnly: true
@@ -323,14 +323,22 @@ spec:
         {{- end }}
         {{- /*
         PLAT-19.2: the ConsoleConfirmation PRIVATE key. Only `confirmation.key`
-        is projected, 0440 for the reason the keys volume gives, and no
-        `optional`: a console bound to a policy with no key must not start.
+        is projected, 0440 for the reason the keys volume gives. A Secret the
+        operator named has no `optional`: a console bound to a policy with no
+        key must not start. PROD-16.1: the MANAGED key's Secret is `optional`,
+        because the identity hook fills it AFTER this pod starts (a post-install
+        hook, after `--wait`); the kubelet projects the key once it is written,
+        without a restart, and `logweir-api` reads it on first use, refusing a
+        confirmation before anything is created until then.
         */}}
-        {{- if .Values.approvalPolicy.confirmationKeySecret }}
+        {{- if include "logweir.consoleKey.secret" . }}
         - name: confirmation
           secret:
-            secretName: {{ .Values.approvalPolicy.confirmationKeySecret }}
+            secretName: {{ include "logweir.consoleKey.secret" . }}
             defaultMode: 0440
+            {{- if include "logweir.consoleKey.managed" . }}
+            optional: true
+            {{- end }}
             items:
               - key: confirmation.key
                 path: confirmation.key

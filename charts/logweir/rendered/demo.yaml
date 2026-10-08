@@ -7332,6 +7332,34 @@ rules:
     resources: ["retentionpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
+# Source: logweir/templates/identity.yaml
+# PROD-16.1: THE FRESH INSTALL'S TRUST. In the one run that GENERATES the
+# installation identity, the hook reads which trust the cluster already has
+# (`list` on TrustPolicy, `get` on the one roster name) and, when it has none,
+# creates ONE default TrustPolicy trusting the installation signer and the
+# console key. `create` cannot be narrowed by resourceName in RBAC, so this
+# grant is the residual docs/kubernetes.md §8 states: whoever can run a pod as
+# `<release>-identity-bootstrap` can create a TrustPolicy. No get, update,
+# patch or delete on the kind: the hook never edits or removes trust.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-identity-trust
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["list", "create"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters"]
+    resourceNames: ["default"]
+    verbs: ["get"]
+---
 # Source: logweir/templates/ui/api-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -7530,6 +7558,26 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: weirkeeper
+    namespace: logweir-system
+---
+# Source: logweir/templates/identity.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: logweir-identity-trust
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-identity-trust
+subjects:
+  - kind: ServiceAccount
+    name: logweir-identity-bootstrap
     namespace: logweir-system
 ---
 # Source: logweir/templates/ui/api-rbac.yaml
@@ -8549,6 +8597,10 @@ spec:
             - logweir-system
             - --public-configmap-name
             - logweir-signing-trust
+            - --installation-trust-policy
+            - logweir-installation
+            - --allowed-target-cluster-id
+            - "tQmDMMCERvy6yIB-vuOZCQ"
           resources:
             limits:
               memory: 128Mi

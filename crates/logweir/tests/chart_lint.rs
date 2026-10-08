@@ -719,10 +719,17 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
         chart_roles.remove("logweir-identity-singleton"),
         "managed Helm must carry the authority-free singleton marker"
     );
+    // PROD-16.1: the managed identity's fresh-install trust step (asserted in
+    // `chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege`).
+    assert!(
+        chart_roles.remove("logweir-identity-trust"),
+        "managed Helm must carry the fresh-install trust grant of the identity hook"
+    );
     assert_eq!(
         names_of(&install, "ClusterRole"),
         chart_roles,
-        "apart from the managed identity singleton, ClusterRoles must match logweir.yaml"
+        "apart from the managed identity's singleton and trust grant, ClusterRoles must match \
+         logweir.yaml"
     );
 
     // The ClusterRoleBinding binds the same role to the same ServiceAccount.
@@ -1254,6 +1261,8 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
         .iter()
         .map(|v| v.as_str().expect("string arg"))
         .collect();
+    // PROD-16.1: the fresh-install trust step, and — with no console in the
+    // default render — no console key and no confirm marker.
     assert_eq!(
         vec![
             "identity",
@@ -1261,9 +1270,65 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
             "--namespace",
             "logweir-system",
             "--public-configmap-name",
-            "logweir-signing-trust"
+            "logweir-signing-trust",
+            "--installation-trust-policy",
+            "logweir-installation",
         ],
         args
+    );
+
+    // PROD-16.1 — THE TRUST GRANT, least privilege: `list` to see what trust
+    // the cluster has and `create` for the one policy (RBAC cannot narrow
+    // `create` by name — the residual docs/kubernetes.md §8 states), `get` on
+    // the one roster name; no get/update/patch/delete on TrustPolicy, no
+    // Secret, no wildcard. Bound to the bootstrap account alone.
+    let trust_role = find(&docs, "ClusterRole", "logweir-identity-trust");
+    let trust_rules = trust_role.value["rules"]
+        .as_sequence()
+        .expect("trust rules");
+    let as_strings = |v: &Value| -> Vec<String> {
+        v.as_sequence()
+            .map(|s| {
+                s.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let flat: Vec<(Vec<String>, Vec<String>, Vec<String>)> = trust_rules
+        .iter()
+        .map(|r| {
+            (
+                as_strings(&r["resources"]),
+                as_strings(&r["verbs"]),
+                as_strings(&r["resourceNames"]),
+            )
+        })
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            (
+                vec!["trustpolicies".to_string()],
+                vec!["list".to_string(), "create".to_string()],
+                Vec::new()
+            ),
+            (
+                vec!["trustrosters".to_string()],
+                vec!["get".to_string()],
+                vec!["default".to_string()]
+            ),
+        ],
+        "the identity hook's cluster grant is exactly list+create TrustPolicy and get the roster"
+    );
+    let trust_binding = find(&docs, "ClusterRoleBinding", "logweir-identity-trust");
+    assert_eq!(
+        trust_binding.value["subjects"],
+        serde_yaml::from_str::<Value>(
+            "- kind: ServiceAccount\n  name: logweir-identity-bootstrap\n  namespace: logweir-system\n"
+        )
+        .expect("subjects"),
+        "bound to the hook's account alone"
     );
 
     let role = find(&docs, "Role", "logweir-identity-bootstrap");
@@ -2881,6 +2946,18 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
             // only — the `list_page endpointslices` pair `logweir-api`'s
             // `linkage.rs` pins — and nothing else anywhere.
             let console = &values["api"]["console"];
+            // PROD-16.1: a console over the managed identity holds ONE more
+            // atom, in the release namespace: `get` on the public identity
+            // ConfigMap by name, which `approval::effective_policies` spends
+            // (`KubeAdapter::get_installation_identity`) to read the
+            // fresh-install marker.
+            if console["enabled"].as_bool() == Some(true)
+                && values["identity"]["enabled"].as_bool() != Some(false)
+            {
+                want.entry(RENDER_NAMESPACE.to_string())
+                    .or_default()
+                    .insert("get core/configmaps@logweir-signing-trust".to_string());
+            }
             let proxy = &console["trustedProxyService"];
             if console["enabled"].as_bool() == Some(true)
                 && console["mode"].as_str() == Some("shared")
@@ -2918,9 +2995,21 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
             for ns in watched {
                 want.insert(ns, controller_grants.clone());
             }
+            // PROD-16.1: with a console over the managed identity, also the
+            // public identity ConfigMap the marker poller reads.
+            let marker = values["api"]["console"]["enabled"].as_bool() == Some(true)
+                && values["api"]["enabled"].as_bool() == Some(true)
+                && values["identity"]["enabled"].as_bool() != Some(false);
             want.insert(
                 RENDER_NAMESPACE.to_string(),
-                pinned(&["get core/configmaps@weirkeeper-policy"]),
+                if marker {
+                    pinned(&[
+                        "get core/configmaps@weirkeeper-policy",
+                        "get core/configmaps@logweir-signing-trust",
+                    ])
+                } else {
+                    pinned(&["get core/configmaps@weirkeeper-policy"])
+                },
             );
         }
         assert_grants(
@@ -3099,14 +3188,22 @@ fn chart_lint_the_console_pod_is_non_root_read_only_and_probes_only_where_it_can
                  group bit is what the process reads through under fsGroup: 65532 (0400 is a \
                  CrashLoopBackOff), and the world bit must stay off."
             );
+            // PROD-16.1: the ONE exception is the MANAGED console key — the
+            // identity hook fills its Secret AFTER this pod starts (a
+            // post-install hook), so it is optional and `logweir-api` reads
+            // the key on first use, refusing a confirmation until then. It is
+            // never a key the console invented.
+            let managed_console_key = name == "confirmation"
+                && volume["secret"]["secretName"].as_str() == Some("logweir-console-confirmation");
             assert_eq!(
-                Some(true),
+                Some(!managed_console_key),
                 volume["secret"]
                     .get("optional")
                     .map_or(Some(true), |o| Some(o.as_bool() != Some(true))),
                 "{render}.yaml: secret volume `{name}` must not be optional — a missing key \
                  Secret should hold the pod in ContainerCreating with an event naming it, not \
-                 start a console that invented its own key"
+                 start a console that invented its own key (the managed console key alone is \
+                 optional, and must be)"
             );
         }
 
@@ -3684,9 +3781,11 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
     assert_eq!(policy_role.value["metadata"]["namespace"], RELEASE_NS);
     let rules = policy_role.value["rules"].as_sequence().expect("rules");
     assert_eq!(rules.len(), 1, "one rule in the release namespace");
+    // PROD-16.1: and, with the console and the managed identity, the public
+    // identity ConfigMap the fresh-install marker is read from — by name, get.
     assert_eq!(
         serde_yaml::to_string(&rules[0]).unwrap(),
-        "apiGroups:\n- ''\nresources:\n- configmaps\nresourceNames:\n- weirkeeper-policy\nverbs:\n- get\n"
+        "apiGroups:\n- ''\nresources:\n- configmaps\nresourceNames:\n- weirkeeper-policy\n- logweir-signing-trust\nverbs:\n- get\n"
     );
     // Nothing else in the render grants the controller anything in the
     // release namespace.
@@ -5173,8 +5272,14 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // enforcing CNI can match, which an `ipBlock` for a ClusterIP is not).
     // Each is something an installation must state and the chart cannot
     // derive; the README carries every explanation.
+    //
+    // RAISED FROM 240 TO 245 FOR PROD-16.1, FIVE LINES AND NO PROSE:
+    // `approvalPolicy.default` (what an unbound namespace resolves to) and
+    // `identity.installationTrust` with its three keys (the fresh install's one
+    // TrustPolicy). The approval-policy header comment was shortened to pay for
+    // the operator's three mode names on one line.
     assert!(
-        lines <= 240,
+        lines <= 245,
         "charts/logweir/values.yaml is {lines} lines. The owner asked for a values file that is \
          read, not skimmed past: one short line per key, no paragraphs, and every explanation \
          in charts/logweir/README.md"
@@ -6025,8 +6130,11 @@ fn chart_lint_install_md_carries_bring_your_own_registry() {
 
 // ------------------------------------------- PLAT-19.2: approval-policy parity
 
-/// The `approvalPolicy` document a values file would render, exactly the three
-/// fields `templates/approval-policy.yaml` writes into the ConfigMap.
+/// The `approvalPolicy` document a values file would render, exactly the
+/// fields `templates/approval-policy.yaml` writes into the ConfigMap — and
+/// (PROD-16.1) `default`, which it writes as `defaultMode` when set. The mode
+/// spellings are passed through: the binary reads `confirm`/`strict` as the
+/// chart's translation does (`chart_lint_the_operator_mode_names_render_as_the_internal_ones`).
 fn approval_policy_document(values: &Value) -> String {
     let block = values.get("approvalPolicy").cloned().unwrap_or(Value::Null);
     let mut document = serde_yaml::Mapping::new();
@@ -6034,6 +6142,16 @@ fn approval_policy_document(values: &Value) -> String {
         if let Some(v) = block.get(field) {
             document.insert(Value::String(field.to_string()), v.clone());
         }
+    }
+    if let Some(default) = block
+        .get("default")
+        .and_then(Value::as_str)
+        .filter(|d| !d.is_empty())
+    {
+        document.insert(
+            Value::String("defaultMode".to_string()),
+            Value::String(default.to_string()),
+        );
     }
     serde_yaml::to_string(&Value::Mapping(document)).expect("a document")
 }
@@ -6053,7 +6171,7 @@ fn chart_lint_every_approval_policy_refusal_is_the_binarys() {
         .iter()
         .filter(|f| f.ends_with(".values.yaml"))
         .collect();
-    assert!(cases.len() >= 12, "the refusal list shrank: {cases:?}");
+    assert!(cases.len() >= 17, "the refusal list shrank: {cases:?}");
     for case in cases {
         let text = read(case);
         assert!(
@@ -6245,4 +6363,176 @@ fn chart_lint_every_chart_value_has_a_probe_row_that_must_change_the_render() {
         ),
         "scripts/check-chart.sh must run scripts/check-chart-values.sh"
     );
+}
+
+// ------------------------------------------- PROD-16.1: no approver key by default
+
+/// The bootstrap Job's arguments in a render.
+fn bootstrap_args(docs: &[Doc]) -> Vec<String> {
+    container(find(docs, "Job", "logweir-identity-bootstrap"))["args"]
+        .as_sequence()
+        .expect("bootstrap args")
+        .iter()
+        .map(|v| v.as_str().expect("string arg").to_string())
+        .collect()
+}
+
+/// **A fresh install with a console needs no key handled by a person**
+/// (PROD-16.1). In the console render the identity hook also manages the
+/// console's ConsoleConfirmation key — empty, retained, creation-only
+/// placeholders, `get`/`patch` by name and nothing else — creates the
+/// installation trust, and marks the fresh install `confirm`; the controller
+/// and the console are told where the marker is read; the console mounts the
+/// managed key `optional` (the hook fills it after the pod starts). The
+/// default render (no console) manages no console key and marks nothing:
+/// without a console nothing could confirm.
+///
+/// MUTANTS: drop `--mark-fresh-install-confirm` from the console render, pass
+/// it in the default render, render the console placeholders without `keep`,
+/// or widen the bootstrap Role with an unnamed Secret rule — each fails here.
+#[test]
+fn chart_lint_a_console_render_generates_the_console_key_and_marks_the_fresh_install() {
+    let docs = rendered("console");
+    for (kind, name) in [
+        ("Secret", "logweir-console-confirmation"),
+        ("ConfigMap", "logweir-console-trust"),
+    ] {
+        let object = find(&docs, kind, name);
+        let annotations = &object.value["metadata"]["annotations"];
+        assert_eq!(
+            Some("keep"),
+            annotations["helm.sh/resource-policy"].as_str()
+        );
+        assert_eq!(
+            Some("pre-install,pre-upgrade"),
+            annotations["helm.sh/hook"].as_str(),
+            "{kind}/{name} is a creation-only placeholder"
+        );
+        assert_eq!(
+            Some("uninitialized"),
+            annotations["logweir.dev/identity-state"].as_str()
+        );
+        assert!(
+            object.value["data"]
+                .as_mapping()
+                .is_some_and(serde_yaml::Mapping::is_empty),
+            "{kind}/{name}: Helm renders no key bytes"
+        );
+    }
+    let args = bootstrap_args(&docs);
+    for pair in [
+        ["--console-secret-name", "logweir-console-confirmation"],
+        ["--console-public-configmap-name", "logweir-console-trust"],
+        ["--installation-trust-policy", "logweir-installation"],
+    ] {
+        assert!(
+            args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]),
+            "console render: the hook is given {pair:?}: {args:?}"
+        );
+    }
+    assert!(
+        args.iter().any(|a| a == "--mark-fresh-install-confirm"),
+        "console render: a fresh install with a console starts in confirm: {args:?}"
+    );
+    // The Role: every rule named, no list, no wildcard, the console objects in.
+    let role = find(&docs, "Role", "logweir-identity-bootstrap");
+    let mut named: BTreeSet<String> = BTreeSet::new();
+    for rule in role.value["rules"].as_sequence().expect("rules") {
+        let names = rule["resourceNames"]
+            .as_sequence()
+            .filter(|n| !n.is_empty())
+            .expect("every bootstrap permission is resourceNames-scoped");
+        for verb in rule["verbs"].as_sequence().expect("verbs") {
+            assert!(
+                matches!(verb.as_str(), Some("get" | "patch")),
+                "bootstrap verbs are get and patch only: {verb:?}"
+            );
+        }
+        named.extend(names.iter().map(|n| n.as_str().expect("name").to_string()));
+    }
+    for name in ["logweir-console-confirmation", "logweir-console-trust"] {
+        assert!(
+            named.contains(name),
+            "{name} is reachable by name: {named:?}"
+        );
+    }
+    // The readers of the marker.
+    let deployment = find(&docs, "Deployment", "weirkeeper");
+    let env = container(deployment)["env"].as_sequence().expect("env");
+    assert!(
+        env.iter().any(
+            |e| e["name"].as_str() == Some("LOGWEIR_IDENTITY_PUBLIC_CONFIGMAP")
+                && e["value"].as_str() == Some("logweir-signing-trust")
+        ),
+        "the controller reads the marker from the public identity ConfigMap"
+    );
+    let (_, config) = console_config("console");
+    assert_eq!(
+        config["installationIdentity"]["namespace"].as_str(),
+        Some("logweir-system")
+    );
+    assert_eq!(
+        config["installationIdentity"]["publicConfigMap"].as_str(),
+        Some("logweir-signing-trust")
+    );
+    assert_eq!(
+        config["confirmationKeyFile"].as_str(),
+        Some("/var/run/logweir/confirmation/confirmation.key")
+    );
+
+    // NEGATIVE CONTROL: the default render.
+    let default = rendered("default");
+    let args = bootstrap_args(&default);
+    assert!(
+        !args
+            .iter()
+            .any(|a| a == "--mark-fresh-install-confirm" || a.starts_with("--console")),
+        "the default render (no console) marks nothing and manages no console key: {args:?}"
+    );
+    assert!(
+        !default
+            .iter()
+            .any(|d| d.name() == "logweir-console-confirmation"
+                || d.name() == "logweir-console-trust"),
+        "no console key placeholder without a console"
+    );
+    let env = container(find(&default, "Deployment", "weirkeeper"))["env"]
+        .as_sequence()
+        .expect("env");
+    assert!(
+        !env.iter()
+            .any(|e| e["name"].as_str() == Some("LOGWEIR_IDENTITY_PUBLIC_CONFIGMAP")),
+        "the default controller reads no marker"
+    );
+}
+
+/// The operator's three mode names are one mapping, and the chart's half of
+/// it is the core's: `confirm` renders `Ordinary`, `strict` renders
+/// `Governed` (`templates/approval-policy.yaml`,
+/// `logweir.approvalPolicy.internalMode`), checked against
+/// `logweir_core::approval_policy::OperatorMode` and the binary's parser.
+#[test]
+fn chart_lint_the_operator_mode_names_render_as_the_internal_ones() {
+    let template = read("charts/logweir/templates/approval-policy.yaml");
+    for (operator, internal) in [("confirm", "Ordinary"), ("strict", "Governed")] {
+        assert!(
+            template.contains(&format!(
+                "(eq $m \"{operator}\") (eq $m \"{internal}\") -}}}}{internal}"
+            )),
+            "the chart maps {operator} to {internal}"
+        );
+        let parsed = logweir_core::approval_policy::ApprovalPolicySet::parse(&format!(
+            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: {operator}\nnamespaces:\n  team-a: p\n"
+        ))
+        .expect("the binary reads the operator name too");
+        let effective = parsed.resolve("team-a");
+        assert_eq!(effective.mode().as_str(), internal);
+        assert_eq!(
+            logweir_core::approval_policy::OperatorMode::of(&effective).as_str(),
+            operator
+        );
+    }
+    // check-chart.sh renders them (a #[test] may not shell out to helm).
+    let gate = read("scripts/check-chart.sh");
+    assert!(gate.contains("operator mode names render as the internal ones"));
 }

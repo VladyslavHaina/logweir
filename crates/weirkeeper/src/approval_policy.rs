@@ -166,12 +166,16 @@ async fn read_marker(
         .as_ref()
         .and_then(|d| d.get("key-id"))
         .map(String::as_str);
+    // A `list` by name, not a `get`: this controller's grant on the kind is
+    // `list`/`watch`/`patch` (its reflector and the compromise finalizer),
+    // and the marker is no reason to widen it.
     let policy = match claimed_policy(annotation) {
-        Some(policy) => {
-            Api::<TrustPolicy>::all(client.clone())
-                .get_opt(&policy)
-                .await?
-        }
+        Some(policy) => Api::<TrustPolicy>::all(client.clone())
+            .list(&kube::api::ListParams::default().fields(&format!("metadata.name={policy}")))
+            .await?
+            .items
+            .into_iter()
+            .find(|p| p.name_any() == policy),
         None => None,
     };
     Ok(marker_verdict(
