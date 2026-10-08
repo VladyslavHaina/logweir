@@ -181,6 +181,7 @@ their refusal text, so the agreement is checked rather than asserted.
 | `source.manifest_version_id` | string \| null | The store's version id for the manifest object, when the backend returned one. |
 | `source.captured_by_logweir` | bool | `true` **exactly when** phase −1 ran. `validate_invariants` enforces the pairing in **both** directions with `last_phase_completed` and the two `rpo_source_relative_*` fields, so it cannot be forged into a signed document. **Always `false` in v0.1.0.** |
 | `source.time_basis` | object, **optional** (1.3.0) | Which source topics the restore's time selection read by **producer time**, and which it selected by time with no recorded timestamp type. See [below](#sourcetime_basis-format-130). ABSENT means not recorded. |
+| `source.selection` | object, **optional** (1.7.0) | The plan's **replay selection** — its stated inclusive window start and per-topic partition subsets — for a narrowed restore. See [below](#sourceselection-format-170). ABSENT means the restore selected every partition of every restored topic from the archive's floor. |
 | `target.cluster_id` | string | The target cluster's own id, read from it. |
 | `target.mode` | string, optional | Which of the two target modes the run was in: `scratch` or `newTopic`. **Absent means `scratch`**, which is what every document written before this field existed carries, so the three checked-in signed fixtures keep their bytes. |
 | `target.marker_topic` | string, optional | The **scratch** segregation proof: the cluster is in `allowedClusterIds` **and** this topic exists, both verified at phase 0, whose failure refuses the drill with exit 3 before anything runs. **Absent in `newTopic` mode**, because that mode skips both checks — a reader that saw the field there would be reading a verification that never ran. Both readers REFUSE a document that is `scratch` and omits it. |
@@ -250,6 +251,70 @@ name, `docs/verify_scorecard.py`'s `FORMAT_VERSION` and
 `SCORECARD_TIME_BASIS_VERSION`, and the literal pins in
 `crates/logweir-core/src/lib.rs`, `docs/test_verify_scorecard.py` and the
 corpus cases `time_basis_*.json` (their `format_version` and TB-1's reason).
+
+### `source.selection` (format 1.7.0)
+
+```json
+"selection": {
+  "window_start_ms": 1788000000000,
+  "window_end_ms": 1788055200000,
+  "partitions": [{"topic": "orders", "partitions": [0, 2]}],
+  "engine_runs": 2
+}
+```
+
+A plan may narrow a restore with an inclusive `restore.window_start` and
+per-topic `restore.partitions` ([the plan fields](drill-spec.md#restorewindow_start-and-restorepartitions-prod-111)).
+A narrowed restore's document is format 1.7.0 and carries this block; the
+contract is [`PROD-11.1-replay-selection.md`](../to-do/decisions/PROD-11.1-replay-selection.md).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `window_start_ms` | integer, optional | The plan's stated inclusive start, epoch milliseconds. ABSENT means the window started at the archive set's floor (guard G-WIN). |
+| `window_end_ms` | integer | The inclusive end: `restore.point_in_time`, or `sample.window_end` when the plan states none. |
+| `partitions` | `{topic, partitions}[]` | The per-topic subsets, one entry per topic in ascending order, each list ascending and distinct. A restored topic not listed was restored on every partition the archive lists for it. |
+| `engine_runs` | integer | How many engine runs restored it: the engine's partition filter applies to every topic of one run, so topics with different subsets are different runs. |
+
+**Every verdict of such a document is judged over the selection only:**
+samples come only from selected partitions and from the stated start; the
+count bound and the per-partition presence check are the selected partitions'
+over `[window_start_ms, window_end_ms]`; a record found in a partition the plan
+did not select fails the run; a complete verification expects records only
+from selected partitions, by each record's own timestamp.
+
+**The existing fields name the selection too**, so a reader that predates the
+block never reads a narrowed restore as a full one: `sample.window_start` is
+never earlier than the stated start; `sample.coverage_note` opens with
+`replay selection: …`, naming every subset and the window; and a complete
+block's `window.start_ms` is the stated start and its `partitions[]` are the
+selected partitions (plus any unselected partition holding a record, which
+fails it).
+
+Seven arms, enforced by both readers in the same position (after
+`sample.unsampled_topics`, before `redactions`) and words, fire only on a
+document carrying the block:
+
+| Arm | Refuses |
+|---|---|
+| SEL-1 | the block under a `format_version` before 1.7.0 |
+| SEL-2 | a block with neither a start nor a subset: a restore that selects everything carries no block |
+| SEL-3 | a start at or after the end |
+| SEL-4 | subsets that are not each topic once, in order, with a non-empty, ascending list of distinct partitions that are not negative |
+| SEL-5 | `engine_runs: 0` |
+| SEL-6 | a complete block whose `window` is not the selection's start and end |
+| SEL-7 | a complete block expecting records from a partition the selection does not select |
+
+Each reads only the new block, or judges an existing field against it and can
+only refuse: MINOR under OD-7 (a). Both readers print one `replay selection:`
+coverage line for a document carrying the block; `logweir drill show` shows
+`sample.coverage_note`, which opens with the same sentence.
+
+**The number.** 1.7.0; 1.6.0 is FX-23's. A renumber moves
+`scorecard::FORMAT_VERSION_WITH_SELECTION` and `scorecard::SELECTION_SINCE_MINOR`
+together, the justfile's `scorecard_schema_version` and this schema file's
+name, `docs/verify_scorecard.py`'s `SCORECARD_SELECTION_SINCE_MINOR`, the parity
+script's `SCORECARD_SELECTION_VERSION`, and the corpus cases `selection_*.json`
+(their `format_version` and SEL-1's reason).
 
 ## `approval`
 

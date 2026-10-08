@@ -15,10 +15,11 @@ fn schema_scorecard_prints_the_schema() {
     assert!(
         s.contains(&format!(
             r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json""#,
-            // The newest minor (FX-23's 1.6.0); the writer still writes
-            // `FORMAT_VERSION` (1.4.0) for every original auth mode, and 1.6.0
-            // only for a scorecard that names an unsampled topic.
-            logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
+            // The newest minor (PROD-11.1's 1.7.0); the writer writes 1.7.0
+            // only for a restore that states a replay selection, 1.6.0 for
+            // every other sampled drill (FX-23), and 1.4.0/1.5.0 for a
+            // complete one.
+            logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
         )),
         "{s}"
     );

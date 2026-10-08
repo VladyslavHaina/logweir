@@ -185,6 +185,13 @@ The current scorecard checks include:
   that defines it; it is never empty, names no blank topic, is sorted with no
   repeat, and never sits beside a complete verification
   ([the arms](formats/drill-scorecard.md#sampleunsampled_topics-format-160)).
+- A `source.selection` block (format 1.7.0) appears only under a version that
+  defines it; it narrows something (a start or a subset); its start is before
+  its end; its subsets name each topic once, in order, each with a non-empty,
+  ascending list of distinct partitions that are not negative; it records at
+  least one engine run; and a complete block beside it uses its window and
+  expects nothing from a partition it does not select
+  ([the arms](formats/drill-scorecard.md#sourceselection-format-170)).
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
 
@@ -761,12 +768,13 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.22.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.23.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
 since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, `1.5.0` for a
-restore into a target whose auth mode is one PROD-01.3 added, or `1.6.0` for
-every sampled drill since FX-23). It
+restore into a target whose auth mode is one PROD-01.3 added, `1.6.0` for
+every sampled drill since FX-23, or `1.7.0` for a restore that states a replay
+selection since PROD-11.1). It
 changes when the reader's accepted-document set changes. The compatibility
 history is:
 
@@ -795,9 +803,21 @@ history is:
 | `1.21.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.4.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.4.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
 | `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line naming them; for every sampled `pass` it also prints a `sample coverage:` line saying whether the document's version proves FX-23's checks ran (only 1.6.0 or later does). Every document without the field is decided exactly as before. |
 
+| `1.23.0` | Knows scorecard format `1.7.0` (PROD-11.1). Adds `source.selection`'s seven arms (SEL-1 to SEL-7: only from 1.7.0; narrowing something; a start before the end; the subsets' one spelling; at least one engine run; a complete block over its window that expects nothing from an unselected partition), its shape check, and prints the `replay selection:` coverage line. Every document without the block is decided exactly as before. |
+
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
 reports `run_id`. Both refuse; this is not an acceptance disagreement.
+
+A verifier older than `1.23.0`, and a `logweir` built before PROD-11.1, accept a
+1.7.0 scorecard — the major is unchanged — ignore `source.selection` and print
+no `replay selection:` line. They never read the narrowed restore as a full
+one: its existing fields say what was restored (`sample.window_start` is never
+earlier than the stated start, `sample.coverage_note` opens with the selection,
+and a complete block's window and partitions are the selection's), and
+`logweir drill show` of any version prints the coverage note. Measured on a
+live narrowed scorecard with the 1.21.0 and 1.22.0 scripts: `VALID`, exit 0,
+`integrity coverage: every selected record compared: 6 expected …`.
 
 A verifier older than `1.22.0`, and a `logweir` built before FX-23, accept a
 1.6.0 scorecard — the major is unchanged — ignore `sample.unsampled_topics`

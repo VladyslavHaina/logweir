@@ -733,7 +733,7 @@ mod tests {
         assert_eq!(
             none.len(),
             1,
-            "no subset: one run, the pre-PROD-11.1 document"
+            "no subset: one run, the document every plan rendered before"
         );
         assert_eq!(none[0].source_partitions, None);
     }
