@@ -2017,6 +2017,9 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "an early-stopped restore is never signed pass",
             "sample.unsampled_topics",
         ),
+        // PROD-11.1 (2026-10-08): a plan may select a window start and
+        // per-topic partitions, and the scorecard signs the selection.
+        ("a restore can select a window start", "source.selection"),
     ];
     assert_eq!(
         items.len(),

@@ -453,6 +453,46 @@ side:
   the 1.6.0 documents already written stay valid under both readers. Its
   `pass` over an early-stopped restore is the defect this section closes.
 
+### Scorecard format 1.7.0: `source.selection`, a narrowed restore's replay selection (PROD-11.1)
+
+A plan may narrow a restore with an inclusive `restore.window_start` and
+per-topic `restore.partitions`
+([the plan fields](formats/drill-spec.md#restorewindow_start-and-restorepartitions-prod-111)).
+Guard G-WIN is amended, not removed: a start STATED in the approved plan is the
+plan's own (`InheritedFromSpec`), is never earlier than the archive set's floor
+(refused, never moved to it), is re-derived by phase 5 from the spec and the
+manifest, and is signed
+([the decision record](to-do/decisions/PROD-11.1-replay-selection.md) §2).
+
+- **The signed block.** A narrowed restore's scorecard carries
+  `source.selection {window_start_ms?, window_end_ms, partitions[], engine_runs}`
+  and is format **1.7.0** (MINOR): arms SEL-1 to SEL-7 read only the block or
+  judge an existing field against it and can only refuse (OD-7 (a)). Every
+  other document is the one it was.
+- **Every verdict is the selection's.** Samples come only from selected
+  partitions and from the stated start; the count bound and the per-partition
+  presence check are the selected partitions' over the selection's window; a
+  record in a partition the plan did not select fails the run (a new cause for
+  the existing `fail-integrity`, only on a narrowed restore); a complete
+  verification expects records only from selected partitions.
+- **An older reader never reads a narrowed restore as a full one**, because the
+  existing fields name the selection: `sample.window_start` is never earlier
+  than the stated start, `sample.coverage_note` opens with `replay selection:`,
+  and a complete block's `window.start_ms` and `partitions[]` are the
+  selection's. A 1.21.0 or 1.22.0 `verify_scorecard.py` accepts a narrowed
+  1.7.0 document and prints `every selected record compared`; it prints no
+  selection line, and claims no full one.
+- **One engine run per distinct subset.** The engine's `source_partitions`
+  applies to every topic of a run, so topics with different subsets are
+  separate runs, each with its own document, checkpoint and offset report;
+  the uploaded offset report of such a restore is a JSON array of the runs'
+  reports in run order (`null` for a run that wrote none). A restore with one
+  run keeps the engine's own report object.
+- **A runner built before PROD-11.1 ignores both plan keys** and restores the
+  full selection — wider than the plan states, into new topics only — and its
+  scorecard, without the block, truthfully describes the full restore it did.
+  Plans with a selection need this release's runner.
+
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the

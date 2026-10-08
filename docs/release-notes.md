@@ -24,8 +24,9 @@ publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
 key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog),
 32 (PROD-05.1), 33 (PROD-01.3, client authentication modes and the credential
 binding), 34 (FX-16, a point-bound restore restores its point's set) and 35
-(PROD-00.2, the engine built from the vendored source) and 36 (FX-23, an
-early-stopped restore is never signed `pass`) so far. Items continue the next entry's
+(PROD-00.2, the engine built from the vendored source), 36 (FX-23, an
+early-stopped restore is never signed `pass`) and 37 (PROD-11.1, a restore can
+select a window start and per-topic partitions) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -695,6 +696,41 @@ killed) are unit rows (`crates/logweir/tests/stopped_restore.rs`).
 aggregate bound and ignores the engine report; the 1.6.0 scorecards already
 written stay valid under both readers, and an older reader ignores the field.
 
+#### 37. A restore can select a window start and per-topic partitions, and the scorecard signs what it selected (PROD-11.1)
+
+**Added.** A drill or restore plan may state an inclusive
+`restore.window_start` and per-topic `restore.partitions`
+([drill-spec.md](formats/drill-spec.md#restorewindow_start-and-restorepartitions-prod-111)).
+Absent, a restore is what it was. A start before the archive's coverage, a
+partition the archive does not list, a malformed subset and a selection no
+archived segment overlaps are refused (exit 3) before any target topic is
+created — never widened. Topics with different subsets are restored by one
+engine run each (the engine's partition filter applies to every topic of a
+run); phase 5 checks every run's document against the approved plan; phases 4
+and 7 judge only the selection, and a record in an unselected partition fails
+the run. The restore preflight previews the selection through the same
+function execution uses (`WindowStartBeforeCoverage`,
+`PartitionNotInBackupSet`, `SelectionEmpty`, `SelectionInvalid`). A narrowed
+restore's scorecard is format **1.7.0** and carries `source.selection`; its
+existing fields (`sample.window_start`, `sample.coverage_note`, a complete
+block's window and partitions) name the selection too
+([stability.md](stability.md#scorecard-format-170-sourceselection-a-narrowed-restores-replay-selection-prod-111)).
+`verify_scorecard.py` 1.23.0 checks it (arms SEL-1 to SEL-7).
+**Do:** nothing for a plan without a selection. Run plans with a selection on
+this release's runner: an older one ignores both keys and restores everything.
+The `Restore` CRD and the console are unchanged (the console's advanced
+selection is PROD-11.1a); a `Restore` carries the plan bytes as they are.
+**Scope:** six compose rows (slot 3, Kafka 3.7.1, engine `0.23.3+logweir.1`)
+with an oracle of their own: inclusive vs exclusive at the start with equal
+and non-monotonic timestamps; a segment whose last record is before the start
+hides an in-window record, which complete coverage fails (the engine's limit,
+PROD-01.1b); different subsets on two topics (two engine runs) with a topic
+subset, under both coverages; the refusals with a control; a compaction hole
+inside a sub-window; a newer backup set arriving after approval.
+**Rollback:** an older runner ignores the selection (above); 1.7.0 scorecards
+already written stay valid under both readers, and an older reader ignores the
+block.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -749,7 +785,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35 and 36, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36 and 37, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -760,7 +796,9 @@ the runner, the console and the `KafkaCluster` CRD, and needs each credentialed
 connection's Secret bound; item 34 changes the runner only; item 35 changes the
 runner image (its engine and its platforms) and the controller's Job
 environment together; item 36 changes the runner's sampled verification and
-needs nothing. To roll back to
+needs nothing; item 37 changes the runner and both readers and needs nothing
+(an older runner ignores a plan's selection and restores everything). To roll
+back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
