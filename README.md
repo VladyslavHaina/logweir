@@ -116,7 +116,8 @@ prove the unsampled portion of the archive. Read the
 
 Logweir does not link upstream's core or consume OSO operator CRDs. It
 redistributes the MIT-licensed pinned engine, with its source and attribution
-in [third_party](third_party/README.md). The full-drill engine floor is 0.21.0;
+in [third_party](third_party/README.md). The pinned engine is `kafka-backup`
+0.23.3 and the full-drill engine floor is 0.21.0;
 [the support matrix](docs/support-matrix.md) distinguishes exercised versions
 from unsupported or untested ones. The engine's own `validation run` is not
 invoked by the current adapter, so `engine_subreport` remains null.

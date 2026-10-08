@@ -40,9 +40,49 @@
 //!
 //! A namespace with no binding resolves to [`EffectivePolicy::Legacy`]
 //! (`legacy-governed-v1`), which is TODAY'S behaviour byte for byte: a v1
-//! approval document signed by a `GovernedApproval` key. Nothing synthesises
-//! `Ordinary`; it exists only where the installation both binds it and sets
-//! `allowOrdinaryConfirmation: true`.
+//! approval document signed by a `GovernedApproval` key — UNLESS the
+//! installation's unbound default says `confirm` (PROD-16.1, below).
+//!
+//! # PROD-16.1: the unbound default, and why an upgrade never reaches it
+//!
+//! OD-8 (2026-10-07) amends D0: a FRESH install starts with one-person
+//! confirmation in the console for every namespace without a binding, so the
+//! first restore needs no personal key. An unbound namespace then resolves to
+//! [`default_confirm_policy`] (`default-confirm-v1`, `Ordinary`), a concrete,
+//! content-addressed policy like any other: the console signs a v2 document
+//! naming it, and every checkpoint compares that name and digest exactly as for
+//! an explicit binding.
+//!
+//! What decides it, in this order ([`ApprovalPolicySet::unbound_basis`]):
+//!
+//! 1. `defaultMode` in the installation document (`approvalPolicy.default` in
+//!    the chart): `confirm` or `strict`, an explicit installation-admin
+//!    rollout — and the way an operator of an OLDER install opts in;
+//! 2. otherwise the FRESH-INSTALL MARKER ([`InstallationMarker`]): a
+//!    [`MarkerClaim`] that `logweir identity bootstrap` writes in the one run
+//!    that GENERATES the installation identity, naming the default
+//!    `TrustPolicy` the same run created for the identity and the console
+//!    key. [`verify_marker`] — the one decision both readers make — honours
+//!    it only beside that exact, hook-made trust entry. An upgraded install's
+//!    identity already existed, so the hook never marks it and never trusts
+//!    its console key, and an annotation patched in later names no such
+//!    entry: it stays `legacy-governed-v1` (D0: "Ordinary mode cannot be
+//!    enabled merely by upgrading");
+//! 3. otherwise `legacy-governed-v1`.
+//!
+//! The marker is runtime state (the API and the controller read it from the
+//! cluster), so [`ApprovalPolicySet::parse`] yields an UNMARKED set and the
+//! reader applies what it observed with [`ApprovalPolicySet::with_installation`].
+//! An unread or unreadable marker is [`InstallationMarker::Unmarked`]: the
+//! strict side.
+//!
+//! # The three modes the operator sees
+//!
+//! [`OperatorMode`] is the ONE mapping between the internal names, which stay
+//! because they are inside signed bytes and snapshots (`Ordinary`, `Governed`,
+//! `legacy-governed-v1`), and the names the chart values, the console and the
+//! docs use: `confirm`, `two-person` (PROD-16.2, not in this build) and
+//! `strict`.
 
 use std::collections::BTreeMap;
 
@@ -54,6 +94,36 @@ use crate::trust::KeyUsage;
 
 /// The name the synthesised policy of an unbound namespace carries.
 pub const LEGACY_GOVERNED_POLICY_NAME: &str = "legacy-governed-v1";
+
+/// PROD-16.1: the name of the policy an unbound namespace resolves to when the
+/// installation's unbound default is `confirm` ([`default_confirm_policy`]).
+/// Reserved: no declared policy may carry it.
+pub const DEFAULT_CONFIRM_POLICY_NAME: &str = "default-confirm-v1";
+
+/// PROD-16.1: the annotation that records a fresh install's `confirm` unbound
+/// default. It appears in TWO places, both written by the identity hook in the
+/// one run that GENERATES the installation identity, and both are required:
+///
+/// * on the public identity ConfigMap, as a [`MarkerClaim`] naming the
+///   installation `TrustPolicy` the same run created (name and UID) and the
+///   two key ids it trusts;
+/// * on that `TrustPolicy`, as the bare value [`APPROVAL_DEFAULT_CONFIRM`].
+///
+/// [`verify_marker`] honours the claim only when the policy it names exists
+/// with that UID, the hook's provenance, `default: true`, this annotation, and
+/// exactly those two keys with their one usage each. Anything else is
+/// [`InstallationMarker::Unmarked`] — `legacy-governed-v1`.
+pub const APPROVAL_DEFAULT_ANNOTATION: &str = "logweir.dev/approval-default";
+
+/// The value the hook-made `TrustPolicy` carries under
+/// [`APPROVAL_DEFAULT_ANNOTATION`], and the first field of a [`MarkerClaim`].
+pub const APPROVAL_DEFAULT_CONFIRM: &str = "confirm";
+
+/// PROD-16.1: the provenance annotation on the installation `TrustPolicy`.
+pub const CREATED_BY_ANNOTATION: &str = "logweir.dev/created-by";
+
+/// Its value: the identity hook.
+pub const CREATED_BY_IDENTITY_BOOTSTRAP: &str = "identity-bootstrap";
 
 /// The policy snapshot's own format version.
 pub const POLICY_SNAPSHOT_FORMAT_VERSION: &str = "1";
@@ -157,6 +227,343 @@ impl std::fmt::Display for ApprovalMode {
     }
 }
 
+/// PROD-16.1 — the three approval modes an OPERATOR sees, and the one place
+/// they are mapped onto the internal names.
+///
+/// | operator | internal | who approves |
+/// |---|---|---|
+/// | `confirm` | `Ordinary` (v2, the console's signature) | the requester, one click in the console |
+/// | `two-person` | PROD-16.2, not in this build | a second person, one click in the console |
+/// | `strict` | `Governed` (v2) or `legacy-governed-v1` (v1) | a human approver's personal key |
+///
+/// The internal names stay: they are inside signed documents and policy
+/// snapshots, and renaming them would change signed bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OperatorMode {
+    /// One-person confirmation in the console (`Ordinary`).
+    Confirm,
+    /// Two-person approval in the console — PROD-16.2. No policy in this
+    /// build resolves to it; it is named so the chart and the docs can refuse
+    /// it by name rather than as an unknown word.
+    TwoPerson,
+    /// A personal-key approval: `Governed` (the console confirms, an approver
+    /// countersigns with a `GovernedApproval` key) or `legacy-governed-v1`.
+    Strict,
+}
+
+impl OperatorMode {
+    /// The operator-facing spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirm => "confirm",
+            Self::TwoPerson => "two-person",
+            Self::Strict => "strict",
+        }
+    }
+
+    /// Parse an operator-facing spelling.
+    #[must_use]
+    pub fn from_operator_name(name: &str) -> Option<Self> {
+        match name {
+            "confirm" => Some(Self::Confirm),
+            "two-person" => Some(Self::TwoPerson),
+            "strict" => Some(Self::Strict),
+            _ => None,
+        }
+    }
+
+    /// What an effective policy is, in the operator's words.
+    #[must_use]
+    pub fn of(effective: &EffectivePolicy) -> Self {
+        match effective {
+            EffectivePolicy::Legacy => Self::Strict,
+            EffectivePolicy::Bound(policy) => match policy.mode {
+                ApprovalMode::Ordinary => Self::Confirm,
+                ApprovalMode::Governed => Self::Strict,
+            },
+        }
+    }
+
+    /// Whether the in-cluster administrator console (`localAdmin`) may serve
+    /// this mode. `confirm` may (PROD-16.1: the confirming principal is
+    /// `urn:logweir:local-admin#admin`, and whoever can reach that console can
+    /// confirm — stated in SECURITY.md); `strict` may, because an independent
+    /// approver key still decides; `two-person` may NOT, because the console's
+    /// one identity cannot be two people.
+    #[must_use]
+    pub const fn allowed_in_local_admin(self) -> bool {
+        !matches!(self, Self::TwoPerson)
+    }
+}
+
+impl std::fmt::Display for OperatorMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// PROD-16.1 — what the installation's fresh-install marker says, as one of
+/// its readers observed it. Never parsed from the policy document: the marker
+/// lives on the installation identity ([`APPROVAL_DEFAULT_ANNOTATION`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum InstallationMarker {
+    /// No marker, an unreadable one, or one not yet read: the strict side.
+    #[default]
+    Unmarked,
+    /// The identity bootstrap generated this installation's identity and
+    /// recorded that a fresh install starts in `confirm`.
+    FreshInstallConfirm,
+}
+
+/// PROD-16.1 — the fresh-install claim the identity hook writes on the public
+/// identity ConfigMap:
+/// `confirm;policy=<name>;uid=<uid>;signing=<keyId>;console=<keyId>`.
+///
+/// It BINDS the marker to what the same run created: the installation
+/// `TrustPolicy` by name AND by the UID the API server assigned it (a policy
+/// deleted and re-created, or one an administrator wrote, has another), the
+/// installation identity's key id, and the console key's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkerClaim {
+    /// The installation `TrustPolicy`'s name.
+    pub policy_name: String,
+    /// Its `metadata.uid` as the API server answered the hook's create.
+    pub policy_uid: String,
+    /// The installation identity's key id (`EvidenceSigning`).
+    pub signing_key_id: String,
+    /// The console key's id (`ConsoleConfirmation`).
+    pub console_key_id: String,
+}
+
+impl MarkerClaim {
+    /// The annotation value.
+    #[must_use]
+    pub fn to_annotation(&self) -> String {
+        format!(
+            "{APPROVAL_DEFAULT_CONFIRM};policy={};uid={};signing={};console={}",
+            self.policy_name, self.policy_uid, self.signing_key_id, self.console_key_id
+        )
+    }
+
+    /// Parse an annotation value. Exactly the five fields, in order, each
+    /// non-empty; anything else — the bare word `confirm` included — is not a
+    /// claim.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let mut parts = value.split(';');
+        if parts.next() != Some(APPROVAL_DEFAULT_CONFIRM) {
+            return None;
+        }
+        let mut field = |name: &str| {
+            parts
+                .next()
+                .and_then(|p| p.strip_prefix(name))
+                .and_then(|p| p.strip_prefix('='))
+                .filter(|v| !v.is_empty() && v.trim() == *v)
+                .map(str::to_string)
+        };
+        let claim = Self {
+            policy_name: field("policy")?,
+            policy_uid: field("uid")?,
+            signing_key_id: field("signing")?,
+            console_key_id: field("console")?,
+        };
+        parts.next().is_none().then_some(claim)
+    }
+}
+
+/// One key of a `TrustPolicy`, as a reader extracted it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustKeyFacts {
+    /// `keyId`.
+    pub key_id: String,
+    /// `usages`, as written.
+    pub usages: Vec<String>,
+    /// `principal.id`.
+    pub principal_id: String,
+}
+
+/// What a reader read of the `TrustPolicy` a [`MarkerClaim`] names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustPolicyFacts {
+    /// `metadata.uid`.
+    pub uid: String,
+    /// `spec.default`.
+    pub default: bool,
+    /// The [`CREATED_BY_ANNOTATION`] value.
+    pub created_by: Option<String>,
+    /// The [`APPROVAL_DEFAULT_ANNOTATION`] value.
+    pub approval_default: Option<String>,
+    /// `spec.keys`.
+    pub keys: Vec<TrustKeyFacts>,
+}
+
+/// Why a fresh-install marker was not honoured. Every arm is the strict side
+/// (`legacy-governed-v1`), and every arm is logged as a WARN by both readers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerRefusal {
+    /// The annotation is not a [`MarkerClaim`] (a bare `confirm`, a hand
+    /// edit, a truncated value).
+    NotAClaim,
+    /// The claim names another installation identity than the ConfigMap it
+    /// is on.
+    OtherIdentity,
+    /// The `TrustPolicy` it names does not exist.
+    PolicyMissing,
+    /// It exists with another UID: deleted and re-created, or written by
+    /// someone else.
+    PolicyReplaced,
+    /// It does not carry the hook's provenance or the confirm annotation.
+    NotHookMade,
+    /// It is no longer the default policy, so it no longer governs unbound
+    /// namespaces.
+    NotDefault,
+    /// It does not declare the claimed keys with exactly their one usage each
+    /// and the hook's principals.
+    KeysDiffer,
+}
+
+impl MarkerRefusal {
+    /// The sentence a WARN carries.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAClaim => "the annotation is not the claim the identity hook writes",
+            Self::OtherIdentity => "the claim names another installation identity",
+            Self::PolicyMissing => "the TrustPolicy the claim names does not exist",
+            Self::PolicyReplaced => "the TrustPolicy the claim names has another UID",
+            Self::NotHookMade => {
+                "the TrustPolicy the claim names lacks the identity hook's provenance or its \
+                 confirm annotation"
+            }
+            Self::NotDefault => "the TrustPolicy the claim names is no longer default: true",
+            Self::KeysDiffer => {
+                "the TrustPolicy the claim names does not declare the claimed keys with their \
+                 one usage each"
+            }
+        }
+    }
+}
+
+/// PROD-16.1 — THE ONE DECISION both readers (the console and the controller)
+/// make over the fresh-install marker, so they cannot disagree about it.
+///
+/// * `annotation`: the [`APPROVAL_DEFAULT_ANNOTATION`] value on the public
+///   identity ConfigMap, if any;
+/// * `identity_key_id`: that ConfigMap's `key-id`;
+/// * `installation_namespace`: its namespace;
+/// * `policy`: the `TrustPolicy` the claim names, as read (`None`: absent).
+///
+/// WHY THE BINDING (the PROD-16.1 security review). Before PROD-16.1, turning
+/// a governed namespace into one-person confirmation took two separate gates:
+/// an approval-policy rollout, and a trust administrator trusting the console
+/// key. An annotation alone would have been ONE ConfigMap patch. Bound, the
+/// marker is honoured only beside a trust entry the identity hook made in the
+/// same fresh-install run — so on an install that existed before, patching
+/// the annotation in changes nothing, and forging the trust entry is the
+/// trust administrator's gate, as before.
+///
+/// # Errors
+///
+/// `Ok(Unmarked)` for no annotation; `Err` for an annotation that is not
+/// honoured — which the caller ALSO treats as unmarked, and logs as a WARN.
+pub fn verify_marker(
+    annotation: Option<&str>,
+    identity_key_id: Option<&str>,
+    installation_namespace: &str,
+    policy: Option<&TrustPolicyFacts>,
+) -> Result<InstallationMarker, MarkerRefusal> {
+    let Some(annotation) = annotation else {
+        return Ok(InstallationMarker::Unmarked);
+    };
+    let claim = MarkerClaim::parse(annotation).ok_or(MarkerRefusal::NotAClaim)?;
+    if identity_key_id != Some(claim.signing_key_id.as_str()) {
+        return Err(MarkerRefusal::OtherIdentity);
+    }
+    let policy = policy.ok_or(MarkerRefusal::PolicyMissing)?;
+    if policy.uid != claim.policy_uid {
+        return Err(MarkerRefusal::PolicyReplaced);
+    }
+    if policy.created_by.as_deref() != Some(CREATED_BY_IDENTITY_BOOTSTRAP)
+        || policy.approval_default.as_deref() != Some(APPROVAL_DEFAULT_CONFIRM)
+    {
+        return Err(MarkerRefusal::NotHookMade);
+    }
+    if !policy.default {
+        return Err(MarkerRefusal::NotDefault);
+    }
+    let carries = |key_id: &str, usage: &str, principal_prefix: &str| {
+        policy.keys.iter().any(|k| {
+            k.key_id == key_id
+                && k.usages.len() == 1
+                && k.usages[0] == usage
+                && k.principal_id.starts_with(principal_prefix)
+        })
+    };
+    if !carries(
+        &claim.signing_key_id,
+        "EvidenceSigning",
+        &format!("install:{installation_namespace}/"),
+    ) || !carries(
+        &claim.console_key_id,
+        "ConsoleConfirmation",
+        &format!("console:{installation_namespace}/"),
+    ) {
+        return Err(MarkerRefusal::KeysDiffer);
+    }
+    Ok(InstallationMarker::FreshInstallConfirm)
+}
+
+/// The installation document's explicit unbound default (`defaultMode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UnboundDefault {
+    /// `defaultMode: confirm` — every unbound namespace is `default-confirm-v1`.
+    Confirm,
+    /// `defaultMode: strict` — every unbound namespace is `legacy-governed-v1`,
+    /// whatever the marker says.
+    Strict,
+}
+
+/// WHY an unbound namespace resolves the way it does — what the console shows
+/// beside the mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UnboundBasis {
+    /// `defaultMode` in the installation document.
+    Configured(UnboundDefault),
+    /// No `defaultMode`, and the fresh-install marker.
+    FreshInstall,
+    /// No `defaultMode` and no marker: `legacy-governed-v1`.
+    Legacy,
+}
+
+impl UnboundBasis {
+    /// The wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Configured(_) => "configured",
+            Self::FreshInstall => "freshInstall",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+/// PROD-16.1 — the policy an unbound namespace resolves to under a `confirm`
+/// unbound default: `Ordinary`, the ordinary default lifetime, no approver.
+///
+/// A CONSTANT, so the console and the controller compute the same snapshot and
+/// digest without sharing anything but this build.
+#[must_use]
+pub fn default_confirm_policy() -> ApprovalPolicy {
+    ApprovalPolicy {
+        name: DEFAULT_CONFIRM_POLICY_NAME.to_string(),
+        mode: ApprovalMode::Ordinary,
+        max_age_seconds: DEFAULT_ORDINARY_MAX_AGE_SECONDS,
+        require_distinct_principal: false,
+    }
+}
+
 /// One named, content-addressed approval policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApprovalPolicy {
@@ -250,11 +657,14 @@ impl ApprovalPolicy {
 /// What a namespace resolves to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EffectivePolicy {
-    /// No binding: `legacy-governed-v1`, today's behaviour. Accepts v1
-    /// approval documents signed by a `GovernedApproval` key and nothing else.
+    /// No binding and a `strict` (or unmarked) unbound default:
+    /// `legacy-governed-v1`, today's behaviour. Accepts v1 approval documents
+    /// signed by a `GovernedApproval` key and nothing else.
     Legacy,
-    /// An explicit installation binding. Accepts authorization document v2
-    /// naming exactly this policy, and nothing else.
+    /// An explicit installation binding, or (PROD-16.1) an unbound namespace
+    /// under a `confirm` unbound default, which is the concrete
+    /// [`default_confirm_policy`]. Accepts authorization document v2 naming
+    /// exactly this policy, and nothing else.
     Bound(ApprovalPolicy),
 }
 
@@ -300,12 +710,40 @@ impl EffectivePolicy {
     }
 }
 
+/// A policy's `mode` as the installation document may spell it: the internal
+/// names, or (PROD-16.1) the operator's. The chart renders the internal names,
+/// so an image-only rollback reads the same document it always did; a
+/// hand-written document may use either. Mapped onto [`ApprovalMode`] in ONE
+/// place, [`ModeSpelling::mode`].
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+enum ModeSpelling {
+    Governed,
+    Ordinary,
+    #[serde(rename = "confirm")]
+    Confirm,
+    #[serde(rename = "strict")]
+    Strict,
+    #[serde(rename = "two-person")]
+    TwoPerson,
+}
+
+impl ModeSpelling {
+    /// The internal mode, or `None` for `two-person` (PROD-16.2).
+    fn mode(self) -> Option<ApprovalMode> {
+        match self {
+            Self::Governed | Self::Strict => Some(ApprovalMode::Governed),
+            Self::Ordinary | Self::Confirm => Some(ApprovalMode::Ordinary),
+            Self::TwoPerson => None,
+        }
+    }
+}
+
 /// A policy as the installation document writes it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct PolicyEntry {
     name: String,
-    mode: ApprovalMode,
+    mode: ModeSpelling,
     #[serde(default)]
     max_age_seconds: Option<i64>,
     #[serde(default)]
@@ -313,11 +751,18 @@ struct PolicyEntry {
 }
 
 /// The installation document as written.
+///
+/// `defaultMode` (PROD-16.1) is a field an OLDER binary does not know, and
+/// `deny_unknown_fields` makes such a binary refuse the whole document at
+/// start — fail closed, never a silent fall back to an unbound default it
+/// cannot represent. The chart renders it only when it is set.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct PolicySetDocument {
     #[serde(default)]
     allow_ordinary_confirmation: bool,
+    #[serde(default)]
+    default_mode: Option<String>,
     #[serde(default)]
     policies: Vec<PolicyEntry>,
     #[serde(default)]
@@ -326,15 +771,21 @@ struct PolicySetDocument {
 
 /// The installation's approval policies and namespace bindings.
 ///
-/// `Default` is the installation that configured nothing: every namespace
-/// resolves to [`EffectivePolicy::Legacy`], which is what an upgrade without
-/// a policy document must mean (D0: "existing installations retain their
-/// approval requirement until explicitly changed").
+/// `Default` is the installation that configured nothing and is not marked:
+/// every namespace resolves to [`EffectivePolicy::Legacy`], which is what an
+/// upgrade without a policy document must mean (D0: "existing installations
+/// retain their approval requirement until explicitly changed"). A fresh
+/// install's readers apply the marker they observed with
+/// [`Self::with_installation`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApprovalPolicySet {
     allow_ordinary_confirmation: bool,
     policies: BTreeMap<String, ApprovalPolicy>,
     bindings: BTreeMap<String, String>,
+    /// `defaultMode`, when the document sets it.
+    default_mode: Option<UnboundDefault>,
+    /// The fresh-install marker as the reader observed it.
+    installation: InstallationMarker,
 }
 
 /// Why an installation document was refused. Every refusal names the field.
@@ -387,6 +838,36 @@ impl ApprovalPolicySet {
         }
         let document: PolicySetDocument = serde_yaml::from_str(text)
             .map_err(|e| PolicyConfigError(format!("the document does not parse: {e}")))?;
+        let default_mode = match document.default_mode.as_deref() {
+            None => None,
+            // D0's floor, kept for the explicit opt-in (PROD-16.1 security
+            // review): an Ordinary unbound default is an Ordinary policy, and
+            // a document that does not also say allowOrdinaryConfirmation
+            // never enables one.
+            Some("confirm") if !document.allow_ordinary_confirmation => {
+                return Err(PolicyConfigError(
+                    "defaultMode confirm is ordinary confirmation for every unbound namespace, \
+                     and allowOrdinaryConfirmation is not true; ordinary confirmation is an \
+                     explicit installation decision (D0) and is never enabled by one field alone"
+                        .to_string(),
+                ));
+            }
+            Some("confirm") => Some(UnboundDefault::Confirm),
+            Some("strict") => Some(UnboundDefault::Strict),
+            Some("two-person") => {
+                return Err(PolicyConfigError(
+                    "defaultMode two-person (two-person approval in the console) is not available in this \
+                     release; use confirm or strict"
+                        .to_string(),
+                ));
+            }
+            Some(other) => {
+                return Err(PolicyConfigError(format!(
+                    "defaultMode {other:?} is not a mode; it is confirm or strict (or absent: the \
+                     fresh-install marker decides)"
+                )));
+            }
+        };
         if document.policies.len() > MAX_POLICIES {
             return Err(PolicyConfigError(format!(
                 "`policies` declares {} policies; at most {MAX_POLICIES}",
@@ -408,13 +889,23 @@ impl ApprovalPolicySet {
                     entry.name
                 )));
             }
-            if entry.name == LEGACY_GOVERNED_POLICY_NAME {
+            if entry.name == LEGACY_GOVERNED_POLICY_NAME
+                || entry.name == DEFAULT_CONFIRM_POLICY_NAME
+            {
                 return Err(PolicyConfigError(format!(
-                    "{field}.name {LEGACY_GOVERNED_POLICY_NAME:?} is reserved for the policy an \
-                     unbound namespace resolves to; leave the namespace unbound instead"
+                    "{field}.name {:?} is reserved for the policy an unbound namespace resolves \
+                     to; leave the namespace unbound instead",
+                    entry.name
                 )));
             }
-            if entry.mode == ApprovalMode::Ordinary && !document.allow_ordinary_confirmation {
+            let Some(mode) = entry.mode.mode() else {
+                return Err(PolicyConfigError(format!(
+                    "{field} ({}) is two-person (two-person approval in the console), which is not \
+                     available in this release; use confirm (Ordinary) or strict (Governed)",
+                    entry.name
+                )));
+            };
+            if mode == ApprovalMode::Ordinary && !document.allow_ordinary_confirmation {
                 return Err(PolicyConfigError(format!(
                     "{field} ({}) is Ordinary but allowOrdinaryConfirmation is not true; ordinary \
                      confirmation is an explicit installation decision (D0) and is never enabled \
@@ -422,7 +913,7 @@ impl ApprovalPolicySet {
                     entry.name
                 )));
             }
-            let require_distinct_principal = match (entry.mode, entry.require_distinct_principal) {
+            let require_distinct_principal = match (mode, entry.require_distinct_principal) {
                 (ApprovalMode::Governed, None | Some(true)) => true,
                 (ApprovalMode::Governed, Some(false)) => {
                     return Err(PolicyConfigError(format!(
@@ -439,7 +930,7 @@ impl ApprovalPolicySet {
                     )))
                 }
             };
-            let max_age_seconds = entry.max_age_seconds.unwrap_or(match entry.mode {
+            let max_age_seconds = entry.max_age_seconds.unwrap_or(match mode {
                 ApprovalMode::Governed => DEFAULT_GOVERNED_MAX_AGE_SECONDS,
                 ApprovalMode::Ordinary => DEFAULT_ORDINARY_MAX_AGE_SECONDS,
             });
@@ -451,7 +942,7 @@ impl ApprovalPolicySet {
             }
             let policy = ApprovalPolicy {
                 name: entry.name.clone(),
-                mode: entry.mode,
+                mode,
                 max_age_seconds,
                 require_distinct_principal,
             };
@@ -479,24 +970,82 @@ impl ApprovalPolicySet {
             allow_ordinary_confirmation: document.allow_ordinary_confirmation,
             policies,
             bindings: document.namespaces,
+            default_mode,
+            installation: InstallationMarker::Unmarked,
         })
     }
 
-    /// What `namespace` resolves to.
+    /// This set as a reader that observed `marker` sees it (PROD-16.1).
+    ///
+    /// The document is the same; only the unbound default can move, and only
+    /// when the document sets no `defaultMode`.
+    #[must_use]
+    pub fn with_installation(mut self, marker: InstallationMarker) -> Self {
+        self.installation = marker;
+        self
+    }
+
+    /// The marker this set was given.
+    #[must_use]
+    pub fn installation(&self) -> InstallationMarker {
+        self.installation
+    }
+
+    /// The explicit `defaultMode`, when the document sets one.
+    #[must_use]
+    pub fn default_mode(&self) -> Option<UnboundDefault> {
+        self.default_mode
+    }
+
+    /// Why an UNBOUND namespace resolves the way it does — the order is the
+    /// module header's: an explicit `defaultMode`, then the fresh-install
+    /// marker, then `legacy-governed-v1`.
+    #[must_use]
+    pub fn unbound_basis(&self) -> UnboundBasis {
+        match (self.default_mode, self.installation) {
+            (Some(explicit), _) => UnboundBasis::Configured(explicit),
+            (None, InstallationMarker::FreshInstallConfirm) => UnboundBasis::FreshInstall,
+            (None, InstallationMarker::Unmarked) => UnboundBasis::Legacy,
+        }
+    }
+
+    /// What an unbound namespace resolves to.
+    #[must_use]
+    pub fn unbound(&self) -> EffectivePolicy {
+        match self.unbound_basis() {
+            UnboundBasis::Configured(UnboundDefault::Confirm) | UnboundBasis::FreshInstall => {
+                EffectivePolicy::Bound(default_confirm_policy())
+            }
+            UnboundBasis::Configured(UnboundDefault::Strict) | UnboundBasis::Legacy => {
+                EffectivePolicy::Legacy
+            }
+        }
+    }
+
+    /// Whether `namespace` has an explicit binding.
+    #[must_use]
+    pub fn is_bound(&self, namespace: &str) -> bool {
+        self.bindings.contains_key(namespace)
+    }
+
+    /// What `namespace` resolves to: its explicit binding — which always wins
+    /// — or the unbound default ([`Self::unbound`]).
     #[must_use]
     pub fn resolve(&self, namespace: &str) -> EffectivePolicy {
         self.bindings
             .get(namespace)
             .and_then(|name| self.policies.get(name))
-            .map_or(EffectivePolicy::Legacy, |policy| {
-                EffectivePolicy::Bound(policy.clone())
-            })
+            .map_or_else(
+                || self.unbound(),
+                |policy| EffectivePolicy::Bound(policy.clone()),
+            )
     }
 
-    /// Whether anything is configured at all.
+    /// Whether the DOCUMENT configures anything at all (a policy, a binding or
+    /// a `defaultMode`); the marker is not configuration.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.policies.is_empty() && self.bindings.is_empty()
+        self.policies.is_empty() && self.bindings.is_empty() && self.default_mode.is_none()
     }
 
     /// The installation floor.
@@ -514,6 +1063,12 @@ impl ApprovalPolicySet {
     /// `sha256:<hex>` over the canonical form of the whole document — the
     /// readiness value D0 asks both processes to expose, so an operator can
     /// see that the console and the controller run the same configuration.
+    ///
+    /// PROD-16.1: it also covers what an UNBOUND namespace resolves to, when
+    /// that is not `legacy-governed-v1` — so a console that has read the
+    /// fresh-install marker and a controller that has not yet publish
+    /// different digests, and the disagreement is visible. An installation
+    /// whose unbound namespaces are legacy keeps the digest it always had.
     #[must_use]
     pub fn digest(&self) -> String {
         #[derive(Serialize)]
@@ -522,11 +1077,14 @@ impl ApprovalPolicySet {
             allow_ordinary_confirmation: bool,
             policies: Vec<String>,
             namespaces: &'a BTreeMap<String, String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            unbound_default: Option<String>,
         }
         let canonical = Canonical {
             allow_ordinary_confirmation: self.allow_ordinary_confirmation,
             policies: self.policies.values().map(ApprovalPolicy::digest).collect(),
             namespaces: &self.bindings,
+            unbound_default: self.unbound().digest(),
         };
         sha256_prefixed(&serde_json::to_vec(&canonical).unwrap_or_default())
     }
@@ -1324,6 +1882,391 @@ namespaces:
         assert_eq!(
             ApprovalMode::Governed.required_usages(),
             &[KeyUsage::ConsoleConfirmation, KeyUsage::GovernedApproval]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // PROD-16.1: the unbound default
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn a_fresh_install_resolves_every_unbound_namespace_to_confirm() {
+        let fresh =
+            ApprovalPolicySet::default().with_installation(InstallationMarker::FreshInstallConfirm);
+        let effective = fresh.resolve("anything");
+        assert_eq!(effective, EffectivePolicy::Bound(default_confirm_policy()));
+        assert_eq!(effective.mode(), ApprovalMode::Ordinary);
+        assert_eq!(effective.name(), DEFAULT_CONFIRM_POLICY_NAME);
+        assert_eq!(OperatorMode::of(&effective), OperatorMode::Confirm);
+        assert_eq!(fresh.unbound_basis(), UnboundBasis::FreshInstall);
+        // NEGATIVE CONTROL: the same empty document, unmarked.
+        let unmarked = ApprovalPolicySet::default();
+        assert_eq!(unmarked.resolve("anything"), EffectivePolicy::Legacy);
+        assert_eq!(
+            OperatorMode::of(&unmarked.resolve("anything")),
+            OperatorMode::Strict
+        );
+    }
+
+    #[test]
+    fn an_upgraded_install_keeps_legacy_for_its_unbound_namespaces() {
+        // An upgraded install's identity already existed, so it carries no
+        // marker; its document (here the PLAT-19.2 example) keeps every
+        // unbound namespace on legacy-governed-v1, and every binding as it was.
+        let upgraded = set();
+        assert_eq!(upgraded.installation(), InstallationMarker::Unmarked);
+        assert_eq!(upgraded.resolve("elsewhere"), EffectivePolicy::Legacy);
+        assert_eq!(upgraded.unbound_basis(), UnboundBasis::Legacy);
+        assert_eq!(upgraded.resolve("team-a").name(), "team-ordinary");
+        assert_eq!(upgraded.resolve("prod").name(), "prod-governed");
+        // A parse never marks: the marker is only ever applied by a reader.
+        assert_eq!(
+            ApprovalPolicySet::parse(DOC).map(|s| s.installation()),
+            Ok(InstallationMarker::Unmarked)
+        );
+    }
+
+    #[test]
+    fn explicit_bindings_win_over_the_unbound_default() {
+        let fresh = set().with_installation(InstallationMarker::FreshInstallConfirm);
+        assert_eq!(
+            fresh.resolve("prod").mode(),
+            ApprovalMode::Governed,
+            "bound Governed stays"
+        );
+        assert_eq!(fresh.resolve("prod").name(), "prod-governed");
+        assert_eq!(fresh.resolve("team-a").name(), "team-ordinary");
+        assert!(fresh.is_bound("prod") && !fresh.is_bound("elsewhere"));
+        assert_eq!(
+            fresh.resolve("elsewhere").name(),
+            DEFAULT_CONFIRM_POLICY_NAME
+        );
+    }
+
+    #[test]
+    fn an_explicit_default_mode_beats_the_marker_both_ways() {
+        let strict = ApprovalPolicySet::parse("defaultMode: strict\n")
+            .unwrap_or_else(|e| panic!("{e}"))
+            .with_installation(InstallationMarker::FreshInstallConfirm);
+        assert_eq!(strict.resolve("x"), EffectivePolicy::Legacy);
+        assert_eq!(
+            strict.unbound_basis(),
+            UnboundBasis::Configured(UnboundDefault::Strict)
+        );
+        // The opt-in of an OLDER install: no marker, an explicit confirm —
+        // which, like any Ordinary policy, needs D0's floor.
+        let opted_in =
+            ApprovalPolicySet::parse("allowOrdinaryConfirmation: true\ndefaultMode: confirm\n")
+                .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(opted_in.installation(), InstallationMarker::Unmarked);
+        assert_eq!(
+            opted_in.resolve("x"),
+            EffectivePolicy::Bound(default_confirm_policy())
+        );
+        assert!(!opted_in.is_empty(), "defaultMode is configuration");
+        assert!(opted_in.allows_ordinary_confirmation());
+        let floorless = ApprovalPolicySet::parse("defaultMode: confirm\n");
+        assert!(
+            floorless
+                .as_ref()
+                .is_err_and(|e| e.0.contains("allowOrdinaryConfirmation")),
+            "{floorless:?}"
+        );
+    }
+
+    const NS: &str = "logweir-system";
+
+    fn claim() -> MarkerClaim {
+        MarkerClaim {
+            policy_name: "logweir-installation".into(),
+            policy_uid: "uid-7".into(),
+            signing_key_id: "a".repeat(64),
+            console_key_id: "b".repeat(64),
+        }
+    }
+
+    fn hook_policy() -> TrustPolicyFacts {
+        TrustPolicyFacts {
+            uid: "uid-7".into(),
+            default: true,
+            created_by: Some(CREATED_BY_IDENTITY_BOOTSTRAP.into()),
+            approval_default: Some(APPROVAL_DEFAULT_CONFIRM.into()),
+            keys: vec![
+                TrustKeyFacts {
+                    key_id: "a".repeat(64),
+                    usages: vec!["EvidenceSigning".into()],
+                    principal_id: format!("install:{NS}/logweir-signing-key"),
+                },
+                TrustKeyFacts {
+                    key_id: "b".repeat(64),
+                    usages: vec!["ConsoleConfirmation".into()],
+                    principal_id: format!("console:{NS}/logweir-console-confirmation"),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn the_claim_round_trips_and_nothing_else_parses() {
+        let c = claim();
+        assert_eq!(MarkerClaim::parse(&c.to_annotation()), Some(c.clone()));
+        for other in [
+            "confirm",
+            "Confirm;policy=p;uid=u;signing=s;console=c",
+            "confirm;policy=p;uid=u;signing=s",
+            "confirm;policy=p;uid=u;signing=s;console=c;extra=1",
+            "confirm;policy=;uid=u;signing=s;console=c",
+            "confirm;uid=u;policy=p;signing=s;console=c",
+            "confirm;policy=p ;uid=u;signing=s;console=c",
+        ] {
+            assert_eq!(MarkerClaim::parse(other), None, "{other:?}");
+        }
+    }
+
+    /// THE BOUND MARKER (PROD-16.1 security review): honoured only beside the
+    /// trust entry the identity hook made in the same fresh-install run. Each
+    /// row below breaks ONE binding and must read unmarked.
+    #[test]
+    fn the_marker_is_honoured_only_beside_the_hook_made_trust_entry() {
+        let annotation = claim().to_annotation();
+        let id = "a".repeat(64);
+        let ok = verify_marker(Some(&annotation), Some(&id), NS, Some(&hook_policy()));
+        assert_eq!(ok, Ok(InstallationMarker::FreshInstallConfirm));
+        assert_eq!(
+            verify_marker(None, Some(&id), NS, None),
+            Ok(InstallationMarker::Unmarked),
+            "no annotation is simply unmarked"
+        );
+        let refused = |annotation: &str,
+                       identity: &str,
+                       namespace: &str,
+                       policy: Option<TrustPolicyFacts>| {
+            verify_marker(Some(annotation), Some(identity), namespace, policy.as_ref()).err()
+        };
+        // A marker patched in by hand (the bare word the first draft used).
+        assert_eq!(
+            refused("confirm", &id, NS, Some(hook_policy())),
+            Some(MarkerRefusal::NotAClaim)
+        );
+        // A marker naming another identity.
+        assert_eq!(
+            refused(&annotation, &"c".repeat(64), NS, Some(hook_policy())),
+            Some(MarkerRefusal::OtherIdentity)
+        );
+        // No hook-made trust entry at all (an UPGRADED install).
+        assert_eq!(
+            refused(&annotation, &id, NS, None),
+            Some(MarkerRefusal::PolicyMissing)
+        );
+        // A policy of that name an administrator wrote later: another UID.
+        let mut replaced = hook_policy();
+        replaced.uid = "uid-8".into();
+        assert_eq!(
+            refused(&annotation, &id, NS, Some(replaced)),
+            Some(MarkerRefusal::PolicyReplaced)
+        );
+        for strip in [0, 1] {
+            let mut p = hook_policy();
+            if strip == 0 {
+                p.created_by = None;
+            } else {
+                p.approval_default = None;
+            }
+            assert_eq!(
+                refused(&annotation, &id, NS, Some(p)),
+                Some(MarkerRefusal::NotHookMade)
+            );
+        }
+        let mut not_default = hook_policy();
+        not_default.default = false;
+        assert_eq!(
+            refused(&annotation, &id, NS, Some(not_default)),
+            Some(MarkerRefusal::NotDefault)
+        );
+        // The console key missing, given another usage, or two.
+        let mut no_console = hook_policy();
+        no_console.keys.truncate(1);
+        let mut wrong_usage = hook_policy();
+        wrong_usage.keys[1].usages = vec!["GovernedApproval".into()];
+        let mut two_usages = hook_policy();
+        two_usages.keys[1].usages.push("EvidenceSigning".into());
+        for p in [no_console, wrong_usage, two_usages] {
+            assert_eq!(
+                refused(&annotation, &id, NS, Some(p)),
+                Some(MarkerRefusal::KeysDiffer)
+            );
+        }
+        assert_eq!(
+            refused(&annotation, &id, "elsewhere", Some(hook_policy())),
+            Some(MarkerRefusal::KeysDiffer),
+            "principals of another installation namespace"
+        );
+    }
+
+    #[test]
+    fn local_admin_may_serve_confirm_and_strict_but_never_two_person() {
+        assert!(OperatorMode::Confirm.allowed_in_local_admin());
+        assert!(OperatorMode::Strict.allowed_in_local_admin());
+        assert!(!OperatorMode::TwoPerson.allowed_in_local_admin());
+    }
+
+    #[test]
+    fn the_operator_names_are_one_mapping() {
+        for mode in [
+            OperatorMode::Confirm,
+            OperatorMode::TwoPerson,
+            OperatorMode::Strict,
+        ] {
+            assert_eq!(OperatorMode::from_operator_name(mode.as_str()), Some(mode));
+        }
+        assert_eq!(OperatorMode::from_operator_name("Ordinary"), None);
+        assert_eq!(
+            OperatorMode::of(&set().resolve("team-a")),
+            OperatorMode::Confirm
+        );
+        assert_eq!(
+            OperatorMode::of(&set().resolve("prod")),
+            OperatorMode::Strict
+        );
+        assert_eq!(
+            OperatorMode::of(&EffectivePolicy::Legacy),
+            OperatorMode::Strict
+        );
+        // A document may spell a policy's mode either way; the parsed policy,
+        // its snapshot and its digest are the internal ones.
+        let aliased = ApprovalPolicySet::parse(
+            &DOC.replace("mode: Ordinary", "mode: confirm")
+                .replace("mode: Governed", "mode: strict"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(aliased.digest(), set().digest());
+        assert_eq!(aliased.resolve("team-a"), set().resolve("team-a"));
+    }
+
+    #[test]
+    fn prod_16_1_refusals_name_the_field() {
+        for (text, needle) in [
+            (
+                "policies:\n  - name: default-confirm-v1\n    mode: Governed\n",
+                "reserved",
+            ),
+            ("defaultMode: two-person\n", "not available in this release"),
+            ("defaultMode: Ordinary\n", "not a mode"),
+            ("defaultMode: \"\"\n", "not a mode"),
+            (
+                "policies:\n  - name: p\n    mode: two-person\n",
+                "not available in this release",
+            ),
+            (
+                "policies:\n  - name: p\n    mode: confirm\n",
+                "allowOrdinaryConfirmation",
+            ),
+        ] {
+            let err = ApprovalPolicySet::parse(text)
+                .err()
+                .unwrap_or_else(|| panic!("{text:?} must be refused"));
+            assert!(err.0.contains(needle), "{text:?}: {err}");
+        }
+    }
+
+    /// THE OLDER READER, frozen: `PolicySetDocument` exactly as PLAT-19.2
+    /// shipped it. A document carrying `defaultMode` must be REFUSED by it —
+    /// an older controller or console reached by rollback refuses to start
+    /// rather than run every unbound namespace on a default it cannot know
+    /// (fail closed, never open).
+    #[test]
+    fn an_older_reader_refuses_the_new_field_and_never_reads_the_marker() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        #[allow(dead_code)]
+        struct OldPolicySetDocument {
+            #[serde(default)]
+            allow_ordinary_confirmation: bool,
+            #[serde(default)]
+            policies: Vec<serde_yaml::Value>,
+            #[serde(default)]
+            namespaces: BTreeMap<String, String>,
+        }
+        let old = |text: &str| serde_yaml::from_str::<OldPolicySetDocument>(text).is_ok();
+        assert!(
+            !old("defaultMode: confirm\n"),
+            "an older reader must refuse defaultMode"
+        );
+        assert!(!old("defaultMode: strict\n"));
+        // NEGATIVE CONTROL: the document an install without `approvalPolicy.default`
+        // renders is still one the older reader accepts.
+        assert!(old(DOC));
+        assert!(ApprovalPolicySet::parse(
+            "allowOrdinaryConfirmation: true\ndefaultMode: confirm\n"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn the_default_confirm_policy_is_canonical_and_checks_like_a_binding() {
+        let p = default_confirm_policy();
+        assert_eq!(
+            String::from_utf8(p.snapshot_bytes()).unwrap_or_default(),
+            "{\"formatVersion\":\"1\",\"kind\":\"ApprovalPolicySnapshot\",\"name\":\"default-confirm-v1\",\"mode\":\"Ordinary\",\"maxAgeSeconds\":900,\"requireDistinctPrincipal\":false}"
+        );
+        assert_eq!(
+            ApprovalPolicy::from_snapshot_bytes(&p.snapshot_bytes()),
+            Ok(p.clone())
+        );
+        let mut d = doc(&p);
+        d.requester = Requester {
+            issuer: "urn:logweir:local-admin".into(),
+            subject: "admin".into(),
+        };
+        let fresh =
+            ApprovalPolicySet::default().with_installation(InstallationMarker::FreshInstallConfirm);
+        let bound = fresh.resolve("team-a");
+        let bound = bound.bound().cloned().unwrap_or_else(|| panic!("confirm"));
+        assert_eq!(
+            check_restore_authorization(&d, &expected(), &bound, at("2026-09-22T10:05:00Z")),
+            Ok(())
+        );
+        // NEGATIVE CONTROL: an unmarked installation resolves the same
+        // namespace to legacy, where no v2 document is accepted at all.
+        assert!(ApprovalPolicySet::default()
+            .resolve("team-a")
+            .bound()
+            .is_none());
+    }
+
+    #[test]
+    fn the_set_digest_names_the_unbound_default_only_when_it_is_not_legacy() {
+        // An install whose unbound namespaces are legacy keeps the PLAT-19.2
+        // digest, computed here by the old formula.
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Old<'a> {
+            allow_ordinary_confirmation: bool,
+            policies: Vec<String>,
+            namespaces: &'a BTreeMap<String, String>,
+        }
+        let s = set();
+        let old = sha256_prefixed(
+            &serde_json::to_vec(&Old {
+                allow_ordinary_confirmation: true,
+                policies: s.policies.values().map(ApprovalPolicy::digest).collect(),
+                namespaces: &s.bindings,
+            })
+            .unwrap_or_default(),
+        );
+        assert_eq!(s.digest(), old);
+        let fresh = set().with_installation(InstallationMarker::FreshInstallConfirm);
+        assert_ne!(
+            fresh.digest(),
+            old,
+            "a reader that saw the marker publishes another digest"
+        );
+        let explicit =
+            ApprovalPolicySet::parse(&format!("defaultMode: confirm\n{DOC}")).unwrap_or_default();
+        assert_eq!(
+            explicit.digest(),
+            fresh.digest(),
+            "confirm is confirm, whatever decided it"
         );
     }
 

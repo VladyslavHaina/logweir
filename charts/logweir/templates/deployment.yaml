@@ -166,6 +166,18 @@ spec:
             - name: LOGWEIR_APPROVAL_POLICY_FILE
               value: {{ include "logweir.approvalPolicy.file" . | quote }}
             {{- end }}
+            {{- /*
+            PROD-16.1 — where the fresh-install marker is read (the public
+            identity ConfigMap in the release namespace, beside the TrustPolicy
+            its claim names). RENDERED ONLY WITH A CONSOLE AND THE MANAGED
+            IDENTITY (`logweir.freshInstallConfirm`): without a console nothing
+            could confirm, and the default install stays byte-identical to
+            `logweir.yaml`.
+            */ -}}
+            {{- if include "logweir.freshInstallConfirm" . }}
+            - name: LOGWEIR_IDENTITY_PUBLIC_CONFIGMAP
+              value: {{ .Values.identity.publicConfigMapName | quote }}
+            {{- end }}
             {{- if $endpoint }}
             - name: AWS_ENDPOINT_URL
               value: {{ $endpoint | quote }}

@@ -2987,8 +2987,10 @@ pub async fn reconcile_approval_with_policy_at(
 async fn reconcile(
     approval: Arc<Approval>,
     ctx: Arc<Context>,
-    policies: Arc<ApprovalPolicySet>,
+    policies: crate::approval_policy::PolicySource,
 ) -> Result<Action, ReconcileError> {
+    // PROD-16.1: the document with the fresh-install marker as last read.
+    let policies = policies.effective();
     let outcome = reconcile_approval_with_policy(&approval, &ctx.client, &policies).await?;
     // NOT `Action::await_change()`. `TrustRoster` is a different kind and this
     // controller does not watch it, so a roster that arrives after the
@@ -3076,10 +3078,11 @@ fn policy_targets(
 /// controller per cluster, no fleet).
 ///
 /// `policies` is the installation's approval-policy document, read once by
-/// `main` (PLAT-19.2); an empty set is every namespace on `legacy-governed-v1`.
+/// `main` (PLAT-19.2), with the fresh-install marker as last read (PROD-16.1);
+/// an empty, unmarked set is every namespace on `legacy-governed-v1`.
 pub fn controller(
     client: kube::Client,
-    policies: Arc<ApprovalPolicySet>,
+    policies: crate::approval_policy::PolicySource,
 ) -> impl std::future::Future<Output = ()> + Send {
     // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
     // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
@@ -3087,7 +3090,7 @@ pub fn controller(
     // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
     // permit. Every copy shares the one policy set (PLAT-19.2).
     crate::scope::run_everywhere(move |namespace| {
-        controller_in(client.clone(), namespace, Arc::clone(&policies))
+        controller_in(client.clone(), namespace, policies.clone())
     })
 }
 
@@ -3096,7 +3099,7 @@ pub fn controller(
 fn controller_in(
     client: kube::Client,
     namespace: Option<String>,
-    policies: Arc<ApprovalPolicySet>,
+    policies: crate::approval_policy::PolicySource,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Approval> = crate::scope::api(&client, namespace.as_deref());
     let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client.clone());
@@ -3129,7 +3132,7 @@ fn controller_in(
                 policy_targets(&objects, &scopes, &policy)
             })
             .run(
-                move |approval, ctx| reconcile(approval, ctx, Arc::clone(&policies)),
+                move |approval, ctx| reconcile(approval, ctx, policies.clone()),
                 error_policy,
                 ctx,
             )

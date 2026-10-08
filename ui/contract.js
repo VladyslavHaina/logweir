@@ -744,9 +744,12 @@ const APPROVAL = shapeOf(
 // operation) or `awaitingApproval` (route to its approval page); `mode` is
 // `governed` or `ordinary`. Read as strings, and compared by the one function
 // that routes on them, `ui/pages/restore-wizard.js`'s `frozenDecision`.
+// PROD-16.1: `operatorMode` is confirm | two-person | strict, the operator's
+// name for `mode`; required, as the schema requires it (the console and the
+// API ship together until the OpenAPI document is frozen).
 const RESTORE_AUTHORIZATION = shapeOf(
   "RestoreRoutingView",
-  { mode: str, policy: str, legacy: bool, state: str, approvalName: str },
+  { mode: str, operatorMode: str, policy: str, legacy: bool, state: str, approvalName: str },
   { policyDigest: str, confirmationName: str, requester: str, expiresAt: str },
 );
 
@@ -755,6 +758,9 @@ const APPROVAL_POLICY = shapeOf(
   "ApprovalPolicyView",
   {
     namespace: str, name: str, mode: str, legacy: bool,
+    // PROD-16.1: the operator's mode name, and why the namespace resolves so
+    // (binding | configured | freshInstall | legacy).
+    operatorMode: str, basis: str,
     requireDistinctPrincipal: bool, installationDigest: str,
     ordinaryConfirmationAvailable: bool, ticketRequired: bool,
   },
@@ -2567,6 +2573,14 @@ const D3_LOCATION = shapeOf("PointLocationView", { locationId: str, availability
  *  `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`, and
  *  a link that could not name them would be an offer to build a plan out of
  *  nothing. */
+/** PROD-05.1: one topic of a point, as the catalog's view lists it -- the
+ *  recorded layout and how its configuration is held, never a value. */
+const D3_POINT_TOPIC = shapeOf(
+  "PointTopicView",
+  { name: str, applyRoute: str },
+  { partitions: int, replicationFactor: int, configCoverage: str, owner: str },
+);
+
 const D3_POINT = shapeOf(
   "PointView",
   {
@@ -2583,6 +2597,15 @@ const D3_POINT = shapeOf(
     // server side (`claude/verdict-precedence`). Present only for a refusal;
     // a row that carries it is `selectable: false` whatever its two axes say.
     backupVerdict: str,
+    // PROD-05.1: the point's topics with their recorded layout. ABSENT is not
+    // published (an older runner, a record before 1.3.0, a point that is not
+    // Available), never "no topics"; `topicsOmitted` counts a list left out.
+    topics: listOf(objectOf(D3_POINT_TOPIC)),
+    topicsOmitted: int,
+    // Where the backup run looked for declarative owners, beside `topics`.
+    // EMPTY says it looked nowhere, so an un-owned topic's `applyRoute` is
+    // `unknown` -- never read as `adminApi`.
+    ownerDetection: listOf(str),
   },
 );
 

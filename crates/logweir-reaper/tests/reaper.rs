@@ -1933,3 +1933,52 @@ fn a_refused_versioning_check_is_not_recorded_deleted() {
         .as_deref()
         .is_some_and(|c| c.starts_with("VersionCheckRefused:")));
 }
+
+/// **FX-17 review L-5: a scheduled set and its retry are string-prefix
+/// siblings**, `<uid>-<slot>` and `<uid>-<slot>-r1`, and FX-17 makes them reach
+/// retention whole for the first time. The bucket holds both; deleting the
+/// first enumerates `<scope>/<uid>-<slot>/` and must leave every key of the
+/// retry where it is. The trailing `/` of the set bound is the whole property:
+/// without it the listing (S3 lists by plain string prefix, as this lister
+/// does) returns the retry's keys too, and they pass a slashless bound.
+#[test]
+fn deleting_a_scheduled_set_never_reaches_its_retry() {
+    let x = "89b585c5-5498-48dc-ae32-090809457ec8-20260901-020000";
+    let x_r1 = format!("{x}-r1");
+    let mut l = line("lwp1-x", x, &[]);
+    l.enumerate_set = true;
+    let p = plan(vec![l]);
+    let ours = vec![
+        format!("{SCOPE}/{x}/manifest.json"),
+        format!("{SCOPE}/{x}/topics/orders/partition=0/segment-00000000000000000000.bin.zst"),
+    ];
+    let retry = vec![
+        format!("{SCOPE}/{x_r1}/manifest.json"),
+        format!("{SCOPE}/{x_r1}/topics/orders/partition=0/segment-00000000000000000000.bin.zst"),
+    ];
+    let bucket: Vec<String> = ours.iter().chain(retry.iter()).cloned().collect();
+    let deleter = FakeDeleter::default();
+    let sink = FakeSink::default();
+    let outcome = execute(
+        &p,
+        &deleter,
+        &FakeSleeper::default(),
+        &sink,
+        &FakeLister(bucket),
+        &attribution(),
+        limits(),
+    );
+    let deleted = deleter.keys();
+    for key in &retry {
+        assert!(
+            !deleted.contains(key),
+            "the retry's {key} was deleted with the older set: {deleted:?}"
+        );
+    }
+    // CONTROL: the older set itself IS deleted, so the row is not passing on a
+    // worker that deletes nothing.
+    for key in &ours {
+        assert!(deleted.contains(key), "{key} was not deleted: {deleted:?}");
+    }
+    assert_eq!(outcome.points[0].state, PointState::Deleted.as_str());
+}

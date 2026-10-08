@@ -47,6 +47,20 @@
 //! `catalog::pin`), and a 1.1.0 reader, which ignores unknown fields inside
 //! major 1, reads a 1.2.0 receipt as the 1.1.0 document under it.
 //!
+//! # 1.3.0: the topic configuration model (PROD-05.1)
+//!
+//! `topic_configuration` records, per named topic, the source's partition
+//! count as the archive's manifest records it, its replication factor as
+//! Logweir's own metadata read found it (the manifest's only where that read
+//! named none), the topic's
+//! configuration entries as Logweir's own read returned them — each with its
+//! source and a portability class from
+//! `crate::topic_configuration::TABLE` — and the topic's declarative owner
+//! ([`TopicConfiguration`]), with `owner_detection` saying where the run
+//! looked for owners. Arms 12-21 read them, and only when they are present.
+//! Every receipt this build signs carries it, so every one is written as
+//! [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] ([`format_version_for`]).
+//!
 //! # A backup that produces no verifiable evidence is a backup an auditor has
 //! # to take Logweir's word for
 //!
@@ -142,6 +156,29 @@ pub struct BackupReceipt {
     /// byte-for-byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_coverage: Option<BTreeMap<String, TopicConfigCoverage>>,
+    /// **Format 1.3.0 (PROD-05.1).** Per named topic, the configuration model
+    /// a restore rebuilds the topic from: partition count, replication factor,
+    /// the recorded configuration entries with their portability, and the
+    /// declarative owner. One entry per `source.topics` entry and no others
+    /// (arm 14); requires `config_coverage` (arm 13), whose read it shares.
+    ///
+    /// ABSENT means NOT RECORDED for every topic — every receipt before 1.3.0
+    /// — and never "no configuration": a reader that needs a topic's settings
+    /// then has none, and says so. Appended LAST and skipped when absent, so
+    /// an older document round-trips byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_configuration: Option<BTreeMap<String, TopicConfiguration>>,
+    /// **Format 1.3.0 (PROD-05.1).** WHERE the run looked for declarative
+    /// owners: `declared` (the plan carried `source.topic_owners`) and/or
+    /// `kafkaTopicResources` (it was given Strimzi `KafkaTopic` resources),
+    /// from the closed set `crate::topic_configuration::OWNER_DETECTION_SOURCES`
+    /// (arm 20), each at most once. EMPTY means the run looked nowhere: a
+    /// topic without an `owner` then has an owner NOT CHECKED, and a reader
+    /// never says it is applied through the admin API. Every owner's basis
+    /// names a source listed here (arm 21). Present only beside
+    /// `topic_configuration`; ABSENT reads as empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_detection: Option<Vec<String>>,
 }
 
 /// The `format_version` this build WRITES for a receipt that pins no manifest
@@ -185,6 +222,20 @@ pub const CONFIG_SOURCES: [&str; 6] = [
     "defaultConfig",
     "unknown",
 ];
+
+/// **PROD-05.1.** The `format_version` of a receipt that carries
+/// `topic_configuration` — the MINOR after FX-7's 1.2.0. Every receipt this
+/// build signs carries the block, pinned or not, so every one is 1.3.0
+/// ([`format_version_for`]); a 1.0.0, 1.1.0 or 1.2.0 reader ignores the field
+/// inside major 1 and reads the document under it.
+pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
+
+/// The first minor of format 1 that defines `topic_configuration` (arm 12). A
+/// renumber moves this, [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] and
+/// `docs/verify_scorecard.py`'s `RECEIPT_TOPIC_CONFIGURATION_SINCE_MINOR`
+/// together; `tests/backup_receipt.rs::the_written_version_defines_topic_configuration`
+/// keeps them coherent.
+pub const TOPIC_CONFIGURATION_SINCE_MINOR: u64 = 3;
 
 /// What Logweir established about ONE topic's configuration at capture
 /// (receipt 1.1.0, FX-4).
@@ -240,6 +291,90 @@ pub struct EffectiveConfigValue {
     /// One of [`CONFIG_SOURCES`]. `dynamicTopicConfig` is a topic override;
     /// every other named source is the broker's.
     pub source: String,
+}
+
+/// **PROD-05.1, receipt 1.3.0.** One topic's configuration model: what a
+/// restore needs to rebuild the topic rather than leave it to a target
+/// broker's defaults.
+///
+/// # Where each part comes from
+///
+/// - `partitions`: the ARCHIVE's record, the manifest's
+///   `original_partition_count` — the manifest this run read back and
+///   digested, so the count a restore creates the topic with. ABSENT when the
+///   manifest does not record one, never `0`.
+/// - `replication_factor`: Logweir's OWN metadata read of the source, through
+///   the engine's principal, immediately before the engine — the SMALLEST
+///   replica count of the topic's partitions (a partition mid-reassignment
+///   also lists the replicas being added). Only where that read named no
+///   factor for the topic does the manifest's `source_replication_factor`
+///   stand, and the pinned engine records that for the first topic it saves
+///   only (`merge_manifests` drops it from every later save; FX-21). When the
+///   metadata read is unavailable — it failed, or the reader cannot answer —
+///   the run logs a warning and records the factor only where the manifest
+///   has one: for every other topic it is ABSENT, NOT RECORDED, never `0` and
+///   never the target's.
+/// - `entries`: Logweir's OWN DescribeConfigs read before the engine — the
+///   same read as `config_coverage` — filtered by
+///   `crate::topic_configuration::records`: every explicit override, and the
+///   effective value of every semantic key. Present exactly when that read
+///   succeeded (arm 15); a `captureDenied` or `describeFailed` topic records
+///   none, which reads as NOT RECORDED, never as "no overrides".
+/// - `owner`: the plan's declaration (`source.topic_owners`), or a Strimzi
+///   `KafkaTopic` resource the run was given. A topic with an owner is
+///   restored by exporting desired state for that owner, never through the
+///   admin API around it. A topic WITHOUT one has "no owner found" only where
+///   the receipt's `owner_detection` says the run looked; where it is empty,
+///   the owner was NOT CHECKED.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TopicConfiguration {
+    /// The source's partition count, as the archive's manifest records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<u32>,
+    /// The source's replication factor: Logweir's own metadata read before
+    /// the engine (the smallest replica count of the topic's partitions), else
+    /// the manifest's where that read named none. When the read is unavailable
+    /// the run warns and the manifest's factor stands where it has one. ABSENT
+    /// when neither names one — NOT RECORDED, never `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication_factor: Option<u32>,
+    /// The recorded configuration entries, by key. ABSENT when the read did
+    /// not succeed; present and possibly empty when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries: Option<BTreeMap<String, ConfigEntry>>,
+    /// The topic's declarative owner, when one manages it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<TopicOwner>,
+}
+
+/// One recorded configuration entry: the value in force, where it came from,
+/// and its portability class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigEntry {
+    /// The value. ABSENT exactly when `portability` is `secret` (arm 17): a
+    /// sensitive entry is recorded by key, never by value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// One of [`CONFIG_SOURCES`]; `dynamicTopicConfig` is the topic's own
+    /// explicit override.
+    pub source: String,
+    /// One of `crate::topic_configuration::PORTABILITY_CLASSES`: `inherited`
+    /// exactly when the source is not the topic's override (arm 17), else the
+    /// table's class for the key.
+    pub portability: String,
+}
+
+/// A declarative owner of a topic's configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TopicOwner {
+    /// `strimzi` or `external`.
+    pub kind: String,
+    /// `kafkaTopicResource` (a Strimzi `KafkaTopic` named it; `strimzi` only)
+    /// or `declared` (the plan said so).
+    pub basis: String,
+    /// Where the desired state lives: `<namespace>/<name>` of the
+    /// `KafkaTopic`, or the plan's own words. 1 to 256 characters.
+    pub reference: String,
 }
 
 /// A topic's configuration capture coverage as a READER uses it.
@@ -443,13 +578,17 @@ pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
     }
 }
 
-/// The `format_version` a receipt with this `archive` block is written with:
+/// The `format_version` a receipt is written with:
+/// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] when it carries
+/// `topic_configuration` (PROD-05.1 — every receipt this build signs), else
 /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] when it pins the manifest's
-/// version, else [`RECEIPT_FORMAT_VERSION`] — FX-4's 1.1.0, because this build
-/// writes `config_coverage` on every receipt, pinned or not.
+/// version, else [`RECEIPT_FORMAT_VERSION`] — FX-4's 1.1.0. The ONE place a
+/// writer decides it.
 #[must_use]
-pub fn format_version_for(archive: &ReceiptArchive) -> &'static str {
-    if archive.manifest_version_id.is_some() {
+pub fn format_version_for(archive: &ReceiptArchive, topic_configuration: bool) -> &'static str {
+    if topic_configuration {
+        FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
+    } else if archive.manifest_version_id.is_some() {
         FORMAT_VERSION_WITH_MANIFEST_VERSION
     } else {
         RECEIPT_FORMAT_VERSION
@@ -560,6 +699,30 @@ impl BackupReceipt {
     ///     `describeFailed`, cannot have observed one.
     /// 11. a `timestamp_type`'s `value` is one of [`TIMESTAMP_TYPES`] and its
     ///     `source` one of [`CONFIG_SOURCES`].
+    ///
+    /// Arms 12-19 (format 1.3.0, PROD-05.1) read `topic_configuration` — with
+    /// `config_coverage` and `source.topics` as the context it is judged in,
+    /// the way arm 7 reads `source.topics` — and run only when it is present,
+    /// so every document without it is decided exactly as before:
+    ///
+    /// 12. `topic_configuration` is present only under a minor of at least 3.
+    /// 13. it is present only beside `config_coverage`.
+    /// 14. it covers exactly `source.topics`.
+    /// 15. a topic's `entries` are present exactly when its configuration read
+    ///     succeeded (`captured`, or `notCaptured`/`manifestDiffers`).
+    /// 16. every entry's `source` is one of [`CONFIG_SOURCES`] and its
+    ///     `portability` one of `PORTABILITY_CLASSES`.
+    /// 17. an entry is `secret` exactly when it carries no value, and
+    ///     otherwise `inherited` exactly when its source is not the topic's own
+    ///     override.
+    /// 18. an `owner`'s kind and basis are from the closed sets (a
+    ///     `kafkaTopicResource` owner is `strimzi`) and its reference is 1 to
+    ///     256 characters with no control character.
+    /// 19. a recorded partition count or replication factor is at least 1.
+    /// 20. `owner_detection` is present only beside `topic_configuration`, and
+    ///     lists `declared` and `kafkaTopicResources` each at most once.
+    /// 21. every recorded owner's basis names a source `owner_detection` lists
+    ///     (absent reads as empty).
     pub fn validate_invariants(&self) -> Result<(), String> {
         // ARM 1. GC12 for this document: a reader refuses a major it has
         // never seen rather than guessing at a shape.
@@ -761,6 +924,189 @@ impl BackupReceipt {
                             ts.value, ts.source
                         ));
                     }
+                }
+            }
+        }
+        // ARMS 12-19 (format 1.3.0, PROD-05.1): the `topic_configuration`
+        // block, and only when it is present. Every earlier receipt is decided
+        // exactly as before. Within the block, topics in name order (the map's
+        // own), and per topic arm 15, then arms 16 and 17 per entry in key
+        // order, then 18 and 19.
+        if let Some(model) = &self.topic_configuration {
+            // ARM 12. A document that declares a minor before 3 cannot carry
+            // a 1.3 field.
+            let minor = parse_semver(&self.format_version).map_or(0, |(_, minor, _)| minor);
+            if minor < TOPIC_CONFIGURATION_SINCE_MINOR {
+                return Err(format!(
+                    "topic_configuration is present but format_version {:?} predates it: the \
+                     field is defined from 1.{TOPIC_CONFIGURATION_SINCE_MINOR}.0",
+                    self.format_version
+                ));
+            }
+            // ARM 13. The entries are judged against the read that produced
+            // them, which `config_coverage` records.
+            let Some(coverage) = &self.config_coverage else {
+                return Err(format!(
+                    "topic_configuration is present under format_version {:?} but \
+                     config_coverage is not: a topic's configuration entries cannot be judged \
+                     without the read that produced them",
+                    self.format_version
+                ));
+            };
+            // ARM 14. The modelled set and the named set are the same set —
+            // the twin of arms 3 and 7.
+            let modelled: std::collections::BTreeSet<&str> =
+                model.keys().map(String::as_str).collect();
+            if modelled != named_topics {
+                return Err(format!(
+                    "topic_configuration covers {} but the named topic set is {}",
+                    render_set(&modelled),
+                    render_set(&named_topics)
+                ));
+            }
+            for (topic, entry) in model {
+                // ARM 15. Entries exactly where the read succeeded. Arms 7 and
+                // 14 make the coverage entry exist; `None` is still rendered,
+                // as `absent`, rather than assumed.
+                let read = coverage.get(topic);
+                let succeeded = read.is_some_and(|c| {
+                    c.coverage == "captured"
+                        || (c.coverage == "notCaptured"
+                            && c.reason.as_deref() == Some("manifestDiffers"))
+                });
+                if entry.entries.is_some() != succeeded {
+                    let rendered = match read {
+                        Some(c) => {
+                            let said = match &c.reason {
+                                Some(reason) => format!("{}/{reason}", c.coverage),
+                                None => c.coverage.clone(),
+                            };
+                            format!("{said:?}")
+                        }
+                        None => "absent".to_string(),
+                    };
+                    return Err(format!(
+                        "topic_configuration[{topic:?}].entries {} does not fit its \
+                         config_coverage {rendered}: entries are recorded exactly when the \
+                         configuration read succeeded (\"captured\", or \"notCaptured\" with \
+                         reason \"manifestDiffers\")",
+                        if entry.entries.is_some() {
+                            "present"
+                        } else {
+                            "absent"
+                        }
+                    ));
+                }
+                for (key, config) in entry.entries.iter().flatten() {
+                    // ARM 16. The source and the class, from closed sets.
+                    if !CONFIG_SOURCES.contains(&config.source.as_str())
+                        || !crate::topic_configuration::PORTABILITY_CLASSES
+                            .contains(&config.portability.as_str())
+                    {
+                        return Err(format!(
+                            "topic_configuration[{topic:?}].entries[{key:?}] source {:?} and \
+                             portability {:?} are not a source and class this format defines: \
+                             the source is \"dynamicTopicConfig\", \"dynamicBrokerConfig\", \
+                             \"dynamicDefaultBrokerConfig\", \"staticBrokerConfig\", \
+                             \"defaultConfig\" or \"unknown\", and the class is \"portable\", \
+                             \"inherited\", \"removedInKafka4\", \"clusterBound\", \
+                             \"requiresTieredStorage\", \"providerOnly\" or \"secret\"",
+                            config.source, config.portability
+                        ));
+                    }
+                    // ARM 17. A secret carries no value and nothing else lacks
+                    // one; otherwise `inherited` is exactly a value the topic
+                    // did not set itself.
+                    let secret = config.portability == crate::topic_configuration::SECRET;
+                    let fits = if secret || config.value.is_none() {
+                        secret && config.value.is_none()
+                    } else {
+                        (config.portability == crate::topic_configuration::INHERITED)
+                            == (config.source != crate::topic_configuration::TOPIC_OVERRIDE_SOURCE)
+                    };
+                    if !fits {
+                        return Err(format!(
+                            "topic_configuration[{topic:?}].entries[{key:?}] is {:?} from {:?} \
+                             with {}: an entry is \"secret\" exactly when it carries no value, \
+                             and otherwise \"inherited\" exactly when its source is not \
+                             \"dynamicTopicConfig\"",
+                            config.portability,
+                            config.source,
+                            if config.value.is_some() {
+                                "a value"
+                            } else {
+                                "no value"
+                            }
+                        ));
+                    }
+                }
+                // ARM 18. The owner, from closed sets, and a usable reference.
+                if let Some(owner) = &entry.owner {
+                    let kind_ok =
+                        crate::topic_configuration::OWNER_KINDS.contains(&owner.kind.as_str());
+                    let basis_ok = owner.basis == "declared"
+                        || (owner.basis == "kafkaTopicResource" && owner.kind == "strimzi");
+                    if !kind_ok
+                        || !basis_ok
+                        || !crate::topic_configuration::reference_fits(&owner.reference)
+                    {
+                        return Err(format!(
+                            "topic_configuration[{topic:?}].owner {:?} by {:?} is not an owner \
+                             this format defines: the kind is \"strimzi\" or \"external\", the \
+                             basis is \"kafkaTopicResource\" (for \"strimzi\" only) or \
+                             \"declared\", and the reference is 1 to 256 characters with no \
+                             control character",
+                            owner.kind, owner.basis
+                        ));
+                    }
+                }
+                // ARM 19. A recorded count is a count.
+                if entry.partitions == Some(0) || entry.replication_factor == Some(0) {
+                    let shown = |n: Option<u32>| n.map_or("absent".to_string(), |n| n.to_string());
+                    return Err(format!(
+                        "topic_configuration[{topic:?}] records partitions {} and \
+                         replication_factor {}: a recorded count is at least 1",
+                        shown(entry.partitions),
+                        shown(entry.replication_factor)
+                    ));
+                }
+            }
+        }
+        // ARM 20 (format 1.3.0, PROD-05.1). Where the run looked for owners:
+        // only beside the model it qualifies, from the closed set, each source
+        // at most once.
+        if let Some(detection) = &self.owner_detection {
+            let mut seen = std::collections::BTreeSet::new();
+            let fits = self.topic_configuration.is_some()
+                && detection.iter().all(|d| {
+                    crate::topic_configuration::OWNER_DETECTION_SOURCES.contains(&d.as_str())
+                        && seen.insert(d.as_str())
+                });
+            if !fits {
+                return Err(format!(
+                    "owner_detection {detection:?} is not a detection this format defines: it is \
+                     present only beside topic_configuration, and lists \"declared\" and \
+                     \"kafkaTopicResources\" each at most once"
+                ));
+            }
+        }
+        // ARM 21. An owner is recorded only from a source the run looked in: a
+        // `declared` owner needs `declared`, a `kafkaTopicResource` owner needs
+        // `kafkaTopicResources`. An absent detection is an empty one.
+        if let Some(model) = &self.topic_configuration {
+            let detection: &[String] = self.owner_detection.as_deref().unwrap_or(&[]);
+            for (topic, entry) in model {
+                let Some(owner) = &entry.owner else {
+                    continue;
+                };
+                let source = crate::topic_configuration::detection_for_basis(&owner.basis);
+                if !source.is_some_and(|s| detection.iter().any(|d| d == s)) {
+                    return Err(format!(
+                        "topic_configuration[{topic:?}].owner by {:?} names no source \
+                         owner_detection {detection:?} lists: a \"declared\" owner needs \
+                         \"declared\", a \"kafkaTopicResource\" owner \"kafkaTopicResources\"",
+                        owner.basis
+                    ));
                 }
             }
         }

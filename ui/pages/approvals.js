@@ -264,12 +264,12 @@ export function renderApprovalList(collection, now) {
 export function noApprovalSentence(policy) {
   const mode = policyMode(policy);
   if (mode === "ordinary") {
-    return "No Approval in this namespace yet. Its approval policy is ordinary confirmation: " +
-      "creating a Restore in the wizard is the confirmation, and nothing is recorded here by " +
-      "hand.";
+    return "No Approval in this namespace yet. Its approval mode is confirm: creating a " +
+      "Restore in the wizard is the confirmation, no key is involved, and nothing is recorded " +
+      "here by hand.";
   }
   if (mode === "governed") {
-    return "No Approval in this namespace yet. Its approval policy is governed: an approver " +
+    return "No Approval in this namespace yet. Its approval mode is strict: an approver " +
       "other than the requester opens a Restore waiting above and records the " +
       "countersignature there.";
   }
@@ -788,10 +788,10 @@ function subjectAction(v) {
     return countersignOffered(v) ? renderCountersignPanel(v) : "";
   }
   if (mode === "ordinary") {
-    return "<section class=\"step\" id=\"ordinary-confirmation\"><h3>Ordinary " +
-      "confirmation</h3><p class=\"note\">Namespace policy <code>" +
-      esc(((v.policy || {}).name) || "") + "</code> is ordinary confirmation: the console " +
-      "recorded its signed confirmation of the requester as Approval <code>" +
+    return "<section class=\"step\" id=\"ordinary-confirmation\"><h3>Confirmed in the " +
+      "console</h3><p class=\"note\">Namespace policy <code>" +
+      esc(((v.policy || {}).name) || "") + "</code> is confirm (one person, no key): the " +
+      "console recorded its signed confirmation of the requester as Approval <code>" +
       esc(((v.subject || {}).approvalName) || "") + "</code> when the Restore was created, and " +
       "there is nothing for an approver to add. The state above is weirkeeper's verdict on it." +
       "</p></section>";
@@ -1158,9 +1158,9 @@ export function renderCountersignPanel(view) {
   const packet = typeof spec.approvalBytes === "string" && typeof spec.sidecarBytes === "string";
   const policyName = esc(((v.policy || {}).name) || "");
   const intro = "<p class=\"blurb\">Namespace policy <code>" + policyName + "</code> is " +
-    "governed: this Restore runs only after an approver who is NOT its requester countersigns " +
-    "the console's confirmation below. Copy both documents to the machine holding your " +
-    "approver key, run the command, and paste the sidecar it wrote.</p>";
+    "strict: this Restore runs only after an approver who is NOT its requester countersigns " +
+    "the console's confirmation below with their personal key. Copy both documents to the " +
+    "machine holding your approver key, run the command, and paste the sidecar it wrote.</p>";
   if (v.confirmationError) {
     return "<section class=\"step\" id=\"countersign-section\"><h3>Governed approval</h3>" +
       intro + errorLine(v.confirmationError) + "</section>";

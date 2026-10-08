@@ -18,6 +18,14 @@ fn main() -> std::process::ExitCode {
         Err(e) => {
             let _ = e.print();
             return if e.use_stderr() {
+                // PROD-16.1 fix round (review H1): an `identity bootstrap`
+                // that clap refused ran none of its steps, so nothing else
+                // would delete the install's trust grant; the arguments
+                // still name it.
+                let argv: Vec<String> = std::env::args_os()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                logweir::identity::revoke_after_usage_error(&argv);
                 exit::ExitCode::Operational.into()
             } else {
                 std::process::ExitCode::SUCCESS
@@ -32,12 +40,34 @@ fn main() -> std::process::ExitCode {
             public_configmap_name,
             external_secret_name,
             external_secret_key,
+            mark_fresh_install_confirm,
+            console_secret_name,
+            console_secret_key,
+            console_public_configmap_name,
+            installation_trust_policy,
+            allowed_target_cluster_ids,
+            revoke_trust_binding,
         }) => logweir::identity::run(&logweir::identity::BootstrapArgs {
             namespace,
             secret_name,
             secret_key,
             public_configmap_name,
             external_secret: external_secret_name.zip(external_secret_key),
+            mark_fresh_install_confirm,
+            console: console_secret_name.zip(console_public_configmap_name).map(
+                |(secret_name, public_configmap_name)| logweir::identity::ConsoleKeyArgs {
+                    secret_name,
+                    secret_key: console_secret_key,
+                    public_configmap_name,
+                },
+            ),
+            installation_trust: installation_trust_policy.map(|policy_name| {
+                logweir::identity::InstallationTrustArgs {
+                    policy_name,
+                    allowed_target_cluster_ids,
+                }
+            }),
+            revoke_trust_binding,
         }),
         cli::Command::Identity(cli::IdentityCmd::Distribute {
             source_namespace,
@@ -137,6 +167,8 @@ fn main() -> std::process::ExitCode {
             out,
             receipt_out,
             backup_id_override,
+            kafka_topic_resources,
+            strimzi_cluster,
         }) => logweir::backup::run(&logweir::backup::BackupRunArgs {
             store_contract_version,
             spec,
@@ -146,6 +178,8 @@ fn main() -> std::process::ExitCode {
             out,
             receipt_out,
             backup_id_override,
+            kafka_topic_resources,
+            strimzi_cluster,
         }),
         // Task 15c, interface I14. Dispatched here for the structural reason
         // the comment at the end of this match records: the arm list is

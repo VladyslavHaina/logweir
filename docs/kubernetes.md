@@ -1559,9 +1559,17 @@ no configuration is reconstructed by hand.**
    `VerifiedHistorical`, joined server side with the namespace's `Backup`
    verdicts (`backupVerdict`) — the verdict join is complete
    (`backupVerdictsIncomplete` absent), and the row carries an unredacted
-   receipt key and both digests. The operator names the topics to restore: the
-   view does not publish a point's topic list, and the readiness check reads the
-   manifest for exactly those names.
+   backup set id and receipt key and both digests. (A catalog synced by a
+   runner up to v0.2.0-rc.1 published every SCHEDULED run's set id and receipt
+   key as `[redacted]`, so none of its scheduled points was offered; upgrade the
+   runner image and sync the catalog again — FX-17.) The operator names the
+   topics to restore, and the readiness check reads the manifest for exactly
+   those names. Since PROD-05.1 the view lists an `Available` point's topics
+   with their recorded partition count and replication factor
+   (`PointView.topics[]`, for points whose receipt is format 1.3.0); the wizard
+   defaults the plan's replication factor from them, capped at the target's
+   broker count, and says so. The operator still types the list: a listed topic
+   set is not yet offered as a choice.
 5. **The plan is bound to the point.** It carries `source.backup: <backupId>`
    and `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`;
    the restore point in time defaults to `coveredTo − 1 ms` (the catalog's end
@@ -1784,7 +1792,10 @@ way: the sink URL reaches the pod as a `secretKeyRef` and the hatch is a literal
 installation that turns it on logs one `WARN` at startup saying so.
 
 **`verificationScope` is `sampled`, `degraded` or `none` — never `complete`.**
-Logweir compares a sample of records. The value reaches a PagerDuty incident
+A `Restore` and a rehearsal compare a sample of records: neither can ask for
+the complete coverage a command-line plan can (`sample.coverage: complete`,
+[release notes](release-notes.md) item 30), and a complete run's scorecard is
+not reported through this field yet (proposed row PROD-08.1a). The value reaches a PagerDuty incident
 title and a Slack channel where someone decides, during an incident, whether an
 archive can be trusted, so the type has three variants and `logweir notify
 deliver` refuses a fourth at parse time. See
@@ -2289,6 +2300,16 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
   worded covers it, so the value stays `NotEnforced` and the `Evaluated`
   message says which half is in force. It becomes `LogweirEnforced` on its
   own, with no code change, the day a view entry carries its keys.
+  A point whose set id names no single directory is never a candidate: an
+  empty id, one carrying `/`, and — since FX-17 — one the catalog published
+  as the redactor's output (`backupId` or `manifestKey` carrying
+  `[redacted]`; a long set id someone chose for `logweir backup run`) is
+  protected `Unknown`, so it neither shares a group with every other such
+  point nor makes the plan writer refuse the whole plan. A scheduled run's
+  set id (`<schedule uid>-<slot>[-r<k>]`) is published whole by a runner after
+  v0.2.0-rc.1, and a set and its retry are two directories: the bound
+  `<scope>/<backupId>/` ends in `/`, so removing one never enumerates the
+  other.
 * `legalHold` is `ProviderEnforcedUnverified` even in `Enforce`, because
   `object_store` 0.14 exposes no WORM readback. "Legal hold respected" means
   exactly *a provider refusal is authoritative, recorded, not retried, and
@@ -3376,9 +3397,146 @@ The controller and the console **refuse to start** on a document that does not
 validate — an unknown field, an `Ordinary` policy without
 `allowOrdinaryConfirmation: true`, a Governed policy with
 `requireDistinctPrincipal: false`, a binding to an undeclared policy, the
-reserved name `legacy-governed-v1` — rather than run every namespace as legacy
-and silently accept v1 approvals where the administrator bound Governed. An
-absent document is the legacy installation. Nothing ever synthesises `Ordinary`.
+reserved names `legacy-governed-v1` and `default-confirm-v1` — rather than run
+every namespace as legacy and silently accept v1 approvals where the
+administrator bound Governed. An absent document on an install that was not
+marked fresh is the legacy installation. Nothing synthesises `Ordinary` except
+the fresh-install default below, which an upgrade can never reach.
+
+### The three modes, and a fresh install's default (PROD-16.1)
+
+The operator sees three modes; the internal names stay, because they are
+inside signed documents and snapshots (`logweir_core::approval_policy::OperatorMode`
+is the one mapping, `logweir.approvalPolicy.internalMode` the chart's half):
+
+| mode | internal | who approves a `Restore` |
+|---|---|---|
+| **confirm** | `Ordinary` (v2) | the requester, one click in the console; no key handled by anyone |
+| **two-person** | PROD-16.2, not in this build | a second person, one click in the console |
+| **strict** | `Governed` (v2) or `legacy-governed-v1` (v1) | an approver's personal `GovernedApproval` key |
+
+`approvalPolicy.policies[].mode` may be written `confirm` or `strict` (the
+chart renders `Ordinary`/`Governed`, so an image-only rollback reads the same
+document); `two-person` is refused by name.
+
+**An unbound namespace** resolves, in this order: an explicit
+`approvalPolicy.default` (`defaultMode` in the document) — `confirm` (which
+needs `allowOrdinaryConfirmation: true`, D0's floor) or `strict`; else the
+**fresh-install marker**, which makes it `confirm`; else `legacy-governed-v1`.
+Under `confirm` an unbound namespace resolves to the concrete policy
+`default-confirm-v1` (`Ordinary`, 900 s), checked at every boundary below
+exactly like an explicit binding; an explicit binding always wins.
+
+**The fresh-install marker, and why an upgrade never reaches it.** The identity
+hook (`logweir identity bootstrap`) writes it only in the ONE run that
+**generates** the installation identity and the console key — a first `helm
+install` with a console, the managed identity and a bootstrap image that runs
+the PROD-16.1 flags (`identity.bootstrapFeatures.consoleKey`). In that run it
+first creates the installation's default `TrustPolicy` (below), then writes, on the public identity ConfigMap
+(`logweir-signing-trust`), the annotation
+`logweir.dev/approval-default: confirm;policy=<name>;uid=<uid>;signing=<keyId>;console=<keyId>`,
+and annotates the policy `logweir.dev/approval-default: confirm` beside its
+provenance `logweir.dev/created-by: identity-bootstrap`. The console (per
+request) and the controller (every 15 s) read both objects and reach ONE
+verdict, `logweir_core::approval_policy::verify_marker` through
+`weirkeeper::approval_policy::marker_verdict`: the claim is honoured only when
+the policy it names exists with that exact UID, the hook's provenance and the
+confirm annotation, is still `default: true`, and declares exactly the claimed
+installation signer (`EvidenceSigning`, principal `install:<release ns>/…`)
+and console key (`ConsoleConfirmation`, principal `console:<release ns>/…`).
+Anything else — no annotation, a bare `confirm`, a claim naming another
+identity, a missing, re-created or hand-written policy, one no longer default,
+one without the console key — is **unmarked**, logged as a WARN by both, and
+the namespace stays `legacy-governed-v1`. An upgraded install's identity
+already existed, so the hook neither creates the trust nor writes the claim;
+an adopted external identity may predate this chart and is never marked; a
+console key the hook ADOPTED (a hand-made Secret of the managed name present
+before the first install) is never trusted automatically, so that install is
+not marked either; a first install whose hook run was interrupted after
+generating the identity is not finished by a later run and starts strict.
+
+**The threat model, and the residual** (the PROD-16.1 security review).
+Before PROD-16.1, turning a governed namespace into one-person confirmation
+took two gates: an approval-policy rollout (installation administrator) and a
+trust administrator trusting the console key. On an install that existed
+before, that is still so: patching the marker into the ConfigMap changes
+nothing (no hook-made policy carries it), and making one requires
+`TrustPolicy` create — the trust administrator's gate. The explicit opt-in of
+such an install is the same two gates (below). **On a fresh install**,
+whoever can change the hook-made `TrustPolicy` (a trust administrator) or the
+approval-policy document (an installation administrator) can change approval,
+as before; and in any console mode, whoever controls the console pod, its key
+Secret or the identity provider can approve alone, which `Ordinary` always
+accepted (SECURITY.md).
+
+**A pre-existing bound on both attackers** (the PROD-16.1 review's attacker
+model; not changed by PROD-16.1, and owed to the trust/RBAC owner). The
+controller's ServiceAccount holds cluster-wide `patch` on `trustpolicies` for
+the compromise finalizer (`charts/logweir/templates/clusterrole.yaml`,
+`controller-scope.yaml`; RBAC cannot narrow a finalizer patch below the
+object), and no admission policy fences that patch to `metadata.finalizers`. So
+whoever can run a pod as `weirkeeper` in the release namespace can append a key
+to ANY EXISTING `TrustPolicy` — a trust administrator's power wherever a policy
+exists. On a fresh install with a console that is from the first minute, because
+`logweir-installation` exists; before PROD-16.1 it waited for the first policy.
+A ValidatingAdmissionPolicy letting that account change only
+`metadata.finalizers` on `trustpolicies` would close it.
+
+**The install-only trust grant.** Creating that one `TrustPolicy` needs
+`create` on the cluster-scoped kind, which RBAC cannot narrow by name. The
+chart therefore renders the grant (`ClusterRole`/`ClusterRoleBinding`
+`<release>-identity-trust`: `list`+`create` TrustPolicy, `get`
+`TrustRoster/default`, `delete` its own binding) ONLY under one guard — a first
+install (`.Release.IsInstall`) into a namespace with no established signing
+Secret, with the managed console key (a console, the bootstrap feature, no
+`identity.externalSecret`: an install that never uses confirm gets no grant) —
+and ONLY as a `post-install` hook (never upgrade or rollback: a rollback replays
+the stored revision's hooks, and this one is not a rollback hook), weighted
+before the Job, with `hook-delete-policy:
+before-hook-creation,hook-succeeded,hook-failed`.
+
+*What removes it, and on which Helm.* On success, every Helm deletes it when
+the install's post-install hooks have run. When the identity Job FAILS, Helm
+3.19.0 and 4.x (`pkg/action/hooks.go` `execHook`,
+`deleteHooksByPolicy(executingHooks[0:i], HookSucceeded, …)`; v4.0.1 sha256
+`ebb121ed85cc27f7c2e249f49dede260e4b9aefa8b61606fd0844d39d600c58d`) also delete
+the earlier `hook-succeeded` hooks — this grant — but Helm 3.12–3.18 delete only
+the failed Job and would leave the grant bound. **The chart therefore refuses
+to render the grant under Helm before 3.19** (`identity.installationTrust
+needs Helm 3.19.0 or newer`; install with a newer Helm, or set
+`identity.installationTrust.enabled=false` and trust the console key
+yourself). The hook ALSO deletes the binding itself on every exit path it
+controls — after the trust step, after a failed step, after a store it could
+not open, after a panic, after a failed delete (on a fresh connection), and
+after a usage error such as a flag from a newer chart — and every later run
+deletes a binding still left. What neither covers is a hook that never runs
+its code (an image that cannot be pulled, a pod never admitted, a SIGKILL), a
+failed `Create` of a later hook, or a Helm client killed mid-install: then the
+binding outlives the install until the next hook run, and the failed-install
+recovery in `docs/install.md` §5f deletes it
+(`kubectl delete clusterrolebinding,clusterrole <release>-identity-trust`).
+`helm uninstall` does not delete hook objects.
+
+**The window:** from the post-install phase to the end of the trust step,
+whoever can run a pod as `<release>-identity-bootstrap` in the release
+namespace could create a TrustPolicy; the installer holds cluster-admin for
+that install anyway (CRDs, ClusterRoles). The hook itself creates only a policy
+of exactly the signer and the console key it GENERATED, `default: true`, and
+only when the cluster has **no TrustPolicy at all** (default or namespaced) and
+no `TrustRoster/default` — a default policy beside administered namespaced
+trust would turn every other unbound namespace into confirm.
+
+**The console key at install.** With a console and the managed identity, the
+hook generates the console's `ConsoleConfirmation` key (Ed25519) once into the
+retained Secret `logweir-console-confirmation` and publishes its public half in
+`logweir-console-trust` — the installation identity's lifecycle: never
+regenerated, a published half without its private key stops the hook (key
+loss), a hand-made Secret of that name (every PLAT-19.2 install) is adopted —
+and, adopted, trusted by nobody automatically. The console mounts it `optional`
+and reads it on first use (`confirmationKeyManaged: true` in its
+configuration), because the hook runs after the console starts; until then a
+`confirm` request is refused before anything is created. An operator-named key
+file that is missing is still a refusal to start.
 
 **Why installation configuration and not a namespaced object.** D0 puts the
 binding and the `allowOrdinaryConfirmation` floor in installation
@@ -3410,14 +3568,17 @@ admission and by the runner, and the console refuses the request before
 anything exists — and optional under `Ordinary`. At most 128 printable
 characters.
 
-**Ordinary confirmation needs the shared console.** D0: the administrator
-(`localAdmin`) mode "does not expose Ordinary". Its one identity is whoever
-holds the port-forward (`urn:logweir:local-admin#admin`), not a person a
-confirmation could attest, so in an `Ordinary`-bound namespace that console
-refuses the submission `409 policy_mismatch` before creating anything, and
-`GET .../approval-policy` answers `ordinaryConfirmationAvailable: false`. A
-`Governed` namespace works in both modes: there the console only attests the
-requester, and an independent approver key decides.
+**`confirm` in the administrator console (PROD-16.1, amending D0's "does not
+expose Ordinary").** The `localAdmin` console confirms too: the confirming
+principal is `urn:logweir:local-admin#admin`. **Residual:** whoever can reach
+that console — the Kubernetes permission to port-forward to
+`deploy/<release>-api`, which is already full console administrator authority
+— can confirm a restore alone; SECURITY.md says so. `two-person` (PROD-16.2)
+is never served there: its one identity cannot be two people. A `strict`
+namespace works in both modes: the console only attests the requester, and an
+independent approver key decides. `GET .../approval-policy` answers
+`ordinaryConfirmationAvailable: false` only while the console's key is not
+there yet.
 
 The console's signature attests **which authenticated principal asked** and
 nothing else. Under `Ordinary` it is the whole authorization and the console
@@ -3504,10 +3665,12 @@ display name, an `install:` id) is refused `SelfApprovalRefused`, because a
 principal that cannot be compared with the requester cannot be shown to differ
 from it.
 
-**Keys to add to the namespace's `TrustPolicy`.** The console's public key with
-usage `ConsoleConfirmation` (`GET /api/v1/namespaces/{ns}/approval-policy`
-prints its key id), and, for a Governed namespace, each approver's public key
-with usage `GovernedApproval` and their `principal.id`. The legacy roster never
+**Keys to add to the namespace's `TrustPolicy`.** On a fresh install the hook's
+installation policy already carries the signer and the console key. Otherwise:
+the console's public key with usage `ConsoleConfirmation` (`logweir-console-trust`
+publishes it; `GET /api/v1/namespaces/{ns}/approval-policy` prints its key id),
+and, for a Governed namespace, each approver's public key with usage
+`GovernedApproval` and their `principal.id`. The legacy roster never
 yields a `ConsoleConfirmation` key (§7.3), so a namespace bound to a policy but
 still on `legacy-roster-v1` refuses every v2 document `KeyIdNotInRoster` until
 a `TrustPolicy` governs it.
@@ -3538,7 +3701,14 @@ digest, and the controller refuses those documents `ApprovalPolicyMismatch`
 therefore have to be submitted again once the rollout completes. Order:
 CRDs (the `Approval` status gains `authorization`) → controller and runner
 image → console with its confirmation key → the `TrustPolicy` keys → the
-binding.
+binding. **PROD-16.1:** an upgrade changes no namespace's approval — no marker,
+no trust step; the hook only generates (or adopts) the console key. To opt an
+older install's unbound namespaces into `confirm`, two gates, as before: (1) a
+trust administrator adds the console key from `logweir-console-trust` to the
+`TrustPolicy` that governs them (usage `ConsoleConfirmation`); (2) the
+installation administrator sets `approvalPolicy.allowOrdinaryConfirmation: true`
+and `approvalPolicy.default: confirm` (or binds the namespaces to a `confirm`
+policy) and rolls out ([install.md](install.md) §5f).
 
 **Rollback.** Unbinding (or removing the document) returns the namespace to
 `legacy-governed-v1`; not-yet-admitted v2 approvals are then refused
@@ -3546,7 +3716,14 @@ binding.
 rollback refuses every v2 document as `PayloadTypeMismatch` — its payload type
 is not the v1 approval's — and an older runner refuses the two new flags before
 dispatch: both fail closed. Nothing deletes public key material in either
-direction, and v1 documents and archives are untouched.
+direction, and v1 documents and archives are untouched. **PROD-16.1:** an older
+controller or console ignores the marker, so every unbound namespace is
+`legacy-governed-v1` again: a pending `default-confirm-v1` confirmation is
+refused `ApprovalPolicyMismatch` (never admitted as v1), and a document with
+`defaultMode` makes an older binary refuse to start — remove
+`approvalPolicy.default` before rolling back. The installation `TrustPolicy`
+stays (an older controller reads it; its evidence keys keep verifying), and so
+do both retained key Secrets.
 
 ## 9. Schedules, and a schedule's retention report (which deletes nothing)
 
@@ -8105,8 +8282,9 @@ in `status.binding.planHash`, which is a field and not prose.
 token".** A remedy has to name the thing it asks you to go and fix, so the
 public identifiers survive whole: a `signerKeyId` (the SHA-256 of a
 SubjectPublicKeyInfo DER — it is on the `TrustRoster`, which is how you roster
-it), a content digest, `runner.image`'s `imageID`, a backup set's UUID, an
-object key, a segment path, and the NAME of a Secret and of the data key inside
+it), a content digest, `runner.image`'s `imageID`, a backup set's id (a manual
+run's UUID, or a scheduled run's `<schedule uid>-<yyyymmdd>-<hhmmss>[-r<k>]`,
+exactly as the controller mints it), an object key, a segment path, and the NAME of a Secret and of the data key inside
 it. So does the kubelet's own `couldn't find key password in Secret
 <namespace>/<name>`: D2 §6.5 says a Secret name is a public reference, and a
 message that named neither the Secret nor the key was the one row an operator
@@ -8378,9 +8556,15 @@ exits 1 instead of assuming the broker is on `CreateTime`.
 
 A `Backup`'s source credential needs DescribeConfigs on every backed-up topic
 for the receipt to record the topic's configuration as `captured`. Without it
-the backup still succeeds, the topic reads `captureDenied`, and a later
-restore's configuration parity names that topic as not assessed
+the backup still succeeds, the topic reads `captureDenied`, its configuration
+model records no settings (only its partition count and replication factor,
+[`topic_configuration`](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130)),
+and a later restore's configuration parity names that topic as not assessed
 ([the receipt field](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
+A `Backup` does not look for declarative owners yet (no `KafkaTopic` listing,
+no declared owners: PROD-05.1a), so its receipt records `owner_detection: []`,
+both readers say each topic's owner was not checked, and the product API
+publishes `applyRoute: unknown` for it, never the admin-API route.
 
 ### 21.7 Skipping a check is not answering it
 

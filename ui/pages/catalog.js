@@ -383,15 +383,20 @@ export function restorePointRoute(ns, catalog, entry, destination) {
 }
 
 // THE REDACTION MARKER. A REDACTED KEY IS NOT A KEY, AND THIS PAGE WILL NOT
-// PASS ONE ON. The catalog sync runs every archive key it records through
-// `logweir::check::redact_path`, and a runner that predates the ULID exemption
-// (CATALOG-RECEIPTKEY-REDACTED) rewrote the 26-character run id, so a point
-// comes back with `receiptKey: "[redacted].receipt.json"`. Carrying that into
-// a plan would build `source.point.receipt_key` out of the redactor's output
-// and earn exit 3 `PointBindingMismatch` from the runner, one step later and
-// one layer further from the cause. The rule lives beside the wizard's point
-// selection (PLAT-15.2), which refuses such a point too, and is re-exported
-// here so this page and the wizard cannot disagree about it.
+// PASS ONE ON. The catalog sync runs a point's `backupId` through
+// `check_contract::redact` and its archive keys through
+// `logweir::check::redact_path`. A runner that predates the ULID exemption
+// (CATALOG-RECEIPTKEY-REDACTED) rewrote the 26-character run id, and runners
+// up to v0.2.0-rc.1 rewrote every SCHEDULED run's set id
+// (`<schedule uid>-<slot>`, FX-17) -- and with it the receipt key built from
+// it -- so such a point comes back with `backupId: "[redacted]"` and
+// `receiptKey: "[redacted].receipt.json"`. Carrying either into a plan would
+// build `source.backup` or `source.point.receipt_key` out of the redactor's
+// output and earn exit 3 `PointBindingMismatch` from the runner, one step
+// later and one layer further from the cause. The rule lives beside the
+// wizard's point selection (PLAT-15.2, `redactedBindingReason`), which refuses
+// such a point with one reason naming the field, and is re-exported here so
+// this page and the wizard cannot disagree about it.
 export { REDACTION_MARKER, isRedacted };
 
 /** The location a restore would read from: the first one the catalog reports
@@ -431,7 +436,7 @@ export const POINT_BINDING_SENTENCE =
  *  THE RESTORE CELL IS THE WIZARD'S OWN QUESTION (PLAT-15.2). A row the catalog
  *  marks `selectable` is offered only when `catalogPointOffer` -- the rule the
  *  wizard applies when it opens -- offers it too: a complete Backup-verdict
- *  join, an unredacted receipt key and both digests. A selectable row it
+ *  join, an unredacted set id and receipt key, and both digests. A selectable row it
  *  refuses says why in the cell, so the table never offers a link the wizard
  *  will refuse. The controller's verdict on the point's own `Backup`
  *  (`backupVerdict`) is printed beside the catalog's verification, because it
@@ -508,7 +513,8 @@ export function renderPoints(page, ns, catalog, destination) {
       ? ""
       : "<p class=\"note\" data-more-points=\"true\">" + messageText(MORE_POINTS_SENTENCE) + "</p>") +
     "<p class=\"note\">" + messageText(POINT_BINDING_SENTENCE) + "</p>" +
-    (entries.some((entry) => isRedacted((entry || {}).receiptKey))
+    (entries.some((entry) => isRedacted((entry || {}).receiptKey) ||
+      isRedacted((entry || {}).backupId))
       ? "<p class=\"complaint\" data-redacted-binding=\"true\">" +
         messageText(POINT_BINDING_REDACTED_SENTENCE) + "</p>"
       : "") +
@@ -516,19 +522,23 @@ export function renderPoints(page, ns, catalog, destination) {
   );
 }
 
-/** What a row says when the key the plan needs came back redacted.
+/** What the table says when a value the plan needs came back redacted.
  *
- *  A COMPLAINT, NOT A NOTE, and it names the field and the repair. The
+ *  A COMPLAINT, NOT A NOTE, and it names the fields and the repair. The
  *  alternative was to carry the redactor's output into the link and let the
  *  runner refuse the plan with exit 3 `PointBindingMismatch` -- a correct
- *  refusal, one step later, about a value nothing on screen said was wrong. */
+ *  refusal, one step later, about a value nothing on screen said was wrong.
+ *  Each such row says which field and why (`redactedBindingReason`); this is
+ *  the one sentence for the page. */
 export const POINT_BINDING_REDACTED_SENTENCE =
-  "At least one point above published its receipt key as `[redacted]`: the product's own " +
-  "archive-key redactor rewrote it on the way into the catalog view, so what the API serves is not the key " +
-  "in the bucket. The restore link for that point omits `receiptKey` rather than carrying the " +
-  "redactor's output, and the plan cannot be completed from this page until the catalog " +
-  "publishes the key itself. The point id, the receipt digest and the manifest digest are " +
-  "unaffected; nothing in your archive is missing or unreadable because of this."
+  "At least one point above published its plan binding -- its backup set id or its receipt " +
+  "key -- as `[redacted]`: the catalog sync's own redactor withheld it on the way into the " +
+  "catalog view, so what the API serves is not the value in the bucket, and this page offers " +
+  "no restore for that point until the catalog publishes the value itself; its row says which " +
+  "field and why. Runners up to v0.2.0-rc.1 did this to every scheduled run's point: upgrade " +
+  "the runner image and sync the catalog again. The point id, the receipt digest and the " +
+  "manifest digest are unaffected; nothing in your archive is missing or unreadable because " +
+  "of this."
 
 /** The next cursor this page did NOT follow, or `null`. */
 export function cursorOf(page) {

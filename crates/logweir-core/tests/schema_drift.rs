@@ -30,8 +30,9 @@ fn justfile_schema_version(name: &str) -> String {
 /// compare the file their justfile variable names; the writer's constant names
 /// the `$id` and the `format_version` it writes. They must be one number, or a
 /// renumber would regenerate one file and sign documents naming another. For
-/// the receipt the CURRENT file is the newest MINOR's, the one a pinned receipt
-/// carries (FX-7, 1.2.0); FX-4's 1.1.0 file is frozen beside it.
+/// the receipt the CURRENT file is the newest MINOR's, the one every receipt
+/// this build signs carries (PROD-05.1, 1.3.0); FX-4's 1.1.0 and FX-7's 1.2.0
+/// files are frozen beside it.
 #[test]
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
@@ -40,7 +41,7 @@ fn the_justfile_schema_versions_are_the_writers_constants() {
     );
     assert_eq!(
         justfile_schema_version("receipt"),
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
     );
 }
 
@@ -241,6 +242,76 @@ fn the_frozen_1_2_0_scorecard_schema_does_not_describe_the_time_basis() {
     );
 }
 
+/// PROD-08.1: FX-8's 1.3.0 scorecard schema is FROZEN beside the 1.4.0 one.
+/// It names itself 1.3.0, carries FX-8's `source.time_basis` and does NOT
+/// describe `integrity.verification`. The current schema does, as an OPTIONAL
+/// field (a document before 1.4.0 without it still validates), whose four
+/// descriptive strings and two range lists are required inside it and whose
+/// `complete` block is optional.
+#[test]
+fn the_frozen_1_3_0_scorecard_schema_does_not_describe_the_verification() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.3.0.json"
+    ))
+    .expect("the frozen 1.3.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.3.0.json"
+    );
+    assert!(frozen["definitions"]["SourceInfo"]["properties"]["time_basis"].is_object());
+    assert!(
+        frozen["definitions"]["Integrity"]["properties"]
+            .get("verification")
+            .is_none(),
+        "the frozen 1.3.0 schema must not describe the 1.4.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
+    let integrity = &current["definitions"]["Integrity"];
+    assert!(integrity["properties"]["verification"].is_object());
+    assert!(
+        !integrity["required"]
+            .as_array()
+            .expect("Integrity has required fields")
+            .iter()
+            .any(|r| r == "verification"),
+        "verification is OPTIONAL: a document before 1.4.0 without it must still validate"
+    );
+    let required = |def: &str| -> Vec<String> {
+        let mut r: Vec<String> = current["definitions"][def]["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{def} has required fields"))
+            .iter()
+            .filter_map(|r| r.as_str().map(str::to_string))
+            .collect();
+        r.sort();
+        r
+    };
+    assert_eq!(
+        required("Verification"),
+        vec![
+            "application",
+            "comparison_basis",
+            "coverage",
+            "gaps",
+            "header_order",
+            "pruned"
+        ],
+        "an absent coverage or range list is never read as sampled-and-clean; `complete` is \
+         optional (present exactly with coverage complete, arm IV-4)"
+    );
+    assert!(
+        required("CompleteVerification").contains(&"covered".to_string())
+            && required("CompleteVerification").contains(&"partitions".to_string()),
+        "a complete block always says whether it covered every partition, and which"
+    );
+    assert!(
+        current["definitions"]["SourceInfo"]["properties"]["time_basis"].is_object(),
+        "the current schema keeps FX-8's field"
+    );
+}
+
 #[test]
 fn schema_declares_the_format_version_const() {
     let v: serde_json::Value =
@@ -335,7 +406,7 @@ fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
     let checked_in = current_schema(
         "backup-receipt",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION,
     );
     assert_eq!(
         generated.trim_end(),
@@ -344,7 +415,7 @@ fn backup_receipt_schema_has_no_drift() {
          review the diff — a field added is a MINOR bump, a field removed or \
          retyped is a MAJOR bump (Global Constraint 12), and the receipt's \
          format_version is its own and not the scorecard's.",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
     );
 }
 
@@ -366,9 +437,18 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         v["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-            logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
         )
     );
+    assert!(
+        !v["required"]
+            .as_array()
+            .expect("the receipt schema has a required array")
+            .iter()
+            .any(|r| r == "topic_configuration"),
+        "topic_configuration is OPTIONAL: every receipt before 1.3.0 lacks it and must still validate"
+    );
+    assert!(v["definitions"]["TopicConfiguration"]["properties"]["entries"].is_object());
     let archive = &v["definitions"]["ReceiptArchive"];
     assert!(archive["properties"]["manifest_version_id"].is_object());
     assert!(
@@ -476,4 +556,36 @@ fn the_frozen_1_1_0_receipt_schema_is_still_fx4s() {
         logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION,
         "the pin is a MINOR bump over FX-4's 1.1.0, so its schema is a NEW file"
     );
+}
+
+/// **FX-7's 1.2.0 receipt schema is FROZEN** beside PROD-05.1's 1.3.0 one. It
+/// still describes every PINNED receipt written before PROD-05.1: it names
+/// itself 1.2.0, carries `config_coverage` and `archive.manifest_version_id`,
+/// and does NOT describe `topic_configuration`. `just schema` no longer
+/// regenerates it, so this is the gate that it stays the file FX-7 published.
+#[test]
+fn the_frozen_1_2_0_receipt_schema_is_still_fx7s() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.2.0.json"
+    ))
+    .expect("the frozen 1.2.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.2.0.json"
+    );
+    assert!(frozen["properties"]["config_coverage"].is_object());
+    assert!(
+        frozen["definitions"]["ReceiptArchive"]["properties"]["manifest_version_id"].is_object()
+    );
+    assert!(
+        frozen["properties"].get("topic_configuration").is_none(),
+        "the frozen 1.2.0 schema must not describe the 1.3.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    assert_ne!(
+        current["$id"], frozen["$id"],
+        "the current schema is a NEW file beside the frozen one, never the 1.2.0 file regenerated"
+    );
+    assert!(current["properties"]["topic_configuration"].is_object());
 }

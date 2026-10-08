@@ -291,6 +291,61 @@ Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.
 
+## Amendment (2026-10-07, PROD-16.1, owner decision OD-8): no approver key by default
+
+OD-8 decided that a fresh installation reaches a verified restore with no key
+handled by any person. This record's approval contract is amended as follows,
+and only as follows:
+
+- **Three operator-facing modes** over the unchanged internal names (which are
+  inside signed documents and snapshots): `confirm` = `Ordinary`, `strict` =
+  `Governed` or `legacy-governed-v1`, `two-person` = PROD-16.2 (not yet).
+  `logweir_core::approval_policy::OperatorMode` is the one mapping.
+- **"Missing binding synthesizes `legacy-governed-v1`; it never synthesizes
+  Ordinary"** now reads: a missing binding resolves to an explicit
+  installation `defaultMode` (`confirm`, which needs `allowOrdinaryConfirmation`,
+  or `strict`), else to the concrete policy `default-confirm-v1` (`Ordinary`)
+  when the installation is MARKED FRESH, else to `legacy-governed-v1`.
+- **"Ordinary mode cannot be enabled merely by upgrading" stands.** The marker
+  is written only by the identity hook run that GENERATES the installation
+  identity, beside the default `TrustPolicy` the same run creates for the
+  identity and the console key, and it is honoured only beside that exact,
+  hook-made policy (`verify_marker`: name, UID, provenance, `default: true`,
+  exactly those two keys and usages). An upgraded install is never marked and
+  gets no automatic trust; a marker patched in later changes nothing (the
+  PROD-16.1 security review: no single object edit can do what two gates did).
+  An older install opts in through the same two gates as before: a trust
+  administrator adds the console key, and an installation-admin rollout sets
+  `defaultMode: confirm` with `allowOrdinaryConfirmation` (or binds).
+- **The confirmation key is generated at install** by the identity hook
+  (create-once, retained, never regenerated, key-loss detection), and on a
+  fresh install trusted by the hook-made policy. The grant that lets the hook
+  create that cluster-scoped policy exists only during the first install's
+  post-install hooks and is revoked by the hook itself.
+- **Fix round (2026-10-08, the Tier-A review of PROD-16.1).** The automatic
+  trust exists only for the console's confirmation: no console, an external
+  identity, or a console key the hook ADOPTED rather than generated creates no
+  policy, no marker and no grant; and any existing `TrustPolicy` (namespaced
+  too) or `TrustRoster/default` means the cluster's trust is administered and
+  the hook adds nothing. The grant renders only under Helm 3.19+ or 4.x, which
+  delete it when the hook fails (the chart refuses older Helm by name), and the
+  hook revokes it on every exit path it controls; a failed first install's
+  recovery command is documented. The chart passes the hook its PROD-16.1
+  flags only behind `identity.bootstrapFeatures.consoleKey`, flipped with the
+  re-pin of the bootstrap image, so a merge never breaks the pinned hook.
+- **`localAdmin` serves `confirm`** — the confirming principal is
+  `urn:logweir:local-admin#admin` — superseding the 2026-09-23 amendment's
+  "`localAdmin` refuses Ordinary" and the acceptance row "does not expose
+  Ordinary" for the in-cluster administrator console. `two-person` will be
+  refused there. Residual, in SECURITY.md: whoever can reach that console can
+  confirm alone; and in any console mode, whoever controls the console pod,
+  its key Secret or the identity provider can approve alone.
+- **Rollback fails closed**: an older controller or console ignores the marker
+  (unbound → `legacy-governed-v1`, a pending `default-confirm-v1` document is
+  refused `ApprovalPolicyMismatch`), and an older binary refuses a document
+  carrying `defaultMode` at start. Existing Approvals, v1/v2 documents, standing
+  authorizations and signed archives are untouched.
+
 ## Amendment at integration (2026-09-21, PLAT-17.1 stage 7)
 
 The chart's deployment stage landed under the existing `api.*` values block that D3 W13

@@ -838,6 +838,10 @@ pub fn render_plan(inputs: &PlanInputs<'_>) -> DrillSpec {
             records_per_partition: usize::try_from(spec.bounds.records_per_partition).unwrap_or(25),
             anchor: Anchor::default(),
             max_partitions: Some(u32::try_from(spec.bounds.max_partitions).unwrap_or(u32::MAX)),
+            // PROD-08.1: a rehearsal verifies by sample; complete coverage is not
+            // a schedule field yet (docs/to-do/decisions/PROD-08.1-integrity-contract.md).
+            coverage: logweir_core::spec::Coverage::Sampled,
+            complete_max_records: None,
         },
         restore: RestoreSpecBlock {
             point_in_time: Some(point_in_time),

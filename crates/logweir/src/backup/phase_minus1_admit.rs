@@ -50,6 +50,12 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
         .into());
     }
 
+    // 1b. **C15** (PROD-00.3f): an `http://` archive endpoint with
+    //     `allow_http: false` is refused here, exit 3, before any client
+    //     exists. The pinned engine would otherwise derive plaintext from the
+    //     scheme; `render_storage_block`'s refusal is the backstop (exit 1).
+    logweir_core::guard::reject_plaintext_endpoint_without_allow_http("storage", &spec.storage)?;
+
     // 2. GC18(c) rail 1 / **G-GLOB**, at the SPEC layer.
     //
     //    `render_backup::render` carries the identical call, and that is NOT
@@ -101,6 +107,24 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
              named-topic allowlist"
                 .to_string(),
         )
+        .into());
+    }
+
+    // 3b. **PROD-05.1.** A declared owner names one of the plan's topics, a
+    //     kind the receipt defines and a usable reference — or the plan is
+    //     refused here, exit 3, rather than recording an owner the receipt's
+    //     arm 18 would refuse after the archive exists, or silently dropping
+    //     a declaration that would have routed a restore to desired-state
+    //     export. A topic declared twice is refused too: which of the two
+    //     the receipt would carry is not the operator's to guess.
+    if let Some(why) = logweir_core::topic_configuration::refuse_declarations(
+        spec.source.topic_owners.as_deref().unwrap_or(&[]),
+        &spec.source.topics,
+    ) {
+        return Err(GuardRefusal(format!(
+            "{why}; a declared owner routes the topic's restore to a desired-state export, \
+             so a declaration this build cannot record is refused rather than dropped"
+        ))
         .into());
     }
 

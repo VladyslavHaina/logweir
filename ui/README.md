@@ -805,10 +805,15 @@ block ARE gates, each also refused by the product API:
   "required in Governed"). Create refuses to send without one, and the ticket
   travels beside the create body -- never inside `Restore.spec` -- to be signed
   into the confirmation. An unbound namespace and legacy mode never send one.
-* **In the administrator (`localAdmin`) console an `Ordinary` binding is not
-  offered** (D0: that mode "does not expose Ordinary"). The policy read says
-  `ordinaryConfirmationAvailable: false`; the step says to use the shared
-  console and Create is disabled (`policyRefusal`).
+* **A `confirm` namespace whose console key is not there yet is not offered**
+  (PROD-16.1): the managed key is written by the identity hook after the
+  console starts. The policy read says `ordinaryConfirmationAvailable: false`;
+  the step says so and Create is disabled (`policyRefusal`). The administrator
+  (`localAdmin`) console serves `confirm` like the shared one, as
+  `urn:logweir:local-admin#admin` (amending D0's "does not expose Ordinary").
+  The step names the mode the operator sees -- confirm ("no key needed", and,
+  on a fresh install, why), strict (an approver's personal key) or the
+  out-of-band step -- from the read's `operatorMode` and `basis`.
 
 **The approvals page under a Governed binding** shows the console's
 confirmation documents verbatim in read-only fields (never parsed here, the rule
@@ -933,9 +938,18 @@ catalog table, the schedule detail and the wizard's own mount share): the API
 row is `selectable` -- the controller's conjunction, joined server side with the
 namespace's `Backup` verdicts; no `backupVerdict`; no `backupVerdictsIncomplete`
 on the page (a join nobody finished cannot say that no `Backup` refused this
-receipt); a current view; a point id, an unredacted receipt key and both
-digests; and a covered window. Anything else is a refusal naming the reason,
-with no plan, no hash and no submit, and never a substituted point.
+receipt); a current view; a point id, an unredacted backup set id and receipt
+key, and both digests; and a covered window. Anything else is a refusal naming
+the reason, with no plan, no hash and no submit, and never a substituted point.
+A set id or receipt key that came back as the catalog sync's `[redacted]` is ONE
+refusal naming the field and the cause (`redactedBindingReason`): runners up to
+v0.2.0-rc.1 withheld every scheduled run's set id (`<schedule uid>-<slot>`) and
+the keys built from it, so a catalog synced by one offered none of its scheduled
+points (FX-17) -- upgrade the runner image and sync the catalog again. A set id
+chosen for `logweir backup run` survives when it is a public form -- for
+example a UUID, or lower-case letters, digits, `.`, `-`, `_` and `=` under 40
+characters. The schedule page joins a run to its catalog row on the same set
+id, so until the re-sync a scheduled run there reads `not in the catalog`.
 
 **What the six steps do with it.** Step 1 reads the archive the catalog reads
 (its saved destination, frozen at mount by UID and location digest and checked
@@ -1065,7 +1079,9 @@ a contract constant or a plan field and never from prose this page invented:
   manifest's. PLAT-15.1's catalog is where that would come from;
 * the **sampled verification scope**, from the plan's `sample` block, closing
   with the clause D3 section 3.5 makes non-optional -- *a sampled check, not an
-  exhaustive comparison*. No level in this version compares every record;
+  exhaustive comparison*. No restore the console starts compares every record
+  (complete coverage, PROD-08.1, is a plan field the wizard does not offer
+  yet);
 * the **consumer cutover limitation**, byte for byte from `render.js`'s
   `COMPLETION_GUIDANCE` and `TARGET_MODE_MEANING` -- the same fixed sentences
   the completion panel shows afterwards;
@@ -1133,9 +1149,9 @@ storage, never durability.
 
 | what is known | the default | step 4 and step 6 say |
 |---|---|---|
-| the source's factor, and the target has room | the source's | `3 (the source's)` |
-| the source's factor, above the target's broker count | the broker count | `2 (capped at the target's 2 brokers; the source's is 3)` |
-| only the target's broker count, at most 3 | the broker count | `2 (the target's 2 brokers; the source's replication factor is not published to this console)` |
+| the source's factor, and the target has room | the source's | ``3 (the source's, as recovery catalog `primary` records point `lwp1-...`, the largest of the selected topics')`` |
+| the source's factor, above the target's broker count | the broker count | ``2 (capped at the target's 2 brokers; the source's is 3, as recovery catalog `primary` records point `lwp1-...`)`` |
+| only the target's broker count, at most 3 | the broker count | `2 (the target's 2 brokers; the source's replication factor is not known for this point)` |
 | only the target's broker count, above 3 | 3 | `3 (at most 3 by default, of the target's 5 brokers; ...)` |
 | nothing | the grammar's 1 | `1 (the plan grammar's default: neither the source's replication factor nor the target's broker count is known to this console)`, and a warning beside the input |
 | a value the operator typed | that value | `4 (set by you; the target has 5 brokers)` |
@@ -1143,8 +1159,8 @@ storage, never durability.
 **The factor can differ from the source's, and both steps say what that
 costs** (FX-5 review M1). A default worked out from the target's brokers knows
 nothing of the source's factor. So unless the source's factor is known and the
-plan asks for exactly it (never, in this build), step 4 prints this beside the
-basis, and the review step prints it under its row:
+plan asks for exactly it, step 4 prints this beside the basis, and the review
+step prints it under its row:
 
 > This factor can differ from the source's, and the target's storage follows
 > it: a topic the source kept at replication factor 1, restored at 3, takes
@@ -1155,18 +1171,28 @@ The sentence is `REPLICATION_DIFFERS_NOTE` and the rule is
 `replicationMayDiffer`; the quickstart (section 7) carries the same sentence,
 and one row holds the page and both documents to it.
 
-**The source's factor is not readable in this build, and the page says so.**
-The backup engine records it per topic in the archive manifest
-(`topics[].source_replication_factor`), and only the restore Job reads the
-manifest. The backup receipt counts records per topic and nothing else, a
-catalog point's topics carry a name, a record count and an always-absent
-partition count, `Backup.status` has no per-topic block, and the product API
-holds no object-store credential. So the first two rows of the table are
-reached by the rule's own test rows and by nothing a cluster says; projecting
-the factor into the receipt, the catalog and the API is PROD-05.1's (capture
-topic configuration with coverage), and `sourceReplicationFactorsOf` is the
-one function that changes when it lands. A topic discovery of the SOURCE is
-not a substitute: it lists the cluster as it is now, not the recovery point.
+**The source's factor comes from a recovery catalog's view of the point**
+(PROD-05.1). The backup receipt records it per topic (format 1.3.0,
+`topic_configuration`, read by the backup runner from the source's metadata
+before the engine), the catalog point record copies it, the catalog's sync lists
+it for an `Available` point whose record agreed with its verified receipt, and
+the product API publishes it as `PointView.topics[]` (`partitions`,
+`replicationFactor`, `configCoverage`, `owner`, `applyRoute`), with
+`PointView.ownerDetection` saying where the run looked for declarative owners:
+an un-owned topic's `applyRoute` is `adminApi` only where it looked, and
+`unknown` where it did not. A catalog point carries its row. A `Backup`'s point is named by its receipt digest (`lwp1-` and
+the first 32 hex digits of `status.evidence.receiptSha256`, the catalog's own
+identity) and looked up in the namespace's recovery catalogs, at most four,
+before the first paint. The default is the LARGEST of the selected topics'
+factors, and both steps say which catalog and point it came from and, when a
+selected topic records none, how many. When no catalog lists the point, or
+lists it without a layout (a receipt before 1.3.0, a catalog synced by an older
+runner, a point that is not `Available`), step 4 says why and the default is
+the broker count's, as before. `Backup.status` does not carry the factor: a
+status is not a second copy of a receipt. A topic discovery of the SOURCE is not
+a substitute: it lists the cluster as it is now, not the recovery point. The
+review step also shows the selected topics' SOURCE partition counts, which the
+restore creates each topic with, when the catalog row records them.
 
 **The target's broker count comes from a topic discovery of the target
 connection.** It is `TopicDiscovery.status.result.brokerCount`, which the

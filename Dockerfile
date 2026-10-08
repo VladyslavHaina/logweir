@@ -174,7 +174,7 @@ RUN cargo build --release --target x86_64-unknown-linux-gnu -p logweir -p logwei
 # third_party/kafka-backup-binary.digest together, never separately.
 # Naming upstream's namespace here is permitted: GC14 forbids Logweir
 # publishing under osodevops/, not pulling from it (controller ruling GR6).
-FROM osodevops/kafka-backup@sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317 AS engine
+FROM osodevops/kafka-backup@sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db AS engine
 
 FROM debian:bookworm-slim AS runtime
 # `libsasl2-2` is REQUIRED BY LOGWEIR'S OWN BINARY, not by the engine. rdkafka

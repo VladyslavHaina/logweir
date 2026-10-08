@@ -85,6 +85,99 @@ fn identity_bootstrap_and_distribution_help_are_release_smokeable() {
     }
 }
 
+/// PROD-16.1 fix round (second-pass review, L-P7): `main.rs`'s usage-error
+/// path still tries to delete the install's trust grant an `identity
+/// bootstrap` invocation names — a chart newer than this image passing a flag
+/// it does not know must not leave `create trustpolicies` bound. The process
+/// is pointed at an EMPTY ServiceAccount directory, so the attempt stops at
+/// reading the token, before any network, and says so; what a reachable API
+/// server answers is `identity.rs`'s rows and the live journey's.
+#[test]
+fn an_identity_bootstrap_usage_error_still_tries_to_revoke_the_trust_grant() {
+    let account = std::env::temp_dir().join(format!(
+        "logweir-usage-revoke-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&account).unwrap();
+    let run = |args: &[&str]| {
+        let out = bin()
+            .args(args)
+            .env("KUBERNETES_SERVICE_HOST", "127.0.0.1")
+            .env("KUBERNETES_SERVICE_PORT_HTTPS", "1")
+            .env("LOGWEIR_SERVICE_ACCOUNT_DIR", &account)
+            .output()
+            .unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let (code, stderr) = run(&[
+        "identity",
+        "bootstrap",
+        "--namespace",
+        "logweir-system",
+        "--a-flag-from-a-newer-chart",
+        "--revoke-trust-binding",
+        "logweir-identity-trust",
+    ]);
+    assert_eq!(code, Some(1), "still a usage error: {stderr}");
+    assert!(
+        stderr.contains("unexpected argument '--a-flag-from-a-newer-chart'"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("could not read ServiceAccount token")
+            && stderr.contains(
+                "installation-trust-grant logweir-identity-trust:delete-failed (after a usage error)"
+            ),
+        "the usage-error path must try to delete the named grant: {stderr}"
+    );
+    // NEGATIVE CONTROLS: another command's usage error, no binding named, a
+    // name that is not a name, and `--help` — none attempts anything.
+    for args in [
+        &[
+            "restore",
+            "run",
+            "--nope",
+            "--revoke-trust-binding",
+            "logweir-identity-trust",
+        ][..],
+        &[
+            "identity",
+            "bootstrap",
+            "--namespace",
+            "logweir-system",
+            "--nope",
+        ][..],
+        &[
+            "identity",
+            "bootstrap",
+            "--nope",
+            "--revoke-trust-binding",
+            "../../secrets",
+        ][..],
+        &[
+            "identity",
+            "bootstrap",
+            "--help",
+            "--revoke-trust-binding",
+            "logweir-identity-trust",
+        ][..],
+    ] {
+        let (_, stderr) = run(args);
+        assert!(
+            !stderr.contains("installation-trust-grant"),
+            "{args:?} must attempt no revocation: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&account);
+}
+
 #[test]
 fn version_still_exits_ok() {
     let out = bin().args(["--version"]).output().unwrap();

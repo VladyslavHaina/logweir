@@ -6363,6 +6363,8 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
             to_ms: started_at.timestamp_millis(),
         },
         config_coverage: None,
+        topic_configuration: None,
+        owner_detection: None,
     }
 }
 
@@ -6563,6 +6565,169 @@ fn only_entry(objects: FakeObjects) -> serde_json::Value {
     let entries = entries_of(&body_of(&run));
     assert_eq!(entries.len(), 1, "{entries:?}");
     entries[0].clone()
+}
+
+// ---------------------------------------------------------------------------
+// PROD-05.1: the view lists a point's topics with their recorded layout
+// ---------------------------------------------------------------------------
+
+/// A 1.3.0 receipt over `topics`, each captured with the given replication
+/// factor and partition count, `orders` owned by a Strimzi `KafkaTopic`.
+/// A 1.3.0 receipt over `(topic, replication factor, partitions)`; a `0`
+/// count is NOT RECORDED (arm 19 forbids a recorded zero), the shape engine
+/// 0.23.3's manifest leaves for every topic after the first (FX-21). `orders`
+/// is owned by a Strimzi `KafkaTopic`, so the run read the resources.
+fn modelled_catalog_receipt(topics: &[(&str, u32, u32)]) -> BackupReceipt {
+    use logweir_core::backup_receipt::{TopicConfigCoverage, TopicConfiguration, TopicOwner};
+    let mut r = catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z");
+    r.format_version =
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION.to_string();
+    r.source.topics = topics.iter().map(|(t, ..)| (*t).to_string()).collect();
+    r.records = topics
+        .iter()
+        .map(|(t, ..)| ((*t).to_string(), 1u64))
+        .collect();
+    r.config_coverage = Some(
+        topics
+            .iter()
+            .map(|(t, ..)| {
+                (
+                    (*t).to_string(),
+                    TopicConfigCoverage {
+                        coverage: "captured".into(),
+                        reason: None,
+                        timestamp_type: None,
+                    },
+                )
+            })
+            .collect(),
+    );
+    r.topic_configuration = Some(
+        topics
+            .iter()
+            .map(|(t, rf, partitions)| {
+                (
+                    (*t).to_string(),
+                    TopicConfiguration {
+                        partitions: (*partitions > 0).then_some(*partitions),
+                        replication_factor: (*rf > 0).then_some(*rf),
+                        entries: Some(BTreeMap::new()),
+                        owner: (*t == "orders").then(|| TopicOwner {
+                            kind: "strimzi".into(),
+                            basis: "kafkaTopicResource".into(),
+                            reference: "kafka/orders".into(),
+                        }),
+                    },
+                )
+            })
+            .collect(),
+    );
+    r.owner_detection = Some(vec!["kafkaTopicResources".into()]);
+    assert_eq!(r.validate_invariants(), Ok(()));
+    r
+}
+
+/// **M3 (fix round): an absent count stays absent.** A topic whose replication
+/// factor was not recorded — engine 0.23.3's manifest keeps it for the first
+/// topic only (FX-21) — and one whose partition count was not, are listed
+/// WITHOUT the key: never `1`, never `0`, never another topic's.
+#[test]
+fn a_topic_whose_factor_or_count_was_not_recorded_is_listed_without_it() {
+    let receipt = modelled_catalog_receipt(&[("orders", 3, 6), ("ledger", 0, 4), ("audit", 2, 0)]);
+    let (objects, _) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Available", "{entry}");
+    assert_eq!(
+        entry["topics"],
+        serde_json::json!([
+            {"name": "audit", "replicationFactor": 2, "configCoverage": "captured"},
+            {"name": "ledger", "partitions": 4, "configCoverage": "captured"},
+            {"name": "orders", "partitions": 6, "replicationFactor": 3, "configCoverage": "captured",
+             "owner": "strimzi"},
+        ]),
+        "{entry}"
+    );
+    // Where the run looked for owners travels with the topics (M2).
+    assert_eq!(
+        entry["ownerDetection"],
+        serde_json::json!(["kafkaTopicResources"]),
+        "{entry}"
+    );
+}
+
+/// **M2 (fix round).** A run that looked for owners nowhere publishes an EMPTY
+/// `ownerDetection` beside its topics — not an absent one, which is NOT
+/// PUBLISHED — so a reader can say "owner not checked" for every topic.
+#[test]
+fn a_point_whose_owners_were_never_looked_for_publishes_an_empty_detection() {
+    let mut receipt = modelled_catalog_receipt(&[("audit", 1, 1)]);
+    receipt.owner_detection = Some(Vec::new());
+    assert_eq!(receipt.validate_invariants(), Ok(()));
+    let (objects, _) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
+    let entry = only_entry(objects);
+    assert_eq!(entry["ownerDetection"], serde_json::json!([]), "{entry}");
+    assert!(entry["topics"][0].get("owner").is_none(), "{entry}");
+}
+
+/// **The console's source.** An `Available` 1.3.0 point lists every topic with
+/// its recorded partition count, replication factor, coverage and owner kind;
+/// the control — a 1.0.0 point — lists none (NOT PUBLISHED).
+#[test]
+fn an_available_1_3_0_point_lists_its_topics_with_their_recorded_layout() {
+    let receipt = modelled_catalog_receipt(&[("orders", 3, 6), ("audit", 1, 1)]);
+    let (objects, _) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Available", "{entry}");
+    assert_eq!(
+        entry["topics"],
+        serde_json::json!([
+            {"name": "audit", "partitions": 1, "replicationFactor": 1, "configCoverage": "captured"},
+            {"name": "orders", "partitions": 6, "replicationFactor": 3, "configCoverage": "captured",
+             "owner": "strimzi"},
+        ]),
+        "{entry}"
+    );
+    assert!(entry.get("topicsOmitted").is_none(), "{entry}");
+    let (control, _) = versioned_objects(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        &[("v1", CATALOG_MANIFEST)],
+    );
+    let control = only_entry(control);
+    assert!(
+        control.get("topics").is_none(),
+        "a pre-1.3.0 point lists no topics: {control}"
+    );
+}
+
+/// A point the sync cannot stand behind lists no topics: a `Conflict` (here a
+/// superseded pin) is a record whose facts are not the point's.
+#[test]
+fn a_point_that_is_not_available_lists_no_topics() {
+    let mut receipt = modelled_catalog_receipt(&[("orders", 3, 6)]);
+    receipt.archive.manifest_version_id = Some("v1".into());
+    let history: &[(&str, &[u8])] = &[("v1", CATALOG_MANIFEST), ("v2", CATALOG_MANIFEST)];
+    let (objects, _) = versioned_objects(&receipt, history);
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Conflict", "{entry}");
+    assert!(entry.get("topics").is_none(), "{entry}");
+}
+
+/// More topics than the cap: none listed, the count said — a partial list would
+/// read as the point's topic set.
+#[test]
+fn a_point_with_more_topics_than_the_cap_lists_none_and_counts_them() {
+    use logweir::check::kinds::catalog_sync::MAX_ENTRY_TOPICS;
+    let names: Vec<String> = (0..=MAX_ENTRY_TOPICS).map(|i| format!("t{i:03}")).collect();
+    let topics: Vec<(&str, u32, u32)> = names.iter().map(|n| (n.as_str(), 1, 1)).collect();
+    let (objects, _) = versioned_objects(
+        &modelled_catalog_receipt(&topics),
+        &[("v1", CATALOG_MANIFEST)],
+    );
+    let entry = only_entry(objects);
+    assert!(entry.get("topics").is_none(), "{entry}");
+    assert_eq!(entry["topicsOmitted"], MAX_ENTRY_TOPICS + 1, "{entry}");
+    // Nothing for `ownerDetection` to qualify, so it is not published either.
+    assert!(entry.get("ownerDetection").is_none(), "{entry}");
 }
 
 /// A pinned point whose pinned version IS the current one is `Available`,
@@ -8518,6 +8683,120 @@ fn the_receipt_key_a_restore_binds_to_survives_a_sync_for_a_real_run_id() {
     );
 }
 
+/// **FX-17's class sweep: the resume cursor is a value the NEXT sync decides
+/// on**, and it passes `redact_path` (`catalog_sync.rs` `cursor_document`).
+/// A redacted cursor would be a listing start-after no key equals. It is a
+/// point's RECORD key, `logweir/catalog/v1/points/<pointId>/record.json`,
+/// whose every component is a public name (`lwp1-` + 32 hex is 37 characters),
+/// so it survives by construction; this row pins that construction for the
+/// id range the writer mints, so a longer point id or a new path component
+/// fails here and not as a sync that re-walks from the start for ever.
+#[test]
+fn the_catalog_resume_cursor_is_a_record_key_the_redactor_keeps() {
+    for receipt in [b"a".as_slice(), b"b", b"the receipt bytes", &[0xff; 64]] {
+        let point_id = logweir::catalog::record::point_id(receipt);
+        let key = logweir::catalog::record::record_key(&point_id);
+        assert!(key.len() >= 40, "the probe must reach the threshold: {key}");
+        assert_eq!(
+            logweir::check::redact_path(&key),
+            key,
+            "the resume cursor was redacted"
+        );
+    }
+    // CONTROL: the same position with a component the redactor withholds is
+    // withheld, so the row above is not passing on a redactor that keeps all.
+    let forged = "logweir/catalog/v1/points/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY0/record.json";
+    assert!(
+        logweir::check::redact_path(forged).contains(logweir_core::check_contract::REDACTED),
+        "{}",
+        logweir::check::redact_path(forged)
+    );
+}
+
+/// **FX-17, end to end.** A SCHEDULED run's point is published with its set
+/// id, its receipt key and its manifest key whole.
+///
+/// REGRESSION REASON. The row above, and every catalog fixture in this file,
+/// spells the backup set id as a UUID — a manual run's. A scheduled run's set
+/// id is `<schedule uid>-<yyyymmdd>-<hhmmss>` (`weirkeeper::slot::
+/// backup_id_for_attempt`), 52 characters, which the redactor read as neither a
+/// UUID nor a public name. So on the PoC every nightly point reached the
+/// console as `backupId: "[redacted]"`, `receiptKey: "[redacted].receipt.json"`
+/// and `manifestKey: "[redacted].json"` — 84 of 370 points, the whole first
+/// page of the Catalog view — and the console offered none of them, because a
+/// plan binding cannot be built from the redactor's output.
+///
+/// The second half is the negative control: a set id with the same shape but
+/// a slot that is not a real instant was never minted, and it is still
+/// withheld from all three fields.
+#[test]
+fn a_scheduled_runs_point_is_published_with_its_set_id_and_keys_whole() {
+    /// The PoC's own nightly schedule UID and one of its run ids.
+    const SCHEDULE_UID: &str = "89b585c5-5498-48dc-ae32-090809457ec8";
+    const RUN: &str = "01M4CKTADX268PREVHJAAYXEMZ";
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let entry_for = |set: &str| -> (serde_json::Value, CatalogFixture) {
+        let f = catalog_fixture(
+            // The day every other catalog row here is captured on: the
+            // fixture's index walk reads that shard.
+            &catalog_receipt(set, RUN, "2026-09-16T03:00:00Z"),
+            "s3://kafka-backups/poc",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        let run = drive_sync(
+            sync_request(),
+            &FakeWiring::default()
+                .with_role(DestinationRole::ArchiveRead, place(FakeObjects::new(), &f)),
+        );
+        let mut entries = entries_of(&body_of(&run));
+        assert_eq!(entries.len(), 1, "one receipt, one point");
+        (entries.remove(0), f)
+    };
+
+    // --- the set ids the schedule controller mints: attempt 0 and a retry ---
+    for set in [
+        format!("{SCHEDULE_UID}-20260916-030000"),
+        format!("{SCHEDULE_UID}-20260916-030000-r2"),
+    ] {
+        let (entry, f) = entry_for(&set);
+        assert_eq!(
+            f.point.receipt.key,
+            format!("logweir/backups/{set}/{RUN}.receipt.json"),
+            "the fixture is not the key `backup run` writes"
+        );
+        assert_eq!(entry["backupId"], set, "the set id was withheld");
+        assert_eq!(
+            entry["receiptKey"], f.point.receipt.key,
+            "the plan binding was not published whole"
+        );
+        assert_eq!(
+            entry["manifestKey"], f.point.archive.manifest_key,
+            "the manifest key was withheld"
+        );
+        assert_eq!(entry["runId"], RUN);
+        let line = serde_json::to_string(&entry).expect("the entry serialises");
+        assert!(
+            !line.contains(logweir_core::check_contract::REDACTED),
+            "the PoC symptom is back: {line}"
+        );
+    }
+
+    // --- the negative control: the shape, but not a slot anything minted ---
+    let forged = format!("{SCHEDULE_UID}-20261309-031700");
+    let (entry, _) = entry_for(&forged);
+    let line = serde_json::to_string(&entry).expect("the entry serialises");
+    assert!(
+        !line.contains(&forged),
+        "a set id no schedule mints rode out on the scheduled shape: {line}"
+    );
+    assert_eq!(entry["backupId"], logweir_core::check_contract::REDACTED);
+    assert_eq!(
+        entry["receiptKey"],
+        format!("{}.receipt.json", logweir_core::check_contract::REDACTED)
+    );
+}
+
 /// **THE CROSS-CRATE GUARD, half one.** Every prefix and every cap this runner
 /// writes is the controller's own constant, read out of its source.
 #[test]
@@ -8575,6 +8854,7 @@ fn the_grammar_this_runner_writes_is_the_grammar_the_controller_parses() {
     assert_eq!(usize_const("MAX_BODY_BYTES"), cs::MAX_BODY_BYTES);
     assert_eq!(usize_const("MAX_BODY_SIGNERS"), cs::MAX_BODY_SIGNERS);
     assert_eq!(usize_const("MAX_ENTRY_LOCATIONS"), cs::MAX_ENTRY_LOCATIONS);
+    assert_eq!(usize_const("MAX_ENTRY_TOPICS"), cs::MAX_ENTRY_TOPICS);
     assert_eq!(usize_const("MAX_BODY_PAGES"), cs::MAX_BODY_PAGES);
     assert_eq!(usize_const("MAX_HISTOGRAM_DAYS"), cs::MAX_HISTOGRAM_DAYS);
     assert!(

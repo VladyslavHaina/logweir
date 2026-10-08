@@ -527,9 +527,19 @@ fn the_signed_receipt_fixture_verifies() {
     // below keeps the weaker sentence honest for the two document types that
     // still get it.
     assert!(
-        stdout.contains("the signature AND all eleven backup-receipt invariants"),
-        "an exit 0 that checked the invariants must say so on stdout (eleven since FX-4's \
-         six config_coverage arms), got: {stdout}"
+        stdout.contains("the signature AND all twenty-one backup-receipt invariants"),
+        "an exit 0 that checked the invariants must say so on stdout (twenty-one since \
+         PROD-05.1's eight topic_configuration arms and two owner_detection arms), got: \
+         {stdout}"
+    );
+    // PROD-05.1: the checked-in receipt is a 1.0.0 document, so its topics'
+    // configuration model is NOT RECORDED — said, never left to read as "none".
+    assert!(
+        stdout.contains(
+            "topic_configuration: not recorded, so no topic's partition count, replication \
+             factor or settings are known to a restore from this receipt"
+        ),
+        "{stdout}"
     );
     // FX-4: the checked-in signed receipt is a 1.0.0 document, so its
     // configuration capture coverage is UNKNOWN — and the verdict says so
@@ -851,5 +861,73 @@ fn drill_verify_prints_the_time_basis_a_scorecard_records() {
             })
             .collect();
         assert_eq!(got, want, "{label:?}:\n{stdout}");
+    }
+}
+
+/// **PROD-08.1.** `drill verify` prints what a scorecard's
+/// `integrity.verification` says the verdict covered: one line saying it is
+/// not recorded (read as a sample) when the block is absent; the coverage, its
+/// basis and header order; a complete block's exact counts, or INCOMPLETE and
+/// why; and how many capture gaps and pruned ranges the verified partitions
+/// record. `docs/verify_scorecard.py` prints the same lines
+/// (`scripts/check-verifier-parity.sh` compares them).
+///
+/// KILLS: deleting the print loop; printing an absent block as anything but
+/// not recorded; a covered line over an incomplete block.
+#[test]
+fn drill_verify_prints_what_the_verdict_covered() {
+    use logweir_core::scorecard::*;
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc: Scorecard =
+        serde_json::from_slice(&std::fs::read(format!("{FIX}/scorecard.json")).unwrap()).unwrap();
+    sc.format_version = logweir_core::FORMAT_VERSION.into();
+    let sampled = Verification {
+        coverage: COVERAGE_SAMPLED.into(),
+        comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
+        header_order: HEADER_ORDER_NOT_VERIFIED.into(),
+        application: APPLICATION_NOT_ATTEMPTED.into(),
+        gaps: vec![OffsetRange {
+            topic: "orders".into(),
+            partition: 0,
+            from_offset: 10,
+            to_offset: 19,
+        }],
+        pruned: vec![],
+        complete: None,
+    };
+    let cases: [(Option<Verification>, &[&str]); 2] = [
+        (
+            None,
+            &[
+                "integrity coverage: not recorded, so this verdict covered a sample, never every \
+               record",
+            ],
+        ),
+        (
+            Some(sampled),
+            &[
+                "integrity coverage: sampled (compared with the archive; header order \
+                 notVerified; application validation notAttempted)",
+                "integrity coverage: the verified partitions record 1 capture gaps and 0 pruned \
+                 ranges",
+            ],
+        ),
+    ];
+    for (block, want) in cases {
+        sc.integrity.verification = block.clone();
+        let (sc_path, sig_path) = sign_into(dir.path(), &sc);
+        let out = verify(&sc_path, &sig_path, format!("{FIX}/public.pem"));
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{block:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let got: Vec<&str> = stdout
+            .lines()
+            .filter_map(|l| l.strip_prefix("coverage:  "))
+            .collect();
+        assert_eq!(got, want, "{block:?}:\n{stdout}");
     }
 }

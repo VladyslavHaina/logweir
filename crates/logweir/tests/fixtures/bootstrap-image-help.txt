@@ -1,0 +1,40 @@
+# The help text of the pinned identity.bootstrapImage, captured with:
+#   docker run --rm --platform linux/amd64 <image> identity bootstrap --help
+# Refreshed at every re-pin (docs/install.md, Release coordinator: re-pin bootstrap
+# bytes); chart_lint holds the chart to the flags listed here.
+# digest: sha256:ea106328eb5f9364a4682e640ba258242c6fc949b5d2198140c57bf719a13968
+# (the digest only: the runner repository is named once under crates/, in
+#  crates/weirkeeper/src/job.rs - crd_shape's the_runner_image_is_named_once)
+Initialize retained private/public identity objects, or validate the identity already stored there. Intended for the chart's short-lived bootstrap Job, not for a long-lived controller
+
+Usage: logweir identity bootstrap [OPTIONS] --namespace <NAMESPACE>
+
+Options:
+      --namespace <NAMESPACE>
+          Namespace containing the retained identity objects
+      --secret-name <SECRET_NAME>
+          Retained Secret written exactly once by bootstrap [default: logweir-signing-key]
+      --secret-key <SECRET_KEY>
+          Key in the retained Secret [default: signing.pem]
+      --public-configmap-name <PUBLIC_CONFIGMAP_NAME>
+          Retained ConfigMap carrying public verification material [default: logweir-signing-trust]
+      --external-secret-name <EXTERNAL_SECRET_NAME>
+          Explicit source Secret to adopt instead of generating a key
+      --external-secret-key <EXTERNAL_SECRET_KEY>
+          Key within --external-secret-name
+      --mark-fresh-install-confirm
+          PROD-16.1: when this run GENERATES the installation identity (a fresh install), record on it that unbound namespaces start in one-person console confirmation (`confirm`). Never written on an identity that already existed or was adopted
+      --console-secret-name <CONSOLE_SECRET_NAME>
+          PROD-16.1: retained Secret holding the console's ConsoleConfirmation key, generated exactly once (Ed25519) or adopted when it already holds a key. Absent: no console key is managed
+      --console-secret-key <CONSOLE_SECRET_KEY>
+          Key in --console-secret-name [default: confirmation.key]
+      --console-public-configmap-name <CONSOLE_PUBLIC_CONFIGMAP_NAME>
+          Retained ConfigMap carrying the console key's public half
+      --installation-trust-policy <INSTALLATION_TRUST_POLICY>
+          PROD-16.1: on a fresh install, create this cluster-scoped `TrustPolicy` (`default: true`) trusting the installation signer (EvidenceSigning) and the console key this run generated (ConsoleConfirmation) — once, and never when any TrustPolicy or `TrustRoster/default` already exists. Needs the console key and the confirm marker: the automatic trust exists for nothing else
+      --allowed-target-cluster-id <ALLOWED_TARGET_CLUSTER_IDS>
+          A cluster id restores under the installation's TrustPolicy may target (`allowedTargetClusterIds`). Repeatable
+      --revoke-trust-binding <REVOKE_TRUST_BINDING>
+          PROD-16.1 security review: at the end of every run, delete this ClusterRoleBinding — the install-only grant that lets the hook create the installation TrustPolicy — so no standing grant remains. Absent or not held (404/403) is nothing to revoke
+  -h, --help
+          Print help

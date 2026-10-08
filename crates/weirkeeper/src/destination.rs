@@ -530,8 +530,10 @@ pub fn write_probe_enabled(dest: &BackupDestination) -> bool {
 ///    before a rule existed, or by an administrator who applied the CRD by hand
 ///    — is still refused, and the operator gets the field name.
 /// 3. **Engine compatibility** (G4). `VirtualHosted` with a custom endpoint is
-///    a setting engine 0.21.0 cannot honour, so it is refused rather than
-///    silently served as path-style (defect **ENGINE-PATHSTYLE**).
+///    a setting the pinned engine cannot honour (every engine since 0.21.0,
+///    the 0.23.3 pin included, forces path-style with an endpoint), so it is
+///    refused rather than silently served as path-style (defect
+///    **ENGINE-PATHSTYLE**).
 /// 4. **The object's own verdict.** `Valid=True` at the current generation.
 ///    AFTER the two checks above, so a destination whose reconciler has not run
 ///    yet still reports the real problem rather than "not valid yet".
@@ -2275,10 +2277,10 @@ pub const DESTINATION_CONDITION_REASONS: [&str; 7] = [
 /// CEL rules R0–R9 are compiled by the API server and cannot change without a
 /// CRD upgrade. These four can:
 ///
-/// * **`AddressingUnsupportedByEngine`** depends on the ENGINE VERSION. Engine
-///   0.21.0 forces path-style whenever an endpoint is set, so `VirtualHosted`
-///   with an endpoint is unhonourable; a later engine may honour it, and that
-///   must not require a new CRD.
+/// * **`AddressingUnsupportedByEngine`** depends on the ENGINE VERSION. Every
+///   engine from 0.21.0 to the 0.23.3 pin forces path-style whenever an
+///   endpoint is set, so `VirtualHosted` with an endpoint is unhonourable; a
+///   later engine may honour it, and that must not require a new CRD.
 /// * **The CA bundle's existence, key, size and content** depend on another
 ///   object, which CEL cannot read at all.
 ///

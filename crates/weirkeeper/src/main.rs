@@ -318,9 +318,26 @@ fn run() -> ExitCode {
         approval_policy_digest = %approval_policies.digest(),
         bound_namespaces = ?approval_policies.bound_namespaces(),
         allow_ordinary_confirmation = approval_policies.allows_ordinary_confirmation(),
+        default_mode = ?approval_policies.default_mode(),
         "the approval policies this controller enforces; an unbound namespace is \
-         legacy-governed-v1"
+         legacy-governed-v1 unless defaultMode or the fresh-install marker says confirm"
     );
+    // PROD-16.1: WHERE THE FRESH-INSTALL MARKER IS READ — the fifth thing this
+    // file reads out of the environment. Both variables, or neither: the
+    // release namespace and the public identity ConfigMap the identity hook
+    // writes the marker on. Neither is an install with no managed identity,
+    // whose readers never see a marker.
+    let marker_source = std::env::var(weirkeeper::approval_policy::IDENTITY_PUBLIC_CONFIGMAP_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .zip(
+            std::env::var(weirkeeper::check::policy::INSTALLATION_NAMESPACE_ENV)
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+        );
+    let marker = weirkeeper::approval_policy::MarkerHandle::default();
+    let approval_policies =
+        weirkeeper::approval_policy::PolicySource::new(approval_policies, marker.clone());
 
     // The pair, threaded as ONE value from here on.
     let runner = weirkeeper::job::RunnerImage {
@@ -420,6 +437,22 @@ fn run() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+
+        // PROD-16.1: the fresh-install marker, read again every
+        // `MARKER_POLL_SECONDS` into the one handle every Approval and Restore
+        // reconcile resolves against. Not a reconciler: it writes nothing.
+        if let Some((configmap, namespace)) = marker_source.clone() {
+            info!(
+                configmap = %format!("{namespace}/{configmap}"),
+                "reading the installation's fresh-install marker"
+            );
+            tokio::spawn(weirkeeper::approval_policy::poll_marker(
+                client.clone(),
+                namespace,
+                configmap,
+                marker.clone(),
+            ));
+        }
 
         // THE RECONCILER-REGISTRATION POINT. Every chain-O task from Task 16
         // onward appends ONE line here — `controllers.push(Box::pin(…));` —

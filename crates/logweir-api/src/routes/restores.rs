@@ -17,7 +17,7 @@ use http::{HeaderMap, StatusCode, Uri};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::ResourceExt as _;
 use logweir_core::approval_policy::{
-    ApprovalMode, EffectivePolicy, Requester, RestoreAuthorization,
+    ApprovalMode, EffectivePolicy, OperatorMode, Requester, RestoreAuthorization,
 };
 use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectKind, SubjectRef};
 use weirkeeper::crds::restore::{Restore, RestoreSpec, RestoreTarget, TargetMode, TopicNaming};
@@ -475,7 +475,12 @@ pub async fn create(
     let point_in_time = validate_create(&request)?;
     // PLAT-19.2: a governed request's confirmation lives beside the Approval
     // under `<approvalRef>-confirmation`, and that name must still be a name.
-    let effective = state.approval().policies.resolve(&ns);
+    // PROD-16.1: the policies as this request sees them, the fresh-install
+    // marker applied — read BEFORE anything is created.
+    let policies = approval::effective_policies(state.approval(), state.kube())
+        .await
+        .map_err(KubeFailure::into_api_error)?;
+    let effective = policies.resolve(&ns);
     refuse_before_create(&state, &ns, &effective, &request)?;
     if effective.mode() == ApprovalMode::Governed
         && !effective.is_legacy()
@@ -539,12 +544,15 @@ pub async fn create(
 /// PLAT-19.2's refusals that must come BEFORE the Restore exists, so a refused
 /// submission leaves nothing behind.
 ///
-/// * **No Ordinary in `localAdmin`** (review H1; D0: that mode "does not
-///   expose Ordinary"). Its only identity is the shared
-///   `urn:logweir:local-admin#admin`, whose authority is the Kubernetes
-///   permission to port-forward, so a one-click confirmation would attest
-///   nobody. Governed stays: the console only attests there, and an
-///   independent approver key still decides.
+/// * **Only the modes `localAdmin` may serve** (PROD-16.1, amending review
+///   H1 and D0's "does not expose Ordinary"): `confirm` and `strict` are
+///   served there — the confirming principal is
+///   `urn:logweir:local-admin#admin`, and whoever can reach this console can
+///   confirm, a residual SECURITY.md states — and `two-person` (PROD-16.2)
+///   never is ([`OperatorMode::allowed_in_local_admin`]).
+/// * **The console key exists** (PROD-16.1): under a bound policy the
+///   console signs, and the managed key is written by the identity hook after
+///   this pod starts. Until it is there, nothing is created.
 /// * **The ticket** (D0: "required in Governed, optional in Ordinary"), and
 ///   none in an unbound namespace, which signs nothing.
 /// * **No `approvalRef.name` ending in `-confirmation` under Governed**
@@ -575,17 +583,34 @@ fn refuse_before_create(
         }
         return Ok(());
     };
-    if policy.mode == ApprovalMode::Ordinary && state.shared().is_none() {
+    let operator_mode = OperatorMode::of(effective);
+    if state.shared().is_none() && !operator_mode.allowed_in_local_admin() {
         return Err(ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
-                "Namespace {ns} is bound to Ordinary approval policy {}, and this console runs in \
-                 localAdmin mode, which does not expose ordinary confirmation (D0): its one \
-                 identity is the port-forward administrator, not a person the confirmation \
-                 could attest. Submit through the shared console. Nothing was created.",
+                "Namespace {ns} is bound to approval policy {} ({operator_mode}), and this console \
+                 runs in localAdmin mode, whose one identity cannot be two people. Submit through \
+                 the shared console. Nothing was created.",
                 policy.name
             ),
         ));
+    }
+    match state.approval().confirmation_key() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Err(ApiError::new(
+                ProblemCode::PolicyMismatch,
+                format!(
+                    "Namespace {ns} is under approval policy {} ({operator_mode}), which the \
+                     console signs, and this console's confirmation key is not there yet: the \
+                     installation's identity hook writes it once, at install. Try again in a \
+                     minute; if it persists, the hook did not finish (`helm status`). Nothing was \
+                     created.",
+                    policy.name
+                ),
+            ))
+        }
+        Err(reason) => return Err(ApiError::new(ProblemCode::InternalError, reason)),
     }
     if let Err(reason) =
         logweir_core::approval_policy::check_ticket(policy.mode, request.ticket.as_deref())
@@ -680,6 +705,7 @@ async fn authorize_submission(
     let Some(policy) = effective.bound() else {
         return Ok(RestoreRoutingView {
             mode: effective.mode().into(),
+            operator_mode: OperatorMode::of(effective).into(),
             policy: effective.name().to_string(),
             policy_digest: None,
             legacy: true,
@@ -690,12 +716,18 @@ async fn authorize_submission(
             expires_at: None,
         });
     };
-    let Some(key) = state.approval().confirmation.as_ref() else {
-        // Unreachable: startup refuses a bound served namespace without a key.
-        return Err(ApiError::new(
-            ProblemCode::InternalError,
-            "This console holds no confirmation key for a namespace bound to an approval policy.",
-        ));
+    let key = match state.approval().confirmation_key() {
+        Ok(Some(key)) => key,
+        // Unreachable: `refuse_before_create` refused before the Restore
+        // existed, and a key once loaded is never unloaded.
+        Ok(None) => {
+            return Err(ApiError::new(
+                ProblemCode::InternalError,
+                "This console holds no confirmation key for a namespace bound to an approval \
+                 policy.",
+            ))
+        }
+        Err(reason) => return Err(ApiError::new(ProblemCode::InternalError, reason)),
     };
     let governed = approval::awaits_approver(policy.mode);
     let target = if governed {
@@ -705,6 +737,7 @@ async fn authorize_submission(
     };
     let view = |doc: &RestoreAuthorization| RestoreRoutingView {
         mode: policy.mode.into(),
+        operator_mode: OperatorMode::of(effective).into(),
         policy: policy.name.clone(),
         policy_digest: Some(policy.digest()),
         legacy: false,
@@ -909,7 +942,10 @@ pub async fn submit_approval(
         )]));
     }
     let restore = get_object::<Restore>(&state, &actor, &ns, &name).await?;
-    let effective = state.approval().policies.resolve(&ns);
+    let effective = approval::effective_policies(state.approval(), state.kube())
+        .await
+        .map_err(KubeFailure::into_api_error)?
+        .resolve(&ns);
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
     actor.audit.set_policy_digest(&policy_identity(&effective));

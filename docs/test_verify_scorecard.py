@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.18.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.20.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -928,6 +928,14 @@ def test_the_version_line_names_the_current_invariant_set():
             "source.time_basis only from 1.3.0, its plan only producerTime, producer time "
             "only under it, and no topic in both of its lists"
         ) in r.stdout, r.stdout
+        # 1.19.0's addition (PROD-08.1): `integrity.verification`'s seven arms.
+        assert (
+            "integrity.verification only from 1.4.0, its coverage sampled or complete, "
+            "header order verified only for complete coverage, its complete block exactly "
+            "with complete coverage, an incomplete reason exactly when not covered, a pass "
+            "only over a covered and clean complete block, and totals that are its "
+            "partitions' sums"
+        ) in r.stdout, r.stdout
 
 
 def test_the_script_version_is_not_the_format_version():
@@ -938,8 +946,8 @@ def test_the_script_version_is_not_the_format_version():
     assert mod.SCRIPT_VERSION != mod.FORMAT_VERSION
     # 1.1.0 since FX-4 (`topic_parity.not_assessed`, a MINOR bump), 1.2.0
     # since FX-3 (`topic_parity.not_reconstructed`), 1.3.0 since FX-8
-    # (`source.time_basis`).
-    assert mod.FORMAT_VERSION == "1.3.0"
+    # (`source.time_basis`), 1.4.0 since PROD-08.1 (`integrity.verification`).
+    assert mod.FORMAT_VERSION == "1.4.0"
 
 
 def test_a_negative_rpo_is_refused():
@@ -1737,8 +1745,10 @@ def test_the_u64_field_list_matches_the_rust_struct():
     # collapse is also why the dotted name, and not the bare key, is what the
     # anchor in `crates/logweir/tests/two_reader_parity.rs` compares.
     entries = list(_verifier_module().U64_FIELDS)
-    assert sum(1 for _, optional in entries if optional) == 5, entries
-    assert sum(1 for _, optional in entries if not optional) == 6, entries
+    # PROD-08.1 adds 25 nested counts of `integrity.verification.complete`:
+    # one `Option<u64>` (`max_records`) and 24 plain.
+    assert sum(1 for _, optional in entries if optional) == 6, entries
+    assert sum(1 for _, optional in entries if not optional) == 30, entries
 
 
 def test_null_is_refused_on_every_non_option_u64_field():
@@ -2209,9 +2219,17 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     #
     # 1.18.0 (FX-8) adds the scorecard's four `source.time_basis` arms and its
     # shape check (1.16.0 is FX-7's, 1.17.0 FX-3's). Map still five.
+    #
+    # 1.19.0 (PROD-08.1) adds the scorecard's seven `integrity.verification`
+    # arms, its shape check, the nested u64 counts and the `integrity
+    # coverage:` lines. Map still five.
+    #
+    # 1.20.0 (PROD-05.1) adds the backup receipt's eight `topic_configuration`
+    # arms (12-19), the two `owner_detection` arms (20-21), their shape checks
+    # and the `topic_configuration` lines. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.18.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.20.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -2227,6 +2245,251 @@ def test_the_config_coverage_minor_is_the_rust_readers():
     m = re.search(r"pub const CONFIG_COVERAGE_SINCE_MINOR: u64 = (\d+);", rust)
     assert m, "backup_receipt.rs no longer declares CONFIG_COVERAGE_SINCE_MINOR"
     assert mod.RECEIPT_CONFIG_COVERAGE_SINCE_MINOR == int(m.group(1))
+
+
+def test_the_topic_configuration_minor_is_the_rust_readers():
+    # Arm 12's minor is ONE number in each reader (PROD-05.1); a renumber must
+    # move both, and the arm's message is built from it on both sides.
+    mod = _verifier_module()
+    rust = (pathlib.Path(__file__).resolve().parent.parent
+            / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    m = re.search(r"pub const TOPIC_CONFIGURATION_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "backup_receipt.rs no longer declares TOPIC_CONFIGURATION_SINCE_MINOR"
+    assert mod.RECEIPT_TOPIC_CONFIGURATION_SINCE_MINOR == int(m.group(1))
+
+
+def test_the_portability_classes_and_sources_are_the_rust_readers():
+    # Arm 16's two closed sets, and the order the `topic_configuration` lines
+    # count classes in, are the Rust constants' — read from the source so a
+    # class added on one side only fails here before it splits the readers.
+    mod = _verifier_module()
+    root = pathlib.Path(__file__).resolve().parent.parent
+    model = (root / "crates/logweir-core/src/topic_configuration.rs").read_text()
+    block = model.split("pub const PORTABILITY_CLASSES", 1)[1].split("];", 1)[0]
+    names = re.findall(r"^\s+([A-Z_0-9]+),$", block, re.M)
+    values = {k: v for k, v in re.findall(r'pub const ([A-Z_0-9]+): &str = "([^"]+)";', model)}
+    assert tuple(values[n] for n in names) == mod.PORTABILITY_CLASSES
+    receipt = (root / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    sources = receipt.split("pub const CONFIG_SOURCES", 1)[1].split("];", 1)[0]
+    assert tuple(re.findall(r'"([^"]+)"', sources)) == mod.RECEIPT_CONFIG_SOURCES
+
+
+def test_the_topic_configuration_shape_is_the_rust_deserialisers():
+    # Rust refuses each of these at DESERIALISATION, so the Python reader must
+    # refuse them in its shape layer, never reach arm 12 with them.
+    mod = _verifier_module()
+    base = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_3_with_topic_configuration.json").read_text())
+    assert mod._receipt_shape(base) == ""
+    cases = [
+        (["topic_configuration"], [], "topic_configuration is not an object"),
+        (["topic_configuration", "orders", "partitions"], -1,
+         'topic_configuration["orders"].partitions is not a u32'),
+        (["topic_configuration", "orders", "partitions"], 2 ** 32,
+         'topic_configuration["orders"].partitions is not a u32'),
+        (["topic_configuration", "orders", "replication_factor"], True,
+         'topic_configuration["orders"].replication_factor is not a u32'),
+        (["topic_configuration", "orders", "replication_factor"], 3.0,
+         'topic_configuration["orders"].replication_factor is not a u32'),
+        (["topic_configuration", "orders", "entries"], [],
+         'topic_configuration["orders"].entries is not an object'),
+        (["topic_configuration", "orders", "entries", "cleanup.policy", "value"], 1,
+         'topic_configuration["orders"].entries["cleanup.policy"].value is not a string'),
+        (["topic_configuration", "orders", "entries", "cleanup.policy", "portability"], None,
+         'topic_configuration["orders"].entries["cleanup.policy"].portability is not a string'),
+        (["topic_configuration", "orders", "owner", "reference"], 7,
+         'topic_configuration["orders"].owner.reference is not a string'),
+    ]
+    for path, value, want in cases:
+        doc = json.loads(json.dumps(base))
+        at = doc
+        for step in path[:-1]:
+            at = at[step]
+        at[path[-1]] = value
+        assert mod._receipt_shape(doc) == want, (path, value)
+    # `null` is absent on both sides: the counts, the entries and the owner.
+    doc = json.loads(json.dumps(base))
+    for name in ("partitions", "replication_factor", "owner"):
+        doc["topic_configuration"]["orders"][name] = None
+    assert mod._receipt_shape(doc) == ""
+
+
+def test_the_topic_configuration_lines_never_carry_a_value():
+    mod = _verifier_module()
+    doc = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_3_with_topic_configuration.json").read_text())
+    lines = mod._topic_configuration_lines(doc["topic_configuration"])
+    assert lines == [
+        'topic_configuration["orders"]: partitions 6, replication factor 3, 5 entries '
+        '(portable 2, inherited 1, removedInKafka4 1, secret 1), owned by strimzi '
+        '(kafkaTopicResource "kafka/orders"), so restored by desired-state export',
+        'topic_configuration["payments"]: partitions 1, replication factor 1, entries not '
+        'recorded, owned by external (declared "terraform: kafka_topic.payments"), so '
+        'restored by desired-state export',
+    ], lines
+    assert "compact" not in " ".join(lines) and "604800000" not in " ".join(lines)
+    assert mod._topic_configuration_lines(None) == [
+        "topic_configuration: not recorded, so no topic's partition count, replication "
+        "factor or settings are known to a restore from this receipt"
+    ]
+
+
+def test_the_owner_detection_sources_are_the_rust_readers():
+    # Arm 20's closed set and arm 21's basis-to-source map are the Rust
+    # constants' (PROD-05.1 fix round, M2), read from the source.
+    mod = _verifier_module()
+    root = pathlib.Path(__file__).resolve().parent.parent
+    model = (root / "crates/logweir-core/src/topic_configuration.rs").read_text()
+    values = {k: v for k, v in re.findall(r'pub const ([A-Z_0-9]+): &str = "([^"]+)";', model)}
+    block = model.split("pub const OWNER_DETECTION_SOURCES", 1)[1].split("];", 1)[0]
+    names = re.findall(r"\b(DETECTION_[A-Z_]+)\b", re.split(r"=\s*\[", block, maxsplit=1)[1])
+    assert tuple(values[n] for n in names) == mod.RECEIPT_OWNER_DETECTION_SOURCES
+    basis = model.split("pub fn detection_for_basis", 1)[1].split("\n}\n", 1)[0]
+    pairs = re.findall(r'"([^"]+)" => Some\(([A-Z_]+)\)', basis)
+    assert {k: values[v] for k, v in pairs} == mod.RECEIPT_OWNER_DETECTION_FOR_BASIS
+
+
+def test_the_owner_detection_shape_is_the_rust_deserialisers():
+    mod = _verifier_module()
+    base = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_3_with_topic_configuration.json").read_text())
+    for bad in ("declared", {"declared": True}, ["declared", 1], [None]):
+        doc = json.loads(json.dumps(base))
+        doc["owner_detection"] = bad
+        assert mod._receipt_shape(doc) == "owner_detection is not a list of strings", bad
+    doc = json.loads(json.dumps(base))
+    doc["owner_detection"] = None
+    assert mod._receipt_shape(doc) == "", "null is absent"
+
+
+def test_an_owner_nobody_looked_for_is_never_the_admin_api_route():
+    # PROD-05.1 fix round, M2: a topic without an owner is applied through the
+    # admin API only where `owner_detection` says the run looked; an empty or
+    # absent detection says the owner was NOT CHECKED.
+    mod = _verifier_module()
+    fixtures = ROOT / "e2e/fixtures/invariants"
+    pinned = json.loads((fixtures / "receipt_1_3_pinned_with_topic_configuration.json").read_text())
+    assert pinned["owner_detection"] == ["kafkaTopicResources"]
+    lines = mod._topic_configuration_lines(pinned["topic_configuration"], pinned["owner_detection"])
+    assert lines[1] == (
+        'topic_configuration["payments"]: partitions 1, replication factor 1, entries not '
+        "recorded, no declarative owner found (kafkaTopicResources), so applied through the "
+        "admin API"
+    ), lines
+    unchecked = json.loads((fixtures / "receipt_1_3_owner_not_checked.json").read_text())
+    assert unchecked["owner_detection"] == []
+    for detection in ([], None):
+        lines = mod._topic_configuration_lines(unchecked["topic_configuration"], detection)
+        assert all(
+            line.endswith(", owner not checked, so how it is applied is not known")
+            for line in lines
+        ), (detection, lines)
+        assert not any("admin API" in line for line in lines), lines
+    both = mod._topic_configuration_lines(unchecked["topic_configuration"],
+                                          ["declared", "kafkaTopicResources"])
+    assert all(line.endswith(
+        ", no declarative owner found (declared, kafkaTopicResources), so applied through "
+        "the admin API") for line in both), both
+
+
+def test_each_half_of_the_topic_configuration_arms_refuses_with_its_exact_message():
+    # PROD-05.1 fix round, M4: arms 15-21 are biconditionals or several rules
+    # in one, and EACH half refuses here — not only the one the first corpus
+    # case happened to exercise — with the Rust reader's exact words
+    # (`crates/logweir-core/tests/backup_receipt.rs`).
+    mod = _verifier_module()
+    base = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_3_with_topic_configuration.json").read_text())
+    assert mod.check_backup_receipt_invariants(base) == ""
+    arm15 = ('entries are recorded exactly when the configuration read succeeded ("captured", '
+             'or "notCaptured" with reason "manifestDiffers")')
+    arm17 = ('an entry is "secret" exactly when it carries no value, and otherwise "inherited" '
+             'exactly when its source is not "dynamicTopicConfig"')
+    arm18 = ('is not an owner this format defines: the kind is "strimzi" or "external", the '
+             'basis is "kafkaTopicResource" (for "strimzi" only) or "declared", and the '
+             'reference is 1 to 256 characters with no control character')
+    arm20 = ('is not a detection this format defines: it is present only beside '
+             'topic_configuration, and lists "declared" and "kafkaTopicResources" each at '
+             'most once')
+    arm21 = ('lists: a "declared" owner needs "declared", a "kafkaTopicResource" owner '
+             '"kafkaTopicResources"')
+
+    def drop_entries(d):
+        del d["topic_configuration"]["orders"]["entries"]
+
+    def differs(d):
+        d["config_coverage"]["orders"] = {"coverage": "notCaptured", "reason": "manifestDiffers"}
+        drop_entries(d)
+
+    def entry(key, **changes):
+        def apply(d):
+            e = d["topic_configuration"]["orders"]["entries"][key]
+            for k, v in changes.items():
+                if v is None:
+                    e.pop(k, None)
+                else:
+                    e[k] = v
+        return apply
+
+    def reference(value):
+        def apply(d):
+            d["topic_configuration"]["payments"]["owner"]["reference"] = value
+        return apply
+
+    def detection(value):
+        def apply(d):
+            if value is None:
+                d.pop("owner_detection", None)
+            else:
+                d["owner_detection"] = value
+        return apply
+
+    def zero_partitions(d):
+        d["topic_configuration"]["payments"]["partitions"] = 0
+
+    cases = [
+        (drop_entries, f'topic_configuration["orders"].entries absent does not fit its '
+                       f'config_coverage "captured": {arm15}'),
+        (differs, f'topic_configuration["orders"].entries absent does not fit its '
+                  f'config_coverage "notCaptured/manifestDiffers": {arm15}'),
+        (entry("cleanup.policy", source="DYNAMIC_TOPIC_CONFIG"),
+         'topic_configuration["orders"].entries["cleanup.policy"] source '
+         '"DYNAMIC_TOPIC_CONFIG" and portability "portable" are not a source and class '
+         'this format defines: the source is "dynamicTopicConfig", "dynamicBrokerConfig", '
+         '"dynamicDefaultBrokerConfig", "staticBrokerConfig", "defaultConfig" or "unknown", '
+         'and the class is "portable", "inherited", "removedInKafka4", "clusterBound", '
+         '"requiresTieredStorage", "providerOnly" or "secret"'),
+        (entry("cleanup.policy", value=None),
+         'topic_configuration["orders"].entries["cleanup.policy"] is "portable" from '
+         f'"dynamicTopicConfig" with no value: {arm17}'),
+        (entry("min.insync.replicas", portability="inherited"),
+         'topic_configuration["orders"].entries["min.insync.replicas"] is "inherited" from '
+         f'"dynamicTopicConfig" with a value: {arm17}'),
+        (reference("x" * 257), f'topic_configuration["payments"].owner "external" by "declared" {arm18}'),
+        (reference("a\u0007b"), f'topic_configuration["payments"].owner "external" by "declared" {arm18}'),
+        (reference(" \t "), f'topic_configuration["payments"].owner "external" by "declared" {arm18}'),
+        (zero_partitions, 'topic_configuration["payments"] records partitions 0 and '
+                          'replication_factor 1: a recorded count is at least 1'),
+        (detection(["declared", "labels"]), f'owner_detection ["declared", "labels"] {arm20}'),
+        (detection(["declared", "declared"]), f'owner_detection ["declared", "declared"] {arm20}'),
+        (detection(["declared"]),
+         'topic_configuration["orders"].owner by "kafkaTopicResource" names no source '
+         f'owner_detection ["declared"] {arm21}'),
+        (detection(["kafkaTopicResources"]),
+         'topic_configuration["payments"].owner by "declared" names no source '
+         f'owner_detection ["kafkaTopicResources"] {arm21}'),
+        (detection(None),
+         'topic_configuration["orders"].owner by "kafkaTopicResource" names no source '
+         f'owner_detection [] {arm21}'),
+    ]
+    for mutate, want in cases:
+        doc = json.loads(json.dumps(base))
+        mutate(doc)
+        assert mod.check_backup_receipt_invariants(doc) == want, want
+    # The boundary: 256 characters is a reference.
+    doc = json.loads(json.dumps(base))
+    reference("x" * 256)(doc)
+    assert mod.check_backup_receipt_invariants(doc) == ""
+    # Arm 20 beside no model: a 1.1.0 receipt claiming where it looked.
+    older = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_1_with_config_coverage.json").read_text())
+    older["owner_detection"] = []
+    assert mod.check_backup_receipt_invariants(older) == f"owner_detection [] {arm20}"
 
 
 def test_the_payload_type_resolver_accepts_every_short_name_and_media_type():
@@ -2940,3 +3203,281 @@ def test_a_scorecard_with_a_time_basis_block_verifies_and_prints_its_lines():
         assert r.returncode == 0, r.stderr
         assert "time basis: SELECTED BY PRODUCER TIME for lat" in r.stdout, r.stdout
         assert "time basis: timestamp type NOT RECORDED for old" in r.stdout, r.stdout
+
+
+# ---------------------------------------------------------------------------
+# PROD-08.1: the scorecard's format 1.4.0 `integrity.verification`, arms IV-1
+# to IV-7, its shape and its nested counts.
+# ---------------------------------------------------------------------------
+
+def _replay(n, **over):
+    r = {k: 0 for k in ("expected", "restored", "matching", "missing", "unexpected",
+                        "duplicates", "out_of_order", "mismatched")}
+    r.update(expected=n, restored=n, matching=n)
+    r.update(over)
+    return r
+
+
+def _complete_block():
+    parts = [
+        {"topic": "orders", "partition": p, "target_topic": "drill-orders", "compared": True,
+         "segments": 2, "segments_verified": 2, "records_decoded": n + 1, "offset_holes": 0,
+         "replay": _replay(n), "findings": []}
+        for p, n in ((0, 5), (1, 7))
+    ]
+    return {
+        "coverage": "complete", "comparison_basis": "archive", "header_order": "verified",
+        "application": "notAttempted", "gaps": [], "pruned": [],
+        "complete": {
+            "covered": True, "incomplete_reason": None, "max_records": None,
+            "window": {"start_ms": None, "end_ms": 1760000005000},
+            "archive": {"segments": 4, "segments_verified": 4, "segments_failed": [],
+                        "segments_unverified": [], "records_decoded": 14, "offset_holes": 0},
+            "replay": _replay(12),
+            "partitions": parts,
+        },
+    }
+
+
+def _sampled_block():
+    return {"coverage": "sampled", "comparison_basis": "archive", "header_order": "notVerified",
+            "application": "notAttempted",
+            "gaps": [{"topic": "orders", "partition": 0, "from_offset": 10, "to_offset": 19}],
+            "pruned": []}
+
+
+def _scorecard_1_4(block, version="1.4.0"):
+    doc = json.loads((ROOT / "e2e/fixtures/scorecard-pass.json").read_text())
+    doc["format_version"] = version
+    if block is not None:
+        doc["integrity"]["verification"] = block
+    return doc
+
+
+def _not_a_pass(doc, result="fail"):
+    doc["outcome"] = "fail-integrity"
+    doc["integrity"]["result"] = result
+    doc["integrity"]["partial_reason"] = "not a pass"
+    doc["engine"]["matrix_verdict"] = "pass-degraded"
+    return doc
+
+
+IV6_MESSAGE = (
+    "integrity.result is pass but integrity.verification.complete is not covered, lists no "
+    "partition, names a failed or unverified segment, or records a missing, unexpected, "
+    "duplicate, out-of-order or mismatched record, in total or in a partition")
+IV7_MESSAGE = (
+    "integrity.verification.complete's totals are not the sums of its partitions, or its "
+    "segments are not each verified, failed or unverified")
+
+
+def test_the_verification_minor_is_the_rust_readers():
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const VERIFICATION_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares VERIFICATION_SINCE_MINOR"
+    assert mod.SCORECARD_VERIFICATION_SINCE_MINOR == int(m.group(1))
+    assert mod._minor(mod.FORMAT_VERSION) >= mod.SCORECARD_VERIFICATION_SINCE_MINOR
+
+
+def test_a_verification_block_is_accepted_in_every_shape_the_writer_produces():
+    mod = _verifier_module()
+    for block in (None, _sampled_block(), _complete_block()):
+        assert mod.check_invariants(_scorecard_1_4(block)) == "", block
+    incomplete = _complete_block()
+    incomplete["complete"]["covered"] = False
+    incomplete["complete"]["incomplete_reason"] = "stopped at the bound"
+    incomplete["complete"]["partitions"][1]["compared"] = False
+    assert mod.check_invariants(_not_a_pass(_scorecard_1_4(incomplete), "partial")) == ""
+
+
+def test_iv1_to_iv7_refuse_with_the_rust_readers_words():
+    mod = _verifier_module()
+    cases = []
+    cases.append((_scorecard_1_4(_sampled_block(), "1.3.0"),
+                  'integrity.verification is present but format_version "1.3.0" predates it: '
+                  "the field is defined from 1.4.0"))
+    b = _sampled_block(); b["coverage"] = "full"
+    cases.append((_scorecard_1_4(b),
+                  'integrity.verification.coverage is neither "sampled" nor "complete"'))
+    b = _sampled_block(); b["header_order"] = "verified"
+    cases.append((_scorecard_1_4(b),
+                  'integrity.verification.header_order is not "verified" or "notVerified", or '
+                  'claims "verified" for a coverage that is not complete; a sampled '
+                  "verification compares a fingerprint that sorts headers"))
+    b = _complete_block(); del b["complete"]
+    cases.append((_scorecard_1_4(b),
+                  "integrity.verification.complete is present exactly when "
+                  'integrity.verification.coverage is "complete"'))
+    b = _complete_block(); b["complete"]["covered"] = False; b["complete"]["incomplete_reason"] = "  "
+    cases.append((_not_a_pass(_scorecard_1_4(b), "partial"),
+                  "integrity.verification.complete.incomplete_reason is required exactly when "
+                  "complete.covered is false"))
+    b = _complete_block()
+    b["complete"]["replay"]["duplicates"] = 1
+    b["complete"]["partitions"][0]["replay"]["duplicates"] = 1
+    cases.append((_scorecard_1_4(b),
+                  IV6_MESSAGE))
+    b = _complete_block(); b["complete"]["partitions"][1]["offset_holes"] = 3
+    cases.append((_not_a_pass(_scorecard_1_4(b)), IV7_MESSAGE))
+    for doc, want in cases:
+        assert mod.check_invariants(doc) == want, (want, mod.check_invariants(doc))
+
+
+def test_the_verification_block_shape_is_refused_before_its_arms():
+    mod = _verifier_module()
+    msg = ("integrity.verification is not an object of the shape the writer gives it: four "
+           "strings, two arrays of offset ranges and an optional complete block")
+    bad = []
+    bad.append("x")
+    b = _sampled_block(); b["coverage"] = 1; bad.append(b)
+    b = _sampled_block(); b["gaps"] = [{"topic": "t", "partition": 0, "from_offset": "1",
+                                        "to_offset": 2}]; bad.append(b)
+    b = _complete_block(); b["complete"]["partitions"] = {}; bad.append(b)
+    b = _complete_block(); del b["complete"]["window"]; bad.append(b)
+    b = _complete_block(); b["complete"]["covered"] = "yes"; bad.append(b)
+    for block in bad:
+        assert mod.check_invariants(_scorecard_1_4(block)) == msg, block
+
+
+def test_the_nested_counts_have_the_u64_domain_and_refuse_null():
+    mod = _verifier_module()
+    doc = _scorecard_1_4(_complete_block())
+    doc["integrity"]["verification"]["complete"]["partitions"][1]["replay"]["missing"] = None
+    assert (mod.check_invariants(doc)
+            == "integrity.verification.complete.partitions[1].replay.missing is not an integer")
+    doc = _scorecard_1_4(_complete_block())
+    doc["integrity"]["verification"]["complete"]["archive"]["segments"] = 2**64
+    assert mod.check_invariants(doc).startswith(
+        "integrity.verification.complete.archive.segments is outside the u64 domain")
+    # `max_records` is the one Option<u64>: null is absent.
+    doc = _scorecard_1_4(_complete_block())
+    doc["integrity"]["verification"]["complete"]["max_records"] = None
+    assert mod.check_invariants(doc) == ""
+
+
+def test_the_coverage_lines_say_what_the_verdict_covered():
+    mod = _verifier_module()
+    assert mod._verification_lines(None) == [
+        "integrity coverage: not recorded, so this verdict covered a sample, never every record"]
+    lines = mod._verification_lines(_sampled_block())
+    assert lines[0] == ("integrity coverage: sampled (compared with the archive; header order "
+                        "notVerified; application validation notAttempted)")
+    assert lines[-1] == ("integrity coverage: the verified partitions record 1 capture gaps "
+                         "and 0 pruned ranges")
+    b = _complete_block(); b["complete"]["covered"] = False
+    b["complete"]["incomplete_reason"] = "the bound"
+    lines = mod._verification_lines(b)
+    assert lines[1].startswith("integrity coverage: INCOMPLETE: 12 expected"), lines
+    assert lines[2] == "integrity coverage: incomplete because the bound"
+
+
+# Review M-1: IV-6 and IV-7 CONJUNCT BY CONJUNCT, as the Rust reader's
+# `iv6_refuses_a_pass_over_a_complete_block_that_is_not_clean` and
+# `iv7_refuses_totals_that_are_not_the_partitions_sums` test them. Each case
+# violates exactly ONE conjunct of its arm, so a reader that drops that
+# conjunct answers with a later arm's words or VALID, never this message. The
+# same cases are in `e2e/fixtures/invariants/` (`verification_iv6_*`,
+# `verification_iv7_*`), where both readers are held to the same text.
+
+def _iv6_not_covered(c):
+    c["covered"] = False
+    c["incomplete_reason"] = "a reason"
+
+
+def _iv6_no_partition(c):
+    c["partitions"] = []
+    c["archive"].update(segments=0, segments_verified=0, records_decoded=0)
+    c["replay"] = _replay(0)
+
+
+def _iv6_verified_short(c):
+    c["archive"]["segments_verified"] = 3
+    c["partitions"][0]["segments_verified"] = 1
+
+
+def _iv6_partitions_inexact(c):
+    c["partitions"][0]["replay"].update(restored=6, matching=6)
+    c["partitions"][1]["replay"].update(restored=6, matching=6)
+
+
+IV6_CASES = {
+    "not covered": _iv6_not_covered,
+    "no partition": _iv6_no_partition,
+    "failed segment": lambda c: c["archive"]["segments_failed"].append("k"),
+    "unverified segment": lambda c: c["archive"]["segments_unverified"].append("k"),
+    "segments not all verified": _iv6_verified_short,
+    "total missing": lambda c: c["replay"].__setitem__("missing", 1),
+    "total unexpected": lambda c: c["replay"].__setitem__("unexpected", 1),
+    "total duplicates": lambda c: c["replay"].__setitem__("duplicates", 1),
+    "total out of order": lambda c: c["replay"].__setitem__("out_of_order", 1),
+    "total mismatched": lambda c: c["replay"].__setitem__("mismatched", 1),
+    "total matching short": lambda c: c["replay"].__setitem__("matching", 11),
+    "total restored over": lambda c: c["replay"].__setitem__("restored", 13),
+    "a partition not compared": lambda c: c["partitions"][1].__setitem__("compared", False),
+    "partitions inexact, totals exact": _iv6_partitions_inexact,
+}
+
+
+def test_iv6_refuses_each_unclean_conjunct_beside_a_pass():
+    mod = _verifier_module()
+    for name, mutate in sorted(IV6_CASES.items()):
+        b = _complete_block()
+        mutate(b["complete"])
+        assert mod.check_invariants(_scorecard_1_4(b)) == IV6_MESSAGE, name
+        # The same block beside a verdict that is not a pass is IV-6's to
+        # ignore (the cases that also break a sum are IV-7's there).
+        if name not in ("failed segment", "unverified segment", "segments not all verified") \
+                and not name.startswith("total "):
+            assert mod.check_invariants(_not_a_pass(_scorecard_1_4(b))) == "", name
+
+
+def _iv7_segments(c):
+    c["archive"]["segments"] = 5
+    c["archive"]["segments_unverified"] = ["k"]
+
+
+def _iv7_verified(c):
+    c["archive"]["segments_verified"] = 3
+    c["archive"]["segments_unverified"] = ["k"]
+
+
+IV7_CASES = {
+    **{f"sum {f}": (lambda c, f=f: c["replay"].__setitem__(f, c["replay"][f] + 1))
+       for f in ("expected", "restored", "matching", "missing", "unexpected", "duplicates",
+                 "out_of_order", "mismatched")},
+    "sum segments": _iv7_segments,
+    "sum segments verified": _iv7_verified,
+    "sum records decoded": lambda c: c["archive"].__setitem__("records_decoded", 15),
+    "sum offset holes": lambda c: c["archive"].__setitem__("offset_holes", 1),
+    "accounted segments": lambda c: c["archive"]["segments_failed"].append("k"),
+}
+
+
+def test_iv7_refuses_each_sum_and_the_accounted_segments():
+    mod = _verifier_module()
+    for name, mutate in sorted(IV7_CASES.items()):
+        b = _complete_block()
+        mutate(b["complete"])
+        assert mod.check_invariants(_not_a_pass(_scorecard_1_4(b))) == IV7_MESSAGE, name
+
+
+def test_the_blank_set_is_the_rust_readers():
+    # Review L-1: Rust's `trim` strips `char::is_whitespace`, and nothing else;
+    # `crates/logweir-core/src/scorecard.rs::
+    # the_blank_set_is_the_unicode_white_space_property_the_script_strips` pins
+    # the same 25 code points there.
+    mod = _verifier_module()
+    want = [*range(0x9, 0xE), 0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200B),
+            0x2028, 0x2029, 0x202F, 0x205F, 0x3000]
+    assert sorted(ord(c) for c in mod.RUST_WHITESPACE) == want
+    # A unit separator is not blank: covered false beside it is a reason, and
+    # covered true beside it is IV-5.
+    b = _complete_block()
+    b["complete"]["covered"] = False
+    b["complete"]["incomplete_reason"] = "\x1f"
+    assert mod.check_invariants(_not_a_pass(_scorecard_1_4(b), "partial")) == ""
+    b = _complete_block()
+    b["complete"]["incomplete_reason"] = "\x1f"
+    assert mod.check_invariants(_scorecard_1_4(b)).startswith(
+        "integrity.verification.complete.incomplete_reason is required")

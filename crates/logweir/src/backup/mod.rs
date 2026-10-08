@@ -104,6 +104,14 @@ pub struct BackupRunArgs {
     /// `BackupOutcome`. Task 18 passes `<schedule>-<slot>`; nothing about a
     /// schedule is decided here.
     pub backup_id_override: Option<String>,
+    /// **PROD-05.1.** Strimzi `KafkaTopic` resources, as YAML: a named topic
+    /// one of them manages is recorded as owned by it
+    /// (`logweir_core::topic_configuration::strimzi_owners`). `None` detects
+    /// nothing; the plan's own `source.topic_owners` still apply.
+    pub kafka_topic_resources: Option<PathBuf>,
+    /// **PROD-05.1.** Only `KafkaTopic` resources labelled
+    /// `strimzi.io/cluster=<this>` count.
+    pub strimzi_cluster: Option<String>,
 }
 
 /// What one `logweir backup run` established. Task 5b turns this into the
@@ -161,6 +169,18 @@ pub struct BackupOutcome {
     /// `phase_run::build_receipt` writes it as the receipt's 1.1.0
     /// `config_coverage` block.
     pub config_coverage: BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>,
+    /// **PROD-05.1.** Per named topic, the configuration model —
+    /// `config_coverage::model` over the same read, the manifest's counts and
+    /// the run's declarative owners. One entry per named topic;
+    /// `phase_run::build_receipt` writes it as the receipt's 1.3.0
+    /// `topic_configuration` block.
+    pub topic_configuration: BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>,
+    /// **PROD-05.1.** Where this run looked for declarative owners
+    /// (`topic_configuration::owner_detection`): the receipt's
+    /// `owner_detection`. Empty when it looked nowhere, and then a topic
+    /// without an owner reads "not checked", never "applied through the admin
+    /// API".
+    pub owner_detection: Vec<String>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -372,6 +392,18 @@ struct Inputs {
     spec: BackupSpec,
     spec_text: String,
     allowed: AllowedClusters,
+    /// **PROD-05.1.** The declarative owner of each named topic that has one:
+    /// the `KafkaTopic` resources' owners, with the plan's
+    /// `source.topic_owners` laid over them (`merge_owners`: a declaration is
+    /// what the plan says, so a resource for the same topic does not replace
+    /// it). Phase −1 refuses an invalid declaration before anything is
+    /// recorded.
+    owners: BTreeMap<String, logweir_core::backup_receipt::TopicOwner>,
+    /// **PROD-05.1.** Where the run looked for owners: `declared` when the
+    /// plan carries `source.topic_owners` (an empty list too: the operator
+    /// says no topic has one), `kafkaTopicResources` when it was given the
+    /// resources file.
+    owner_detection: Vec<String>,
 }
 
 fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
@@ -384,10 +416,58 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
     })?;
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
         .map_err(|e| BackupError::Operational(format!("allowed-clusters does not parse: {e}")))?;
+    let detected = match &args.kafka_topic_resources {
+        None => BTreeMap::new(),
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| BackupError::Operational(format!("{}: {e}", path.display())))?;
+            let mut docs = Vec::new();
+            for doc in serde_yaml::Deserializer::from_str(&text) {
+                let value =
+                    <serde_yaml::Value as serde::Deserialize>::deserialize(doc).map_err(|e| {
+                        BackupError::Operational(format!(
+                            "--kafka-topic-resources {}: not YAML: {e}",
+                            path.display()
+                        ))
+                    })?;
+                if !value.is_null() {
+                    docs.push(value);
+                }
+            }
+            for (topic, reference) in logweir_core::topic_configuration::strimzi_unrecordable(
+                &docs,
+                &spec.source.topics,
+                args.strimzi_cluster.as_deref(),
+            ) {
+                tracing::warn!(
+                    topic = %topic,
+                    reference = %reference,
+                    "a KafkaTopic resource manages this topic, but its namespace/name is longer \
+                     than the receipt records (256 characters): the topic is recorded with no \
+                     owner. Declare the owner in source.topic_owners with a shorter reference"
+                );
+            }
+            logweir_core::topic_configuration::strimzi_owners(
+                &docs,
+                &spec.source.topics,
+                args.strimzi_cluster.as_deref(),
+            )
+        }
+    };
+    let owners = logweir_core::topic_configuration::merge_owners(
+        detected,
+        spec.source.topic_owners.as_deref().unwrap_or(&[]),
+    );
+    let owner_detection = logweir_core::topic_configuration::owner_detection(
+        spec.source.topic_owners.is_some(),
+        args.kafka_topic_resources.is_some(),
+    );
     Ok(Inputs {
         spec,
         spec_text,
         allowed,
+        owners,
+        owner_detection,
     })
 }
 
@@ -597,10 +677,26 @@ fn execute_with_signer(
     // capture cannot answer this.
     let observed = config_coverage::observe(reader, &plan.topics);
     config_coverage::log(&observed);
+    // PROD-05.1: each named topic's replication factor, from the same reader's
+    // metadata, before the engine — the pinned engine's manifest keeps it for
+    // the first topic it saves only (`config_coverage::model`). Never fatal: a
+    // failed read leaves the factor NOT RECORDED.
+    let factors = reader
+        .replication_factors(&plan.topics)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                "the topics' replication factors could not be read before the engine; the \
+                 receipt records them only where the archive manifest does"
+            );
+            BTreeMap::new()
+        });
 
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
     let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
+    let topic_configuration =
+        config_coverage::model(&observed, &ran.manifest_layouts, &factors, &inputs.owners);
 
     let mut outcome = BackupOutcome {
         backup_id,
@@ -624,6 +720,8 @@ fn execute_with_signer(
         covered_from_ms: ran.covered_from_ms,
         covered_to_ms: ran.covered_to_ms,
         config_coverage: coverage,
+        topic_configuration,
+        owner_detection: inputs.owner_detection.clone(),
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

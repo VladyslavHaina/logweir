@@ -116,6 +116,8 @@ fn receipt() -> BackupReceipt {
         // 1.1.0: it is the "old evidence verifies unchanged" case, and ruling
         // R-G reserves the re-mint. A 1.0.0 document has no config_coverage.
         config_coverage: None,
+        topic_configuration: None,
+        owner_detection: None,
     }
 }
 

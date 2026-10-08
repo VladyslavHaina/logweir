@@ -149,7 +149,7 @@ anything not listed is `404`.
 | `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. An optional `topicMapping` declares the mapping the caller previewed and is checked against the prefix this request stores — see below. |
 | `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status, including — for a verified authorization document v2 — `authorization {mode, policyName, policyDigest, requester, confirmationKeyId}`. |
 | `POST /api/v1/namespaces/{ns}/restores/{name}/approval` | PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation (Approver role; never the requester); in an unbound namespace an approver records the two `logweir drill approve` files. See *Approval policy*. |
-| `GET /api/v1/namespaces/{ns}/approval-policy` | PLAT-19.2: the namespace's effective approval policy, the installation document's digest and the console confirmation key id. |
+| `GET /api/v1/namespaces/{ns}/approval-policy` | PLAT-19.2: the namespace's effective approval policy, the installation document's digest and the console confirmation key id. PROD-16.1: `operatorMode` (`confirm` \| `two-person` \| `strict`) and `basis` (`binding` \| `configured` \| `freshInstall` \| `legacy`) — why an unbound namespace resolves as it does; the create's `authorization` carries `operatorMode` too. |
 | `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
 | `GET /api/v1/namespaces/{ns}/destinations` | `BackupDestination` rows: the canonical URL, the endpoint, the transport, the addressing and the controller's `Valid` verdict. |
 | `POST /api/v1/namespaces/{ns}/destinations` | Create a destination **under the name in the body**, because every schedule, backup and restore references it by that name. |
@@ -174,7 +174,7 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/catalogs` | Recovery catalogs: ten verdict counts, the signer list, and whether the Kubernetes view is a window over a larger archive. |
 | `POST /api/v1/namespaces/{ns}/catalogs` | Connect an existing archive: create a `RecoveryCatalog` **under the name in the body**, because every protection, rehearsal and retention policy references it by that name. |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}` | One catalog. |
-| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns. |
+| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns, and, for an `Available` point recorded from receipt format 1.3.0, its topics' recorded partition count, replication factor, configuration coverage, owner kind and apply route (`topics[]`; absent is not published, never "no topics"), beside `ownerDetection`, where the backup run looked for declarative owners: an un-owned topic's `applyRoute` is `adminApi` only where it looked, and `unknown` where it did not (every controller-run `Backup` today). |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}/signers` | The untrusted-signer panel: key ids, point counts, whether the bound policy accepts each one, and the out-of-band fingerprint command. |
 | `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` | Retention: what the last evaluation would remove, what is **actually** enforcing it, which guarantees are in force and by whom, where the approved-plan gate stands, and whether enforcement has degraded. |
 | `GET /api/v1/trust-policies[/{name}]` | The installation's trust policies. **Cluster-scoped** and administrator-only; `unknown` is not `valid`. |
@@ -185,7 +185,15 @@ The console reads the installation's approval-policy document —
 `approvalPolicyFile`, **the same file the controller mounts** — and its own
 `ConsoleConfirmation` private key — `confirmationKeyFile`, from a Secret. Both
 are optional; a served namespace bound to a policy without the key is a startup
-refusal (exit 2), because both modes carry the console's signature. The full
+refusal (exit 2), because both modes carry the console's signature. A
+configured key file that does not exist is a startup refusal too, unless
+`confirmationKeyManaged: true` says it is the key the identity hook generates
+(PROD-16.1), which the kubelet projects only after the post-install hook ran:
+then it is read on first use, and a confirm request before it exists is
+refused `409 policy_mismatch` before anything is created.
+`confirmationKeyManaged` without `confirmationKeyFile` is a configuration
+error. `installationIdentity: {namespace, publicConfigMap}` names where the
+fresh-install marker is read (the chart sets both only with the managed key). The full
 contract, the four enforcement points and upgrade/rollback are in
 `docs/kubernetes.md` §8, *Approval policy*.
 
@@ -222,7 +230,8 @@ Refused **before anything is created** (no Restore, no Approval):
 
 | request | answer |
 |---|---|
-| an `Ordinary`-bound namespace in a **`localAdmin`** console — D0: that mode "does not expose Ordinary"; its one identity is the port-forward administrator, not a person a confirmation could attest | `409 policy_mismatch`; use the shared console. `GET .../approval-policy` says `ordinaryConfirmationAvailable: false` |
+| a `confirm` namespace (an `Ordinary` policy, or `default-confirm-v1`) while the console's confirmation key is not there yet — PROD-16.1: the identity hook writes the managed key after the console starts | `409 policy_mismatch`, naming the key; `GET .../approval-policy` says `ordinaryConfirmationAvailable: false`. Since PROD-16.1 a **`localAdmin`** console confirms too, as `urn:logweir:local-admin#admin`; only `two-person` (PROD-16.2) is refused there |
+| the fresh-install marker cannot be read (the public identity ConfigMap or the `TrustPolicy` it names answers an error other than `404`) | the read's own error (`kubernetes_unavailable`, `upstream_timeout`, …); nothing is created rather than a fresh install's Restore parked on the legacy path |
 | a `Governed`-bound namespace without `ticket`, or a blank / padded / over-128-character one (D0: the ticket is "required in Governed") | `422`, field `ticket` (`required` / `invalid`) |
 | `ticket` in an unbound namespace, which signs nothing (`logweir drill approve --ticket` carries it there) | `422`, field `ticket`, `not_accepted` |
 

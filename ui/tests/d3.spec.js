@@ -2283,8 +2283,16 @@ test("a_redacted_receipt_key_is_not_carried_into_a_plan", async () => {
   // THE PAGE SAYS SO, and says it as a complaint rather than a note.
   const html = decode(renderPoints({ items: [redacted], page: {} }, "team-a", "c1", "dest"));
   assert.match(html, /data-redacted-binding="true"/);
-  assert.match(html, /published its receipt key as <code>\[redacted\]<\/code>/);
+  assert.match(html,
+    /published its plan binding -- its backup set id or its receipt key -- as <code>\[redacted\]<\/code>/);
+  assert.match(html, /Runners up to v0\.2\.0-rc\.1 did this to every scheduled run's point/);
   assert.match(html, /nothing in your archive is missing or unreadable because of this/);
+
+  // FX-17: a redacted SET ID raises the same complaint with the key whole --
+  // the scheduled run's `<schedule uid>-<slot>` that the PoC's runner withheld.
+  const setGone = Object.assign({}, good, { backupId: "[redacted]" });
+  assert.match(decode(renderPoints({ items: [setGone], page: {} }, "team-a", "c1", "dest")),
+    /data-redacted-binding="true"/);
 
   // AND THE SENTENCE NO LONGER PROMISES WHAT THE API DOES NOT DELIVER.
   assert.equal(POINT_BINDING_SENTENCE.indexOf("the whole plan binding"), -1,

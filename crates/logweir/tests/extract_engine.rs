@@ -88,9 +88,13 @@ fn the_extracted_engine_reports_the_pinned_version() {
             .unwrap_or_else(|e| panic!("docker run failed ({e}); is Docker running?"));
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr)
     };
+    // The extracted bytes report EXACTLY the pin `doctor` accepts (PROD-00.3f
+    // moved it to 0.23.3; the full-drill floor stays 0.21.0). A whole-token
+    // comparison, as `doctor` makes it: `contains` would accept `0.23.31`.
+    let pin = logweir::doctor::ENGINE_PIN;
     assert!(
-        s.contains("0.21.0"),
-        "engine floor is v0.21.0 (Global Constraint 8), got: {s}"
+        s.split_ascii_whitespace().any(|t| t == pin),
+        "the extracted engine must report the pinned version {pin}, got: {s}"
     );
 }
 

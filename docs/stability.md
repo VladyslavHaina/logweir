@@ -41,7 +41,11 @@ adopter's evidence bucket is a document some reader may already parse, so:
     `archive.manifest_version_id`. So is FX-3's move of the new-topic
     deviations from `intentionally_deviated` to `unexpected_divergence`. So is
     FX-8's refusal `PointInTimeByProducerTime`, a new cause for exit 3
-    ([below](#scorecard-format-130-sourcetime_basis-fx-8)).
+    ([below](#scorecard-format-130-sourcetime_basis-fx-8)). So is PROD-08.1's
+    sampled-lane order check, a new cause for `fail-integrity`, and its
+    phase-0 refusals of a plan that asks for two verifications at once, new
+    causes for exit 3
+    ([below](#scorecard-format-140-integrityverification-prod-081)).
 
   Nothing else is ruled: any other change to an existing field's content is
   still a MAJOR bump.
@@ -212,6 +216,124 @@ which it selected by time with **no recorded timestamp type**
   documents again with no block, runs the selections FX-8 refuses, and signs
   them without a label — the pre-FX-8 behaviour. The 1.3.0 documents already
   written stay valid under both readers.
+
+### Scorecard format 1.4.0: `integrity.verification` (PROD-08.1)
+
+PROD-08.1 adds one nested optional block to the drill scorecard,
+`integrity.verification`, and moves the scorecard to **1.4.0**
+(`schemas/logweir-drill-scorecard-1.4.0.json`, with FX-8's 1.3.0 frozen beside
+it). The block says what a verdict COVERED — a sample, or every selected record
+— and, for a complete verification, what it found
+([the scorecard format](formats/drill-scorecard.md#integrityverification-format-140);
+[the plan field](formats/drill-spec.md#samplecoverage-and-samplecomplete_max_records-prod-081);
+[the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
+- **Absent means not recorded, read as sampled.** A document without the block
+  — every scorecard before 1.4.0 — is never read as a complete verification,
+  and both readers print an `integrity coverage: not recorded` line for it.
+  Every 1.4.0 run that reaches phase 7 writes the block.
+- **The block is additive and optional: MINOR.**
+- **Seven arms, IV-1 to IV-7, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block and judges the block, or `integrity.result`
+  against it (IV-6, as NR-2 to NR-5 judge the existing parity lists against
+  `not_reconstructed`), and each can only refuse. No document without the block
+  changes verdict; the corpus (`e2e/fixtures/invariants/`) and the parity gate
+  re-prove that on every `just lint`.
+- **A complete verification fills the existing counters with the complete
+  comparison**: `integrity.records_sampled` is the expected records of the
+  compared partitions, `sample.records_expected` the same (the whole expected
+  output only when `complete.covered` is `true`),
+  `sample.partitions` and `sample.topics` every partition and topic it
+  verified. Each field keeps its meaning — how many records the drill set out
+  to reconcile, and how many it did — and a reader that predates the block
+  reads a large sample, never a complete one.
+- **Two new causes for existing values, each only to the safer side (OD-7's
+  third case).** The sampled lane now FAILS a selection whose restored head
+  repeats or goes backwards in `x-original-offset` (it used to key the head by
+  that header in a map, where a duplicate collapsed and order was invisible):
+  a new cause for `fail-integrity`. And phase 0 now refuses, exit 3, a plan
+  asking for two verifications at once (`coverage: complete` with
+  `max_partitions`; `complete_max_records` with sampled coverage, or `0`).
+  Neither makes any verdict stronger.
+- **A complete verification can pass a restore the sampled check fails, and
+  fail one it passes** — the point. The exact per-partition model replaces the
+  manifest's first/last count bound, so PROD-01.1's correct point-in-time
+  restore over an out-of-order segment passes complete coverage, and its
+  skipped segment and below-the-floor record fail it
+  ([the limitation](#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+  Both are new runs under a new plan value, signed with the block; no earlier
+  document is re-read.
+- **Readers built before PROD-08.1** accept every 1.4.0 document — the major
+  is unchanged and the block is a nested optional field they ignore — and print
+  no coverage line. They do not run IV-1 to IV-7.
+- **The plan grammar gains `sample.coverage` and `sample.complete_max_records`**,
+  both omitted from the serialised plan at their defaults. A runner built
+  before PROD-08.1 ignores them, runs a sampled check, and signs no block.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.3.0
+  documents again, sampled, with no block; the 1.4.0 documents already written
+  stay valid under both readers.
+
+### Receipt and catalog-point format 1.3.0: `topic_configuration` (PROD-05.1)
+
+PROD-05.1 adds one optional block to the backup receipt, `topic_configuration`,
+and its per-topic copy to the catalog point record, `topics[].configuration`,
+and moves both documents to **1.3.0**
+(`schemas/logweir-backup-receipt-1.3.0.json` and
+`schemas/logweir-catalog-point-1.3.0.json`, FX-7's 1.2.0 files frozen beside
+them). Per named topic it records the source's partition count and replication
+factor, the configuration entries Logweir's own read returned with their
+source and portability class, and the topic's declarative owner, with a
+top-level `owner_detection` saying where the run looked for owners
+([the receipt format](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130);
+[the model and the portability table](to-do/decisions/PROD-05.1-configuration-model.md)).
+
+- **Absent means not recorded.** A receipt without the block — every receipt
+  before 1.3.0 — records no topic's configuration model, and a reader that
+  needs one has none; never "no configuration". Within the block, a topic whose
+  configuration read was denied or failed records NO entries (arm 15), never an
+  empty set.
+- **Every receipt this build signs carries the block**, pinned or not, so every
+  one is 1.3.0. FX-7's statement that an unpinned receipt is FX-4's 1.1.0
+  document byte for byte holds for builds before PROD-05.1; a 1.3.0 receipt
+  without a pin still has no `manifest_version_id` key.
+- **Ten arms, 12 to 21, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block (arm 20 also on one carrying `owner_detection`
+  without it, which no writer produces), and judges it against
+  `config_coverage` and `source.topics` the way FX-4's arm 7 judges
+  `config_coverage` against `source.topics`. No document without the block
+  changes verdict; the corpus (`e2e/fixtures/invariants/`, a case for each
+  refusing half of every arm) and the parity gate re-prove that on every
+  `just lint`.
+- **An owner nobody looked for is not "no owner".** `owner_detection` empty —
+  every `Backup` and `BackupSchedule` the controller runs today, which passes
+  neither a declaration nor `KafkaTopic` resources (PROD-05.1a) — makes both
+  readers print `owner not checked` for an un-owned topic and the product API
+  publish `applyRoute: unknown`, never the admin-API route a later restore
+  would act on.
+- **The class is the writer's.** The arms judge a class against its source and
+  value, never against the key, so a later table refinement cannot make an
+  older receipt refuse itself; a restore re-derives the class from its own
+  table and fails closed on a disagreement (PROD-05.2).
+- **The catalog record's existing `topics[].partitions` is now filled** from
+  the receipt (it was always absent: no receipt recorded a count). Its meaning
+  is unchanged — the source's partition count — and `reader::cross_check`
+  refuses a record whose count the receipt does not back. Its one reader,
+  rehearsal selection's `maxPartitions` filter, can only refuse more points
+  with a count than without one.
+- **The plan grammar gains `source.topic_owners`**, omitted from the serialised
+  plan when absent (an empty list is kept: it says no topic has a declared
+  owner, and the receipt records `declared` among the places the run looked); a
+  runner built before PROD-05.1 ignores it and records no owner. Phase −1
+  refuses, exit 3, a declaration it cannot record or a topic declared twice.
+- **Readers built before PROD-05.1** (`verify_scorecard.py` 1.19.0 and earlier,
+  and an older `logweir`) accept every 1.3.0 document — the major is unchanged
+  and the block is an optional field they ignore — print no model line, and do
+  not run arms 12 to 21.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.1.0 or
+  1.2.0 receipts and records again; the 1.3.0 documents already written stay
+  valid under both readers. A catalog synced by an older runner lists no
+  topics for a point (the console then says the source's layout is not
+  published, and defaults as FX-5 did).
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -626,6 +748,17 @@ and last records are inside the window holds a later record. Measured by three r
 `non_monotonic_create_time_inside_a_wholly_inside_segment` (the correct restore signed
 `fail-integrity`).
 
+Since PROD-08.1 a plan can ask for **complete coverage** (`sample.coverage:
+complete`), which selects the expected output by each archived record's own
+timestamp and compares every restored record with it, so the same three rows
+read differently there: the skipped record and the record below the floor are
+reported missing and the restore is signed `fail-integrity` (at the point too),
+and the correct point-in-time restore is signed `pass`. The restores themselves
+are unchanged — the engine still selects by first and last timestamps, and the
+floor still drops the record — until PROD-01.1b. Measured by the same rows'
+complete restores
+([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
 ### `LogAppendTime` sources are restored with the producers' timestamps
 
 For a topic on `message.timestamp.type=LogAppendTime`, the archive holds the timestamp each
@@ -695,6 +828,11 @@ a duplicated target was not measured. Measured by
 `e2e/tests/record_semantics.rs::a_lost_produce_acknowledgement_during_restore`, an `#[ignore]`d
 row that freezes the broker and runs alone with `--ignored`
 ([decision record §5.1](to-do/decisions/PROD-01.1-record-semantics.md#51-a-lost-produce-acknowledgement--run)).
+Since PROD-08.1, a duplicated target that DOES reach phase 7 is counted:
+complete coverage reports each repeated `x-original-offset` as a duplicate and
+fails the restore, and the sampled check fails a duplicate inside the head it
+reads (measured over a duplicated target on the real broker by
+`e2e/tests/record_semantics.rs::complete_coverage_over_faulted_targets_on_the_real_broker_and_archive`).
 
 ### SASL/SCRAM-SHA-512: two clients, two trust stores, and one password variable
 
@@ -1260,7 +1398,7 @@ What changes for an operator:
   Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
   bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
   merges the two views for you yet (PROD-09.2 owns that merge).
-- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key).
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), and an unpinned one still has no `manifest_version_id` key.
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and
@@ -2011,6 +2149,12 @@ used engine **0.21.0**, digest
 `sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`,
 and Apache Kafka **3.7.1** (KRaft).
 
+On 2026-10-08 PROD-00.3f re-ran the row with the **0.23.3** pin (digest
+`sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`, Kafka
+3.7.1, compose slot 4): 1 passed, the same six of nine records, and both readers
+accept the signed result. Upstream's `pitr_accuracy.rs` at v0.23.3 still
+contains zero assertions.
+
 At the fixed recovery point `T = 1_760_000_000_000`, each of three partitions
 contains records at `T − 1 ms`, `T` and `T + 1 ms`. The restore returns
 **six of the nine records**: the first two from each partition. The boundary
@@ -2054,8 +2198,10 @@ spend).
   the run. `kafka-backup` **0.21.0** is the floor for the full drill as
   shipped — it is the version this plan verified every vendored struct and
   CLI behaviour against (`docs/UPSTREAM-VERSIONS.md` in the planning repo;
-  `ae5a102f93b5270927d95d4ccec184b577febb10`), and it is the version pinned
-  by digest in `third_party/kafka-backup-binary.digest`.
+  `ae5a102f93b5270927d95d4ccec184b577febb10`). The floor is not the pin:
+  since PROD-00.3f the version pinned by digest in
+  `third_party/kafka-backup-binary.digest` is **0.23.3** (*Supported engine
+  pin*, below).
 
 - **Runtime image floor.** The extracted `kafka-backup` binary is dynamically
   linked against **glibc >= 2.36** and **libssl3**, and performs TLS
@@ -2090,21 +2236,44 @@ spend).
   of an exit code, without a major bump. New flags and new exit codes may be
   added in a minor.
 
-- **Supported engine pin.** The full-drill pin is 0.21.0 and the digest in
-  `third_party/kafka-backup-binary.digest`; `doctor` checks that exact version.
-  Older archive-manifest fixtures exercise parsing compatibility, not full
-  runtime support. The old two-minor support table conflicted with the stated
-  full-drill floor and is superseded by the [support matrix](support-matrix.md).
-  Upstream's current release is 0.22.0 (2026-09-07). It was evaluated against
-  this pin in [PROD-00.1](to-do/decisions/PROD-00-engine-route.md). Moving the
-  pin is a recorded decision (OD-3), not a routine bump: `doctor` accepts only
-  0.21.0.
+- **Supported engine pin.** The pin is **0.23.3**, OSO's newest release on
+  2026-10-07 (tag commit `afb160e7`, image digest
+  `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`
+  in `third_party/kafka-backup-binary.digest`); `doctor` accepts exactly that
+  version, as a whole token. It replaced 0.21.0 with PROD-00.3f, which
+  evaluated it from source and on the compose stack
+  ([decision record](to-do/decisions/PROD-00-engine-route.md) §12): the
+  segment format, the three subcommands Logweir runs and every key it renders
+  are unchanged, and no capability gap the decision record lists is fixed by
+  it. The full-drill **floor** stays 0.21.0. Older archive-manifest fixtures
+  exercise parsing compatibility, not full runtime support. The old two-minor
+  support table conflicted with the stated full-drill floor and is superseded
+  by the [support matrix](support-matrix.md). Moving the pin is a recorded
+  decision (OD-3, decided 2026-10-07: Logweir follows the newest OSO release,
+  and builds from source with its own patches once PROD-00.2 lands), never a
+  routine bump: the guard `crates/logweir/tests/engine_pin.rs` fails until every place
+  that names the pin, PROD-01.1's measured contract included, names the new
+  one.
+
+  Two engine behaviours since 0.22.0 are refused by Logweir rather than
+  inherited:
+
+  - an `http://` storage endpoint beside `allow_http: false` is no longer a
+    refusal in the engine, which derives plaintext from the scheme. Logweir
+    refuses that combination at phase 0 (exit 3) and in every engine document
+    it renders (C15);
+  - `path_style: true` is honoured, but a custom endpoint still forces
+    path-style, so `VirtualHosted` addressing with an endpoint stays refused
+    as `AddressingUnsupportedByEngine` (C16).
 
   What OSO's operators run:
 
   - `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0
-    (2026-09-07). Its v0.2.22–v0.2.25 default to v0.19.1.
-  - `kafka-backup-operator` 1.3.0 links `kafka-backup-core` 0.19.2 as a library.
+    (2026-09-07), through v0.4.0 (2026-10-06). Its v0.2.22–v0.2.25 default to
+    v0.19.1.
+  - `kafka-backup-operator` 1.3.0 links `kafka-backup-core` 0.19.2 as a
+    library; its 1.4.0, 1.4.1 and 1.4.2 (2026-10-06/07) link 0.23.0, 0.23.1
+    and 0.23.3.
 
   Archives written by engines before 0.21 carry no segment sha256, so a drill
   over one reports `integrity.result: partial`, never `pass`.
@@ -2162,7 +2331,7 @@ The separate **Never** list records product boundaries, not scheduled work.
 | # | Item | Reason | Citation |
 |---|---|---|---|
 | 1 | **MSK IAM auth** | The `TokenProvider` seam exists and is empty; nothing mints an IAM token. | `crates/logweir-kafka/src/token.rs:1-9` |
-| 2 | **Strimzi as a source** | `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07); its v0.2.22–v0.2.25 default to `v0.19.1`, **below the `0.21.0` floor**, which the matrix reports `unsupported (lever-absent)` and never as a fault. The drill always restores with Logweir's pinned engine, so what matters is the archive. The CLI drill reads 0.21 and 0.22 archives in full, and reads older ones as `partial` (no segment sha256). A non-empty consumer-group snapshot fails the drill until FX-1. No operator-written archive carries a Logweir receipt, so none can enter the catalog. | spec §13; `docs/support-matrix.md`; [PROD-00.1](to-do/decisions/PROD-00-engine-route.md) §7 |
+| 2 | **Strimzi as a source** | `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07), through v0.4.0 (2026-10-06); its v0.2.22–v0.2.25 default to `v0.19.1`, **below the `0.21.0` floor**, which the matrix reports `unsupported (lever-absent)` and never as a fault. The drill always restores with Logweir's pinned engine (0.23.3 since PROD-00.3f), so what matters is the archive. The CLI drill reads 0.21, 0.22 and 0.23 archives in full, and reads older ones as `partial` (no segment sha256). A non-empty consumer-group snapshot fails the drill until FX-1. No operator-written archive carries a Logweir receipt, so none can enter the catalog. | spec §13; `docs/support-matrix.md`; [PROD-00.1](to-do/decisions/PROD-00-engine-route.md) §7 |
 | 3 | **The in-browser WASM verifier** | Tag 1's UI ships no build step and no bundler, so there is nothing to compile a verifier into; verification is the CLI and `docs/verify_scorecard.py`. | spec §8 |
 | 4 | **`OsoCliEngine::validation_run`** | The trait method is not overridden, so the engine's own validation run is never executed and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
 | 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` still only reports; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md) §7f; [release-notes.md](release-notes.md) |

@@ -430,5 +430,266 @@
   "python_exit": 1,
   "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `1`, expected a string",
   "python_reason": "source.time_basis is not an object of an optional string plan and two arrays of strings, producer_time and not_recorded"
+ },
+ {
+  "id": "verification_archive_segments_null",
+  "file": "verification_archive_segments_null.json",
+  "check": "null:integrity.verification.complete.archive.segments",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.archive.segments is not an integer"
+ },
+ {
+  "id": "verification_archive_segments_verified_null",
+  "file": "verification_archive_segments_verified_null.json",
+  "check": "null:integrity.verification.complete.archive.segments_verified",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.archive.segments_verified is not an integer"
+ },
+ {
+  "id": "verification_archive_records_decoded_null",
+  "file": "verification_archive_records_decoded_null.json",
+  "check": "null:integrity.verification.complete.archive.records_decoded",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.archive.records_decoded is not an integer"
+ },
+ {
+  "id": "verification_archive_offset_holes_null",
+  "file": "verification_archive_offset_holes_null.json",
+  "check": "null:integrity.verification.complete.archive.offset_holes",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.archive.offset_holes is not an integer"
+ },
+ {
+  "id": "verification_replay_expected_null",
+  "file": "verification_replay_expected_null.json",
+  "check": "null:integrity.verification.complete.replay.expected",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.replay.expected is not an integer"
+ },
+ {
+  "id": "verification_replay_restored_null",
+  "file": "verification_replay_restored_null.json",
+  "check": "null:integrity.verification.complete.replay.restored",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.replay.restored is not an integer"
+ },
+ {
+  "id": "verification_replay_matching_null",
+  "file": "verification_replay_matching_null.json",
+  "check": "null:integrity.verification.complete.replay.matching",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.replay.matching is not an integer"
+ },
+ {
+  "id": "verification_replay_missing_null",
+  "file": "verification_replay_missing_null.json",
+  "check": "null:integrity.verification.complete.replay.missing",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.replay.missing is not an integer"
+ },
+ {
+  "id": "verification_replay_unexpected_null",
+  "file": "verification_replay_unexpected_null.json",
+  "check": "null:integrity.verification.complete.replay.unexpected",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.replay.unexpected is not an integer"
+ },
+ {
+  "id": "verification_replay_duplicates_null",
+  "file": "verification_replay_duplicates_null.json",
+  "check": "null:integrity.verification.complete.replay.duplicates",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.replay.duplicates is not an integer"
+ },
+ {
+  "id": "verification_replay_out_of_order_null",
+  "file": "verification_replay_out_of_order_null.json",
+  "check": "null:integrity.verification.complete.replay.out_of_order",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.replay.out_of_order is not an integer"
+ },
+ {
+  "id": "verification_replay_mismatched_null",
+  "file": "verification_replay_mismatched_null.json",
+  "check": "null:integrity.verification.complete.replay.mismatched",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.replay.mismatched is not an integer"
+ },
+ {
+  "id": "verification_partitions_segments_null",
+  "file": "verification_partitions_segments_null.json",
+  "check": "null:integrity.verification.complete.partitions[].segments",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].segments is not an integer"
+ },
+ {
+  "id": "verification_partitions_segments_verified_null",
+  "file": "verification_partitions_segments_verified_null.json",
+  "check": "null:integrity.verification.complete.partitions[].segments_verified",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].segments_verified is not an integer"
+ },
+ {
+  "id": "verification_partitions_records_decoded_null",
+  "file": "verification_partitions_records_decoded_null.json",
+  "check": "null:integrity.verification.complete.partitions[].records_decoded",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].records_decoded is not an integer"
+ },
+ {
+  "id": "verification_partitions_offset_holes_null",
+  "file": "verification_partitions_offset_holes_null.json",
+  "check": "null:integrity.verification.complete.partitions[].offset_holes",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].offset_holes is not an integer"
+ },
+ {
+  "id": "verification_partitions_replay_expected_null",
+  "file": "verification_partitions_replay_expected_null.json",
+  "check": "null:integrity.verification.complete.partitions[].replay.expected",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].replay.expected is not an integer"
+ },
+ {
+  "id": "verification_partitions_replay_restored_null",
+  "file": "verification_partitions_replay_restored_null.json",
+  "check": "null:integrity.verification.complete.partitions[].replay.restored",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].replay.restored is not an integer"
+ },
+ {
+  "id": "verification_partitions_replay_matching_null",
+  "file": "verification_partitions_replay_matching_null.json",
+  "check": "null:integrity.verification.complete.partitions[].replay.matching",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].replay.matching is not an integer"
+ },
+ {
+  "id": "verification_partitions_replay_missing_null",
+  "file": "verification_partitions_replay_missing_null.json",
+  "check": "null:integrity.verification.complete.partitions[].replay.missing",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].replay.missing is not an integer"
+ },
+ {
+  "id": "verification_partitions_replay_unexpected_null",
+  "file": "verification_partitions_replay_unexpected_null.json",
+  "check": "null:integrity.verification.complete.partitions[].replay.unexpected",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].replay.unexpected is not an integer"
+ },
+ {
+  "id": "verification_partitions_replay_duplicates_null",
+  "file": "verification_partitions_replay_duplicates_null.json",
+  "check": "null:integrity.verification.complete.partitions[].replay.duplicates",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].replay.duplicates is not an integer"
+ },
+ {
+  "id": "verification_partitions_replay_out_of_order_null",
+  "file": "verification_partitions_replay_out_of_order_null.json",
+  "check": "null:integrity.verification.complete.partitions[].replay.out_of_order",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].replay.out_of_order is not an integer"
+ },
+ {
+  "id": "verification_partitions_replay_mismatched_null",
+  "file": "verification_partitions_replay_mismatched_null.json",
+  "check": "null:integrity.verification.complete.partitions[].replay.mismatched",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+  "python_reason": "integrity.verification.complete.partitions[1].replay.mismatched is not an integer"
+ },
+ {
+  "id": "verification_not_an_object",
+  "file": "verification_not_an_object.json",
+  "check": "message:integrity.verification is not an object of the shape",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"x\", expected struct Verification",
+  "python_reason": "integrity.verification is not an object of the shape the writer gives it: four strings, two arrays of offset ranges and an optional complete block"
+ },
+ {
+  "id": "verification_coverage_not_a_string",
+  "file": "verification_coverage_not_a_string.json",
+  "check": "message:integrity.verification is not an object of the shape",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `1`, expected a string",
+  "python_reason": "integrity.verification is not an object of the shape the writer gives it: four strings, two arrays of offset ranges and an optional complete block"
+ },
+ {
+  "id": "verification_gaps_absent",
+  "file": "verification_gaps_absent.json",
+  "check": "message:integrity.verification is not an object of the shape",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: missing field `gaps`",
+  "python_reason": "integrity.verification is not an object of the shape the writer gives it: four strings, two arrays of offset ranges and an optional complete block"
+ },
+ {
+  "id": "verification_covered_not_a_bool",
+  "file": "verification_covered_not_a_bool.json",
+  "check": "message:integrity.verification is not an object of the shape",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"yes\", expected a boolean",
+  "python_reason": "integrity.verification is not an object of the shape the writer gives it: four strings, two arrays of offset ranges and an optional complete block"
+ },
+ {
+  "id": "verification_partitions_not_an_array",
+  "file": "verification_partitions_not_an_array.json",
+  "check": "message:integrity.verification is not an object of the shape",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: map, expected a sequence",
+  "python_reason": "integrity.verification is not an object of the shape the writer gives it: four strings, two arrays of offset ranges and an optional complete block"
  }
 ]
