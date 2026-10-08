@@ -27,8 +27,9 @@ binding), 34 (FX-16, a point-bound restore restores its point's set), 35
 (PROD-00.2, the engine built from the vendored source), 36 (FX-23, an
 early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
 one crate that may hold `unsafe` code, and the consumer-group and ACL reads
-behind it) and 38 (FX-20, the binding for every other credential reference)
-so far. Items continue the next entry's
+behind it), 38 (FX-20, the binding for every other credential reference)
+and 39 (FX-18, a topic phase 0 creates is used only once the cluster serves
+it) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -73,6 +74,11 @@ object to MinIO; a bound one backs up); it changes the controller, every
 runner, the retention worker, the product API, the console and three CRDs'
 status, and the PoC upgrade that carries it binds the `primary` destination's
 Secrets and runs the refusal rows against a sentinel.
+Item 39 is fix-now row FX-18, proven by unit and phase rows, a guard over
+every e2e helper that creates a topic, and the compose e2e suite (the
+`NotLeaderForPartition` race reproduced with the wait removed, 3 of 13 runs,
+and gone with it); it changes the runner's phase 0 only, and the PoC upgrade
+that carries it runs its restore rows unchanged.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -834,6 +840,37 @@ the new status fields; bound Secrets keep working with them. An older console
 offers `existing` again, which this API refuses — roll the console with the
 controller.
 
+#### 39. A topic phase 0 creates is read, or handed to the engine, only once the cluster serves it (FX-18)
+
+**Changed.** Phase 0 creates the target topics (and, on a `LogAppendTime`
+broker, the one probe topic whose `message.timestamp.type` it reads back).
+Kafka answers a create before every broker serves the new topic, so a read or
+an engine produce that follows at once could meet `UnknownTopicOrPartition`,
+`LeaderNotAvailable` or `NotLeaderForPartition`. CI met the last one. Phase 0
+now waits, bounded, until every partition of each topic it created has a
+leader that answers. A topic still not served at the bound is exit 1 naming
+it, never a pass and never a guessed value. The probe's configuration read
+after the create retries the same propagation answers, plus the empty
+DescribeConfigs answer a topic gives while it propagates, and returns every
+other error at once.
+
+**Do:** nothing.
+**Scope:**
+- `crates/logweir-kafka` (the wait and the read classifications, each a
+  pure function with a unit row);
+- `crates/logweir/src/drill/phase0_admit.rs`, with phase rows, including a
+  created topic that is never served (exit 1);
+- the guard `e2e/tests/created_topics.rs`: every e2e helper that creates a
+  topic waits until it is served;
+- the compose e2e suite. With the wait removed, CI's `NotLeaderForPartition`
+  came back in 3 of 13 runs under load; with it, none did.
+
+A run whose target cluster never serves a created topic leaves those topics
+for an operator to remove, as a failed create in the same batch already did.
+
+**Rollback:** an older runner creates and uses the topics at once again. No
+document, archive or API object changes in either direction.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -895,7 +932,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37 and 38, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38 and 39, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -910,7 +947,8 @@ needs nothing; item 37 changes no behaviour any binary shows (it adds
 library calls no command uses yet) and needs nothing; item 38 changes the
 controller, every runner, the retention worker, the product API, the
 console and the status of three CRDs, and needs each destination,
-retention, notification and inline-archive credential Secret bound. To roll back to
+retention, notification and inline-archive credential Secret bound; item 39
+changes the runner's phase 0 only and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
