@@ -224,10 +224,18 @@ use logweir_core::engine::{
 };
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::scorecard::{Integrity, TopicParity};
+use logweir_core::scorecard::{
+    Verification, APPLICATION_NOT_ATTEMPTED, COMPARISON_BASIS_ARCHIVE, HEADER_ORDER_NOT_VERIFIED,
+    HEADER_ORDER_VERIFIED,
+};
+use logweir_core::spec::Coverage;
 use logweir_core::spec::TargetMode;
 use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord};
 use std::collections::BTreeMap;
+
+/// PROD-08.1: the complete lane (`sample.coverage: complete`).
+pub mod complete;
 
 #[derive(Debug)]
 pub struct VerifyOutcome {
@@ -286,15 +294,16 @@ pub fn compare(
     // scratch topic restored from offset 0 — and ONLY then, which is why
     // `decode_original_offset` must not be allowed to answer `None` for a
     // header the engine actually wrote (see its doc comment).
+    //
+    // PROD-08.1: the LAST `x-original-offset`, as the complete lane reads it
+    // (`complete::lineage_offset`): the backup appends its own after the
+    // record's headers, so the last is this archive's lineage. A restored
+    // record from the pinned engine carries exactly one (PROD-01.1 R4), so
+    // first and last agree on every target it writes.
     let by_offset: BTreeMap<i64, &ConsumedRecord> = consumed
         .iter()
         .map(|c| {
-            let orig = c
-                .headers
-                .iter()
-                .find(|(k, _)| k == "x-original-offset")
-                .and_then(|(_, v)| v.as_ref())
-                .and_then(|v| decode_original_offset(v));
+            let orig = complete::lineage_offset(&c.headers);
             (orig.unwrap_or(c.offset), c)
         })
         .collect();
@@ -1030,6 +1039,45 @@ fn straddler_note((count, records): (usize, u64)) -> String {
     }
 }
 
+/// **PROD-08.1 (acceptance row 08-4), the sampled lane's share.** The
+/// restored records `compare` reconciles are keyed by `x-original-offset` in
+/// a map, where a repeated source offset COLLAPSES and order is invisible
+/// (PROD-01.1 V4). This reads the same consumed head in target order and
+/// names every record whose lineage offset repeats one already read
+/// (`duplicates`) or is below one already read (`out of order`; archive order
+/// is source-offset order). Records without a lineage header are `compare`'s
+/// fallback case and are skipped here.
+///
+/// A new cause for the sampled lane's existing `Failed` — it can only move a
+/// verdict to the safer side (OD-7's third case) — and over the head the
+/// sample read, never the whole output: that is the complete lane's.
+#[must_use]
+pub fn lineage_faults(consumed: &[ConsumedRecord]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut max_seen: Option<i64> = None;
+    let mut out = Vec::new();
+    for c in consumed {
+        let Some(o) = complete::lineage_offset(&c.headers) else {
+            continue;
+        };
+        if !seen.insert(o) {
+            out.push(format!(
+                "source offset {o} is restored again at target offset {}",
+                c.offset
+            ));
+            continue;
+        }
+        if let Some(m) = max_seen.filter(|m| o < *m) {
+            out.push(format!(
+                "source offset {o} is restored at target offset {} after source offset {m}",
+                c.offset
+            ));
+        }
+        max_seen = Some(max_seen.map_or(o, |m| m.max(o)));
+    }
+    out
+}
+
 /// Builds the ONE verdict for ONE selection. Every lane's conclusion is a
 /// value in the returned `SelectionVerdict`; nothing here decides pass or
 /// fail, and nothing here may return "no opinion".
@@ -1133,8 +1181,27 @@ fn verdict_for_selection(
             // is what makes `roll_up`'s stated property 1 true on this lane:
             // delete the `matching < compared` arm and a 100%-mismatching
             // sample lands on `Unverified` (Partial), never on `Verified`.
-            let evidence = if compared > 0 && compared >= claimed && matching == compared {
+            // PROD-08.1: a repeated or backwards lineage offset in the head
+            // the sample read is examined-and-wrong, whatever `compare` saw
+            // through its offset-keyed map.
+            let order = lineage_faults(&consumed);
+            for w in &order {
+                tracing::error!(target: "logweir::verify", detail = %w, "lineage order fault");
+            }
+            let evidence = if compared > 0
+                && compared >= claimed
+                && matching == compared
+                && order.is_empty()
+            {
                 Evidence::Verified { checked: matching }
+            } else if !order.is_empty() {
+                Evidence::Failed {
+                    why: format!(
+                        "{} restored records repeat or reorder the archive's source offsets: {}",
+                        order.len(),
+                        order.iter().take(5).cloned().collect::<Vec<_>>().join("; ")
+                    ),
+                }
             } else if matching < compared {
                 Evidence::Failed {
                     why: format!(
@@ -1611,6 +1678,50 @@ pub fn run(
     coverage: &SourceConfigCoverage,
     mode: TargetMode,
 ) -> Result<VerifyOutcome, DrillError> {
+    run_with_coverage(
+        engine,
+        reader,
+        store,
+        facts,
+        sel,
+        mapping,
+        plan,
+        coverage,
+        mode,
+        Coverage::Sampled,
+        None,
+    )
+}
+
+/// [`run`], with the plan's `sample.coverage` and `sample.complete_max_records`
+/// (PROD-08.1). `run` is this with `Coverage::Sampled`, the behaviour every
+/// plan had before the field existed.
+///
+/// - **`Sampled`**: the sampled lane below, unchanged except that a restored
+///   head whose `x-original-offset` repeats or goes backwards now fails its
+///   selection (`lineage_faults`), and the signed block says `coverage:
+///   sampled`, `header_order: notVerified`, with the sampled partitions'
+///   structured gap and pruned ranges.
+/// - **`Complete`**: [`complete::run`] — every segment of every restored
+///   partition, the expected output from each record's own timestamp, every
+///   restored record compared, exact counts. The manifest's first/last count
+///   BOUND is not consulted (it is what fails a correct point-in-time restore
+///   and passes a skipped segment, PROD-01.1 ts-bound and ts-pit); the same
+///   `roll_up` decides the verdict from one verdict per partition.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_coverage(
+    engine: &dyn DataEngine,
+    reader: &dyn ClusterReader,
+    store: &Store,
+    facts: &BackupSetFacts,
+    sel: &[SampleSelection],
+    mapping: &BTreeMap<String, String>,
+    plan: &RestorePlan,
+    coverage: &SourceConfigCoverage,
+    mode: TargetMode,
+    verify: Coverage,
+    complete_max_records: Option<u64>,
+) -> Result<VerifyOutcome, DrillError> {
     // OSO's own rule, adopted throughout this codebase (phase4_sample's own
     // empty-candidates guard is the precedent): zero selections scanned is
     // never a positive result. This one IS operational — a plan that named
@@ -1660,43 +1771,88 @@ pub fn run(
     // makes the ledger total in every build. This is not a lane-specific
     // guard: it is the chokepoint's own precondition — `roll_up` can only be
     // sound if the ledger it reads covers every selection.
-    let archives = probe_archive_modes(engine, sel)?;
-    let mut verdicts = Vec::with_capacity(sel.len());
-    for (i, s) in sel.iter().enumerate() {
-        let archive = archives.get(i).ok_or_else(|| {
-            DrillError::Operational(format!(
-                "probe_archive_modes answered for {} of {} selections; refusing to verify a \
-                 ledger that cannot cover {}/{}",
-                archives.len(),
-                sel.len(),
-                s.topic,
-                s.partition
-            ))
-        })?;
-        verdicts.push(verdict_for_selection(
-            reader, store, facts, s, mapping, archive,
-        )?);
-    }
+    let selected: Vec<(String, i32)> = sel.iter().map(|s| (s.topic.clone(), s.partition)).collect();
+    let (verdicts, count_bound, block) = match verify {
+        Coverage::Sampled => {
+            let archives = probe_archive_modes(engine, sel)?;
+            let mut verdicts = Vec::with_capacity(sel.len());
+            for (i, s) in sel.iter().enumerate() {
+                let archive = archives.get(i).ok_or_else(|| {
+                    DrillError::Operational(format!(
+                        "probe_archive_modes answered for {} of {} selections; refusing to \
+                         verify a ledger that cannot cover {}/{}",
+                        archives.len(),
+                        sel.len(),
+                        s.topic,
+                        s.partition
+                    ))
+                })?;
+                verdicts.push(verdict_for_selection(
+                    reader, store, facts, s, mapping, archive,
+                )?);
+            }
 
-    // Guard **G-WIN**, second half. The two instants are the PLAN's window —
-    // `(floor, point_in_time-or-window_end)`, whose floor plan construction has
-    // already checked against the manifest (`build_plan_with_floor`, exit 3) and
-    // whose rendered spelling phase 5 has already re-derived from the manifest
-    // (`phase5_preflight::check_rendered_window_floor`). `check_restored_count`
-    // takes them as integers so it can reach no document of its own.
-    let count_bound = check_restored_count(
-        reader,
-        facts,
-        mapping,
-        plan.time_window.0.timestamp_millis(),
-        plan.time_window.1.timestamp_millis(),
-    )?;
-    if let Some(why) = &count_bound {
-        tracing::error!(target: "logweir::verify", detail = %why,
-                        "restored count is outside the manifest's bound for the window");
-    }
+            // Guard **G-WIN**, second half. The two instants are the PLAN's
+            // window — `(floor, point_in_time-or-window_end)`, whose floor
+            // plan construction has already checked against the manifest
+            // (`build_plan_with_floor`, exit 3) and whose rendered spelling
+            // phase 5 has already re-derived from the manifest
+            // (`phase5_preflight::check_rendered_window_floor`).
+            // `check_restored_count` takes them as integers so it can reach no
+            // document of its own.
+            let count_bound = check_restored_count(
+                reader,
+                facts,
+                mapping,
+                plan.time_window.0.timestamp_millis(),
+                plan.time_window.1.timestamp_millis(),
+            )?;
+            if let Some(why) = &count_bound {
+                tracing::error!(target: "logweir::verify", detail = %why,
+                                "restored count is outside the manifest's bound for the window");
+            }
+            let (gaps, pruned) = complete::ranges_for(facts, &selected);
+            let block = Verification {
+                coverage: Coverage::Sampled.as_str().to_string(),
+                comparison_basis: COMPARISON_BASIS_ARCHIVE.to_string(),
+                // The sampled lane reconciles `record_fingerprint`, which
+                // SORTS headers: it never verified their order (08-6).
+                header_order: HEADER_ORDER_NOT_VERIFIED.to_string(),
+                application: APPLICATION_NOT_ATTEMPTED.to_string(),
+                gaps,
+                pruned,
+                complete: None,
+            };
+            (verdicts, count_bound, block)
+        }
+        Coverage::Complete => {
+            let out = complete::run(
+                reader,
+                store,
+                facts,
+                &selected,
+                mapping,
+                plan,
+                complete_max_records,
+            )?;
+            let block = Verification {
+                coverage: Coverage::Complete.as_str().to_string(),
+                comparison_basis: COMPARISON_BASIS_ARCHIVE.to_string(),
+                header_order: HEADER_ORDER_VERIFIED.to_string(),
+                application: APPLICATION_NOT_ATTEMPTED.to_string(),
+                gaps: out.gaps,
+                pruned: out.pruned,
+                complete: Some(out.block),
+            };
+            // No count BOUND here: each partition's verdict carries its exact
+            // count, and the bound's first/last reading is the defect this
+            // lane exists to replace.
+            (out.verdicts, None, block)
+        }
+    };
 
-    let integrity = roll_up(&verdicts, count_bound.as_deref());
+    let mut integrity = roll_up(&verdicts, count_bound.as_deref());
+    integrity.verification = Some(block);
     for v in &verdicts {
         tracing::info!(target: "logweir::verify", selection = %v.id, claimed = v.claimed,
                        segments = ?v.segments, records = ?v.records,

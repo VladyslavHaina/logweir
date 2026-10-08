@@ -1,7 +1,7 @@
 use crate::drill::DrillError;
 use chrono::{DateTime, Utc};
 use logweir_core::engine::{BackupSetFacts, BackupSetRef, SampleSelection};
-use logweir_core::spec::SampleSpec;
+use logweir_core::spec::{Coverage, SampleSpec};
 
 #[derive(Debug, Clone)]
 pub struct Selection {
@@ -83,14 +83,22 @@ pub fn run(
     let (ms0, ms1) = (w0.timestamp_millis(), w1.timestamp_millis());
     let mut candidates: Vec<Candidate> = Vec::new();
 
+    // PROD-08.1: a COMPLETE verification selects every partition the
+    // manifest lists for a restored topic — never the first `max_partitions`
+    // (phase 0 refuses that pairing), and never only the partitions whose
+    // segments' first/last timestamps overlap the window: those bounds are
+    // the engine's selection, and the complete lane's expected output is
+    // computed from each record's own timestamp instead. Every segment counts
+    // toward `expected` and every recorded gap and pruned range is noted.
+    let complete = spec.coverage == Coverage::Complete;
     for t in facts.topics.iter().filter(|t| topics.contains(&t.name)) {
         for p in &t.partitions {
             let in_window: Vec<_> = p
                 .segments
                 .iter()
-                .filter(|s| s.start_timestamp <= ms1 && s.end_timestamp >= ms0)
+                .filter(|s| complete || (s.start_timestamp <= ms1 && s.end_timestamp >= ms0))
                 .collect();
-            if in_window.is_empty() {
+            if in_window.is_empty() && !complete {
                 continue;
             }
             let expected: u64 = in_window.iter().map(|s| s.record_count as u64).sum();
@@ -102,13 +110,29 @@ pub fn run(
             // read for THIS window is reported as overlapping it: a gap or
             // pruned range entirely outside this partition's in-window
             // segments is real, but it does not overlap THIS sample.
-            let lo = in_window.iter().map(|s| s.start_offset).min().unwrap();
-            let hi = in_window.iter().map(|s| s.end_offset).max().unwrap();
+            // A complete selection notes every range of the partition; a
+            // partition the manifest lists with no segment has no extent.
+            let (lo, hi) = if complete {
+                (i64::MIN, i64::MAX)
+            } else {
+                (
+                    in_window.iter().map(|s| s.start_offset).min().unwrap(),
+                    in_window.iter().map(|s| s.end_offset).max().unwrap(),
+                )
+            };
             let mut notes = Vec::new();
+            let (gap_where, pruned_where) = if complete {
+                (
+                    "in a completely verified partition",
+                    "in a completely verified partition",
+                )
+            } else {
+                ("overlaps the sampled window", "inside the sampled window")
+            };
             for (g0, g1) in &p.gaps {
                 if *g0 <= hi && *g1 >= lo {
                     notes.push(format!(
-                        "{}/{}: capture gap {g0}..{g1} overlaps the sampled window",
+                        "{}/{}: capture gap {g0}..{g1} {gap_where}",
                         t.name, p.partition_id
                     ));
                 }
@@ -116,7 +140,7 @@ pub fn run(
             for (g0, g1) in &p.pruned {
                 if *g0 <= hi && *g1 >= lo {
                     notes.push(format!(
-                        "{}/{}: retention pruned {g0}..{g1} inside the sampled window",
+                        "{}/{}: retention pruned {g0}..{g1} {pruned_where}",
                         t.name, p.partition_id
                     ));
                 }
@@ -153,7 +177,7 @@ pub fn run(
             w1.to_rfc3339()
         )));
     }
-    if let Some(max) = spec.max_partitions {
+    if let (Some(max), false) = (spec.max_partitions, complete) {
         // Truncate BEFORE deriving the aggregate counts below, not after:
         // `records_expected`/`topics`/`notes` must describe exactly the
         // partitions `per_partition` ends up naming, never a pre-truncation

@@ -3023,7 +3023,7 @@ fn execute_with_validated_approval(
 
     // 7
     let verified = record(&mut sc, 7, "verify", || {
-        phase7_verify::run(
+        phase7_verify::run_with_coverage(
             c.engine.as_ref(),
             reader,
             &c.archive,
@@ -3035,11 +3035,15 @@ fn execute_with_validated_approval(
             // FX-3: the spec's mode, the one `target_info` signs as
             // `target.mode`, decides `intended` versus `not_reconstructed`.
             c.spec.target.mode,
+            // PROD-08.1: the approved plan's coverage and its bound.
+            c.spec.sample.coverage,
+            c.spec.sample.complete_max_records,
         )
     })?;
     sc.integrity = verified.integrity.clone();
     sc.topic_parity = verified.topic_parity.clone();
     sc.sample.records_restored = verified.records_restored;
+    complete_sample_info(&mut sc.sample, &sc.integrity);
 
     // 7 -> 8: SCORE BEFORE SIGNING. `phase8_score::run` signs the document it is
     // handed and never recomputes, so `measured`, `outcome` and `objectives`
@@ -3848,6 +3852,26 @@ fn sample_info(
             sel.notes.join("; ")
         },
     }
+}
+
+/// **PROD-08.1.** A COMPLETE verification set out to reconcile every
+/// expected record of every restored partition, so `sample` says so: its
+/// canary is the whole expected output (`records_expected`, which
+/// `integrity.records_sampled` is held to), over every partition and topic the
+/// complete block lists. A sampled verification's `sample` is phase 4's,
+/// untouched.
+fn complete_sample_info(sample: &mut SampleInfo, integrity: &logweir_core::scorecard::Integrity) {
+    let Some(c) = integrity
+        .verification
+        .as_ref()
+        .and_then(|v| v.complete.as_ref())
+    else {
+        return;
+    };
+    sample.records_expected = c.replay.expected;
+    sample.partitions = u32::try_from(c.partitions.len()).unwrap_or(u32::MAX);
+    let topics: BTreeSet<&str> = c.partitions.iter().map(|p| p.topic.as_str()).collect();
+    sample.topics = u32::try_from(topics.len()).unwrap_or(u32::MAX);
 }
 
 #[cfg(test)]
