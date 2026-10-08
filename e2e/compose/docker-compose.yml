@@ -316,6 +316,9 @@ services:
   # ===========================================================================
 
   # --- profile `auth`: PLAIN over TLS, SCRAM-SHA-256 and mTLS listeners -------
+  # (PROD-01.3 extends it: SCRAM-SHA-256 also on the TLS listener, the marker
+  # topic `logweir.scratch` so a drill can restore into this cluster, and a
+  # self-signed `wrong-client` identity for the mTLS refusal row.)
   # A SEPARATE single-node cluster (its own CLUSTER_ID) so the default broker's
   # five listeners, which the whole suite depends on, never change. Clients
   # reach it from the HOST (or through e2e/fixtures/engine-docker.sh, which
@@ -366,9 +369,13 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-auth:9094,PLAINTLS://localhost:${LOGWEIR_E2E_AUTH_PLAIN_PORT:-9102},SCRAM256://localhost:${LOGWEIR_E2E_AUTH_SCRAM256_PORT:-9103},MTLS://localhost:${LOGWEIR_E2E_AUTH_MTLS_PORT:-9104}
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTLS:SASL_SSL,SCRAM256:SASL_PLAINTEXT,MTLS:SSL
       KAFKA_SASL_ENABLED_MECHANISMS: PLAIN,SCRAM-SHA-256
-      KAFKA_LISTENER_NAME_PLAINTLS_SASL_ENABLED_MECHANISMS: PLAIN
+      # PROD-01.3: the SASL_SSL listener serves SCRAM-SHA-256 beside PLAIN, so
+      # SCRAM-SHA-256 OVER TLS (what managed services offer) and its wrong-CA
+      # refusal run without another published port.
+      KAFKA_LISTENER_NAME_PLAINTLS_SASL_ENABLED_MECHANISMS: PLAIN,SCRAM-SHA-256
       KAFKA_LISTENER_NAME_SCRAM256_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
       KAFKA_LISTENER_NAME_PLAINTLS_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required user_logweir="logweir-e2e-not-a-secret";'
+      KAFKA_LISTENER_NAME_PLAINTLS_SCRAM___SHA___256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
       KAFKA_LISTENER_NAME_SCRAM256_SCRAM___SHA___256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
       # PEM stores (KIP-651): the key+chain file and the test CA, no passwords.
       KAFKA_SSL_KEYSTORE_TYPE: PEM
@@ -408,6 +415,8 @@ services:
         --entity-type users --entity-name logweir
         && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-auth:9094 --create
         --if-not-exists --topic orders --partitions 3 --replication-factor 1
+        && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-auth:9094 --create
+        --if-not-exists --topic logweir.scratch --partitions 1 --replication-factor 1
         && touch /tmp/ready && exec sleep 2147483647
     healthcheck:
       test: ["CMD", "test", "-f", "/tmp/ready"]
