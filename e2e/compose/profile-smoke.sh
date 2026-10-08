@@ -390,7 +390,7 @@ EOF
   # reset (it is active); once `stop` returns, the same reset commits and
   # reads back (PROD-04.0 §3.3's control) — and the OTHER live groups are
   # still Stable, so the bracketed pattern stopped only its own member.
-  local m mg others want_others reset rb
+  local m mg others want_others reset rb t0 dt
   # The live groups of this line, sorted: a stop must leave every OTHER one
   # Stable (an unanchored or unbracketed pattern can take a neighbour down).
   live=$(printf '%s\n' "$rows" | awk '$3 == "Stable" { print $1 }' | sort)
@@ -400,11 +400,15 @@ EOF
     reset="$T/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --reset-offsets --group $mg --topic pa-orders:0 --to-offset 1 --execute"
     out=$(innet "$reset")
     if printf '%s' "$out" | grep -q 'inactive\|is Stable\|current state is Stable'; then pass "groups.$m.live-refuses-reset" "$(printf '%s' "$out" | grep -o -m1 'Assignments can only be reset[^.]*')"; else fail "groups.$m.live-refuses-reset" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+    t0=$SECONDS
     out=$(bounded 300 bash e2e/compose/groups.sh stop "$m" 2>&1)
     s=$?
+    dt=$((SECONDS - t0))
     others=$(bounded 600 bash e2e/compose/groups.sh list 2>/dev/null | awk -v g="$mg" '$1 != g && $3 == "Stable" { print $1 }' | sort | tr '\n' ' ')
     want_others=$(printf '%s\n' "$live" | grep -vx "$mg" | tr '\n' ' ')
-    if [ $s = 0 ] && [ "$others" = "$want_others" ]; then pass "groups.$m.stop" "$mg Empty; every other live group still Stable: $others"; else fail "groups.$m.stop" "rc $s; Stable: '$others', want '$want_others'; $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+    # Under 40 s: a member that did not LEAVE (killed, not closed) would hold
+    # its group until session.timeout.ms, 45 s by default.
+    if [ $s = 0 ] && [ "$dt" -lt 40 ] && [ "$others" = "$want_others" ]; then pass "groups.$m.stop" "$mg Empty, stop returned in $dt s; every other live group still Stable: $others"; else fail "groups.$m.stop" "rc $s in $dt s; Stable: '$others', want '$want_others'; $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
     out=$(innet "$reset")
     rb=$(innet "$T/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group $mg --offsets" | awk -v g="$mg" '$1 == g && $2 == "pa-orders" && $3 == 0 { print $4 }')
     # One stream of words: 3.9.2's reset prints its row on the header's line.
@@ -415,8 +419,11 @@ EOF
   for m in share-live streams; do
     [ "$m" = share-live ] && [ $has_s != 1 ] && continue
     [ "$m" = streams ] && [ $has_t != 1 ] && continue
+    t0=$SECONDS
     out=$(bounded 300 bash e2e/compose/groups.sh stop "$m" 2>&1)
-    if [ $? = 0 ]; then pass "groups.$m.stop" "its group is Empty"; else fail "groups.$m.stop" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+    s=$?
+    dt=$((SECONDS - t0))
+    if [ $s = 0 ] && [ "$dt" -lt 40 ]; then pass "groups.$m.stop" "its group is Empty, stop returned in $dt s"; else fail "groups.$m.stop" "rc $s in $dt s: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
     out=$(bounded 400 bash e2e/compose/groups.sh start "$m" 2>&1)
     if [ $? = 0 ]; then pass "groups.$m.start" "Stable again"; else fail "groups.$m.start" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   done

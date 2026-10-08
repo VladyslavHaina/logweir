@@ -53,7 +53,7 @@
 # (`docker compose exec -d`), each bounded by `timeout` (GROUPS_MEMBER_SECONDS,
 # default 7200) and gone with the container at `just e2e-down`. `stop` sends
 # SIGTERM: the console consumer's shutdown hook closes it, so it LEAVES its
-# group, which is Empty at once (not after a session timeout). Every
+# group, which is Empty without waiting out a session timeout. Every
 # pkill/pgrep pattern is BRACKETED, `[g]roup NAME$`: PROD-04.0's first control
 # step ran `pkill -f "group pa-classic-live"` inside `sh -c`, which matched
 # its own shell and killed it before the other two pkills ran (§3.3). The

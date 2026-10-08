@@ -90,8 +90,9 @@ services:
       # `__share_group_state` is never created (INVALID_REPLICATION_FACTOR on
       # every attempt) and share groups get members but no share-partition
       # state: no start offsets to read (PROD-04.0 §3.8, measured on 4.3.1).
-      # A 3.x broker does not know either key and only logs it as unused, so
-      # the 3.7 default stack and the 3.9 line behave exactly as before. Every
+      # A 3.x broker does not know either key and ignores it: measured on 3.7.1
+      # and 3.9.2, both reach server.properties, the broker starts and serves
+      # as before, and its log never names them. Every
       # single-node broker below carries the same two lines
       # (e2e/tests/stack_params.rs checks it).
       KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
@@ -706,9 +707,10 @@ services:
   #
   # The PROCESSOR demo, not WordCountDemo, on purpose: WordCountDemo's output
   # topic is a constant, `streams-wordcount-output`, which the `streams`
-  # profile's application writes; two WordCountDemos on one broker would each
-  # count the shared input into that topic, and the `streams` smoke's
-  # stopped-application control would fail. This one writes
+  # profile's application writes; two WordCountDemos on one broker would both
+  # write their counts of the shared input there, and the `streams` smoke's
+  # stopped-application control could no longer tell its application's counts
+  # from the other's. This one writes
   # `streams-wordcount-processor-output`. Both read `streams-plaintext-input`,
   # each with its own group, so the two profiles run together. Its store is
   # in memory (`Stores.inMemoryKeyValueStore`, no RocksDB, see `streams`) and

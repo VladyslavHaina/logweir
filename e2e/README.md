@@ -16,7 +16,8 @@ MinIO on 9000 and 9001, and `just e2e-up` / `just e2e` / `just e2e-down`.
 `docker compose config` renders byte for byte what it rendered before these
 parameters existed, except for two broker settings PROD-04.0d added for share
 groups (`KAFKA_SHARE_COORDINATOR_STATE_TOPIC_*`, below), which the 3.7 broker
-does not know and only logs as unused. The default stack is shared: on the
+does not know and ignores (measured: it starts and serves as before, and its
+log never names them). The default stack is shared: on the
 orchestrated run, hold `claude/compose-lock.sh` while you use it.
 
 ## Parallel stacks: slots
@@ -215,8 +216,9 @@ group of AP-04.1-1.
 **Members stop cleanly.** The three live consumers run inside
 `kafka-broker-1`, each bounded by `timeout` (`GROUPS_MEMBER_SECONDS`, default
 7200). `stop` sends SIGTERM through a bracketed, anchored pattern
-(`[g]roup NAME$`), so the consumer closes and leaves its group, which is
-Empty at once; the pattern never matches the shell that carries it (PROD-04.0
+(`[g]roup NAME$`), so the consumer closes and LEAVES its group, which is
+Empty without waiting out a session timeout (the smoke requires `stop` to
+return in under 40 s; `session.timeout.ms` is 45 s); the pattern never matches the shell that carries it (PROD-04.0
 §3.3's first control killed its own `sh -c`) or a neighbouring member. The
 streams member is stopped and started with `docker compose`. While a member
 lives, a reset of its group is refused (the group is active); once `stop`
@@ -228,7 +230,8 @@ on.
 `share.coordinator.state.topic.replication.factor=1` and `…min.isr=1`, as the
 offsets and transaction topics already were. With the defaults (3 and 2)
 `__share_group_state` is never created on one broker, so share groups get
-members but no share-partition state (§3.8). 3.x brokers ignore both keys.
+members but no share-partition state (§3.8). 3.x brokers ignore both keys
+(measured on 3.7.1 and 3.9.2).
 
 **Groups a principal cannot see (§3.9), on `acl`.** `visibility apply`, as the
 super user on `kafka-acl`: topic `pa-orders`; groups `pa-visible` and
