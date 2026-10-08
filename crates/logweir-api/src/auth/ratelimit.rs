@@ -8,15 +8,42 @@
 //! a single client can turn one cheap request into one provider request
 //! forever, which is a denial of service aimed at the IdP through this service.
 //!
-//! THE KEY IS THE IMMEDIATE PEER, NOT A HEADER. `X-Forwarded-For` is attacker-
-//! controlled unless the immediate peer is a trusted proxy, and D0 allows
-//! forwarded values for transport logging only — never for an identity or a
-//! grant (`requireTrustedProxy` reads the forwarded SCHEME from a trusted peer,
-//! and only ever to refuse; see `crate::http::entry_point`). So the
-//! bucket key is the socket peer address, which is the reverse proxy's address
-//! in a shared deployment. That is a deliberate trade: behind one ingress the
-//! limit is a global limit, which is the correct conservative behaviour for a
-//! service whose per-user limits live behind authentication.
+//! THE KEY IS THE CLIENT AS THE TRUSTED PROXY SAW IT, AND OTHERWISE THE PEER
+//! (FX-13). Behind the shared console's ingress every request has the same
+//! socket peer — the ingress — so a limit keyed on the peer alone is one
+//! global budget: about ten sign-ins a minute for everyone, and one
+//! unauthenticated client can spend it and block every sign-in for a minute.
+//! So `crate::http::login_rate_key` chooses the bucket:
+//!
+//! - when the immediate peer is a trusted proxy — the same
+//!   `TrustedProxies::contains` decision the entry point's `requireTrustedProxy`
+//!   gate makes, so a Service source that is not read yet or older than its
+//!   `MAX_AGE` trusts nobody here either — the key is the rightmost
+//!   `X-Forwarded-For` hop that is not itself a trusted proxy: the address the
+//!   outermost trusted proxy received the request from, which a client cannot
+//!   choose (everything left of it is client-sent and is never read);
+//! - otherwise, and whenever that hop is absent or is not an IP address, or the
+//!   chain names only trusted proxies, the key is the socket peer.
+//!
+//! `X-Forwarded-For` is the only header read, because it is the one the
+//! supported ingress writes: Traefik (`deploy/poc/traefik.values.yaml`,
+//! `forwardedHeaders.trustedIPs: []`) deletes a client's `X-Forwarded-*` and
+//! appends the client's socket address, while it copies an RFC 7239
+//! `Forwarded` header through untouched — so `Forwarded` is whatever the
+//! client wrote, and is never read.
+//!
+//! A BUCKET IS NOT AN IDENTITY. D0 allows forwarded values for transport
+//! facts only — never for an identity or a grant (amended 2026-10-07 for this
+//! key). The forwarded address chooses which counter a request is charged to,
+//! and a counter can only refuse: it authenticates no one, authorizes nothing
+//! and is never an audit actor. A forged header from an untrusted peer is not
+//! read at all, so it cannot move a request out of its peer's bucket.
+//!
+//! The table is still bounded by [`MAX_TRACKED_PEERS`], whatever chooses the
+//! keys: a spray of forwarded addresses through a trusted proxy grows it no
+//! further than a spray of socket addresses did. The windows are per console
+//! process, as they always were: behind an ingress that spreads requests over
+//! N replicas, one client may be served up to N times the allowance.
 //!
 //! STREAM SLOTS BOUND THE EVENT STREAM. `routes::operations::events` takes one
 //! per open stream, keyed by principal and namespace, and answers `429` when
@@ -30,7 +57,8 @@ use std::time::{Duration, Instant};
 
 /// The login window.
 pub const LOGIN_WINDOW: Duration = Duration::from_secs(60);
-/// The most login or callback requests one peer may make per window.
+/// The most login or callback requests one key — a client behind a trusted
+/// proxy, or else a socket peer — may make per window.
 pub const LOGIN_PER_WINDOW: u32 = 20;
 /// The most peers tracked at once. Past this the oldest windows are dropped,
 /// so a spray of source addresses cannot grow this map without bound.
@@ -41,7 +69,8 @@ struct Window {
     count: u32,
 }
 
-/// A fixed-window counter keyed by peer address.
+/// A fixed-window counter keyed by address: the forwarded client behind a
+/// trusted proxy, or the socket peer (see the module documentation).
 pub struct RateLimiter {
     window: Duration,
     per_window: u32,
@@ -77,7 +106,7 @@ impl RateLimiter {
         Self::new(LOGIN_WINDOW, LOGIN_PER_WINDOW)
     }
 
-    /// Count one request from `peer` and decide.
+    /// Count one request against `peer`'s window and decide.
     pub fn check(&self, peer: IpAddr) -> Decision {
         self.check_at(peer, Instant::now())
     }
@@ -115,6 +144,18 @@ impl RateLimiter {
         } else {
             Decision::Allowed
         }
+    }
+}
+
+impl RateLimiter {
+    /// How many keys hold a window right now. Never more than
+    /// [`MAX_TRACKED_PEERS`].
+    #[must_use]
+    pub fn tracked(&self) -> usize {
+        self.state
+            .lock()
+            .expect("the limiter lock is never poisoned")
+            .len()
     }
 }
 
