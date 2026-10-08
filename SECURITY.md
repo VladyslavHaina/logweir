@@ -110,7 +110,10 @@ them; a report that one of them is true is not a vulnerability report.
   that namespace can read any credential a run projects, bound or not. And
   anyone who can WRITE a Secret can bind a credential they put there to their
   own connection — that is their own credential, which the binding exists to
-  allow.
+  allow. For the same reason Secret `patch` WITHOUT `get` is, for a connection
+  credential, as strong as `get`: it can set a victim Secret's
+  `logweir-binding` to a connection whose endpoint the patcher chose (the
+  binding value is public on `status.credentialBinding`).
 
 ## Cryptography
 

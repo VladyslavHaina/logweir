@@ -8200,25 +8200,72 @@ kubectl --context <ctx> -n <ns> create secret generic <name>-credential \
   --from-literal=password='<password>' --from-literal=logweir-binding='<that value>'
 ```
 
-**Upgrade: existing credentialed connections must be bound.** A `scramSha512`
-connection created before this release has a Secret with no
-`logweir-binding`, and every run of it is refused (`CredentialBindingMismatch`)
-until the key is added — fail closed, never a credential presented unbound.
-For each such connection, after rolling the controller:
+**Upgrade: existing credentialed connections must be bound — one at a time,
+by name, after an inventory.** A `scramSha512` connection created before this
+release has a Secret with no `logweir-binding`, and every run of it is refused
+(`CredentialBindingMismatch`) until the key is added — fail closed, never a
+credential presented unbound. **The binding step can itself perform the theft
+the binding prevents**, so it is done carefully: before this release nothing
+stopped a `KafkaCluster` from naming another connection's Secret, so a "thief"
+connection — someone else's Secret, an endpoint its author controls — may
+already exist. Binding "each connection's Secret" in a loop would bind the
+victim's Secret to whichever connection came last; "splitting" a shared Secret
+would copy the victim's credential into a Secret bound to the thief.
 
-```
-b=$(kubectl --context <ctx> -n <ns> get kafkacluster <name> -o jsonpath='{.status.credentialBinding}')
-kubectl --context <ctx> -n <ns> patch secret <secretRef.name> --type merge \
-  -p "{\"stringData\":{\"logweir-binding\":\"$b\"}}"
-```
+1. **Before the roll, suspend the credentialed schedules** (`spec.suspend:
+   true` on each `BackupSchedule` and `RehearsalSchedule` that uses such a
+   connection). `status.credentialBinding` exists only once the new controller
+   has probed the connection, and until the Secret is bound every run of it is
+   refused; suspending turns those refusals into skipped slots.
+2. **Inventory, per namespace, and stop on any Secret named twice:**
 
-Two connections that shared one Secret need one Secret each (one binding per
-Secret). Rollback: an older controller and runner ignore the binding pair, so
-a bound Secret keeps working with them; the extra key is inert.
+   ```
+   kubectl --context <ctx> -n <ns> get kafkaclusters \
+     -o custom-columns=CONNECTION:.metadata.name,SECRET:.spec.auth.secretRef.name,SERVERS:.spec.bootstrapServers
+   ```
+
+   A Secret that appears in more than one row is **an incident, not a split**:
+   ask the credential's owner which connection is theirs, check the other's
+   `bootstrapServers` and its creator (`api.logweir.dev/actor` when the console
+   made it), delete the connection they do not recognise, and treat the
+   credential as exposed if that connection ever ran. A second legitimate
+   connection gets its own credential, entered again by its owner (the console
+   creates the Secret) — never a copy of a Secret another connection names.
+3. **Bind one connection at a time, by an explicit command that names both the
+   connection and the Secret**, and only when the connection already named that
+   Secret before the upgrade and its owner confirms the endpoint:
+
+   ```
+   c=<connection>; s=<secret>
+   # the connection must name exactly this Secret ...
+   test "$(kubectl --context <ctx> -n <ns> get kafkacluster "$c" -o jsonpath='{.spec.auth.secretRef.name}')" = "$s"
+   # ... and this must be the endpoint the credential's owner expects
+   kubectl --context <ctx> -n <ns> get kafkacluster "$c" -o jsonpath='{.spec.bootstrapServers}{"\n"}'
+   b=$(kubectl --context <ctx> -n <ns> get kafkacluster "$c" -o jsonpath='{.status.credentialBinding}')
+   kubectl --context <ctx> -n <ns> patch secret "$s" --type merge \
+     -p "{\"stringData\":{\"logweir-binding\":\"$b\"}}"
+   ```
+
+   Never iterate over every connection, and never bind a Secret a connection
+   started naming after the inventory.
+4. **Resume the schedules.** A console-mode adopter needs a kubectl user with
+   Secret `patch` for step 3: the console has no re-bind action, by design
+   (it never names an existing Secret).
+
+Rollback: an older controller and runner ignore the binding pair, so a bound
+Secret keeps working with them; the extra key is inert. Connections created
+through this release's console are bound when they are made and need none of
+this.
 
 **What it does not close.** Anyone who can **write** a Secret can bind a
 credential they put there — that is their own credential. A namespace
-administrator with Secret read can read every credential anyway. The kubelet
+administrator with Secret read can read every credential anyway. **For a
+connection credential, Secret `patch` is equivalent to Secret `get`:** a
+principal who may patch Secrets but not read them can set a victim Secret's
+`logweir-binding` to a thief connection's `status.credentialBinding` (public)
+and so re-bind a credential they never saw to an endpoint they chose. Grant
+Secret `patch` in a namespace only to principals you would let read its
+credentials. The kubelet
 projects a foreign Secret's value into the refused pod's environment before
 the runner refuses; it never leaves the pod (`automountServiceAccountToken:
 false`, no network use before the check), and the pod exits at once

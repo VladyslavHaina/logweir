@@ -311,6 +311,14 @@ documents — the backup receipt's `source.auth.mode` and the scorecard's
   create (`422 existing_credential_refused`); the credential is entered once in
   `auth.credential`. A pre-release API change (below), listed in the release
   notes.
+- **A credential value is no longer part of a create's idempotency identity**
+  (connections and destinations): the digests the API publishes on the object
+  and in the audit record are taken with every write-only value replaced by
+  `<write-only>`, because a digest over the value let anyone who could read the
+  object confirm a guessed credential offline. A same-key retry that changes
+  only the value now replays instead of answering `409 idempotency_conflict`;
+  a retry spanning the upgrade of a create that carried a value answers `409`
+  (retry with a new key).
 - **Rollback.** An older `logweir` cannot parse a spec naming a new mode, so it
   writes no 1.3.0/1.5.0 document; those already written stay valid for every
   reader from PROD-01.3 on, and older readers refuse them (the safe direction).

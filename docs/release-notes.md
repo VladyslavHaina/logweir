@@ -370,11 +370,22 @@ present that credential to a broker of its author's choosing. The console API
 takes the credential ONCE (`auth.credential`), creates the bound Secret itself
 (owned by the connection) and refuses `auth.credentialRef`
 (`422 existing_credential_refused`); a console CA comes from a ConfigMap.
-**Do:** apply the CRDs, roll controller, runner and console together, then
-bind every existing credentialed connection's Secret ([kubernetes.md](kubernetes.md)
-§20.9 has the two commands). A Secret shared by two connections needs splitting
-(one binding each). A client of the product API that named `credentialRef`
-sends the password in `auth.credential` instead. Admission-policy users: the
+**Do:** suspend the schedules that use a credentialed connection, apply the
+CRDs, roll controller, runner and console together, then bind each existing
+credentialed connection's Secret **one at a time, by a command that names both
+the connection and the Secret, after an inventory** ([kubernetes.md](kubernetes.md)
+§20.9 has the procedure), and resume. Before this release a `KafkaCluster`
+could name another connection's Secret, so a connection naming a Secret that
+another connection also names is an incident to investigate, not a Secret to
+split or to bind in a loop: either would hand the credential to the second
+connection's endpoint. Binding needs Secret `patch`, which for a connection
+credential is as strong as Secret `get` — grant it accordingly. A client of
+the product API that named `credentialRef` sends the password in
+`auth.credential` instead; a credential value is no longer part of a create's
+idempotency identity, so a same-key retry that changes only the value replays
+the first create ([api.md](api.md)). A `BackupDestination` created with
+`secret.new` by an earlier build carries a request hash taken over its secret
+key: remove its `api.logweir.dev/request-sha256` annotation, or rotate the key. Admission-policy users: the
 chart's policy now also admits `logweir.dev/kafka-client-certificate`.
 **Scope:** on compose slot 4 (Kafka 3.7.1, engine 0.23.3 under emulation), the
 `auth` profile's four listener shapes each passed a real backup (Logweir's
@@ -418,12 +429,20 @@ In addition to the next entry's six, in its order:
 - **After the runner image rolls, set each `RecoveryCatalog`'s
   `spec.syncRequest` to a new value** so its view is published again by the
   new runner (item 31).
-- **Bind every credentialed connection's Secret** (item 32): apply the CRDs,
-  roll the controller, the runner and the console together, then copy each
-  `KafkaCluster`'s `status.credentialBinding` into its credential Secret's
-  `logweir-binding` key ([kubernetes.md](kubernetes.md) §20.9). Until then its
-  runs are refused (`CredentialBindingMismatch`), closed. A connection with no
-  credential (`plaintext`, or TLS with no client certificate) needs nothing.
+- **Bind each credentialed connection's Secret, one at a time, after an
+  inventory** (item 32). Suspend the schedules that use such a connection
+  before the roll; apply the CRDs and roll the controller, the runner and the
+  console together; list which `KafkaCluster` names which Secret and stop on
+  any Secret named twice (an incident, not a split); then, per connection, by a
+  command that names both, copy its `status.credentialBinding` into the Secret
+  it already named, once its owner confirms the endpoint
+  ([kubernetes.md](kubernetes.md) §20.9); resume the schedules. Until a Secret
+  is bound its runs are refused (`CredentialBindingMismatch`), closed. Never
+  bind in a loop over every connection. A connection with no credential
+  (`plaintext`, or TLS with no client certificate) needs nothing.
+- **Remove `api.logweir.dev/request-sha256` from each `BackupDestination` an
+  earlier build created with `secret.new`** (item 32), or rotate its key: that
+  hash was taken over the secret access key.
 
 ### Verification scope after `v0.2.0-rc.1`
 
