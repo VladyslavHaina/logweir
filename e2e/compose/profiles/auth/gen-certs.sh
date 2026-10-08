@@ -69,6 +69,11 @@ openssl pkcs8 -topk8 -nocrypt -in wrong-client.orig -out wrong-client.key
 rm -f ./*.csr ./*.srl ./*.ext ./*.orig broker.key broker.pem
 chmod 0644 ./*.pem client.key wrong-client.key
 chmod 0600 ca.key
+# Written as root (docker-compose.yml): give the files to whoever owns /certs,
+# the host user when `just e2e-up` created it, so a host-side cleanup can
+# remove them.
+owner="$(stat -c '%u:%g' /certs)"
+[ "$owner" = "0:0" ] || chown "$owner" $want
 for f in $want; do [ -s "$f" ] || { echo "auth certs: $f was not written" >&2; exit 1; }; done
 openssl verify -CAfile ca.pem client.pem
 echo "auth certs: generated in $(pwd): $want"
