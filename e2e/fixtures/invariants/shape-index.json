@@ -351,6 +351,51 @@
   "python_reason": "target_diff.not_assessed is not an array of strings"
  },
  {
+  "id": "topic_parity_not_reconstructed_not_an_array",
+  "file": "topic_parity_not_reconstructed_not_an_array.json",
+  "check": "message:topic_parity.not_reconstructed is not an array of strings",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"x\", expected a sequence",
+  "python_reason": "topic_parity.not_reconstructed is not an array of strings"
+ },
+ {
+  "id": "topic_parity_not_reconstructed_item_not_a_string",
+  "file": "topic_parity_not_reconstructed_item_not_a_string.json",
+  "check": "message:topic_parity.not_reconstructed is not an array of strings",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `1`, expected a string",
+  "python_reason": "topic_parity.not_reconstructed is not an array of strings"
+ },
+ {
+  "id": "topic_parity_intentionally_deviated_not_an_array",
+  "file": "topic_parity_intentionally_deviated_not_an_array.json",
+  "check": "message:topic_parity.{name} is not an array of strings",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"x\", expected a sequence",
+  "python_reason": "topic_parity.intentionally_deviated is not an array of strings"
+ },
+ {
+  "id": "topic_parity_intentionally_deviated_absent",
+  "file": "topic_parity_intentionally_deviated_absent.json",
+  "check": "message:topic_parity.{name} is not an array of strings",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: missing field `intentionally_deviated`",
+  "python_reason": "topic_parity.intentionally_deviated is not an array of strings"
+ },
+ {
+  "id": "topic_parity_unexpected_divergence_item_not_a_string",
+  "file": "topic_parity_unexpected_divergence_item_not_a_string.json",
+  "check": "message:topic_parity.{name} is not an array of strings",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `1`, expected a string",
+  "python_reason": "topic_parity.unexpected_divergence is not an array of strings"
+ },
+ {
   "id": "time_basis_not_an_object",
   "file": "time_basis_not_an_object.json",
   "check": "message:source.time_basis is not an object of an optional string plan",

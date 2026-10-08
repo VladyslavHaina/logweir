@@ -149,7 +149,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | FX-1 | Parse the engine's consumer-group snapshot | P1 | M1 | fix | — | — | compose | A | Done |
 | 0 | FX-2 | Apply or refuse `runnerResources` | P1 | M1 | fix | — | — | k8s | A | In progress |
-| 0 | FX-3 | Stop labelling new-topic deviations "intended" | P1 | M1 | fix | — | — | compose | A | In progress |
+| 0 | FX-3 | Stop labelling new-topic deviations "intended" | P1 | M1 | fix | — | — | compose | A | Done |
 | 0 | FX-4 | Record topic-configuration capture coverage | P1 | M1 | fix | — | — | compose | A | In progress |
 | 0 | FX-5 | Console replication factor from the source | P1 | M1 | fix | — | — | k8s | B | In progress |
 | 0 | FX-6 | Disclose transaction and timestamp semantics | P1 | M1 | docs | — | — | none | B | In progress |
@@ -308,6 +308,14 @@ Found by the 2026-09-23 review. They do not depend on any expansion feature. Evi
 - **Migration:** an install that never set either key keeps a byte-identical policy document and digest. One that set another value gets the fixed value once: its digest changes and its still-valid `ready` Preflights read `unknown` (`policyChanged`) until run again (chart README, release-notes item 23). `helm rollback` restores the previous document.
 - **Follow-ups:** FX-15 (the seven owed LOW items).
 - **Artifacts:** `claude/artifacts/fx-10/`.
+
+**FX-3 — Done (2026-10-07).**
+- **Ownership:** worker `fx-3` (a run, a resume and a fix round), independent Tier-A review `claude/fx-3.review.md`: ACCEPT-WITH-FIXES (F1 MEDIUM: nothing refused a 1.2.0 `newTopic` scorecard claiming `not_reconstructed: []` beside intended settings; F2, F3 LOW), all fixed and read by the orchestrator. Merged into main after integration batch 3 (branch tip `895549fc`). Gate: `scripts/ci-check.sh` rc 0 at `895549fc` (`claude/artifacts/fx-3/integrate/ci-check-2026-10-07.log`).
+- **Fix:** in `newTopic` mode, phase 7 (`crates/logweir/src/drill/phase7_verify.rs` `classify_parity`, mode passed from `drill/mod.rs`) records lost compaction, `retention.ms`, partition count and replication factor as `unexpected_divergence` plus the new optional `topic_parity.not_reconstructed`, never `intentionally_deviated`; scratch drills are unchanged. Scorecard format 1.2.0 (frozen 1.1.0 schema kept), verifier script 1.17.0. Arms NR-1 to NR-5 in both readers fire only on a document carrying the block (NR-4 and NR-5 only in `newTopic` mode) and can only refuse. New readers re-read a pre-1.2.0 `newTopic` document's `intentionally_deviated` as not reconstructed (weaker, never stronger). Two pre-existing two-reader splits (array shape, `format_version` parse) were closed.
+- **Owner ruling:** the content change to the two existing arrays is MINOR (OD-7's third case, 2026-10-07), stated in `docs/stability.md`, with a guard that no doc calls it pending.
+- **Evidence:** live row on compose slot 1 at `7c804375` (a compacted RF-3 source on `cluster3`, restored as `newTopic` and as a drill, the broker as the oracle; `claude/artifacts/fx-3/live/`); later changes were readers, docs and tests, and the review confirmed the live row still represents the tip. Mutants: 11/11 (first round) and 9/9 (fix round, including the reviewer's survivor R6). Workspace tests 4275 passed, 0 failed; `just verify-py` 122; parity and invariant corpus green.
+- **Migration:** older readers accept 1.2.0 scorecards without misreading them (the old-reader table in the report); release-notes item 24.
+- **Artifacts:** `claude/artifacts/fx-3/`.
 
 ## Foundation dependency map
 

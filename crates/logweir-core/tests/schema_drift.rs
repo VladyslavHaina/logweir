@@ -118,6 +118,46 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
     );
 }
 
+/// FX-3: the 1.1.0 scorecard schema is FROZEN beside the 1.2.0 one, the way
+/// FX-4 froze the 1.0.0 one. It still describes every document written between
+/// the two bumps: it names itself 1.1.0, carries FX-4's two `not_assessed`
+/// fields and does NOT describe `topic_parity.not_reconstructed`. The current
+/// schema does, as an OPTIONAL field, so a 1.0.0 or 1.1.0 document without it
+/// still validates against it.
+#[test]
+fn the_frozen_1_1_0_scorecard_schema_is_still_the_1_1_0_schema() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.1.0.json"
+    ))
+    .expect("the frozen 1.1.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.1.0.json"
+    );
+    let parity = &frozen["definitions"]["TopicParity"]["properties"];
+    assert!(parity["not_assessed"].is_object());
+    assert!(
+        parity.get("not_reconstructed").is_none(),
+        "the frozen 1.1.0 schema must not describe the 1.2.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_ne!(
+        current["$id"], frozen["$id"],
+        "the current schema is a NEW file beside the frozen one, never the 1.1.0 file regenerated"
+    );
+    let parity = &current["definitions"]["TopicParity"];
+    assert!(parity["properties"]["not_reconstructed"].is_object());
+    assert!(
+        !parity["required"]
+            .as_array()
+            .expect("TopicParity has required fields")
+            .iter()
+            .any(|r| r == "not_reconstructed"),
+        "not_reconstructed is OPTIONAL: a document before 1.2.0 without it must still validate"
+    );
+}
+
 /// FX-8: the 1.1.0 scorecard schema is FROZEN beside the 1.3.0 one, the way
 /// FX-4 froze the 1.0.0 one. It still describes every document written before
 /// the bump: it names itself 1.1.0, carries FX-4's `not_assessed` and does NOT
@@ -172,6 +212,35 @@ fn the_frozen_1_1_0_scorecard_schema_does_not_describe_the_time_basis() {
     );
 }
 
+/// FX-8: the 1.2.0 scorecard schema (FX-3's) is FROZEN beside the 1.3.0 one.
+/// It names itself 1.2.0, carries FX-3's `not_reconstructed` and does NOT
+/// describe `source.time_basis`.
+#[test]
+fn the_frozen_1_2_0_scorecard_schema_does_not_describe_the_time_basis() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.2.0.json"
+    ))
+    .expect("the frozen 1.2.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.2.0.json"
+    );
+    assert!(frozen["definitions"]["TopicParity"]["properties"]["not_reconstructed"].is_object());
+    assert!(
+        frozen["definitions"]["SourceInfo"]["properties"]
+            .get("time_basis")
+            .is_none(),
+        "the frozen 1.2.0 schema must not describe the 1.3.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
+    assert!(
+        current["definitions"]["TopicParity"]["properties"]["not_reconstructed"].is_object(),
+        "the current schema keeps FX-3's field"
+    );
+}
+
 #[test]
 fn schema_declares_the_format_version_const() {
     let v: serde_json::Value =
@@ -213,6 +282,10 @@ fn the_scorecard_top_level_shape_is_unchanged() {
         "../../../schemas/logweir-drill-scorecard-1.0.0.json"
     ))
     .expect("the frozen 1.0.0 scorecard schema parses");
+    let frozen_1_1: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.1.0.json"
+    ))
+    .expect("the frozen 1.1.0 scorecard schema parses");
     let checked_in: serde_json::Value = serde_json::from_str(&current_schema(
         "drill-scorecard",
         logweir_core::FORMAT_VERSION,
@@ -223,6 +296,7 @@ fn the_scorecard_top_level_shape_is_unchanged() {
             .expect("the generated scorecard schema parses");
     for (source, v) in [
         ("the frozen 1.0.0 file", frozen),
+        ("the frozen 1.1.0 file", frozen_1_1),
         ("the checked-in current file", checked_in),
         ("the type", generated),
     ] {

@@ -1083,6 +1083,9 @@ fn each_phases_result_reaches_the_signed_document() {
         sc.topic_parity.not_assessed,
         Some(vec!["drill-orders: configuration (unknown)".to_string()])
     );
+    // FX-3: a SCRATCH drill's deviations are intended (above), and phase 7
+    // makes the 1.2.0 claim that nothing was left unreconstructed.
+    assert_eq!(sc.topic_parity.not_reconstructed, Some(vec![]));
     assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
     // FX-8: the fixture's plan states no point in time and its sample window
     // ends on the archive's newest timestamp, so nothing was selected by time:
@@ -1095,6 +1098,104 @@ fn each_phases_result_reaches_the_signed_document() {
     assert_eq!(sc.objectives.rto_seconds, Some(900));
     assert_eq!(sc.objectives.met, Some(true));
     assert_eq!(sc.triggered_by.as_deref(), Some("fixture"));
+}
+
+/// **FX-3, end to end through the phase sequence.** The same fixture drill as
+/// `each_phases_result_reaches_the_signed_document`, as a `newTopic` restore:
+/// the spec's mode reaches phase 7 and decides the label in the SIGNED
+/// document. The deviation the scratch run signs as intended (the source's
+/// `cleanup.policy`) is signed here as NOT reconstructed, and also in
+/// `unexpected_divergence`, where a reader older than format 1.2.0 sees it.
+///
+/// The approval covers the fixture's unchanged spec bytes; the mode and a
+/// `topic_naming.prefix` that keeps the fixture's `drill-orders` name are set
+/// on the parsed spec, which is what phases 0, 7 and 9 read.
+///
+/// Negative control: an orchestrator that hands phase 7 `TargetMode::Scratch`
+/// instead of `c.spec.target.mode` signs `intentionally_deviated:
+/// ["drill-orders: cleanup.policy"]` here and this test fails.
+#[test]
+fn a_new_topic_run_signs_its_lost_source_settings_as_not_reconstructed() {
+    let mut f = fixtures::orchestrator_args_against_fixture_engine();
+    f.ctx.spec.target.mode = logweir_core::spec::TargetMode::NewTopic;
+    f.ctx.spec.target.topic_naming = Some(logweir_core::spec::TopicNaming {
+        prefix: "drill-".into(),
+    });
+    execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.target.mode, logweir_core::spec::TargetMode::NewTopic);
+    assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
+    assert!(
+        sc.topic_parity.intentionally_deviated.is_empty(),
+        "a newTopic restore signs nothing as intended: {:?}",
+        sc.topic_parity.intentionally_deviated
+    );
+    let not_reconstructed = sc
+        .topic_parity
+        .not_reconstructed
+        .clone()
+        .expect("phase 7 ran, so the 1.2.0 field is recorded");
+    assert!(
+        not_reconstructed.contains(&"drill-orders: cleanup.policy".to_string()),
+        "{not_reconstructed:?}"
+    );
+    for entry in &not_reconstructed {
+        assert!(
+            sc.topic_parity.unexpected_divergence.contains(entry),
+            "{entry} must also be an unexpected divergence: {:?}",
+            sc.topic_parity.unexpected_divergence
+        );
+    }
+}
+
+/// **FX-3 review F2 (and FX-4's twin): a scorecard signed BEFORE phase 7
+/// records neither parity claim.** `topic_parity.not_reconstructed` and
+/// `topic_parity.not_assessed` are written by phase 7 alone; `[]` in either is
+/// the claim "compared, and nothing left unreconstructed / unassessed". A run
+/// that stops at phase 5 (a blocked preflight) or phase 6 (a restore that
+/// wrote nothing) signs both ABSENT, in both modes, so no reader reads a
+/// comparison that never ran.
+///
+/// Negative control: `new_scorecard` drafting `not_reconstructed:
+/// Some(Vec::new())` (the review's surviving mutant R6), or `not_assessed:
+/// Some(Vec::new())`, signs the key and this test fails.
+#[test]
+fn a_scorecard_signed_before_phase_7_records_neither_parity_claim() {
+    for drill in [Drill::BlocksAtPreflight, Drill::RestoresNothing] {
+        for mode in [
+            logweir_core::spec::TargetMode::Scratch,
+            logweir_core::spec::TargetMode::NewTopic,
+        ] {
+            let mut f = fixtures::orchestrator_fixture(drill);
+            f.ctx.spec.target.mode = mode;
+            if mode == logweir_core::spec::TargetMode::NewTopic {
+                f.ctx.spec.target.topic_naming = Some(logweir_core::spec::TopicNaming {
+                    prefix: "drill-".into(),
+                });
+            }
+            let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
+                logweir::drill::DrillError::NotPass(sc, _) => sc,
+                other => panic!("{drill:?} / {mode:?}: expected a signed NotPass, got {other:?}"),
+            };
+            assert!(
+                !sc.phases.iter().any(|p| p.phase == 7),
+                "{drill:?} / {mode:?}: phase 7 must not have run"
+            );
+            let signed: serde_json::Value =
+                serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+            let parity = signed["topic_parity"]
+                .as_object()
+                .expect("the signed document carries topic_parity");
+            for claim in ["not_reconstructed", "not_assessed"] {
+                assert!(
+                    !parity.contains_key(claim),
+                    "{drill:?} / {mode:?}: a scorecard signed before phase 7 must not record \
+                     topic_parity.{claim}: {parity:?}"
+                );
+            }
+        }
+    }
 }
 
 /// Phase 9's call site, its policy and its binding. The attestation is bound

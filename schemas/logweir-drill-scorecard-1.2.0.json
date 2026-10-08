@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://logweir.dev/schemas/logweir-drill-scorecard-1.3.0.json",
+  "$id": "https://logweir.dev/schemas/logweir-drill-scorecard-1.2.0.json",
   "title": "Scorecard",
   "type": "object",
   "required": [
@@ -640,15 +640,6 @@
           "default": null,
           "type": "string",
           "nullable": true
-        },
-        "time_basis": {
-          "description": "**Format 1.3.0 (FX-8).** Which clock this restore's TIME SELECTION read, for each source topic where that is not the topic's own: see [`TimeBasisLabel`].\n\nABSENT means NOT RECORDED — every document before 1.3.0 — and is never read as \"every selection used the topic's own clock\": before FX-8 a point-in-time restore over a `LogAppendTime` source was signed `pass` with no label at all (PROD-01.1, `lat`). Every run that reaches the time-basis decision writes `Some`, so a 1.3.0 document whose two lists are empty is the CLAIM that no topic was selected by producer time or with an unrecorded timestamp type AS FAR AS THE ARCHIVE MANIFEST'S SEGMENT BOUNDS SHOW (review L-1). A plan that states no point and whose `sample.window_end` is at or after every segment's first and last timestamp is not counted as a selection, yet with out-of-order timestamps inside a segment the engine's end filter can still drop a record later than both ends; that case is PROD-01.1b's.\n\nGlobal Constraint 12 as amended permits this as a NESTED optional field: `SourceInfo`'s properties are not the scorecard's 21. `skip_serializing_if`, so the signed 1.0.0 fixtures under `e2e/fixtures/signed/` round-trip byte for byte.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/TimeBasisLabel"
-            }
-          ],
-          "nullable": true
         }
       }
     },
@@ -762,35 +753,6 @@
         "scratch",
         "newTopic"
       ]
-    },
-    "TimeBasisLabel": {
-      "description": "**FX-8, scorecard format 1.3.0.** What the restore's time selection read, per selected source topic.\n\n# Why a restore needs this label at all\n\nThe pinned engine archives each record's PRODUCER timestamp (PROD-01.1 S3), so every selection by time — a stated `restore.point_in_time`, or a `sample.window_end` earlier than what the archive holds — reads producer time. For a `CreateTime` topic that is the topic's own clock. For a `LogAppendTime` topic it is not, and phase 7 cannot notice: it compares the target with the archive, and both carry producer time. So the runner REFUSES such a selection (`PointInTimeByProducerTime`) unless the approved plan states `restore.time_basis: producerTime`, and this block is what the signed document says about the selections it did make.\n\n# The three fields\n\n| field | meaning | |---|---| | `plan` | the approved plan's `restore.time_basis`, copied: `producerTime`, or ABSENT when the plan stated none | | `producer_time` | source topics whose recorded timestamp type is `LogAppendTime` and which this restore selected by time — by producer time, accepted by `plan` (arm TB-3) | | `not_recorded` | source topics this restore selected by time while their timestamp type was NOT RECORDED: no `message.timestamp.type` override in the archive manifest, and no effective value in a verified backup receipt (FX-4) — so the selection may have read producer time |\n\nA topic whose recorded type is `CreateTime`, and a topic the restore did not select by time (no `restore.point_in_time`, and a `sample.window_end` at or after every timestamp the manifest records for it), is in neither list. Both lists are sorted topic names.\n\n# Why the unknown case runs and is labelled rather than refused\n\nRule 3 of the expansion tracker: never read old evidence as a stronger guarantee. A receipt from before FX-4, or a plan bound to no receipt, carries no effective timestamp type, and most topics carry no manifest override; reading that silence as `CreateTime` would be the stronger reading, so it is never taken. Refusing would be the other mistake: it would stop every point-in-time restore of every archive written before FX-4, where a `CreateTime` topic's selection is right. So the restore runs and this list says, in the signed document, that the clock it selected by is unknown.",
-      "type": "object",
-      "required": [
-        "not_recorded",
-        "producer_time"
-      ],
-      "properties": {
-        "not_recorded": {
-          "description": "Source topics selected by time whose timestamp type was not recorded.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "plan": {
-          "description": "`producerTime` ([`TIME_BASIS_PRODUCER_TIME`], arm TB-2) when the approved plan stated `restore.time_basis: producerTime`; absent when it stated none.",
-          "type": "string",
-          "nullable": true
-        },
-        "producer_time": {
-          "description": "Source topics selected by PRODUCER time: recorded `LogAppendTime`, selected by time, accepted by `plan` (arm TB-3).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      }
     },
     "TopicParity": {
       "type": "object",
