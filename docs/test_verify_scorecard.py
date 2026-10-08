@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.18.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.17.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -917,7 +917,7 @@ def test_the_version_line_names_the_current_invariant_set():
         assert (
             "target.mode absent or one of the two values the format defines"
         ) in r.stdout, r.stdout
-        # 1.18.0's addition (FX-8): `source.time_basis`'s four arms.
+        # 1.17.0's addition (FX-8): `source.time_basis`'s four arms.
         assert (
             "source.time_basis only from 1.3.0, its plan only producerTime, producer time "
             "only under it, and no topic in both of its lists"
@@ -2189,12 +2189,11 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed`
     # shape checks. Map still five.
     #
-    # 1.18.0 (FX-8) adds the scorecard's four `source.time_basis` arms and its
-    # shape check (1.16.0 and 1.17.0 are held by FX-7 and FX-3 on their
-    # branches). Map still five.
+    # 1.17.0 (FX-8) adds the scorecard's four `source.time_basis` arms and its
+    # shape check (1.16.0 is held by FX-3 on its branch). Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.18.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.17.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE

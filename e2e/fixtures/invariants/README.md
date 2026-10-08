@@ -465,6 +465,35 @@ Neither message interpolates, so both `arm` fields are verbatim fragments of
 `Scorecard::validate_invariants` and `every_invariant_arm_has_a_corpus_case`
 joins on them exactly as it does for every other case here.
 
+## FX-8: `source.time_basis` (scorecard format 1.3.0)
+
+Six `index.json` cases for the block and its four arms, TB-1 to TB-4, which
+both readers state in the same position (after `target.auth`, before
+`redactions`) and words. Each is `unmodified_example.json` with
+`format_version` and `source.time_basis` set and nothing else touched.
+
+| case | what it pins |
+|---|---|
+| `time_basis_1_3_producer_time` | ACCEPT: the plan's `producerTime` and one topic selected by producer time, the shape a restore of a `LogAppendTime` topic writes under the opt-in |
+| `time_basis_1_3_not_recorded` | ACCEPT: one topic selected by time with no recorded timestamp type, and no plan value |
+| `time_basis_under_format_1_1_0` | TB-1: the block under `1.1.0` |
+| `time_basis_plan_outside_its_set` | TB-2: `plan: appendTime` |
+| `time_basis_producer_time_without_the_plan` | TB-3: a topic selected by producer time in a document whose plan did not accept it |
+| `time_basis_topic_in_both_lists` | TB-4: one topic in both lists |
+
+TB-1's message interpolates the document's `format_version`, so its `arm` is the
+literal text before the placeholder, as the redactions arm's is. TB-2 to TB-4 do
+not interpolate (the lists name topics); TB-2's and TB-3's messages quote
+`"producerTime"`, which the Rust source spells `\"`, so their `arm`s are the
+quote-free clause at the end of each message.
+
+Four `shape-index.json` cases (`check: message:`), because `drill verify`
+refuses them at deserialisation (`TimeBasisLabel`'s two lists carry no serde
+default, and `plan` is an `Option<String>`): `time_basis_not_an_object`,
+`time_basis_producer_time_absent`,
+`time_basis_not_recorded_item_not_a_string` and
+`time_basis_plan_not_a_string`.
+
 ---
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

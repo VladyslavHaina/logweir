@@ -225,5 +225,51 @@
   "rust_exit": 0,
   "python_exit": 0,
   "reason": ""
+ },
+ {
+  "id": "time_basis_1_3_producer_time",
+  "file": "time_basis_1_3_producer_time.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "time_basis_1_3_not_recorded",
+  "file": "time_basis_1_3_not_recorded.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "time_basis_under_format_1_1_0",
+  "file": "time_basis_under_format_1_1_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.time_basis is present but format_version \"1.1.0\" predates it: the field is defined from 1.3.0",
+  "arm": "source.time_basis is present but format_version "
+ },
+ {
+  "id": "time_basis_plan_outside_its_set",
+  "file": "time_basis_plan_outside_its_set.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.time_basis.plan is not \"producerTime\", the one value restore.time_basis has",
+  "arm": "the one value restore.time_basis has"
+ },
+ {
+  "id": "time_basis_producer_time_without_the_plan",
+  "file": "time_basis_producer_time_without_the_plan.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.time_basis.producer_time names a topic but source.time_basis.plan is not \"producerTime\"; a selection by producer time is one the approved plan accepted, never a default",
+  "arm": "a selection by producer time is one the approved plan accepted, never a default"
+ },
+ {
+  "id": "time_basis_topic_in_both_lists",
+  "file": "time_basis_topic_in_both_lists.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.time_basis names a topic in both producer_time and not_recorded; a topic's timestamp type was either recorded as LogAppendTime or not recorded",
+  "arm": "source.time_basis names a topic in both producer_time and not_recorded; a topic's timestamp type was either recorded as LogAppendTime or not recorded"
  }
 ]

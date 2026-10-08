@@ -133,10 +133,11 @@ pub fn reason_for_exit(code: i32) -> &'static str {
 
 /// The terminal states that are **not** an exit code.
 ///
-/// TWO PRODUCERS, ONE LIST. Three of these are printed by the RUNNER on its
+/// TWO PRODUCERS, ONE LIST. Four of these are printed by the RUNNER on its
 /// `refusal-reason=` line and are declared in
 /// `logweir_core::guard::TERMINAL_STATES` — `TargetTopicConfigRefused`,
-/// `CredentialNotRenderable`, and the default `GuardRefused` which this list
+/// `CredentialNotRenderable`, `PointInTimeByProducerTime` (FX-8), and the
+/// default `GuardRefused` which this list
 /// spells [`TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON`] on the controller
 /// side because the controller reaches it for a DIFFERENT observation (the
 /// line was absent or unparseable, not "the message named no state"). The rest
@@ -158,6 +159,9 @@ pub const TERMINAL_STATES: &[&str] = &[
     "PodUnschedulable",
     "TargetTopicConfigRefused",
     "CredentialNotRenderable",
+    // FX-8: the runner's refusal of a time selection by producer time over a
+    // `LogAppendTime` source, read off `refusal-reason=` like the two above.
+    "PointInTimeByProducerTime",
     "NoExitCode",
     TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
     "GuardRefusedUnknownReason",
@@ -245,8 +249,8 @@ pub const TERMINAL_STATE_AUTHORIZATION_EXPIRED: &str = "AuthorizationExpired";
 /// # It is declared here and NOT YET PRODUCED, and that is the hand-off
 ///
 /// `crates/logweir/src/drill/binding.rs` says in so many words that
-/// `logweir_core::guard::TERMINAL_STATES` "is a closed three-element list owned
-/// elsewhere … until that list grows (it is the status worker's to extend) the
+/// `logweir_core::guard::TERMINAL_STATES` "is a closed list owned elsewhere …
+/// until that list grows (it is the status worker's to extend) the
 /// refusal classifies as the general `GuardRefused`". `logweir-core` is not in
 /// this worker's D3 §14 ownership row, so the controller half lands here and
 /// the runner half is recorded as an explicit hand-off rather than reached for:

@@ -1614,6 +1614,13 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// a larger factor costs, and the read that audits a Restore made from a
 /// resumed draft. The notes at main's `b8b9263f`, with twenty-one items, fail
 /// the twenty-two pin (FX-5 fix round, 2026-10-05).
+///
+/// Then to twenty-three: item 23 is FX-8's runner change (a point-in-time
+/// restore of a `LogAppendTime` topic is refused unless its plan selects by
+/// producer time). Its token is the refusal an operator will see on the
+/// `Restore`, and it is held, below, to the pre-upgrade inventory of the
+/// topics it applies to and to the opt-in. The notes at main's `55487071`,
+/// with twenty-two items, fail the twenty-three pin (FX-8, 2026-10-07).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1639,9 +1646,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=22).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-two operator-facing changes, `#### 1.` \
-         to `#### 22.` in order; found {numbers:?}"
+        (1..=23).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-three operator-facing changes, `#### 1.` \
+         to `#### 23.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1687,6 +1694,12 @@ fn the_release_notes_carry_every_owed_operator_action() {
             "a console restore's replication factor and topic subset",
             "*Discover topics*",
         ),
+        // FX-8 (2026-10-07): a point-in-time restore of a LogAppendTime topic
+        // is refused unless its plan selects by producer time.
+        (
+            "a LogAppendTime point in time refused or labelled",
+            "PointInTimeByProducerTime",
+        ),
     ]) {
         assert!(
             body.contains(token),
@@ -1717,6 +1730,24 @@ fn the_release_notes_carry_every_owed_operator_action() {
         assert!(
             fx5.contains(owed),
             "docs/release-notes.md item 22 (FX-5) no longer carries `{owed}` in its own section"
+        );
+    }
+
+    // ITEM 23 OWES the inventory an operator runs before the runner rolls --
+    // which source topics are LogAppendTime, by override or broker default --
+    // and the opt-in that restores them knowingly (FX-8).
+    let (_, fx8) = items
+        .iter()
+        .find(|(n, _)| *n == 23)
+        .expect("docs/release-notes.md carries item 23");
+    for owed in [
+        "--entity-type brokers --entity-default",
+        "restore.time_basis: producerTime",
+        "RehearsalSchedule",
+    ] {
+        assert!(
+            fx8.contains(owed),
+            "docs/release-notes.md item 23 (FX-8) no longer carries `{owed}` in its own section"
         );
     }
 

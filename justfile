@@ -84,13 +84,16 @@ golden:
 # FROZEN beside the new ones and are NOT regenerated here: they describe every
 # document written before the bump. Their own tests
 # (`the_frozen_1_0_0_*_schema_is_still_the_1_0_0_schema`) keep them what they were.
+# FX-8 moved the scorecard to 1.3.0 (`source.time_basis`; 1.2.0 is FX-3's), and
+# its `-1.1.0.json` is frozen beside the new file the same way
+# (`the_frozen_1_1_0_scorecard_schema_does_not_describe_the_time_basis`).
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's constant (`logweir_core::FORMAT_VERSION`,
 # `backup_receipt::RECEIPT_FORMAT_VERSION`, `catalog::record::FORMAT_VERSION`),
 # which also builds the schema's `$id`. A renumber (for instance 1.1.0 -> 1.2.0)
 # moves the constant and this line, keeps the old file frozen beside the new.
-scorecard_schema_version := "1.1.0"
+scorecard_schema_version := "1.3.0"
 receipt_schema_version := "1.1.0"
 catalog_schema_version := "1.1.0"
 

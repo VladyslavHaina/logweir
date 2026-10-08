@@ -370,7 +370,7 @@ FORMAT_VERSION = "1.3.0"
 # whose configuration was not assessed) is shape-checked like it and not
 # printed: the collisions themselves are not printed either.
 #
-# 1.18.0 (FX-8) knows scorecard format 1.3.0 and its `source.time_basis`: the
+# 1.17.0 (FX-8) knows scorecard format 1.3.0 and its `source.time_basis`: the
 # approved plan's `restore.time_basis`, the source topics a restore selected by
 # producer time (recorded `LogAppendTime`, accepted by the plan) and the ones it
 # selected by time with no recorded timestamp type. Four arms, TB-1 to TB-4,
@@ -383,11 +383,11 @@ FORMAT_VERSION = "1.3.0"
 # `time basis:` lines say which topics were selected by producer time or with
 # an unrecorded type, and that a document before 1.3.0 does not say; a backup
 # receipt's `time basis:` lines name its LogAppendTime topics, whose covered
-# window is their producers' time. 1.16.0 and 1.17.0 are held by FX-7 and FX-3
-# on their branches; the orchestrator assigns the final number at integration
-# (this line, the literal pins in docs/test_verify_scorecard.py and the guide's
-# table move together).
-SCRIPT_VERSION = "1.18.0"
+# window is their producers' time. 1.17.0 because FX-3 holds 1.16.0 (and
+# scorecard format 1.2.0) on its branch; the orchestrator assigns the final
+# number at integration (this line, the literal pins in
+# docs/test_verify_scorecard.py and the guide's table move together).
+SCRIPT_VERSION = "1.17.0"
 
 # The first minor of SCORECARD format 1 that defines `source.time_basis` (arm
 # TB-1) -- `TIME_BASIS_SINCE_MINOR` in `crates/logweir-core/src/scorecard.rs`,

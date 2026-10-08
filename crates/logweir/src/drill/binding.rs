@@ -34,8 +34,8 @@ use logweir_evidence::{
 
 /// The prose a point-binding refusal opens with.
 ///
-/// `logweir_core::guard::TERMINAL_STATES` is a closed three-element list owned
-/// elsewhere, and D3 §5.5 names `PointBindingMismatch` as a state a controller
+/// `logweir_core::guard::TERMINAL_STATES` is a closed list owned elsewhere
+/// (three elements when this was written, four since FX-8), and D3 §5.5 names `PointBindingMismatch` as a state a controller
 /// should be able to read off `refusal-reason=`. Until that list grows (it is
 /// the status worker's to extend, not this one's) the refusal classifies as
 /// the general `GuardRefused` and carries this token in the message, so an
