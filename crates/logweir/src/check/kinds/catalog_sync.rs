@@ -158,6 +158,10 @@ pub const MAX_BODY_SIGNERS: usize = 64;
 pub const MAX_ENTRY_LOCATIONS: usize = 16;
 /// The most pages a body may declare — the CRD's `status.pages` `maxItems`.
 pub const MAX_BODY_PAGES: usize = 8;
+/// **PROD-05.1.** The most topics one entry may list. A point naming more
+/// lists none and says how many it left out (`topicsOmitted`): a partial list
+/// would read as the point's whole topic set.
+pub const MAX_ENTRY_TOPICS: usize = 64;
 /// The most `byDay` rows a body carries — `status.histogram`'s `maxItems`.
 pub const MAX_HISTOGRAM_DAYS: usize = 400;
 
@@ -299,6 +303,30 @@ pub struct EntryLocation {
     pub availability: Availability,
 }
 
+/// **PROD-05.1.** One topic of a point, as the view lists it: the facts the
+/// console needs to default a restore's replication factor and to say how the
+/// topic's configuration is held — copied from the point RECORD's
+/// `topics[]`, which the sync has just cross-checked against the verified
+/// receipt (rule 3). Never a configuration value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryTopic {
+    pub name: String,
+    /// The source's partition count, when the record carries one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<u32>,
+    /// The source's replication factor, when the record's model carries one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_factor: Option<u32>,
+    /// FX-4's `config_coverage` word, when the record carries one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_coverage: Option<String>,
+    /// The declarative owner's kind (`strimzi`, `external`), when there is
+    /// one: such a topic is restored by desired-state export.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
 /// One point, as this Job reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -331,6 +359,18 @@ pub struct CatalogEntry {
     pub signer_key_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remedy: Option<String>,
+    /// **PROD-05.1.** The point's topics with their recorded layout — present
+    /// only for a point whose record AGREED with its verified receipt
+    /// (`Available`) and carries the 1.3.0 configuration model, and at most
+    /// [`MAX_ENTRY_TOPICS`] of them. Empty otherwise, which a reader takes as
+    /// NOT PUBLISHED, never as "no topics".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<EntryTopic>,
+    /// How many topics the entry left out: all of them, when the point names
+    /// more than [`MAX_ENTRY_TOPICS`] or the body's byte budget could not hold
+    /// them. A reader then knows the list is not the point's topic set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topics_omitted: Option<u32>,
 }
 
 /// The signature half of [`CatalogCounts`].
@@ -1509,12 +1549,54 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
         remedy: entry_remedy(observation)
             .map(|r| redact(&r))
             .filter(|r| !r.is_empty()),
+        topics: Vec::new(),
+        topics_omitted: None,
     };
     // One sync contributes one location, so this can only ever be a no-op —
     // and it is written down so the cap is enforced on the side that renders
     // the line rather than assumed on the side that parses it.
     entry.locations.truncate(MAX_ENTRY_LOCATIONS);
+    // PROD-05.1: the topics, from a record the cross-check let stand.
+    (entry.topics, entry.topics_omitted) = entry_topics(point, availability);
     Some(entry)
+}
+
+/// **PROD-05.1.** An entry's `topics` and `topicsOmitted`, from the record.
+///
+/// Only an `Available` point lists them — every other availability is a
+/// record the sync could not stand behind (a `Conflict` is a record the
+/// cross-check refused) — and only a record that carries the 1.3.0 model:
+/// an older record's topics hold a name and a count and nothing a restore
+/// defaults from, so listing them would cost the body bytes for nothing. A
+/// point naming more than [`MAX_ENTRY_TOPICS`] lists none and counts them.
+fn entry_topics(
+    point: &CatalogPoint,
+    availability: Availability,
+) -> (Vec<EntryTopic>, Option<u32>) {
+    if availability != Availability::Available
+        || !point.topics.iter().any(|t| t.configuration.is_some())
+    {
+        return (Vec::new(), None);
+    }
+    if point.topics.len() > MAX_ENTRY_TOPICS {
+        return (Vec::new(), u32::try_from(point.topics.len()).ok());
+    }
+    let topics = point
+        .topics
+        .iter()
+        .map(|t| EntryTopic {
+            name: redact(&t.name),
+            partitions: t.partitions,
+            replication_factor: t.configuration.as_ref().and_then(|c| c.replication_factor),
+            config_coverage: t.config_coverage.as_ref().map(|c| redact(&c.coverage)),
+            owner: t
+                .configuration
+                .as_ref()
+                .and_then(|c| c.owner.as_ref())
+                .map(|o| redact(&o.kind)),
+        })
+        .collect();
+    (topics, None)
 }
 
 /// An entry's remedy: [`pin::SUPERSEDED_REMEDY`] for a pin this bucket holds
@@ -1558,10 +1640,23 @@ struct RenderedBody {
 /// — the fence, so a truncated read cannot end with a cursor that claims a
 /// walk reached further than it did.
 fn render_body(req: &CatalogSyncRequest, walk: &Walk) -> RenderedBody {
-    let mut lines: Vec<String> = Vec::new();
-    for entry in &walk.entries {
-        lines.push(serde_json::to_string(entry).unwrap_or_default());
-    }
+    // Each entry in two renderings: with its topics, and SLIM — without them,
+    // `topicsOmitted` counting what was left out (PROD-05.1). The topics are an
+    // enhancement and never cost a point its place in the view.
+    let rendered: Vec<(String, String)> = walk
+        .entries
+        .iter()
+        .map(|entry| {
+            let full = serde_json::to_string(entry).unwrap_or_default();
+            if entry.topics.is_empty() {
+                return (full.clone(), full);
+            }
+            let mut slim = entry.clone();
+            slim.topics_omitted = u32::try_from(slim.topics.len()).ok();
+            slim.topics.clear();
+            (full, serde_json::to_string(&slim).unwrap_or_default())
+        })
+        .collect();
 
     // The summary lines are rendered FIRST so the byte budget is spent on the
     // pages that are left after the numbers that describe them. A body whose
@@ -1588,18 +1683,8 @@ fn render_body(req: &CatalogSyncRequest, walk: &Walk) -> RenderedBody {
         // Room for up to `MAX_BODY_PAGES` headers, each about 110 bytes.
         + MAX_BODY_PAGES * 128;
 
-    let mut budget = MAX_BODY_BYTES.saturating_sub(overhead);
-    let mut kept: Vec<String> = Vec::new();
-    let mut dropped_for_space = 0usize;
-    for line in lines {
-        let cost = ENTRY_LINE_PREFIX.len() + line.len() + 1;
-        if cost > budget {
-            dropped_for_space += 1;
-            continue;
-        }
-        budget -= cost;
-        kept.push(line);
-    }
+    let (kept, dropped_for_space) =
+        allocate_entry_lines(rendered, MAX_BODY_BYTES.saturating_sub(overhead));
 
     let pages: Vec<&[String]> = kept.chunks(entries_per_page(kept.len())).collect();
     let total_pages = pages.len();
@@ -1634,6 +1719,43 @@ fn render_body(req: &CatalogSyncRequest, walk: &Walk) -> RenderedBody {
         pages: total_pages,
         dropped_for_space,
     }
+}
+
+/// **PROD-05.1: spend the entry budget.** `rendered` is each entry as `(full,
+/// slim)` — with its topics, and without them — in body order, newest first.
+/// Returns the lines kept and how many entries were dropped for space.
+///
+/// An entry keeps its topic list only when every LATER entry still fits
+/// slim, so a topic list never pushes a point out of the view: the newest
+/// points keep their lists and the oldest give theirs up first. Without topics
+/// in play (`full == slim`) this is exactly the old rule — keep a line while
+/// it fits, drop and count it when it does not.
+fn allocate_entry_lines(
+    rendered: Vec<(String, String)>,
+    mut budget: usize,
+) -> (Vec<String>, usize) {
+    let cost = |line: &str| ENTRY_LINE_PREFIX.len() + line.len() + 1;
+    let mut slim_after = vec![0usize; rendered.len() + 1];
+    for i in (0..rendered.len()).rev() {
+        slim_after[i] = slim_after[i + 1].saturating_add(cost(&rendered[i].1));
+    }
+    let mut kept: Vec<String> = Vec::new();
+    let mut dropped_for_space = 0usize;
+    for (i, (full, slim)) in rendered.into_iter().enumerate() {
+        let line = if cost(&full).saturating_add(slim_after[i + 1]) <= budget {
+            full
+        } else {
+            slim
+        };
+        let line_cost = cost(&line);
+        if line_cost > budget {
+            dropped_for_space += 1;
+            continue;
+        }
+        budget -= line_cost;
+        kept.push(line);
+    }
+    (kept, dropped_for_space)
 }
 
 /// How many entries go on one page — **as few pages as the ceiling allows**.
@@ -1737,5 +1859,44 @@ fn cursor_document(req: &CatalogSyncRequest, walk: &Walk) -> CursorReport {
             },
             complete: walk.stop.complete(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PROD-05.1: a topic list never costs a point its place in the view. Three
+    /// entries whose full lines do not all fit: the newest keep their lists
+    /// while every later one still fits slim, the rest go slim, none is
+    /// dropped; and with no topics in play the old keep-or-drop rule holds.
+    #[test]
+    fn a_topic_list_never_pushes_a_point_out_of_the_view() {
+        let line = |c: char, n: usize| c.to_string().repeat(n);
+        let cost = |n: usize| ENTRY_LINE_PREFIX.len() + n + 1;
+        let rendered = vec![
+            (line('a', 100), line('a', 10)),
+            (line('b', 100), line('b', 10)),
+            (line('c', 100), line('c', 10)),
+        ];
+        // Room for one full line and two slim ones, not two full lines.
+        let budget = cost(100) + 2 * cost(10) + 5;
+        let (kept, dropped) = allocate_entry_lines(rendered.clone(), budget);
+        assert_eq!(dropped, 0);
+        assert_eq!(kept, vec![line('a', 100), line('b', 10), line('c', 10)]);
+        // Room for every slim line only: all slim, none dropped.
+        let (kept, dropped) = allocate_entry_lines(rendered.clone(), 3 * cost(10));
+        assert_eq!((kept.len(), dropped), (3, 0));
+        assert!(kept.iter().all(|l| l.len() == 10));
+        // Not even that: the old rule — keep while it fits, drop the rest.
+        let (kept, dropped) = allocate_entry_lines(rendered, 2 * cost(10));
+        assert_eq!((kept.len(), dropped), (2, 1));
+        // No topics in play: full == slim, the old rule exactly.
+        let plain = vec![
+            (line('x', 50), line('x', 50)),
+            (line('y', 50), line('y', 50)),
+        ];
+        let (kept, dropped) = allocate_entry_lines(plain, cost(50));
+        assert_eq!((kept, dropped), (vec![line('x', 50)], 1));
     }
 }

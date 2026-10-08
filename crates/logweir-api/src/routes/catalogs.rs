@@ -384,6 +384,39 @@ pub struct PointLocationView {
     pub availability: String,
 }
 
+/// **PROD-05.1.** One topic of a recovery point, as the catalog's view lists
+/// it: what the archive records of its layout and how its configuration is
+/// held. Never a configuration value — the settings themselves are in the
+/// signed receipt and the point record, not in a listing.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PointTopicView {
+    /// The source topic's name.
+    pub name: String,
+    /// The source's partition count, as the archive records it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<u32>,
+    /// The source's replication factor, as the archive records it. The
+    /// console's restore wizard defaults a plan's factor from it, capped by
+    /// the target's broker count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_factor: Option<u32>,
+    /// `captured`, `notCaptured` or `captureDenied` — whether the archive's
+    /// record of the topic's configuration is complete (FX-4). Absent is
+    /// unknown, never `captured`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_coverage: Option<String>,
+    /// The declarative owner's kind (`strimzi`, `external`), when one manages
+    /// the topic's configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// `adminApi`, or `desiredStateExport` for a topic a declarative owner
+    /// manages: a restore exports its desired state for the owner to apply
+    /// instead of changing it through Kafka's admin API, which the owner would
+    /// revert.
+    pub apply_route: String,
+}
+
 /// One recovery point, with its two verdicts kept apart.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -460,7 +493,23 @@ pub struct PointView {
     /// The record's format version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format_version: Option<String>,
+    /// **PROD-05.1.** The point's topics with their recorded layout, from a
+    /// point record that agreed with its verified receipt. ABSENT is NOT
+    /// PUBLISHED — a catalog synced by an older runner, a point recorded
+    /// before format 1.3.0, a point that is not `Available` — and never "no
+    /// topics". At most 64.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub topics: Vec<PointTopicView>,
+    /// How many topics the view left out of `topics` (the point names more
+    /// than 64, or the sync's byte budget could not hold them), so a reader
+    /// never takes a partial list for the point's topic set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topics_omitted: Option<u32>,
 }
+
+/// The longest topic name Kafka accepts.
+const MAX_TOPIC_NAME: usize = 249;
 
 fn instant(ms: i64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(ms)
@@ -498,6 +547,25 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
             .collect(),
         remedy: entry.remedy.as_deref().map(|r| bounded(r, 512)),
         format_version: entry.format_version.as_deref().map(|v| bounded(v, 32)),
+        topics: entry
+            .topics
+            .iter()
+            .take(64)
+            .map(|t| PointTopicView {
+                name: bounded(&t.name, MAX_TOPIC_NAME),
+                partitions: t.partitions,
+                replication_factor: t.replication_factor,
+                config_coverage: t.config_coverage.as_deref().map(|c| bounded(c, 32)),
+                owner: t.owner.as_deref().map(|o| bounded(o, 32)),
+                apply_route: if t.owner.is_some() {
+                    "desiredStateExport"
+                } else {
+                    "adminApi"
+                }
+                .to_string(),
+            })
+            .collect(),
+        topics_omitted: entry.topics_omitted,
     }
 }
 

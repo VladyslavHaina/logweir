@@ -6566,6 +6566,120 @@ fn only_entry(objects: FakeObjects) -> serde_json::Value {
     entries[0].clone()
 }
 
+// ---------------------------------------------------------------------------
+// PROD-05.1: the view lists a point's topics with their recorded layout
+// ---------------------------------------------------------------------------
+
+/// A 1.3.0 receipt over `topics`, each captured with the given replication
+/// factor and partition count, `orders` owned by a Strimzi `KafkaTopic`.
+fn modelled_catalog_receipt(topics: &[(&str, u32, u32)]) -> BackupReceipt {
+    use logweir_core::backup_receipt::{TopicConfigCoverage, TopicConfiguration, TopicOwner};
+    let mut r = catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z");
+    r.format_version =
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION.to_string();
+    r.source.topics = topics.iter().map(|(t, ..)| (*t).to_string()).collect();
+    r.records = topics
+        .iter()
+        .map(|(t, ..)| ((*t).to_string(), 1u64))
+        .collect();
+    r.config_coverage = Some(
+        topics
+            .iter()
+            .map(|(t, ..)| {
+                (
+                    (*t).to_string(),
+                    TopicConfigCoverage {
+                        coverage: "captured".into(),
+                        reason: None,
+                        timestamp_type: None,
+                    },
+                )
+            })
+            .collect(),
+    );
+    r.topic_configuration = Some(
+        topics
+            .iter()
+            .map(|(t, rf, partitions)| {
+                (
+                    (*t).to_string(),
+                    TopicConfiguration {
+                        partitions: Some(*partitions),
+                        replication_factor: Some(*rf),
+                        entries: Some(BTreeMap::new()),
+                        owner: (*t == "orders").then(|| TopicOwner {
+                            kind: "strimzi".into(),
+                            basis: "kafkaTopicResource".into(),
+                            reference: "kafka/orders".into(),
+                        }),
+                    },
+                )
+            })
+            .collect(),
+    );
+    assert_eq!(r.validate_invariants(), Ok(()));
+    r
+}
+
+/// **The console's source.** An `Available` 1.3.0 point lists every topic with
+/// its recorded partition count, replication factor, coverage and owner kind;
+/// the control — a 1.0.0 point — lists none (NOT PUBLISHED).
+#[test]
+fn an_available_1_3_0_point_lists_its_topics_with_their_recorded_layout() {
+    let receipt = modelled_catalog_receipt(&[("orders", 3, 6), ("audit", 1, 1)]);
+    let (objects, _) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Available", "{entry}");
+    assert_eq!(
+        entry["topics"],
+        serde_json::json!([
+            {"name": "audit", "partitions": 1, "replicationFactor": 1, "configCoverage": "captured"},
+            {"name": "orders", "partitions": 6, "replicationFactor": 3, "configCoverage": "captured",
+             "owner": "strimzi"},
+        ]),
+        "{entry}"
+    );
+    assert!(entry.get("topicsOmitted").is_none(), "{entry}");
+    let (control, _) = versioned_objects(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        &[("v1", CATALOG_MANIFEST)],
+    );
+    let control = only_entry(control);
+    assert!(
+        control.get("topics").is_none(),
+        "a pre-1.3.0 point lists no topics: {control}"
+    );
+}
+
+/// A point the sync cannot stand behind lists no topics: a `Conflict` (here a
+/// superseded pin) is a record whose facts are not the point's.
+#[test]
+fn a_point_that_is_not_available_lists_no_topics() {
+    let mut receipt = modelled_catalog_receipt(&[("orders", 3, 6)]);
+    receipt.archive.manifest_version_id = Some("v1".into());
+    let history: &[(&str, &[u8])] = &[("v1", CATALOG_MANIFEST), ("v2", CATALOG_MANIFEST)];
+    let (objects, _) = versioned_objects(&receipt, history);
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Conflict", "{entry}");
+    assert!(entry.get("topics").is_none(), "{entry}");
+}
+
+/// More topics than the cap: none listed, the count said — a partial list would
+/// read as the point's topic set.
+#[test]
+fn a_point_with_more_topics_than_the_cap_lists_none_and_counts_them() {
+    use logweir::check::kinds::catalog_sync::MAX_ENTRY_TOPICS;
+    let names: Vec<String> = (0..=MAX_ENTRY_TOPICS).map(|i| format!("t{i:03}")).collect();
+    let topics: Vec<(&str, u32, u32)> = names.iter().map(|n| (n.as_str(), 1, 1)).collect();
+    let (objects, _) = versioned_objects(
+        &modelled_catalog_receipt(&topics),
+        &[("v1", CATALOG_MANIFEST)],
+    );
+    let entry = only_entry(objects);
+    assert!(entry.get("topics").is_none(), "{entry}");
+    assert_eq!(entry["topicsOmitted"], MAX_ENTRY_TOPICS + 1, "{entry}");
+}
+
 /// A pinned point whose pinned version IS the current one is `Available`,
 /// with the record's own (pinned) format reported.
 #[test]
@@ -8576,6 +8690,7 @@ fn the_grammar_this_runner_writes_is_the_grammar_the_controller_parses() {
     assert_eq!(usize_const("MAX_BODY_BYTES"), cs::MAX_BODY_BYTES);
     assert_eq!(usize_const("MAX_BODY_SIGNERS"), cs::MAX_BODY_SIGNERS);
     assert_eq!(usize_const("MAX_ENTRY_LOCATIONS"), cs::MAX_ENTRY_LOCATIONS);
+    assert_eq!(usize_const("MAX_ENTRY_TOPICS"), cs::MAX_ENTRY_TOPICS);
     assert_eq!(usize_const("MAX_BODY_PAGES"), cs::MAX_BODY_PAGES);
     assert_eq!(usize_const("MAX_HISTOGRAM_DAYS"), cs::MAX_HISTOGRAM_DAYS);
     assert!(

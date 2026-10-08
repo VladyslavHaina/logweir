@@ -1679,3 +1679,57 @@ async fn an_unattributable_refusal_marks_the_page_incomplete() {
         .iter()
         .all(|i| i.get("backupVerdict").is_none()));
 }
+
+/// **PROD-05.1: the point view publishes a point's topics** — the recorded
+/// partition count, replication factor, configuration coverage and owner
+/// kind — with the apply route a declarative owner implies, and an entry that
+/// lists none publishes none (absent is NOT PUBLISHED, never "no topics").
+/// This is what the console's restore wizard defaults a replication factor
+/// from.
+#[tokio::test]
+async fn the_point_view_publishes_each_topics_recorded_layout_and_apply_route() {
+    let fake = seeded();
+    let mut lines = entry_lines();
+    let mut first: Value = serde_json::from_str(&lines[0]).expect("the fixture's entry is JSON");
+    first["topics"] = json!([
+        {"name": "audit", "partitions": 1, "replicationFactor": 1, "configCoverage": "captureDenied"},
+        {"name": "orders", "partitions": 6, "replicationFactor": 3, "configCoverage": "captured",
+         "owner": "strimzi"},
+    ]);
+    lines[0] = serde_json::to_string(&first).unwrap();
+    let digest = seed_page(&fake, "primary-g1-p0", &lines);
+    let mut catalog = fixture("recovery-catalog.json");
+    catalog["status"]["pages"] = json!([{
+        "configMapName": "primary-g1-p0",
+        "index": 0,
+        "count": lines.len(),
+        "sha256": digest,
+    }]);
+    fake.seed("recoverycatalogs", NS_A, catalog);
+    let app = TestApp::with(fake, Options::default());
+    let v = app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await
+        .json();
+    let items = v["items"].as_array().unwrap();
+    let listed = items
+        .iter()
+        .find(|i| i["pointId"] == first["pointId"])
+        .expect("the point is listed");
+    assert_eq!(
+        listed["topics"],
+        json!([
+            {"name": "audit", "partitions": 1, "replicationFactor": 1,
+             "configCoverage": "captureDenied", "applyRoute": "adminApi"},
+            {"name": "orders", "partitions": 6, "replicationFactor": 3,
+             "configCoverage": "captured", "owner": "strimzi",
+             "applyRoute": "desiredStateExport"},
+        ]),
+        "{listed}"
+    );
+    for other in items.iter().filter(|i| i["pointId"] != first["pointId"]) {
+        assert!(other.get("topics").is_none(), "{other}");
+        assert!(other.get("topicsOmitted").is_none(), "{other}");
+    }
+    app.fake.assert_strict();
+}

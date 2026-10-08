@@ -4099,3 +4099,66 @@ async fn a_synced_policy_store_resolves_the_catalog_without_a_list() {
         verdict("Verified", true)
     );
 }
+
+// ===========================================================================
+// PROD-05.1: a point's topics travel from the runner's entry into the view
+// ===========================================================================
+
+fn with_topics(mut e: Value) -> Value {
+    e["topics"] = json!([
+        {"name": "audit", "partitions": 1, "replicationFactor": 1, "configCoverage": "captured"},
+        {"name": "orders", "partitions": 6, "replicationFactor": 3, "configCoverage": "captured",
+         "owner": "strimzi"},
+    ]);
+    e
+}
+
+/// The topics parse, survive the merge of two copies of one point (a copy
+/// that lists them fills one that does not), and reach the published row
+/// unchanged; an entry listing more than the grammar allows is skipped and
+/// counted like any other malformed entry.
+#[test]
+fn a_points_topics_reach_the_view_and_an_unbounded_list_is_malformed() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let point = "lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let body = versioned(&page_block(1, 1, &[with_topics(ok_entry(point, 1))]));
+    let parsed = view::parse_body(&body, 5000).expect("an entry with topics parses");
+    let listed = parsed.pages[0].entries[0].clone();
+    assert_eq!(listed.topics.len(), 2);
+    assert_eq!(listed.topics[1].replication_factor, Some(3));
+    assert_eq!(listed.topics[1].owner.as_deref(), Some("strimzi"));
+
+    // A copy at a second location that lists no topics (an older runner)
+    // merges with one that does, in either order: the list is kept.
+    let mut bare = entry(point, 1, "s3://copy/p");
+    bare.topics.clear();
+    for order in [
+        vec![bare.clone(), listed.clone()],
+        vec![listed.clone(), bare],
+    ] {
+        let merged = view::merge_entries(order);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].topics, listed.topics);
+        let row = view::view_entry(merged[0].clone(), &trust, now());
+        assert_eq!(row.topics, listed.topics);
+        assert_eq!(row.topics_omitted, None);
+    }
+
+    let mut wide = ok_entry("lwp1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 2);
+    wide["topics"] = json!((0..view::MAX_ENTRY_TOPICS + 1)
+        .map(|i| json!({"name": format!("t{i}")}))
+        .collect::<Vec<_>>());
+    let body = versioned(&page_block(1, 1, &[wide]));
+    let parsed = view::parse_body(&body, 5000).expect("skipped, never fatal");
+    assert_eq!(parsed.pages[0].entries.len(), 0);
+    assert_eq!(parsed.skipped_entries, 1);
+
+    // The count of what the runner left out travels too.
+    let mut omitted = ok_entry("lwp1-cccccccccccccccccccccccccccccccc", 3);
+    omitted["topicsOmitted"] = json!(70);
+    let body = versioned(&page_block(1, 1, &[omitted]));
+    let parsed = view::parse_body(&body, 5000).expect("parses");
+    let row = view::view_entry(parsed.pages[0].entries[0].clone(), &trust, now());
+    assert!(row.topics.is_empty());
+    assert_eq!(row.topics_omitted, Some(70));
+}
