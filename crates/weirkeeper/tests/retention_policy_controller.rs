@@ -6930,3 +6930,132 @@ async fn external_lifecycle_clears_an_earlier_evaluation() {
     );
     assert_eq!(f.condition(ctrl::CONDITION_EVALUATED)["status"], "Unknown");
 }
+
+// ===========================================================================
+// FX-17: set ids the catalog now publishes whole, and what is still redacted
+// ===========================================================================
+
+/// The PoC's nightly schedule UID: a scheduled run's set id is
+/// `<schedule uid>-<yyyymmdd>-<hhmmss>`, `-r<k>` for retry `k`.
+const FX17_SCHEDULE: &str = "89b585c5-5498-48dc-ae32-090809457ec8";
+
+fn scheduled(id: &str, set: &str, age_days: i64) -> plan::PointFacts {
+    plan::PointFacts {
+        backup_id: set.to_string(),
+        manifest_key: Some(format!("{SCOPE}/{set}/manifest.json")),
+        ..point(id, age_days)
+    }
+}
+
+/// **FX-17 review L-1: a set id the catalog published as the redactor's output
+/// is kept `Unknown` and never refuses the whole plan.** Every such point
+/// shares the set `[redacted]` and the manifest key `[redacted].json`, which is
+/// under no set bound, so one of them among the candidates made
+/// `plan_document` refuse the plan (`PlanError::Scope`) and no set expired at
+/// all. A current runner publishes every set id the controller mints whole;
+/// what is left is a long set id someone chose.
+///
+/// NEGATIVE CONTROL: the same two points with their set ids whole are
+/// candidates and are planned, so the row is about the marker.
+#[test]
+fn fx17_a_redacted_set_is_kept_unknown_and_never_refuses_the_whole_plan() {
+    let redacted = |id: &str, age: i64| plan::PointFacts {
+        backup_id: "[redacted]".to_string(),
+        manifest_key: Some("[redacted].json".to_string()),
+        ..point(id, age)
+    };
+    let mut manifest_only = point("p-key-gone", 40);
+    manifest_only.manifest_key = Some("[redacted].json".to_string());
+    let points = vec![
+        point("p-new", 1),
+        point("p-due", 30),
+        redacted("p-red-1", 30),
+        redacted("p-red-2", 31),
+        manifest_only,
+    ];
+    let r = rules(Some(1), Some(7), 1);
+    let evaluation = evaluate(&points, r);
+    for id in ["p-red-1", "p-red-2", "p-key-gone"] {
+        assert_eq!(
+            protected_reason(&evaluation, id),
+            Some("Unknown"),
+            "{id}: a set the catalog could not name is kept, not planned"
+        );
+    }
+    assert_eq!(candidate_ids(&evaluation), vec!["p-due"]);
+    let document = plan::plan_document(&identity(), &destination(), r, &evaluation)
+        .expect("one unreadable set id no longer refuses the whole plan");
+    let lines: Vec<&str> = document.lines.iter().map(|l| l.point_id.as_str()).collect();
+    assert_eq!(lines, vec!["p-due"]);
+
+    // CONTROL: whole set ids are weighed and planned like any other.
+    let whole = vec![
+        point("p-new", 1),
+        point("p-due", 30),
+        point("p-red-1", 30),
+        point("p-red-2", 31),
+    ];
+    let evaluation = evaluate(&whole, r);
+    assert_eq!(
+        candidate_ids(&evaluation),
+        vec!["p-due", "p-red-1", "p-red-2"]
+    );
+}
+
+/// **FX-17: a scheduled set and its retry are weighed one by one, and planning
+/// the older never reaches the retry** (review L-5, at the plan layer). FX-17
+/// makes string-prefix sibling sets — `<uid>-<slot>` and `<uid>-<slot>-r1` —
+/// reach retention whole for the first time; the trailing `/` of the set bound
+/// is what keeps the first's enumeration out of the second.
+///
+/// NEGATIVE CONTROL: the same points as a runner up to v0.2.0-rc.1 published
+/// them (one shared set `[redacted]`) plan nothing at all.
+#[test]
+fn fx17_a_scheduled_set_and_its_retry_are_weighed_one_by_one() {
+    let x = format!("{FX17_SCHEDULE}-20260901-020000");
+    let x_r1 = format!("{x}-r1");
+    let points = vec![
+        scheduled("p-newest", &format!("{FX17_SCHEDULE}-20260916-020000"), 1),
+        scheduled("p-x-r1", &x_r1, 2),
+        scheduled("p-x", &x, 30),
+    ];
+    let r = rules(None, Some(7), 1);
+    let evaluation = evaluate(&points, r);
+    assert_eq!(
+        candidate_ids(&evaluation),
+        vec!["p-x"],
+        "each scheduled set is its own set"
+    );
+    assert!(evaluation.kept.contains(&"p-x-r1".to_string()));
+    let document = plan::plan_document(&identity(), &destination(), r, &evaluation)
+        .expect("a scheduled set is planned");
+    assert_eq!(document.lines.len(), 1);
+    let line = &document.lines[0];
+    assert_eq!(line.backup_id, x);
+    assert_eq!(line.set_prefix, format!("{SCOPE}/{x}/"));
+    let sibling = format!("{SCOPE}/{x_r1}/manifest.json");
+    assert!(
+        !sibling.starts_with(&line.set_prefix),
+        "the retry's keys are outside the older set's bound"
+    );
+    assert!(
+        plan::validate_key(&sibling, SCOPE, &x).is_err(),
+        "and the worker's re-validation refuses one listed under it"
+    );
+
+    // NEGATIVE CONTROL: as v0.2.0-rc.1 published them.
+    let shared: Vec<plan::PointFacts> = points
+        .iter()
+        .map(|p| plan::PointFacts {
+            backup_id: "[redacted]".to_string(),
+            manifest_key: Some("[redacted].json".to_string()),
+            ..p.clone()
+        })
+        .collect();
+    let evaluation = evaluate(&shared, r);
+    assert!(
+        candidate_ids(&evaluation).is_empty(),
+        "no scheduled set was ever weighed while their ids were redacted: {:?}",
+        candidate_ids(&evaluation)
+    );
+}

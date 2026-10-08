@@ -83,6 +83,15 @@ struct ConfigFile {
     /// PEM, from a mounted Secret.
     #[serde(default)]
     confirmation_key_file: Option<PathBuf>,
+    /// PROD-16.1 fix round (review L5): the key file is the one the chart's
+    /// identity hook generates, which may not exist yet when this pod
+    /// starts. Without it, a missing key file is a refusal to start.
+    #[serde(default)]
+    confirmation_key_managed: bool,
+    /// PROD-16.1: where the installation's fresh-install marker is read — the
+    /// public identity ConfigMap the chart's identity hook writes.
+    #[serde(default)]
+    installation_identity: Option<InstallationIdentityFile>,
     /// P10: the manual-run create ceilings. Absent is the documented
     /// defaults; either key may be omitted and takes its own default.
     #[serde(default)]
@@ -103,6 +112,56 @@ struct RateLimitsFile {
 struct ServiceRefFile {
     namespace: String,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct InstallationIdentityFile {
+    namespace: String,
+    public_config_map: String,
+}
+
+/// `installationIdentity`, validated: a namespace (DNS label) and a ConfigMap
+/// name (DNS subdomain), or absent.
+/// `confirmationKeyManaged` names the file the identity hook writes; it means
+/// nothing without that file.
+fn managed_key(managed: bool, file: Option<&Path>) -> Result<bool, ConfigError> {
+    if managed && file.is_none() {
+        return Err(field(
+            "confirmationKeyManaged",
+            "is true and there is no `confirmationKeyFile`: it marks the configured key file as \
+             the one the identity hook writes after the console starts"
+                .to_string(),
+        ));
+    }
+    Ok(managed)
+}
+
+fn installation_identity(
+    file: Option<InstallationIdentityFile>,
+) -> Result<Option<crate::approval::InstallationIdentityRef>, ConfigError> {
+    let Some(file) = file else {
+        return Ok(None);
+    };
+    if !validate::is_dns_label(&file.namespace) {
+        return Err(field(
+            "installationIdentity",
+            format!("the namespace `{}` is not a DNS-1123 label", file.namespace),
+        ));
+    }
+    if !validate::is_dns_subdomain(&file.public_config_map) {
+        return Err(field(
+            "installationIdentity",
+            format!(
+                "the publicConfigMap `{}` is not a DNS-1123 subdomain",
+                file.public_config_map
+            ),
+        ));
+    }
+    Ok(Some(crate::approval::InstallationIdentityRef {
+        namespace: file.namespace,
+        config_map: file.public_config_map,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -361,6 +420,11 @@ pub struct Config {
     pub approval_policy_file: Option<PathBuf>,
     /// PLAT-19.2: the console confirmation key file, when one is configured.
     pub confirmation_key_file: Option<PathBuf>,
+    /// PROD-16.1: that file is the identity hook's managed key, which may be
+    /// written after this process starts (`confirmationKeyManaged`).
+    pub confirmation_key_managed: bool,
+    /// PROD-16.1: where the fresh-install marker is read, when configured.
+    pub installation_identity: Option<crate::approval::InstallationIdentityRef>,
     /// P10: the manual-run create ceilings, per actor, per namespace, per
     /// minute. `rateLimits` in the file; absent is
     /// [`crate::routes::RunRateLimits::default`].
@@ -620,7 +684,12 @@ impl Config {
             cursor_key: CursorKeySource::RawFile(resolve(base, &cursor_key_file)),
             kubernetes_principal: String::new(),
             approval_policy_file: file.approval_policy_file.map(|p| resolve(base, &p)),
+            confirmation_key_managed: managed_key(
+                file.confirmation_key_managed,
+                file.confirmation_key_file.as_deref(),
+            )?,
             confirmation_key_file: file.confirmation_key_file.map(|p| resolve(base, &p)),
+            installation_identity: installation_identity(file.installation_identity)?,
             run_rate_limits: crate::routes::RunRateLimits::default(),
         })
     }
@@ -843,7 +912,12 @@ impl Config {
             }),
             kubernetes_principal: String::new(),
             approval_policy_file: file.approval_policy_file.map(|p| resolve(base, &p)),
+            confirmation_key_managed: managed_key(
+                file.confirmation_key_managed,
+                file.confirmation_key_file.as_deref(),
+            )?,
             confirmation_key_file: file.confirmation_key_file.map(|p| resolve(base, &p)),
+            installation_identity: installation_identity(file.installation_identity)?,
             run_rate_limits: crate::routes::RunRateLimits::default(),
         })
     }
@@ -2138,5 +2212,35 @@ mod tests {
             Config::parse(&t, Path::new(".")),
             Err(ConfigError::Field { field: "mode", .. })
         ));
+    }
+
+    /// PROD-16.1 fix round (review L5): `confirmationKeyManaged` marks the
+    /// configured key file as the identity hook's; alone it is refused.
+    #[test]
+    fn the_managed_key_flag_needs_its_key_file() {
+        let base = text("127.0.0.1:8484", "http://127.0.0.1:8484");
+        let managed = Config::parse(
+            &format!("{base}confirmationKeyFile: confirmation/confirmation.key\nconfirmationKeyManaged: true\n"),
+            Path::new("/etc/lw"),
+        )
+        .unwrap();
+        assert!(managed.confirmation_key_managed);
+        let named = Config::parse(
+            &format!("{base}confirmationKeyFile: confirmation/confirmation.key\n"),
+            Path::new("/etc/lw"),
+        )
+        .unwrap();
+        assert!(
+            !named.confirmation_key_managed,
+            "absent is an operator-named key"
+        );
+        let Err(alone) = Config::parse(
+            &format!("{base}confirmationKeyManaged: true\n"),
+            Path::new("/etc/lw"),
+        ) else {
+            panic!("the flag without the file is refused");
+        };
+        let alone = alone.to_string();
+        assert!(alone.contains("confirmationKeyManaged"), "{alone}");
     }
 }

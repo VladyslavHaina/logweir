@@ -31,7 +31,7 @@ fn justfile_schema_version(name: &str) -> String {
 /// the `$id` and the `format_version` it writes. They must be one number, or a
 /// renumber would regenerate one file and sign documents naming another. The
 /// CURRENT file is each document's newest MINOR's — since PROD-01.3 the one a
-/// document naming a new auth mode carries (scorecard 1.4.0, receipt 1.3.0);
+/// document naming a new auth mode carries (scorecard 1.5.0, receipt 1.3.0);
 /// the older files are frozen beside it.
 #[test]
 fn the_justfile_schema_versions_are_the_writers_constants() {
@@ -242,6 +242,76 @@ fn the_frozen_1_2_0_scorecard_schema_does_not_describe_the_time_basis() {
     assert!(
         current["definitions"]["TopicParity"]["properties"]["not_reconstructed"].is_object(),
         "the current schema keeps FX-3's field"
+    );
+}
+
+/// PROD-08.1: FX-8's 1.3.0 scorecard schema is FROZEN beside the 1.4.0 one.
+/// It names itself 1.3.0, carries FX-8's `source.time_basis` and does NOT
+/// describe `integrity.verification`. The current schema does, as an OPTIONAL
+/// field (a document before 1.4.0 without it still validates), whose four
+/// descriptive strings and two range lists are required inside it and whose
+/// `complete` block is optional.
+#[test]
+fn the_frozen_1_3_0_scorecard_schema_does_not_describe_the_verification() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.3.0.json"
+    ))
+    .expect("the frozen 1.3.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.3.0.json"
+    );
+    assert!(frozen["definitions"]["SourceInfo"]["properties"]["time_basis"].is_object());
+    assert!(
+        frozen["definitions"]["Integrity"]["properties"]
+            .get("verification")
+            .is_none(),
+        "the frozen 1.3.0 schema must not describe the 1.4.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
+    let integrity = &current["definitions"]["Integrity"];
+    assert!(integrity["properties"]["verification"].is_object());
+    assert!(
+        !integrity["required"]
+            .as_array()
+            .expect("Integrity has required fields")
+            .iter()
+            .any(|r| r == "verification"),
+        "verification is OPTIONAL: a document before 1.4.0 without it must still validate"
+    );
+    let required = |def: &str| -> Vec<String> {
+        let mut r: Vec<String> = current["definitions"][def]["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{def} has required fields"))
+            .iter()
+            .filter_map(|r| r.as_str().map(str::to_string))
+            .collect();
+        r.sort();
+        r
+    };
+    assert_eq!(
+        required("Verification"),
+        vec![
+            "application",
+            "comparison_basis",
+            "coverage",
+            "gaps",
+            "header_order",
+            "pruned"
+        ],
+        "an absent coverage or range list is never read as sampled-and-clean; `complete` is \
+         optional (present exactly with coverage complete, arm IV-4)"
+    );
+    assert!(
+        required("CompleteVerification").contains(&"covered".to_string())
+            && required("CompleteVerification").contains(&"partitions".to_string()),
+        "a complete block always says whether it covered every partition, and which"
+    );
+    assert!(
+        current["definitions"]["SourceInfo"]["properties"]["time_basis"].is_object(),
+        "the current schema keeps FX-8's field"
     );
 }
 
@@ -482,21 +552,23 @@ fn the_frozen_1_1_0_receipt_schema_is_still_fx4s() {
     );
 }
 
-/// **PROD-01.3: FX-8's 1.3.0 scorecard schema is FROZEN** beside the 1.4.0
-/// one, and still describes every scorecard of a `plaintext` or `scramSha512`
-/// target, which this build writes as 1.3.0: it names itself 1.3.0 and its
+/// **PROD-01.3: PROD-08.1's 1.4.0 scorecard schema is FROZEN** beside the
+/// 1.5.0 one, and still describes every scorecard of a `plaintext` or
+/// `scramSha512` target, which this build writes as 1.4.0: it names itself
+/// 1.4.0, it carries PROD-08.1's `integrity.verification`, and its
 /// `target.auth.mode` description is the closed set of two. The current file
 /// names the five.
 #[test]
-fn the_frozen_1_3_0_scorecard_schema_is_still_fx8s() {
+fn the_frozen_1_4_0_scorecard_schema_is_still_prod_08_1s() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../schemas/logweir-drill-scorecard-1.3.0.json"
+        "../../../schemas/logweir-drill-scorecard-1.4.0.json"
     ))
-    .expect("the frozen 1.3.0 scorecard schema parses");
+    .expect("the frozen 1.4.0 scorecard schema parses");
     assert_eq!(
         frozen["$id"],
-        "https://logweir.dev/schemas/logweir-drill-scorecard-1.3.0.json"
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.4.0.json"
     );
+    assert!(frozen["definitions"]["Integrity"]["properties"]["verification"].is_object());
     let mode = frozen["definitions"]["AuthSummary"]["properties"]["mode"]["description"]
         .as_str()
         .expect("AuthSummary.mode has a description");
@@ -504,17 +576,18 @@ fn the_frozen_1_3_0_scorecard_schema_is_still_fx8s() {
     assert!(!mode.contains("mtls"), "{mode}");
     let current: serde_json::Value =
         serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
     let mode = current["definitions"]["AuthSummary"]["properties"]["mode"]["description"]
         .as_str()
         .expect("AuthSummary.mode has a description");
     assert!(
-        mode.contains("from 1.4.0") && mode.contains("mtls"),
+        mode.contains("from 1.5.0") && mode.contains("mtls"),
         "{mode}"
     );
-    assert_eq!(logweir_core::FORMAT_VERSION, "1.3.0");
+    assert_eq!(logweir_core::FORMAT_VERSION, "1.4.0");
     assert_eq!(
         logweir_core::scorecard::FORMAT_VERSION_WITH_AUTH_MODES,
-        "1.4.0"
+        "1.5.0"
     );
 }
 

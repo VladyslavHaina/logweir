@@ -1,9 +1,9 @@
-# The drill spec: `name`, `source.point`, `restore.time_basis` and `notifications`
+# The drill spec: `name`, `source.point`, `restore.time_basis`, `sample.coverage` and `notifications`
 
-**This is not yet a complete drill-spec reference.** It documents exactly four
-things — the top-level `name` key, `source.point`, `restore.time_basis` and the
-`notifications` block — because those are what Task 14, decision D3 and FX-8
-created and changed. Every other key of a drill spec is
+**This is not yet a complete drill-spec reference.** It documents exactly five
+things — the top-level `name` key, `source.point`, `restore.time_basis`,
+`sample.coverage` with its bound, and the `notifications` block — because those
+are what Task 14, decision D3, FX-8 and PROD-08.1 created and changed. Every other key of a drill spec is
 described today only by the commented example at
 [`examples/drill.yaml`](../../examples/drill.yaml) and by
 [`crates/logweir-core/src/spec.rs`](../../crates/logweir-core/src/spec.rs). A
@@ -217,6 +217,74 @@ the plan without refusing or labelling, which is the behaviour this field
 exists to end; the signed scorecard of such a run carries no
 `source.time_basis` block, and both readers print that the time basis was not
 recorded.
+
+---
+
+## `sample.coverage` and `sample.complete_max_records` (PROD-08.1)
+
+```yaml
+sample:
+  window_start: "2026-08-29T00:00:00Z"
+  window_end: "2026-08-30T02:00:00Z"
+  coverage: complete            # sampled (the default) | complete
+  complete_max_records: 5000000 # optional: the most archived records it decodes
+```
+
+Optional. **How much of the restore phase 7 verifies.**
+
+- **`sampled`** (the default, and every plan written before the field): the
+  first `records_per_partition` records of each sampled partition, reconciled
+  by a fingerprint that sorts headers; the sha256 of the segments those
+  records came from; and the archive manifest's count bound for the window.
+- **`complete`**: every archived segment of every partition of every restored
+  topic is read, its sha256 checked against the manifest and its records
+  decoded; the expected output is every archived record whose OWN timestamp
+  is at or before the restore window's end (no lower bound: the window starts
+  at the archive); every restored record is read back and compared with it by
+  its `x-original-offset` — content with headers in order, exact counts,
+  duplicates and order. The manifest's first/last-timestamp count bound is not
+  consulted. The contract is
+  [`PROD-08.1-integrity-contract.md`](../to-do/decisions/PROD-08.1-integrity-contract.md);
+  the signed result is `integrity.verification`
+  ([the scorecard format](drill-scorecard.md#integrityverification-format-140)).
+
+`records_per_partition`, `anchor` and the sample window do not narrow a
+complete verification; the window still names `sample.window_end`, the restore
+window's end when the plan states no `restore.point_in_time`.
+
+**`complete_max_records`** bounds a complete verification: the most archived
+records it decodes, summed over the restored partitions (each partition's
+count is taken from the manifest before any byte of it is read). When the next
+partition would take the total past the bound, that partition and every later
+one are NOT compared, and the signed block says `covered: false` with the
+reason; the verdict is then never `pass`. **Complete coverage is never
+silently replaced by sampling.** Absent means no bound.
+
+**Refused at phase 0** (exit 3, before anything runs), because each asks for
+two verifications at once:
+
+- `coverage: complete` with `max_partitions`, which keeps the first N
+  partitions;
+- `complete_max_records` with `coverage: sampled` (or no `coverage`);
+- `complete_max_records: 0`.
+
+**What it costs.** Complete verification reads the whole archive of the
+restored partitions and the whole restored output; measured on the compose
+stack in the decision record (about a minute per GiB of one-KiB records with
+an optimised build on a laptop, several times the sampled check). A
+`RehearsalSchedule`, a `Restore` object and the console cannot ask for it yet;
+`logweir drill run` and `logweir restore run` can.
+
+**It is inside `plan_hash`.** The fields are part of the plan bytes an approver
+signs. Both are omitted from the serialised plan at their defaults, so a plan
+that does not ask for complete coverage is byte-identical to one written before
+the fields existed.
+
+**Absent field, old plans, old runners.** A plan without the field is sampled,
+exactly as before. A runner built before PROD-08.1 ignores both keys (the
+grammar ignores unknown keys), runs a sampled verification and signs no
+`integrity.verification` block, which both readers print as "coverage not
+recorded" — never as complete.
 
 ---
 

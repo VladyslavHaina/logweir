@@ -1785,3 +1785,109 @@ async fn a_compromise_recorded_on_another_policy_reaches_a_consumed_record() {
     let clean = decide_trusting(&object, vec![console(), bob()]).await;
     assert!(clean.is_verified(), "{clean:?}");
 }
+
+// ---------------------------------------------------------------------------
+// PROD-16.1: the fresh install's unbound default, at the Approval controller
+// ---------------------------------------------------------------------------
+
+/// A second throwaway console key (out of tree, as above): the one a fresh
+/// install's identity hook generated. Only the public half is here.
+const FRESH_CONSOLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAdt8QWZnc1BhjblUIQQuFcRWp68erPX9LV/hnz7YH+Fs=\n-----END PUBLIC KEY-----\n";
+const FRESH_CONSOLE_KEY_ID: &str =
+    "3eb8b1879357fa22413cfe29a44189afef27e2e446d9783ef768a36d8c3cfb8d";
+/// The localAdmin console's one-click confirmation of an UNBOUND namespace on
+/// a fresh install: policy `default-confirm-v1`, requester the local
+/// administrator.
+const DEFAULT_CONFIRM_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Ordinary","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"urn:logweir:local-admin","subject":"admin"},"policy":{"name":"default-confirm-v1","digest":"sha256:2f9f510607e57e08eec6e5169480d22389665c3822fa5d97751ef1b29b6d9e39"},"issuedAt":"2026-09-09T12:55:00Z","expiresAt":"2026-09-09T13:10:00Z"}"#;
+const DEFAULT_CONFIRM_SIG: &str =
+    "x4EaXcWLyj/zlvBlDPLGjMrPZdIsv1NJy9z0oXZGR1OOWHX6e4GwMd6kG/CgvtOt+FDIJtx95t2r28pT/6q4DA==";
+
+fn fresh_console() -> SpecKey {
+    key(
+        FRESH_CONSOLE_KEY_ID,
+        FRESH_CONSOLE_PEM,
+        SpecUsage::ConsoleConfirmation,
+        "console:logweir-system/logweir-console-confirmation",
+    )
+}
+
+async fn decide_fresh(policies: &ApprovalPolicySet) -> ApprovalOutcome {
+    let (client, _recorder) = mock_client_recording(routes(vec![fresh_console(), bob()]));
+    let object = approval_object(
+        DEFAULT_CONFIRM_DOC,
+        &sidecar(V2_PAYLOAD, &[(FRESH_CONSOLE_KEY_ID, DEFAULT_CONFIRM_SIG)]),
+    );
+    approval::decide_with_policy_at(&object, &client, policies, now())
+        .await
+        .expect("a verdict")
+}
+
+#[test]
+fn the_default_confirm_fixture_names_the_default_policy() {
+    assert!(DEFAULT_CONFIRM_DOC
+        .contains(&logweir_core::approval_policy::default_confirm_policy().digest()));
+}
+
+/// **A fresh install's first restore, confirmed in one click, with no key
+/// handled by a person** — an unbound namespace on a marked install verifies
+/// the localAdmin console's confirmation under `default-confirm-v1`.
+/// NEGATIVE CONTROLS: the same signed document on an UNMARKED install (the
+/// upgraded install; "the upgrade marker ignored" must fail here), under an
+/// explicit Governed binding (explicit bindings win), and under an explicit
+/// `defaultMode: strict`.
+#[tokio::test]
+async fn a_fresh_install_verifies_a_one_click_confirmation_of_an_unbound_namespace() {
+    let fresh = ApprovalPolicySet::default()
+        .with_installation(logweir_core::approval_policy::InstallationMarker::FreshInstallConfirm);
+    let outcome = decide_fresh(&fresh).await;
+    assert!(outcome.is_verified(), "{outcome:?}");
+    let ApprovalOutcome::Verified(v) = &outcome else {
+        unreachable!()
+    };
+    let provenance = v.authorization.as_ref().expect("v2 provenance");
+    assert_eq!(provenance.policy_name, "default-confirm-v1");
+    assert_eq!(provenance.requester, "urn:logweir:local-admin#admin");
+    assert_eq!(provenance.confirmation_key_id, FRESH_CONSOLE_KEY_ID);
+
+    let upgraded = ApprovalPolicySet::default();
+    assert_eq!(
+        outcome_reason(&decide_fresh(&upgraded).await),
+        "ApprovalPolicyMismatch",
+        "an unmarked install keeps legacy-governed-v1"
+    );
+    let bound_governed = bind("prod-governed")
+        .with_installation(logweir_core::approval_policy::InstallationMarker::FreshInstallConfirm);
+    assert_eq!(
+        outcome_reason(&decide_fresh(&bound_governed).await),
+        "ApprovalPolicyMismatch",
+        "an explicit binding wins over the fresh-install default"
+    );
+    let strict = ApprovalPolicySet::parse("defaultMode: strict\n")
+        .expect("valid")
+        .with_installation(logweir_core::approval_policy::InstallationMarker::FreshInstallConfirm);
+    assert_eq!(
+        outcome_reason(&decide_fresh(&strict).await),
+        "ApprovalPolicyMismatch"
+    );
+}
+
+/// The console key must be trusted for `ConsoleConfirmation` where the
+/// namespace resolves its trust: a fresh install's confirmation verified
+/// against a policy that carries the key under ANOTHER usage confirms nothing.
+#[tokio::test]
+async fn the_fresh_console_key_must_be_trusted_for_confirmation() {
+    let fresh = ApprovalPolicySet::default()
+        .with_installation(logweir_core::approval_policy::InstallationMarker::FreshInstallConfirm);
+    let mut wrong = fresh_console();
+    wrong.usages = vec![SpecUsage::GovernedApproval];
+    wrong.principal.id = "https://idp.example#console".into();
+    let (client, _recorder) = mock_client_recording(routes(vec![wrong]));
+    let object = approval_object(
+        DEFAULT_CONFIRM_DOC,
+        &sidecar(V2_PAYLOAD, &[(FRESH_CONSOLE_KEY_ID, DEFAULT_CONFIRM_SIG)]),
+    );
+    let outcome = approval::decide_with_policy_at(&object, &client, &fresh, now())
+        .await
+        .expect("a verdict");
+    assert!(!outcome.is_verified(), "{outcome:?}");
+}

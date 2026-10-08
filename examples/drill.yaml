@@ -62,6 +62,14 @@ sample:
   # `fail-integrity`. `tail` and `random` are now REFUSED at phase 0 (exit 3)
   # rather than silently mis-sampling — see `logweir_core::spec::Anchor`.
   anchor: head
+  # PROD-08.1: `coverage: complete` verifies EVERY archived segment and EVERY
+  # restored record of every restored partition, with exact counts, instead of
+  # this 25-record sample; `complete_max_records` bounds it, and a bound that
+  # stops it signs `covered: false`, never a pass. It reads the whole archive
+  # of the restored partitions, so it costs far more than the sample — see
+  # docs/formats/drill-spec.md. Omitted here: the default is `sampled`.
+  # coverage: complete
+  # complete_max_records: 5000000
 
 objectives:
   rto_seconds: 900

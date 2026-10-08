@@ -5167,16 +5167,22 @@
         "description": "PLAT-19.2: a namespace's effective approval policy.",
         "type": "object",
         "required": [
+          "basis",
           "installationDigest",
           "legacy",
           "mode",
           "name",
           "namespace",
+          "operatorMode",
           "ordinaryConfirmationAvailable",
           "requireDistinctPrincipal",
           "ticketRequired"
         ],
         "properties": {
+          "basis": {
+            "description": "PROD-16.1: why the namespace resolves to this policy.",
+            "$ref": "#/components/schemas/PolicyBasisView"
+          },
           "confirmationKeyId": {
             "description": "The console's `ConsoleConfirmation` key id, when configured — the id an administrator must put on this namespace's `TrustPolicy`.",
             "type": "string",
@@ -5192,7 +5198,7 @@
             "type": "string"
           },
           "legacy": {
-            "description": "`true` when the namespace is unbound.",
+            "description": "`true` when the namespace resolves to `legacy-governed-v1`.",
             "type": "boolean"
           },
           "maxAgeSeconds": {
@@ -5206,15 +5212,19 @@
             "$ref": "#/components/schemas/ApprovalModeView"
           },
           "name": {
-            "description": "The policy name — `legacy-governed-v1` when the namespace is unbound.",
+            "description": "The policy name — `legacy-governed-v1` for an unbound namespace on an unmarked install, `default-confirm-v1` for one under a `confirm` unbound default (PROD-16.1).",
             "type": "string"
           },
           "namespace": {
             "description": "The namespace asked about.",
             "type": "string"
           },
+          "operatorMode": {
+            "description": "PROD-16.1: the same mode in the operator's words: `confirm`, `two-person` or `strict`.",
+            "$ref": "#/components/schemas/OperatorModeView"
+          },
           "ordinaryConfirmationAvailable": {
-            "description": "Whether THIS console will sign an ordinary confirmation here: `true` only for an Ordinary binding served by a `shared` console. D0: the `localAdmin` mode \"does not expose Ordinary\", so there a submission in an Ordinary namespace is refused `policy_mismatch` and nothing is created.",
+            "description": "Whether THIS console will sign an ordinary confirmation here: `true` for an Ordinary policy (`confirm`) when the console holds its confirmation key. PROD-16.1: in either console mode — `localAdmin` confirms as `urn:logweir:local-admin#admin`. `false` under `confirm` means the key is not there yet (the identity hook writes it once, at install), and a submission is refused `policy_mismatch` with nothing created.",
             "type": "boolean"
           },
           "requireDistinctPrincipal": {
@@ -9899,6 +9909,32 @@
           }
         }
       },
+      "OperatorModeView": {
+        "description": "PROD-16.1: the approval mode in the operator's words — the one mapping is `logweir_core::approval_policy::OperatorMode`.",
+        "oneOf": [
+          {
+            "description": "One-person confirmation in the console (internal `Ordinary`).",
+            "type": "string",
+            "enum": [
+              "confirm"
+            ]
+          },
+          {
+            "description": "Two-person approval in the console (PROD-16.2; never served by this build).",
+            "type": "string",
+            "enum": [
+              "two-person"
+            ]
+          },
+          {
+            "description": "A personal-key approval (internal `Governed`, or `legacy-governed-v1`).",
+            "type": "string",
+            "enum": [
+              "strict"
+            ]
+          }
+        ]
+      },
       "Page": {
         "description": "One page of a list.",
         "type": "object",
@@ -10140,6 +10176,39 @@
             "type": "string"
           }
         }
+      },
+      "PolicyBasisView": {
+        "description": "PROD-16.1: why a namespace resolves to its policy.",
+        "oneOf": [
+          {
+            "description": "An explicit namespace binding in the installation document.",
+            "type": "string",
+            "enum": [
+              "binding"
+            ]
+          },
+          {
+            "description": "Unbound, and the installation document's `defaultMode`.",
+            "type": "string",
+            "enum": [
+              "configured"
+            ]
+          },
+          {
+            "description": "Unbound, and the fresh-install marker: `confirm`.",
+            "type": "string",
+            "enum": [
+              "freshInstall"
+            ]
+          },
+          {
+            "description": "Unbound, no `defaultMode`, no marker: `legacy-governed-v1`.",
+            "type": "string",
+            "enum": [
+              "legacy"
+            ]
+          }
+        ]
       },
       "PolicyChangedDetail": {
         "description": "What a schedule's policy is NOW, on `policy_changed` (D1 §8.2).\n\nA PROBLEM EXTENSION, NOT A FIELD ERROR. `expectedGeneration` was not malformed — it named a revision that has been superseded — so the answer a console needs is the current revision, not a sentence about a field. RFC 9457 permits extension members; this is the only one this API defines.",
@@ -11806,6 +11875,7 @@
           "approvalName",
           "legacy",
           "mode",
+          "operatorMode",
           "policy",
           "state"
         ],
@@ -11832,6 +11902,10 @@
           "mode": {
             "description": "The mode the namespace's binding requires.",
             "$ref": "#/components/schemas/ApprovalModeView"
+          },
+          "operatorMode": {
+            "description": "PROD-16.1: the same mode in the operator's words.",
+            "$ref": "#/components/schemas/OperatorModeView"
           },
           "policy": {
             "description": "The policy name — `legacy-governed-v1` for an unbound namespace.",

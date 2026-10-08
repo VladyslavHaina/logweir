@@ -728,7 +728,7 @@ function receiptVerified(status) {
 //     API could not finish cannot say that no `Backup` refused this receipt,
 //     and this page does not guess;
 //   * the row carries everything the plan binding needs, unredacted: the
-//     point id, the receipt key, and both digests;
+//     point id, the backup set id, the receipt key, and both digests;
 //   * and, when the offer came from a `Backup` (a destination-backed run the
 //     controller could not verify itself, so it wrote no window), that
 //     Backup's OWN verdict is absent or `NotAttempted` -- never a reached
@@ -757,6 +757,104 @@ export const REDACTION_MARKER = "[redacted]";
 /** Whether a published archive key is the redactor's output rather than a key. */
 export function isRedacted(value) {
   return typeof value === "string" && value.indexOf(REDACTION_MARKER) !== -1;
+}
+
+/** A bare UUID in either case (`check_contract.rs` `is_uuid` takes any hex
+ *  digit), or a LOWER-case UID followed by a scheduled run's slot and retry
+ *  suffix (`is_scheduled_set_id`). */
+const MINTED_SET_ID =
+  /^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-([0-9]{8})-([0-9]{6})(?:-r[1-9])?)$/;
+
+/** Whether `id` is a set id the catalog sync's redactor reads as an IDENTITY
+ *  (`check_contract.rs` `is_set_id`): a UUID -- a manual run's set id is the
+ *  `Backup`'s own UID -- or a scheduled run's `<schedule uid>-<yyyymmdd>-
+ *  <hhmmss>`, `-r<k>` for a retry, whose slot is an instant chrono accepts:
+ *  a real date and time, the year `0000` and a leap second (`...60`)
+ *  included, exactly as the Rust side's round trip does (review L-4).
+ *  `ui/tests/fixtures/set-ids.json` is read by this side's test and by the
+ *  redactor's, so the two agree, edges included.
+ *
+ *  Used only to say WHY a binding came back redacted -- never to decide an
+ *  offer: the offer is refused on the marker itself. */
+export function isMintedSetId(id) {
+  const m = MINTED_SET_ID.exec(typeof id === "string" ? id : "");
+  if (m === null) {
+    return false;
+  }
+  if (m[1] === undefined) {
+    return true;
+  }
+  const n = (s, from, to) => Number(s.slice(from, to));
+  const [y, mo, d] = [n(m[1], 0, 4), n(m[1], 4, 6), n(m[1], 6, 8)];
+  const [h, mi, se] = [n(m[2], 0, 2), n(m[2], 2, 4), n(m[2], 4, 6)];
+  // `setUTCFullYear` takes a year below 100 literally (`Date.UTC` would add
+  // 1900), and a leap second is checked as the :59 it extends.
+  const t = new Date(0);
+  t.setUTCFullYear(y, mo - 1, d);
+  t.setUTCHours(h, mi, Math.min(se, 59), 0);
+  return se <= 60 && t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 &&
+    t.getUTCDate() === d && t.getUTCHours() === h && t.getUTCMinutes() === mi &&
+    t.getUTCSeconds() === Math.min(se, 59);
+}
+
+/** What a set id chosen for `logweir backup run` must be for its points to be
+ *  restorable from the console: the key `backup run` writes is
+ *  `logweir/backups/<set id>/<run id>.receipt.json`, the run id already
+ *  spends the key's ONE free component, so the set id must be a public form.
+ *  The common ones are named, as examples (review L-4): a SHA-256 digest is
+ *  public too, and so is a scheduled run's own id. */
+const CHOSEN_SET_ID_RULE =
+  "a set id chosen for `logweir backup run` survives when it is a public form -- for " +
+  "example a UUID, or lower-case letters, digits, `.`, `-`, `_` and `=` under 40 characters";
+
+/** WHY A POINT'S PLAN BINDING CAME BACK REDACTED -- one sentence, or `null`
+ *  when neither binding field carries the marker (FX-17).
+ *
+ *  The binding is `source.backup` (the set id) and `source.point.receipt_key`;
+ *  the catalog sync passes both through the product's redactor, and a field
+ *  that comes back as its output cannot be put into a plan. The sentence says
+ *  which field, and the cause the published values still let this page tell
+ *  apart:
+ *    * the SET ID went: the redactor did not read it as an identity. Runners up
+ *      to v0.2.0-rc.1 did that to every scheduled run's set id, which is the
+ *      PoC's whole first Catalog page (FX-17); a chosen set id outside the
+ *      public forms does it too;
+ *    * only the KEY went, beside a set id this product mints: the run id in
+ *      it was withheld, which runners older than v0.2.0-rc.1 did
+ *      (CATALOG-RECEIPTKEY-REDACTED, the ULID exemption);
+ *    * only the KEY went, beside a set id someone chose: that id and the run
+ *      id are two free components, one more than an archive key may carry. */
+export function redactedBindingReason(entry) {
+  const e = entry || {};
+  const setGone = isRedacted(e.backupId);
+  const keyGone = isRedacted(e.receiptKey);
+  if (!setGone && !keyGone) {
+    return null;
+  }
+  const what = [];
+  if (setGone) {
+    what.push("backup set id as `" + e.backupId + "`");
+  }
+  if (keyGone) {
+    what.push("receipt key as `" + e.receiptKey + "`");
+  }
+  const head = "the catalog published this point's " + what.join(" and its ") +
+    ", the redactor's output rather than the value in the bucket, so no plan binding can name " +
+    "the objects the runner must re-read: ";
+  if (setGone) {
+    return head +
+      "the catalog sync did not read the set id as an identity. Runners up to v0.2.0-rc.1 " +
+      "withhold every scheduled run's set id (its schedule's UID, then the slot) this way; " +
+      "upgrade the runner image and sync the catalog again. And " + CHOSEN_SET_ID_RULE;
+  }
+  if (isMintedSetId(e.backupId)) {
+    return head +
+      "the redactor withheld the run id in the key, which runners older than v0.2.0-rc.1 " +
+      "did; sync the catalog again with a current runner image";
+  }
+  return head +
+    "its set id `" + String(e.backupId || "") + "` and the run id are two chosen components, " +
+    "and an archive key may carry only one past the redactor; " + CHOSEN_SET_ID_RULE;
 }
 
 /** The two verdicts that let a catalog row answer for a `Backup`: none at all,
@@ -962,12 +1060,12 @@ export function catalogPointOffer(entry, page) {
   if (typeof e.receiptKey !== "string" || e.receiptKey.trim().length === 0) {
     return no("the catalog published no receipt key for this point");
   }
-  if (isRedacted(e.receiptKey)) {
-    return no(
-      "the catalog published this point's receipt key as `" + e.receiptKey + "`: the " +
-        "archive-key redactor rewrote it, so the plan binding cannot name the object the " +
-        "runner must re-read; re-sync the catalog with a runner that keeps a ULID run id",
-    );
+  // ONE REASON FOR A REDACTED BINDING, whichever of its two fields carries
+  // the marker (FX-17). The set id used to fall through to "no usable backup
+  // set id" below -- true of `[redacted]`, and no help to anyone.
+  const redacted = redactedBindingReason(e);
+  if (redacted !== null) {
+    return no(redacted);
   }
   if (typeof e.receiptSha256 !== "string" || !DIGEST_SHAPE.test(e.receiptSha256)) {
     return no("the catalog published no well-formed receipt digest for this point");
@@ -3645,45 +3743,51 @@ export const GUIDED_SUBMIT_SENTENCE =
   "because its name is minted from these bytes.";
 
 
-/** The approval step under the namespace's EFFECTIVE policy (PLAT-19.2).
+/** The approval step under the namespace's EFFECTIVE policy (PLAT-19.2), in
+ *  the three modes an operator sees (PROD-16.1): `confirm` (one person clicks
+ *  Create; no key), `two-person` (PROD-16.2) and `strict` (an approver's
+ *  personal key).
  *
  *  `policy` is the product API's `ApprovalPolicyView`, or `null` when the mode
  *  cannot know it (legacy `kubectl proxy`) or the read failed -- and `null`
- *  renders exactly today's governed instructions, which is the fail-safe
+ *  renders exactly today's out-of-band instructions, which is the fail-safe
  *  reading: nothing here ever tells an operator a Restore will run on their
- *  confirmation unless the console said the namespace is bound Ordinary. */
+ *  confirmation unless the console said the namespace is under `confirm`. */
 export function approvalPolicyBlock(policy, ticket, ticketErrors) {
   const p = policy !== null && typeof policy === "object" ? policy : null;
   if (p !== null && p.legacy === false && p.mode === "ordinary" &&
     p.ordinaryConfirmationAvailable === false) {
     return (
-      "<h4 id=\"approval-policy-ordinary-unavailable\">Ordinary confirmation is not " +
-      "available here</h4>" +
-      "<p class=\"complaint\">This namespace is bound to approval policy <code>" +
-      esc(p.name) + "</code> (ordinary confirmation), and this console runs in the " +
-      "administrator mode, which does not offer ordinary confirmation: its one identity is " +
-      "whoever holds the port-forward, not a person the confirmation could attest. Submit " +
-      "this restore through the shared console.</p>"
+      "<h4 id=\"approval-policy-ordinary-unavailable\">Confirm: not available yet</h4>" +
+      "<p class=\"complaint\">This namespace is under approval policy <code>" +
+      esc(p.name) + "</code> (confirm: one person confirms in the console), and this console " +
+      "cannot sign a confirmation yet: its confirmation key is not there. The installation's " +
+      "identity hook generates it once, at install; try again in a minute, and if it persists " +
+      "the hook did not finish.</p>"
     );
   }
   if (p !== null && p.legacy === false && p.mode === "ordinary") {
+    const fresh = p.basis === "freshInstall"
+      ? " This installation started in confirm: every namespace without its own approval " +
+        "policy is confirmed in the console."
+      : "";
     return (
-      "<h4 id=\"approval-policy-ordinary\">Ordinary confirmation</h4>" +
-      "<p class=\"note\">This namespace is bound to approval policy <code>" + esc(p.name) +
-      "</code> (ordinary confirmation). Create the Restore is your confirmation: the console " +
-      "signs, as its attestation that you asked, a document naming exactly this Restore, its " +
-      "UID and this plan hash, and the Restore runs once weirkeeper verifies it. No approver " +
-      "and no out-of-band signature are involved.</p>"
+      "<h4 id=\"approval-policy-ordinary\">Confirm: no key needed</h4>" +
+      "<p class=\"note\">This namespace is under approval policy <code>" + esc(p.name) +
+      "</code> (confirm). Create the Restore is your confirmation: the console signs, as its " +
+      "attestation that you asked, a document naming exactly this Restore, its UID and this " +
+      "plan hash, and the Restore runs once weirkeeper verifies it. No approver and no key " +
+      "are involved." + fresh + "</p>"
     );
   }
   if (p !== null && p.legacy === false && p.mode === "governed") {
     return (
-      "<h4 id=\"approval-policy-governed\">Governed approval</h4>" +
-      "<p class=\"note\">This namespace is bound to approval policy <code>" + esc(p.name) +
-      "</code> (governed approval). Create the Restore records the console's confirmation of " +
-      "you as the requester; the Restore runs only after an approver who is NOT you " +
-      "countersigns that confirmation on their own machine and submits it on the Restore's " +
-      "approval page.</p>" +
+      "<h4 id=\"approval-policy-governed\">Strict: an approver's personal key</h4>" +
+      "<p class=\"note\">This namespace is under approval policy <code>" + esc(p.name) +
+      "</code> (strict). Create the Restore records the console's confirmation of you as the " +
+      "requester; the Restore runs only after an approver who is NOT you countersigns that " +
+      "confirmation with their own key, on their own machine, and submits it on the " +
+      "Restore's approval page.</p>" +
       "<div class=\"field\"><label for=\"change-ticket\">Change ticket (required)</label>" +
       "<input id=\"change-ticket\" name=\"ticket\" maxlength=\"128\" value=\"" +
       esc(typeof ticket === "string" ? ticket : "") + "\"" +
@@ -3695,7 +3799,7 @@ export function approvalPolicyBlock(policy, ticket, ticketErrors) {
     );
   }
   return (
-    "<h4>Approve it out of band</h4>" +
+    "<h4>Approve it out of band (strict: an approver's personal key)</h4>" +
     "<p class=\"note\">Run this on the machine that holds the approver's private key. This " +
     "page never sees it.</p>" +
     copyBlock([APPROVE_COMMAND])
@@ -4572,15 +4676,16 @@ function ticketFor(state) {
 }
 
 /** A refusal the namespace's approval POLICY makes before anything is sent
- *  (PLAT-19.2), or `null`: an Ordinary binding in a console that does not
- *  offer ordinary confirmation (D0: the administrator mode "does not expose
- *  Ordinary"). The product API refuses the same request; this says so first. */
+ *  (PLAT-19.2), or `null`: a `confirm` policy this console cannot sign yet --
+ *  PROD-16.1: its confirmation key is not there (the identity hook writes it
+ *  once, at install). The product API refuses the same request; this says so
+ *  first. */
 export function policyRefusal(state) {
   const p = (state || {}).approvalPolicy;
   if (p !== null && typeof p === "object" && p.legacy === false && p.mode === "ordinary" &&
     p.ordinaryConfirmationAvailable === false) {
-    return "namespace policy " + String(p.name) + " is ordinary confirmation, which this " +
-      "console mode does not offer; submit through the shared console";
+    return "namespace policy " + String(p.name) + " is confirm, and this console does not " +
+      "offer it yet: its confirmation key is not there; try again in a minute";
   }
   return null;
 }

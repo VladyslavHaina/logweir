@@ -169,7 +169,12 @@ PAYLOAD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 # `1.3.0` since FX-8 (`source.time_basis`: which source topics a restore
 # selected by producer time, and which it selected by time with no recorded
 # timestamp type). 1.2.0 is FX-3's (`topic_parity.not_reconstructed`).
-FORMAT_VERSION = "1.3.0"
+#
+# `1.4.0` since PROD-08.1 (`integrity.verification`: whether the verdict
+# covered a sample or every selected record, the structured capture gaps and
+# pruned ranges, and a complete verification's archive integrity and replay
+# comparison).
+FORMAT_VERSION = "1.4.0"
 
 # This SCRIPT's own version — NOT the format version (GC12: FORMAT_VERSION stays
 # "1.0.0"). Bumped whenever this script's VERDICT RULE changes: when there is a
@@ -416,23 +421,44 @@ FORMAT_VERSION = "1.3.0"
 # renumber moves this line, the literal pins in docs/test_verify_scorecard.py
 # and the guide's table together.
 #
-# 1.19.0 (PROD-01.3) knows the three auth modes PROD-01.3 adds --
+# 1.19.0 (PROD-08.1) knows scorecard format 1.4.0 and its
+# `integrity.verification`: `coverage` (sampled or complete), what the
+# restored records were compared with, whether header order was verified,
+# application validation, the verified partitions' capture gaps and pruned
+# ranges, and a complete verification's archive integrity, replay comparison
+# and per-partition counts. Seven arms, IV-1 to IV-7, mirrored byte for byte
+# and in position from `Scorecard::validate_invariants`: the block only under a
+# version of at least 1.4.0, a coverage of `sampled` or `complete`, header order
+# `verified` only for complete coverage, the complete block exactly with
+# complete coverage, an incomplete reason exactly when not covered, a pass only
+# over a covered, clean complete block (clean in total and in every partition,
+# over at least one partition), and totals that are the partitions' sums. They
+# fire only on a document carrying the block, so every document without it is
+# decided exactly as before. The shape layer refuses a block whose fields are not
+# of the types the writer gives them. The `integrity coverage:` lines say what
+# the verdict covered, and that a document before 1.4.0 covered a sample. Every
+# blank test (ruling R-A) now strips `RUST_WHITESPACE`, Rust's own `trim` set,
+# where it stripped Python's wider one (U+001C..U+001F too). A renumber moves
+# this line, the literal pins in docs/test_verify_scorecard.py and the guide's
+# table together.
+#
+# 1.20.0 (PROD-01.3) knows the three auth modes PROD-01.3 adds --
 # `scramSha256`, `plain` (SASL/PLAIN, over TLS only) and `mtls` (a TLS client
 # certificate) -- as VERSIONED values of the two existing auth-mode fields:
 # the backup receipt's `source.auth.mode` from receipt format 1.3.0, and the
-# scorecard's `target.auth.mode` from scorecard format 1.4.0. Each field's one
+# scorecard's `target.auth.mode` from scorecard format 1.5.0. Each field's one
 # arm becomes three statements, mirrored byte for byte and in position: the
 # closed two below the new version (unchanged), a new value under a version
 # that predates it, and the closed five from the new version. Every document
 # that predates PROD-01.3 is decided exactly as before; an older script refuses
 # a document naming a new mode, which is the safer verdict (OD-7, third case).
-SCRIPT_VERSION = "1.19.0"
+SCRIPT_VERSION = "1.20.0"
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
 # `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
 # `crates/logweir-core/src/scorecard.rs`, which it must equal
 # (`docs/test_verify_scorecard.py::test_the_auth_modes_minors_are_the_rust_readers`).
-SCORECARD_AUTH_MODES_SINCE_MINOR = 4
+SCORECARD_AUTH_MODES_SINCE_MINOR = 5
 
 # The first minor of the BACKUP RECEIPT's format 1 whose `source.auth.mode` may
 # be `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
@@ -444,6 +470,47 @@ RECEIPT_AUTH_MODES_SINCE_MINOR = 3
 # `crates/logweir-core/src/connection.rs`, which they must equal.
 ORIGINAL_AUTH_MODES = ("plaintext", "scramSha512")
 PROD_01_3_AUTH_MODES = ("scramSha256", "plain", "mtls")
+
+# The first minor of SCORECARD format 1 that defines `integrity.verification`
+# (arm IV-1) -- `VERIFICATION_SINCE_MINOR` in
+# `crates/logweir-core/src/scorecard.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_verification_minor_is_the_rust_readers`).
+# A renumber moves both, and FORMAT_VERSION.
+SCORECARD_VERIFICATION_SINCE_MINOR = 4
+
+# The eight counts of a `ReplayComparison` (PROD-08.1), in its declaration
+# order; arm IV-7 sums each over `complete.partitions`.
+REPLAY_FIELDS = (
+    "expected",
+    "restored",
+    "matching",
+    "missing",
+    "unexpected",
+    "duplicates",
+    "out_of_order",
+    "mismatched",
+)
+
+
+def _replay_exact(replay) -> bool:
+    """`ReplayComparison::is_exact`: no fault of any kind, every expected
+    record restored once and matching, nothing else restored. Each conjunct is
+    held to the Rust reader by its own corpus case (review M-1)."""
+    return (
+        replay["missing"] == 0
+        and replay["unexpected"] == 0
+        and replay["duplicates"] == 0
+        and replay["out_of_order"] == 0
+        and replay["mismatched"] == 0
+        and replay["matching"] == replay["expected"]
+        and replay["restored"] == replay["expected"]
+    )
+
+
+def _sat_add(a: int, b: int) -> int:
+    """`u64::saturating_add`: the Rust reader's sums stop at `u64::MAX`, so
+    IV-7 compares the same numbers in both readers."""
+    return min(a + b, 2**64 - 1)
 
 # The first minor of SCORECARD format 1 that defines `source.time_basis` (arm
 # TB-1) -- `TIME_BASIS_SINCE_MINOR` in `crates/logweir-core/src/scorecard.rs`,
@@ -663,6 +730,23 @@ def _minor(version: str):
     return n if n < 2 ** 64 else None
 
 
+# RULING R-A'S "BLANK", EXACTLY AS THE RUST READER SPELLS IT (PROD-08.1 review
+# L-1). Every blank test there is `str::trim().is_empty()`, and `trim` strips
+# `char::is_whitespace` — the Unicode White_Space property, these 25 code
+# points. Python's argument-less `str.strip()` also strips U+001C..U+001F (the
+# file, group, record and unit separators, which `str.isspace` counts), so on a
+# reason, key or mode made of those the two readers disagreed in both
+# directions: `incomplete_reason: "\x1f"` beside `covered: false` was VALID from
+# `drill verify` and refused here, and beside `covered: true` the reverse. The
+# writer never produces either; the script mirrors the reference reader, so
+# every blank test here strips this set and nothing else.
+RUST_WHITESPACE = (
+    "\t\n\x0b\x0c\r \x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+
+
 def _time_basis_shape_ok(block) -> bool:
     """`source.time_basis` has the shape `TimeBasisLabel` deserialises: an
     object whose `plan` is absent, null or a string and whose `producer_time`
@@ -676,6 +760,87 @@ def _time_basis_shape_ok(block) -> bool:
     for name in ("producer_time", "not_recorded"):
         listed = block.get(name)
         if not isinstance(listed, list) or not all(isinstance(t, str) for t in listed):
+            return False
+    return True
+
+
+def _int_in(x, bits) -> bool:
+    """`x` is a JSON integer in the signed `bits`-bit range (Rust's `i32` or
+    `i64`), never a bool."""
+    return isinstance(x, int) and not isinstance(x, bool) and -(2 ** (bits - 1)) <= x < 2 ** (bits - 1)
+
+
+def _strings(x) -> bool:
+    return isinstance(x, list) and all(isinstance(t, str) for t in x)
+
+
+def _verification_shape_ok(block) -> bool:
+    """`integrity.verification` has the shape `Verification` deserialises
+    (PROD-08.1, format 1.4.0): four strings; `gaps` and `pruned`, arrays of
+    `{topic: string, partition: i32, from_offset: i64, to_offset: i64}`; and
+    `complete` absent, null, or an object with a bool `covered`, an optional
+    string `incomplete_reason`, a `window` of an optional `start_ms` and an
+    `end_ms` (i64), and `archive`, `replay` and `partitions` objects and
+    arrays in the writer's shape.
+
+    The `u64` counts are NOT checked here: `U64_FIELDS` names every one, and
+    the domain loop refuses a null, absent, non-integer or out-of-range count
+    in the words it uses for every other u64 of the document. Only their
+    CONTAINERS are asserted, so that loop can read through them. Unknown keys
+    are ignored, as serde ignores them."""
+    if not isinstance(block, dict):
+        return False
+    for name in ("coverage", "comparison_basis", "header_order", "application"):
+        if not isinstance(block.get(name), str):
+            return False
+    for name in ("gaps", "pruned"):
+        ranges = block.get(name)
+        if not isinstance(ranges, list):
+            return False
+        for r in ranges:
+            if not (
+                isinstance(r, dict)
+                and isinstance(r.get("topic"), str)
+                and _int_in(r.get("partition"), 32)
+                and _int_in(r.get("from_offset"), 64)
+                and _int_in(r.get("to_offset"), 64)
+            ):
+                return False
+    complete = block.get("complete")
+    if complete is None:
+        return True
+    if not isinstance(complete, dict) or not isinstance(complete.get("covered"), bool):
+        return False
+    reason = complete.get("incomplete_reason")
+    if reason is not None and not isinstance(reason, str):
+        return False
+    window = complete.get("window")
+    if not isinstance(window, dict) or not _int_in(window.get("end_ms"), 64):
+        return False
+    if window.get("start_ms") is not None and not _int_in(window.get("start_ms"), 64):
+        return False
+    archive = complete.get("archive")
+    if not (
+        isinstance(archive, dict)
+        and _strings(archive.get("segments_failed"))
+        and _strings(archive.get("segments_unverified"))
+    ):
+        return False
+    if not isinstance(complete.get("replay"), dict):
+        return False
+    partitions = complete.get("partitions")
+    if not isinstance(partitions, list):
+        return False
+    for p in partitions:
+        if not (
+            isinstance(p, dict)
+            and isinstance(p.get("topic"), str)
+            and _int_in(p.get("partition"), 32)
+            and isinstance(p.get("target_topic"), str)
+            and isinstance(p.get("compared"), bool)
+            and isinstance(p.get("replay"), dict)
+            and _strings(p.get("findings"))
+        ):
             return False
     return True
 
@@ -896,6 +1061,31 @@ U64_FIELDS = (
     ("integrity.records_sampled", False),
     ("integrity.records_sampled_matching", False),
     ("integrity.mismatches", False),
+    ("integrity.verification.complete.max_records", True),
+    ("integrity.verification.complete.archive.segments", False),
+    ("integrity.verification.complete.archive.segments_verified", False),
+    ("integrity.verification.complete.archive.records_decoded", False),
+    ("integrity.verification.complete.archive.offset_holes", False),
+    ("integrity.verification.complete.replay.expected", False),
+    ("integrity.verification.complete.replay.restored", False),
+    ("integrity.verification.complete.replay.matching", False),
+    ("integrity.verification.complete.replay.missing", False),
+    ("integrity.verification.complete.replay.unexpected", False),
+    ("integrity.verification.complete.replay.duplicates", False),
+    ("integrity.verification.complete.replay.out_of_order", False),
+    ("integrity.verification.complete.replay.mismatched", False),
+    ("integrity.verification.complete.partitions[].segments", False),
+    ("integrity.verification.complete.partitions[].segments_verified", False),
+    ("integrity.verification.complete.partitions[].records_decoded", False),
+    ("integrity.verification.complete.partitions[].offset_holes", False),
+    ("integrity.verification.complete.partitions[].replay.expected", False),
+    ("integrity.verification.complete.partitions[].replay.restored", False),
+    ("integrity.verification.complete.partitions[].replay.matching", False),
+    ("integrity.verification.complete.partitions[].replay.missing", False),
+    ("integrity.verification.complete.partitions[].replay.unexpected", False),
+    ("integrity.verification.complete.partitions[].replay.duplicates", False),
+    ("integrity.verification.complete.partitions[].replay.out_of_order", False),
+    ("integrity.verification.complete.partitions[].replay.mismatched", False),
 )
 
 
@@ -945,7 +1135,35 @@ def _u64_fields(doc):
         owner = blocks.get(block, doc.get(block))
         if not isinstance(owner, dict):
             continue
-        yield path, owner.get(key), optional
+        # PROD-08.1 (1.19.0): a u64 NESTED below its block, at any depth —
+        # `integrity.verification.complete.archive.segments`, and through a
+        # list, `integrity.verification.complete.partitions[].replay.expected`.
+        # Each step is an OPTIONAL struct, a REQUIRED one inside an optional
+        # one (whose presence the block's own shape check has already
+        # asserted), or a `Vec` of structs; anything that is not the expected
+        # container is skipped, never traced back.
+        for name, value in _nested(owner, key.split("."), f"{block}."):
+            yield name, value, optional
+
+
+def _nested(owner, steps, shown):
+    """(dotted name, value) for `steps` below `owner`, expanding a `name[]`
+    step over every element of the list it names (the element's index
+    replaces `[]` in the name, as `phases[0].duration_ms` does)."""
+    head, rest = steps[0], steps[1:]
+    if not rest:
+        yield f"{shown}{head}", owner.get(head)
+        return
+    if head.endswith("[]"):
+        items = owner.get(head[:-2])
+        if isinstance(items, list):
+            for n, item in enumerate(items):
+                if isinstance(item, dict):
+                    yield from _nested(item, rest, f"{shown}{head[:-2]}[{n}].")
+        return
+    child = owner.get(head)
+    if isinstance(child, dict):
+        yield from _nested(child, rest, f"{shown}{head}.")
 
 
 def check_invariants(doc) -> str:
@@ -1112,6 +1330,19 @@ def check_invariants(doc) -> str:
     ):
         return "topic_parity.not_reconstructed is not an array of strings"
 
+    # Also shape (PROD-08.1, scorecard 1.4.0): `integrity.verification` is an
+    # `Option<Verification>` over there, so `null` is ABSENT and a block whose
+    # containers, strings, bools or signed integers are not the writer's is
+    # refused at DESERIALISATION. Before the u64 loop below, which reads the
+    # block's counts through those containers. Every bad shape is a case in
+    # `shape-index.json`.
+    verification = integrity.get("verification")
+    if verification is not None and not _verification_shape_ok(verification):
+        return (
+            "integrity.verification is not an object of the shape the writer gives it: "
+            "four strings, two arrays of offset ranges and an optional complete block"
+        )
+
     # THE u64 DOMAIN, not merely the JSON type (Task 5d, from Task 5c's review
     # finding F1). `isinstance(v, int)` mirrors serde's TYPE and not `u64`'s
     # DOMAIN, and the gap was a live two-reader disagreement of exactly the
@@ -1190,8 +1421,8 @@ def check_invariants(doc) -> str:
         # on `""` — Rust's `is_some()` is true for `Some("")` while Python's
         # truthiness is false — which is the class of split the parity gate
         # exists to catch, and the one T0-6 actually found.
-        offset_key_named = bool(str(evidence.get("offset_report_key") or "").strip())
-        offset_digest_named = bool(str(evidence.get("offset_report_sha256") or "").strip())
+        offset_key_named = bool(str(evidence.get("offset_report_key") or "").strip(RUST_WHITESPACE))
+        offset_digest_named = bool(str(evidence.get("offset_report_sha256") or "").strip(RUST_WHITESPACE))
         if offset_key_named != offset_digest_named:
             return (
                 "evidence.offset_report_key and evidence.offset_report_sha256 are present or "
@@ -1254,7 +1485,7 @@ def check_invariants(doc) -> str:
         # `#[serde(default)]` plus `TargetMode::is_scratch` for every document
         # the Rust reader can read. By the time this runs, a PRESENT `mode` is
         # one of the two spellings and `mode is None` means the key was absent.
-        marker_named = bool(str(target.get("marker_topic") or "").strip())
+        marker_named = bool(str(target.get("marker_topic") or "").strip(RUST_WHITESPACE))
         mode = target.get("mode")
         if not marker_named and (mode is None or mode == "scratch"):
             return (
@@ -1272,7 +1503,7 @@ def check_invariants(doc) -> str:
     # predicate, the same message, the same position.
     if integrity.get("result") == "partial" and not str(
         integrity.get("partial_reason") or ""
-    ).strip():
+    ).strip(RUST_WHITESPACE):
         return "integrity.result is 'partial' but partial_reason is null"
 
     # The format's only two float fields.
@@ -1353,7 +1584,7 @@ def check_invariants(doc) -> str:
     # The converse of the `partial => partial_reason` arm above, on the same
     # trimmed-empty predicate (ruling R-A), so `""` and `"   "` count as absent
     # in both readers.
-    if outcome == "pass" and str(integrity.get("partial_reason") or "").strip():
+    if outcome == "pass" and str(integrity.get("partial_reason") or "").strip(RUST_WHITESPACE):
         return "outcome is 'pass' but integrity.partial_reason is present"
 
     # `met: null` is legitimate on a pass; only an explicit `false` contradicts
@@ -1419,8 +1650,8 @@ def check_invariants(doc) -> str:
     # neither reaches an invariant. `"auth": null` is absent in both.
     target_auth = target.get("auth")
     if isinstance(target_auth, dict):
-        mode_blank = not str(target_auth.get("mode") or "").strip()
-        username_named = bool(str(target_auth.get("username") or "").strip())
+        mode_blank = not str(target_auth.get("mode") or "").strip(RUST_WHITESPACE)
+        username_named = bool(str(target_auth.get("username") or "").strip(RUST_WHITESPACE))
         if mode_blank and username_named:
             return (
                 "target.auth names a username with no auth mode; a username without its "
@@ -1438,10 +1669,10 @@ def check_invariants(doc) -> str:
         # has already refused a whitespace-only mode, and the receipt's arm 5
         # does not strip either, so one spelling means one comparison.
         #
-        # PROD-01.3 (scorecard format 1.4.0) splits the arm by version, in the
-        # Rust reader's order: a PROD-01.3 mode under a version before 1.4.0
+        # PROD-01.3 (scorecard format 1.5.0) splits the arm by version, in the
+        # Rust reader's order: a PROD-01.3 mode under a version before 1.5.0
         # (the message names the version, never the mode), the closed five from
-        # 1.4.0, and the unchanged closed two below it.
+        # 1.5.0, and the unchanged closed two below it.
         target_mode = str(target_auth.get("mode"))
         version = doc.get("format_version")
         five_defined = (
@@ -1567,6 +1798,102 @@ def check_invariants(doc) -> str:
                 "source.time_basis names a topic in both producer_time and not_recorded; a "
                 "topic's timestamp type was either recorded as LogAppendTime or not recorded"
             )
+
+    # `integrity.verification` (format 1.4.0, PROD-08.1): arms IV-1 to IV-7,
+    # mirrored ARM FOR ARM, IN THIS POSITION (after `source.time_basis`, before
+    # `redactions`) and with the same words from
+    # `Scorecard::validate_invariants`. They fire ONLY on a document carrying
+    # the block, so every document before 1.4.0 is decided exactly as before.
+    # Not interpolated except IV-1's version: the block names topics and
+    # segment keys. The shape layer above has proved the block's shape and the
+    # u64 loop every count's domain.
+    if verification is not None:
+        # IV-1. A version before 1.4.0 cannot carry the 1.4.0 field.
+        minor = _minor(version)
+        if not (
+            doc_major == 1
+            and minor is not None
+            and minor >= SCORECARD_VERIFICATION_SINCE_MINOR
+        ):
+            return (
+                f"integrity.verification is present but format_version "
+                f"{_rust_debug_str(version)} predates it: the field is defined from "
+                f"1.{SCORECARD_VERIFICATION_SINCE_MINOR}.0"
+            )
+        # IV-2. A coverage this reader does not know is refused.
+        if verification["coverage"] not in ("sampled", "complete"):
+            return "integrity.verification.coverage is neither \"sampled\" nor \"complete\""
+        # IV-3. Only a complete verification compares headers in order.
+        complete_cov = verification["coverage"] == "complete"
+        order = verification["header_order"]
+        if order not in ("verified", "notVerified") or (order == "verified" and not complete_cov):
+            return (
+                "integrity.verification.header_order is not \"verified\" or \"notVerified\", "
+                "or claims \"verified\" for a coverage that is not complete; a sampled "
+                "verification compares a fingerprint that sorts headers"
+            )
+        # IV-4. The complete block exactly with complete coverage.
+        c = verification.get("complete")
+        if complete_cov != (c is not None):
+            return (
+                "integrity.verification.complete is present exactly when "
+                "integrity.verification.coverage is \"complete\""
+            )
+        if c is not None:
+            # IV-5. A reason exactly when not covered; blank is no reason.
+            reason_given = bool(str(c.get("incomplete_reason") or "").strip(RUST_WHITESPACE))
+            if c["covered"] == reason_given:
+                return (
+                    "integrity.verification.complete.incomplete_reason is required exactly "
+                    "when complete.covered is false"
+                )
+            replay = c["replay"]
+            archive = c["archive"]
+            # IV-6. A pass over a complete block is a covered, clean one.
+            if integrity.get("result") == "pass":
+                clean = (
+                    c["covered"]
+                    and bool(c["partitions"])
+                    and not archive["segments_failed"]
+                    and not archive["segments_unverified"]
+                    and archive["segments_verified"] == archive["segments"]
+                    and _replay_exact(replay)
+                    and all(p["compared"] and _replay_exact(p["replay"]) for p in c["partitions"])
+                )
+                if not clean:
+                    return (
+                        "integrity.result is pass but integrity.verification.complete is not "
+                        "covered, lists no partition, names a failed or unverified segment, or "
+                        "records a missing, unexpected, duplicate, out-of-order or mismatched "
+                        "record, in total or in a partition"
+                    )
+            # IV-7. The totals are the partitions' sums (saturating, as the
+            # Rust reader adds), and every segment is accounted for.
+            sums = {k: 0 for k in REPLAY_FIELDS}
+            segs = verified_segs = decoded = holes = 0
+            for p in c["partitions"]:
+                for k in REPLAY_FIELDS:
+                    sums[k] = _sat_add(sums[k], p["replay"][k])
+                segs = _sat_add(segs, p["segments"])
+                verified_segs = _sat_add(verified_segs, p["segments_verified"])
+                decoded = _sat_add(decoded, p["records_decoded"])
+                holes = _sat_add(holes, p["offset_holes"])
+            accounted = _sat_add(
+                _sat_add(archive["segments_verified"], len(archive["segments_failed"])),
+                len(archive["segments_unverified"]),
+            )
+            if (
+                any(sums[k] != replay[k] for k in REPLAY_FIELDS)
+                or segs != archive["segments"]
+                or verified_segs != archive["segments_verified"]
+                or decoded != archive["records_decoded"]
+                or holes != archive["offset_holes"]
+                or accounted != archive["segments"]
+            ):
+                return (
+                    "integrity.verification.complete's totals are not the sums of its "
+                    "partitions, or its segments are not each verified, failed or unverified"
+                )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -1766,7 +2093,7 @@ def check_backup_receipt_invariants(doc) -> str:
     # COUNTS AS ABSENT (ruling R-A): naming no manifest and naming a manifest
     # made of spaces are the same claim.
     manifest_key = doc["archive"].get("manifest_key")
-    named = bool(str(manifest_key or "").strip())
+    named = bool(str(manifest_key or "").strip(RUST_WHITESPACE))
     exit_code = doc["exit_code"]
     if (exit_code == 0) != named:
         rendered = _rust_debug_str(manifest_key) if named else "absent"
@@ -1934,6 +2261,44 @@ def _coverage_lines(block):
         else:
             timestamp = "message.timestamp.type not recorded"
         lines.append(f"config_coverage[{_rust_debug_str(topic)}]: {coverage}, {timestamp}")
+    return lines
+
+
+def _verification_lines(block):
+    """`integrity.verification` as lines -- the twin of `crates/logweir/src/
+    verify.rs::verification_lines` (PROD-08.1), in the same words from the
+    same cases. ABSENT is NOT RECORDED (every scorecard before 1.4.0) and read
+    as a sample, never as complete."""
+    if block is None:
+        return [
+            "integrity coverage: not recorded, so this verdict covered a sample, never every "
+            "record"
+        ]
+    lines = [
+        f"integrity coverage: {block['coverage']} (compared with the "
+        f"{block['comparison_basis']}; header order {block['header_order']}; application "
+        f"validation {block['application']})"
+    ]
+    c = block.get("complete")
+    if c is not None:
+        r, a = c["replay"], c["archive"]
+        lines.append(
+            f"integrity coverage: "
+            f"{'every selected record compared' if c['covered'] else 'INCOMPLETE'}: "
+            f"{r['expected']} expected, {r['restored']} restored, {r['matching']} matching, "
+            f"{r['missing']} missing, {r['unexpected']} unexpected, {r['duplicates']} "
+            f"duplicates, {r['out_of_order']} out of order, {r['mismatched']} different; "
+            f"{a['segments_verified']} of {a['segments']} segments verified, "
+            f"{len(a['segments_failed'])} failed, {len(a['segments_unverified'])} unverified; "
+            f"{a['offset_holes']} offset holes"
+        )
+        if c.get("incomplete_reason") is not None:
+            lines.append(f"integrity coverage: incomplete because {c['incomplete_reason']}")
+    if block["gaps"] or block["pruned"]:
+        lines.append(
+            f"integrity coverage: the verified partitions record {len(block['gaps'])} capture "
+            f"gaps and {len(block['pruned'])} pruned ranges"
+        )
     return lines
 
 
@@ -2222,7 +2587,7 @@ def main(
         # older run's output is byte-identical to what it was — and the DIGEST
         # is printed beside the key, because a key alone tells an auditor where
         # to look and not whether what they find is what was signed.
-        offsets_key = str(doc["evidence"].get("offset_report_key") or "").strip()
+        offsets_key = str(doc["evidence"].get("offset_report_key") or "").strip(RUST_WHITESPACE)
         if offsets_key:
             print(f"       offsets:  {offsets_key}")
             print(
@@ -2250,6 +2615,11 @@ def main(
         # (`crates/logweir/src/verify.rs::time_basis_lines`).
         for line in _time_basis_lines(doc["source"].get("time_basis")):
             print(f"       time:     {line}")
+        # PROD-08.1: nor a verdict over every record when it covered a sample.
+        # The same lines `logweir drill verify` prints
+        # (`crates/logweir/src/verify.rs::verification_lines`).
+        for line in _verification_lines(doc["integrity"].get("verification")):
+            print(f"       coverage: {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -2278,7 +2648,7 @@ def main(
             "the six required non-block fields present and of the type their Rust type "
             "implies, u64 domain with null refused where Rust has no Option, "
             "target.auth's mode present, not blank, and one of the two values the "
-            "format defines when the block is, or from 1.4.0 one of the five; "
+            "format defines when the block is, or from 1.5.0 one of the five; "
             "evidence.offset_report_key and its sha256 present or absent together; "
             "target.marker_topic present unless target.mode is newTopic; "
             "target.mode absent or one of the two values the format defines; "
@@ -2287,6 +2657,11 @@ def main(
             "and every decided setting's divergence named in it; "
             "source.time_basis only from 1.3.0, its plan only producerTime, producer time "
             "only under it, and no topic in both of its lists; "
+            "integrity.verification only from 1.4.0, its coverage sampled or complete, "
+            "header order verified only for complete coverage, its complete block exactly "
+            "with complete coverage, an incomplete reason exactly when not covered, a pass "
+            "only over a covered and clean complete block, and totals that are its "
+            "partitions' sums; "
             "approval.self_attested derived, not echoed)"
         )
         return 0
@@ -2319,7 +2694,7 @@ def main(
         # The manifest and its digest are what an auditor goes and looks with.
         # An empty key is LEGAL and means the backup did not exit 0 (arm 2), so
         # it is spelled out rather than printed blank.
-        if str(archive.get("manifest_key") or "").strip():
+        if str(archive.get("manifest_key") or "").strip(RUST_WHITESPACE):
             print(f"       manifest {archive.get('manifest_key')}")
             print(f"       manifest_sha256={archive.get('manifest_sha256')}")
             # FX-7: on a versioned bucket, WHICH version of that key the digest

@@ -159,7 +159,7 @@ The current scorecard checks include:
 - Matrix `fail` carries a reason; matrix `pass` requires a passing drill at
   `byte-fingerprint` level.
 - An auth block names a nonblank supported mode (`plaintext` or `scramSha512`,
-  and from format 1.4.0 also `scramSha256`, `plain` or `mtls`);
+  and from format 1.5.0 also `scramSha256`, `plain` or `mtls`);
   a username without a mode is refused. `redactions` is empty.
 - `topic_parity`'s lists are arrays of strings. A `topic_parity.not_reconstructed`
   (format 1.2.0) appears only under a `format_version` of at least `1.2.0`, and
@@ -172,6 +172,15 @@ The current scorecard checks include:
   defines it; its `plan` is `producerTime` or absent; a topic selected by
   producer time appears only when `plan` is `producerTime`; and no topic is in
   both of its lists ([the arms](formats/drill-scorecard.md#sourcetime_basis-format-130)).
+- An `integrity.verification` block (format 1.4.0) appears only under a
+  version that defines it; its `coverage` is `sampled` or `complete`; it claims
+  header order verified only for complete coverage; its `complete` block is
+  present exactly with complete coverage, says why when it did not cover every
+  partition, and is never beside a `pass` unless it covered at least one
+  partition and every partition, verified every segment and found the restored
+  output exactly the expected one, in total and in every partition; and its
+  totals are its partitions' sums
+  ([the arms](formats/drill-scorecard.md#integrityverification-format-140)).
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
 
@@ -219,6 +228,22 @@ the third is every document without the block, including every one before
 1.3.0. None is a refusal and none changes the exit code. No line is printed for
 a 1.3.0 document whose two lists are empty. See
 [point-in-time selection over `LogAppendTime` topics](#a-point-in-time-restore-of-a-logappendtime-topic-is-refused-or-labelled).
+
+And both say what the verdict covered (`integrity.verification`, format 1.4.0):
+
+```
+integrity coverage: complete (compared with the archive; header order verified; application validation notAttempted)
+integrity coverage: every selected record compared: 75 expected, 75 restored, 75 matching, 0 missing, 0 unexpected, 0 duplicates, 0 out of order, 0 different; 4 of 4 segments verified, 0 failed, 0 unverified; 0 offset holes
+integrity coverage: sampled (compared with the archive; header order notVerified; application validation notAttempted)
+integrity coverage: the verified partitions record 1 capture gaps and 0 pruned ranges
+integrity coverage: not recorded, so this verdict covered a sample, never every record
+```
+
+A complete verification prints its counts — `every selected record compared`,
+or `INCOMPLETE` followed by an `incomplete because …` line when a bound stopped
+it or a partition could not be compared; a sampled one says header order was
+not verified; every document before 1.4.0 prints the last line. None changes
+the exit code. See [sampled and complete coverage](#the-sample-window-is-not-a-claim-about-the-whole-archive).
 
 Backup receipts have their own shape and invariants — eleven arms since format
 1.1.0 ([the list](formats/backup-receipt.md#the-eleven-arms)). For an accepted
@@ -506,6 +531,22 @@ establishes agreement within that sampled window; it does not establish that
 unsampled archive records would also match. Read `coverage_note` before making
 claims about representativeness.
 
+Since format 1.4.0 the document says which it is.
+`integrity.verification.coverage: sampled` is that sample, and its
+`header_order: notVerified` says the fingerprint it compared sorts headers.
+`coverage: complete` is a verification of every archived segment and every
+restored record of every restored partition: the expected output selected by
+each archived record's own timestamp, every restored record mapped back by its
+`x-original-offset`, and the counts — expected, restored, matching, missing,
+unexpected, duplicates, out of order, different — in
+`integrity.verification.complete` per partition and in total. Read
+`complete.covered` before the counts: `false` means a bound stopped the
+verification or a partition could not be compared, `incomplete_reason` says
+which, and such a document is never a `pass`. A document without the block
+(every one before 1.4.0) covered a sample. Complete coverage still compares
+with the archive, not the source (the section above), and validates no
+application ([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+
 ### The `evidence` block is not a finding about your bucket
 
 The four post-put fields are zeroed before signing. Storage facts belong in the
@@ -633,11 +674,11 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.19.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.20.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
-since FX-3, `1.3.0` since FX-8, or `1.4.0` for a restore into a target whose
-auth mode is one PROD-01.3 added). It
+since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, or `1.5.0` for a
+restore into a target whose auth mode is one PROD-01.3 added). It
 changes when the reader's accepted-document set changes. The compatibility
 history is:
 
@@ -652,7 +693,7 @@ history is:
 | `1.7.0` | Requires all six non-block fields and rejects null for nonoptional `u64` values; the five optional `u64` fields still permit null. |
 | `1.8.0` | Type-checks the six non-block fields using their Rust-implied JSON types, closing cases such as `run_id: 42`, `phases: "x"` and `requested_at: 5`. |
 | `1.9.0` | Adds backup-receipt verification and scorecard auth-field consistency checks. |
-| `1.10.0` | Restricts scorecard/backup-receipt auth modes to `plaintext` or `scramSha512` (widened by version in `1.19.0`). |
+| `1.10.0` | Restricts scorecard/backup-receipt auth modes to `plaintext` or `scramSha512` (widened by version in `1.20.0`). |
 | `1.11.0` | Requires offset-report key and digest to be present or absent together. |
 | `1.12.0` | Requires a marker topic unless target mode is `newTopic`. |
 | `1.13.0` | Rejects present target modes other than `scratch` or `newTopic`, including null; retains acceptance of failed integrity results with or without a partial reason. |
@@ -661,14 +702,15 @@ history is:
 | `1.16.0` | Knows backup-receipt and catalog-point format `1.2.0` (FX-7). Refuses a receipt's `archive.manifest_version_id` that is not a string — a shape check, where Rust refuses the same document at deserialisation — and prints the pinned manifest version of a receipt or a catalog point. No arm is added; every document without the field is decided exactly as before. |
 | `1.17.0` | Knows scorecard format `1.2.0` (FX-3). Adds the five `topic_parity.not_reconstructed` arms (NR-1 to NR-5; NR-4 and NR-5 refuse a `newTopic` document carrying the field whose `intentionally_deviated` is not empty, or whose block omits a divergence on a setting the restore decides) and prints the reconstruction line. Refuses `topic_parity.intentionally_deviated` and `unexpected_divergence` that are not arrays of strings, and a `format_version` whose major Rust's integer parse refuses (`" 1.0.0"`, `"0_1.0.0"`): `drill verify` refused all of these while earlier versions printed `VALID`. Every other document without the new field is decided exactly as before. |
 | `1.18.0` | Knows scorecard format `1.3.0` (FX-8). Adds `source.time_basis`'s four arms (TB-1 to TB-4) and its shape check, and prints the `time basis:` lines for a scorecard and, for a backup receipt, one per topic it records as `LogAppendTime`. Every document without the block is decided exactly as before. |
-| `1.19.0` | Knows scorecard format `1.4.0` and backup-receipt format `1.3.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.4.0 and in `source.auth.mode` from receipt 1.3.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
+| `1.19.0` | Knows scorecard format `1.4.0` (PROD-08.1). Adds `integrity.verification`'s seven arms (IV-1 to IV-7), its shape check and the domain of its 25 nested counts (24 refuse null), and prints the `integrity coverage:` lines. Every blank test (ruling R-A) now strips exactly the set Rust's `trim` strips: before, a reason, key, mode or marker made only of U+001C–U+001F was blank here and not in `logweir drill verify`, so the two readers split on it (the writer never produces one). Apart from such a value, every document without the block is decided exactly as before. |
+| `1.20.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.3.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.3.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
 reports `run_id`. Both refuse; this is not an acceptance disagreement.
 
-A verifier older than `1.19.0`, and a `logweir` built before PROD-01.3,
-**refuse** a 1.4.0 scorecard or a 1.3.0 receipt that names `scramSha256`,
+A verifier older than `1.20.0`, and a `logweir` built before PROD-01.3,
+**refuse** a 1.5.0 scorecard or a 1.3.0 receipt that names `scramSha256`,
 `plain` or `mtls` — as a mode outside the two they know — which is the safer
 verdict (OD-7, third case). Every document naming `plaintext` or `scramSha512`
 is still written at its earlier version and still verifies with them.
@@ -676,6 +718,11 @@ is still written at its earlier version and still verifies with them.
 A verifier older than `1.18.0`, and a `logweir` built before FX-8, accept a
 1.3.0 scorecard — the major is unchanged — ignore `source.time_basis`, check
 none of its four arms and print no time-basis line.
+
+A verifier older than `1.19.0`, and a `logweir` built before PROD-08.1, accept a
+1.4.0 scorecard the same way: they ignore `integrity.verification`, check none
+of IV-1 to IV-7 and print no coverage line; a complete verification reads to
+them as a sample of every expected record.
 
 A `1.15.0` verifier, and a `logweir` built before FX-7, still accept a 1.2.0
 receipt or catalog point: they ignore `archive.manifest_version_id` and print

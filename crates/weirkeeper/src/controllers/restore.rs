@@ -7723,9 +7723,11 @@ pub const REFERENT_NOT_FOUND_REASON: &str = "ReferentNotFound";
 async fn reconcile(
     restore: Arc<Restore>,
     ctx: Arc<Context>,
-    approval_policies: Arc<ApprovalPolicySet>,
+    approval_policies: crate::approval_policy::PolicySource,
     objects: reflector::Store<Restore>,
 ) -> Result<Action, RestoreError> {
+    // PROD-16.1: the document with the fresh-install marker as last read.
+    let approval_policies = approval_policies.effective();
     // P10: the manual-restore pool counts from the watch this controller
     // already runs (`run_pool::store_snapshot`: `None` until it has synced),
     // with the process's one reservation registry.
@@ -7894,7 +7896,7 @@ async fn reconcile_with_trust(
     ctx: Arc<Context>,
     policies: reflector::Store<crate::crds::trust_policy::TrustPolicy>,
     synced: Arc<AtomicBool>,
-    approval_policies: Arc<ApprovalPolicySet>,
+    approval_policies: crate::approval_policy::PolicySource,
     objects: reflector::Store<Restore>,
 ) -> Result<Action, RestoreError> {
     if synced.load(Ordering::Relaxed) {
@@ -7992,12 +7994,13 @@ async fn reconcile_with_trust(
 /// resolvable.
 ///
 /// `approval_policies` is the installation's approval-policy document, read
-/// once by `main` (PLAT-19.2), and shared by every per-namespace copy.
+/// once by `main` (PLAT-19.2), with the fresh-install marker as last read
+/// (PROD-16.1), and shared by every per-namespace copy.
 pub async fn controller(
     client: kube::Client,
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
-    approval_policies: Arc<ApprovalPolicySet>,
+    approval_policies: crate::approval_policy::PolicySource,
 ) {
     // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
     // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
@@ -8015,7 +8018,7 @@ pub async fn controller(
             archive.clone(),
             runner_image.clone(),
             policies.clone(),
-            Arc::clone(&approval_policies),
+            approval_policies.clone(),
             namespace,
         )
     })
@@ -8029,7 +8032,7 @@ fn controller_in(
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
     shared: crate::trust::SharedPolicies,
-    approval_policies: Arc<ApprovalPolicySet>,
+    approval_policies: crate::approval_policy::PolicySource,
     namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Restore> = crate::scope::api(&client, namespace.as_deref());
@@ -8069,7 +8072,7 @@ fn controller_in(
                         context,
                         policies.clone(),
                         Arc::clone(&synced),
-                        Arc::clone(&approval_policies),
+                        approval_policies.clone(),
                         pool_objects.clone(),
                     )
                 },

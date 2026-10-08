@@ -2945,6 +2945,82 @@ fn is_uuid(c: &str) -> bool {
             .all(|(n, g)| g.len() == *n && g.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// A backup set id this product mints: a UUID (a manual run's — the `Backup`'s
+/// own UID) or a SCHEDULED run's [`is_scheduled_set_id`]. Every key predicate
+/// below that answers "is this component an identity" asks THIS, so the two
+/// spellings the controller writes are read the same way everywhere (FX-17).
+fn is_set_id(c: &str) -> bool {
+    is_uuid(c) || is_scheduled_set_id(c)
+}
+
+/// The length of a schedule's slot, `yyyymmdd-hhmmss`
+/// (`weirkeeper::slot::SLOT_NAME_LEN`).
+const SLOT_LEN: usize = 15;
+
+/// A SCHEDULED run's backup set id, exactly as
+/// `weirkeeper::slot::backup_id_for_attempt` mints it:
+/// `<schedule uid>-<yyyymmdd>-<hhmmss>` for attempt 0 and
+/// `<schedule uid>-<yyyymmdd>-<hhmmss>-r<k>` for retry `k`.
+///
+/// # Why it is an identity and not free text (FX-17)
+///
+/// It is 52 to 55 characters of lower-case hex, digits and `-`, so it was
+/// neither of the two forms the redactor knew: not a UUID, and not a public
+/// NAME, which stops at 39 characters. The catalog sync therefore published
+/// every scheduled point's `backupId` as `[redacted]`, its `receiptKey` as
+/// `[redacted].receipt.json` and its `manifestKey` as `[redacted].json`, and
+/// the console refused to offer any of them — the whole first page of the
+/// PoC's Catalog view, every nightly run — because a plan binding cannot be
+/// built from the redactor's output. A manual run's UUID set id was untouched,
+/// which is why the defect read as "some points are not offered".
+///
+/// It is exactly as public as the UUID it starts with: the schedule's UID is
+/// on the `BackupSchedule`, the slot is the run's own name, and the whole id is
+/// `Backup.status.backupId` and the archive prefix in the bucket listing.
+///
+/// # How narrow
+///
+/// Every clause is the minter's, so a component that merely LOOKS like one is
+/// not exempt:
+///
+/// * the UID is a UUID in **lower case** — what Kubernetes writes; an upper-case
+///   one was not minted;
+/// * the slot is a date and time **that exist** — `chrono` parses it and the
+///   formatted value must equal the input (the same round trip the controller's
+///   own `valid_slot` makes), so `20261309-031700` is refused;
+/// * the retry suffix is `-r` and ONE digit `1`–`9`: attempt 0 carries none,
+///   and the controller's `MAX_RETRIES` is 3 (`weirkeeper`'s
+///   `every_set_id_the_minter_writes_survives_the_redactor` row walks every
+///   attempt it can write, so a wider retry range fails there first);
+/// * nothing before the UID and nothing after the slot or the suffix.
+///
+/// The shape carries no upper case, no `/` and no `+`, so no AWS-shaped secret
+/// can take it, and what it adds to a UUID is fourteen decimal digits that
+/// must spell a real instant.
+fn is_scheduled_set_id(c: &str) -> bool {
+    const UID_LEN: usize = 36;
+    const SLOT_FORMAT: &str = "%Y%m%d-%H%M%S";
+    let (Some(uid), Some(rest)) = (c.get(..UID_LEN), c.get(UID_LEN..)) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix('-') else {
+        return false;
+    };
+    let (Some(slot), Some(suffix)) = (rest.get(..SLOT_LEN), rest.get(SLOT_LEN..)) else {
+        return false;
+    };
+    let retry_ok = match suffix.as_bytes() {
+        [] => true,
+        [b'-', b'r', k] => (b'1'..=b'9').contains(k),
+        _ => false,
+    };
+    retry_ok
+        && is_uuid(uid)
+        && !uid.bytes().any(|b| b.is_ascii_uppercase())
+        && chrono::NaiveDateTime::parse_from_str(slot, SLOT_FORMAT)
+            .is_ok_and(|t| t.format(SLOT_FORMAT).to_string() == slot)
+}
+
 /// A NAME rather than material: lower case, and short enough that it cannot be
 /// a secret on its own.
 ///
@@ -2980,11 +3056,17 @@ fn is_public_name(c: &str) -> bool {
 /// `[redacted].receipt.json` (defect CATALOG-RECEIPTKEY-REDACTED). A receipt
 /// key is `<prefix>/<backup_id>/<run_id>.receipt.json`, `.` is not a run
 /// character, so the run the scanner sees is
-/// `<prefix>/<backup_id>/<run_id>` — anchored by the backup set's UUID, with
+/// `<prefix>/<backup_id>/<run_id>` — anchored by the backup set's id, with
 /// the run id as its one free component. A run id is a ULID
 /// ([`crate::ids::format_run_id`]): **26** characters, two over this budget.
 /// So a key the console needs as a plan binding was destroyed while
 /// `receiptSha256` and the location beside it survived.
+///
+/// Because the run id takes the ONE free slot, the set id beside it must be a
+/// PUBLIC form for the key to survive at all. A UUID always was; a scheduled
+/// run's `<schedule uid>-<slot>` was not until FX-17 ([`is_scheduled_set_id`]),
+/// so every scheduled point's key went whole, by the long-run rule, before
+/// this budget was ever consulted.
 ///
 /// The budget is NOT raised to cover it. Raising it to 26 admits any
 /// 26-character mixed-case component, and the same measurement goes from
@@ -3137,11 +3219,12 @@ fn is_fact_pair(c: &str) -> bool {
 /// The run is split on `/` — an object key's own separator — and answered two
 /// ways:
 ///
-/// * **every component is a public FORM**: a SHA-256/512 digest, a UUID, a
-///   lower-case name, or a `<factName>=<identifier>` pair. This is what lets a
-///   bare `signerKeyId`, an `imageID`'s digest, a Secret `<ns>/<name>` and a
-///   prefix-joined manifest key through.
-/// * **or the run is ANCHORED** — by a UUID, by a digest, or by a component
+/// * **every component is a public FORM**: a SHA-256/512 digest, a backup set
+///   id this product mints ([`is_set_id`]: a UUID, or a scheduled run's
+///   `<schedule uid>-<slot>`), a lower-case name, or a `<factName>=<identifier>`
+///   pair. This is what lets a bare `signerKeyId`, an `imageID`'s digest, a
+///   Secret `<ns>/<name>` and a prefix-joined manifest key through.
+/// * **or the run is ANCHORED** — by a set id, by a digest, or by a component
 ///   this product itself writes into an archive key
 ///   ([`is_archive_component`]) — which makes the run an object key rather than
 ///   a token. **At most one** of its remaining components may then be something
@@ -3175,7 +3258,7 @@ fn is_fact_pair(c: &str) -> bool {
 fn is_public_identifier(run: &str) -> bool {
     let components: Vec<&str> = run.split('/').collect();
     let public = |c: &&str| {
-        c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
+        c.is_empty() || is_hex_digest(c) || is_set_id(c) || is_public_name(c) || is_fact_pair(c)
     };
     if components.iter().all(public) {
         return true;
@@ -3187,7 +3270,7 @@ fn is_public_identifier(run: &str) -> bool {
     // the anchor test was dead code.
     components
         .iter()
-        .any(|c| is_uuid(c) || is_hex_digest(c) || is_archive_component(c))
+        .any(|c| is_set_id(c) || is_hex_digest(c) || is_archive_component(c))
         && components.iter().all(|c| public(c) || is_key_component(c))
         // `true`: the anchor was just required on the line above, so this arm
         // is always looking at a run this product's own archive structure
@@ -3209,8 +3292,8 @@ fn is_public_identifier(run: &str) -> bool {
 /// # `ulid_exempt` is the ANCHOR, passed down
 ///
 /// The two callers do not share a precondition. [`is_public_identifier`] has
-/// already required an anchor — a UUID, a digest, or a component this product
-/// writes into an archive key — before it reaches here, so its run is archive
+/// already required an anchor — a set id ([`is_set_id`]), a digest, or a
+/// component this product writes into an archive key — before it reaches here, so its run is archive
 /// structure and the exemption is about the run-id SLOT of a key this product
 /// minted. [`is_object_key_shaped`] is that clause with the anchor requirement
 /// DROPPED, so without this parameter the exemption would ride on shape alone,
@@ -3226,10 +3309,11 @@ fn is_public_identifier(run: &str) -> bool {
 /// `logweir/backups/<uuid>/<run id>` and `logweir/drills/<run id>` both carry
 /// `logweir` and `backups`/`blobs`-class components that
 /// [`is_archive_component`] names, and the adopter-prefixed spellings carry the
-/// backup set's UUID.
+/// backup set's id — a UUID, or a scheduled run's `<schedule uid>-<slot>`,
+/// which is anchored by the same UUID (FX-17).
 fn at_most_one_free_component(components: &[&str], ulid_exempt: bool) -> bool {
     let public = |c: &str| {
-        c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
+        c.is_empty() || is_hex_digest(c) || is_set_id(c) || is_public_name(c) || is_fact_pair(c)
     };
     let mut free = components.iter().filter(|c| !public(c));
     match free.next() {
@@ -3249,7 +3333,7 @@ fn at_most_one_free_component(components: &[&str], ulid_exempt: bool) -> bool {
 /// requirement dropped, and it exists for exactly one caller —
 /// `logweir::check::redact_path`, which is applied to values already known to
 /// be archive object keys and Kafka topic names rather than to prose. A message
-/// may say anything, so [`redact`] insists on a UUID or a digest before it will
+/// may say anything, so [`redact`] insists on a set id or a digest before it will
 /// read a run as a key; a `missingSegment` value cannot, so the same run may be
 /// read as a key on the strength of its shape alone.
 ///
@@ -3276,12 +3360,12 @@ fn at_most_one_free_component(components: &[&str], ulid_exempt: bool) -> bool {
 pub fn is_object_key_shaped(value: &str) -> bool {
     let components: Vec<&str> = value.split('/').collect();
     let public = |c: &str| {
-        c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
+        c.is_empty() || is_hex_digest(c) || is_set_id(c) || is_public_name(c) || is_fact_pair(c)
     };
     // MEASURED, not required — the difference from [`is_public_identifier`].
     let anchored = components
         .iter()
-        .any(|c| is_uuid(c) || is_hex_digest(c) || is_archive_component(c));
+        .any(|c| is_set_id(c) || is_hex_digest(c) || is_archive_component(c));
     components.iter().all(|c| public(c) || is_key_component(c))
         && at_most_one_free_component(&components, anchored)
 }

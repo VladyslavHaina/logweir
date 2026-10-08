@@ -3071,7 +3071,7 @@ fn execute_with_validated_approval(
 
     // 7
     let verified = record(&mut sc, 7, "verify", || {
-        phase7_verify::run(
+        phase7_verify::run_with_coverage(
             c.engine.as_ref(),
             reader,
             &c.archive,
@@ -3083,11 +3083,15 @@ fn execute_with_validated_approval(
             // FX-3: the spec's mode, the one `target_info` signs as
             // `target.mode`, decides `intended` versus `not_reconstructed`.
             c.spec.target.mode,
+            // PROD-08.1: the approved plan's coverage and its bound.
+            c.spec.sample.coverage,
+            c.spec.sample.complete_max_records,
         )
     })?;
     sc.integrity = verified.integrity.clone();
     sc.topic_parity = verified.topic_parity.clone();
     sc.sample.records_restored = verified.records_restored;
+    complete_sample_info(&mut sc.sample, &sc.integrity);
 
     // 7 -> 8: SCORE BEFORE SIGNING. `phase8_score::run` signs the document it is
     // handed and never recomputes, so `measured`, `outcome` and `objectives`
@@ -3606,9 +3610,9 @@ pub fn build_plan_with_floor(
 fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
     let id = c.engine.id();
     Scorecard {
-        // PROD-01.3: 1.4.0 when the target's auth mode is one PROD-01.3 added
+        // PROD-01.3: 1.5.0 when the target's auth mode is one PROD-01.3 added
         // (`target_info` fills `target.auth.mode` from the same spec field),
-        // the 1.3.0 document otherwise — so no scorecard of a `plaintext` or
+        // the 1.4.0 document otherwise — so no scorecard of a `plaintext` or
         // `scramSha512` target changes by a byte.
         format_version: logweir_core::scorecard::format_version_for_target(Some(&AuthSummary {
             mode: c.spec.target.auth.mode_str().into(),
@@ -3745,6 +3749,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             mismatches: 0,
             pass_rate_measured: None,
             restored_principal_could_consume: None,
+            verification: None,
         },
         topic_parity: TopicParity {
             intentionally_deviated: Vec::new(),
@@ -3904,6 +3909,28 @@ fn sample_info(
             sel.notes.join("; ")
         },
     }
+}
+
+/// **PROD-08.1.** A COMPLETE verification set out to reconcile every
+/// expected record of every restored partition, so `sample` says so: its
+/// canary is the expected output of every COMPARED partition
+/// (`records_expected`, which `integrity.records_sampled` is held to) — the
+/// whole expected output only when the block is `covered`, since a partition
+/// the bound stopped is never decoded and contributes 0 (review L-3) — over
+/// every partition and topic the complete block lists. A sampled
+/// verification's `sample` is phase 4's, untouched.
+fn complete_sample_info(sample: &mut SampleInfo, integrity: &logweir_core::scorecard::Integrity) {
+    let Some(c) = integrity
+        .verification
+        .as_ref()
+        .and_then(|v| v.complete.as_ref())
+    else {
+        return;
+    };
+    sample.records_expected = c.replay.expected;
+    sample.partitions = u32::try_from(c.partitions.len()).unwrap_or(u32::MAX);
+    let topics: BTreeSet<&str> = c.partitions.iter().map(|p| p.topic.as_str()).collect();
+    sample.topics = u32::try_from(topics.len()).unwrap_or(u32::MAX);
 }
 
 #[cfg(test)]

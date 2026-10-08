@@ -11,13 +11,14 @@ use crate::scorecard::Scorecard;
 /// "with a new schema file beside the old one").
 ///
 /// **1.2.0 since FX-3** (`topic_parity.not_reconstructed`), and **1.3.0 since
-/// FX-8** (`source.time_basis`); the 1.1.0 and 1.2.0 files are frozen beside
-/// the current one the same way. **1.4.0 since PROD-01.3**: the closed set of
+/// FX-8** (`source.time_basis`), **1.4.0 since PROD-08.1**
+/// (`integrity.verification`), and **1.5.0 since PROD-01.3**: the closed set of
 /// `target.auth.mode` grows by three values, which a scorecard declares by
-/// being 1.4.0; the 1.3.0 file is frozen beside it and still describes every
-/// scorecard of a `plaintext` or `scramSha512` target, which this build writes
-/// as 1.3.0. The `$id` is built from
-/// [`crate::scorecard::FORMAT_VERSION_WITH_AUTH_MODES`], the newest minor.
+/// being 1.5.0; the 1.1.0 to 1.4.0 files are frozen beside the current one the
+/// same way, and the 1.4.0 file still describes every scorecard of a
+/// `plaintext` or `scramSha512` target, which this build writes as 1.4.0. The
+/// `$id` is built from [`crate::scorecard::FORMAT_VERSION_WITH_AUTH_MODES`],
+/// the newest minor.
 pub fn scorecard_schema() -> String {
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
         s.option_nullable = true;

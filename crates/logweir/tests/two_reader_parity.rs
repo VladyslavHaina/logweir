@@ -839,11 +839,27 @@ fn rust_u64_fields() -> Vec<(String, bool)> {
             .push((name.to_string(), optional));
     }
 
-    let mut out: Vec<(String, bool)> = Vec::new();
-    let mut reached: Vec<&str> = Vec::new();
-    for line in between(&src, "scorecard.rs", "pub struct Scorecard {", "}") {
-        let code = line.trim();
-        let Some(decl) = code.strip_prefix("pub ") else {
+    // Every declared struct's fields, `(name, type)`, in declaration order.
+    let mut fields_of: Vec<(&str, Vec<(String, String)>)> = Vec::new();
+    let mut open: Option<&str> = None;
+    for line in src.lines() {
+        if let Some(rest) = line.strip_prefix("pub struct ") {
+            open = rest
+                .split(|c: char| c == '{' || c == '(' || c == '<' || c.is_whitespace())
+                .find(|t| !t.is_empty());
+            if let Some(name) = open {
+                fields_of.push((name, Vec::new()));
+            }
+            continue;
+        }
+        if line == "}" {
+            open = None;
+            continue;
+        }
+        if open.is_none() {
+            continue;
+        }
+        let Some(decl) = line.trim().strip_prefix("pub ") else {
             continue;
         };
         let Some((name, ty)) = decl.split_once(": ") else {
@@ -852,28 +868,80 @@ fn rust_u64_fields() -> Vec<(String, bool)> {
         let Some(ty) = ty.strip_suffix(',') else {
             continue;
         };
-        let (owner, prefix) = if declared.contains(&ty) {
-            (ty, name.to_string())
-        } else if let Some(inner) = ty.strip_prefix("Vec<").and_then(|t| t.strip_suffix('>')) {
-            if !declared.contains(&inner) {
-                continue;
-            }
-            (inner, format!("{name}[]"))
-        } else if let Some(inner) = ty.strip_prefix("Option<").and_then(|t| t.strip_suffix('>')) {
-            if !declared.contains(&inner) {
-                continue;
-            }
-            (inner, name.to_string())
-        } else {
-            continue;
+        fields_of
+            .last_mut()
+            .expect("a struct is open")
+            .1
+            .push((name.to_string(), ty.to_string()));
+    }
+
+    // PROD-08.1: DEPTH-FIRST, at every depth. A struct field, a `Vec<T>` or an
+    // `Option<T>` of a declared struct is walked into wherever it sits —
+    // `integrity.verification.complete.partitions[].replay.expected` is four
+    // levels below `Scorecard` — and each struct's own `u64` fields are
+    // emitted at their declaration position, so the order is still serde's.
+    // Until PROD-08.1 the walk went ONE level below `Scorecard`, which was the
+    // whole document; the closure assertion below is unchanged.
+    fn walk<'a>(
+        owner: &'a str,
+        prefix: &str,
+        fields_of: &[(&'a str, Vec<(String, String)>)],
+        declared: &[&'a str],
+        out: &mut Vec<(String, bool)>,
+        reached: &mut Vec<&'a str>,
+    ) {
+        let Some((_, fields)) = fields_of.iter().find(|(s, _)| *s == owner) else {
+            return;
         };
-        reached.push(owner);
-        if let Some((_, fields)) = u64_of.iter().find(|(s, _)| *s == owner) {
-            for (field, optional) in fields {
-                out.push((format!("{prefix}.{field}"), *optional));
+        for (name, ty) in fields {
+            let dotted = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}.{name}")
+            };
+            match ty.as_str() {
+                "u64" => out.push((dotted, false)),
+                "Option<u64>" => out.push((dotted, true)),
+                _ => {
+                    let ty = ty.as_str();
+                    let (inner, path) = if let Some(i) = declared.iter().find(|d| **d == ty) {
+                        (*i, dotted)
+                    } else if let Some(i) = ty
+                        .strip_prefix("Vec<")
+                        .and_then(|t| t.strip_suffix('>'))
+                        .and_then(|t| declared.iter().find(|d| **d == t))
+                    {
+                        (*i, format!("{dotted}[]"))
+                    } else if let Some(i) = ty
+                        .strip_prefix("Option<")
+                        .and_then(|t| t.strip_suffix('>'))
+                        .and_then(|t| declared.iter().find(|d| **d == t))
+                    {
+                        (*i, dotted)
+                    } else {
+                        continue;
+                    };
+                    reached.push(inner);
+                    walk(inner, &path, fields_of, declared, out, reached);
+                }
             }
         }
     }
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut reached: Vec<&str> = Vec::new();
+    walk(
+        "Scorecard",
+        "",
+        &fields_of,
+        &declared,
+        &mut out,
+        &mut reached,
+    );
+    // `between` still pins that `Scorecard` is where the walk starts.
+    assert!(
+        !between(&src, "scorecard.rs", "pub struct Scorecard {", "}").is_empty(),
+        "scorecard.rs declares `pub struct Scorecard {{`"
+    );
 
     // CLOSURE, counted a second and independent way off the raw text: if a `u64`
     // is declared in a struct no `Scorecard` field reaches by one of the three
@@ -891,15 +959,22 @@ fn rust_u64_fields() -> Vec<(String, bool)> {
         .filter(|(s, fields)| !fields.is_empty() && !reached.contains(s))
         .map(|(s, _)| *s)
         .collect();
+    // Counted over DECLARATIONS reached, not over dotted names: since
+    // PROD-08.1 one struct (`ReplayComparison`) is reached at two paths, and
+    // each of its `u64` lines is one declaration with two names.
+    let reachable: usize = u64_of
+        .iter()
+        .filter(|(s, _)| *s == "Scorecard" || reached.contains(s))
+        .map(|(_, fields)| fields.len())
+        .sum();
     assert_eq!(
-        out.len(),
-        flat,
+        reachable, flat,
         "crates/logweir-core/src/scorecard.rs declares {flat} `u64` document field(s) but \
          only {} are reachable from `Scorecard` by a struct field, a `Vec<T>` or an \
          `Option<T>`. Unreached struct(s): {unreached:?}. Extend `rust_u64_fields` (and \
          `docs/verify_scorecard.py`'s `_u64_fields`) to reach them, or the new field has \
          no domain check in the Python reader at all.",
-        out.len(),
+        reachable,
     );
     out
 }

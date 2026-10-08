@@ -1859,6 +1859,241 @@ fn a_receipt_keys_ulid_run_id_survives_and_nothing_its_length_rides_with_it() {
     }
 }
 
+/// **FX-17.** A SCHEDULED run's backup set id is an identity this product
+/// minted, exactly as a UUID is, and it survives — bare and in every key built
+/// from it.
+///
+/// REGRESSION REASON. `weirkeeper::slot::backup_id_for_attempt` mints a
+/// scheduled run's set id as `<schedule uid>-<yyyymmdd>-<hhmmss>`, plus `-r<k>`
+/// for retry `k`: 52 to 55 lower-case characters. The redactor knew a bare UUID
+/// as a public form and a lower-case NAME only under 40 characters, so this id
+/// was neither: the catalog sync published every scheduled point's `backupId`
+/// as `[redacted]`, its `receiptKey` as `[redacted].receipt.json` and its
+/// `manifestKey` as `[redacted].json`. On the PoC that was 84 of 370 points —
+/// every nightly run, the whole first page of the console's Catalog view —
+/// each "not offered" because the plan binding was the redactor's output. The
+/// manual runs beside them (a UUID set id) were offered, which is why the
+/// earlier rounds saw one or two links rather than none. Every fixture above
+/// spells the set id as a UUID, so the suite was green throughout.
+///
+/// The values are the PoC's own (`logweir-poc`, nightly and every-5 schedules).
+#[test]
+fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
+    const SCHEDULE_UID: &str = "89b585c5-5498-48dc-ae32-090809457ec8";
+    const RUN: &str = "01M3BNHJFZCV0D4BRZ0EM0RESH";
+    const AWS: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const AWS_ONE_SLASH: &str = "wJalrXUtnFEMIK7MDENGb/PxRfiCYEXAMPLEKEY0";
+
+    // --- KEEP: attempt 0, a retry, and the deepest retry the minter writes ---
+    let minted = [
+        format!("{SCHEDULE_UID}-20260925-065500"),
+        format!("{SCHEDULE_UID}-20261008-020000-r1"),
+        format!("{SCHEDULE_UID}-20261231-235959-r3"),
+    ];
+    for set in &minted {
+        assert!(
+            set.len() >= 40,
+            "the fixture must reach the long-run threshold, or it proves nothing: {set}"
+        );
+        // The catalog entry's `backupId`, which `catalog_sync` passes through
+        // the WHOLE `redact`.
+        assert_eq!(redact(set), *set, "the set id itself was redacted");
+        // The receipt key — half the plan binding — exactly as `backup run`
+        // writes it.
+        let receipt = format!("logweir/backups/{set}/{RUN}.receipt.json");
+        assert_eq!(redact(&receipt), receipt, "the plan binding was redacted");
+        assert!(
+            is_object_key_shaped(&format!("logweir/backups/{set}/{RUN}")),
+            "`redact_path`'s clause must agree with `redact`'s for {set}"
+        );
+        // The manifest key, under the PoC's prefix and under a prefix with ONE
+        // adopter-chosen component beside the set id.
+        for prefix in ["poc", "Team-Prod"] {
+            let manifest = format!("{prefix}/{set}/manifest.json");
+            assert_eq!(redact(&manifest), manifest, "the manifest key went");
+            assert!(
+                is_object_key_shaped(&format!("{prefix}/{set}/manifest")),
+                "and as a key: {prefix}/{set}/manifest"
+            );
+        }
+        // A segment path an operator has to go and recover (F7 /
+        // D2-REDACT-OVERBROAD), its one free component a topic name.
+        let segment = format!(
+            "poc/{set}/topics/payments-EU/partition=2/segment-00000000000000000000.bin.zst"
+        );
+        assert_eq!(redact(&segment), segment, "the segment path went");
+        // The set id ANCHORS a run exactly as a UUID does, so a run with no
+        // archive word in it still reads as a key: the set's own prefix under
+        // one adopter-chosen component (what retention names), and an
+        // adopter-prefixed key whose run id needs the anchor for its ULID
+        // exemption (the shape of the lab's `archive/<uuid>/<run id>`).
+        let set_prefix = format!("Team-Prod/{set}");
+        assert_eq!(redact(&set_prefix), set_prefix, "the set prefix went");
+        let prefixed = format!("poc/{set}/{RUN}");
+        assert!(
+            is_object_key_shaped(&prefixed),
+            "the set id did not anchor `{prefixed}`"
+        );
+        assert_eq!(
+            redact(&format!("{prefixed}.receipt.json")),
+            format!("{prefixed}.receipt.json"),
+            "…and `redact`'s anchored branch disagrees"
+        );
+        // In the sentence a remedy really is, through the controller's second
+        // pass.
+        let prose = format!("the evidence object {receipt} is not in the archive");
+        assert_eq!(redact(&prose), prose, "in prose: {}", redact(&prose));
+        assert_eq!(redact(&redact(&prose)), prose, "not idempotent");
+    }
+
+    // --- DIE: nothing a schedule did not mint rides on the shape -------------
+    let not_minted: Vec<(&str, String)> = vec![
+        // A date that does not exist: the slot is an instant, and a run is
+        // never named after one that never occurs.
+        ("month 13", format!("{SCHEDULE_UID}-20261309-031700")),
+        ("hour 25", format!("{SCHEDULE_UID}-20260915-256100")),
+        ("30 February", format!("{SCHEDULE_UID}-20260230-000000")),
+        // Attempt 0 carries no suffix; one digit is the minter's whole range.
+        ("retry 0", format!("{SCHEDULE_UID}-20260925-065500-r0")),
+        (
+            "two-digit retry",
+            format!("{SCHEDULE_UID}-20260925-065500-r12"),
+        ),
+        // The minter's separators, and only those.
+        ("not a hyphen", format!("{SCHEDULE_UID}_20260925-065500")),
+        ("not `-r`", format!("{SCHEDULE_UID}-20260925-065500-q1")),
+        (
+            "not `-r` either",
+            format!("{SCHEDULE_UID}-20260925-065500xr1"),
+        ),
+        // Anything after the slot.
+        (
+            "a trailing word",
+            format!("{SCHEDULE_UID}-20260925-065500-x"),
+        ),
+        // A Kubernetes UID is lower case; an upper-case one was not minted.
+        (
+            "an upper-case uid",
+            format!("{}-20260925-065500", SCHEDULE_UID.to_uppercase()),
+        ),
+        // Thirty-six characters where the UID belongs that are not a UUID.
+        (
+            "not a uid",
+            "nightly-backups-of-the-prod-cluster1-20260925-065500".to_string(),
+        ),
+        // A schedule NAME where the UID belongs.
+        (
+            "a schedule name",
+            "nightly-backups-schedule-prod-20260925-065500".to_string(),
+        ),
+        // Fifteen characters that are not a slot.
+        ("not a slot", format!("{SCHEDULE_UID}-abcdefgh-ijklmn")),
+    ];
+    let mut survived: Vec<String> = Vec::new();
+    for (name, one) in &not_minted {
+        assert!(one.len() >= 40, "the probe `{name}` is too short: {one}");
+        if !redact(one).contains(REDACTED) {
+            survived.push(format!("{name} (bare): {}", redact(one)));
+        }
+        let key = format!("logweir/backups/{one}/{RUN}.receipt.json");
+        if redact(&key).contains(one.as_str()) {
+            survived.push(format!("{name} (receipt key): {}", redact(&key)));
+        }
+        if is_object_key_shaped(&format!("logweir/backups/{one}/{RUN}")) {
+            survived.push(format!("{name} (as a key)"));
+        }
+    }
+    assert!(
+        survived.is_empty(),
+        "a set id the minter never writes was read as an identity ({} rows):\n  {}",
+        survived.len(),
+        survived.join("\n  ")
+    );
+
+    // --- the set id spends no free slot, and buys none ----------------------
+    // It is a public form, as a UUID is, so the ULID beside it is still the
+    // key's ONE free component: a second free component still sinks the run.
+    let set = &minted[0];
+    for beside in ["MyBackupSet01", "payments-EU"] {
+        let run = format!("logweir/backups/{set}/{beside}/{RUN}");
+        assert!(
+            !is_object_key_shaped(&run),
+            "a scheduled set id bought a second free component in `{run}`"
+        );
+        assert!(
+            redact(&format!("the object {run} failed")).contains(REDACTED),
+            "…and in prose"
+        );
+    }
+    // And it anchors no credential: F1's probes with the scheduled set id in
+    // the anchor position, exactly as they run with a UUID.
+    for input in [
+        format!("{set}/{AWS}"),
+        format!("{set}/{AWS_ONE_SLASH}"),
+        format!("the object poc/{set}/manifest/{AWS} failed"),
+        format!("the object {set}/topics/orders/partition=0/{AWS_ONE_SLASH} failed"),
+    ] {
+        let out = redact(&input);
+        assert!(
+            !out.contains(AWS) && !out.contains(AWS_ONE_SLASH),
+            "a scheduled set id carried a credential out: {out}"
+        );
+    }
+}
+
+/// **FX-17, the fixture both sides read.** `ui/tests/fixtures/set-ids.json`
+/// lists the set ids the controller mints and near misses it never mints; the
+/// console's `isMintedSetId` (`ui/tests/restore-catalog.spec.js`) reads the
+/// same file. Here: every minted id survives the redactor bare and as the
+/// receipt key `backup run` writes, and every near miss is withheld from both.
+#[test]
+fn the_shared_set_id_fixture_is_what_the_redactor_keeps_and_withholds() {
+    const RUN: &str = "01M3BNHJFZCV0D4BRZ0EM0RESH";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../ui/tests/fixtures/set-ids.json"
+    );
+    let text = std::fs::read_to_string(path).expect("the shared fixture is readable");
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("the fixture is JSON");
+    let list = |name: &str| -> Vec<String> {
+        doc[name]
+            .as_array()
+            .unwrap_or_else(|| panic!("`{name}` is a list"))
+            .iter()
+            .map(|v| v.as_str().expect("a set id is a string").to_string())
+            .collect()
+    };
+    let (minted, not_minted) = (list("minted"), list("notMinted"));
+    assert!(
+        minted.len() >= 4 && not_minted.len() >= 9,
+        "the fixture lost rows"
+    );
+    let edges = list("identityEdges");
+    assert!(edges.len() >= 4, "the fixture lost its edge rows");
+    for id in minted.iter().chain(&edges) {
+        let key = format!("logweir/backups/{id}/{RUN}.receipt.json");
+        assert_eq!(redact(id), *id, "a minted set id was withheld");
+        assert_eq!(
+            redact(&key),
+            key,
+            "a minted set id's receipt key was withheld"
+        );
+    }
+    for id in &not_minted {
+        assert!(
+            id.len() >= 40,
+            "a near miss under 40 characters proves nothing: {id}"
+        );
+        let key = format!("logweir/backups/{id}/{RUN}.receipt.json");
+        assert!(redact(id).contains(REDACTED), "a near miss survived: {id}");
+        assert!(
+            !redact(&key).contains(id.as_str()),
+            "a near miss survived in its receipt key: {}",
+            redact(&key)
+        );
+    }
+}
+
 // --------------------------------------------------------------- visibility
 
 fn signals() -> VisibilitySignals {

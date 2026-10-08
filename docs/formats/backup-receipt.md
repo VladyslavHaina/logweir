@@ -787,7 +787,7 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
   (arm 5a: a value outside the two they know) and accept every other receipt.
   Refusal is the safe direction — a reader that cannot say what a mode means
   does not vouch for the document — so the bump is MINOR (OD-7, third case),
-  and an auditor verifying such a receipt uses script 1.19.0 or a `logweir`
+  and an auditor verifying such a receipt uses script 1.20.0 or a `logweir`
   built from PROD-01.3 on.
 - **Rollback.** A build from before PROD-01.3 cannot take a backup over
   `scramSha256`, `plain` or `mtls` at all (its `AuthSpec` has no such arm, so

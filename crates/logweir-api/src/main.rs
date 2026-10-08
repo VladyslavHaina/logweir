@@ -151,6 +151,14 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             .confirmation
             .as_ref()
             .map_or("", |k| k.key_id()),
+        // PROD-16.1: a managed key the identity hook has not written yet is
+        // read on first use; and the fresh-install marker is read per request.
+        confirmation_key_pending = state.approval().pending_confirmation_file.is_some(),
+        installation_marker_source = state
+            .approval()
+            .installation
+            .as_ref()
+            .map_or(String::new(), |i| format!("{}/{}", i.namespace, i.config_map)),
         "logweir-api started"
     );
     serve(listener, logweir_api::app::router(state)).await

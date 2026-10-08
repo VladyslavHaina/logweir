@@ -17,7 +17,7 @@
 //! restores that archive into the same cluster's scratch namespace (Logweir's
 //! client at phases 0, 3, 7 and 9, the engine's `restore` and `validation
 //! run`). The receipt and the scorecard verify in BOTH readers, carry the mode
-//! (receipt 1.3.0, scorecard 1.4.0), and — the seeded-secret scan — carry
+//! (receipt 1.3.0, scorecard 1.5.0), and — the seeded-secret scan — carry
 //! neither the password nor a line of the client key, nor does any line the
 //! two processes printed.
 //!
@@ -519,7 +519,7 @@ fn backup_restore_verify(row: Row) {
         "{label}: phase 9 left scratch topics on the auth cluster: {left:?}"
     );
     assert_eq!(sc["target"]["auth"]["mode"], row.mode, "{label}");
-    assert_eq!(sc["format_version"], "1.4.0", "{label}");
+    assert_eq!(sc["format_version"], "1.5.0", "{label}");
     assert_eq!(sc["target"]["cluster_id"], cluster_id, "{label}");
     assert!(
         logweir_verify(&r).success(),

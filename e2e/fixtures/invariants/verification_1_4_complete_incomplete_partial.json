@@ -1,7 +1,7 @@
 {
   "format_version": "1.4.0",
   "run_id": "01J9X2QK7C4V0R8YB3ZP6MTS5A",
-  "outcome": "pass",
+  "outcome": "fail-integrity",
   "last_phase_completed": 7,
   "requested_at": "2026-09-03T09:00:00Z",
   "approval_validated_at": "2026-09-03T09:00:30Z",
@@ -16,7 +16,7 @@
       "dry_run_check_segments": "unknown-not-observable",
       "unknown_key_warnings": []
     },
-    "matrix_verdict": "pass",
+    "matrix_verdict": "pass-degraded",
     "matrix_verdict_reason": null
   },
   "source": {
@@ -30,11 +30,7 @@
     "marker_topic": "logweir.scratch",
     "topic_mapping_prefix": "drill-",
     "topic_mapping_sha256": "sha256:1350c08855c7d26b531ce7c309a5584f56d80b58f5271bca3daedf048efc8dea",
-    "topic_mapping_entries": 1,
-    "auth": {
-      "mode": "plain",
-      "username": "logweir"
-    }
+    "topic_mapping_entries": 1
   },
   "approval": {
     "approver": "sre-oncall@example.com",
@@ -90,13 +86,97 @@
   },
   "integrity": {
     "level": "byte-fingerprint",
-    "result": "pass",
-    "partial_reason": null,
+    "result": "partial",
+    "partial_reason": "the complete verification found a fault",
     "records_sampled": 75,
     "records_sampled_matching": 75,
     "mismatches": 0,
     "pass_rate_measured": 1.0,
-    "restoredPrincipalCouldConsume": null
+    "restoredPrincipalCouldConsume": null,
+    "verification": {
+      "coverage": "complete",
+      "comparison_basis": "archive",
+      "header_order": "verified",
+      "application": "notAttempted",
+      "gaps": [],
+      "pruned": [],
+      "complete": {
+        "covered": false,
+        "incomplete_reason": "1 of 2 partitions were not compared: the verification stopped at sample.complete_max_records = 40 decoded records, first at orders/1",
+        "max_records": 40,
+        "window": {
+          "start_ms": null,
+          "end_ms": 1788055200000
+        },
+        "archive": {
+          "segments": 4,
+          "segments_verified": 2,
+          "segments_failed": [],
+          "segments_unverified": [
+            "set/orders/1/a",
+            "set/orders/1/b"
+          ],
+          "records_decoded": 31,
+          "offset_holes": 0
+        },
+        "replay": {
+          "expected": 30,
+          "restored": 75,
+          "matching": 30,
+          "missing": 0,
+          "unexpected": 0,
+          "duplicates": 0,
+          "out_of_order": 0,
+          "mismatched": 0
+        },
+        "partitions": [
+          {
+            "topic": "orders",
+            "partition": 0,
+            "target_topic": "drill-orders",
+            "compared": true,
+            "segments": 2,
+            "segments_verified": 2,
+            "records_decoded": 31,
+            "offset_holes": 0,
+            "replay": {
+              "expected": 30,
+              "restored": 30,
+              "matching": 30,
+              "missing": 0,
+              "unexpected": 0,
+              "duplicates": 0,
+              "out_of_order": 0,
+              "mismatched": 0
+            },
+            "findings": []
+          },
+          {
+            "topic": "orders",
+            "partition": 1,
+            "target_topic": "drill-orders",
+            "compared": false,
+            "segments": 2,
+            "segments_verified": 0,
+            "records_decoded": 0,
+            "offset_holes": 0,
+            "replay": {
+              "expected": 0,
+              "restored": 45,
+              "matching": 0,
+              "missing": 0,
+              "unexpected": 0,
+              "duplicates": 0,
+              "out_of_order": 0,
+              "mismatched": 0
+            },
+            "findings": [
+              "not compared: the complete verification stopped at its bound of 40 decoded records (sample.complete_max_records) before this partition"
+            ]
+          }
+        ]
+      }
+    }
   },
   "topic_parity": {
     "intentionally_deviated": [

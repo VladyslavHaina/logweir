@@ -1082,3 +1082,217 @@ for name in producer-time-without-the-plan block-under-1.1.0; do
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (time basis refused)"
 done
 echo "check-verifier-parity: both readers accept $SCORECARD_TIME_BASIS_VERSION scorecards, say the same about the time basis, and refuse a producer-time selection the plan did not accept"
+
+# ---------------------------------------------------------------------------
+# VERIFICATION LOOP (PROD-08.1): the scorecard's `integrity.verification`, and
+# what its exit 0 says about how much of the restore the verdict covered.
+# ---------------------------------------------------------------------------
+#
+# Four documents both readers ACCEPT, and the `integrity coverage:` lines each
+# must print — the SAME lines from both, compared WHOLE:
+#
+#   absent-1.0.0         the frozen 1.0.0 document, no block: the one line
+#                        saying it was NOT RECORDED and read as a sample
+#   sampled              coverage sampled, header order not verified, and one
+#                        recorded capture gap: two lines
+#   complete             a covered complete verification: its counts
+#   complete-incomplete  a complete verification the bound stopped, signed
+#                        `partial`: INCOMPLETE, and why
+#
+# and seven both readers REFUSE with the same full text, one per arm IV-1 to
+# IV-7. Generated and signed here with the throwaway fixture key, like the
+# loops above.
+#
+# The scorecard format that defines `integrity.verification` —
+# `logweir_core::FORMAT_VERSION` at PROD-08.1 and `VERIFICATION_SINCE_MINOR`;
+# a renumber moves all three.
+SCORECARD_VERIFICATION_VERSION="1.4.0"
+mkdir -p "$tmp/scorecard-iv"
+"$PY" - "$ROOT" "$tmp/scorecard-iv" "$SC_PT" "$SCORECARD_VERIFICATION_VERSION" <<'PYEOF'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+root, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+current = sys.argv[4]
+fix = root / "e2e" / "fixtures" / "signed"
+key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+base = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
+
+
+def replay(n, **over):
+    r = {k: 0 for k in ("expected", "restored", "matching", "missing", "unexpected",
+                        "duplicates", "out_of_order", "mismatched")}
+    r.update(expected=n, restored=n, matching=n)
+    r.update(over)
+    return r
+
+
+def sampled():
+    return {"coverage": "sampled", "comparison_basis": "archive",
+            "header_order": "notVerified", "application": "notAttempted",
+            "gaps": [{"topic": "orders", "partition": 0, "from_offset": 10, "to_offset": 19}],
+            "pruned": []}
+
+
+def complete():
+    parts = [{"topic": "orders", "partition": p, "target_topic": "drill-orders",
+              "compared": True, "segments": 2, "segments_verified": 2,
+              "records_decoded": n + 1, "offset_holes": 0, "replay": replay(n),
+              "findings": []} for p, n in ((0, 30), (1, 45))]
+    return {"coverage": "complete", "comparison_basis": "archive",
+            "header_order": "verified", "application": "notAttempted",
+            "gaps": [], "pruned": [],
+            "complete": {"covered": True, "incomplete_reason": None, "max_records": None,
+                         "window": {"start_ms": None, "end_ms": 1788055200000},
+                         "archive": {"segments": 4, "segments_verified": 4,
+                                     "segments_failed": [], "segments_unverified": [],
+                                     "records_decoded": 77, "offset_holes": 0},
+                         "replay": replay(75), "partitions": parts}}
+
+
+def doc(block, version=current, not_a_pass=None):
+    d = json.loads(json.dumps(base))
+    d["format_version"] = version
+    if block is not None:
+        d["integrity"]["verification"] = block
+    if not_a_pass:
+        d["outcome"] = "fail-integrity"
+        d["integrity"]["result"] = not_a_pass
+        d["integrity"]["partial_reason"] = "the complete verification found a fault"
+        d["engine"]["matrix_verdict"] = "pass-degraded"
+    return d
+
+
+inc = complete()
+c = inc["complete"]
+c["covered"] = False
+c["incomplete_reason"] = "the bound stopped it"
+c["partitions"][1].update(compared=False, segments_verified=0, records_decoded=0)
+c["partitions"][1]["replay"] = replay(0, restored=45)
+c["archive"].update(segments_verified=2, segments_unverified=["k1", "k2"], records_decoded=31)
+c["replay"] = replay(30, restored=75)
+
+hdr = sampled()
+hdr["header_order"] = "verified"
+cov = sampled()
+cov["coverage"] = "full"
+noblock = complete()
+del noblock["complete"]
+noreason = complete()
+noreason["complete"]["covered"] = False
+missing = complete()
+missing["complete"]["partitions"][1]["replay"] = replay(45, restored=44, matching=44, missing=1)
+missing["complete"]["replay"] = replay(75, restored=74, matching=74, missing=1)
+sums = complete()
+sums["complete"]["replay"]["expected"] = 76
+
+cases = {
+    "absent-1.0.0": json.loads(json.dumps(base)),
+    "sampled": doc(sampled()),
+    "complete": doc(complete()),
+    "complete-incomplete": doc(inc, not_a_pass="partial"),
+    "iv1-under-1.3.0": doc(sampled(), version="1.3.0"),
+    "iv2-coverage": doc(cov),
+    "iv3-header-order": doc(hdr),
+    "iv4-no-block": doc(noblock),
+    "iv5-no-reason": doc(noreason, not_a_pass="partial"),
+    "iv6-pass-over-a-missing-record": doc(missing),
+    "iv7-sums": doc(sums, not_a_pass="fail"),
+}
+for name, d in cases.items():
+    payload = (json.dumps(d, indent=2) + "\n").encode()
+    t = pt.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{name}.json").write_bytes(payload)
+    (out / f"{name}.sig").write_text(json.dumps(
+        {"payloadType": pt,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+PYEOF
+
+for name in absent-1.0.0 sampled complete complete-incomplete; do
+    doc="$tmp/scorecard-iv/$name.json"
+    sig="$tmp/scorecard-iv/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 0 ] || { cat "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 0"; }
+    [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 0"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_lines="$(grep -oE 'integrity coverage: .*' "$tmp/rust.all" || true)"
+    py_lines="$(grep -oE 'integrity coverage: .*' "$tmp/py.all" || true)"
+    if [ "$rust_lines" != "$py_lines" ]; then
+        fail "scorecard/$name: the two readers say different things about the verification coverage.
+  rust:   $rust_lines
+  python: $py_lines"
+    fi
+    case "$name" in
+        absent-1.0.0) want="integrity coverage: not recorded, so this verdict covered a sample, never every record" ;;
+        sampled) want="integrity coverage: sampled (compared with the archive; header order notVerified; application validation notAttempted)
+integrity coverage: the verified partitions record 1 capture gaps and 0 pruned ranges" ;;
+        complete) want="integrity coverage: complete (compared with the archive; header order verified; application validation notAttempted)
+integrity coverage: every selected record compared: 75 expected, 75 restored, 75 matching, 0 missing, 0 unexpected, 0 duplicates, 0 out of order, 0 different; 4 of 4 segments verified, 0 failed, 0 unverified; 0 offset holes" ;;
+        complete-incomplete) want="integrity coverage: complete (compared with the archive; header order verified; application validation notAttempted)
+integrity coverage: INCOMPLETE: 30 expected, 75 restored, 30 matching, 0 missing, 0 unexpected, 0 duplicates, 0 out of order, 0 different; 2 of 4 segments verified, 0 failed, 2 unverified; 0 offset holes
+integrity coverage: incomplete because the bound stopped it" ;;
+    esac
+    if [ "$rust_lines" != "$want" ]; then
+        fail "scorecard/$name: expected the coverage lines to be
+$want
+got:
+$rust_lines"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (verification coverage)"
+done
+
+# The seven refusals, one per arm, on FULL text once each reader's own prefix
+# is stripped.
+for name in iv1-under-1.3.0 iv2-coverage iv3-header-order iv4-no-block iv5-no-reason \
+    iv6-pass-over-a-missing-record iv7-sums; do
+    doc="$tmp/scorecard-iv/$name.json"
+    sig="$tmp/scorecard-iv/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 4"; }
+    [ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 1"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
+    py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
+    case "$name" in
+        iv1-under-1.3.0) want_msg="integrity.verification is present but format_version \"1.3.0\" predates it: the field is defined from $SCORECARD_VERIFICATION_VERSION" ;;
+        iv2-coverage) want_msg='integrity.verification.coverage is neither "sampled" nor "complete"' ;;
+        iv3-header-order) want_msg='integrity.verification.header_order is not "verified" or "notVerified", or claims "verified" for a coverage that is not complete; a sampled verification compares a fingerprint that sorts headers' ;;
+        iv4-no-block) want_msg='integrity.verification.complete is present exactly when integrity.verification.coverage is "complete"' ;;
+        iv5-no-reason) want_msg="integrity.verification.complete.incomplete_reason is required exactly when complete.covered is false" ;;
+        iv6-pass-over-a-missing-record) want_msg="integrity.result is pass but integrity.verification.complete is not covered, lists no partition, names a failed or unverified segment, or records a missing, unexpected, duplicate, out-of-order or mismatched record, in total or in a partition" ;;
+        iv7-sums) want_msg="integrity.verification.complete's totals are not the sums of its partitions, or its segments are not each verified, failed or unverified" ;;
+    esac
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
+        fail "scorecard/$name: the refusal differs between the two readers or from its arm.
+  rust:   $rust_msg
+  python: $py_msg
+  want:   $want_msg"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (verification refused)"
+done
+echo "check-verifier-parity: both readers accept $SCORECARD_VERIFICATION_VERSION scorecards, say the same about what the verdict covered, and refuse each of the seven verification arms with the same words"

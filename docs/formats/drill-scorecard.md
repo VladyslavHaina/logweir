@@ -3,17 +3,21 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-drill-scorecard-1.4.0.json`](../../schemas/logweir-drill-scorecard-1.4.0.json)
+[`schemas/logweir-drill-scorecard-1.5.0.json`](../../schemas/logweir-drill-scorecard-1.5.0.json)
 and CI diffs it against the code on every build, so this document and the
-schema cannot drift apart silently. Format **1.4.0** (PROD-01.3) adds no field:
+schema cannot drift apart silently. Format **1.5.0** (PROD-01.3) adds no field:
 it widens `target.auth.mode` by three values (`scramSha256`, `plain`, `mtls`),
 and only a scorecard of a restore into such a target declares it — every other
-scorecard is the 1.3.0 document, described by the frozen
-[`schemas/logweir-drill-scorecard-1.3.0.json`](../../schemas/logweir-drill-scorecard-1.3.0.json).
+scorecard is the 1.4.0 document, described by the frozen
+[`schemas/logweir-drill-scorecard-1.4.0.json`](../../schemas/logweir-drill-scorecard-1.4.0.json).
+[`schemas/logweir-drill-scorecard-1.3.0.json`](../../schemas/logweir-drill-scorecard-1.3.0.json),
 [`schemas/logweir-drill-scorecard-1.2.0.json`](../../schemas/logweir-drill-scorecard-1.2.0.json),
 [`schemas/logweir-drill-scorecard-1.1.0.json`](../../schemas/logweir-drill-scorecard-1.1.0.json)
 and [`schemas/logweir-drill-scorecard-1.0.0.json`](../../schemas/logweir-drill-scorecard-1.0.0.json)
-are frozen beside it. Format **1.3.0** (FX-8) added the nested optional
+are frozen beside it. Format **1.4.0** (PROD-08.1) added the nested optional
+[`integrity.verification`](#integrityverification-format-140): whether the
+verdict covered a sample or every selected record, and what a complete
+verification found. Format **1.3.0** (FX-8) added the nested optional
 [`source.time_basis`](#sourcetime_basis-format-130); format **1.2.0** (FX-3) added
 `topic_parity.not_reconstructed`. Format **1.1.0** (FX-4) added the nested optional
 [`topic_parity.not_assessed` and `target_diff.not_assessed`](#topic_parity-and-what-its-silence-means),
@@ -63,7 +67,7 @@ that reader and this one is a reference.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of this format. `1.0.0` in v0.1; `1.1.0` since FX-4; `1.2.0` since FX-3; `1.3.0` since FX-8; `1.4.0` (PROD-01.3) for a restore into a target whose `target.auth.mode` is `scramSha256`, `plain` or `mtls`. |
+| `format_version` | string | Semver of this format. `1.0.0` in v0.1; `1.1.0` since FX-4; `1.2.0` since FX-3; `1.3.0` since FX-8; `1.4.0` since PROD-08.1; `1.5.0` (PROD-01.3) for a restore into a target whose `target.auth.mode` is `scramSha256`, `plain` or `mtls`. |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
 | `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../architecture.md#adr-0007-source-capture-scope) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
@@ -177,7 +181,7 @@ their refusal text, so the agreement is checked rather than asserted.
 | `target.topic_mapping_prefix` | string | Prefix applied to restored topic names. |
 | `target.topic_mapping_sha256` | string | `sha256:` of the mapping, so the mapping is attested rather than described. |
 | `target.topic_mapping_entries` | integer | How many mapping entries there were. |
-| `target.auth` | object, optional | How the target client authenticated: `mode` and, for a SASL mode, `username` — never a password. `mode` is `plaintext` or `scramSha512` in every format and from **1.4.0** also `scramSha256`, `plain` or `mtls` (PROD-01.3); a new value under an older version, or any other value, is refused by both readers. `mtls` has no `username` (the identity is the client certificate). Absent means plaintext. |
+| `target.auth` | object, optional | How the target client authenticated: `mode` and, for a SASL mode, `username` — never a password. `mode` is `plaintext` or `scramSha512` in every format and from **1.5.0** also `scramSha256`, `plain` or `mtls` (PROD-01.3); a new value under an older version, or any other value, is refused by both readers. `mtls` has no `username` (the identity is the client certificate). Absent means plaintext. |
 
 ### `source.time_basis` (format 1.3.0)
 
@@ -327,8 +331,8 @@ Copied verbatim from your spec, plus the verdict.
 | Field | Type | Meaning |
 |---|---|---|
 | `window_start`, `window_end` | RFC 3339 | The point-in-time window drilled. |
-| `topics`, `partitions` | integer | How many of each were selected. |
-| `records_expected` | integer | **The canary size**: how many records this drill set out to reconcile — `records_per_partition` summed over the partitions actually selected. It is **not** how many records the manifest says the window holds; those differ by orders of magnitude on a real archive. |
+| `topics`, `partitions` | integer | How many of each were selected. Under complete coverage (1.4.0), every topic and partition the complete block lists. |
+| `records_expected` | integer | **The canary size**: how many records this drill set out to reconcile — `records_per_partition` summed over the partitions actually selected. It is **not** how many records the manifest says the window holds; those differ by orders of magnitude on a real archive. Under complete coverage (1.4.0) the canary is the expected output of every compared partition, so this is `integrity.verification.complete.replay.expected` — the whole expected output only when `complete.covered` is `true` (an uncompared partition is never decoded and contributes 0). |
 | `records_restored` | integer | How many were restored. |
 | `anchor` | string | The vocabulary is `head`, `tail`, `random`; **v0.1 implements only `head`** and REFUSES the other two at phase 0 with exit 3 rather than silently substituting. The scorecard field is a plain string (the closed enum lives on the input spec, `logweir_core::spec::Anchor`, which is where a bad value has to be caught); a v0.1.0 scorecard therefore always reads `head`. See [stability.md](../stability.md). |
 | `coverage_note` | string | What the drill itself says about how representative the window is. Read it. |
@@ -457,6 +461,7 @@ fields.
 | `integrity.mismatches` | integer | How many did not. A **compacted** target topic is reported through this path as a mismatch, not as `partial` — see [stability.md](../stability.md). |
 | `integrity.pass_rate_measured` | float \| null | `matching / sampled`. **Null in three cases**, and a `byte-fingerprint` document with a null rate is well-formed: the level is not `byte-fingerprint`; not every selection reached a conclusion; or `records_sampled` is 0 (a zero denominator is withheld, never published as NaN). |
 | `integrity.restoredPrincipalCouldConsume` | bool \| null | **SP3.** Null, never `false`, until then. The wire name is camelCase deliberately and permanently: renaming it later would be a major bump. |
+| `integrity.verification` | object, **optional** (1.4.0) | What the verdict COVERED: `sampled` or `complete` coverage, what it compared against, whether header order was verified, the verified partitions' capture gaps and pruned ranges, and a complete verification's archive integrity and replay comparison. See [below](#integrityverification-format-140). ABSENT means not recorded, read as sampled and never as complete. |
 | `topic_parity.intentionally_deviated` | string[] | A SCRATCH drill's deviations on the four settings the restore's own topic creation decides (`cleanup.policy`, `retention.ms`, `partition_count`, `replication_factor`), as `"<target topic>: <key>"`. Since 1.2.0 always `[]` in a `newTopic` restore; in a `newTopic` document before 1.2.0 its entries were NOT reconstructed, whatever the label ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
 | `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have, as `"<target topic>: <key>"`. Since 1.1.0 also one fail-safe entry `"<target topic>: configuration not assessed (<why>)"` per topic `not_assessed` names ([below](#topic_parity-and-what-its-silence-means)). Since 1.2.0, in a `newTopic` restore, also every entry of `not_reconstructed` ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
 | `topic_parity.not_assessed` | string[], **optional** (1.1.0) | The mapped target topics whose CONFIGURATION parity was not assessed, as `"<target topic>: configuration (<why>)"`. See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
@@ -610,6 +615,117 @@ anything. Nothing is printed for `[]`, for a scratch drill, or for a `newTopic`
 document with nothing to say. `logweir drill show` adds
 `not reconstructed [...]`, or `intended = NOT reconstructed (a newTopic document
 before format 1.2.0)`, to its `topic parity` row.
+
+### `integrity.verification` (format 1.4.0)
+
+```json
+"verification": {
+  "coverage": "complete",
+  "comparison_basis": "archive",
+  "header_order": "verified",
+  "application": "notAttempted",
+  "gaps": [{"topic": "orders", "partition": 0, "from_offset": 10, "to_offset": 19}],
+  "pruned": [],
+  "complete": {
+    "covered": true,
+    "incomplete_reason": null,
+    "max_records": null,
+    "window": {"start_ms": null, "end_ms": 1788055200000},
+    "archive": {"segments": 4, "segments_verified": 4, "segments_failed": [],
+                "segments_unverified": [], "records_decoded": 77, "offset_holes": 0},
+    "replay": {"expected": 75, "restored": 75, "matching": 75, "missing": 0,
+               "unexpected": 0, "duplicates": 0, "out_of_order": 0, "mismatched": 0},
+    "partitions": [
+      {"topic": "orders", "partition": 0, "target_topic": "drill-orders", "compared": true,
+       "segments": 2, "segments_verified": 2, "records_decoded": 31, "offset_holes": 0,
+       "replay": {"expected": 30, "restored": 30, "matching": 30, "missing": 0,
+                  "unexpected": 0, "duplicates": 0, "out_of_order": 0, "mismatched": 0},
+       "findings": []}
+    ]
+  }
+}
+```
+
+A plan chooses how much of the restore phase 7 verifies with
+`sample.coverage` ([the plan field](drill-spec.md#samplecoverage-and-samplecomplete_max_records-prod-081)).
+**`sampled`**, the default, is the check every earlier scorecard records: the
+first records of each sampled partition reconciled by a fingerprint that sorts
+headers, the sha256 of the segments those records came from, and the manifest's
+count bound for the window, which reads segment first and last timestamps.
+**`complete`** reads every archived segment of every partition of every
+restored topic, checks its sha256 and decodes it, computes the expected output
+from each archived record's OWN timestamp, reads every restored record back,
+and compares the two by `x-original-offset`, headers in order. The contract —
+the expected-output model and what filters, partition subsets, compaction and
+transformations do to it — is
+[`PROD-08.1-integrity-contract.md`](../to-do/decisions/PROD-08.1-integrity-contract.md).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `coverage` | string | `sampled` or `complete` (arm IV-2): the plan's `sample.coverage`, as run. |
+| `comparison_basis` | string | What the restored records were compared with: `archive`. Never the source: a loss that happened when the archive was written is in the archive and the target alike ([the archive, not the source](../verify-a-scorecard.md#a-pass-compares-the-restored-topic-with-the-archive-not-with-the-source)). |
+| `header_order` | string | `verified` (complete coverage compares each record's headers in order, every occurrence) or `notVerified` (sampled coverage's fingerprint sorts them). Arm IV-3: `verified` only with `complete`. |
+| `application` | string | Application-level validation of the restored data: `notAttempted`. |
+| `gaps` | object[] | The capture gaps the manifest records for the partitions this run verified, each `{topic, partition, from_offset, to_offset}` (source offsets, inclusive), sorted. Structured and signed; `sample.coverage_note` keeps its sentence. |
+| `pruned` | object[] | The ranges retention deliberately removed, for the same partitions, the same shape. |
+| `complete` | object, optional | Present exactly when `coverage` is `complete` (arm IV-4). |
+| `complete.covered` | bool | `true` when every partition was compared. `false` when the bound stopped the verification or a partition's expected output could not be established; never a `pass` (arm IV-6). |
+| `complete.incomplete_reason` | string \| null | Why `covered` is `false`; null when it is `true` (arm IV-5). |
+| `complete.max_records` | integer \| null | The plan's `sample.complete_max_records`, the bound in force. |
+| `complete.window` | object | The selection the expected output was computed with: a record is expected when its own timestamp is at or before `end_ms` (inclusive) and, when `start_ms` is present, at or after it. `start_ms` ABSENT means no lower bound: the plan's window starts at the archive, so every archived record at or before the end is expected, including one older than every segment's first record. |
+| `complete.archive.segments` | integer | Segments the manifest lists for the restored partitions. |
+| `complete.archive.segments_verified` | integer | Segments read back whose sha256 matched the manifest, which decoded, and whose decoded count and offsets agreed with the manifest. |
+| `complete.archive.segments_failed` | string[] | Segment keys examined and found wrong: a sha256 mismatch, an object the store does not hold, or a decoded count or offset range the manifest contradicts. |
+| `complete.archive.segments_unverified` | string[] | Segment keys that could not be examined: no sha256 (written before 0.21), a format the decoder does not read, or past the bound. |
+| `complete.archive.records_decoded` | integer | Archived records decoded, inside the window or not. |
+| `complete.archive.offset_holes` | integer | Source offsets inside the decoded span that no archived record holds and no recorded gap or pruned range explains — a compacted source's holes. Disclosed, never a fault. |
+| `complete.replay.expected` | integer | Archived records the window selects: the expected output. |
+| `complete.replay.restored` | integer | Records the target partitions hold. |
+| `complete.replay.matching` | integer | Expected records whose first restored copy is byte-identical: key, value, timestamp, and the headers in order. |
+| `complete.replay.missing` | integer | Expected records with no restored copy. |
+| `complete.replay.unexpected` | integer | Restored records that are no expected record: an `x-original-offset` outside the expected output, or none at all. |
+| `complete.replay.duplicates` | integer | Restored records that repeat an `x-original-offset` already read. |
+| `complete.replay.out_of_order` | integer | Restored records whose `x-original-offset` is below one read before them. |
+| `complete.replay.mismatched` | integer | Expected records whose first restored copy differs from the archive. |
+| `complete.partitions[]` | object[] | One entry per partition of every restored topic, sorted: `topic` (archive side), `partition`, `target_topic`, `compared` (false when this partition was not compared), `segments`, `segments_verified`, `records_decoded`, `offset_holes`, `replay` (the eight counts above, for this partition), and `findings`: the first 20 findings in words (which offsets are missing, duplicated, out of order or different, and why a partition was not compared), and one more saying how many were left out. The counts are complete; the words illustrate. |
+
+**Absent means not recorded.** Every document before 1.4.0 — and one whose
+phase 7 never ran — is read as a SAMPLED verdict, never a complete one. Every
+1.4.0 run that reaches phase 7 writes the block. The legacy counters carry the
+complete comparison under complete coverage: `integrity.records_sampled` is the
+expected records of the compared partitions, `records_sampled_matching` their
+matching records, and `sample.records_expected` the expected records of the
+compared partitions too — the whole expected output only when
+`complete.covered` is `true`.
+
+Seven arms, enforced by both readers in the same position (after
+`source.time_basis`, before `redactions`) and words, fire only on a document
+carrying the block:
+
+| Arm | Refuses |
+|---|---|
+| IV-1 | the block under a `format_version` before 1.4.0 |
+| IV-2 | a `coverage` other than `sampled` or `complete` |
+| IV-3 | a `header_order` other than `verified` or `notVerified`, or `verified` beside sampled coverage |
+| IV-4 | a `complete` block without `coverage: complete`, or `coverage: complete` without one |
+| IV-5 | `covered: false` without a non-blank `incomplete_reason`, or a reason beside `covered: true` |
+| IV-6 | `integrity.result: pass` beside a complete block that is not covered, lists no partition, names a failed or unverified segment, records a missing, unexpected, duplicate, out-of-order or different record — in total or in any one partition — or lists a partition it did not compare |
+| IV-7 | totals that are not the sums of `partitions[]`, or segments not each verified, failed or unverified |
+
+Both readers print `integrity coverage:` lines — the coverage, its basis and
+header order; a complete block's counts, or `INCOMPLETE` and why; and how many
+gaps and pruned ranges the verified partitions record — or the one line saying
+the coverage was not recorded; `logweir drill show` renders the same in its
+qualifiers footer (`integrity.verification`).
+
+**The number.** 1.4.0; 1.3.0 is FX-8's. A renumber moves
+`logweir_core::FORMAT_VERSION` and `scorecard::VERIFICATION_SINCE_MINOR`
+together, the justfile's `scorecard_schema_version` and this schema file's
+name, `docs/verify_scorecard.py`'s `FORMAT_VERSION` and
+`SCORECARD_VERIFICATION_SINCE_MINOR`, the parity script's
+`SCORECARD_VERIFICATION_VERSION`, and the literal pins in
+`crates/logweir-core/src/lib.rs`, `docs/test_verify_scorecard.py` and the
+corpus cases `verification_*.json` (their `format_version` and IV-1's reason).
 
 ### `partial_reason` must SAY something
 

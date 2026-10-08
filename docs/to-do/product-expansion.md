@@ -159,7 +159,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 4 | FX-9a | A Linux shim for `just test-shifted-clock` (macOS only today; Linux refuses) | P3 | M3 | infra | FX-9 | — | none | C | Proposed |
 | 0 | FX-10 | Apply or withdraw configured values that reach nothing (two inert chart defaults; the retention caps' parse) | P2 | M1 | fix | — | — | none | A | Done |
 | 0 | FX-16 | Refuse a restore whose backup set is not the bound point's (manifest digest) | P1 | M1 | fix | — | — | compose | A | Proposed |
-| 0 | FX-17 | The catalog view offers no point on its first page ("not offered: … receipt key as [redacted]") | P1 | M1 | fix | — | — | k8s | A | Proposed |
+| 0 | FX-17 | The catalog view offers no point on its first page ("not offered: … receipt key as [redacted]") | P1 | M1 | fix | — | — | k8s | A | In progress |
 | 0 | FX-18 | Test and harness hygiene: the `logweir-api` connection-ceiling test flakes under host load; the PoC harnesses cannot name a browser executable | P3 | M1 | infra | — | — | none | C | Proposed |
 | 0 | FX-19 | A probe Job Kubernetes is deleting reads as a crash: `reachable` flaps for seconds and each probe cycle logs about 12 WARN lines | P2 | M1 | fix | FX-11 | — | none | A | Proposed |
 | 0 | FX-15 | FX-10's owed items: non-default rows for five configured values (evidence-fetch pool, restore manual-run gate, `api.console.*`, `identity.*`, a Backup's `visibilityAttestations`), the unread `legacyArchiveAddressing` fields, and a retention refusal's reason on its status | P3 | M3 | fix | — | — | none | A | Proposed |
@@ -180,10 +180,11 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-01.3 | Reach managed and mTLS clusters | P1 | M1 | impl | 01.5 | — | k8s | A | Proposed |
 | 1 | PROD-01.2 | Publish a tested compatibility contract | P1 | M1 | research | 00.1, 01.1, 01.3, 01.5 | OD-4 (provider rows) | compose | B | Proposed |
 | 1 | PROD-14.1 | Simple install and emergency recovery kit | P1 | M1 | impl | 14.0, 01.2, 16.1 | — | k8s | A | Proposed |
-| 1 | PROD-16.1 | No key by default: one-person console confirmation, console key generated at install | P1 | M1 | impl | — | — | k8s | A | Proposed |
+| 1 | PROD-16.1 | No key by default: one-person console confirmation, console key generated at install | P1 | M1 | impl | — | — | k8s | A | In progress |
 | 1 | PROD-16.2 | Two-person approval in the console: the second person clicks Approve | P1 | M1 | impl | 16.1 | — | k8s | A | Proposed |
 | 1 | PROD-16.4 | Auth follow-ups: IdP groups mapped to roles proven live; an audit-log retention recipe | P2 | M1 | impl | — | — | k8s | B | Proposed |
-| 1 | PROD-08.1 | Complete archive integrity and exact counts | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
+| 1 | PROD-08.1 | Complete archive integrity and exact counts | P1 | M2 | impl | 01.1 | — | compose | A | Done |
+| 2 | PROD-08.1a | Request and show complete coverage through the CRDs, the API and the console | P1 | M2 | impl | 08.1 | — | k8s | A | Proposed |
 | 1 | PROD-05.1 | Capture topic configuration with coverage | P1 | M2 | impl | FX-4, 01.5 | — | compose | A | Proposed |
 | 1 | PROD-04.1 | Archive consumer position evidence | P1 | M2 | impl | 04.0, 04.0a, 04.0d, 01.4, FX-1 | — | compose | A | Proposed |
 | 1 | PROD-02.1 | Honest coverage for scheduled backups | P1 | M2 | impl | 01.4 | — | k8s | A | Proposed |
@@ -800,6 +801,14 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Acceptance:** Evidence separates authenticated report, archive integrity, replay comparison and application validation; old scorecards verify unchanged; complete mode covers every selected record or reports incomplete.
 - **Tests/evidence:** Corrupt an unsampled segment, omit a segment, duplicate output, reorder records, non-monotonic timestamps, compaction holes; each fault is caught or disclosed at the right level.
 - **Dependencies:** PROD-01.1. **Handoff:** verification contract, cost measurements, backward-compatible report fields.
+
+**Completion record — Done (2026-10-08), PROD-08.1.**
+- **Ownership:** worker `prod-08-1` (a run and a fix round), independent Tier-A review `claude/prod-08-1.review.md`: ACCEPT-WITH-FIXES (four MEDIUM, nine LOW), all fixed and read by the orchestrator. Merged as `187816ef` (branch tip `171c1773`). Gate: `scripts/ci-check.sh` rc 0 at `171c1773`.
+- **Delivered:** a plan may ask for `sample.coverage: complete`. The run then hashes and decodes every archived segment of every restored partition, computes exact per-partition expectations from each record's own timestamp (independent of the engine's first/last-timestamp segment selection), and checks every restored record against them on `x-original-offset` (duplicates, order and header order caught). A bound or an error that stops complete mode signs `covered: false`, never `pass`; a sampled run says sampled. Scorecard 1.4.0 adds `integrity.verification`; verifier script 1.19.0; arms IV-1 to IV-7 with identical text in both readers, each MINOR under OD-7; the parity script and the corpus cover each arm, condition by condition. Old scorecards (1.0–1.3) verify unchanged and are never read as complete.
+- **Decision record:** [`decisions/PROD-08.1-integrity-contract.md`](decisions/PROD-08.1-integrity-contract.md): the expected-output model for filters, partition subsets, compaction and transformations, with numbered rows for PROD-03.2, 04.2, 05.2, 08.2, 08.3, 11.1 and 12.1. PROD-04.2 may translate consumer positions only over a complete verification that passed for every partition it names (review M-3).
+- **Evidence:** the row's faults on compose slot 2, each caught or disclosed at the right level with a negative control: a corrupted unsampled segment, an omitted segment, duplicated output, reordered records, non-monotonic timestamps, compaction holes (a live row added in the fix round); `record_semantics` and `full_drill` on engine 0.23.3 after the pin moved. Mutants: 25 (first round) and 13 (fix round, every reviewer survivor included). Workspace suites 3,564 passed, 0 failed.
+- **Limits:** the cost figures per GB and per partition were measured on engine 0.21.0 and not re-measured on 0.23.3; PROD-10.1 bounds complete mode. The CRDs, the API and the console cannot yet request or show complete coverage: PROD-08.1a.
+- **Artifacts:** `claude/artifacts/prod-08-1/`.
 
 ### PROD-08.2 — Measure recovery objectives through exercises
 

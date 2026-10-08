@@ -1,0 +1,5 @@
+# expect: allowOrdinaryConfirmation is not true
+approvalPolicy:
+  default: confirm
+  policies: []
+  namespaces: {}

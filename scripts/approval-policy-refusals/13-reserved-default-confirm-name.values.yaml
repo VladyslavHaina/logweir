@@ -1,0 +1,6 @@
+# expect: default-confirm-v1
+approvalPolicy:
+  allowOrdinaryConfirmation: true
+  policies:
+    - {name: default-confirm-v1, mode: confirm}
+  namespaces: {}
