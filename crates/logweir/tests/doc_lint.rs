@@ -1600,10 +1600,26 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// notes as they stood at `4e58d330`, with sixteen items, fail the twenty pin,
 /// and so does deleting any one of items 17–20 (release-docs-final, 2026-09-25).
 ///
-/// Then to twenty-one: item 21 is FX-10's withdrawal of the two inert policy
-/// values. Its token is the install-notes warning an upgrade that still carries
-/// one prints, so an item 21 that stops telling an operator what they will see
-/// fails here (FX-10, 2026-10-05).
+/// Then to twenty-one: item 21 is FX-2's upgrade behaviour change, which the
+/// FX-2 review (M1) found only in `docs/kubernetes.md`. Its token is the
+/// pre-upgrade inventory itself, so an item 21 that loses the command an
+/// operator runs before the upgrade fails here. The notes at FX-2's `3147f498`,
+/// with twenty items, fail the twenty-one pin (FX-2 fix round, 2026-10-05).
+///
+/// Then to twenty-two: item 22 is FX-5's console change (the replication
+/// factor's default, its input and its refusal, and the topic subset a resumed
+/// draft lost), which the FX-5 review (M2) found in no release note. Its token
+/// is the operator action that gives the new default, and it is held, below,
+/// to what it owes beyond that: what an operator sees after the upgrade, what
+/// a larger factor costs, and the read that audits a Restore made from a
+/// resumed draft. The notes at main's `b8b9263f`, with twenty-one items, fail
+/// the twenty-two pin (FX-5 fix round, 2026-10-05).
+///
+/// Then to twenty-three: item 23 is FX-10's withdrawal of the two inert policy
+/// values. Its token is the install-notes warning an upgrade that still
+/// carries one prints, so an item 23 that stops telling an operator what they
+/// will see fails here. The notes at main's `80336916`, with twenty-two items,
+/// fail the twenty-three pin (FX-10 fix round, 2026-10-05).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1629,9 +1645,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=21).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-one operator-facing changes, `#### 1.` \
-         to `#### 21.` in order; found {numbers:?}"
+        (1..=23).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-three operator-facing changes, `#### 1.` \
+         to `#### 23.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1665,6 +1681,18 @@ fn the_release_notes_carry_every_owed_operator_action() {
         ("one catalog per destination", "DuplicateCatalog"),
         ("a failed controller read is read again", "retryAfter"),
         ("a readiness replay names its expiry", "staleBasis"),
+        // FX-2 (2026-10-05): runnerResources applied or refused, and the
+        // pre-upgrade inventory of the objects whose behaviour changes.
+        (
+            "runnerResources applied or refused",
+            "select(.spec.runnerResources // .spec.bounds.runnerResources)",
+        ),
+        // FX-5 (2026-10-05): the replication factor a console restore asks
+        // for, and the topic subset a resumed draft lost.
+        (
+            "a console restore's replication factor and topic subset",
+            "*Discover topics*",
+        ),
         // FX-10 (2026-10-05): two inert policy values withdrawn; the notes say so.
         (
             "two inert policy values withdrawn",
@@ -1682,6 +1710,25 @@ fn the_release_notes_carry_every_owed_operator_action() {
                 "docs/release-notes.md item {number} ({item}) has no `{owed}` paragraph"
             );
         }
+    }
+
+    // ITEM 22 OWES MORE THAN ONE THING (FX-5 review M2), each in its own
+    // section: what an operator sees after the upgrade, what a larger factor
+    // costs on the target, and the read that audits a Restore made from a
+    // resumed draft.
+    let (_, fx5) = items
+        .iter()
+        .find(|(n, _)| *n == 22)
+        .expect("docs/release-notes.md carries item 22");
+    for owed in [
+        "What an operator sees after the console image is upgraded",
+        "takes three times the storage it took there",
+        "-o jsonpath='{.spec.planBytes}'",
+    ] {
+        assert!(
+            fx5.contains(owed),
+            "docs/release-notes.md item 22 (FX-5) no longer carries `{owed}` in its own section"
+        );
     }
 
     // The six required actions, numbered, in the section that orders them.

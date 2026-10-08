@@ -452,3 +452,36 @@ fn show_renders_an_em_dash_when_nothing_was_redacted() {
         "the refusal note belongs only on a redacted document:\n{table}"
     );
 }
+
+/// **FX-4.** The `topic parity` row never lets an empty `unexpected []` read
+/// as configuration parity the document does not claim: a 1.0.0 document (no
+/// `not_assessed`) says the coverage was NOT RECORDED, a 1.1.0 one names every
+/// topic that was not assessed, and only `Some([])` — every topic assessed —
+/// adds nothing.
+#[test]
+fn the_parity_row_says_what_was_not_assessed_and_never_reads_absent_as_assessed() {
+    let row = |sc: &logweir_core::scorecard::Scorecard| {
+        logweir::show::render_table(sc)
+            .lines()
+            .find(|l| l.contains("topic parity"))
+            .unwrap()
+            .to_string()
+    };
+    let mut sc = fixtures::scorecard_pass();
+    assert!(
+        row(&sc).ends_with("configuration coverage not recorded"),
+        "{}",
+        row(&sc)
+    );
+    sc.format_version = "1.1.0".into();
+    sc.topic_parity.not_assessed = Some(vec![
+        "drill-orders: configuration (captureDenied)".to_string()
+    ]);
+    assert!(
+        row(&sc).ends_with("not assessed [drill-orders: configuration (captureDenied)]"),
+        "{}",
+        row(&sc)
+    );
+    sc.topic_parity.not_assessed = Some(vec![]);
+    assert!(row(&sc).ends_with("unexpected []"), "{}", row(&sc));
+}

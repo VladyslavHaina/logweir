@@ -3085,6 +3085,9 @@ pub fn runner_job_spec_from_inputs(
         // WAY IF THIS PROCESS WAS HANDED ANOTHER POLICY (Task 37,
         // `job::RUNNER_PULL_POLICY_ENV`). Same argument, same one line.
         image_pull_policy: None,
+        // `Backup.spec` has no resources field, so its Job states none and the
+        // namespace's `LimitRange` defaults apply (FX-2's sweep; PROD-10.1).
+        resources: None,
     })
 }
 

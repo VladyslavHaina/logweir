@@ -2661,9 +2661,20 @@ async fn a_policy_governed_namespace_verifies_under_its_own_policy() {
         },
     ]);
     let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
-    let outcome = approval::decide(&approval, &client)
-        .await
-        .expect("the decision completes");
+    // At `now()`, the fixed clock this file promises, and NOT through
+    // `approval::decide`, which reads the wall clock: this row VERIFIES, so
+    // it needs `policy_key`'s window open at the instant it is judged, and
+    // through the wall clock it failed from 2099-01-01 (FX-9's sweep).
+    // `decide` is `decide_with_policy` over the default set, so this is the
+    // same decision with the clock handed in.
+    let outcome = approval::decide_with_policy_at(
+        &approval,
+        &client,
+        &logweir_core::approval_policy::ApprovalPolicySet::default(),
+        now(),
+    )
+    .await
+    .expect("the decision completes");
     assert!(
         outcome.is_verified(),
         "the policy names this namespace and carries the approver key: {outcome:?}"

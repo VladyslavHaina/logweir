@@ -502,6 +502,8 @@ fn base_verify_outcome() -> logweir::drill::phase7_verify::VerifyOutcome {
         topic_parity: TopicParity {
             intentionally_deviated: vec![],
             unexpected_divergence: vec![],
+            // Phase 7 ran: every topic's configuration parity was assessed.
+            not_assessed: Some(vec![]),
         },
         records_restored: 75,
         newest_restored_ts_ms: 1_756_519_200_000,
@@ -1578,6 +1580,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             // CA path with no TLS transport is refused by `AuthRender` anyway
             // (PLAT-07.1). `tests/tls_ca.rs` drives the other value.
             target_tls_ca_file: None,
+            // FX-4: an unbound plan's coverage — UNKNOWN for every topic.
+            // `tests/config_coverage_drill.rs` drives the captured value.
+            source_config_coverage: logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
         },
         segment_bytes,
         out,

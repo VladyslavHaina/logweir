@@ -93,7 +93,9 @@ pub mod stack;
 // Re-exported for every test binary; not every binary uses all four, and the
 // module-level `allow(dead_code)` does not cover an unused `use`.
 #[allow(unused_imports)]
-pub use stack::{bootstrap, bootstrap_k8s, bootstrap_sasl, s3_endpoint};
+pub use stack::{
+    bootstrap, bootstrap_acl, bootstrap_acl_sasl, bootstrap_k8s, bootstrap_sasl, s3_endpoint,
+};
 
 /// The `SASL` listener — the SAME SCRAM credential store as `bootstrap_sasl()`,
 /// advertised for clients ON `kafka-net`. Unresolvable from the host by
@@ -544,6 +546,30 @@ pub fn create_topic_with_configs(topic: &str, partitions: i32, configs: &[(&str,
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
     panic!("topic {topic} still absent 15s after --create");
+}
+
+/// [`create_topic_with_configs`] for records stamped at a FIXED past instant
+/// (a literal such as `T` = 2025-10-09), with `retention.ms=-1` added.
+///
+/// **Why it has to exist.** Such records have already breached the broker's
+/// default retention (7 days) when they land. The broker's retention check
+/// runs every five minutes and deletes them the next time it runs, so a row
+/// that captures after that check finds its topic empty. Engine-matrix run
+/// 36542777892 lost PROD-01.1's shapes row that way, and either engine does
+/// the same (`docs/to-do/decisions/PROD-00-engine-route.md` 4.4, A-C20-2).
+/// Logweir gives its own restore targets the same override
+/// (`crates/logweir-kafka/src/reader.rs`, the `retention.ms = -1` entry).
+/// `e2e/tests/fixture_retention.rs` fails a suite that stamps a fixed past
+/// instant and creates a topic any other way.
+pub fn create_topic_for_fixed_timestamps(topic: &str, partitions: i32, configs: &[(&str, &str)]) {
+    assert!(
+        configs.iter().all(|(k, _)| *k != "retention.ms"),
+        "create_topic_for_fixed_timestamps({topic}) owns retention.ms: a fixture that wants the \
+         broker's retention to act does not stamp a fixed past instant"
+    );
+    let mut kept = configs.to_vec();
+    kept.push(("retention.ms", "-1"));
+    create_topic_with_configs(topic, partitions, &kept);
 }
 
 /// The total number of records the broker holds for `topic`, over every

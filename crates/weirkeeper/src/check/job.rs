@@ -294,6 +294,8 @@ pub fn runner_job_spec(spec: &CheckJobSpec) -> RunnerJobSpec {
         plan_config_map: None,
         image: spec.image.clone(),
         image_pull_policy: spec.image_pull_policy.clone(),
+        // No check kind's spec states resources for its Job (FX-2's sweep).
+        resources: None,
     }
 }
 

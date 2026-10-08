@@ -40,6 +40,16 @@ mutant-clean:
 test:
     cargo test --locked --workspace
 
+# FX-9's time-bomb guard. A row that compares the wall clock with a fixed
+# instant fails now rather than on that date. The default offset is a year and
+# a day. On macOS it builds a clock shim with `cc`; on Linux it needs
+# libfaketime and refuses without it (and, with Debian's libfaketime 0.9.10, at
+# its self-check). It is not in `lint` or CI, because it is a second full test
+# run.
+# Run the unit suites with every test binary's wall clock shifted forward.
+test-shifted-clock OFFSET="+366d":
+    bash scripts/test-shifted-clock.sh {{OFFSET}}
+
 golden:
     INSTA_UPDATE=always cargo test --workspace
 
@@ -47,7 +57,7 @@ golden:
 # as revised): the drill scorecard and the backup receipt; PLAT-17.1 adds a
 # THIRD, `schemas/logweir-api-v1.openapi.json`, the product API's OpenAPI
 # document generated from `crates/logweir-api`'s DTOs; PLAT-15.1 adds a
-# FOURTH, `schemas/logweir-catalog-point-1.0.0.json`, the recovery catalog's
+# FOURTH, `schemas/logweir-catalog-point-1.1.0.json` (1.0.0 frozen beside it), the recovery catalog's
 # point record, generated from `crates/logweir`'s own type (the type is runner
 # vocabulary, so its emitter lives beside it rather than in `logweir-core`).
 # `logweir schema` still accepts exactly the two names Global Constraint 13
@@ -67,11 +77,28 @@ golden:
 # interfere. Neither target is a SIGNED artefact — unlike `fixtures-sign`'s,
 # these files carry no signature and a truncated redirect target costs a
 # `just schema`, not a re-mint (Task 5).
+#
+# FX-4 moved the scorecard, the receipt and the catalog point to 1.1.0 (the
+# first fields added after the v0.1 tags: a MINOR bump "with a new schema file
+# beside the old one", docs/stability.md). The three `-1.0.0.json` files are
+# FROZEN beside the new ones and are NOT regenerated here: they describe every
+# document written before the bump. Their own tests
+# (`the_frozen_1_0_0_*_schema_is_still_the_1_0_0_schema`) keep them what they were.
+#
+# The CURRENT version of each document, in ONE place for these two recipes:
+# each must equal its writer's constant (`logweir_core::FORMAT_VERSION`,
+# `backup_receipt::RECEIPT_FORMAT_VERSION`, `catalog::record::FORMAT_VERSION`),
+# which also builds the schema's `$id`. A renumber (for instance 1.1.0 -> 1.2.0)
+# moves the constant and this line, keeps the old file frozen beside the new.
+scorecard_schema_version := "1.1.0"
+receipt_schema_version := "1.1.0"
+catalog_schema_version := "1.1.0"
+
 schema:
-    cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-1.0.0.json
-    cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-1.0.0.json
+    cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json
+    cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-{{receipt_schema_version}}.json
     cargo run -p logweir-api --example emit_openapi > schemas/logweir-api-v1.openapi.json
-    cargo run -p logweir --example emit_catalog_point_schema > schemas/logweir-catalog-point-1.0.0.json
+    cargo run -p logweir --example emit_catalog_point_schema > schemas/logweir-catalog-point-{{catalog_schema_version}}.json
 
 # Compare regenerated schemas without changing the working tree.
 schema-check:
@@ -84,10 +111,10 @@ schema-check:
     cargo run --locked -p logweir-core --example emit_backup_receipt_schema > "$tmp/receipt.json"
     cargo run --locked -p logweir-api --example emit_openapi > "$tmp/api.json"
     cargo run --locked -p logweir --example emit_catalog_point_schema > "$tmp/catalog-point.json"
-    diff -u schemas/logweir-drill-scorecard-1.0.0.json "$tmp/scorecard.json"
-    diff -u schemas/logweir-backup-receipt-1.0.0.json "$tmp/receipt.json"
+    diff -u schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json "$tmp/scorecard.json"
+    diff -u schemas/logweir-backup-receipt-{{receipt_schema_version}}.json "$tmp/receipt.json"
     diff -u schemas/logweir-api-v1.openapi.json "$tmp/api.json"
-    diff -u schemas/logweir-catalog-point-1.0.0.json "$tmp/catalog-point.json"
+    diff -u schemas/logweir-catalog-point-{{catalog_schema_version}}.json "$tmp/catalog-point.json"
 
 # Compatibility alias; the main check runs schema-check only once.
 receipt-schema-check: schema-check
@@ -192,7 +219,7 @@ e2e-up:
 # stack — or another slot — from under its user.
 e2e-down:
     ./e2e/compose/stack-env.sh --check
-    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile streams --profile objectstore --profile registry down -v --remove-orphans
+    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile streams --profile objectstore --profile registry --profile acl down -v --remove-orphans
 
 # AWS_EC2_METADATA_DISABLED (fix round 1, review F7): with no AWS credentials
 # in the environment, `AmazonS3Builder::from_env()` falls through to the EC2

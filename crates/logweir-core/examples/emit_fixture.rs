@@ -18,7 +18,13 @@ fn main() {
     let sub: &[u8] = br#"{"schema_version":"1.0.0","report_id":"01J9X2QK7C4V0R8YB3ZP6MTS5A"}"#;
 
     let sc = Scorecard {
-        format_version: logweir_core::FORMAT_VERSION.to_string(),
+        // "1.0.0", NOT `logweir_core::FORMAT_VERSION`: the committed signed
+        // fixture this reproduces byte for byte
+        // (`tests/fixture_regen.rs::emit_fixture_reproduces_the_committed_scorecard_bytes`)
+        // is a 1.0.0 document, and FX-4's 1.1.0 bump leaves it one — old
+        // evidence verifies unchanged, and ruling R-G reserves the re-mint. A
+        // 1.0.0 document has no `topic_parity.not_assessed`, hence `None`.
+        format_version: "1.0.0".to_string(),
         run_id: "01J9X2QK7C4V0R8YB3ZP6MTS5A".into(),
         outcome: Outcome::Pass,
         // 7, not 9: `phase8_score::run` signs a frozen clone, so phase 8's own
@@ -127,6 +133,9 @@ fn main() {
             absent: vec![],
             would_create: vec![("drill-orders".to_string(), 3)],
             level: "full".into(),
+            // FX-4's 1.1.0 field stays absent: this fixture is the frozen
+            // 1.0.0 document.
+            not_assessed: None,
         },
         integrity: Integrity {
             level: IntegrityLevel::ByteFingerprint,
@@ -141,6 +150,7 @@ fn main() {
         topic_parity: TopicParity {
             intentionally_deviated: vec!["cleanup.policy".into(), "retention.ms".into()],
             unexpected_divergence: vec![],
+            not_assessed: None,
         },
         engine_subreport: Some(EngineSubreport {
             retained_verbatim: true,

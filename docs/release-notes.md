@@ -20,8 +20,9 @@ mark without one). The supported path these notes assume is
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
-published image. No tag is cut at `fdb48cd8`, so the candidate record below
-stays empty. The shipped task list, the six publications the PoC ran, the
+published image. Items 21 (FX-2), 22 (FX-5) and 23 (FX-10), from the
+product-expansion tracker's fix-now rows, land after `fdb48cd8`. No tag is cut at `fdb48cd8`, so the candidate
+record below stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
 
@@ -155,15 +156,24 @@ A key that must not be compromised everywhere cannot be un-revoked (G3, and G9
 in this build). Either delete that policy before the upgrade, or re-issue the key.
 Do not deploy until every listed record is one you mean installation-wide.
 
-### The twenty-one operator-facing changes
+**Pre-upgrade check: which `Restore`s and `RehearsalSchedule`s carry a
+`runnerResources` block** (item 21). This build applies the block to the runner
+container, or refuses the object, where earlier builds ignored it. Run item 21's
+inventory before the controller rolls; no output means the upgrade changes
+nothing there.
+
+### The twenty-three operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
 PLAT-20.2 from merged changes; the defect names are the platform tracker's.
 Items 17–20 were found by the PoC rounds and landed after its first
 publication (`86a554e6`); each was proven on the running install by the
-in-place upgrade that carried it. Item 21 is the product-expansion tracker's
-fix-now row FX-10.
+in-place upgrade that carried it. Items 21 and 22 are the product-expansion
+tracker's fix-now rows FX-2 and FX-5 and are not proven live yet: the PoC
+upgrade that carries each runs its rows. Item 23 is fix-now row FX-10, proven
+offline; the PoC upgrade that carries it checks that the installation's policy
+document and its digest are unchanged.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -685,7 +695,139 @@ not be staged inside the PoC's 15-minute session. **Rollback:** `helm rollback`
 moves the API and the console together, and the older pair replays a spent
 check again; nothing stored changes.
 
-#### 21. Two policy values that changed nothing are withdrawn (FX-10)
+#### 21. A `Restore`'s `runnerResources` is applied, or the object is refused (FX-2)
+
+**Changed.** `Restore.spec.runnerResources`, and a `RehearsalSchedule`'s
+`spec.bounds.runnerResources` through the child `Restore` it creates, were
+accepted, documented as what the runner pod asks for and is capped at, and
+dropped: no runner container carried `resources`, so every runner pod was
+`BestEffort`. The block now reaches the `runner` container exactly as written.
+A block the controller will not apply is refused, never clamped: a quantity
+outside the schema's grammar, memory that is not whole bytes, CPU finer than
+`1m`, anything above 4 CPUs or `8Gi` (requests included), a zero limit, a memory
+limit below `32Mi`, or a request above its limit. A `Restore` with such a block
+ends `Failed` with reason `ExecutionSpecInvalid` before its approval is read or
+anything is created, and the product API serves it `refused`. A
+`RehearsalSchedule` skips every slot as `AuthorizationInvalid` and creates no
+child ([kubernetes.md](kubernetes.md) §12, *The runner's requests and limits*).
+An object without the block gets exactly the Job it got before; the console
+never sets the field.
+
+What changes on the upgrade, for objects that already carry a block:
+
+- **A `Restore` with no Job yet** (held for its approval, queued, or created
+  during the upgrade) is judged on its next pass. A valid block now caps its
+  pod, so the pod can be rejected by a `ResourceQuota` or `LimitRange` it never
+  met before (reported as `RunnerReady=False` with `PodCreationForbidden`, then
+  ending `PodCreationForbidden`), or be OOM-killed at its memory limit. A block
+  outside the bounds ends it `Failed`/`ExecutionSpecInvalid`, and the remedy is
+  a new `Restore`, because `spec` is immutable.
+- **A `Restore` whose Job already exists** keeps that Job, which carries no
+  `resources`. A terminal `Restore` is untouched.
+- **A `RehearsalSchedule`** caps every rehearsal from its next slot, or, when its
+  block is outside the bounds, skips every slot as `AuthorizationInvalid` for
+  good. The spec is sealed, so the fix is a new schedule and a new signed
+  standing authorization.
+
+**Do:** before the upgrade, list every object that carries a block:
+
+```bash
+kubectl --context <ctx> get restores,rehearsalschedules -A -o json \
+  | jq -r '.items[] | select(.spec.runnerResources // .spec.bounds.runnerResources)
+      | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
+```
+
+No output means nothing changes. Check each listed block against §12's rules
+and against its namespace's `ResourceQuota` and `LimitRange`. Replace an
+out-of-bounds schedule (and its authorization) before the upgrade, or expect its
+slots to be skipped. Expect an out-of-bounds `Restore` that has no Job yet to
+end `ExecutionSpecInvalid`. **Scope:** `crates/weirkeeper/tests/runner_resources.rs`
+(the rules, and the exact quantity arithmetic in every suffix),
+`restore_controller.rs` and `rehearsal_controller.rs` (the container carries
+the block exactly, one-sided blocks included; the refusal comes before the
+approval is read, with no `POST`; a quota rejection is reported and failed
+fast), `crates/logweir-api/tests/status_mapping.rs` (`refused`), and planted
+mutants, each killed (FX-2, its review and its fix round). Not yet proven live:
+the PoC upgrade that carries FX-2 runs its CRD, refusal and Job-bytes rows. An
+admitted `Restore`'s real Job and the `RehearsalSchedule` side wait for
+PROD-10.1, which exposes the control in the console.
+**Rollback:** an older controller ignores the field again. Its Jobs carry no
+`resources`, and a `Restore` this build refused stays `Failed`; an older
+product API serves that refusal `failed` again. A
+`RehearsalSchedule` this build skipped for its block fires again under the
+older controller, uncapped: suspend it (`spec.suspend: true`, the one mutable
+field) before rolling back if it must not run. Nothing has to be deleted.
+
+#### 22. A console restore asks for a replication factor it can explain, and keeps its topic subset (FX-5)
+
+**Changed.** The restore wizard wrote `replicationFactor: 1` into every plan
+and showed it read-only, so every console restore created topics with
+replication factor 1, on any cluster. Step 4 now has a **replication factor**
+input. Its default is the target connection's broker count, at most 3, read
+from that connection's newest successful topic discovery: a fresh one, or one
+whose only stale reason is `expired`, while the controller keeps it
+(`checks.discovery.retentionSeconds`, a day by default). With no such
+discovery the default stays 1, and step 4 says why and links *Discover
+topics* on the target. The source's own factor is not read: it is recorded
+only in the archive manifest, and projecting it is PROD-05.1's. Step 4 and the
+review step print the factor with where it came from, such as `2 (the target's
+2 brokers; ...)` or `3 (set by you; the target has 2 brokers)`. They also say
+it can differ from the source's: a topic the source kept at replication factor
+1, restored at 3, takes three times the storage it took there. A factor above
+a fresh discovery's count is refused before anything is sent, with
+`ReplicationFactorExceedsBrokers`. A factor above an older count is not
+refused; the readiness check's `target.topicCreate` row stays the check
+against the target as it is. The topic-discovery DTO of the product API gains
+an optional, additive `brokerCount` ([api.md](api.md), *Bounded, honest topic
+inventory*; [ui/README.md](../ui/README.md), *The replication factor: a
+default with its basis, an input, and a refusal before Create*).
+
+Also fixed: **a resumed restore draft lost its topic subset.** The console's
+draft store keeps strings and booleans only, and the wizard handed it the
+topic subset, and a catalog point's typed topic list, as arrays, which it
+dropped without a word. After leaving the wizard and coming back in the same
+page, every topic of the point was selected again while the page said "your
+unsubmitted edits ... are back", so a Restore created from a resumed draft may
+have restored more topics than were chosen. Both lists are now kept.
+
+What an operator sees after the console image is upgraded:
+
+- **No discovery of the target in the last day** (the PoC's state): the factor
+  is still 1, now with a warning beside the input and a link to run *Discover
+  topics* on the target connection.
+- **After a *Discover topics* of the target:** a restore into a multi-broker
+  target asks for 2 or 3 replicas where it asked for 1, so it stores up to
+  three times as much on the target as the same restore did before the
+  upgrade, plus replication traffic.
+- **A `Restore` created before the upgrade** keeps its plan bytes
+  (`Restore.spec` is immutable) and so its factor of 1. A retry builds a new
+  plan with the new default.
+
+**Do:** before restoring into a target with little free disk, check the factor
+on step 4 and set it yourself if the default is not what you want. Run the
+readiness check (step 5) before Create: with no check, a factor the target's
+brokers cannot hold fails the approved run when it creates the topics
+(`exitCode 1`, `operational`, nothing restored; [quickstart.md](quickstart.md)
+§7). For console Restores created before this build from a resumed draft,
+compare the topics each one restored with the ones you meant: they are the
+`source.topics` list of the plan
+(`kubectl --context <ctx> -n <ns> get restore <name> -o jsonpath='{.spec.planBytes}'`).
+**Scope:** `ui/tests/replication-factor.spec.js` (the default rule and its
+4-broker boundary, the count's freshness rule, the refusal before Create, the
+review row, the sentence about the source's factor in the page and in both
+documents, the readiness warning, both mounts, and the draft class), with a
+negative control for each behaviour, each killed. Also
+`crates/logweir-api/tests/topic_discoveries.rs`
+(`a_discovery_publishes_the_broker_count_its_result_recorded`, over the fixture
+the console rows read), with four API mutants killed, and a Chromium journey
+over the real console modules at 1440 and 390 px (FX-5, its review and its fix
+round). Not yet proven live: the PoC upgrade that carries FX-5 runs its rows,
+stopping before Create. **Rollback:** rolling the console image back restores
+the fixed, read-only 1 and the draft that drops the subset, and an older
+product API omits `brokerCount`. Nothing stored changes: a `Restore` created
+with a factor above 1 keeps it.
+
+#### 23. Two policy values that changed nothing are withdrawn (FX-10)
 
 **Changed.** `checks.discovery.defaultMaxTopics` and
 `checks.preflight.defaultTimeoutSeconds` were documented as the default a
@@ -785,8 +927,9 @@ document still carries both keys at values an older controller accepts.
 ### Migration and rollback
 
 **Upgrade order:** identity backup → retention grants and modes (items 1–2) →
-CRDs (all fourteen established) → controller **and** runner image together →
-console image → approval-policy binding. Every CRD change is additive; nothing
+the `runnerResources` inventory (item 21) → CRDs (all fourteen established) →
+controller **and** runner image together → console image → approval-policy
+binding. Every CRD change is additive; nothing
 is converted and no stored object is rewritten
 ([install.md](install.md), *Upgrade CRDs before upgrading the controller*).
 
@@ -826,6 +969,10 @@ is converted and no stored object is rewritten
    one is there), and record each such revocation on every policy that still
    lists the key (`CompromiseInherited`). Do not delete a policy to "go back to
    the roster" before that: it is held until nothing lists the key.
+10. **Suspend every `RehearsalSchedule` this build skips for its
+    `runnerResources`** (item 21) that must not run uncapped: an older
+    controller drops the block and fires its next slot. A `Restore` this build
+    refused `ExecutionSpecInvalid` stays `Failed`.
 
 **How this upgrade is rehearsed.** From `v0.1.5` (the last version tag: 6 →
 14 CRDs, the managed identity adopting a hand-provisioned signer, the console
@@ -837,7 +984,8 @@ back. The running install was then upgraded in place five times: to
 CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
-showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20.
+showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
+from `fdb48cd8` crosses items 21, 22 and 23.
 
 **The chart and the images move together.** This chart's controller probes run
 `weirkeeper --probe`, and its console configuration can carry
@@ -910,6 +1058,10 @@ policy or roster ([keys.md](keys.md)).
   `docker.io/vladyslavhaina/minio-mirror` and `mc-mirror` (AGPL-3.0). Replacing
   MinIO with a maintained, permissively licensed S3 server is an open task
   (REPLACE-MINIO), not started.
+- **A console restore's replication factor does not start from the
+  source's** (item 22). The source's factor is recorded only in the archive
+  manifest; the default is the target's broker count, at most 3, until
+  PROD-05.1 projects the source's factor to the console.
 - **The product API's OpenAPI document is still `1.0.0-alpha.1`**, although the
   console image and the chart now consume it; ship and upgrade the console and
   the API together until the owner freezes it ([stability.md](stability.md)).

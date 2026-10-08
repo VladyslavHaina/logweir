@@ -9,9 +9,18 @@ use chrono::{DateTime, Datelike, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// The format this module writes and the only MAJOR it reads (D3 §5.2
-/// reading rule 1).
-pub const FORMAT_VERSION: &str = "1.0.0";
+/// The format this module writes for a POINT RECORD and the only MAJOR it
+/// reads (D3 §5.2 reading rule 1).
+///
+/// `1.1.0` since FX-4, which added the optional `topics[].config_coverage`. A
+/// minor bump adds optional fields only (reading rule 2), so a 1.0.0 reader
+/// reads a 1.1.0 record and ignores the field; the 1.0.0 schema is frozen
+/// beside the 1.1.0 one.
+pub const FORMAT_VERSION: &str = "1.1.0";
+
+/// The format of the day-sharded INDEX entry, which FX-4 did not change: its
+/// fields are copies of the record's and none of them is the new one.
+pub const LOG_ENTRY_FORMAT_VERSION: &str = "1.0.0";
 
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
@@ -107,8 +116,8 @@ pub fn log_key(recovery_point_at: DateTime<Utc>, point_id: &str) -> String {
 /// Field order IS byte order: `serde_json` is built with `preserve_order` and
 /// `logweir_core::det_json::to_deterministic_json` walks the value, so
 /// declaration order here is the order in the bytes that get signed. Do not
-/// reorder without regenerating `schemas/logweir-catalog-point-1.0.0.json`
-/// (`just schema`).
+/// reorder without regenerating `schemas/logweir-catalog-point-1.1.0.json`
+/// (`just schema`; the 1.0.0 file is frozen).
 ///
 /// **Nothing here may hold a credential.** `source.bootstrap_servers` is
 /// addressing and `source.auth_mode` is a mechanism name — the same two
@@ -228,6 +237,17 @@ pub struct RecordTopic {
     pub partitions: Option<u32>,
     /// Records this run captured for the topic, from the receipt.
     pub records: u64,
+    /// **Format 1.1.0 (FX-4).** The receipt's `config_coverage` entry for this
+    /// topic, copied and never recomputed: whether the archive's record of
+    /// the topic's configuration was captured, and the effective
+    /// `message.timestamp.type` with its source.
+    ///
+    /// Receipt-derived under rule 3 — `reader::cross_check` refuses a record
+    /// whose copy the receipt does not back. ABSENT means UNKNOWN (rule 2):
+    /// every 1.0.0 record, and every record derived from a receipt that
+    /// predates 1.1.0. Never read as `captured`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_coverage: Option<logweir_core::backup_receipt::TopicConfigCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -437,7 +457,7 @@ impl CatalogLogEntry {
     #[must_use]
     pub fn of(point: &CatalogPoint) -> Self {
         Self {
-            format_version: FORMAT_VERSION.to_string(),
+            format_version: LOG_ENTRY_FORMAT_VERSION.to_string(),
             point_id: point.point_id.clone(),
             backup_id: point.backup_id.clone(),
             run_id: point.run_id.clone(),

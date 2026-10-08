@@ -148,7 +148,7 @@ export function renderPlanBytes(fields) {
   out.push("  marker_topic: " + quote(needed(target.markerTopic, "target.markerTopic")));
   out.push(
     "  default_replication_factor: " +
-      integer(target.replicationFactor, "target.replicationFactor"),
+      replicationFactor(target.replicationFactor, "target.replicationFactor"),
   );
   out.push("  teardown: " + quote(needed(target.teardown, "target.teardown")));
 
@@ -443,6 +443,27 @@ function integer(value, field) {
     throw new TypeError(field + " must be a whole number; got " + String(value));
   }
   return String(value);
+}
+
+/** The largest replication factor the grammar holds:
+ *  `target.default_replication_factor` is an `i16` in `logweir_core::spec`. */
+export const MAX_REPLICATION_FACTOR = 32767;
+
+// THE ONE REPLICATION FACTOR A BROKER CAN PLACE, OR NO DOCUMENT. A value above
+// the `i16` bound does not parse in the runner, `0` is refused by every
+// broker, and a negative one is `-1` at best -- which asks the broker for its
+// own `default.replication.factor`, a number the signed plan would then not
+// state. So a whole number from 1 to the bound renders, and anything else is
+// a `RangeError` the wizard shows instead of a hash.
+function replicationFactor(value, field) {
+  const text = integer(value, field);
+  if (value < 1 || value > MAX_REPLICATION_FACTOR) {
+    throw new RangeError(
+      field + " must be a whole number from 1 to " + String(MAX_REPLICATION_FACTOR) +
+        "; got " + text,
+    );
+  }
+  return text;
 }
 
 // A float, always with a decimal point, so `pass_rate: 1` cannot reach a

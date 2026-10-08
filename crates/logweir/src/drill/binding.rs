@@ -56,11 +56,27 @@ fn refuse(message: String) -> DrillError {
     DrillError::Guard(GuardRefusal(message))
 }
 
+/// What a VERIFIED recovery-point binding established, beyond "it holds".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedPoint {
+    /// The point this run proved, for the log line.
+    pub point_id: String,
+    /// **FX-4.** The bound receipt's per-topic configuration capture coverage,
+    /// read from bytes whose digest, identity, signature and manifest were all
+    /// checked above it — so phases 3 and 7 may compare a restored topic's
+    /// configuration against the manifest's record exactly where this says the
+    /// record was `captured`, and say `notAssessed` everywhere else. A receipt
+    /// that predates format 1.1.0 carries no block and reads UNKNOWN for every
+    /// topic.
+    pub config_coverage: logweir_core::backup_receipt::SourceConfigCoverage,
+}
+
 /// Re-verify the recovery point the plan is bound to, against the archive.
 ///
 /// `Ok(None)` when the plan carries no `source.point` — a v1-shaped plan, and
-/// the only shape a pre-catalog archive can be restored from. `Ok(Some(id))`
-/// names the point this run proved, for the log line.
+/// the only shape a pre-catalog archive can be restored from. `Ok(Some(point))`
+/// names the point this run proved, for the log line, and carries its verified
+/// receipt's configuration capture coverage (FX-4).
 ///
 /// # The three answers, and why they are not one code
 ///
@@ -78,7 +94,7 @@ pub fn verify_point_binding(
     archive: &Store,
     evidence_keys: Option<&[u8]>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<String>, DrillError> {
+) -> Result<Option<VerifiedPoint>, DrillError> {
     let Some(point) = plan.source.point.as_ref() else {
         return Ok(None);
     };
@@ -206,7 +222,38 @@ pub fn verify_point_binding(
             point.point_id, point.manifest_sha256
         )));
     }
-    Ok(Some(point.point_id.clone()))
+    Ok(Some(VerifiedPoint {
+        point_id: point.point_id.clone(),
+        config_coverage: verified_coverage(&point.point_id, &receipt),
+    }))
+}
+
+/// **FX-4.** The coverage a verified point lends phases 3 and 7 — read only
+/// after every check in [`verify_point_binding`], so these bytes are the
+/// approved ones, signed by a trusted key, over the manifest the archive
+/// holds. A signature proves who wrote them, not that they are coherent: a
+/// receipt that contradicts itself (`validate_invariants`, the eleven arms
+/// both verifiers enforce — e.g. a 1.0.x document carrying `config_coverage`,
+/// arm 6) lends NOTHING, and its coverage reads UNKNOWN rather than being
+/// believed (review L2). The restore itself is not refused on that ground:
+/// the binding's own checks all passed, and UNKNOWN only makes parity report
+/// `notAssessed`.
+fn verified_coverage(
+    point_id: &str,
+    receipt: &logweir_core::backup_receipt::BackupReceipt,
+) -> logweir_core::backup_receipt::SourceConfigCoverage {
+    match receipt.validate_invariants() {
+        Ok(()) => logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(receipt),
+        Err(why) => {
+            tracing::warn!(
+                point_id,
+                why = %why,
+                "the bound point's receipt contradicts itself; its configuration capture \
+                 coverage is read as UNKNOWN"
+            );
+            logweir_core::backup_receipt::SourceConfigCoverage::unknown()
+        }
+    }
 }
 
 /// The mounted evidence keyring, parsed -- or the refusal that there is none.
@@ -667,6 +714,7 @@ mod tests {
                 from_ms: 1,
                 to_ms: 2,
             },
+            config_coverage: None,
         }
     }
 
@@ -744,6 +792,7 @@ mod tests {
 
     fn check(plan: &DrillSpec, store: &Store, keys: &[u8]) -> Result<Option<String>, DrillError> {
         verify_point_binding(plan, store, Some(keys), chrono::Utc::now())
+            .map(|verified| verified.map(|point| point.point_id))
     }
 
     /// One internally consistent, SIGNED recovery point in a socket-free
@@ -773,6 +822,111 @@ mod tests {
 
     fn archive() -> Archive {
         archive_with_a_point("", RECEIPT_KEY)
+    }
+
+    /// [`archive_with_a_point`] whose receipt is edited by `edit` before it is
+    /// serialised and signed — how FX-4's rows get a 1.1.0 receipt.
+    fn archive_with_receipt(edit: impl FnOnce(&mut BackupReceipt)) -> Archive {
+        let store = Store::in_memory("");
+        let manifest = br#"{"topics":[]}"#.to_vec();
+        let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
+        let mut doc = receipt(MANIFEST_KEY, &manifest_sha256);
+        edit(&mut doc);
+        let receipt_bytes = serde_json::to_vec(&doc).expect("serialises");
+        let signer = SigningKey::generate_ed25519();
+        put_signed_receipt(&store, &receipt_bytes, &signer);
+        store
+            .put_create_only(MANIFEST_KEY, &manifest)
+            .expect("the manifest is written");
+        Archive {
+            store,
+            binding: PointBinding {
+                point_id: crate::catalog::record::point_id(&receipt_bytes),
+                receipt_key: RECEIPT_KEY.into(),
+                receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
+                manifest_sha256,
+            },
+            keys: evidence_keys(vec![(&signer, trusted(&signer))]),
+        }
+    }
+
+    /// **FX-4.** A verified binding hands the drill its receipt's
+    /// configuration capture coverage — the ONLY source phases 3 and 7 read it
+    /// from — and a 1.0.0 receipt hands over UNKNOWN for every topic.
+    #[test]
+    fn a_verified_binding_carries_the_receipts_config_coverage_and_a_1_0_0_one_carries_unknown() {
+        use logweir_core::backup_receipt::{ConfigCoverage, TopicConfigCoverage};
+        let a = archive_with_receipt(|r| {
+            r.format_version = "1.1.0".into();
+            r.config_coverage = Some(BTreeMap::from([(
+                "orders".to_string(),
+                TopicConfigCoverage {
+                    coverage: "captureDenied".into(),
+                    reason: None,
+                    timestamp_type: None,
+                },
+            )]));
+        });
+        let verified = verify_point_binding(
+            &plan_with(Some(a.binding.clone())),
+            &a.store,
+            Some(&a.keys),
+            chrono::Utc::now(),
+        )
+        .expect("the point verifies")
+        .expect("a bound plan names its point");
+        assert_eq!(
+            verified.config_coverage.of("orders"),
+            ConfigCoverage::CaptureDenied
+        );
+        let old = archive();
+        let verified = verify_point_binding(
+            &plan_with(Some(old.binding.clone())),
+            &old.store,
+            Some(&old.keys),
+            chrono::Utc::now(),
+        )
+        .expect("the point verifies")
+        .expect("a bound plan names its point");
+        assert_eq!(
+            verified.config_coverage.of("orders"),
+            ConfigCoverage::Unknown,
+            "a 1.0.0 receipt carries no block: unknown, never captured"
+        );
+    }
+
+    /// **FX-4 review L2.** A receipt both verifiers refuse lends no coverage,
+    /// even though a trusted key signed it: here a 1.0.0 document carrying a
+    /// `captured` block (arm 6). The binding still verifies (its own checks
+    /// pass), and the coverage reads UNKNOWN, never `captured`. Mutant: copy
+    /// the block without `validate_invariants` → `Captured`, and this fails.
+    #[test]
+    fn a_signed_receipt_that_contradicts_itself_lends_unknown_coverage() {
+        use logweir_core::backup_receipt::{ConfigCoverage, TopicConfigCoverage};
+        let a = archive_with_receipt(|r| {
+            // format_version stays "1.0.0": arm 6 refuses the block under it.
+            r.config_coverage = Some(BTreeMap::from([(
+                "orders".to_string(),
+                TopicConfigCoverage {
+                    coverage: "captured".into(),
+                    reason: None,
+                    timestamp_type: None,
+                },
+            )]));
+        });
+        let verified = verify_point_binding(
+            &plan_with(Some(a.binding.clone())),
+            &a.store,
+            Some(&a.keys),
+            chrono::Utc::now(),
+        )
+        .expect("the binding's own checks pass: digests, signature, manifest")
+        .expect("a bound plan names its point");
+        assert_eq!(
+            verified.config_coverage.of("orders"),
+            ConfigCoverage::Unknown,
+            "a self-contradicting receipt's `captured` is not believed"
+        );
     }
 
     const PLAN_YAML: &str = r#"

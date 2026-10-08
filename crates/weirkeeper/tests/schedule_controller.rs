@@ -8053,3 +8053,43 @@ async fn a_pre_creation_slot_an_older_controller_fired_is_not_called_never_fired
         "{status}"
     );
 }
+
+/// **FX-2's class sweep: `BackupSchedule.spec.activeDeadlineSeconds`**,
+/// documented as "the Job deadline copied into every created `Backup`'s
+/// `spec.deadlineSeconds`". The only reconcile row that read the created
+/// spec's deadline used an ABSENT field and so the 3600 default; a set value
+/// must be the one the run carries (and, through `Backup.spec.deadlineSeconds`,
+/// its Job's `activeDeadlineSeconds`).
+///
+/// MUTANT: `deadline_seconds: SCHEDULED_DEADLINE_SECONDS` in
+/// `run_policy_spec`, ignoring the field.
+#[tokio::test]
+async fn a_schedules_run_deadline_is_the_deadline_its_backup_carries() {
+    let fire = utc(2026, 9, 10, 0, 0);
+    let slot = slot_name(fire);
+    let name: &'static str = Box::leak(
+        scheduled_backup_name("nightly", &slot)
+            .expect("fits")
+            .into_boxed_str(),
+    );
+    let spec = EDITABLE_SPEC.replace(
+        "\"suspend\": false",
+        "\"suspend\": false, \"activeDeadlineSeconds\": 7200",
+    );
+    let schedule = schedule_with(UID, 1, "5", &spec);
+    assert_eq!(schedule.spec.active_deadline_seconds, Some(7200));
+    let (client, _calls, bodies) = mock_client_recording_bodies(admitting_routes(
+        name,
+        201,
+        serde_json::to_string(&schedule).expect("serialises"),
+    ));
+    reconcile_schedule(&schedule, &client, fire)
+        .await
+        .expect("the slot fires");
+    let bodies = bodies.lock().expect("readable").clone();
+    assert_eq!(
+        posted_spec(&bodies)["deadlineSeconds"],
+        serde_json::json!(7200),
+        "the run carries the schedule's own deadline, not the default"
+    );
+}

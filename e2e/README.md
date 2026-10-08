@@ -146,6 +146,7 @@ container with `timeout` or `gtimeout` when present (this host's
 | `objectstore` | `objectstore` (+ setup) | SeaweedFS 4.48 beside MinIO: `kafka-backups`, `logweir-evidence`, `kafka-backups-locked` (Object Lock) and `kafka-backups-2`, credentials `minioadmin`/`minioadmin` | 9130 | PROD-09.1 (PROD-09.2, REPLACE-MINIO) |
 | `registry` | `registry` | Karapace 6.2.3, Schema-Registry-compatible, schemas in `_schemas` on `kafka-broker-1`, BACKWARD compatibility | 9141 | PROD-03.0 (PROD-03.1, 03.2) |
 | `streams` | `streams-wordcount` (+ topics) | Apache Kafka's WordCountDemo from the broker line's own image, group `logweir-e2e-wordcount`, in-memory state stores | none | PROD-06.1 (PROD-04.x, 06.2) |
+| `acl` | `kafka-acl` (+ setup) | A single-node cluster that ENFORCES ACLs (KRaft's StandardAuthorizer, `allow.everyone.if.no.acl.found=true`). Every PLAINTEXT client, in-network on `kafka-acl:9094` or host-side on 9150, is `User:ANONYMOUS`, a super user; the SCRAM-SHA-512 user `logweir` (password `logweir-e2e-not-a-secret`) on 9151 is the restricted principal a row's ACLs name. The marker topic exists. Harness: `bootstrap_acl()`, `bootstrap_acl_sasl()` | 9150-9151 | FX-4 (PROD-04.0d extends it; PROD-05.3) |
 | `txn` | reserved | The transactional producer PROD-01.1 builds | — | PROD-01.1 |
 
 The **owner** changes a profile's services without asking; anyone else extends
@@ -157,8 +158,11 @@ Limits worth knowing: the auth listeners are host-facing (an in-network client
 uses `kafka-auth:9094`, plaintext); the Streams application keeps its state in
 memory, because RocksDB's native library needs `libstdc++`, which the
 Alpine-based `apache/kafka` image lacks; `objectstore` does not replace MinIO
-(that is REPLACE-MINIO); every behaviour above was measured with Docker Compose
-v5.0.2.
+(that is REPLACE-MINIO); on `acl`, a row grants or denies with `kafka-acls.sh`
+inside `kafka-acl` as the super user and removes what it added, and the
+restricted principal's `kafka-topics.sh --describe` needs DescribeConfigs
+too, because it reads the topic's configuration (measured on 3.7.1); every
+behaviour above was measured with Docker Compose v5.0.2.
 
 ## Extending the fixtures
 

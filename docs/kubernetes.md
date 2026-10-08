@@ -2531,12 +2531,22 @@ skip with no `Restore`:
 | the slot is inside `spec.bounds.startingDeadlineSeconds` | `ConcurrencyBlocked` |
 | this schedule's own previous rehearsal finished | `ConcurrencyBlocked` |
 | no other schedule is rehearsing against the same target cluster | `TargetBusy` |
+| `spec.bounds.runnerResources` is one the controller applies: whole millicores and bytes, at most 4 CPUs and 8Gi, no zero limit, a memory limit of at least 32Mi, no request above its limit (FX-2, §12) | `AuthorizationInvalid` |
 | the `Approval` is `Verified=True`, bound to **this object's UID**, its `planHash` is the recomputed digest, its key may still authorise and carries an approver usage | `AuthorizationInvalid` |
 | the signed document has not expired and was not minted for more than 90 days | `AuthorizationExpired` |
 | the target `KafkaCluster` reports `reachable: true` and a `clusterId`, and its saved connection resolves (the same `RestoreTarget` resolution the `Restore` admission makes — a SCRAM connection with no `secretRef`, say, is refused here by field) | `TargetUnavailable` |
 | the signed scope's `templateDigest`, `targetClusterId` and `deadlineSeconds` agree with the sealed spec | `AuthorizationInvalid` |
 | a point qualifies: covered by `spec.point.topics`, old enough, with a non-empty window, inside `maxPartitions`, not captured from the target cluster, not inside a retention lease | `NoQualifyingPoint`, `TargetUnavailable` or `PointRetentionInProgress` |
 | the RENDERED plan falls inside the signed scope | `AuthorizationInvalid` |
+
+**`spec.bounds.runnerResources` reaches the runner container.** It is copied
+verbatim onto each child `Restore`'s `spec.runnerResources`, and from there
+onto the runner container (§12, *The runner's requests and limits*). A block
+outside the bounds can never run under the authorization that binds it, so
+every slot is skipped as `AuthorizationInvalid` — the `Authorized` condition's
+message names the field — and no child is created; the spec is sealed, so the
+remedy is a new schedule under a new authorization. Before FX-2 the block was
+copied onto the child and then dropped at the Job.
 
 **A slot that came due before the `RehearsalSchedule` was created is not its
 slot.** The controller never rehearses a slot whose due time is before the
@@ -4434,6 +4444,12 @@ Four things about it are worth knowing before you debug one:
   lives on the pod, so a TTL that existed earlier would be a race pod garbage
   collection can win.
 
+There is **no `resources` block**: `Backup.spec` has no requests-or-limits
+field, so a backup's runner states none and the namespace's `LimitRange`
+supplies them or nothing does. A `ResourceQuota` that requires limits rejects
+the pod, and the `Backup` reports `RunnerReady=False`, `PodCreationForbidden`.
+(`Restore.spec.runnerResources` is the `Restore`'s field — §12.)
+
 ### Manual backups: the typed contract, and no annotation anywhere
 
 A `Backup` is an ordinary object. This is the whole of what a person, a script
@@ -5548,11 +5564,12 @@ the same spec exits `1` — so a UI that maps exit 3 to *"your approval does not
 match this spec"* mislabels that case every time the scratch cluster is down.
 
 The controller removes the ambiguity **at the source**. Before any pod exists
-it runs four checks, in this order:
+it runs these six checks, in this order:
 
 | # | Check | `reason`, and what happens |
 |---|---|---|
 | 0 | The object's own name is at most 63 characters | `NameTooLong`, terminal. Nothing is created |
+| 0b | `spec.runnerResources`, when set, is a block the controller applies (*The runner's requests and limits*, below) | `ExecutionSpecInvalid`, **terminal**, naming every refused field. Nothing is created, and the `Approval` is not read |
 | 1 | `spec.approvalRef` names something | `ApprovalNotReceived`, **terminal** |
 | 2 | That `Approval` exists and is `Verified=True` | `ApprovalNotVerified`, **held and retried in 30 s** |
 | 3 | `sha256(spec.planBytes)` equals the `plan_hash` **inside** `Approval.spec.approvalBytes` | `PlanHashMismatch`, terminal, naming both hashes |
@@ -5763,6 +5780,145 @@ A `scramSha512` target additionally gets `LOGWEIR_TARGET_PASSWORD` from that
 the same connection the `clusterRef` resolves to, or the Restore is refused
 with `ConnectionPlanMismatch` before any Job exists: the runner dials the
 PLAN's address with THIS connection's credential.
+
+### The runner's requests and limits: `spec.runnerResources` (FX-2)
+
+`spec.runnerResources` is what the runner pod asks for and is capped at. It
+reaches the one `runner` container's `resources` **exactly as written** —
+requests as requests, limits as limits, in the spelling the object carries (the
+API server stores the canonical form, so `0.5` reads back as `500m`). Absent,
+or with no quantity in it, the container states no `resources` at all, which is
+the Job every `Restore` had before FX-2, and the namespace's `LimitRange`
+defaults apply unchanged. A `RehearsalSchedule`'s `spec.bounds.runnerResources`
+is copied onto each child `Restore` verbatim and arrives the same way (§7g).
+The console never sets the field; it is set with `kubectl` or by a
+`RehearsalSchedule`. Neither the console nor the product API shows it yet, so an
+approver does not see it beside the plan: read it with the `kubectl` line at the
+end of this section. Showing it on the `Restore` view is owed to PROD-10.1,
+which exposes the control.
+
+Before FX-2 the field was accepted, documented and **dropped**: the container
+carried no `resources` whatever the object said, so every runner pod was
+`BestEffort`.
+
+**The decision: apply it, and refuse rather than clamp.** D3 §4.5 designed the
+field and the CRD documented it. Withdrawing it would have left every runner
+pod `BestEffort` — the first pod the kubelet evicts under node pressure, and a
+restore evicted mid-write leaves a half-written target — and unable to run at
+all in a namespace whose `ResourceQuota` requires limits. A clamped value would
+be a Job nobody asked for, and a run OOM-killed at a limit the controller chose
+would read as a runner defect, so a value the controller will not apply is
+refused, never adjusted. Every quantity is checked before anything else about
+the object is read:
+
+| Rule | Refused, for example |
+|---|---|
+| a Kubernetes quantity in the grammar the schema's pattern admits | `abc`; `1K` (the decimal kilo is `k`) |
+| memory is a whole number of bytes, CPU a whole number of millicores | `memory: 100m` (a tenth of a byte — `Mi` was meant); `cpu: 100u` |
+| nothing above the ceiling, requests included: **4** CPUs and **8Gi** of memory | `limits.memory: 16Gi`; `requests.cpu: "8"`; `cpu: 5Gi` |
+| a limit is a cap: never zero, and a memory limit is at least **32Mi** | `limits.cpu: "0"` (a runtime reads zero as "no limit"); `limits.memory: "512"` (512 bytes) |
+| a request is at most its limit, per resource | `requests.memory: 4Gi` beside `limits.memory: 2Gi` |
+
+The ceilings are D3 §4.1's and are compiled in: no chart value configures them,
+and the schema cannot state them because comparing quantities in CEL needs a
+library the 1.29 floor cannot be relied on to have. The memory floor is not a
+measured minimum for a working run (PROD-10.1 measures that); it stops a
+missing unit before it becomes a pod the runtime cannot create. A `Restore`
+that breaks any rule ends `phase: Failed` with `reason: ExecutionSpecInvalid`
+(`Failed=True`, same reason) **before its approval is read, a manual-run pool
+slot is taken, or anything is created**, and the message names every refused
+field at once, because `spec` is immutable and the remedy is a new `Restore`. A
+`RehearsalSchedule` skips each slot as `AuthorizationInvalid` instead and
+creates no child (§7g).
+
+**`LimitRange`, `ResourceQuota` and the scheduler decide the rest, and each
+answer lands on the `Restore`.** The Job is created with the values above; what
+happens next is the namespace's:
+
+- a `LimitRange` fills in what the block leaves out. With only
+  `requests.memory` set its default limit applies, and a default below the
+  request gets the pod rejected;
+- a `LimitRange` minimum or maximum, or a `ResourceQuota` (including one that
+  requires every pod to state limits), rejects the pod at creation. The Job
+  controller's only trace is a `FailedCreate` event on the Job, and the
+  `Restore` reports it: `RunnerReady=False` with reason `PodCreationForbidden`,
+  the same value in `status.reason` (the `REASON` column), and a
+  `status.progress.diagnostics[]` entry `PodCreateRejected` carrying the
+  admission's own words (`exceeded quota: …`). Once that has held for
+  `failFastSeconds` (§10, *Failing fast, and what it costs*) the Job's deadline
+  is collapsed and the run ends `PodCreationForbidden` — never a Job silently
+  waiting out its deadline;
+- requests no node can hold leave the pod `Pending`: `RunnerReady=False` with
+  `PodUnschedulable`, left to `activeDeadlineSeconds` because a node can still
+  join.
+
+A namespace whose `ResourceQuota` covers compute and which has no `LimitRange`
+defaults refuses every pod that states no limits, and `spec.runnerResources` is
+how a `Restore` runs there. `Backup`, check, probe, delivery and retention Jobs
+have no such field and state no resources; their requests and limits come from
+the namespace's `LimitRange` or not at all. When such a Job's pod is rejected
+at creation, what its object reports depends on whether that controller reads
+the Job's `FailedCreate` event:
+
+| The Job | What the object reports for a pod rejected at creation |
+|---|---|
+| A `Backup`'s runner, and a `Restore`'s (with a block or without) | `RunnerReady=False` / `PodCreationForbidden`, a `PodCreateRejected` diagnostic quoting the admission, then terminal `PodCreationForbidden` after `failFastSeconds` |
+| A `Preflight`, and a run's evidence-fetch Job | `PodCreateRejected` once the Job has had no pod for 30 seconds, and the Job is cancelled |
+| A `TopicDiscovery`, a `RecoveryCatalog` sync, and a dynamic `Backup`'s topic discovery | These read no Events. `PodNotStarted` (on the `Backup`, `Resolving`) until the Job's own deadline, then `DeadlineExceeded`: `Synced=False` on the catalog, and the `Backup` ends `DiscoveryFailed` |
+| A `KafkaCluster` probe | `Reachable=Unknown` / `ProbeRunning` until the probe's 120-second deadline, then `Reachable=Unknown` / `NoExitCode`; `reachable` and `clusterId` keep their last values |
+| A `ProtectionPolicy` delivery | After the delivery Job's 120-second deadline the attempt is recorded `Failed` ("the delivery Job finished with no exit code") and `NotificationsDelivered=False` / `DeliveryFailed`; it is retried, three attempts in all |
+| A `RetentionPolicy` enforcement run | `Enforced=True` / `RunInProgress` until `enforcement.deadlineSeconds`, then `Enforced=False` / `RunFailed` ("produced no exit code"); three failed runs in a row turn `Degraded=True` |
+
+**What binds it.** `spec.runnerResources` is not part of `planBytes` and not a
+member of the approval bundle, so a per-run approver signs the data operation
+and not its container bounds — the same position as a per-run `Restore`'s
+`deadlineSeconds`. `spec` is immutable, so the value cannot change after the
+object is created, and a Job's pod template is immutable too: nothing changes it
+after admission. For a rehearsal the value is inside the `RehearsalSchedule`'s
+sealed spec, whose digest (`templateDigest`) the standing authorization signs,
+so a different value is a different schedule under a different authorization.
+
+**That binds the schedule, not every `Restore` the authorization admits.** The
+signed `RehearsalScope` carries no `runnerResources`. The `Restore` controller's
+standing admission checks a `Restore`'s plan and its `deadlineSeconds` against
+the signed scope, and the schedule's digest is out of its reach. So a standing
+`Restore` written by hand (anyone with `create` on `restores` may name the
+authorization) is held only to the controller's compiled-in bounds above, not to
+the schedule's sealed value; the `Restore`s the schedule creates carry that value
+verbatim. Carrying `runnerResources` in the signed `RehearsalScope`, a versioned
+change to a signed document, is owed to PROD-10.1.
+
+**Upgrade and rollback.** The CRD change is descriptions only; the field and its
+pattern have been served since the D3 W0 schemas. Before the upgrade, list the
+objects it changes, those that already carry a block, with the inventory in
+[the release notes](release-notes.md), item 21.
+
+- A `Restore` that already has a Job keeps it: the pod template is immutable,
+  and the upgraded controller observes the run and never refuses it
+  mid-flight. That pod has no `resources`.
+- A terminal `Restore` is untouched.
+- A `Restore` with no Job yet (held for approval, queued, or created during
+  the upgrade) is checked on its next pass. A valid block gives it a Job whose
+  container carries it, which is a behaviour change: the pod now asks for, and
+  is capped at, what the object said, so it can meet a quota or an OOM limit it
+  never met before. A block outside the bounds ends it
+  `Failed`/`ExecutionSpecInvalid`.
+- A `RehearsalSchedule` with the block set applies it from its next slot, or
+  skips every slot as `AuthorizationInvalid` when it is outside the bounds.
+- **Rolling back** to a controller from before FX-2 ignores the field again:
+  the Jobs it creates carry no `resources`. A `Restore` this build refused stays
+  `Failed` (no controller acts on a terminal `Restore`); a schedule's next slot
+  fires under the older controller and drops the block, as it always did. A
+  schedule this build skipped for its block therefore runs again, uncapped:
+  suspend it first (`spec.suspend`, its one mutable field) if it must not.
+  Nothing has to be deleted in either direction.
+
+What a runner Job actually carries:
+
+```bash
+kubectl --context "$LOGWEIR_CONTEXT" -n <namespace> get job <restore-name> \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="runner")].resources}'
+```
 
 ### The credential is validated by the RUNNER, and the controller checks nothing
 
@@ -8067,6 +8223,24 @@ conversion: the field appears on the next reconcile of each one, which the
 five-minute heartbeat guarantees. Nothing reads the window to decide
 authorisation, so a cluster that never publishes one keeps working.
 
+### 21.6b A refused configuration read is `unknown`, never `ready` (FX-4)
+
+`target.timestampBound` reads the target's broker configuration with the
+restore's own credential. A credential without DescribeConfigs on the Cluster
+resource (Describe does not imply it) now gets `unknown` with code
+`BrokerConfigsNotReadable`. Builds before FX-4 answered `ready` with
+`TimestampWithinBound`: rust-rdkafka returned the refused read as an EMPTY
+configuration, and an empty configuration declares no bound (PROD-04.0 T13,
+[the ruling](stability.md#an-empty-configuration-answer-is-a-refused-read-never-no-overrides-prod-040-t13-fx-4)).
+The Restore itself needs the same grant: phase 0 of a run with that credential
+exits 1 instead of assuming the broker is on `CreateTime`.
+
+A `Backup`'s source credential needs DescribeConfigs on every backed-up topic
+for the receipt to record the topic's configuration as `captured`. Without it
+the backup still succeeds, the topic reads `captureDenied`, and a later
+restore's configuration parity names that topic as not assessed
+([the receipt field](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
+
 ### 21.7 Skipping a check is not answering it
 
 `spec.request.skipChecks` leaves a row out of the run. The row is still
@@ -8263,6 +8437,12 @@ answers the same request `Failed`/`ArchiveUrlUnreadable`, as it always did;
 after a rollback, re-run the check or restore without it. The one Restore
 controller row added, the advisory `destination.evidenceReadable`, never
 changes the aggregate.
+
+**A refused broker-configuration read (FX-4).** A runner image from FX-4 on
+answers `target.timestampBound` `unknown` (`BrokerConfigsNotReadable`) where an
+older one answered `ready` (§21.6b). No code, field or plan shape is new, so
+the controller and runner may be upgraded in either order. Rolling back the
+runner brings back the old `ready` answer.
 
 ## 22. The installation policy, the RBAC rows, and the console admission policy
 

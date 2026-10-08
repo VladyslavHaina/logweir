@@ -317,8 +317,13 @@ test("the_recovery_limits_come_from_contract_constants_and_never_from_prose", ()
   );
 
   const html = renderRecoveryLimits(state);
-  assert.ok(html.includes(">" + String(LIMITS.defaultReplicationFactor.value) + "<"),
-    "the factor is displayed: " + html);
+  // FX-5: THE FACTOR IS SHOWN WITH WHERE IT CAME FROM. With nothing read -- no
+  // source factor, no broker count -- it is the grammar's own default, pinned
+  // above, and the panel says that is what it is rather than printing a bare 1.
+  assert.ok(html.includes(">" + String(LIMITS.defaultReplicationFactor.value) +
+    " (the plan grammar&#39;s default: neither the source&#39;s replication factor nor the " +
+    "target&#39;s broker count is known to this console)<"),
+  "the factor is displayed with its basis: " + html);
   assert.ok(html.includes(PARTITION_COUNT_NOT_PUBLISHED.slice(0, 60)),
     "the partition-count gap is NAMED rather than filled with a guess");
   assert.ok(!/\b\d+ partitions\b/.test(html), "and no partition count is invented: " + html);
