@@ -425,6 +425,25 @@ check_console_grants() {
       sort -u "$dir/expected.variant" -o "$dir/expected.variant"
     fi
 
+    # PROD-16.1 — THE SECOND CONDITIONAL PAIR. A render whose console
+    # configuration names `installationIdentity` spends `get configmaps` on
+    # that ONE public identity ConfigMap (`KubeAdapter::get_installation_identity`,
+    # the fresh-install marker read), and must be granted exactly it.
+    if grep -q '^    installationIdentity:$' "$render_file"; then
+      case "$(sed '/^[[:space:]]*\/\//d' "$adapter")" in
+        *'pub async fn get_installation_identity'*) ;;
+        *)
+          rm -rf "$dir"
+          echo "render-install: $render_file configures installationIdentity but $adapter no" >&2
+          echo "  longer reads it (\`get_installation_identity\`); the grant would be one nobody uses." >&2
+          exit 1
+          ;;
+      esac
+      identity_cm="$(sed -n 's/^      publicConfigMap: *//p' "$render_file" | head -1)"
+      printf '%s\n' "get configmaps@$identity_cm" >> "$dir/expected.variant"
+      sort -u "$dir/expected.variant" -o "$dir/expected.variant"
+    fi
+
     if [ ! -s "$dir/granted" ]; then
       if [ "$render_file" = "$demo" ]; then
         rm -rf "$dir"
