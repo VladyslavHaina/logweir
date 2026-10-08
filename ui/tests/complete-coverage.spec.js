@@ -183,6 +183,25 @@ test("prod081a_the_list_row_says_complete_and_not_covered_and_never_pass", () =>
   }
   const covered = renderHistoryList({ items: [forgedPass(true)] }, { items: [] }, "team-a");
   assert.match(covered, /coverage: complete, covered</);
+
+  // A CONSOLE LIST ROW (review RM5): no recorded verification block, only the
+  // API's summary, which says verified -- beside `covered: false` and an
+  // outcome that reads pass. Its RESULT cell must still carry the
+  // unverified-claim caption: the row's own verdict refuses covered: false
+  // even if a summary ever said otherwise.
+  const consoleRow = (coveredValue) => {
+    const object = forgedPass(coveredValue);
+    delete object.status.evidence;
+    object.status.__summary = { verifiedSuccess: true, verificationState: "valid" };
+    return object;
+  };
+  const claimed = renderHistoryList({ items: [consoleRow(false)] }, { items: [] }, "team-a");
+  assert.match(claimed, /data-scorecard-claim="true"/,
+    "NEGATIVE CONTROL: `listRowVerified` without its `notCovered` clause calls this pass verified");
+  // The control: the same console row with `covered: true` IS a verified
+  // claim, so the caption above is about `covered`.
+  const verified = renderHistoryList({ items: [consoleRow(true)] }, { items: [] }, "team-a");
+  assert.doesNotMatch(verified, /data-scorecard-claim="true"/, verified);
 });
 
 test("prod081a_the_detail_shows_the_request_the_signed_coverage_and_every_partitions_counts", () => {
@@ -362,6 +381,12 @@ test("prod081a_the_wizard_offers_complete_coverage_as_an_advanced_choice_with_it
   assert.equal(COMPLETE_COVERAGE_COST.split("`covered: false`").length, 2);
   // The default plan sentence is the sampled one; the choice changes it.
   assert.ok(verificationPlanSentence(state).includes("sampled check"));
+  // It points at the choice below it and never says no level compares every
+  // record (review L5: that read as a contradiction above this very choice).
+  assert.ok(verificationPlanSentence(state)
+    .includes("choose complete coverage below to compare every record"),
+  "NEGATIVE CONTROL: the sentence before PROD-08.1a's choice fails this");
+  assert.doesNotMatch(verificationPlanSentence(state), /no level in this version/);
   setCoverage(state, true, "5000");
   assert.match(renderCoverageChoice(state), /id="coverage-advanced" open>/);
   assert.match(renderCoverageChoice(state), /id="coverage-complete" name="coverage" checked>/);

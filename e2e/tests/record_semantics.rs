@@ -3525,6 +3525,29 @@ fn console_fields(
     })
 }
 
+/// The target cluster id the run's kept signed scorecard names -- the
+/// `cluster` label every runner gauge carries.
+fn kept_target_cluster(row: &Row, label: &str) -> String {
+    let path = demo_dir().join(format!(
+        "record-semantics/{}-{label}.scorecard.json",
+        row.name
+    ));
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let scorecard: Value = serde_json::from_slice(&bytes).expect("the kept scorecard is JSON");
+    scorecard["target"]["cluster_id"]
+        .as_str()
+        .expect("the scorecard names its target cluster")
+        .to_string()
+}
+
+/// One gauge's whole line in a runner metrics textfile: the name, the
+/// `cluster` label, any further labels, and the value, from line start to
+/// line end. A predicate that matched a value without its name is met by
+/// other series in the same file.
+fn gauge_line(name: &str, cluster: &str, more_labels: &str, value: u8) -> String {
+    format!("\n{name}{{cluster=\"{cluster}\"{more_labels}}} {value}\n")
+}
+
 /// One `logweir restore run` over the console's exact bytes, approved over
 /// those bytes, writing its metrics textfile beside the outcome files.
 fn run_console_plan(row: &mut Row, label: &str, bytes: &str, target: String) -> (Restored, String) {
@@ -3667,12 +3690,27 @@ fn a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stac
     assert_eq!(b["replay"]["matching"], json!(source.len()), "{b}");
     assert_eq!(b["archive"]["segments_verified"], 6, "{b}");
     assert_eq!(b["partitions"].as_array().map(Vec::len), Some(3), "{b}");
+    // THE EXACT LINES (review L4): a `contains("} 1")` is met by other series
+    // in the same file, so each gauge is matched as its whole line, labelled
+    // with the cluster the scorecard names.
+    let full_cluster = kept_target_cluster(&row, "cfull");
+    let full_cluster = full_cluster.as_str();
     assert!(
-        full_prom.contains("coverage=\"complete\"} 1"),
+        full_prom.contains(&gauge_line(
+            "logweir_drill_integrity_coverage",
+            full_cluster,
+            ",coverage=\"complete\"",
+            1
+        )),
         "{full_prom}"
     );
     assert!(
-        full_prom.contains("logweir_drill_integrity_complete_covered{"),
+        full_prom.contains(&gauge_line(
+            "logweir_drill_integrity_complete_covered",
+            full_cluster,
+            "",
+            1
+        )),
         "{full_prom}"
     );
 
@@ -3701,9 +3739,24 @@ fn a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stac
     );
     assert!(!bound_prom.contains("outcome=\"pass\""), "{bound_prom}");
     assert!(!bound_prom.contains("result=\"pass\""), "{bound_prom}");
+    let bound_cluster = kept_target_cluster(&row, "cbound");
+    let bound_cluster = bound_cluster.as_str();
     assert!(
-        bound_prom.contains("logweir_drill_integrity_complete_covered{")
-            && bound_prom.contains("} 0\n"),
+        bound_prom.contains(&gauge_line(
+            "logweir_drill_integrity_complete_covered",
+            bound_cluster,
+            "",
+            0
+        )),
+        "{bound_prom}"
+    );
+    assert!(
+        !bound_prom.contains(&gauge_line(
+            "logweir_drill_integrity_complete_covered",
+            bound_cluster,
+            "",
+            1
+        )),
         "{bound_prom}"
     );
 

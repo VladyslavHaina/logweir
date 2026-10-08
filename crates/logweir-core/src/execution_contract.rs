@@ -1522,6 +1522,24 @@ mod tests {
             .expect("1.1.0 carries it");
         admit_standing_authorization(&doc("1.0.0", scope()), Some("u-1"), now)
             .expect("a 1.0.0 scope without it, as before");
+        // A version with NO numeric minor (review RM2) is not "1.1.0 or
+        // later": the fields are refused under it. The control: the same
+        // versions are admitted for a scope that does not carry them (the
+        // major is 1), so the refusal is the minor's, and a later minor
+        // carries them.
+        for version in ["1", "1.x.0", "1."] {
+            let refused =
+                admit_standing_authorization(&doc(version, complete_scope()), Some("u-1"), now)
+                    .expect_err("no numeric minor cannot carry coverage");
+            assert!(
+                refused.detail.contains("defined from formatVersion 1.1.0"),
+                "{version}: {refused}"
+            );
+            admit_standing_authorization(&doc(version, scope()), Some("u-1"), now)
+                .unwrap_or_else(|e| panic!("the control, {version} without the fields: {e}"));
+        }
+        admit_standing_authorization(&doc("1.2.0", complete_scope()), Some("u-1"), now)
+            .expect("a later minor carries them");
         let sampled_bound = RehearsalScope {
             complete_max_records: Some(5),
             ..scope()

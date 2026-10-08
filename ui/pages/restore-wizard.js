@@ -3408,9 +3408,9 @@ export function verificationPlanSentence(state) {
   const anchor = typeof sample.anchor === "string" ? sample.anchor : "?";
   return (
     "This restore will compare " + n + " records per partition, anchored at " + anchor +
-    ", inside the sample window above. That is a sampled check, not an exhaustive comparison: " +
-    "no level in this version compares every restored record, and the result will say so beside " +
-    "its counts."
+    ", inside the sample window above. That is a sampled check, not an exhaustive comparison; " +
+    "choose complete coverage below to compare every record. The result will say which it was " +
+    "beside its counts."
   );
 }
 
