@@ -546,6 +546,22 @@ mod tests {
             c.coverage,
             AclCoverage::Unverified(Unverified::ClusterOperationsUnread(_))
         ));
+        // A refusal's answer is never a binding set, even a non-empty one
+        // (mutant A8: exporting it).
+        let stray = Ok(vec![
+            raw(2, "pa-orders", 3, "User:alice", 3, 3),
+            raw(0, "User:bob", 3, "User:alice", 0, 3),
+        ]);
+        for (probe, access) in [
+            (&standard, ClusterAccess::Reported(vec![])),
+            (&AuthorizerProbe::Disabled, every_op()),
+        ] {
+            let c = acl_coverage(probe, &access, &stray);
+            assert!(
+                c.bindings.is_empty() && c.not_representable.is_empty(),
+                "{c:?}"
+            );
+        }
         // The control: Describe granted, the same answer is a capture.
         let one = vec![raw(2, "pa-orders", 3, "User:alice", 3, 3)];
         let c = acl_coverage(&standard, &ClusterAccess::Reported(vec![8]), &Ok(one));
