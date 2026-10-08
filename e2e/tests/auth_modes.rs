@@ -711,7 +711,7 @@ fn plain_without_tls_is_refused_by_name_before_dialling() {
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     assert_eq!(
-        stdout.lines().rfind(|l| !l.trim().is_empty()),
+        stdout.lines().filter(|l| !l.trim().is_empty()).next_back(),
         Some("refusal-reason=PlainWithoutTls"),
         "{stdout}"
     );
