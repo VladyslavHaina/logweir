@@ -1111,6 +1111,8 @@ fn on_three_brokers_an_existing_group_is_never_excluded_while_one_is_down() {
         ],
         "create the topic",
     );
+    // FX-18's rule: a created topic is used only once the cluster serves it.
+    harness::await_created_on(&c.plaintext, &topic, 3);
     let r = c.reader();
     let groups: Vec<String> = (0..12).map(|i| format!("lw-c3-g{i:02}-{n}")).collect();
     for g in &groups {
