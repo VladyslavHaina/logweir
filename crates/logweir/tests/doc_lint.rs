@@ -1986,7 +1986,10 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ("complete coverage", "coverage: complete"),
         // FX-17 (2026-10-08): every scheduled point is offered once the
         // catalog is synced by the new runner; the operator re-syncs it.
-        ("scheduled points offered after a re-sync", "spec.syncRequest"),
+        (
+            "scheduled points offered after a re-sync",
+            "spec.syncRequest",
+        ),
     ];
     assert_eq!(
         items.len(),
