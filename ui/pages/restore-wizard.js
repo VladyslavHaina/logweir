@@ -2155,14 +2155,16 @@ export function renderTimeBasisField(state) {
     "<label class=\"inline\" for=\"time-basis\">" +
     "<input type=\"checkbox\" id=\"time-basis\" name=\"timeBasis\"" +
     (ticked ? " checked" : "") +
-    "> Select by producer time (<code>restore.time_basis: producerTime</code>)</label>" +
+    "> Select by producer time</label>" +
     "<p class=\"note\" id=\"time-basis-note\">" + messageText(TIME_BASIS_NOTE) + "</p>"
   );
 }
 
 /** What the time-basis box means, under it (FX-8). Code spans render through
- *  `messageText`. */
+ *  `messageText`. The field's name is HERE and not in the label: a code span
+ *  inside the inline label split it across three ragged pieces at 390 px. */
 export const TIME_BASIS_NOTE =
+  "Ticked, the plan states `restore.time_basis: producerTime`. " +
   "The archive holds each record's producer timestamp, not the broker's append time. If a " +
   "topic of this plan is `LogAppendTime` -- by its own setting or the broker's default -- " +
   "the runner refuses this point in time (`PointInTimeByProducerTime`) before it creates " +

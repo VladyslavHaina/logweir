@@ -1269,8 +1269,8 @@ when the archive manifest or the bound receipt records the topic as
 `LogAppendTime`
 ([stability.md](../docs/stability.md#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time)).
 
-**Step 3 carries the opt-in**: *Select by producer time
-(`restore.time_basis: producerTime`)*. It is unticked by default and the page
+**Step 3 carries the opt-in**: *Select by producer time*, with the note under
+it naming the plan line `restore.time_basis: producerTime`. It is unticked by default and the page
 never ticks it, because ticking it is the operator's acceptance, which the
 approver then signs with the plan. Ticked, the plan carries
 `time_basis: "producerTime"` under `restore:`, which moves the plan hash; the
