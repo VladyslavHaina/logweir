@@ -47,6 +47,22 @@
 //! reference written into a PodSpec — writing a reference is not reading a
 //! value. Nothing from a pod log reaches the status except a `'static` string
 //! from [`crate::protection::NOTIFY_RESULTS`]'s closed table.
+//!
+//! # A delivery Job whose pod is refused at creation fails fast (FX-11)
+//!
+//! A `ResourceQuota`, a `LimitRange` or an admission webhook can refuse the
+//! delivery pod, and the Job controller's only trace is a `FailedCreate`
+//! Event on the Job. Once the Job has had no pod for 30 seconds and that Event
+//! says why ([`crate::check::refused_pod_creation`], the `Preflight` grace and
+//! the same matcher), the Job is cancelled and the attempt is recorded
+//! `Failed` with `PodCreationForbidden` and the admission's own words — never
+//! "the delivery Job finished with no exit code" two minutes later. The
+//! attempt counts: the ordinary backoff retries it, three attempts in all
+//! ([`crate::protection::MAX_DELIVERY_ATTEMPTS`]), then
+//! `NotificationsDelivered=False/DeliveryFailed`. The admission's message is an
+//! API-server Event, not pod output; it reaches `lastError` redacted
+//! ([`logweir_core::check_contract::redact`]) and capped, as a `Preflight`
+//! publishes the same message.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -413,7 +429,7 @@ pub async fn reconcile_policy(
     let mut observed: Vec<AlertEntry> = Vec::new();
     let mut finished_jobs: Vec<String> = Vec::new();
     for entry in &stored_alerts {
-        let (entry, finished) = observe_delivery(&ctx.client, &namespace, entry, now).await?;
+        let (entry, finished) = observe_delivery(&ctx.client, &namespace, &uid, entry, now).await?;
         if let Some(job_name) = finished {
             finished_jobs.push(job_name);
         }
@@ -1512,12 +1528,15 @@ async fn create_delivery_job(
 
 /// Look at the delivery Job for one ledger entry and record what it did.
 ///
-/// Returns the entry (possibly unchanged) and the name of a FINISHED Job whose
-/// verdict this pass just recorded — the caller patches its TTL after the
-/// status write, never before.
+/// Returns the entry (possibly unchanged) and the name of a Job whose verdict
+/// this pass just recorded — the caller patches its TTL after the status
+/// write, never before. That Job is FINISHED, or (FX-11) cancelled this pass
+/// because its pod was refused at creation: a TTL counts from the finish, and
+/// a Job with no pod has no log for it to race.
 async fn observe_delivery(
     client: &kube::Client,
     namespace: &str,
+    owner_uid: &str,
     entry: &AlertEntry,
     now: Time,
 ) -> Result<(AlertEntry, Option<String>), ReconcileError> {
@@ -1554,7 +1573,32 @@ async fn observe_delivery(
         return Ok((next, None));
     };
     if !crate::controllers::backup::job_finished(&job) {
-        return Ok((entry.clone(), None));
+        // FX-11: A POD THE NAMESPACE REFUSED IS FAILED FAST. No request at all
+        // while the Job's own status counts a pod or it is younger than the
+        // 30-second grace; otherwise one pod list and, when it finds none, one
+        // events list by the Job's UID.
+        let Some(refusal) = crate::check::refused_pod_creation(client, namespace, &job, now)
+            .await
+            .map_err(ReconcileError::Api)?
+        else {
+            return Ok((entry.clone(), None));
+        };
+        crate::check::cancel(client, namespace, &job, owner_uid)
+            .await
+            .map_err(ReconcileError::Api)?;
+        warn!(
+            namespace = %namespace,
+            alert = %entry.key,
+            job = %job_ref.name,
+            attempts = delivery.attempts.unwrap_or(0),
+            code = refusal.code.as_str(),
+            "a delivery Job's pod was refused at creation; the Job is cancelled and the attempt \
+             is recorded as failed, naming the refusal. NOTHING else is written"
+        );
+        return Ok((
+            refused(entry, delivery, &refusal, now),
+            Some(job_ref.name.clone()),
+        ));
     }
 
     // SEAM S6. The pod is proved by the Job's own `metadata.uid` on its
@@ -1563,6 +1607,18 @@ async fn observe_delivery(
     let found = crate::check::pod::find_owned_pod(client, namespace, &job)
         .await
         .map_err(ReconcileError::Api)?;
+    if found.is_none() {
+        // FX-11: a Job that finished without ever having a pod, and whose
+        // `FailedCreate` Event says why, is that refusal — not "no exit code".
+        if let Some(refusal) =
+            crate::check::finished_without_pod(client, namespace, &job, now).await
+        {
+            return Ok((
+                refused(entry, delivery, &refusal, now),
+                Some(job_ref.name.clone()),
+            ));
+        }
+    }
     let (exit_code, tail) = match found.as_ref() {
         Some(pod) => {
             let exit = crate::controllers::backup::terminated_exit_code(pod);
@@ -1600,6 +1656,28 @@ async fn observe_delivery(
         );
     }
     Ok((next, Some(job_ref.name.clone())))
+}
+
+/// The ledger entry for an attempt whose pod was refused at creation — FX-11.
+///
+/// `Failed`, so the ordinary backoff retries it and the third such attempt
+/// ends in `DeliveryFailed`; `lastError` names `PodCreationForbidden` and the
+/// admission's words ([`crate::protection::refused_delivery`]).
+fn refused(
+    entry: &AlertEntry,
+    delivery: &AlertDelivery,
+    refusal: &crate::check::Waiting,
+    now: Time,
+) -> AlertEntry {
+    let (state, message) = p::refused_delivery(&refusal.message);
+    let mut next = entry.clone();
+    next.delivery = Some(AlertDelivery {
+        state: Some(state.as_str().to_string()),
+        last_attempt_at: Some(now),
+        last_error: Some(p::cap_error(&message)),
+        ..delivery.clone()
+    });
+    next
 }
 
 /// Patch a finished delivery Job's `ttlSecondsAfterFinished`.

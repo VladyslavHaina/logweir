@@ -49,6 +49,20 @@
 //! is a **merge-ordering constraint**, not a runtime surprise to discover at
 //! the live acceptance.
 //!
+//! # A run whose pod is refused at creation says so, and fails fast (FX-11)
+//!
+//! A `ResourceQuota`, a `LimitRange`, an admission webhook — or the missing
+//! ServiceAccount above — can refuse the enforcement Job's pod, and the Job
+//! controller's only trace is a `FailedCreate` Event on the Job. Once the Job
+//! has had no pod for 30 seconds and that Event says why
+//! ([`crate::check::refused_pod_creation`], the `Preflight` grace and the same
+//! matcher), the Job is cancelled and `Enforced=False` / `PodCreationForbidden`
+//! names the admission's own words at once. The run is harvested when the
+//! cancelled Job has finished (the lease is held until then): a failed run
+//! counted toward `EnforcementDegraded` like any other — never
+//! `RunInProgress` until `enforcement.deadlineSeconds` and then "produced no
+//! exit code". Nothing was deleted, because nothing ran.
+//!
 //! # And the evaluation names the right destination
 //!
 //! Its input is the `RecoveryCatalog`'s bounded VIEW of this destination
@@ -174,6 +188,15 @@ pub const REASON_RUN_IN_PROGRESS: &str = "RunInProgress";
 pub const REASON_RUN_COMPLETE: &str = "RunComplete";
 /// `Enforced=False`: the last run did not complete.
 pub const REASON_RUN_FAILED: &str = "RunFailed";
+/// `Enforced=False`: the last run never started, because the namespace refused
+/// its pod at creation — a `ResourceQuota`, a `LimitRange`, an admission
+/// webhook or a missing ServiceAccount (FX-11). The shared terminal state a
+/// `Backup`'s or a `Restore`'s runner reaches for the same refusal, and the
+/// condition message carries the admission's words. A failed run like
+/// [`REASON_RUN_FAILED`] in every other respect: it is counted, and three in a
+/// row are `EnforcementDegraded`.
+pub const REASON_POD_CREATION_FORBIDDEN: &str =
+    crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN;
 /// `Enforced=True` with `requireApprovedPlan: false` — D3 §6.5 requires the
 /// choice to be visible ON the object.
 pub const REASON_UNATTENDED: &str = "UnattendedDeletionEnabled";
@@ -220,6 +243,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_RUN_IN_PROGRESS,
     REASON_RUN_COMPLETE,
     REASON_RUN_FAILED,
+    REASON_POD_CREATION_FORBIDDEN,
     REASON_UNATTENDED,
     REASON_NOTHING_TO_DO,
     REASON_JOB_NAME_CONFLICT,
@@ -894,6 +918,15 @@ impl Pass<'_> {
             "enforcement": ENFORCEMENT_EXTERNAL,
             "guarantees": guarantees,
             "conditions": conditions,
+            // CLEARED, BESIDE `Evaluated=Unknown/NeverEvaluated` (O-1's class,
+            // swept by FX-11). A policy that was `Report` or `Enforce` before
+            // it declared a provider rule kept its last evaluation under a
+            // merge patch that omits the key: the console showed a plan
+            // preview this mode says it never makes, the API derived an
+            // approved-plan state from it, and a later switch back to
+            // `Enforce` re-used its `planExpiresAt` anchor. The next
+            // evaluation writes a fresh one.
+            "lastEvaluation": Value::Null,
         });
         self.adopt_generation(&mut status);
         self.patch_status(status).await?;
@@ -964,6 +997,40 @@ impl Pass<'_> {
             ));
         }
         if !super::backup::job_finished(&job) {
+            // FX-11: A POD THE NAMESPACE REFUSED IS FAILED FAST. No request at
+            // all while the Job's own status counts a pod or it is younger than
+            // the 30-second grace; otherwise one pod list and, when it finds
+            // none, one events list by the Job's UID. The Job is cancelled and
+            // the status names the refusal NOW.
+            //
+            // THE RUN IS NOT HARVESTED IN THIS PASS, AND THE LEASE STAYS (FX-11
+            // review L1). The lease must never die before the run it protects
+            // (`LEASE_MARGIN_SECONDS`), and a cancelled Job is not yet a
+            // finished one: a pod the Job controller admitted between this
+            // pass's pod list and its processing of the deadline patch could
+            // still run until the Job controller kills it. The Job finishes
+            // within about a second, its watch (`owns(jobs)`) wakes the next
+            // pass, and THAT pass harvests it through `harvest_run`, which
+            // proves "no pod" at the finish (`finished_without_pod`) — or reads
+            // the exit code of a pod that did start — and only then releases
+            // the lease, counts the run and patches the TTL.
+            if let Some(refusal) =
+                check::refused_pod_creation(self.ctx.client, &self.namespace, &job, self.ctx.now)
+                    .await?
+            {
+                check::cancel(self.ctx.client, &self.namespace, &job, &self.uid).await?;
+                warn!(
+                    policy = %self.name, namespace = %self.namespace, run = %run_id,
+                    job = %job_name, code = refusal.code.as_str(),
+                    "the retention run's pod was refused at creation; the Job is cancelled, the \
+                     status names the refusal, and the run is recorded once the Job has \
+                     finished. Nothing was deleted"
+                );
+                return Ok(Some(
+                    self.report_refused(&run_id, &job_name, &refusal.message)
+                        .await?,
+                ));
+            }
             return Ok(Some(self.report_running(&run_id, &job_name).await?));
         }
         let report = self.harvest_run(&job).await?;
@@ -983,7 +1050,20 @@ impl Pass<'_> {
     async fn harvest_run(&self, job: &Job) -> Result<RunReport, ReconcileError> {
         let Some(pod) = check::pod::find_owned_pod(self.ctx.client, &self.namespace, job).await?
         else {
-            return Ok(RunReport::default());
+            // FX-11: a Job that finished without ever having a pod, and whose
+            // `FailedCreate` Event says why, is that refusal — not "produced no
+            // exit code".
+            return Ok(RunReport {
+                refused: check::finished_without_pod(
+                    self.ctx.client,
+                    &self.namespace,
+                    job,
+                    self.ctx.now,
+                )
+                .await
+                .map(|w| w.message),
+                ..RunReport::default()
+            });
         };
         let exit_code = super::backup::terminated_exit_code(&pod);
         let pods: Api<k8s_openapi::api::core::v1::Pod> =
@@ -1042,6 +1122,58 @@ impl Pass<'_> {
         })
     }
 
+    /// The pass that CANCELLED a run whose pod was refused at creation — FX-11.
+    ///
+    /// `Enforced=False` / `PodCreationForbidden` with the admission's words, so
+    /// the refusal is on the object the moment it is known; and nothing else.
+    /// `lastEnforcement`, the lease and `consecutiveRunFailures` are left for
+    /// the harvest of the finished Job (review L1, see `tracked_run`).
+    async fn report_refused(
+        &self,
+        run_id: &str,
+        job_name: &str,
+        admission: &str,
+    ) -> Result<Outcome, ReconcileError> {
+        let conditions = self.conditions(&[
+            (
+                CONDITION_READY,
+                "True",
+                REASON_POLICY_READY,
+                "the policy resolves".to_string(),
+            ),
+            (
+                CONDITION_ENFORCED,
+                "False",
+                REASON_POD_CREATION_FORBIDDEN,
+                format!(
+                    "retention run {run_id} never started ({REASON_POD_CREATION_FORBIDDEN}), so \
+                     nothing was deleted: {admission}. Job {job_name} is cancelled; the run is \
+                     recorded, and its lease released, once the Job has finished"
+                ),
+            ),
+        ]);
+        let mut status = json!({
+            "enforcement": ENFORCEMENT_LOGWEIR_WORKER,
+            "conditions": conditions,
+        });
+        self.adopt_generation(&mut status);
+        self.patch_status(status).await?;
+        Ok(Outcome {
+            phase: RetentionPhase::Running,
+            ready: "True",
+            ready_reason: REASON_POLICY_READY,
+            enforced_reason: REASON_POD_CREATION_FORBIDDEN,
+            enforcement: ENFORCEMENT_LOGWEIR_WORKER,
+            points_evaluated: 0,
+            candidates: 0,
+            protected: 0,
+            skipped: 0,
+            plan_sha256: None,
+            job_name: Some(job_name.to_string()),
+            deletes_performed: 0,
+        })
+    }
+
     /// Publish what a finished run did, clear the lease, and count the failure
     /// if it was one.
     ///
@@ -1074,12 +1206,19 @@ impl Pass<'_> {
             0
         };
         let degraded = failures >= DEGRADED_AFTER_FAILURES;
-        let reason = if failed {
+        let reason = if report.refused.is_some() {
+            REASON_POD_CREATION_FORBIDDEN
+        } else if failed {
             REASON_RUN_FAILED
         } else {
             REASON_RUN_COMPLETE
         };
         let message = match exit_code {
+            None if report.refused.is_some() => format!(
+                "retention run {run_id} never started ({REASON_POD_CREATION_FORBIDDEN}), so \
+                 nothing was deleted: {}",
+                report.refused.as_deref().unwrap_or_default()
+            ),
             Some(0) => format!("retention run {run_id} completed"),
             Some(3) => format!(
                 "retention run {run_id} REFUSED its plan before deleting anything (exit 3); the \
@@ -1102,7 +1241,13 @@ impl Pass<'_> {
             ),
         };
         let codes: Vec<String> = report.failed.iter().map(|(_, code)| code.clone()).collect();
-        let detail = failure_detail(exit_code, &codes);
+        let detail = match report.refused.as_deref() {
+            Some(admission) => format!(
+                "the last run never started, because its pod was refused at creation \
+                 ({REASON_POD_CREATION_FORBIDDEN}): {admission}"
+            ),
+            None => failure_detail(exit_code, &codes),
+        };
         let stop = scheduling_stop(&codes);
         let conditions = self.conditions(&[
             (
@@ -3289,6 +3434,10 @@ pub struct RunReport {
     pub record_key: Option<String>,
     /// That record's digest.
     pub record_sha256: Option<String>,
+    /// Why the run's pod was never created, when the Job controller said so —
+    /// the `FailedCreate` row of [`crate::check::waiting`], redacted (FX-11).
+    /// `Some` only for a run with no pod at all, so `exit_code` is `None`.
+    pub refused: Option<String>,
 }
 
 impl RunReport {

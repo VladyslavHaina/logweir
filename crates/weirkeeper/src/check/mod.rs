@@ -585,10 +585,129 @@ pub async fn observe(
     expect: &FrameExpectations,
     now: DateTime<Utc>,
 ) -> Result<Observation, kube::Error> {
-    use kube::ResourceExt as _;
     let owned = pod::find_owned_pod(client, namespace, job).await?;
+    observe_found(client, namespace, job, owned.as_ref(), events, expect, now).await
+}
+
+/// [`observe`], reading the Job's Events itself — through [`job_events`], so
+/// only when the classifier could use one (FX-11).
+///
+/// For a check controller that holds no Events read of its own (the
+/// `RecoveryCatalog` sync). Without it, a pod a `ResourceQuota` or a
+/// `LimitRange` refused at creation was `PodNotStarted` until the Job's own
+/// deadline and then `DeadlineExceeded`, never naming the admission.
+///
+/// # Errors
+/// [`kube::Error`] from the pod `list` or the `pods/log` read. The events list
+/// is best effort ([`crate::diagnostics::events_for`]).
+pub async fn observe_reading_events(
+    client: &kube::Client,
+    namespace: &str,
+    job: &Job,
+    expect: &FrameExpectations,
+    now: DateTime<Utc>,
+) -> Result<Observation, kube::Error> {
+    let owned = pod::find_owned_pod(client, namespace, job).await?;
+    let events = job_events(client, namespace, job, owned.as_ref(), now).await;
+    observe_found(client, namespace, job, owned.as_ref(), &events, expect, now).await
+}
+
+/// The Events that explain why one Job's pod has not started — **the one read
+/// every Job-owning controller without its own shares** (FX-11).
+///
+/// # Bounded, and why the bound is the classifier's own
+///
+/// * **Only when [`waiting::reads_events`] says the classifier could read
+///   one**: no pod after [`waiting::POD_CREATE_GRACE`], or a container still
+///   creating after [`waiting::MOUNT_GRACE`]. A Job whose pod exists and runs
+///   — every healthy run — costs NOTHING here.
+/// * **One list, never a namespace-wide scan by the controller**: a field
+///   selector on `involvedObject.uid` (the Job's while there is no pod, the
+///   pod's once there is one, because those are the only objects the two rows
+///   match) and `limit` [`crate::diagnostics::EVENT_LIMIT`], through
+///   [`crate::diagnostics::events_for`] — the read the `Backup` and `Restore`
+///   diagnostics already make.
+/// * **By UID and never by name**: `FailedCreate` is a common event in a
+///   namespace with a `ResourceQuota`, and a classifier handed somebody else's
+///   would cancel a healthy Job (`waiting::from_failed_create`'s own note).
+///
+/// # Best effort
+///
+/// A list that fails yields an EMPTY slice, so the classification falls back
+/// to the state it reported before Events were read (`PodNotStarted`, then the
+/// Job's own deadline) — a diagnostic aid never becomes an outage, and an
+/// installation whose role lacks `events: list` behaves exactly as before.
+pub async fn job_events(
+    client: &kube::Client,
+    namespace: &str,
+    job: &Job,
+    pod: Option<&Pod>,
+    now: DateTime<Utc>,
+) -> Vec<EventFact> {
+    use kube::ResourceExt as _;
+    if !waiting::reads_events(job, pod, now) {
+        return Vec::new();
+    }
+    let subject = match pod {
+        Some(p) => p.uid(),
+        None => job.uid(),
+    };
+    crate::diagnostics::events_for(client, namespace, &[subject]).await
+}
+
+/// Why an UNFINISHED runner Job has no pod, when the Job controller said why
+/// — FX-11's fail-fast read for the runner kinds that keep no pod read of
+/// their own while a Job runs (the `KafkaCluster` probe, a `ProtectionPolicy`
+/// delivery, a retention run).
+///
+/// `None` costs no request at all while the Job's own status counts a pod or
+/// the Job is younger than [`waiting::POD_CREATE_GRACE`]
+/// ([`waiting::no_pod_counted`]); otherwise one pod list (the owner-UID proof)
+/// and, when that finds none, one [`job_events`] list.
+///
+/// # Errors
+/// [`kube::Error`] from the pod list. The events list is best effort.
+pub async fn refused_pod_creation(
+    client: &kube::Client,
+    namespace: &str,
+    job: &Job,
+    now: DateTime<Utc>,
+) -> Result<Option<Waiting>, kube::Error> {
+    if !waiting::no_pod_counted(job, now) {
+        return Ok(None);
+    }
+    if pod::find_owned_pod(client, namespace, job).await?.is_some() {
+        return Ok(None);
+    }
+    Ok(finished_without_pod(client, namespace, job, now).await)
+}
+
+/// Why a Job that has NO owned pod was never given one, from its
+/// `FailedCreate` Event — the read a runner kind makes once it has already
+/// listed pods and found none (a finished probe, delivery or retention Job).
+pub async fn finished_without_pod(
+    client: &kube::Client,
+    namespace: &str,
+    job: &Job,
+    now: DateTime<Utc>,
+) -> Option<Waiting> {
+    let events = job_events(client, namespace, job, None, now).await;
+    waiting::pod_create_refusal(job, None, &events, now)
+}
+
+/// [`observe`]'s body, once the owned pod is known.
+async fn observe_found(
+    client: &kube::Client,
+    namespace: &str,
+    job: &Job,
+    owned: Option<&Pod>,
+    events: &[EventFact],
+    expect: &FrameExpectations,
+    now: DateTime<Utc>,
+) -> Result<Observation, kube::Error> {
+    use kube::ResourceExt as _;
     let finished = crate::controllers::backup::job_finished(job);
-    let log = match (finished, owned.as_ref()) {
+    let log = match (finished, owned) {
         (true, Some(p)) => {
             let pods: kube::Api<Pod> = kube::Api::namespaced(client.clone(), namespace);
             match pods.logs(&p.name_any(), &relay::log_params()).await {
@@ -624,7 +743,7 @@ pub async fn observe(
     };
     Ok(classify(&Input {
         job,
-        pod: owned.as_ref(),
+        pod: owned,
         events,
         log: log.as_deref(),
         expect,

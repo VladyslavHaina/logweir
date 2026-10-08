@@ -1639,6 +1639,13 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// spent. The notes at main's `fcaae178`, with twenty-four items, fail the
 /// twenty-five pin, and so does an item 25 without its token (FX-13, after
 /// FX-3 took 24, 2026-10-07).
+///
+/// Then to twenty-six: item 26 is FX-11's — every Job-owning controller now
+/// reports a pod the namespace refused at creation, with new reason values
+/// where alert rules match and a refused discovery no schedule retries. Its
+/// token is the read that shows an operator which namespaces refuse Logweir
+/// pods today. The notes at main's `99e3802e`, with twenty-five items, fail
+/// the twenty-six pin (FX-11, after FX-13 took 25, 2026-10-07).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1664,9 +1671,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=25).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-five operator-facing changes, `#### 1.` \
-         to `#### 25.` in order; found {numbers:?}"
+        (1..=26).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-six operator-facing changes, `#### 1.` \
+         to `#### 26.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1726,6 +1733,12 @@ fn the_release_notes_carry_every_owed_operator_action() {
         // FX-13 (2026-10-07): the sign-in limit per client behind the
         // trusted ingress, and the audit note that says which counter.
         ("the sign-in limit per client", "loginRateKey"),
+        // FX-11 (2026-10-07): every Job-owning controller reports a refused
+        // pod; the operator's read of which namespaces refuse one today.
+        (
+            "a refused Job pod is reported by every kind",
+            "--field-selector reason=FailedCreate",
+        ),
     ]) {
         assert!(
             body.contains(token),
