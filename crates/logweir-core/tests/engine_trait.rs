@@ -241,6 +241,76 @@ fn expected_restored_count_treats_the_window_as_closed_and_ignores_segments_outs
     assert_eq!(expected_restored_count(&empty, FLOOR_MS, PIT_MS), (0, 0));
 }
 
+// ---------------------------------------------------------------------------
+// FX-23 — `partition_count_bound`, the per-partition bound phase 7's sampled
+// lane holds every mapped partition to.
+
+fn partition(segs: Vec<SegmentFacts>) -> PartitionFacts {
+    PartitionFacts {
+        partition_id: 0,
+        segments: segs,
+        gaps: vec![],
+        pruned: vec![],
+    }
+}
+
+/// **FX-23, hole A's arithmetic.** A segment the point in time cuts across
+/// still PROVES one record in the window when its FIRST record's timestamp
+/// (`start_timestamp`) is inside it, so its partition's `lower` is 1, never 0:
+/// an empty target partition is then outside its own bound. The aggregate
+/// bound says `(0, 50)` for the same segment and is silent over an empty one.
+///
+/// KILLS: dropping the straddler's 1 (`(0, 50)`), adding the whole straddler
+/// to `lower` (`(50, 50)`), and adding the 1 on top of `upper` (`(1, 51)`).
+#[test]
+fn a_straddling_segment_that_starts_inside_the_window_proves_one_record() {
+    let p = partition(vec![seg(NEAR_PIT_MS, PAST_PIT_MS, 50)]);
+    assert_eq!(partition_count_bound(&p, FLOOR_MS, PIT_MS), (1, 50));
+    // Its last record inside the window proves one just as well (a segment
+    // straddling the floor).
+    let p = partition(vec![seg(FLOOR_MS - 1, MID_MS, 70)]);
+    assert_eq!(partition_count_bound(&p, FLOOR_MS, PIT_MS), (1, 70));
+    // And on top of the wholly-inside sum, never instead of it.
+    let p = partition(vec![
+        seg(MID_MS, NEAR_PIT_MS, 100),
+        seg(NEAR_PIT_MS, PAST_PIT_MS, 50),
+    ]);
+    assert_eq!(partition_count_bound(&p, FLOOR_MS, PIT_MS), (101, 150));
+    // The aggregate reading of the same facts is unchanged by FX-23.
+    assert_eq!(
+        expected_restored_count(&facts_with_segments(p.segments.clone()), FLOOR_MS, PIT_MS),
+        (100, 150)
+    );
+}
+
+/// The arms that must NOT prove a record: a segment covering the whole window
+/// with both ends outside it (its records may all lie outside), an empty
+/// segment, and a segment outside the window. Wholly inside and inclusive
+/// ends read exactly as `expected_restored_count` reads them.
+///
+/// KILLS: proving a record from mere overlap (`(1, 9000)` for the first case),
+/// and proving one from an empty segment.
+#[test]
+fn only_an_end_inside_the_window_proves_a_record() {
+    let around = partition(vec![seg(FLOOR_MS - 1, PIT_MS + 1, 9_000)]);
+    assert_eq!(partition_count_bound(&around, FLOOR_MS, PIT_MS), (0, 9_000));
+    let empty = partition(vec![seg(NEAR_PIT_MS, PAST_PIT_MS, 0)]);
+    assert_eq!(partition_count_bound(&empty, FLOOR_MS, PIT_MS), (0, 0));
+    let outside = partition(vec![
+        seg(PAST_PIT_MS, PAST_PIT_MS + 1, 9_000),
+        seg(FLOOR_MS - 10, FLOOR_MS - 1, 9_000),
+    ]);
+    assert_eq!(partition_count_bound(&outside, FLOOR_MS, PIT_MS), (0, 0));
+    let flush = partition(vec![seg(FLOOR_MS, PIT_MS, 400)]);
+    assert_eq!(partition_count_bound(&flush, FLOOR_MS, PIT_MS), (400, 400));
+    let negative = partition(vec![seg(NEAR_PIT_MS, PAST_PIT_MS, -5)]);
+    assert_eq!(partition_count_bound(&negative, FLOOR_MS, PIT_MS), (0, 0));
+    assert_eq!(
+        partition_count_bound(&partition(vec![]), FLOOR_MS, PIT_MS),
+        (0, 0)
+    );
+}
+
 /// FX-1 fix round (M1): the default `describe_with_notices` is exactly
 /// `describe` with no notice, so a double that only implements `describe`
 /// behaves as it always did — and it must propagate `describe`'s error rather

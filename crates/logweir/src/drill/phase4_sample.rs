@@ -25,6 +25,15 @@ pub struct Selection {
     /// Human-readable facts that must reach the operator: known capture gaps
     /// and retention-pruned ranges overlapping the sampled window.
     pub notes: Vec<String>,
+    /// **FX-23.** The restored topics with at least one partition in the
+    /// window that `max_partitions` left WITHOUT a sampled partition, sorted
+    /// and each once — empty when every such topic has one. It can be
+    /// non-empty only when `max_partitions` is below the number of those
+    /// topics: the cap keeps a partition of every topic first (round-robin)
+    /// before it keeps a second of any. The scorecard signs it as
+    /// `sample.unsampled_topics`; phase 7 still holds every partition of these
+    /// topics to its count bound.
+    pub unsampled_topics: Vec<String>,
 }
 
 impl Selection {
@@ -177,12 +186,15 @@ pub fn run(
             w1.to_rfc3339()
         )));
     }
+    let mut unsampled_topics = Vec::new();
     if let (Some(max), false) = (spec.max_partitions, complete) {
         // Truncate BEFORE deriving the aggregate counts below, not after:
         // `records_expected`/`topics`/`notes` must describe exactly the
         // partitions `per_partition` ends up naming, never a pre-truncation
         // total for partitions the `Selection` no longer contains.
-        candidates.truncate(max as usize);
+        let (kept, left) = round_robin(candidates, max as usize);
+        candidates = kept;
+        unsampled_topics = left;
     }
 
     let records_expected = candidates.iter().map(|c| c.expected).sum();
@@ -204,5 +216,60 @@ pub fn run(
         topics: topics_count,
         partitions,
         notes,
+        unsampled_topics,
     })
+}
+
+/// **FX-23 (b).** Keep at most `max` candidates, ROUND-ROBIN across topics:
+/// the first partition of every topic, in manifest order, then the second of
+/// every topic that has one, and so on. Returns what is kept, in the
+/// candidates' own (manifest) order, and the topics left with no kept
+/// partition, sorted.
+///
+/// The cap used to keep the FIRST `max` candidates in manifest order, which
+/// is the order the engine restores topics in. A restore the engine stopped
+/// early (a SIGTERM is honoured between topics, with exit 0) restores a
+/// manifest-order PREFIX of the topics, so that sample covered exactly the
+/// topics that finished, and reconciled them. Round-robin samples every topic
+/// as soon as the cap allows one partition each; below that, the topics it
+/// could not reach are named in the signed `sample` block rather than left to
+/// be inferred, and phase 7's per-partition count bound still holds them.
+fn round_robin(candidates: Vec<Candidate>, max: usize) -> (Vec<Candidate>, Vec<String>) {
+    // Rank of each candidate within its topic (0 for a topic's first listed
+    // partition), and the topic's first appearance, both in manifest order.
+    let mut topic_order: Vec<String> = Vec::new();
+    let mut rank_in_topic: Vec<usize> = Vec::with_capacity(candidates.len());
+    let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for c in &candidates {
+        let n = seen.entry(c.topic.clone()).or_insert_with(|| {
+            topic_order.push(c.topic.clone());
+            0
+        });
+        rank_in_topic.push(*n);
+        *n += 1;
+    }
+    let topic_index = |t: &str| {
+        topic_order
+            .iter()
+            .position(|x| x == t)
+            .unwrap_or(usize::MAX)
+    };
+    // Picking order: by rank, then by the topic's manifest position.
+    let mut order: Vec<usize> = (0..candidates.len()).collect();
+    order.sort_by_key(|&i| (rank_in_topic[i], topic_index(&candidates[i].topic)));
+    let keep: std::collections::BTreeSet<usize> = order.into_iter().take(max).collect();
+    let mut kept = Vec::with_capacity(keep.len());
+    let mut kept_topics = std::collections::BTreeSet::new();
+    for (i, c) in candidates.into_iter().enumerate() {
+        if keep.contains(&i) {
+            kept_topics.insert(c.topic.clone());
+            kept.push(c);
+        }
+    }
+    let mut left: Vec<String> = topic_order
+        .into_iter()
+        .filter(|t| !kept_topics.contains(t))
+        .collect();
+    left.sort_unstable();
+    (kept, left)
 }

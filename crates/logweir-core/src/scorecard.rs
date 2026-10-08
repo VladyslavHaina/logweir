@@ -203,6 +203,36 @@ pub const AUTH_MODES_SINCE_MINOR: u64 = 5;
 /// a `plaintext` or `scramSha512` target is the 1.4.0 document it was.
 pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.5.0";
 
+/// **FX-23.** The first minor of scorecard format 1 that defines
+/// `sample.unsampled_topics`, which arm US-1 enforces. **A renumber changes
+/// this and [`FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`] together**, and
+/// `docs/verify_scorecard.py`'s `SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR`
+/// follows it.
+pub const UNSAMPLED_TOPICS_SINCE_MINOR: u64 = 6;
+
+/// **FX-23.** The `format_version` of a scorecard that carries
+/// `sample.unsampled_topics` — a MINOR bump for a new optional field, under
+/// OD-7: arms US-1 and US-2 read only that field and can only refuse. Written
+/// only for such a document ([`format_version_with_sample`]), so every other
+/// scorecard is the 1.4.0 or 1.5.0 document it was. The newest minor: the
+/// current schema file is this version's.
+pub const FORMAT_VERSION_WITH_UNSAMPLED_TOPICS: &str = "1.6.0";
+
+/// The `format_version` a scorecard is written with once its `sample` block
+/// is known (FX-23): [`FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`] when the block
+/// names an unsampled topic, else `current` — the version
+/// [`format_version_for_target`] chose — unchanged. 1.6.0 defines everything
+/// 1.5.0 does, so a document of a PROD-01.3 mode with unsampled topics is
+/// 1.6.0 too.
+#[must_use]
+pub fn format_version_with_sample<'a>(current: &'a str, sample: &SampleInfo) -> &'a str {
+    if sample.unsampled_topics.is_some() {
+        FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
+    } else {
+        current
+    }
+}
+
 /// The `format_version` a scorecard is written with, given its
 /// `target.auth` block: [`FORMAT_VERSION_WITH_AUTH_MODES`] for a PROD-01.3
 /// mode, else [`crate::FORMAT_VERSION`].
@@ -472,6 +502,20 @@ pub struct SampleInfo {
     pub records_restored: u64,
     pub anchor: String, // head | tail | random
     pub coverage_note: String,
+    /// **FX-23, format 1.6.0.** The restored topics with records in the window
+    /// that `sample.max_partitions` left WITHOUT a sampled partition: sorted,
+    /// each once, never empty when present. Present exactly when the cap was
+    /// below the number of such topics; the cap keeps one partition of every
+    /// topic first (round-robin) before a second of any. Phase 7 still holds
+    /// every partition of these topics to its count bound, so a topic named
+    /// here was COUNTED, not reconciled record by record.
+    ///
+    /// ABSENT means no topic is recorded as unsampled. A document before
+    /// 1.6.0 was written by a build whose cap kept the first partitions in
+    /// manifest order and recorded nothing about the rest, so its absence
+    /// says nothing. Arms US-1 to US-3 read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsampled_topics: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1815,6 +1859,62 @@ impl Scorecard {
                 }
             }
         }
+        // `sample.unsampled_topics` (format 1.6.0, FX-23): arms US-1 to US-3.
+        // They fire ONLY on a document that CARRIES the field, so every
+        // document without it is decided exactly as before: MINOR under the
+        // owner's OD-7 (a). US-3 judges an existing field against it (as IV-6
+        // does) and can only refuse.
+        //
+        // NOT INTERPOLATED, except US-1's version: the list names topics, an
+        // adopter-influenced string, and the messages are joined to
+        // `index.json`'s `arm` fields by literal substring.
+        //
+        // Mirrored arm for arm, in this order and this position (after
+        // `integrity.verification`, before `redactions`, which stays last), in
+        // `docs/verify_scorecard.py::check_invariants`.
+        if let Some(unsampled) = &self.sample.unsampled_topics {
+            // US-1. A document declaring a version before 1.6.0 cannot carry
+            // a 1.6.0 field.
+            let defined = major_version(&self.format_version) == Some(1)
+                && minor_version(&self.format_version)
+                    .is_some_and(|minor| minor >= UNSAMPLED_TOPICS_SINCE_MINOR);
+            if !defined {
+                return Err(InvariantError(format!(
+                    "sample.unsampled_topics is present but format_version {:?} predates it: \
+                     the field is defined from 1.{UNSAMPLED_TOPICS_SINCE_MINOR}.0",
+                    self.format_version
+                )));
+            }
+            // US-2. Each topic once, in order, and absent rather than empty:
+            // one list has one spelling, so two readers compare it as one.
+            if unsampled.is_empty()
+                || unsampled.iter().any(|t| t.trim().is_empty())
+                || !unsampled.windows(2).all(|w| w[0] < w[1])
+            {
+                return Err(InvariantError(
+                    "sample.unsampled_topics is empty, names a blank topic, or is not sorted \
+                     and free of repeats; it names each topic max_partitions left unsampled \
+                     once, in order, and is absent when there is none"
+                        .into(),
+                ));
+            }
+            // US-3. A complete verification compares every restored partition
+            // (phase 0 refuses it beside `max_partitions`), so it leaves no
+            // topic unsampled.
+            if self
+                .integrity
+                .verification
+                .as_ref()
+                .is_some_and(|v| v.coverage == COVERAGE_COMPLETE)
+            {
+                return Err(InvariantError(
+                    "sample.unsampled_topics is present but integrity.verification.coverage is \
+                     \"complete\"; a complete verification compares every restored partition \
+                     and leaves no topic unsampled"
+                        .into(),
+                ));
+            }
+        }
         // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
         // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
         // now nothing enforced it and no surface displayed it — a third party
@@ -1946,6 +2046,7 @@ mod tests {
                 records_restored: 0,
                 anchor: "head".into(),
                 coverage_note: "no capture gap overlaps the sampled window".into(),
+                unsampled_topics: None,
             },
             target_diff: TargetDiffSummary {
                 collisions: vec![],
@@ -3821,5 +3922,117 @@ mod tests {
             !'\u{1f}'.is_whitespace(),
             "U+001F is not blank to this reader"
         );
+    }
+
+    // ---- FX-23: `sample.unsampled_topics`, arms US-1 to US-3 ----
+
+    /// A sampled scorecard at 1.6.0 that names `topics` as unsampled.
+    fn with_unsampled(topics: &[&str]) -> Scorecard {
+        let mut sc = with_verification(sampled_verification());
+        sc.format_version = FORMAT_VERSION_WITH_UNSAMPLED_TOPICS.into();
+        sc.sample.unsampled_topics = Some(topics.iter().map(|t| (*t).to_string()).collect());
+        sc
+    }
+
+    /// The writer's version rule: 1.6.0 exactly when the field is present,
+    /// the version it was handed otherwise. KILLS: always 1.6.0 (every
+    /// document changes by a byte); never 1.6.0 (US-1 refuses the writer's
+    /// own document).
+    #[test]
+    fn the_version_with_sample_is_1_6_0_only_for_a_document_naming_an_unsampled_topic() {
+        let sc = with_unsampled(&["orders"]);
+        assert_eq!(format_version_with_sample("1.4.0", &sc.sample), "1.6.0");
+        assert_eq!(format_version_with_sample("1.5.0", &sc.sample), "1.6.0");
+        let sc = valid_scorecard();
+        assert_eq!(format_version_with_sample("1.4.0", &sc.sample), "1.4.0");
+        assert_eq!(format_version_with_sample("1.5.0", &sc.sample), "1.5.0");
+        assert!(with_unsampled(&["audit", "orders"])
+            .validate_invariants()
+            .is_ok());
+    }
+
+    /// US-1. KILLS: deleting the arm; comparing against the wrong minor.
+    #[test]
+    fn us1_refuses_unsampled_topics_under_a_version_that_predates_them() {
+        for version in ["1.0.0", "1.3.0", "1.4.0", "1.5.0", "1.x.0"] {
+            let mut sc = with_unsampled(&["orders"]);
+            // No 1.4.0 block, so IV-1 does not answer first.
+            sc.integrity.verification = None;
+            sc.format_version = version.into();
+            assert_eq!(
+                sc.validate_invariants().unwrap_err().0,
+                format!(
+                    "sample.unsampled_topics is present but format_version {version:?} predates \
+                     it: the field is defined from 1.{UNSAMPLED_TOPICS_SINCE_MINOR}.0"
+                )
+            );
+        }
+        // Absent, every version is decided exactly as before.
+        let mut sc = with_verification(sampled_verification());
+        sc.format_version = "1.6.0".into();
+        assert!(sc.validate_invariants().is_ok());
+    }
+
+    /// US-2. KILLS: deleting the arm, or any one of its three conditions
+    /// (an empty list, a blank name, a repeat or a wrong order).
+    #[test]
+    fn us2_refuses_an_empty_blank_repeated_or_unordered_list() {
+        let msg = "sample.unsampled_topics is empty, names a blank topic, or is not sorted and free of repeats; it names each topic max_partitions left unsampled once, in order, and is absent when there is none";
+        for bad in [
+            &[][..],
+            &["  "][..],
+            &["audit", "\u{2003}"][..],
+            &["orders", "audit"][..],
+            &["orders", "orders"][..],
+        ] {
+            assert_eq!(
+                with_unsampled(bad).validate_invariants().unwrap_err().0,
+                msg,
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// US-3. KILLS: deleting the arm. A complete verification leaves no topic
+    /// unsampled; a sampled one may, and a document with no block (before
+    /// 1.4.0's writer) is not judged by it.
+    #[test]
+    fn us3_refuses_unsampled_topics_beside_a_complete_verification() {
+        let mut sc = with_unsampled(&["orders"]);
+        sc.integrity.verification = Some(complete_verification());
+        assert_eq!(
+            sc.validate_invariants().unwrap_err().0,
+            "sample.unsampled_topics is present but integrity.verification.coverage is \"complete\"; a complete verification compares every restored partition and leaves no topic unsampled"
+        );
+        let mut sc = with_unsampled(&["orders"]);
+        sc.integrity.verification = None;
+        assert!(sc.validate_invariants().is_ok());
+    }
+
+    /// US-1 to US-3 sit after IV-1 to IV-7 and before `redactions`: a document
+    /// that breaks IV-1 and US-1 reports IV-1, and one that breaks US-1 and
+    /// the redactions arm reports US-1. KILLS: moving the block.
+    #[test]
+    fn the_unsampled_arms_sit_between_the_verification_arms_and_redactions() {
+        let mut sc = with_unsampled(&["orders"]);
+        sc.format_version = "1.3.0".into();
+        assert!(sc
+            .validate_invariants()
+            .unwrap_err()
+            .0
+            .starts_with("integrity.verification is present"));
+        let mut sc = with_unsampled(&["orders"]);
+        sc.integrity.verification = None;
+        sc.format_version = "1.5.0".into();
+        sc.redactions = vec![Redaction {
+            path: "/x".into(),
+            reason: "y".into(),
+            present: true,
+        }];
+        assert!(sc
+            .validate_invariants()
+            .unwrap_err()
+            .0
+            .starts_with("sample.unsampled_topics is present"));
     }
 }

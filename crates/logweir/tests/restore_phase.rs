@@ -157,6 +157,7 @@ impl DataEngine for SentinelEngine {
             finished_at: fixtures::ts("2026-01-01T00:00:05Z"),
             exit_code: 0,
             unknown_key_warnings: vec!["restore.some_key".to_string()],
+            engine_report: logweir_core::engine::EngineReport::Absent,
         })
     }
     fn fingerprints(&self, _s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {

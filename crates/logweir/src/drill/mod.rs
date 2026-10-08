@@ -2825,6 +2825,11 @@ fn execute_with_validated_approval(
     // and the `Selection` are both in scope.
     sel.bind_backup_set(&set);
     sc.sample = sample_info(&c.spec.sample, &sel);
+    // FX-23: a sample that names an unsampled topic is a 1.6.0 document; any
+    // other keeps the version `new_scorecard` chose, byte for byte.
+    sc.format_version =
+        logweir_core::scorecard::format_version_with_sample(&sc.format_version, &sc.sample)
+            .to_string();
 
     // 5 — the engine's preflight runs INSIDE the phase-5 record, so the
     // record's own `duration_ms` is the number `compute_measured` subtracts
@@ -3071,7 +3076,7 @@ fn execute_with_validated_approval(
 
     // 7
     let verified = record(&mut sc, 7, "verify", || {
-        phase7_verify::run_with_coverage(
+        phase7_verify::run_after_restore(
             c.engine.as_ref(),
             reader,
             &c.archive,
@@ -3086,6 +3091,9 @@ fn execute_with_validated_approval(
             // PROD-08.1: the approved plan's coverage and its bound.
             c.spec.sample.coverage,
             c.spec.sample.complete_max_records,
+            // FX-23: the engine's offset report, which phase 7 refuses when
+            // it lacks a mapped partition with records in the window.
+            &restored.engine_report,
         )
     })?;
     sc.integrity = verified.integrity.clone();
@@ -3738,6 +3746,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             records_restored: 0,
             anchor: c.spec.sample.anchor.as_str().to_string(),
             coverage_note: "phase 4 has not run".into(),
+            unsampled_topics: None,
         },
         target_diff: TargetDiffSummary::default(),
         integrity: Integrity {
@@ -3908,6 +3917,9 @@ fn sample_info(
         } else {
             sel.notes.join("; ")
         },
+        // FX-23: absent unless `max_partitions` left a topic unsampled; a
+        // document carrying it is 1.6.0 (`format_version_with_sample`).
+        unsampled_topics: (!sel.unsampled_topics.is_empty()).then(|| sel.unsampled_topics.clone()),
     }
 }
 

@@ -731,6 +731,7 @@ impl DataEngine for SleepEngine {
             finished_at: Utc::now(),
             exit_code: 0,
             unknown_key_warnings: vec![],
+            engine_report: logweir_core::engine::EngineReport::Absent,
         })
     }
     fn fingerprints(&self, _s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
@@ -1097,6 +1098,9 @@ pub struct FixtureEngine {
     /// Optional replacement written during `restore`, after signer validation
     /// and before scorecard/receipt/teardown persistence.
     pub signing_key_rotation: Option<(PathBuf, String)>,
+    /// FX-23: what `restore` reports the engine's offset report said.
+    /// `Absent` (no report) unless a test moves it.
+    pub engine_report: logweir_core::engine::EngineReport,
 }
 
 impl FixtureEngine {
@@ -1118,6 +1122,7 @@ impl FixtureEngine {
             fingerprint_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             restored: std::sync::Arc::new(std::sync::Mutex::new(false)),
             signing_key_rotation: None,
+            engine_report: logweir_core::engine::EngineReport::Absent,
         }
     }
 }
@@ -1192,6 +1197,7 @@ impl DataEngine for FixtureEngine {
             finished_at: Utc::now(),
             exit_code: 0,
             unknown_key_warnings: self.restore_unknown_keys.clone(),
+            engine_report: self.engine_report.clone(),
         })
     }
     fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
