@@ -323,3 +323,57 @@ fn a_failure_reason_is_lifted_only_beside_its_own_exit_code() {
     assert_eq!(failure_reason_for_exit(0, "ExecutionAlreadyClaimed"), None);
     assert_eq!(failure_reason_for_exit(3, "ExecutionClaimUnproven"), None);
 }
+
+/// **C15 at the spec layer** (PROD-00.3f, A-C15-1): the predicate and the
+/// refusal both drill and backup admission call. Only an S3 location with a
+/// plain `http://` endpoint AND `allow_http: false` is refused; plaintext
+/// stated explicitly, TLS, no endpoint and the other backends are not.
+#[test]
+fn an_http_endpoint_without_allow_http_is_refused_and_nothing_else_is() {
+    use logweir_core::engine::StorageUrl;
+    use logweir_core::guard::reject_plaintext_endpoint_without_allow_http;
+    let s3 = |endpoint: Option<&str>, allow_http: bool| StorageUrl::S3 {
+        bucket: "b".into(),
+        prefix: "p".into(),
+        region: None,
+        endpoint: endpoint.map(str::to_string),
+        path_style: true,
+        allow_http,
+    };
+    for refused in [
+        s3(Some("http://minio:9000"), false),
+        s3(Some("HTTP://minio:9000"), false),
+    ] {
+        assert!(refused.plaintext_endpoint_without_allow_http());
+        let refusal =
+            reject_plaintext_endpoint_without_allow_http("source.storage", &refused).unwrap_err();
+        assert!(
+            refusal
+                .0
+                .starts_with("source.storage.endpoint is a plain http:// endpoint"),
+            "{}",
+            refusal.0
+        );
+        assert!(
+            !refusal.0.contains("minio"),
+            "never the endpoint: {}",
+            refusal.0
+        );
+    }
+    for admitted in [
+        s3(Some("http://minio:9000"), true),
+        s3(Some("https://minio:9000"), false),
+        s3(Some("httpx://minio:9000"), false),
+        s3(None, false),
+        StorageUrl::Gcs {
+            bucket: "b".into(),
+            prefix: "p".into(),
+        },
+    ] {
+        assert!(
+            !admitted.plaintext_endpoint_without_allow_http(),
+            "{admitted:?}"
+        );
+        assert!(reject_plaintext_endpoint_without_allow_http("storage", &admitted).is_ok());
+    }
+}

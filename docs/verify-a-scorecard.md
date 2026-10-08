@@ -440,7 +440,8 @@ states these limits against each control clause it maps.
 
 Restore drills fingerprint sampled records of the restored topic against the
 same records in the archive. A loss that happened when the archive was written
-is in both, so the comparison cannot see it. With engine 0.21.0:
+is in both, so the comparison cannot see it. With engine 0.21.0, and unchanged
+on the 0.23.3 pin (re-measured: PROD-01.1 record §11):
 
 - **Transactions.** The backup reads uncommitted data. Records of aborted
   transactions, records of transactions still open when the backup ran, and the

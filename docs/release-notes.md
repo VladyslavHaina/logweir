@@ -22,7 +22,7 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10), 24 (FX-3), 25
 (FX-13), 26 (FX-11) and 27 (FX-8), from the product-expansion tracker's fix-now
-rows, and 28 (PROD-16.1, no approver key by default) land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
+rows, and items 28 (PROD-00.3f, the engine pin) and 29 (PROD-16.1, no approver key by default), land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
 execution-claim set check, receipt and catalog format 1.2.0, the pin's read
 by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
@@ -46,18 +46,18 @@ the GitHub Release asset, after the tag, together with the run rows
 
 | What | Value |
 |---|---|
-| Candidate commit (the tagged commit) | the commit `v0.2.0-rc.1` names: this record's commit, docs-only on top of the publication commit |
+| Candidate commit (the tagged commit) | `56a60ebe509f2449c649fc1899756100d961832f` (the pre-tag record; it differs from the publication commit only under `docs/`) |
 | Version tag | `v0.2.0-rc.1` (pushed 2026-10-08 with the owner's standing approval of 2026-10-07) |
 | Publication commit (`release.json` `.images.publication`: the `sha-<commit>` images and chart the tag promotes) | `2c277dc11521c337748fbf9059cbaff76c36e82c` |
 | CI run (`ci.yml`) for the publication commit, its `publish` job green | [37725467323](https://github.com/VladyslavHaina/logweir/actions/runs/37725467323): `check`, `e2e` and `publish` (build amd64, build arm64, promote) green |
 | Release dry run (`release.yml` dispatched on the candidate) | [37730468445](https://github.com/VladyslavHaina/logweir/actions/runs/37730468445) on `2c277dc1`, every job green; `release.sh verify` on its `release-assets`: 14 assets verified, `SHA256SUMS` 14/14 |
-| Release run (`release.yml` on the tag) and release drill | — |
+| Release run (`release.yml` on the tag) and release drill | [37733173995](https://github.com/VladyslavHaina/logweir/actions/runs/37733173995): every job green, including `drill / drill-from-artifact` (job 113167927725), `publish-images` and `github-release`; the GitHub Release is a pre-release |
 | Runner image digest (`linux/amd64`) | `docker.io/vladyslavhaina/logweir@sha256:affa8075492614ff0964bf29ca79a0caa61aa2f8aa47d022460f855e92024054` |
 | Controller image digest (manifest list; amd64 and arm64) | `docker.io/vladyslavhaina/weirkeeper@sha256:fac312ba31df831e4cf96dd4546266ee47766528752f97a931eb125974dd56c6` |
 | Console image digest (`logweir-console`) | `docker.io/vladyslavhaina/logweir-console@sha256:b7402cb143aee14356707ee10fb644e5f5c25a4993ff285315adfccf5b13b0a7` |
 | UI image digest (`logweir-ui`) | `docker.io/vladyslavhaina/logweir-ui@sha256:2a43b5c0a7ec42688076986c96f63d34449060981fc746a9c8e4ac397e305daf` |
-| Chart (`logweir-chart` version and package sha256 from the tag run's `release.json` `.chart`; OCI digest from the release's notes, as an anonymous `helm pull` reports it) | — |
-| CLI archives (three; the tag run's `release.json` `.archives`, each with its sha256 and run-time needs) | — |
+| Chart (`logweir-chart` version and package sha256 from the tag run's `release.json` `.chart`; OCI digest from the release's notes, as an anonymous `helm pull` reports it) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart` `0.2.0-rc.1`, package sha256 `515be23262193931c1c4028654c24a2e2b72a96f9473232724e2cd12e5ce561b`, OCI digest `sha256:d10e9772159da2934fd27e86daa822623e82366021acbbaa09fc21871ca6b727`; an anonymous `helm pull` is byte-identical to the release asset |
+| CLI archives (three; the tag run's `release.json` `.archives`, each with its sha256 and run-time needs) | `logweir-x86_64-unknown-linux-gnu.tar.xz` `6b45d0787a0cae4edd952c50b2218eeb5730148a498a7323bd799ee18d3ce02d` (glibc 2.34+; libssl3, libsasl2-2, zlib1g); `logweir-aarch64-unknown-linux-gnu.tar.xz` `32e07061a67f1b29554d5a336118fcf3bfee97f0d635af9a0de8fbf273e70839` (the same); `logweir-aarch64-apple-darwin.tar.xz` `a2ddd05df432c0b7fcb09f749ee8f4b75297dcc802a6679fb0741c9990792a66` (macOS 11+, Homebrew `openssl@3`) |
 | `ui/` bundle, file by file | the output of the command below, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate (context, auth mode, storage, limits) | — |
 | Checks deliberately deferred, each with its reason | — |
@@ -123,7 +123,7 @@ Do these before rolling the controller, in this order. Each is also listed
 under its item below.
 
 1. **Back up the installation identity** (`logweir-signing-key` and
-   `logweir-signing-trust`, and — once the console key exists, item 28 —
+   `logweir-signing-trust`, and — once the console key exists, item 29 —
    `logweir-console-confirmation` and `logweir-console-trust`) and export the trust material
    (`logweir trust export`) — [install.md](install.md), *Back up and recover
    the installation identity*.
@@ -180,7 +180,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-eight operator-facing changes
+### The twenty-nine operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -200,7 +200,9 @@ FX-11 and is not proven live yet: the PoC upgrade that carries it runs its
 rows.
 Item 27 is fix-now row FX-8, proven on the compose stack; the PoC upgrade that
 carries it runs its refusal and opt-in rows.
-Item 28 is PROD-16.1 (owner decision OD-8), proven by unit, mock-cluster and
+Item 28 is PROD-00.3f, the engine pin, proven on a compose stack; the PoC
+upgrade that carries it runs its controller and runner rows.
+Item 29 is PROD-16.1 (owner decision OD-8), proven by unit, mock-cluster and
 chart rows and a host console journey; its controller and hook rows run at
 the PoC refresh that carries it.
 
@@ -1239,7 +1241,63 @@ Not yet proven on the PoC: the upgrade that carries FX-8 runs those rows.
 selections this build refuses, unlabelled, signing format 1.1.0 again. The 1.3.0
 scorecards already written stay valid under both readers.
 
-#### 28. A fresh install needs no approver key; an upgrade changes no namespace's approval (PROD-16.1)
+#### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
+
+**Changed.** The runner image carries `kafka-backup` **0.23.3** (image digest
+`sha256:cc7d5a8a…`, upstream commit `afb160e7`), OSO's newest release on
+2026-10-07, in place of 0.21.0. The segment format, the three engine commands
+Logweir runs and every key it renders are unchanged, and archives written by
+either engine read and restore with the other. `logweir doctor` accepts exactly
+0.23.3, as a whole token: 0.21.0 is now a version mismatch, and so is a suffixed
+`0.23.3+build`. Receipts and scorecards name the engine that ran, so new ones
+say 0.23.3. Two engine behaviours since 0.22.0 are refused instead of
+inherited. A storage location with a plain `http://` endpoint and
+`allow_http: false` is refused at phase 0 with exit 3 (`refusal-reason=GuardRefused`),
+by `drill run`, `restore run` and `backup run` alike, and no engine document
+is rendered with it: the engine now derives plaintext from the scheme and
+would dial the archive in the clear. `VirtualHosted` addressing with a custom
+endpoint stays refused (`AddressingUnsupportedByEngine` /
+`addressing_unsupported_by_engine`); its message no longer names an engine
+version. The full-drill floor stays 0.21.0.
+**Do:** nothing with the chart: the controller stamps the new version into
+every runner Job, so roll the controller **and** runner image together (the
+existing upgrade order). A standalone CLI install replaces its engine binary
+with 0.23.3 (the digest in `third_party/kafka-backup-binary.digest`) and its
+`LOGWEIR_ENGINE_VERSION` / `LOGWEIR_ENGINE_DIGEST` with the new pair
+([quickstart.md](quickstart.md), step 4; `examples/cronjob-drill.yaml`). A spec
+that names an `http://` endpoint must say `allow_http: true`; a saved
+destination already cannot combine the two (rule R3).
+**Scope:** source evaluation of every change from 0.21.0 to 0.23.3
+([decision record](to-do/decisions/PROD-00-engine-route.md) §12: no capability gap
+it lists is fixed, and nothing Logweir reads or renders changed shape). On a
+compose stack (slot 4, Kafka 3.7.1, the engine under `linux/amd64` emulation)
+CI's e2e command passed 177 tests, PROD-01.1's record-semantics contract
+asserted on 0.23.3 included; the demo drill passed with both readers VALID; an
+archive 0.21.0 wrote drilled with 0.23.3, and an archive 0.23.3 wrote drilled
+with 0.21.0, both `pass`. On Kafka 4.3.1 the record-semantics, G-PITR, FX-1,
+FX-7 and full-drill rows passed with the pin as well (34 tests). Unit rows refuse the `http://` combination in each
+of the three engine documents and at phase 0 for drill and backup specs, with
+mutants on those guards and on `doctor`'s pin, and `crates/logweir/tests/engine_pin.rs`
+(CI's workspace run) holds every place that names the pin to one version.
+`engine-matrix` run 37728540932 recorded `pass` for both 0.23.3 rows (Kafka
+3.7.1 and 4.3.1) with PROD-01.1's rows asserted. Its 0.21.0 and 0.22.0 rows
+recorded `fail(e2e suite)` because the pin guard then ran in the package the
+matrix runs with each row's own engine, and stopped those rows before their
+drill suites; it is not an engine finding, and the guard has moved. The
+re-dispatch at the fix tip, run 37736333362, recorded every one of the seven
+declared rows as declared: 0.21.0, 0.22.0 and both 0.23.3 rows `pass`, the
+three below-floor rows `unsupported(lever-absent)`. The controller's
+`LOGWEIR_ENGINE_VERSION` reaches a live runner Job only at the next PoC
+upgrade.
+**Rollback:** an older runner and controller run 0.21.0 again; `doctor` from
+that build refuses 0.23.3. Measured: an archive 0.23.3 wrote restores and
+verifies `pass` when this build drives the 0.21.0 engine. Not run, and reasoned
+from source only: an OLDER Logweir build reading a 0.23.3 archive or receipt.
+The manifest has the keys a 0.21.0 manifest has (`missing_topics` is omitted
+when empty), the segment container is unchanged since 0.18.0, and the vendored
+structs ignore unknown keys.
+
+#### 29. A fresh install needs no approver key; an upgrade changes no namespace's approval (PROD-16.1)
 
 **Changed.** Three approval modes by name: **confirm** (one person clicks
 Create in the console, no key; internal `Ordinary`), **two-person** (PROD-16.2,
@@ -1265,7 +1323,7 @@ confirms too, as `urn:logweir:local-admin#admin`. `approvalPolicy.default`
 `confirmationKeyManaged` (the managed key may arrive after the console starts;
 an operator-named key file that is missing still refuses to start). The API's
 policy view gains `operatorMode` and `basis`, the create's `authorization` gains
-`operatorMode` (OpenAPI `1.0.0-alpha.2`, additive). Item 28 lands after the
+`operatorMode` (OpenAPI `1.0.0-alpha.2`, additive). Item 29 lands after the
 `v0.2.0-rc.1` publication commit `2c277dc1` and is not in that candidate.
 **The install-only grant.** The `ClusterRole`/`ClusterRoleBinding`
 `<release>-identity-trust` that lets the hook create a cluster-scoped
@@ -1416,7 +1474,7 @@ is converted and no stored object is rewritten
     `runnerResources`** (item 21) that must not run uncapped: an older
     controller drops the block and fires its next slot. A `Restore` this build
     refused `ExecutionSpecInvalid` stays `Failed`.
-11. **Remove `approvalPolicy.default`** (item 28): an older binary refuses a
+11. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
     document carrying `defaultMode` at start. Expect unbound namespaces of a
     fresh install to be `legacy-governed-v1` again under the older build.
 
@@ -1431,7 +1489,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26, 27 and 28, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26, 27, 28 and 29, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.

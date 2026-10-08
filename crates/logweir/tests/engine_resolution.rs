@@ -25,7 +25,14 @@ fn fake_engine_dir() -> (tempfile::TempDir, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let exe = dir.path().join("kafka-backup");
-    std::fs::write(&exe, "#!/bin/sh\necho 'kafka-backup 0.21.0'\n").unwrap();
+    std::fs::write(
+        &exe,
+        format!(
+            "#!/bin/sh\necho 'kafka-backup {}'\n",
+            logweir::doctor::ENGINE_PIN
+        ),
+    )
+    .unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
     (dir, exe)
 }
