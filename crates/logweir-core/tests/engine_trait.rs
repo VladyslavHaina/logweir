@@ -266,6 +266,14 @@ fn partition(segs: Vec<SegmentFacts>) -> PartitionFacts {
 fn a_straddling_segment_that_starts_inside_the_window_proves_one_record() {
     let p = partition(vec![seg(NEAR_PIT_MS, PAST_PIT_MS, 50)]);
     assert_eq!(partition_count_bound(&p, FLOOR_MS, PIT_MS), (1, 50));
+    // Both ends of the window are INCLUSIVE, as the engine's restore filter is:
+    // a segment whose first record sits exactly AT the point in time proves
+    // that record (review L5: `ts < pit_ms` survived without this row), and
+    // one whose first record sits exactly at the floor proves it too.
+    let p = partition(vec![seg(PIT_MS, PAST_PIT_MS, 7)]);
+    assert_eq!(partition_count_bound(&p, FLOOR_MS, PIT_MS), (1, 7));
+    let p = partition(vec![seg(FLOOR_MS - 5, FLOOR_MS, 7)]);
+    assert_eq!(partition_count_bound(&p, FLOOR_MS, PIT_MS), (1, 7));
     // Its last record inside the window proves one just as well (a segment
     // straddling the floor).
     let p = partition(vec![seg(FLOOR_MS - 1, MID_MS, 70)]);

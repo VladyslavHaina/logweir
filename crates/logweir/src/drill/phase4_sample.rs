@@ -236,27 +236,25 @@ pub fn run(
 /// be inferred, and phase 7's per-partition count bound still holds them.
 fn round_robin(candidates: Vec<Candidate>, max: usize) -> (Vec<Candidate>, Vec<String>) {
     // Rank of each candidate within its topic (0 for a topic's first listed
-    // partition), and the topic's first appearance, both in manifest order.
+    // partition), and each topic's first appearance, both in manifest order.
     let mut topic_order: Vec<String> = Vec::new();
-    let mut rank_in_topic: Vec<usize> = Vec::with_capacity(candidates.len());
-    let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut topic_index: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    let mut seen: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut key: Vec<(usize, usize)> = Vec::with_capacity(candidates.len());
     for c in &candidates {
-        let n = seen.entry(c.topic.clone()).or_insert_with(|| {
-            topic_order.push(c.topic.clone());
-            0
+        let t = c.topic.as_str();
+        let idx = *topic_index.entry(t).or_insert_with(|| {
+            topic_order.push(t.to_string());
+            topic_order.len() - 1
         });
-        rank_in_topic.push(*n);
+        let n = seen.entry(t).or_insert(0);
+        key.push((*n, idx));
         *n += 1;
     }
-    let topic_index = |t: &str| {
-        topic_order
-            .iter()
-            .position(|x| x == t)
-            .unwrap_or(usize::MAX)
-    };
     // Picking order: by rank, then by the topic's manifest position.
     let mut order: Vec<usize> = (0..candidates.len()).collect();
-    order.sort_by_key(|&i| (rank_in_topic[i], topic_index(&candidates[i].topic)));
+    order.sort_by_key(|&i| key[i]);
     let keep: std::collections::BTreeSet<usize> = order.into_iter().take(max).collect();
     let mut kept = Vec::with_capacity(keep.len());
     let mut kept_topics = std::collections::BTreeSet::new();

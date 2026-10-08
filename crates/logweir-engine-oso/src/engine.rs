@@ -55,13 +55,22 @@ fn captured(s: &str) -> String {
 /// when there is one this build cannot parse. Neither is an error: the report
 /// is evidence of what the engine LACKS, never of what it wrote, and phase 7
 /// logs a report it could not check.
+///
+/// **Streamed, never buffered (FX-23 review M1).** The report carries one
+/// `detailed_mappings` pair per restored record — about 116 bytes of file per
+/// record — so it is read through a `BufReader` into a shape that names only
+/// `entries[].{topic, partition}`, and serde skips everything else as it
+/// streams past. Memory is bounded by the number of partition entries, not by
+/// the number of records (`tests/offset_report_memory.rs` measures it).
 pub fn read_engine_report(path: &std::path::Path) -> EngineReport {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return EngineReport::Absent,
         Err(e) => return EngineReport::Unreadable(format!("{}: {e}", path.display())),
     };
-    match serde_json::from_slice::<vendored::offset_report::OffsetMappingReport>(&bytes) {
+    match serde_json::from_reader::<_, vendored::offset_report::OffsetMappingReport>(
+        std::io::BufReader::new(file),
+    ) {
         Ok(r) => EngineReport::Read(
             r.entries
                 .into_values()
