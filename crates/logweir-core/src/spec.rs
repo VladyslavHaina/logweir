@@ -63,17 +63,27 @@ pub struct DrillSpec {
 }
 
 /// Spec §3.2 `Restore.spec`'s restore block — the recovery POINT, which is the
-/// only half of the window a spec may state.
+/// half of the window every spec states, and (PROD-11.1) the optional replay
+/// selection: an inclusive window START and per-topic partition subsets.
 ///
-/// # There is deliberately no `window_start` here, and there never will be
+/// # The window start: absent is the archive's floor (guard G-WIN, amended)
 ///
-/// Spec §6.1 H7: the window is a closed interval and the spec binds its
-/// **start** to the archive, not to a field. `RestorePlan.time_window.0` is the
-/// archive set's earliest covered timestamp as recorded in the manifest, and
-/// `crate::engine::WindowFloorSource` is how the plan says so. A spec-supplied
-/// floor is what guard **G-WIN** exists to refuse: a restore that inherits a
-/// later start silently loses everything before it, while phase 7 reconciles
-/// only the *sampled* records and the scorecard says pass.
+/// Spec §6.1 H7: the window is a closed interval and, by default, the spec
+/// binds its **start** to the archive, not to a field. `RestorePlan.time_window.0`
+/// is then the archive set's earliest covered timestamp as recorded in the
+/// manifest (`crate::engine::WindowFloorSource::ArchiveManifest`). What guard
+/// **G-WIN** exists to refuse is a start that is INHERITED SILENTLY: a restore
+/// that took a later start from somewhere nobody approved loses everything
+/// before it, while phase 7 reconciles only the *sampled* records and the
+/// scorecard says pass.
+///
+/// PROD-11.1's recorded amendment (`docs/to-do/decisions/PROD-11.1-replay-selection.md`
+/// §2) admits ONE stated start, [`RestoreSpecBlock::window_start`]: it is in
+/// the plan bytes (inside `plan_hash`, so an approver saw it), the plan says so
+/// (`WindowFloorSource::InheritedFromSpec`), it is never earlier than the
+/// archive's coverage (refused, never silently widened), phase 5 re-derives it
+/// from the spec and the manifest, and the signed scorecard states it
+/// (`source.selection`, format 1.7.0).
 ///
 /// `point_in_time` is the window's END when it is present, and
 /// `sample.window_end` when it is absent — which preserves every existing
@@ -126,6 +136,52 @@ pub struct RestoreSpecBlock {
     /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_basis: Option<TimeBasis>,
+    /// **PROD-11.1.** The restore window's INCLUSIVE start: a record whose
+    /// timestamp equals it is restored, as one equal to the end is.
+    ///
+    /// ABSENT — every plan written before PROD-11.1 — the start is the archive
+    /// set's floor, exactly as before (guard G-WIN). PRESENT, it must not be
+    /// earlier than that floor: a start the archive does not cover is REFUSED,
+    /// exit 3, naming both instants, and is never moved to the floor (that
+    /// would silently widen the selection the approver read). It must also be
+    /// earlier than the window's end. It is a time selection, so FX-8's
+    /// `restore.time_basis` rule applies to it as it does to `point_in_time`.
+    ///
+    /// `skip_serializing_if`, so every plan that states none (a rehearsal
+    /// slot's included) is byte-identical to what it was before the field
+    /// existed. A runner built before PROD-11.1 ignores it (the grammar ignores
+    /// unknown keys) and restores from the floor; its scorecard then carries no
+    /// `source.selection` block, which every reader reads as a full selection
+    /// (`docs/to-do/decisions/PROD-11.1-replay-selection.md` §6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_start: Option<DateTime<Utc>>,
+    /// **PROD-11.1.** Per-topic partition subsets: `{topic: [partition, …]}`.
+    /// A selected topic not named here restores every partition the archive
+    /// lists for it, as before.
+    ///
+    /// Every key must be one of `source.topics`; every list must be non-empty,
+    /// without a repeated or negative partition, and every partition must be
+    /// one the archive lists for the topic. Each violation is refused, exit 3,
+    /// before anything runs. The selected partitions keep their numbers on the
+    /// target (no partition remapping): the target topic is created with the
+    /// source's partition count and every partition NOT selected stays empty,
+    /// which phase 7 checks.
+    ///
+    /// The pinned engine's `restore.source_partitions` applies to every topic
+    /// of one run, so the engine adapter runs the engine once per distinct
+    /// subset (`logweir_engine_oso::render_restore::runs`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub partitions: BTreeMap<String, Vec<i32>>,
+}
+
+impl RestoreSpecBlock {
+    /// `true` when the plan states no replay selection of its own: no window
+    /// start and no partition subset. Such a plan is restored, verified and
+    /// signed exactly as every plan before PROD-11.1.
+    #[must_use]
+    pub fn selects_everything(&self) -> bool {
+        self.window_start.is_none() && self.partitions.is_empty()
+    }
 }
 
 /// **FX-8.** `restore.time_basis`'s closed value set: an unsupported spelling

@@ -64,6 +64,7 @@ fn validation_run_defaults_to_an_operational_refusal_not_a_fabricated_pass() {
             "2026-08-30T02:00:00Z".parse().unwrap(),
         ),
         window_floor_source: WindowFloorSource::ArchiveManifest,
+        source_partitions: Default::default(),
         default_replication_factor: 1,
         checkpoint_state: "/tmp/checkpoint.json".into(),
         checkpoint_interval_secs: 30,

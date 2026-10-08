@@ -140,6 +140,8 @@ pub fn recorded_timestamp_type(
 ///   record by its own timestamp at the point, and nothing the manifest holds
 ///   proves the point leaves every record in (a segment records its first and
 ///   last timestamps, not its maximum — PROD-01.1 S6).
+/// * A stated `restore.window_start` (PROD-11.1) always does, for the same
+///   reason at the other end of the window.
 /// * With no point stated the window's end is `sample.window_end`, and it
 ///   selects by time when that end is EARLIER than the newest timestamp the
 ///   manifest records for the topic: a record the archive certainly holds is
@@ -153,7 +155,9 @@ pub fn recorded_timestamp_type(
 /// "no recorded timestamp", so only a stated point selects it by time.
 #[must_use]
 pub fn selects_by_time(spec: &DrillSpec, topic: Option<&TopicFacts>) -> bool {
-    if spec.restore.point_in_time.is_some() {
+    // PROD-11.1: a stated window START is a selection by time exactly as a
+    // stated point is — it excludes every archived record older than it.
+    if spec.restore.point_in_time.is_some() || spec.restore.window_start.is_some() {
         return true;
     }
     let end = spec.sample.window_end.timestamp_millis();

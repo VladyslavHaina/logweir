@@ -52,6 +52,9 @@ pub mod outcome;
 /// authorization signs over. Types only — the `plan ∈ scope` predicate is
 /// W7's, against W5's execution contract v2.
 pub mod rehearsal_scope;
+/// PROD-11.1: the replay selection — an inclusive window start and per-topic
+/// partition subsets — and the one function preview and execution select by.
+pub mod replay_selection;
 pub mod schema;
 pub mod scorecard;
 pub mod spec;

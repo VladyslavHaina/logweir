@@ -363,6 +363,7 @@ fn plan_in(
             chrono::DateTime::from_timestamp_millis(window.1).expect("end"),
         ),
         window_floor_source: WindowFloorSource::ArchiveManifest,
+        source_partitions: Default::default(),
         default_replication_factor: 1,
         checkpoint_state: checkpoint.to_path_buf(),
         checkpoint_interval_secs: 30,

@@ -328,6 +328,7 @@ fn plan_orders_to_drill_orders() -> RestorePlan {
             fixtures::ts("2026-08-30T02:00:00Z"),
         ),
         window_floor_source: WindowFloorSource::ArchiveManifest,
+        source_partitions: Default::default(),
         default_replication_factor: 1,
         checkpoint_state: "/tmp/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,

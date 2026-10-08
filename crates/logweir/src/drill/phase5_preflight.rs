@@ -68,6 +68,54 @@ pub fn check_rendered_window_floor(
     plan: &RestorePlan,
     facts: &BackupSetFacts,
 ) -> Result<(), DrillError> {
+    check_rendered_selection(plan, facts, &StatedSelection::default())
+}
+
+/// What the APPROVED SPEC states about the replay selection (PROD-11.1), as
+/// phase 5 reads it: never from the plan, whose claim it checks.
+#[derive(Debug, Clone, Default)]
+pub struct StatedSelection {
+    /// `restore.window_start`, epoch milliseconds.
+    pub window_start_ms: Option<i64>,
+    /// `restore.partitions`, as stated.
+    pub partitions: std::collections::BTreeMap<String, Vec<i32>>,
+}
+
+impl StatedSelection {
+    /// Read off the spec the run was approved with.
+    #[must_use]
+    pub fn of(spec: &logweir_core::spec::DrillSpec) -> Self {
+        Self {
+            window_start_ms: spec.restore.window_start.map(|t| t.timestamp_millis()),
+            partitions: spec.restore.partitions.clone(),
+        }
+    }
+}
+
+/// **GUARD G-WIN, the refusing half, as amended by PROD-11.1**
+/// (`docs/to-do/decisions/PROD-11.1-replay-selection.md` §2).
+///
+/// For every engine run the plan renders, it reads the RENDERED document and
+/// refuses, exit 3, unless:
+///
+/// 1. its `time_window_start` is the instant re-derived from the SPEC and the
+///    manifest: the stated `restore.window_start` when there is one — refused
+///    outright when it is earlier than the archive's floor — else the floor;
+/// 2. its `source_partitions` is the spec's subset of every topic it names
+///    (absent exactly when those topics have none), and its
+///    `target.topics.include` is the topics the spec's grouping puts in that
+///    run (`ReplaySelection::engine_runs`, the shared function) — so a plan
+///    that dropped, merged or swapped a subset is refused, not run;
+/// 3. there are exactly as many documents as the spec's grouping has runs.
+///
+/// The plan's own claims (`window_floor_source`, `source_partitions`) are
+/// never read as the expected value: a guard that read the claim could be
+/// talked out of refusing by the very plan it is refusing.
+pub fn check_rendered_selection(
+    plan: &RestorePlan,
+    facts: &BackupSetFacts,
+    stated: &StatedSelection,
+) -> Result<(), DrillError> {
     // RE-DERIVED from the manifest, never read off the plan: a floor taken
     // from `plan.time_window.0` would make this check compare the plan with
     // itself.
@@ -88,33 +136,141 @@ pub fn check_rendered_window_floor(
                 plan.set.backup_id
             )))
         })?;
-    let doc = logweir_engine_oso::render_restore::render(plan)
+    // PROD-11.1: the stated start, from the SPEC. Never earlier than the
+    // floor: refused here as at plan construction, whatever the plan says.
+    if let Some(start_ms) = stated.window_start_ms {
+        if start_ms < floor {
+            return Err(DrillError::Guard(GuardRefusal(
+                logweir_core::replay_selection::SelectionRefusal::StartBeforeCoverage {
+                    start_ms,
+                    floor_ms: floor,
+                }
+                .to_string(),
+            )));
+        }
+    }
+    // The runs the SPEC's subsets need over the plan's mapped topics, by the
+    // shared grouping function.
+    let stated_subsets: std::collections::BTreeMap<String, BTreeSet<i32>> = stated
+        .partitions
+        .iter()
+        .filter(|(t, _)| plan.topic_mapping.contains_key(*t))
+        .map(|(t, ps)| (t.clone(), ps.iter().copied().collect()))
+        .collect();
+    let mut expected_runs = logweir_core::replay_selection::ReplaySelection::engine_runs(
+        &stated_subsets,
+        plan.topic_mapping.keys(),
+    );
+    if expected_runs.is_empty() {
+        expected_runs.push(logweir_core::replay_selection::EngineRunSelection {
+            source_partitions: None,
+            topics: Vec::new(),
+        });
+    }
+    let docs = logweir_engine_oso::render_restore::render_all(plan)
         .map_err(|e| DrillError::Operational(format!("rendering restore.yaml: {e}")))?;
-    let rendered = doc
-        .lines()
-        .find_map(|l| l.strip_prefix(RENDERED_WINDOW_START_PREFIX))
-        .ok_or_else(|| {
-            DrillError::Operational(format!(
-                "the rendered restore.yaml carries no `{}` line, so the archive floor cannot \
-                 be checked against it",
-                RENDERED_WINDOW_START_PREFIX.trim_end()
-            ))
-        })?
-        .trim()
-        .parse::<i64>()
-        .map_err(|e| {
-            DrillError::Operational(format!(
-                "the rendered restore.yaml's time_window_start is not an integer: {e}"
-            ))
-        })?;
-    if rendered != floor {
+    if docs.len() != expected_runs.len() {
         return Err(DrillError::Guard(GuardRefusal(format!(
-            "rendered time_window_start {rendered} is not the archive floor {floor}; a \
-             Restore's window start is the archive set's earliest covered timestamp, never \
-             the spec's"
+            "the plan renders {} engine run(s) where the approved restore.partitions need {}; a \
+             run-wide partition filter applied to the wrong topics would restore partitions \
+             nobody approved",
+            docs.len(),
+            expected_runs.len()
         ))));
     }
+    for ((_, doc), expected) in docs.iter().zip(expected_runs.iter()) {
+        let rendered = doc
+            .lines()
+            .find_map(|l| l.strip_prefix(RENDERED_WINDOW_START_PREFIX))
+            .ok_or_else(|| {
+                DrillError::Operational(format!(
+                    "the rendered restore.yaml carries no `{}` line, so the archive floor cannot \
+                     be checked against it",
+                    RENDERED_WINDOW_START_PREFIX.trim_end()
+                ))
+            })?
+            .trim()
+            .parse::<i64>()
+            .map_err(|e| {
+                DrillError::Operational(format!(
+                    "the rendered restore.yaml's time_window_start is not an integer: {e}"
+                ))
+            })?;
+        match stated.window_start_ms {
+            None if rendered != floor => {
+                return Err(DrillError::Guard(GuardRefusal(format!(
+                    "rendered time_window_start {rendered} is not the archive floor {floor}; a \
+                     Restore's window start is the archive set's earliest covered timestamp, \
+                     never the spec's"
+                ))));
+            }
+            Some(start_ms) if rendered != start_ms => {
+                return Err(DrillError::Guard(GuardRefusal(format!(
+                    "rendered time_window_start {rendered} is not the approved \
+                     restore.window_start {start_ms} (the archive floor is {floor}); a Restore's \
+                     window starts at the archive's floor or at the start its approved plan \
+                     states, and nowhere else"
+                ))));
+            }
+            _ => {}
+        }
+        let (include, partitions) = rendered_run_selection(doc)?;
+        if include != expected.topics || partitions != expected.source_partitions {
+            return Err(DrillError::Guard(GuardRefusal(format!(
+                "a rendered engine run restores topics {include:?} with source_partitions \
+                 {partitions:?}, where the approved restore.partitions put topics {:?} in a run \
+                 with source_partitions {:?}; refused before the engine is handed a partition \
+                 selection nobody approved",
+                expected.topics, expected.source_partitions
+            ))));
+        }
+    }
     Ok(())
+}
+
+/// The `target.topics.include` list and the `restore.source_partitions`
+/// filter of one RENDERED restore document, read back off its bytes.
+fn rendered_run_selection(doc: &str) -> Result<(Vec<String>, Option<Vec<i32>>), DrillError> {
+    let unreadable = |why: String| {
+        DrillError::Operational(format!(
+            "the rendered restore.yaml cannot be read back to check its partition selection: \
+             {why}"
+        ))
+    };
+    let v: serde_yaml::Value = serde_yaml::from_str(doc).map_err(|e| unreadable(e.to_string()))?;
+    let mut include: Vec<String> = v
+        .get("target")
+        .and_then(|t| t.get("topics"))
+        .and_then(|t| t.get("include"))
+        .and_then(serde_yaml::Value::as_sequence)
+        .map(|seq| {
+            seq.iter()
+                .map(|e| match e {
+                    serde_yaml::Value::String(s) => s.clone(),
+                    other => serde_yaml::to_string(other)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    include.sort();
+    let partitions = match v.get("restore").and_then(|r| r.get("source_partitions")) {
+        None => None,
+        Some(seq) => Some(
+            seq.as_sequence()
+                .ok_or_else(|| unreadable("source_partitions is not a list".into()))?
+                .iter()
+                .map(|p| {
+                    p.as_i64()
+                        .and_then(|n| i32::try_from(n).ok())
+                        .ok_or_else(|| unreadable(format!("partition {p:?} is not an i32")))
+                })
+                .collect::<Result<Vec<i32>, DrillError>>()?,
+        ),
+    };
+    Ok((include, partitions))
 }
 
 #[derive(Debug, Clone)]

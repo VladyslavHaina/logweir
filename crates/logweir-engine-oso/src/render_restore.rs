@@ -10,12 +10,109 @@
 use crate::render_backup::RenderError;
 use crate::yaml::{assert_no_unnamed_dollar_brace, reject_dollar_brace, yaml_scalar_checked};
 use logweir_core::engine::{RestorePlan, StorageUrl};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+/// **PROD-11.1.** One engine run of a restore plan.
+///
+/// The pinned engine's `restore.source_partitions` is a run-wide filter: it
+/// applies to every topic the run restores (`restore/engine.rs:1253-1263` and
+/// `restore/preflight.rs:253` in the 0.23.3 source). A plan whose topics carry
+/// DIFFERENT partition subsets is therefore restored by one run per distinct
+/// subset, plus one unfiltered run for the topics without one
+/// ([`logweir_core::replay_selection::ReplaySelection::engine_runs`], the
+/// shared selection function, decides the grouping). A plan with no subset is
+/// ONE run whose document is byte for byte the one every plan rendered before
+/// PROD-11.1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreRun {
+    /// 0-based position in render (and execution) order.
+    pub index: usize,
+    /// How many runs the plan has.
+    pub count: usize,
+    /// The part of the plan's topic mapping this run restores.
+    pub topic_mapping: BTreeMap<String, String>,
+    /// `Some` renders `source_partitions`; `None` renders no filter.
+    pub source_partitions: Option<Vec<i32>>,
+}
+
+impl RestoreRun {
+    /// `path` for this run: unchanged when the plan has one run, else
+    /// `<stem>.run-<index>.<ext>` beside it, so two runs never share an engine
+    /// checkpoint or an offset report.
+    #[must_use]
+    pub fn path(&self, path: &Path) -> PathBuf {
+        if self.count <= 1 {
+            return path.to_path_buf();
+        }
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = match path.extension() {
+            Some(ext) => format!("{stem}.run-{}.{}", self.index, ext.to_string_lossy()),
+            None => format!("{stem}.run-{}", self.index),
+        };
+        path.with_file_name(name)
+    }
+
+    /// The file the engine is handed as `--config`: `restore.yaml` for a
+    /// one-run plan, as always, else `restore.run-<index>.yaml`.
+    #[must_use]
+    pub fn config_file_name(&self) -> String {
+        self.path(Path::new("restore.yaml"))
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// The engine runs `plan` needs, in render and execution order. Never empty:
+/// a plan with no mapped topic is one (empty) run, as it always rendered.
+#[must_use]
+pub fn runs(plan: &RestorePlan) -> Vec<RestoreRun> {
+    let subsets: BTreeMap<String, BTreeSet<i32>> = plan
+        .source_partitions
+        .iter()
+        .filter(|(topic, _)| plan.topic_mapping.contains_key(*topic))
+        .map(|(topic, list)| (topic.clone(), list.iter().copied().collect()))
+        .collect();
+    let groups = logweir_core::replay_selection::ReplaySelection::engine_runs(
+        &subsets,
+        plan.topic_mapping.keys(),
+    );
+    if groups.is_empty() {
+        return vec![RestoreRun {
+            index: 0,
+            count: 1,
+            topic_mapping: plan.topic_mapping.clone(),
+            source_partitions: None,
+        }];
+    }
+    let count = groups.len();
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, g)| RestoreRun {
+            index,
+            count,
+            topic_mapping: g
+                .topics
+                .iter()
+                .filter_map(|t| plan.topic_mapping.get(t).map(|d| (t.clone(), d.clone())))
+                .collect(),
+            source_partitions: g.source_partitions,
+        })
+        .collect()
+}
 
 /// The rendered restore document and the SHA-256 of the EXACT bytes that
 /// `OsoCliEngine::write` hands to `std::fs::write`. T0-14: the document is
 /// rendered at phase 5 and again at phase 6, and `fs::write` truncates, so
 /// the digest — never a re-serialisation of `plan` — is the only thing that
 /// can prove the two are the same document.
+///
+/// A plan whose subsets need more than one engine run is refused here
+/// ([`RenderError::MultipleRuns`]); [`render_all_and_digest`] renders it.
 pub fn render_and_digest(plan: &RestorePlan) -> Result<(String, String), RenderError> {
     let doc = render(plan)?;
     // **G-EXP**, post-render leg, BEFORE the digest — see
@@ -25,7 +122,45 @@ pub fn render_and_digest(plan: &RestorePlan) -> Result<(String, String), RenderE
     Ok((doc, digest))
 }
 
+/// **PROD-11.1.** Every run's document and its digest, in run order, each
+/// checked exactly as [`render_and_digest`] checks the one document of a
+/// one-run plan.
+pub fn render_all_and_digest(
+    plan: &RestorePlan,
+) -> Result<Vec<(RestoreRun, String, String)>, RenderError> {
+    render_all(plan)?
+        .into_iter()
+        .map(|(run, doc)| {
+            assert_no_unnamed_dollar_brace(&doc)?;
+            let digest = logweir_core::ids::sha256_prefixed(doc.as_bytes());
+            Ok((run, doc, digest))
+        })
+        .collect()
+}
+
+/// **PROD-11.1.** Every run's document, in run order.
+pub fn render_all(plan: &RestorePlan) -> Result<Vec<(RestoreRun, String)>, RenderError> {
+    runs(plan)
+        .into_iter()
+        .map(|run| render_run(plan, &run).map(|doc| (run, doc)))
+        .collect()
+}
+
+/// THE restore document of a ONE-RUN plan — every plan that states no
+/// partition subset, and one whose topics all share one. A plan that needs
+/// more runs is refused ([`RenderError::MultipleRuns`]) rather than rendered
+/// as one of its runs.
 pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
+    let all = runs(plan);
+    match all.as_slice() {
+        [only] => render_run(plan, only),
+        _ => Err(RenderError::MultipleRuns(all.len())),
+    }
+}
+
+/// One run's document. For a one-run plan with no subset this is, byte for
+/// byte, the document every plan rendered before PROD-11.1 (the goldens).
+pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, RenderError> {
     // GC18(c) rail 1 / **G-GLOB**, restore side. BOTH SIDES of the mapping
     // are checked, because both reach an include-style position: the keys are
     // rendered verbatim into `target.topics.include` below, and the values are
@@ -37,8 +172,8 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     // Two calls, not one over a concatenation, so the refusal names which
     // entry it found — an operator fixing `a]b` needs to know whether it is
     // the topic or the prefix that produced it.
-    let sources: Vec<String> = plan.topic_mapping.keys().cloned().collect();
-    let targets: Vec<String> = plan.topic_mapping.values().cloned().collect();
+    let sources: Vec<String> = run.topic_mapping.keys().cloned().collect();
+    let targets: Vec<String> = run.topic_mapping.values().cloned().collect();
     // **G-EXP** ahead of **G-GLOB** on both sides — `${` is two glob
     // metacharacters, and the reason an operator is given decides which fix
     // they attempt (`crate::yaml::reject_dollar_brace`).
@@ -62,7 +197,7 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
         s.push_str(&format!("    - {}\n", yaml_scalar_checked(b)?));
     }
     s.push_str("  topics:\n    include:\n");
-    for src in plan.topic_mapping.keys() {
+    for src in run.topic_mapping.keys() {
         s.push_str(&format!("      - {}\n", yaml_scalar_checked(src)?));
     }
     // THE SASL BLOCK (Task 6, interface **I1**), and the reason the whole task
@@ -93,7 +228,7 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     // explicit entry per selected topic. Both sides go through `yaml_scalar`:
     // an operator-influenced topic name is exactly the kind of value GC4
     // cares about ("never emitted, at any value") — see that function's doc.
-    s.push_str(&render_topic_mapping_block(&plan.topic_mapping)?);
+    s.push_str(&render_topic_mapping_block(&run.topic_mapping)?);
     // **Guard G-TS.** `false`, rendered EXPLICITLY rather than left to the
     // engine's own default, so the chosen value is in this golden and in the
     // approved bytes.
@@ -141,7 +276,7 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     // `yaml_scalar` for the same reason.
     s.push_str(&format!(
         "  checkpoint_state: {}\n",
-        yaml_scalar_checked(&plan.checkpoint_state.display().to_string())?
+        yaml_scalar_checked(&run.path(&plan.checkpoint_state).display().to_string())?
     ));
     s.push_str(&format!(
         "  checkpoint_interval_secs: {}\n",
@@ -162,6 +297,17 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
         "  time_window_end: {}\n",
         plan.time_window.1.timestamp_millis()
     ));
+    // **PROD-11.1.** `pub source_partitions: Option<Vec<i32>>`
+    // [U:crates/kafka-backup-core/src/config.rs:859-861 @ v0.23.3], a filter
+    // the engine applies to EVERY topic of this run — which is why a plan
+    // whose topics carry different subsets is several runs (`runs`). Rendered
+    // only when this run has a subset, so every document without one is
+    // byte-identical to what it was. Integers, sorted and unique
+    // (`ReplaySelection::from_spec`): no `yaml_scalar` needed.
+    if let Some(partitions) = &run.source_partitions {
+        let list: Vec<String> = partitions.iter().map(i32::to_string).collect();
+        s.push_str(&format!("  source_partitions: [{}]\n", list.join(", ")));
+    }
     // RENDERED EXPLICITLY, IN BOTH MODES, and never `true` (spec §6.1 M5/N1).
     // `include_offset_headers` defaults true on the BACKUP side and stamps
     // `x-original-offset`/`x-original-timestamp` on every archived record;
@@ -222,7 +368,7 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     // the same reason.
     s.push_str(&format!(
         "  offset_report: {}\n",
-        yaml_scalar_checked(&plan.offset_report.display().to_string())?
+        yaml_scalar_checked(&run.path(&plan.offset_report).display().to_string())?
     ));
     // Deliberately NOT rendered, at any value: purge_topics, dry_run,
     // header_preflight_external (Global Constraint 4). `reset_consumer_offsets`

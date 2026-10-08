@@ -246,6 +246,18 @@ pub fn run(
     // converts it into `DrillError::Guard` via the `#[from]` impl.
     check_topic_mapping_coverage(&spec.source.topics, &topic_mapping)?;
 
+    // **PROD-11.1, the SHAPE of the replay selection**, purely local: a
+    // partition subset for a topic the plan does not select, an empty subset,
+    // a repeated or negative partition, and a window start at or after the
+    // window's end are refused here, exit 3, before any broker or bucket is
+    // touched. What needs the archive (a start before its coverage, a
+    // partition it does not list, a selection no segment overlaps) is refused
+    // as soon as the manifest is read, still before phase 2
+    // (`crate::drill::resolve_selection`). A plan that states no selection
+    // cannot fail this.
+    logweir_core::replay_selection::ReplaySelection::from_spec(spec)
+        .map_err(|refusal| GuardRefusal(refusal.to_string()))?;
+
     // **G-GLOB and G-EXP, at phase 0.** Both are also enforced by
     // `render_restore::render`, and that is NOT where a plan gets refused.
     //

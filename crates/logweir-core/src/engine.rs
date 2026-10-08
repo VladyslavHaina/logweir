@@ -277,9 +277,14 @@ pub fn expected_restored_count(facts: &BackupSetFacts, floor_ms: i64, pit_ms: i6
 /// guard that read the claim could be talked out of refusing by the very plan
 /// it is refusing.
 ///
-/// `InheritedFromSpec` is constructed nowhere in tag 1 (plan erratum E7): it
-/// is the negative arm of the plan-construction check, and the variant a later
-/// restore mode may use (interface I33).
+/// **`InheritedFromSpec` is PROD-11.1's.** It was constructed nowhere in tag
+/// 1 (plan erratum E7). Since guard G-WIN's recorded amendment
+/// (`docs/to-do/decisions/PROD-11.1-replay-selection.md` §2) it is what a plan
+/// says when its spec states `restore.window_start`: plan construction binds
+/// that instant and refuses it before the archive's floor, phase 5 re-derives
+/// the same instant from the SPEC and the manifest (never from this claim) and
+/// checks the rendered integer against it, and the complete lane selects its
+/// expected output from it (`complete::window_of`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowFloorSource {
     ArchiveManifest,
@@ -372,6 +377,16 @@ pub struct RestorePlan {
     /// release) that `ArchiveManifest` implies `time_window.0` equals the
     /// manifest floor it just computed, and refuses exit 3 otherwise.
     pub window_floor_source: WindowFloorSource,
+    /// **PROD-11.1.** Per-topic source partition subsets, keyed by SOURCE
+    /// topic, each list sorted and unique (`restore.partitions` in the spec,
+    /// validated by `crate::replay_selection::ReplaySelection`). A mapped topic
+    /// not named here restores every partition. EMPTY for every plan that
+    /// states no subset, which renders the one document it always rendered.
+    ///
+    /// The engine's own `restore.source_partitions` applies to every topic of
+    /// a run, so an engine adapter that cannot filter per topic runs once per
+    /// distinct subset (`crate::replay_selection::ReplaySelection::engine_runs`).
+    pub source_partitions: BTreeMap<String, Vec<i32>>,
     pub default_replication_factor: i16,
     pub checkpoint_state: std::path::PathBuf,
     pub checkpoint_interval_secs: u64,

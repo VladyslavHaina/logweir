@@ -414,6 +414,7 @@ fn plan(floor: i64, end: i64) -> RestorePlan {
             chrono::DateTime::from_timestamp_millis(end).unwrap(),
         ),
         window_floor_source: WindowFloorSource::ArchiveManifest,
+        source_partitions: Default::default(),
         default_replication_factor: 1,
         checkpoint_state: "/tmp/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,

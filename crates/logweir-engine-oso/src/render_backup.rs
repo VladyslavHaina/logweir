@@ -117,6 +117,13 @@ pub enum RenderError {
     /// endpoint is operator input and is never echoed.
     #[error("the storage endpoint is a plain http:// endpoint but allow_http is false; the pinned engine (kafka-backup 0.22.0 and later) derives plaintext transport from an http:// endpoint whatever allow_http says, so this document would dial the archive in the clear (C15). Refused rather than rendered")]
     PlaintextEndpointWithoutAllowHttp,
+    /// **PROD-11.1.** A caller asked for THE restore document of a plan whose
+    /// partition subsets need more than one engine run (the engine's
+    /// `source_partitions` applies to every topic of a run). Refused rather
+    /// than rendering one run's document as if it were the plan's: the caller
+    /// must take every run's document (`render_restore::render_all`).
+    #[error("this restore plan needs {0} engine runs (its partition subsets differ between topics, and the engine's source_partitions applies to every topic of one run); render every run's document with render_all, never one of them as the plan's")]
+    MultipleRuns(usize),
 }
 
 /// The rendered backup document and the SHA-256 of the EXACT bytes a caller

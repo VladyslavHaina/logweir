@@ -69,6 +69,7 @@ fn restore_plan(storage: StorageUrl) -> RestorePlan {
                 .into(),
         ),
         window_floor_source: WindowFloorSource::ArchiveManifest,
+        source_partitions: Default::default(),
         default_replication_factor: 1,
         checkpoint_state: "/var/lib/logweir/checkpoint".into(),
         checkpoint_interval_secs: 30,
