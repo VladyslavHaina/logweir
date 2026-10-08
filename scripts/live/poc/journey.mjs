@@ -14,7 +14,7 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
-  chromium, newSession, gotoHash, textOf, waitForText, createCluster, createDestination,
+  launchBrowser, newSession, gotoHash, textOf, waitForText, createCluster, createDestination,
   restoreFromBackup, secretValue, revealInGrid, settledRows, outcomeOf,
 } from "./console.mjs";
 
@@ -48,7 +48,7 @@ async function waitRows(page, selector, seconds) {
   return { rows: read.rows, outcome: outcomeOf(read) };
 }
 
-const browser = await chromium.launch();
+const browser = await launchBrowser();
 try {
   const { page } = await newSession(browser, "operator");
   // ---------------------------------------------------------------- J1 connections

@@ -43,7 +43,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chromium, newSession, gotoHash, waitForText, openWizard, wizardStep, revealInGrid,
+  launchBrowser, newSession, gotoHash, waitForText, openWizard, wizardStep, revealInGrid,
   checkRowsIn, settledRows, outcomeOf,
 } from "./console.mjs";
 
@@ -197,7 +197,7 @@ async function queuedAt10(page, id, t0) {
   return { phase: st.phase, reason: st.reason, message: String(st.message || "").slice(0, 160) };
 }
 
-const browser = await chromium.launch();
+const browser = await launchBrowser();
 try {
   // ======================================================================== CONN
   if (GROUPS.includes("CONN")) {

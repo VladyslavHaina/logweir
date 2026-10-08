@@ -32,7 +32,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chromium, newSession, gotoHash, textOf, waitForText, openWizard, wizardAt, wizardStep, BASE, HOST, credential,
+  launchBrowser, newSession, gotoHash, textOf, waitForText, openWizard, wizardAt, wizardStep, BASE, HOST, credential,
   settledRows, checkVerdict, outcomeOf,
 } from "./console.mjs";
 
@@ -108,7 +108,7 @@ async function waitUntil(page, iso, extraMs, what) {
   return Date.now() >= until;
 }
 
-const browser = await chromium.launch();
+const browser = await launchBrowser();
 try {
   // ======================================================================== LONG
   if (GROUPS.includes("LONG")) {
