@@ -51,3 +51,8 @@ tokio = { version = "1", default-features = false, features = ["rt", "time", "ne
 default = ["client"]
 client = ["dep:rdkafka", "dep:tokio", "dep:logweir-rdkafka-ffi"]
 e2e = ["client"]
+
+# `unsafe_code = "forbid"` for every target of this package, tests and build
+# scripts included (the root Cargo.toml's `[workspace.lints.rust]`).
+[lints]
+workspace = true

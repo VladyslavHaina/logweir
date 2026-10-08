@@ -6,22 +6,33 @@
 # EXACTLY ONE crate, `crates/logweir-rdkafka-ffi`. It is the only place in the
 # workspace where `unsafe` may appear, and only in its library source
 # (`src/`). Every other crate keeps `#![forbid(unsafe_code)]`. This gate makes
-# that sentence mechanical, in five checks:
+# that sentence mechanical. RUSTC is the first layer: the root Cargo.toml's
+# `[workspace.lints.rust] unsafe_code = "forbid"`, which every member but the
+# perimeter takes with `[lints] workspace = true`, makes rustc refuse `unsafe`
+# (and `no_mangle`, `export_name`, `link_section`, `global_asm!`) in EVERY
+# target: lib, bin, example, integration test, bench, build script. This
+# script checks that layer is in place and adds a text scan as the second:
 #
 #   1. The perimeter exists, is a workspace member, and is the package this
 #      script names; nothing but `logweir-kafka` depends on it, and it depends
 #      on nothing but `rdkafka` (so no second binding layer enters through it).
-#   2. Every lib, bin and example target root of every OTHER workspace package
-#      carries `#![forbid(unsafe_code)]` as code (a commented-out attribute
-#      does not count). Integration tests, benches and build scripts are crates
-#      of their own that a root attribute does not reach: check 3 covers them.
-#   3. No code-shaped `unsafe` outside the perimeter's `src/`: `unsafe {`,
-#      `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`,
-#      `#[unsafe(...)]`, a foreign `extern { }` block, `#[no_mangle]`,
-#      `#[export_name]`, `#[link_section]`, or an `allow`/`warn` of
-#      `unsafe_code`. Comments and string, byte-string, raw-string and char
-#      literals are stripped first, so the API's "unsafe method" prose and a
-#      test's probe text do not count (a bare-word grep would hit both).
+#   2. The lint layer: the root manifest carries `[workspace.lints.rust]` with
+#      `unsafe_code = "forbid"`; every member but the perimeter carries
+#      `[lints]` with `workspace = true`; the perimeter does not. And every lib,
+#      bin and example target root of every OTHER package carries
+#      `#![forbid(unsafe_code)]` as code (a commented-out one does not count).
+#   3. The scan, over every `*.rs` file of the tree (pruned only at the root:
+#      `target`, `.git`, `.engine`, `.e2e`, `.demo`, `node_modules`, `upstream`,
+#      `third_party`), outside the perimeter's `src/`, after comments and
+#      string, byte-string, raw-string and char literals are stripped (so the
+#      API's "unsafe method" prose and a test's probe text do not count): any
+#      `unsafe` token (a block, fn, impl, trait, extern, attribute, or one a
+#      macro expands to); a foreign `extern { }` block; `no_mangle`,
+#      `export_name` or `link_section` anywhere (inside `cfg_attr` too);
+#      `global_asm!` or `naked_asm!`; an `allow`, `warn` or `expect` of
+#      `unsafe_code`; any `include!` (it would pull text this scan never
+#      reads); and a `#[path]` that points into the perimeter or out of the
+#      tree (it would compile the perimeter's exempt source into another crate).
 #   4. The perimeter's root keeps the lints that make its `unsafe` reviewable:
 #      `deny(unsafe_op_in_unsafe_fn)` and `deny(clippy::undocumented_unsafe_blocks)`
 #      (so `cargo clippy -D warnings` refuses an `unsafe` block without a
@@ -174,11 +185,14 @@ def strip(src):
 
 
 CODE_SHAPED = [
-    (re.compile(r"\bunsafe\b\s*(\{|fn\b|impl\b|trait\b|extern\b|\()"), "code-shaped `unsafe`"),
+    (re.compile(r"\bunsafe\b"), "an `unsafe` token"),
     (re.compile(r'\bextern\s*(?:"\s*"\s*)?\{'), "a foreign `extern` block"),
-    (re.compile(r"#\s*!?\s*\[\s*(no_mangle|export_name|link_section)\b"), "an `unsafe_code` attribute"),
+    (re.compile(r"\b(no_mangle|export_name|link_section)\b"), "an `unsafe_code` attribute"),
+    (re.compile(r"\b(global_asm|naked_asm)\s*!"), "module-level assembly"),
     (re.compile(r"\b(allow|warn|expect)\s*\(\s*(?:[^)]*,\s*)?unsafe_code\b"), "a relaxed `unsafe_code` lint"),
+    (re.compile(r"\binclude\s*!"), "an `include!` (text this scan never reads)"),
 ]
+PATH_ATTR = re.compile(r'#\s*\[\s*path\s*=\s*"')
 FORBID = re.compile(r"#!\[\s*forbid\s*\(\s*(?:[\w:]+\s*,\s*)*unsafe_code\s*(?:,\s*[\w:]+\s*)*\)\s*\]")
 DENY_OP = re.compile(r"#!\[\s*deny\s*\(\s*(?:[\w:]+\s*,\s*)*unsafe_op_in_unsafe_fn\b")
 DENY_DOC = re.compile(r"#!\[\s*deny\s*\(\s*(?:[\w:]+\s*,\s*)*clippy::undocumented_unsafe_blocks\b")
@@ -221,6 +235,41 @@ for p in packages:
 print(f"ok: checked who depends on `{perim_pkg}`")
 
 # ---- check 2 and 4: crate roots
+print("== 2a. rustc forbids unsafe in every target: the workspace lint table and each member's opt-in ==")
+
+
+def tables(text):
+    """TOML tables of a manifest, as {header: [body lines]}, comments dropped.
+    A line parser, not a TOML one: enough for `[x]` headers and `k = v` keys."""
+    out, cur = {}, None
+    for raw_line in text.split("\n"):
+        line = raw_line.split("#", 1)[0].strip()
+        m = re.fullmatch(r"\[\s*([^\[\]]+?)\s*\]", line)
+        if m:
+            cur = m.group(1).replace(" ", "")
+            out.setdefault(cur, [])
+        elif cur is not None and line:
+            out[cur].append(line.replace(" ", ""))
+    return out
+
+
+root_tables = tables(read(os.path.join(root, "Cargo.toml")))
+if 'unsafe_code="forbid"' not in root_tables.get("workspace.lints.rust", []):
+    fail('Cargo.toml: no `[workspace.lints.rust]` table with `unsafe_code = "forbid"`')
+else:
+    print('ok: Cargo.toml forbids unsafe_code for the workspace')
+for p in packages:
+    t = tables(read(p["manifest_path"]))
+    opted = "workspace=true" in t.get("lints", [])
+    if p["name"] == perim_pkg:
+        if opted:
+            fail(f"{rel(p['manifest_path'])}: the perimeter takes the workspace lints, which forbid "
+                 f"the `unsafe` it exists for")
+    elif not opted:
+        fail(f"{rel(p['manifest_path'])}: `{p['name']}` lacks `[lints] workspace = true`, so rustc "
+             f"does not forbid unsafe in its tests, benches and build scripts")
+print(f"ok: read {len(packages)} member manifests")
+
 print("== 2. every root outside the perimeter carries #![forbid(unsafe_code)] ==")
 roots = 0
 for p in packages:
@@ -252,7 +301,10 @@ print("== 3. no code-shaped unsafe outside the perimeter's src/; 5. SAFETY above
 PRUNE = {"target", ".git", ".engine", ".e2e", ".demo", "node_modules", "upstream", "third_party"}
 scanned = inside = 0
 for dirpath, dirnames, filenames in os.walk(root):
-    dirnames[:] = sorted(d for d in dirnames if d not in PRUNE)
+    # Pruned at the ROOT only: a `tests/upstream/mod.rs` is compiled like any
+    # other module, so a directory's name never hides it.
+    at_root = os.path.realpath(dirpath) == root
+    dirnames[:] = sorted(d for d in dirnames if not (at_root and d in PRUNE))
     for name in sorted(filenames):
         if not name.endswith(".rs"):
             continue
@@ -267,6 +319,15 @@ for dirpath, dirnames, filenames in os.walk(root):
                 for m in rx.finditer(code):
                     fail(f"{rel(path)}:{line_of(code, m.start())}: {what} outside the perimeter "
                          f"({perim_dir}/src)")
+            # `#[path = "..."]`: the literal is read from the ORIGINAL text at
+            # the stripped match's offsets (stripping keeps every offset).
+            for m in PATH_ATTR.finditer(code):
+                start = m.end()
+                end = text.find('"', start)
+                target = os.path.realpath(os.path.join(os.path.dirname(path), text[start:end]))
+                if target.startswith(perim_abs + os.sep) or not target.startswith(root + os.sep):
+                    fail(f"{rel(path)}:{line_of(code, m.start())}: a `#[path]` into the perimeter or "
+                         f"out of the tree ({text[start:end]})")
             continue
         inside += 1
         lines = text.split("\n")
