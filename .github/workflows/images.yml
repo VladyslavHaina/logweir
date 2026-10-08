@@ -263,10 +263,18 @@ jobs:
   #     pushed to the registry beside it.
   #
   # Verification is `scripts/ci-images.sh verify-signatures` (docs/install.md,
-  # "Verify the images"). Every action here is pinned by commit: the job holds
-  # the Docker Hub token and the OIDC token.
+  # "Verify the images"): the exact identity (images.yml on main), and the
+  # CALLER pinned — this repository, main, a push — because a reusable
+  # workflow's certificate names the called file whoever called it. Every
+  # action here is pinned by commit: the job holds the Docker Hub token and the
+  # OIDC token.
+  # images.yml is a reusable workflow because ci.yml's `publish` job, its one
+  # caller, invokes it with `uses:`; nothing else may sign. In a run another
+  # repository starts by calling this file, `github.repository`, `ref` and
+  # `event_name` are the CALLER's, so this job does not run there.
   sign:
     needs: promote
+    if: github.repository == 'VladyslavHaina/logweir' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

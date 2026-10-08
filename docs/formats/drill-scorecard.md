@@ -149,7 +149,7 @@ their refusal text, so the agreement is checked rather than asserted.
 |---|---|---|
 | `engine.id` | string | `oso-cli` in v0.1. |
 | `engine.version` | string | Read off the engine that actually ran. **Never empty** — a signed document that names no engine is refused before signing. |
-| `engine.digest` | string | The `sha256:` image digest the binary was extracted from. Never a tag. **Never empty**, for the same reason. |
+| `engine.digest` | string | A `sha256:` digest naming the engine build, never a tag. For Logweir's build (PROD-00.2, `engine.version` `<release>+logweir.<n>`) it is the build-input digest over the vendored source, the patch set and the version (`third_party/kafka-backup-build.env`, recomputed by `scripts/engine-source.sh digest`); for OSO's release (the one-release rollback, or a document written before PROD-00.2) it is the digest of OSO's image the binary came from. Inside the runner image both fields are what the image declares in `/etc/logweir/engine-identity`. **Never empty**, for the same reason. |
 | `engine.execution` | string | `subprocess` in v0.1. A string, not a closed enum, because SP5's Kubernetes-Job execution would add a value and the format is frozen at 1.0.0. |
 | `engine.levers.header_preflight` | enum | Whether the engine honoured the preflight lever. |
 | `engine.levers.dry_run_check_segments` | enum | Whether the segment check was honoured. `unknown-not-observable` is a real and common value: the lever's effect is not observable from outside on every version. |

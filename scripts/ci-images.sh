@@ -351,7 +351,17 @@ case "${1:-}" in
     # PROD-00.2: keyless signatures (cosign, GitHub OIDC -> Fulcio, logged in
     # Rekor) for the four published indexes and every platform manifest in
     # them, and the runner's SBOM attested to each platform's candidate digest.
+    # Only from this repository's main, on a push: images.yml is a reusable
+    # workflow, and a run another repository starts by calling it must not
+    # sign under its identity (the verification pins refuse such a signature
+    # anyway; this keeps one from being made).
     : "${RUNNER_DIGEST:?}" "${CONTROLLER_DIGEST:?}" "${UI_DIGEST:?}" "${CONSOLE_DIGEST:?}"
+    if [[ "${GITHUB_REPOSITORY:-}" != VladyslavHaina/logweir || "${GITHUB_REF:-}" != refs/heads/main \
+          || "${GITHUB_EVENT_NAME:-}" != push ]]; then
+      echo "sign: refusing outside VladyslavHaina/logweir main on a push" \
+           "(${GITHUB_REPOSITORY:-?} ${GITHUB_REF:-?} ${GITHUB_EVENT_NAME:-?})" >&2
+      exit 1
+    fi
     for pair in "logweir=$RUNNER_DIGEST" "weirkeeper=$CONTROLLER_DIGEST" \
                 "logweir-ui=$UI_DIGEST" "logweir-console=$CONSOLE_DIGEST"; do
       product=${pair%%=*} digest=${pair#*=}
@@ -366,25 +376,48 @@ case "${1:-}" in
     done
     ;;
   verify-signatures)
-    # What an adopter runs (docs/install.md, "Verify the images"): each index
-    # is signed by THIS repository's images.yml on main, and each runner
-    # platform carries the SBOM attestation. A signature by any other identity
-    # does not verify.
+    # What an adopter runs (docs/install.md, "Verify the images"), with the
+    # same pins. EVERY PIN IS A LITERAL AND NONE IS A REGULAR EXPRESSION
+    # (security review of PROD-00.2):
+    #   * `--certificate-identity`: the certificate's SAN, which for a reusable
+    #     workflow is the CALLED workflow's ref — images.yml on main — whoever
+    #     called it. A public repository's reusable workflow can be called from
+    #     any repository, so the SAN alone does not say whose run signed;
+    #   * `--certificate-github-workflow-repository`: the repository the run
+    #     belonged to (the token's `repository` claim, the CALLER's), which
+    #     is what refuses a signature made by another repository's workflow
+    #     calling this one;
+    #   * `--certificate-github-workflow-ref` and `-trigger`: main, on a push —
+    #     the only event ci.yml's `publish` job, images.yml's one caller, runs on;
+    #   * `--certificate-oidc-issuer`: GitHub's.
+    # cosign documents all five for `verify` and `verify-attestation` in v2.0.0
+    # and in v2.5.2, the version the sign job installs
+    # (https://github.com/sigstore/cosign/blob/v2.5.2/doc/cosign_verify.md,
+    # .../doc/cosign_verify-attestation.md). scripts/check-cosign-verify.py
+    # refuses any cosign verification in the repository without them.
     : "${RUNNER_DIGEST:?}" "${CONTROLLER_DIGEST:?}" "${UI_DIGEST:?}" "${CONSOLE_DIGEST:?}"
-    identity="^https://github\.com/${GITHUB_REPOSITORY:?}/\.github/workflows/images\.yml@refs/heads/main$"
-    issuer=https://token.actions.githubusercontent.com
     for pair in "logweir=$RUNNER_DIGEST" "weirkeeper=$CONTROLLER_DIGEST" \
                 "logweir-ui=$UI_DIGEST" "logweir-console=$CONSOLE_DIGEST"; do
       product=${pair%%=*} digest=${pair#*=}
-      cosign verify --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" \
+      cosign verify \
+        --certificate-identity "https://github.com/VladyslavHaina/logweir/.github/workflows/images.yml@refs/heads/main" \
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+        --certificate-github-workflow-repository "VladyslavHaina/logweir" \
+        --certificate-github-workflow-ref "refs/heads/main" \
+        --certificate-github-workflow-trigger "push" \
         "docker.io/$NS/$product@$digest" >/dev/null
       echo "- verified: docker.io/$NS/$product@$digest" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
     done
     for arch in amd64 arm64; do
       digest=$(jq -er --arg sha "$GITHUB_SHA" 'select(.sha == $sha and .product == "logweir") | .digest' \
         "image-digests/logweir-$arch.json")
-      cosign verify-attestation --type spdxjson --certificate-identity-regexp "$identity" \
-        --certificate-oidc-issuer "$issuer" "docker.io/$NS/logweir@$digest" >/dev/null
+      cosign verify-attestation --type spdxjson \
+        --certificate-identity "https://github.com/VladyslavHaina/logweir/.github/workflows/images.yml@refs/heads/main" \
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+        --certificate-github-workflow-repository "VladyslavHaina/logweir" \
+        --certificate-github-workflow-ref "refs/heads/main" \
+        --certificate-github-workflow-trigger "push" \
+        "docker.io/$NS/logweir@$digest" >/dev/null
       echo "- verified SBOM attestation: docker.io/$NS/logweir@$digest (linux/$arch)" \
         >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
     done

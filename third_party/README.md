@@ -1,21 +1,30 @@
 # third_party/
 
-Provenance for two pinned things Logweir did not write: the `kafka-backup`
-engine, and the **org root's public key**. Nothing here is Logweir code.
+Provenance for two pinned things Logweir did not write — the `kafka-backup`
+engine's source, and the **org root's public key** — and the recipe and patches
+Logweir builds the engine with (OD-3, PROD-00.2).
 
 | File | What it is |
 | --- | --- |
-| `kafka-backup-binary.digest` | The immutable `sha256:` image digest the engine binary was extracted from. Never a tag — Docker Hub tags are mutable (Global Constraint 7). |
-| `kafka-backup-v0.23.3.tar.gz` | The upstream source at the pinned tag (`v0.23.3` = commit `afb160e7f2c69b7c3c28e1b868dd952835a5b0af`), force-added past `.gitignore`. It replaced `kafka-backup-v0.21.0.tar.gz` with the PROD-00.3f bump; `xtask`'s drift gate requires exactly one tarball here. |
+| `kafka-backup-build.env` | **Logweir's build** of the engine: `ENGINE_VERSION` (`<release>+logweir.<n>`, what `kafka-backup --version` prints) and `ENGINE_DIGEST` (the build-input digest over the tarball, the patches and the version). `scripts/engine-source.sh` builds from it, and the runner image declares it in `/etc/logweir/engine-identity`. |
+| `kafka-backup-patches/` | The ordered patches Logweir carries on the vendored source, and the patch-first policy (its `README.md`). |
+| `kafka-backup-deny.toml` | `cargo deny`'s policy for the engine's own lockfile, after the patches (`scripts/ci-check.sh`). |
+| `kafka-backup-binary.digest` | The immutable `sha256:` digest of OSO's released image of the same tag. Never a tag — Docker Hub tags are mutable (Global Constraint 7). It pins the one-release rollback (`ENGINE_SOURCE=oso`) and the compose stack's seeding engine; what ships is Logweir's build. |
+| `kafka-backup-v0.23.3.tar.gz` | The upstream source at the pinned tag (`v0.23.3` = commit `afb160e7f2c69b7c3c28e1b868dd952835a5b0af`), force-added past `.gitignore` and let into the Docker build context by name (`.dockerignore`). Logweir's build compiles it. It replaced `kafka-backup-v0.21.0.tar.gz` with the PROD-00.3f bump; `xtask`'s drift gate requires exactly one tarball here. |
 | `kafka-backup-v0.23.3.tar.gz.sha256` | Checksum of the tarball above. |
 | `LICENSE-MIT` | The upstream MIT licence, redistributed as required (Global Constraint 15). |
 | `org-root.pub.pem` | The org root's **public** key. Un-ignored by name in `/.gitignore`, exactly as `e2e/fixtures/signed/*.pem` is. |
 | `org-root.fingerprint` | One `sha256:` line: the SHA-256 of the SubjectPublicKeyInfo DER encoding of the key above. `COPY`ed into **both** images at `/etc/logweir/org-root.fingerprint`. |
 
 Upstream is MIT with no CLA/DCO, which is uncapped relicensing risk; vendoring the
-source and the licence is the hedge. The first four files are produced together by
-`./scripts/extract-engine.sh` (`just engine`) and must be updated together —
-changing the digest without re-vendoring the tarball is a defect.
+source and the licence is the hedge, and since OD-3 the source is what Logweir
+builds. The digest, the tarball, its checksum and the licence are produced
+together by `./scripts/extract-engine.sh` (`OSO_REFRESH=1`) and must be updated
+together — changing the digest without re-vendoring the tarball is a defect —
+and a new tarball is a new build: re-apply the patches, bump the `<n>` of
+`ENGINE_VERSION` and re-record `ENGINE_DIGEST` (`scripts/engine-source.sh digest`).
+`crates/logweir/tests/engine_pin.rs` and `engine_build.rs` refuse a tree where
+they disagree.
 
 ## The org-root anchor
 

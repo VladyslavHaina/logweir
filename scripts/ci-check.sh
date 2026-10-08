@@ -32,6 +32,11 @@ done
 
 cargo test --locked --workspace
 python3 scripts/test-ci-images.py
+# PROD-00.2 security review: every cosign / gh attestation verification in the
+# repository pins the exact signer identity, the calling repository, ref and
+# trigger, and the issuer (images.yml is a reusable workflow).
+python3 scripts/check-cosign-verify.py
+python3 scripts/test-check-cosign-verify.py
 python3 scripts/test-release.py
 just verify-py
 
