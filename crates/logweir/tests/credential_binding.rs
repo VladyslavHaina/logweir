@@ -465,7 +465,7 @@ fn fx20_catalog_list_refuses_a_foreign_store_credential() {
         let (listener, address) = sentinel();
         let mut command = base(root.path());
         command
-            .args(["catalog", "list", "--url", "s3://lw-a", "--endpoint"])
+            .args(["catalog", "list", "--url", "s3://lw-a", "--endpoint"]) // engine-token-ok: `logweir catalog list`, Logweir's own subcommand, never the engine's
             .arg(format!("http://{address}"))
             .args(["--path-style", "--allow-http"])
             .env("AWS_ACCESS_KEY_ID", "AKIASTOREROW")
@@ -491,7 +491,7 @@ fn fx20_catalog_list_refuses_a_foreign_store_credential() {
     std::fs::create_dir_all(&catalog).unwrap();
     let mut command = base(root.path());
     command
-        .args(["catalog", "list", "--url"])
+        .args(["catalog", "list", "--url"]) // engine-token-ok: `logweir catalog list`, Logweir's own subcommand, never the engine's
         .arg(&catalog)
         .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED", EXPECTED)
         .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", EXPECTED);
@@ -648,6 +648,11 @@ fn fx20_catalog_sync_and_doctor_refuse_a_foreign_store_credential() {
                 "LOGWEIR_ENGINE_BIN",
                 manifest.join("../../e2e/fixtures/fake-engine-ok.sh"),
             )
+            // No declared identity (PROD-00.2): the fake engine prints the
+            // pin, and doctor stops at the first failing check, so a declared
+            // sentinel version would end the run before the storage check.
+            .env_remove("LOGWEIR_ENGINE_VERSION")
+            .env_remove("LOGWEIR_ENGINE_DIGEST")
             .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED", EXPECTED)
             .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", binding);
         let out = run(command, label);

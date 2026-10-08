@@ -1465,8 +1465,7 @@ fn fx20_phase0_refuses_an_injected_region_on_either_store() {
             &creator,
             &deleter,
         )
-        .err()
-        .expect("an injected region is refused at phase 0");
+        .expect_err("an injected region is refused at phase 0");
         let DrillError::Guard(GuardRefusal(message)) = refusal else {
             panic!("{field}: a guard refusal, not {refusal:?}");
         };
