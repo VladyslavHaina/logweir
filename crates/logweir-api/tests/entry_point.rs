@@ -886,38 +886,37 @@ async fn a_chain_with_no_client_hop_falls_back_to_the_peer() {
     assert_eq!(client.status, 303, "{}", client.text());
 }
 
-/// **The bound on tracked keys holds under a spray of forwarded addresses**,
-/// on a limiter with no ceiling (the table's own bound). A trusted proxy
-/// forwards more distinct clients than the table holds, inside one window:
-/// the table stops at `MAX_TRACKED_PEERS` and the next new client is refused
-/// rather than tracked, with the audit naming that limit. NEGATIVE CONTROL:
-/// the table is FULL, not merely small — every sprayed address took its own
-/// key, so a limiter that keyed this spray on the peer (one key) fails the
-/// equality.
+/// **The bound on tracked keys holds under a spray of forwarded addresses,
+/// and a full table locks no one out.** A trusted proxy forwards more
+/// distinct clients than the table holds, inside one window: the table stops
+/// at `MAX_TRACKED_PEERS`, every client past it is still SERVED (without a
+/// window, the audit noting `loginRateUntracked`), and a client that spent its
+/// budget before the spray stays refused — the spray reset nothing.
+/// NEGATIVE CONTROL: the table is FULL, not merely small — every sprayed
+/// address took its own key, so a limiter that keyed this spray on the peer
+/// (one key) fails the equality.
 #[tokio::test]
 async fn the_bound_on_tracked_keys_holds_under_a_spray_of_forwarded_addresses() {
     use logweir_api::auth::ratelimit::MAX_TRACKED_PEERS;
-    let app = limited_app(ingress_range(), 20);
+    let app = limited_app(ingress_range(), PER_WINDOW);
     let limiter = || &app.app.state.shared().expect("shared mode").login_limiter;
-    for i in 0..MAX_TRACKED_PEERS {
+    spend(&app, INGRESS, &[Some("203.0.113.99"); 3]).await;
+    for i in 0..(MAX_TRACKED_PEERS - 1) {
         let served = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
         assert_eq!(served.status, 303, "client {i}: {}", served.text());
     }
     assert_eq!(limiter().tracked(), MAX_TRACKED_PEERS);
     let (log, _guard) = capture();
     for i in MAX_TRACKED_PEERS..(MAX_TRACKED_PEERS + 64) {
-        let refused = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
-        assert_limited(&refused);
+        let served = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
+        assert_eq!(served.status, 303, "client {i}: {}", served.text());
         if i == MAX_TRACKED_PEERS {
-            let (_, notes) = log.record(&refused.header("x-request-id").unwrap());
-            assert_eq!(notes["loginRateLimit"], "trackedKeys");
+            let (_, notes) = log.record(&served.header("x-request-id").unwrap());
+            assert_eq!(notes["loginRateUntracked"], "tableFull");
         }
     }
-    assert!(
-        limiter().tracked() <= MAX_TRACKED_PEERS,
-        "the limiter tracked {} keys",
-        limiter().tracked()
-    );
+    assert_eq!(limiter().tracked(), MAX_TRACKED_PEERS);
+    assert_limited(&sign_in(&app, INGRESS, Some("203.0.113.99")).await);
 }
 
 fn sprayed(i: usize) -> String {
@@ -925,42 +924,33 @@ fn sprayed(i: usize) -> String {
     format!("198.18.{hi}.{lo}")
 }
 
-/// **The shipped limiter stops the same spray at its ceiling** (the FX-13
-/// security review: per-client keys must not unbound the provider's load).
-/// Of more distinct forwarded clients than the table holds, exactly
-/// `LOGIN_CEILING_PER_WINDOW` are served; every later one is refused `429`
-/// with `Retry-After`, the audit naming the CEILING, and the table holds only
-/// the served keys. NEGATIVE CONTROL: the previous row's limiter, identical
-/// but for the ceiling, serves all `MAX_TRACKED_PEERS` of them.
+/// **There is no global bucket** (the FX-13 security reviews: a ceiling over
+/// all clients is the original lockout at a higher threshold). Forty distinct
+/// clients through the trusted ingress, each spending exactly its own twenty
+/// sign-in requests in one window — 800, more than the 600 a minute the
+/// withdrawn ceiling admitted — are every one served by the shipped login
+/// limiter. NEGATIVE CONTROL: each client's twenty-first is refused, by its
+/// own key.
 #[tokio::test]
-async fn the_ceiling_bounds_a_spray_of_forwarded_clients() {
-    use logweir_api::auth::ratelimit::{RateLimiter, LOGIN_CEILING_PER_WINDOW, MAX_TRACKED_PEERS};
+async fn no_global_bucket_exists_behind_the_trusted_ingress() {
+    use logweir_api::auth::ratelimit::{RateLimiter, LOGIN_PER_WINDOW};
     let app = app_with_limiter(ingress_range(), RateLimiter::for_login());
-    let mut served = 0;
-    for i in 0..(MAX_TRACKED_PEERS + 64) {
-        let response = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
-        if response.status == 303 {
-            served += 1;
-        } else {
-            assert_limited(&response);
+    let clients: Vec<String> = (0..40).map(|i| format!("203.0.113.{}", 100 + i)).collect();
+    assert!(clients.len() as u32 * LOGIN_PER_WINDOW > 600);
+    for round in 0..LOGIN_PER_WINDOW {
+        for client in &clients {
+            let served = sign_in(&app, INGRESS, Some(client)).await;
+            assert_eq!(
+                served.status,
+                303,
+                "{client} request {round}: {}",
+                served.text()
+            );
         }
     }
-    assert_eq!(served, LOGIN_CEILING_PER_WINDOW);
-    let limiter = &app.app.state.shared().expect("shared mode").login_limiter;
-    assert_eq!(limiter.tracked(), LOGIN_CEILING_PER_WINDOW as usize);
-
-    let (log, _guard) = capture();
-    let refused = sign_in(&app, INGRESS, Some("203.0.113.90")).await;
-    assert_limited(&refused);
-    assert!(
-        refused.text().contains("to this console"),
-        "the ceiling's detail does not blame the address: {}",
-        refused.text()
-    );
-    let (record, notes) = log.record(&refused.header("x-request-id").unwrap());
-    assert_eq!(notes["loginRateLimit"], "ceiling");
-    assert_eq!(notes["loginRateKey"], "forwardedClient");
-    assert_eq!(record["failureCode"], "rate_limited");
+    for client in &clients {
+        assert_limited(&sign_in(&app, INGRESS, Some(client)).await);
+    }
 }
 
 /// **A client rotating IPv6 addresses inside its `/64` spends one budget**
@@ -986,7 +976,6 @@ async fn a_client_rotating_ipv6_addresses_in_its_64_spends_one_budget() {
     let rotated = sign_in(&app, INGRESS, Some("2001:db8:aa:1:dead:beef:0:4")).await;
     assert_limited(&rotated);
     let (_, notes) = log.record(&rotated.header("x-request-id").unwrap());
-    assert_eq!(notes["loginRateLimit"], "key");
     assert_eq!(notes["loginRateKey"], "forwardedClient");
 
     let neighbour = sign_in(&app, INGRESS, Some("2001:db8:aa:2::1")).await;

@@ -241,27 +241,23 @@ pub fn check_login_rate(state: &AppState, parts: &Parts) -> Result<(), ApiError>
     }
     match shared.login_limiter.check(key.address()) {
         crate::auth::ratelimit::Decision::Allowed => Ok(()),
+        crate::auth::ratelimit::Decision::AllowedUntracked => {
+            // The table of keys is full of live windows: this new key is
+            // served without one rather than locked out. Many addresses are
+            // signing in at once, which an operator wants to see — on this
+            // request's own audit line, not on a second log line per request.
+            if let Some(audit) = audit {
+                audit.note("loginRateUntracked", "tableFull");
+            }
+            Ok(())
+        }
         crate::auth::ratelimit::Decision::Limited {
             retry_after_seconds,
-            limit,
         } => {
-            // WHICH LIMIT REFUSED is the operator's first question: one
-            // client's budget (`key`), or the console's ceiling over every
-            // client (`ceiling`), which means many addresses are signing in
-            // at once.
-            if let Some(audit) = audit {
-                audit.note("loginRateLimit", limit.as_str());
-            }
-            let detail = match limit {
-                crate::auth::ratelimit::Limit::Key => {
-                    "Too many sign-in attempts from this address. Try again shortly."
-                }
-                crate::auth::ratelimit::Limit::Ceiling
-                | crate::auth::ratelimit::Limit::TrackedKeys => {
-                    "Too many sign-in attempts to this console right now. Try again shortly."
-                }
-            };
-            let mut error = ApiError::new(ProblemCode::RateLimited, detail);
+            let mut error = ApiError::new(
+                ProblemCode::RateLimited,
+                "Too many sign-in attempts from this address. Try again shortly.",
+            );
             error.retry_after_seconds = Some(retry_after_seconds);
             Err(error)
         }

@@ -1,19 +1,46 @@
 //! Rate and connection limits for the unauthenticated login surface and for
 //! streams.
 //!
-//! WHY THE LOGIN SURFACE NEEDS ITS OWN LIMIT. `/auth/login` and
-//! `/auth/callback` are the only routes an unauthenticated caller can reach
-//! that do work: a login mints randomness and may fetch discovery, and a
-//! callback makes an outbound request to the identity provider. Without a limit
-//! a single client can turn one cheap request into one provider request
-//! forever, which is a denial of service aimed at the IdP through this service.
+//! WHAT THE LOGIN LIMIT IS FOR. `/auth/login` and `/auth/callback` are the
+//! only routes an unauthenticated caller can reach that do work: a login mints
+//! randomness and a login cookie, and a callback that carries a login cookie
+//! whose `state` matches makes one request to the identity provider. The
+//! limit keeps one client from spending this service's work, and the
+//! provider's, as fast as it can send.
 //!
-//! THE KEY IS THE CLIENT AS THE TRUSTED PROXY SAW IT, AND OTHERWISE THE PEER
-//! (FX-13). Behind the shared console's ingress every request has the same
-//! socket peer — the ingress — so a limit keyed on the peer alone is one
-//! global budget: about ten sign-ins a minute for everyone, and one
-//! unauthenticated client can spend it and block every sign-in for a minute.
-//! So `crate::http::login_rate_key` chooses the bucket:
+//! IT IS PER CLIENT, AND THERE IS NO GLOBAL BUDGET (FX-13). A global budget —
+//! which the old peer key became behind an ingress, where every request has
+//! the ingress as its peer — lets one unauthenticated client lock everyone out
+//! of the console; for a recovery tool, being able to sign in during an
+//! incident outranks everything this limit protects. A ceiling over all
+//! clients, however high, is the same lockout at a higher threshold (30
+//! addresses, or one IPv6 customer's `/56`, at 600 a minute), so there is
+//! none: N clients each within their budget are all served, whatever N is.
+//!
+//! WHY NO GLOBAL BUDGET IS NEEDED: THERE IS NO AMPLIFICATION. Each inbound
+//! request makes at most one provider request once the caches are warm, which
+//! readiness ensures before a replica takes traffic (`oidc.rs:357`, discovery
+//! then JWKS):
+//!
+//! - `/auth/login` makes none while the discovery document is cached
+//!   (`DISCOVERY_MAX_AGE`, one hour, `oidc.rs:40`; the cache read at
+//!   `oidc.rs:412`), and one `GET` of it when the hour has lapsed
+//!   (`oidc.rs:426`; called at `login.rs:117`);
+//! - `/auth/callback` reaches the provider only after its login cookie
+//!   decrypts and its `state` matches (`login.rs:214`, `login.rs:225`), then
+//!   makes exactly one token `POST` (`login.rs:231` → `oidc.rs:577`,
+//!   `oidc.rs:604`). The keys come from the JWKS cache (`JWKS_MAX_AGE`, a day,
+//!   `oidc.rs:45`; `oidc.rs:642`); an unknown `kid` in the provider's OWN ID
+//!   token forces at most one refetch per `JWKS_MIN_REFETCH` per process
+//!   (60 s, `oidc.rs:43`, `oidc.rs:505`, `oidc.rs:644`).
+//!
+//! On a cold or expired cache a request adds at most the discovery `GET` and a
+//! JWKS `GET` (three requests at most), and the result serves every later
+//! request. That is one-to-one, not amplification, and a provider has to limit
+//! its own traffic anyway; this service only promises not to multiply it.
+//!
+//! THE KEY IS THE CLIENT AS THE TRUSTED PROXY SAW IT, AND OTHERWISE THE PEER.
+//! `crate::http::login_rate_key` chooses the bucket:
 //!
 //! - when the immediate peer is a trusted proxy — the same
 //!   `TrustedProxies::contains` decision the entry point's `requireTrustedProxy`
@@ -32,6 +59,16 @@
 //! `Forwarded` header through untouched — so `Forwarded` is whatever the
 //! client wrote, and is never read.
 //!
+//! AN IPv6 KEY IS ITS `/64` ([`bucket_of`]). A per-client key is only as good
+//! as the client's inability to change it, and an IPv6 client holds a whole
+//! `/64` at least: keyed per address it could take a fresh budget for every
+//! request. [`IPV6_KEY_PREFIX`] says why `/64` and not wider.
+//!
+//! THE RESIDUAL, STATED. A client holding many addresses — many IPv4
+//! addresses, or many `/64`s (a `/56` is 256 of them) — holds that many
+//! budgets. Each is bounded at [`LOGIN_PER_WINDOW`], none can spend another
+//! client's, and each request costs the provider at most one request (above).
+//!
 //! A BUCKET IS NOT AN IDENTITY. D0 allows forwarded values for transport
 //! facts only — never for an identity or a grant (amended 2026-10-07 for this
 //! key). The forwarded address chooses which counter a request is charged to,
@@ -39,28 +76,17 @@
 //! and is never an audit actor. A forged header from an untrusted peer is not
 //! read at all, so it cannot move a request out of its peer's bucket.
 //!
-//! AN IPv6 KEY IS ITS `/64`, AND A CEILING BACKS EVERY KEY (the FX-13 security
-//! review). A per-client key is only as good as the client's inability to
-//! change it, and an IPv6 client holds a whole `/64` at least: keyed per
-//! address it could take a fresh budget for every request, so IPv6 keys are
-//! folded to their `/64` ([`IPV6_KEY_PREFIX`] says why `/64` and not wider).
-//! And the old global key, for all its harm, bounded the provider's load at
-//! 20 requests a minute; per-client keys alone lose that bound for anyone who
-//! holds many addresses. So [`LOGIN_CEILING_PER_WINDOW`] caps every key
-//! together, high enough that ordinary use never meets it. A request is
-//! charged to both only when both allow it: a client refused by its own budget
-//! does not spend the ceiling, and one refused by the ceiling keeps its
-//! budget. The audit note `loginRateLimit` says which limit refused (`key`,
-//! `ceiling`, or `trackedKeys` for the table bound below).
-//!
-//! The table is still bounded by [`MAX_TRACKED_PEERS`], whatever chooses the
-//! keys: a spray of forwarded addresses through a trusted proxy grows it no
-//! further than a spray of socket addresses did, and only expired windows are
-//! ever dropped, so a spray cannot reset a live count. With the login ceiling
-//! the bound is not even reached: a key is added only by a request the ceiling
-//! allows. The windows are per console process, as they always were: behind an
-//! ingress that spreads requests over N replicas, one client may be served up
-//! to N times its allowance, and the provider may see N times the ceiling.
+//! THE TABLE IS BOUNDED, AND A FULL ONE LOCKS NO ONE OUT. At most
+//! [`MAX_TRACKED_PEERS`] keys hold a window, whatever chooses the keys. When a
+//! new key finds the table full, the windows that have expired are dropped —
+//! they hold nothing a fresh window would not, so a spray of addresses cannot
+//! reset a live count — and if it is still full of live windows, the new key
+//! is SERVED WITHOUT A WINDOW rather than refused: refusing it would be the
+//! global lockout again, for whoever holds `MAX_TRACKED_PEERS` keys. Tracked
+//! keys keep their windows meanwhile, and the audit notes `loginRateUntracked`
+//! so an operator can see it happen. The windows are per console process, as
+//! they always were: behind an ingress that spreads requests over N replicas,
+//! one client may be served up to N times its allowance.
 //!
 //! STREAM SLOTS BOUND THE EVENT STREAM. `routes::operations::events` takes one
 //! per open stream, keyed by principal and namespace, and answers `429` when
@@ -78,22 +104,6 @@ pub const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 /// proxy, or else a socket peer, an IPv6 one folded to its `/64` — may make
 /// per window.
 pub const LOGIN_PER_WINDOW: u32 = 20;
-/// The most login and callback requests ALL keys together may make per
-/// window, per console process: the backstop that keeps the provider's load
-/// bounded when a client holds many addresses (FX-13 security review).
-///
-/// WHY 600. A sign-in is two requests (`/auth/login`, then `/auth/callback`),
-/// so this is 300 sign-ins a minute per process. A session lasts at most
-/// 15 minutes (`sessionMaxAgeSeconds`, 900 by default), so it is more than
-/// 4,000 people signing in again every quarter hour on one replica, or all of
-/// them at once after a key rotation drains in a minute — ordinary use of a
-/// team console never meets it. It is also 30 keys' worth of the per-key
-/// budget, so the one global budget the per-client key replaced comes back
-/// only for someone holding 30 addresses (30 `/64`s for IPv6) and spending
-/// them all, and even then the provider sees at most ten requests a second
-/// from each console process — the bound the old peer key gave at a thirtieth
-/// of the rate, without making one client everyone's limit.
-pub const LOGIN_CEILING_PER_WINDOW: u32 = 600;
 /// The prefix an IPv6 key is folded to.
 ///
 /// WHY `/64`. It is the smallest subnet an IPv6 site or host is given: SLAAC
@@ -103,14 +113,16 @@ pub const LOGIN_CEILING_PER_WINDOW: u32 = 600;
 /// every request. `/64` is also as wide as is safe to go: some networks give
 /// each customer or handset exactly one `/64`, so a `/56` or `/48` key would
 /// put unrelated clients in one budget. A client that holds a `/56` therefore
-/// still has 256 budgets — [`LOGIN_CEILING_PER_WINDOW`] is the bound on that.
-/// The cost is the same as IPv4 NAT: hosts sharing one `/64` share one budget.
+/// still has 256 budgets, each bounded, none able to spend another client's
+/// (the residual the module documentation states). The cost is the same as
+/// IPv4 NAT: hosts sharing one `/64` share one budget.
 /// IPv4 keys, IPv4-mapped IPv6 included, stay single addresses.
 pub const IPV6_KEY_PREFIX: u32 = 64;
 /// The most keys tracked at once. When the table is full, the windows that
 /// have expired are dropped; a live window is never dropped, so a spray of
 /// source addresses cannot grow this map without bound, and cannot reset any
-/// key's live count either. A new key that finds it still full is refused.
+/// key's live count either. A new key that finds it still full is served
+/// without a window ([`Decision::AllowedUntracked`]), never refused.
 pub const MAX_TRACKED_PEERS: usize = 4096;
 
 /// The bucket an address is counted in: an IPv4-mapped IPv6 address as its
@@ -153,86 +165,48 @@ impl Window {
     }
 }
 
-struct Table {
-    keys: HashMap<IpAddr, Window>,
-    all: Window,
-}
-
-/// A fixed-window counter keyed by address — the forwarded client behind a
-/// trusted proxy, or the socket peer (see the module documentation) — with an
-/// optional ceiling over all keys together.
+/// A fixed-window counter per key — the forwarded client behind a trusted
+/// proxy, or the socket peer (see the module documentation). There is no
+/// budget over all keys together, on purpose.
 pub struct RateLimiter {
     window: Duration,
     per_window: u32,
-    ceiling: Option<u32>,
-    state: Mutex<Table>,
-}
-
-/// Which limit refused a request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Limit {
-    /// The key's own budget.
-    Key,
-    /// The ceiling over all keys together.
-    Ceiling,
-    /// The table of keys is full of live windows and this key is new.
-    TrackedKeys,
-}
-
-impl Limit {
-    /// The audit note's value.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Key => "key",
-            Self::Ceiling => "ceiling",
-            Self::TrackedKeys => "trackedKeys",
-        }
-    }
+    state: Mutex<HashMap<IpAddr, Window>>,
 }
 
 /// What a limiter decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// Under every limit; the request was counted.
+    /// Under the key's budget; the request was counted.
     Allowed,
-    /// Over a limit; retry after this many seconds. Nothing was counted.
+    /// The table of keys is full of live windows and this key is new: served,
+    /// without a window, rather than locked out (see the module
+    /// documentation).
+    AllowedUntracked,
+    /// Over the key's budget; retry after this many seconds. Nothing was
+    /// counted.
     Limited {
-        /// Seconds until the refusing window resets.
+        /// Seconds until the key's window resets.
         retry_after_seconds: u64,
-        /// Which limit refused.
-        limit: Limit,
     },
 }
 
 impl RateLimiter {
-    /// A limiter over a window and a per-key budget, with no ceiling over all
-    /// keys.
+    /// A limiter over a window and a per-key budget.
     #[must_use]
     pub fn new(window: Duration, per_window: u32) -> Self {
         Self {
             window,
             per_window,
-            ceiling: None,
-            state: Mutex::new(Table {
-                keys: HashMap::new(),
-                all: Window::fresh(Instant::now()),
-            }),
+            state: Mutex::new(HashMap::new()),
         }
     }
 
-    /// The same limiter with a ceiling over all keys together per window.
-    #[must_use]
-    pub fn with_ceiling(mut self, total_per_window: u32) -> Self {
-        self.ceiling = Some(total_per_window);
-        self
-    }
-
-    /// The login-surface limiter: [`LOGIN_PER_WINDOW`] per key and
-    /// [`LOGIN_CEILING_PER_WINDOW`] in all, per [`LOGIN_WINDOW`].
+    /// The login-surface limiter: [`LOGIN_PER_WINDOW`] per key per
+    /// [`LOGIN_WINDOW`].
     #[must_use]
     pub fn for_login() -> Self {
-        Self::new(LOGIN_WINDOW, LOGIN_PER_WINDOW).with_ceiling(LOGIN_CEILING_PER_WINDOW)
+        Self::new(LOGIN_WINDOW, LOGIN_PER_WINDOW)
     }
 
     /// Count one request against `address`'s bucket ([`bucket_of`]) and
@@ -242,64 +216,36 @@ impl RateLimiter {
     }
 
     /// Count one request at an explicit instant, for tests.
-    ///
-    /// THE ORDER IS THE POINT. The key's own budget is checked first, and a
-    /// request it refuses is not charged to the ceiling — so one client that
-    /// keeps knocking after its budget cannot spend everyone's. A request the
-    /// ceiling refuses is not charged to its key either, so the key's budget is
-    /// intact when the ceiling's window turns. A request is counted, on both,
-    /// only when it is allowed.
     pub fn check_at(&self, address: IpAddr, now: Instant) -> Decision {
         let bucket = bucket_of(address);
         let length = self.window;
-        let mut table = self
+        let mut keys = self
             .state
             .lock()
             .expect("the limiter lock is never poisoned");
-        if !table.all.live(now, length) {
-            table.all = Window::fresh(now);
-        }
-        let current = table
-            .keys
+        if let Some(window) = keys
             .get(&bucket)
-            .copied()
-            .filter(|w| w.live(now, length));
-        if let Some(window) = current.filter(|w| w.count >= self.per_window) {
+            .filter(|w| w.live(now, length) && w.count >= self.per_window)
+        {
             return Decision::Limited {
                 retry_after_seconds: window.retry_after(now, length),
-                limit: Limit::Key,
             };
         }
-        if let Some(ceiling) = self.ceiling {
-            if table.all.count >= ceiling {
-                return Decision::Limited {
-                    retry_after_seconds: table.all.retry_after(now, length),
-                    limit: Limit::Ceiling,
-                };
-            }
-        }
-        if !table.keys.contains_key(&bucket) && table.keys.len() >= MAX_TRACKED_PEERS {
+        if !keys.contains_key(&bucket) && keys.len() >= MAX_TRACKED_PEERS {
             // Only windows that have expired are dropped: they hold nothing a
             // fresh window would not.
-            table.keys.retain(|_, w| w.live(now, length));
-            if table.keys.len() >= MAX_TRACKED_PEERS {
-                // Still full of live windows: refuse the new key rather than
-                // grow, or than drop a live count.
-                return Decision::Limited {
-                    retry_after_seconds: length.as_secs().max(1),
-                    limit: Limit::TrackedKeys,
-                };
+            keys.retain(|_, w| w.live(now, length));
+            if keys.len() >= MAX_TRACKED_PEERS {
+                // Still full of live windows: serve the new key without one,
+                // rather than grow, drop a live count, or lock it out.
+                return Decision::AllowedUntracked;
             }
         }
-        let window = table
-            .keys
-            .entry(bucket)
-            .or_insert_with(|| Window::fresh(now));
+        let window = keys.entry(bucket).or_insert_with(|| Window::fresh(now));
         if !window.live(now, length) {
             *window = Window::fresh(now);
         }
         window.count += 1;
-        table.all.count += 1;
         Decision::Allowed
     }
 
@@ -310,18 +256,13 @@ impl RateLimiter {
         self.state
             .lock()
             .expect("the limiter lock is never poisoned")
-            .keys
             .len()
     }
 }
 
 impl std::fmt::Debug for RateLimiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "RateLimiter({} per {:?}, ceiling {:?})",
-            self.per_window, self.window, self.ceiling
-        )
+        write!(f, "RateLimiter({} per {:?})", self.per_window, self.window)
     }
 }
 
@@ -424,7 +365,6 @@ mod tests {
         }
         let Decision::Limited {
             retry_after_seconds,
-            limit: Limit::Key,
         } = limiter.check_at(ip(1), start)
         else {
             panic!("the fourth request in the window must be limited");
@@ -482,11 +422,8 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn limited(decision: Decision) -> Option<Limit> {
-        match decision {
-            Decision::Allowed => None,
-            Decision::Limited { limit, .. } => Some(limit),
-        }
+    fn limited(decision: Decision) -> bool {
+        matches!(decision, Decision::Limited { .. })
     }
 
     /// **An IPv6 key is its `/64`; an IPv4 key, mapped or not, is its
@@ -512,9 +449,8 @@ mod tests {
             let rotated = v6(&format!("2001:db8:1:2::{host:x}"));
             assert_eq!(limiter.check_at(rotated, start), Decision::Allowed);
         }
-        assert_eq!(
+        assert!(
             limited(limiter.check_at(v6("2001:db8:1:2:dead:beef:0:4"), start)),
-            Some(Limit::Key),
             "a fresh address in the same /64 is the same, spent, budget"
         );
         assert_eq!(
@@ -530,113 +466,42 @@ mod tests {
         }
     }
 
-    /// **The ceiling bounds every key together.** Ten keys, one request each,
-    /// spend a ceiling of ten; the eleventh key is refused by the CEILING, with
-    /// a `Retry-After` inside the window, and the window turning lifts it.
-    /// NEGATIVE CONTROL: the same eleven requests against the same limiter
-    /// without a ceiling are all served.
+    /// **There is no global budget.** Forty distinct clients, each spending
+    /// exactly its own twenty inside one window — 800 requests, more than any
+    /// ceiling of 600 a minute would admit — are every one served by the
+    /// shipped login limiter. NEGATIVE CONTROL: each client's twenty-first is
+    /// refused, so the limiter is limiting, per client.
     #[test]
-    fn the_ceiling_bounds_all_keys_together() {
+    fn no_global_bucket_exists() {
+        let limiter = RateLimiter::for_login();
         let start = Instant::now();
-        let key = |i: u8| IpAddr::from([192, 0, 2, i]);
-        let capped = RateLimiter::new(Duration::from_secs(60), 3).with_ceiling(10);
-        let uncapped = RateLimiter::new(Duration::from_secs(60), 3);
-        for i in 0..10 {
-            assert_eq!(capped.check_at(key(i), start), Decision::Allowed);
-            assert_eq!(uncapped.check_at(key(i), start), Decision::Allowed);
-        }
-        let at = start + Duration::from_secs(20);
-        let Decision::Limited {
-            retry_after_seconds,
-            limit: Limit::Ceiling,
-        } = capped.check_at(key(10), at)
-        else {
-            panic!("the eleventh key must meet the ceiling");
-        };
-        assert!(
-            (1..=40).contains(&retry_after_seconds),
-            "{retry_after_seconds}"
-        );
-        assert_eq!(
-            limited(capped.check_at(key(0), at)),
-            Some(Limit::Ceiling),
-            "a key with budget left meets it too"
-        );
-        assert_eq!(uncapped.check_at(key(10), at), Decision::Allowed);
-        let later = start + Duration::from_secs(61);
-        assert_eq!(capped.check_at(key(10), later), Decision::Allowed);
-    }
-
-    /// **A key over its own budget does not spend the ceiling.** One client
-    /// that keeps knocking after its three is refused by its KEY, and the
-    /// other keys still find the whole remaining ceiling. NEGATIVE CONTROL:
-    /// the ceiling still holds — the request past it is refused.
-    #[test]
-    fn a_key_over_its_budget_does_not_spend_the_ceiling() {
-        let start = Instant::now();
-        let limiter = RateLimiter::new(Duration::from_secs(60), 3).with_ceiling(10);
-        let noisy = IpAddr::from([192, 0, 2, 200]);
-        let mut refused = 0;
-        for _ in 0..50 {
-            match limiter.check_at(noisy, start) {
-                Decision::Allowed => {}
-                Decision::Limited { limit, .. } => {
-                    assert_eq!(limit, Limit::Key);
-                    refused += 1;
-                }
+        let clients: Vec<IpAddr> = (0..40u8).map(|i| IpAddr::from([192, 0, 2, i])).collect();
+        let total = clients.len() as u32 * LOGIN_PER_WINDOW;
+        assert!(total > 600, "the row must exceed the reviewed ceiling");
+        for round in 0..LOGIN_PER_WINDOW {
+            for (i, client) in clients.iter().enumerate() {
+                assert_eq!(
+                    limiter.check_at(*client, start + Duration::from_millis(u64::from(round))),
+                    Decision::Allowed,
+                    "client {i}, request {round}: a client within its budget is served"
+                );
             }
         }
-        assert_eq!(refused, 47);
-        for i in 0..7 {
-            assert_eq!(
-                limiter.check_at(IpAddr::from([192, 0, 2, i]), start),
-                Decision::Allowed,
-                "key {i}: the ceiling has 7 left after the noisy key's 3"
-            );
+        for client in &clients {
+            assert!(limited(limiter.check_at(*client, start)));
         }
-        assert_eq!(
-            limited(limiter.check_at(IpAddr::from([192, 0, 2, 7]), start)),
-            Some(Limit::Ceiling)
-        );
     }
 
-    /// **A request the ceiling refuses is not charged to its key.** A key
-    /// refused five times by the ceiling at t+30s still has its whole budget
-    /// when the ceiling's window turns at t+60s. NEGATIVE CONTROL: the budget
-    /// is real — the request after it is refused by the key.
+    /// **A spray of new keys cannot reset a live window, grow the table, or
+    /// lock anyone out.** The table fills with live windows; a spent key stays
+    /// spent (eviction drops only EXPIRED windows, which hold nothing a fresh
+    /// window would not), a tracked key with budget left is still served, and
+    /// the new keys past the bound are served WITHOUT a window
+    /// (`AllowedUntracked`), never refused. NEGATIVE CONTROL: once the windows
+    /// expire, the next new key evicts them and is tracked again, and the
+    /// table is still bounded.
     #[test]
-    fn a_request_the_ceiling_refuses_is_not_charged_to_its_key() {
-        let start = Instant::now();
-        let limiter = RateLimiter::new(Duration::from_secs(60), 3).with_ceiling(3);
-        for i in 0..3 {
-            assert_eq!(
-                limiter.check_at(IpAddr::from([192, 0, 2, i]), start),
-                Decision::Allowed
-            );
-        }
-        let late = IpAddr::from([192, 0, 2, 99]);
-        for _ in 0..5 {
-            assert_eq!(
-                limited(limiter.check_at(late, start + Duration::from_secs(30))),
-                Some(Limit::Ceiling)
-            );
-        }
-        let turned = start + Duration::from_secs(61);
-        for _ in 0..3 {
-            assert_eq!(limiter.check_at(late, turned), Decision::Allowed);
-        }
-        assert_eq!(limited(limiter.check_at(late, turned)), Some(Limit::Key));
-    }
-
-    /// **A spray of new keys cannot reset a live window, nor lock out a
-    /// tracked key, nor grow the table.** The table fills with live windows;
-    /// a spent key stays spent (eviction drops only EXPIRED windows, which
-    /// hold nothing a fresh window would not), a tracked key with budget left
-    /// is still served, and only the new keys are refused, as
-    /// `TrackedKeys`. NEGATIVE CONTROL: once the windows expire, the next new
-    /// key evicts them and is served, and the table is still bounded.
-    #[test]
-    fn a_spray_cannot_reset_a_live_window_or_grow_the_table() {
+    fn a_spray_cannot_reset_a_live_window_grow_the_table_or_lock_anyone_out() {
         let start = Instant::now();
         let limiter = RateLimiter::new(Duration::from_secs(60), 2);
         let spent = IpAddr::from([192, 0, 2, 1]);
@@ -648,21 +513,27 @@ mod tests {
             let [_, b, c, d] = (i as u32).to_be_bytes();
             IpAddr::from([10, b, c, d])
         };
-        let mut refused_new = 0;
+        let mut untracked = 0;
         for i in 0..(MAX_TRACKED_PEERS + 100) {
             match limiter.check_at(spray(i), start + Duration::from_secs(1)) {
                 Decision::Allowed => {}
-                Decision::Limited { limit, .. } => {
-                    assert_eq!(limit, Limit::TrackedKeys);
-                    refused_new += 1;
-                }
+                Decision::AllowedUntracked => untracked += 1,
+                Decision::Limited { .. } => panic!("sprayed key {i} was locked out"),
             }
         }
         assert_eq!(limiter.tracked(), MAX_TRACKED_PEERS);
-        assert_eq!(refused_new, 102, "the two earlier keys hold two places");
+        assert_eq!(untracked, 102, "the two earlier keys hold two places");
         let during = start + Duration::from_secs(2);
-        assert_eq!(limited(limiter.check_at(spent, during)), Some(Limit::Key));
+        assert!(
+            limited(limiter.check_at(spent, during)),
+            "the spray did not reset the spent key's live window"
+        );
         assert_eq!(limiter.check_at(tracked, during), Decision::Allowed);
+        assert_eq!(
+            limiter.check_at(IpAddr::from([192, 0, 2, 3]), during),
+            Decision::AllowedUntracked,
+            "a new client is served while the table is full"
+        );
 
         let after = start + Duration::from_secs(62);
         assert_eq!(
