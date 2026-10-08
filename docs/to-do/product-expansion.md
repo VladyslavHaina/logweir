@@ -204,7 +204,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-01.5c | Run PROD-01.1's and 01.4's suites on the 3.9, 4.1 and 4.3 lines | P1 | M2 | infra | 01.5 | — | compose | C | Proposed |
 | 3 | PROD-01.5d | A produce-response fault proxy profile: drop or hold one produce response deterministically (oracle for 07.1-R9 and 00.3d's A-C5-1) | P2 | M2 | infra | 01.5 | — | compose | B | Proposed |
 | 3 | PROD-01.5b | Put the `crates/` e2e rows on the per-stack variables | P2 | M3 | infra | 01.5 | — | compose | B | Proposed |
-| 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Proposed |
+| 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Done |
 | 1 | PROD-04.0c | Amendment D names the engine's group subcommands | P2 | M3 | docs | 04.0 | owner's yes on Amendment D (rule 8) | none | B | Proposed |
 | 1 | PROD-04.0d | Fixtures for groups and ACLs (`acl` profile, `groups` helper, streams-protocol variant, share-state settings) | P1 | M2 | infra | 04.0, 01.5 | — | compose | B | Done |
 | 3 | PROD-01.4b | Upstream DescribeTopics in rust-rdkafka (the exit for 01.4a) | P3 | M3 | impl | 01.4a | — | none | B | Proposed |
@@ -704,6 +704,12 @@ Provenance is attested per index by design (`images.yml`), so a platform digest 
 - **Evidence:** smokes on compose slot 1 with a negative control each: Kafka 4.3.1 47/0, 3.9.2 21/0, 3.7.1 8/0; `stack_params` 20/20; 9 mutants killed; the SIGKILL control fails the stop check.
 - **Artifacts:** `claude/artifacts/prod-04-0d/`.
 - **Rows added:** PROD-04.0a–d. PROD-04.1 now also depends on 04.0a and 04.0d, and PROD-05.3 on 04.0b and 04.0d.
+
+**Completion record — Done (2026-10-08), PROD-04.0b.**
+- **Ownership:** worker `prod-04-0b` (a run and a fix round), independent Tier-A review `claude/prod-04-0b.review.md`. The verdict was ACCEPT-WITH-FIXES, with one HIGH: a non-ignored row failed on CI's default Kafka 3.7.1 stack. The same reviewer's second pass was ACCEPT. Merged as `24ea0c9a` (PR #5, CI check and e2e green on Linux; release-notes item 37).
+- **Delivered:** OD-6 (a2). One FFI crate holds every librdkafka call the safe API lacks, and the first ones are the consumer-group and ACL reads. `[workspace.lints.rust]` makes rustc forbid `unsafe` in every other target, tests, build scripts and examples included. The gate script is a second layer, and each of its patterns has a negative control. No command uses the reads yet; PROD-04.1 is the first consumer.
+- **Evidence:** `group_admin` passed on the default 3.7.1 stack with `auth`: 3 passed, 4 ignored, and two planted wrong answers each fail the fixture row. It passed 7/7 on Kafka 3.9.2 and 4.3.1, the three-broker row included. 17 worker mutants were killed, plus the reviewer's three survivors. The decision record §14.1 sets the 3.7.1 rule for PROD-04.1.
+- **Follow-up (non-blocking):** L5, a leaked-name-listing mutant that survives the soak on macOS. PROD-04.1 and PROD-01.4a are now unblocked.
 
 ### PROD-04.1 — Archive consumer position evidence
 
