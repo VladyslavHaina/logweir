@@ -826,6 +826,8 @@ fn backup_fixture(auth_block: &str) -> BackupFixture {
             out: None,
             receipt_out: None,
             backup_id_override: None,
+            kafka_topic_resources: None,
+            strimzi_cluster: None,
         },
     }
 }

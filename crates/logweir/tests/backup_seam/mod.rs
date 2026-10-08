@@ -87,6 +87,8 @@ impl Fixture {
                 out: None,
                 receipt_out: None,
                 backup_id_override: None,
+                kafka_topic_resources: None,
+                strimzi_cluster: None,
             },
             key,
             _dir: dir,
@@ -136,6 +138,8 @@ impl Fixture {
             out: None,
             receipt_out: None,
             backup_id_override: Some(backup_id.to_string()),
+            kafka_topic_resources: None,
+            strimzi_cluster: None,
         };
         execute_with(
             &args,

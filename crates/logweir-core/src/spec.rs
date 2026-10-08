@@ -823,6 +823,21 @@ pub struct BackupSourceSpec {
     /// "everything" to the engine, and a mandatory allowlist whose absence
     /// means "all topics" is not an allowlist.
     pub topics: Vec<String>,
+    /// **PROD-05.1.** Topics whose configuration a declarative owner manages
+    /// outside Kafka's admin API — a Strimzi `KafkaTopic`, Terraform, a GitOps
+    /// repository — declared by the plan. Each names one of `topics`, a kind
+    /// (`strimzi` or `external`) and where its desired state lives; phase −1
+    /// refuses anything else (exit 3). The receipt records the owner, and a
+    /// restore exports desired state for such a topic instead of applying its
+    /// settings through the admin API, which the owner would revert.
+    ///
+    /// Optional: an older runner ignores the key, and a plan without it is the
+    /// plan it was. ABSENT and EMPTY differ: an absent list declares nothing
+    /// and the receipt's `owner_detection` does not name `declared`; an empty
+    /// list is the operator's statement that no topic of the plan has a
+    /// declared owner, and it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_owners: Option<Vec<crate::topic_configuration::DeclaredOwner>>,
 }
 
 /// The `backup:` block's tunables. The two keys the rendered document pins

@@ -416,6 +416,8 @@ fn a_backup_tells_an_unreadable_snapshot_and_still_writes_its_receipt() {
         out: None,
         receipt_out: None,
         backup_id_override: None,
+        kafka_topic_resources: None,
+        strimzi_cluster: None,
     };
     // EMPTY: the engine double writes the manifest when it runs (FX-7: a set
     // whose manifest exists before the engine starts is refused).

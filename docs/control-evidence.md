@@ -445,6 +445,7 @@ and retention periods for the copies.
 | 4.2.2(a): the recovery time of a tested restore is measured, and compared with the objective the plan set. | [Scorecard](formats/drill-scorecard.md): `measured.rto_seconds`, `measured.rto_restore_only_seconds`, `measured.rto_excluding_preflight_seconds`, `objectives.rto_seconds`, `objectives.met` |
 | 4.2.2(b): each completed backup run's per-topic record counts and covered window are signed; where a restore's `integrity.level` reads `byte-fingerprint`, its sampled records were compared byte for byte with the archive. | [Backup receipt](formats/backup-receipt.md): `records`, `covered.from_ms`, `covered.to_ms`; [Scorecard](formats/drill-scorecard.md): `integrity.level`, `integrity.records_sampled`, `integrity.records_sampled_matching` |
 | 4.2.2(b), configuration data: from format 1.1.0, each backup receipt records per topic whether the archive's record of the topic's configuration overrides is complete, and why not, and the catalog point copies it; a restore compares configuration only for topics whose record is complete, and names the others. | [Backup receipt](formats/backup-receipt.md): `config_coverage.<topic>.coverage`, `config_coverage.<topic>.reason`; [Catalog point](formats/catalog-point.md): `topics[].config_coverage`; [Scorecard](formats/drill-scorecard.md): `topic_parity.not_assessed` |
+| 4.2.2(b), configuration data: from format 1.3.0, each backup receipt also records per topic the source's partition count and replication factor, its explicit overrides and the effective values of the settings that decide which records it keeps, each with its source and portability class, and the topic's declarative owner with where the run looked for one; a topic whose configuration could not be read records no settings. The catalog point copies it. | [Backup receipt](formats/backup-receipt.md): `topic_configuration.<topic>.partitions`, `topic_configuration.<topic>.replication_factor`, `topic_configuration.<topic>.entries`, `topic_configuration.<topic>.owner`, `owner_detection`; [Catalog point](formats/catalog-point.md): `topics[].configuration`, `topics[].partitions`, `owner_detection` |
 | 4.2.2(e): data was restored from a recorded archive into a recorded target. | [Scorecard](formats/drill-scorecard.md): `source.backup_id`, `target.cluster_id`, `target_diff.would_create` |
 | 4.2.3: the archive manifest's digest is signed and can be re-derived by hand, and a restore test that reaches a result records the check it made on a sample of the archive, and how strong it was. | [Scorecard](formats/drill-scorecard.md): `source.manifest_sha256`, `integrity.level`, `integrity.result` |
 | 4.2.6: each recovery test that reaches a result leaves a signed record of it, including why it did not pass; one that ends before a result signs nothing, and under Kubernetes is recorded on unsigned status. | [Scorecard](formats/drill-scorecard.md): `outcome`, `integrity.partial_reason`; [Restore](../config/crd/restores.yaml): `status.exitCode`, `status.exitReason`; [RehearsalSchedule](../config/crd/rehearsalschedules.yaml): `status.lastFailed.reason` |
@@ -454,7 +455,8 @@ and retention periods for the copies.
 - 4.2.2(a), the recovery time of a real recovery:
   [RTO and RPO are measured, not guaranteed](#rto-and-rpo-are-measured-not-guaranteed).
 - 4.2.2(b), configuration data beyond the overrides the engine captures, and,
-  without `config_coverage`, whether any was captured:
+  without `config_coverage`, whether any was captured; that the recorded
+  configuration was applied to a restored topic (PROD-05.2):
   [configuration coverage](#configuration-coverage); completeness against the
   source: [archive-relative, not source-relative](#archive-relative-not-source-relative).
 - 4.2.2(c), (d) and (f), where the copies are stored, who can reach them and how
@@ -627,6 +629,15 @@ receipt, means unknown and never `captured`. For a topic the principal can see,
 `captureDenied` is an inference, because the Kafka client library Logweir uses
 does not expose the per-resource error
 ([an empty configuration answer is a refused read](stability.md#an-empty-configuration-answer-is-a-refused-read-never-no-overrides-prod-040-t13-fx-4)).
+Since format 1.3.0 the receipt also records each topic's configuration model
+([`topic_configuration`](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130)):
+the source's partition count and replication factor, every explicit override
+and the effective value of each setting that decides which records the topic
+keeps, each with where it came from and whether it can be carried to another
+cluster, and the topic's declarative owner, with where the run looked for one
+(`owner_detection`: an owner nobody looked for is recorded as not checked, never
+as "no owner"). It is a record of the source, not of the restore: nothing
+applies it to a restored topic yet.
 
 **What a restore compares.** A restore assesses a topic's configuration only
 where the backup receipt it is bound to says `captured`. It names every other

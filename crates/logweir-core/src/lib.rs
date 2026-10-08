@@ -58,6 +58,9 @@ pub mod spec;
 /// FX-8: which clock a restore's time selection reads per source topic, and
 /// the `PointInTimeByProducerTime` refusal.
 pub mod time_basis;
+/// PROD-05.1: the topic configuration model's portability table, the capture
+/// rule and the detection of declarative owners.
+pub mod topic_configuration;
 /// PLAT-19.1 / decision D3 §7.4: the trust lifecycle — `decide`,
 /// `may_sign_new` and `claimed_signing_time`, with `now` always an argument.
 pub mod trust;

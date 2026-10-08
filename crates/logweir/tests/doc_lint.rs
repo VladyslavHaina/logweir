@@ -1990,6 +1990,9 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "scheduled points offered after a re-sync",
             "spec.syncRequest",
         ),
+        // PROD-05.1 (2026-10-08): every receipt records each topic's
+        // configuration model, and the console defaults from it.
+        ("the topic configuration model", "topic_configuration"),
     ];
     assert_eq!(
         items.len(),

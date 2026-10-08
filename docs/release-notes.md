@@ -21,8 +21,8 @@ The last tag is `v0.2.0-rc.1` (candidate `56a60ebe`, publication `2c277dc1`);
 its record is in the next entry, whose twenty-seven items are what that
 candidate shipped. This entry collects what lands on `main` after that
 publication: items 28 (PROD-00.3f, the engine pin), 29 (PROD-16.1, no approver
-key by default), 30 (PROD-08.1) and 31 (FX-17, scheduled points in the catalog)
-so far. Items continue the next entry's
+key by default), 30 (PROD-08.1), 31 (FX-17, scheduled points in the catalog)
+and 32 (PROD-05.1) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -41,6 +41,10 @@ sampled rows unchanged. Item 31 is fix-now row FX-17, proven on the compose
 stack with the console on the host; it changes the runner (the catalog sync)
 and the console's text, and the PoC upgrade that carries it re-syncs the PoC's
 catalog and checks its first page and the nightly schedule's page.
+Item 32 is row PROD-05.1, proven on the compose stack on the 3.9 and 4.3 broker
+lines; it changes the runner's signed receipt and catalog record, the catalog's
+view (runner and controller), the product API and the console, so the PoC
+upgrade that carries it runs its catalog and console rows.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -345,6 +349,68 @@ for those points, and retention treats every scheduled set as one shared set
 again. Nothing in the archive changes on the rollback itself; sets an
 `Enforce` policy deleted in between stay deleted.
 
+#### 32. A recovery point records each topic's configuration, its portability and its owner, and the console defaults the replication factor from the source's (PROD-05.1)
+
+**Added.** Every backup receipt `logweir backup run` signs now records, per
+named topic, the source's partition count and replication factor, the topic's
+explicit overrides and the effective value of each semantic key (retention,
+compaction, timestamps, min in-sync and the rest) — each with its source and a
+portability class from a table measured on the 3.9 and 4.3 broker lines — and
+the topic's declarative owner: a Strimzi `KafkaTopic`
+(`--kafka-topic-resources <file> [--strimzi-cluster <name>]`) or the plan's own
+`source.topic_owners` — and where the run looked for one
+(`owner_detection`), so an owner nobody looked for reads "owner not checked",
+never "applied through the admin API". A topic whose configuration read was
+denied records NO entries, never "no overrides". Keys Kafka 4.0 removed are
+recorded and marked `removedInKafka4`; a sensitive entry is recorded by key,
+never by value. The receipt and the catalog point record are format **1.3.0**;
+both readers check ten new arms, 12 to 21, and print one `topic_configuration`
+line per topic; `verify_scorecard.py` is 1.20.0. The catalog's view lists an `Available`
+point's topics with their recorded layout, the product API publishes them as
+`PointView.topics[]` with each topic's `applyRoute` (`unknown` where the run
+did not look for owners, beside `PointView.ownerDetection`), and the console's
+restore wizard defaults the
+replication factor to the largest selected topic's source factor, capped at
+the target's broker count, saying which catalog and point it came from
+([backup-receipt.md](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130),
+[stability.md](stability.md#receipt-and-catalog-point-format-130-topic_configuration-prod-051),
+[the model and the table](to-do/decisions/PROD-05.1-configuration-model.md),
+[ui/README.md](../ui/README.md)).
+
+What changes on the upgrade:
+
+- **Every receipt and catalog record a new runner writes is 1.3.0**, pinned or
+  not. Readers built before PROD-05.1 accept them and ignore the new fields.
+- **Phase −1 refuses**, exit 3, a backup plan whose `source.topic_owners`
+  names an unplanned topic, a kind other than `strimzi` or `external`, a
+  reference that is blank, over 256 characters or carries a control character,
+  or one topic twice.
+- **A `Backup` or `BackupSchedule` records `owner_detection: []`**: the
+  controller passes neither a declaration nor `KafkaTopic` resources yet, so
+  its receipts say each un-owned topic's owner was not checked.
+- **The receipt's replication factor is read from the source's metadata**: the
+  pinned engine's manifest keeps it for the first topic it saves only (measured;
+  the decision record names the upstream lines).
+
+**Do:** nothing for existing plans. Pass `--kafka-topic-resources` (or declare
+`source.topic_owners`) for topics an operator such as Strimzi or Terraform
+manages; a restore of such a topic is meant to export desired state for its
+owner rather than change it behind the owner's back (PROD-05.2). A `Backup`
+cannot declare owners yet (child row PROD-05.1a). **Scope:**
+`crates/logweir-core/tests/backup_receipt.rs` (one row per arm),
+`crates/logweir/src/backup/config_coverage.rs` (the projection, the secret, the
+factor's source), the corpus and the parity gate over both readers, the catalog
+and view rows (`crates/logweir/tests/catalog.rs`,
+`crates/logweir/tests/check_cli.rs`, `crates/weirkeeper/tests/catalog_controller.rs`,
+`crates/logweir-api/tests/d3_reads.rs`), the console rows
+(`ui/tests/replication-factor.spec.js`), and live, on the compose stack on 3.9.2
+and 4.3.1: `e2e/tests/topic_configuration.rs`'s three rows (the table against
+the broker, the model end to end with its owners, a denied DescribeConfigs).
+**Rollback:** an older runner writes 1.1.0 or 1.2.0 receipts again and records
+no model; the 1.3.0 documents already written stay valid under both readers. A
+catalog synced by an older runner lists no topics, and the console then
+defaults as before and says why.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -377,12 +443,14 @@ In addition to the next entry's six, in its order:
 
 ### Migration and rollback after `v0.2.0-rc.1`
 
-An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30
-and 31, in the order of the next entry's upgrade path. Item 28 moves the engine in
+An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
+31 and 32, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
-console's text), and item 31 takes effect at each catalog's next sync. To roll back to
+console's text), and item 31 takes effect at each catalog's next sync; item 32
+changes the runner's receipts and records, the catalog's view (runner and
+controller), the product API and the console. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -391,7 +459,9 @@ console's text), and item 31 takes effect at each catalog's next sync. To roll b
 2. Roll the controller and the runner back together (item 28): they run the
    0.21.0 engine again, and that build's `doctor` refuses 0.23.3. The runner
    signs format 1.3.0 again, sampled (item 30); the 1.4.0 scorecards already
-   written stay valid under both readers.
+   written stay valid under both readers. It writes 1.1.0 or 1.2.0 receipts
+   again with no `topic_configuration` (item 32); the 1.3.0 receipts and
+   records already written stay valid.
 
 ---
 

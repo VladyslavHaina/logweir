@@ -1,13 +1,15 @@
-//! `BackupReceipt::validate_invariants` has exactly ELEVEN arms — the four
+//! `BackupReceipt::validate_invariants` has exactly TWENTY-ONE arms — the four
 //! SELF-CONTRADICTION invariants and, since Task 5b fix round 1, the one
 //! CLOSED VALUE SET (`source.auth.mode`), plus since FX-4 the six arms (6-11)
-//! that read ONLY the 1.1.0 `config_coverage` block — and each one refuses with
-//! an exact message.
+//! that read ONLY the 1.1.0 `config_coverage` block, plus since PROD-05.1 the
+//! eight (12-19) that run only on the 1.3.0 `topic_configuration` block and
+//! the two (20-21) over its `owner_detection` — and each one refuses with an
+//! exact message.
 //!
 //! The four and the five are asserted SEPARATELY and on purpose:
 //! `arm_cases()` carries the four self-contradiction arms and
 //! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` closes over them, while
-//! `validate_invariants_has_exactly_eleven_return_err_statements` closes over
+//! `validate_invariants_has_exactly_twenty_one_return_err_statements` closes over
 //! the function's TOTAL by reading its source text. So an arm added to the
 //! function without a case here fails the second test, and a case deleted
 //! from `arm_cases()` fails the first — neither number can go stale under
@@ -38,8 +40,9 @@
 //! the bottom, and well inside the per-test budget.
 
 use logweir_core::backup_receipt::{
-    BackupReceipt, ConfigCoverage, EffectiveConfigValue, ReceiptArchive, ReceiptAuth,
+    BackupReceipt, ConfigCoverage, ConfigEntry, EffectiveConfigValue, ReceiptArchive, ReceiptAuth,
     ReceiptCovered, ReceiptEngine, ReceiptSource, SourceConfigCoverage, TopicConfigCoverage,
+    TopicConfiguration, TopicOwner,
 };
 use std::collections::BTreeMap;
 
@@ -84,6 +87,8 @@ fn pristine() -> BackupReceipt {
             to_ms: 1_757_419_486_000,
         },
         config_coverage: None,
+        topic_configuration: None,
+        owner_detection: None,
     }
 }
 
@@ -96,7 +101,7 @@ fn pristine() -> BackupReceipt {
 /// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
 /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` keeps saying exactly
 /// what its name says while
-/// `validate_invariants_has_exactly_eleven_return_err_statements` pins the
+/// `validate_invariants_has_exactly_twenty_one_return_err_statements` pins the
 /// total.
 fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     // Arm 1: a major this reader has never seen.
@@ -253,7 +258,7 @@ fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
     }
 }
 
-/// **THE TOTAL.** `validate_invariants` has exactly eleven refusing statements.
+/// **THE TOTAL.** `validate_invariants` has exactly twenty-one refusing statements.
 ///
 /// Read out of the SOURCE TEXT, which is the only way to make the count a
 /// claim about the function rather than about this file's case list: an arm
@@ -266,7 +271,7 @@ fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
 /// `crates/logweir/tests/two_reader_parity.rs::
 /// every_invariant_arm_has_a_corpus_case` applies to the scorecard's arms).
 #[test]
-fn validate_invariants_has_exactly_eleven_return_err_statements() {
+fn validate_invariants_has_exactly_twenty_one_return_err_statements() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/backup_receipt.rs"
@@ -287,9 +292,9 @@ fn validate_invariants_has_exactly_eleven_return_err_statements() {
 
     let total = body.matches("return Err(format!(").count();
     assert_eq!(
-        total, 11,
+        total, 21,
         "BackupReceipt::validate_invariants has {total} `return Err(format!(` \
-         statement(s), not 11. Every one of them needs a per-arm test in this file with \
+         statement(s), not 21. Every one of them needs a per-arm test in this file with \
          its exact message AND a case in \
          e2e/fixtures/invariants/backup-receipt-index.json — \
          scripts/check-invariant-corpus.sh derives the list from this same slice and \
@@ -315,7 +320,7 @@ fn validate_invariants_has_exactly_eleven_return_err_statements() {
 /// exact message, and a pristine receipt accepted. Arm 5 — the closed value
 /// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
 /// function's total is
-/// `validate_invariants_has_exactly_eleven_return_err_statements`.
+/// `validate_invariants_has_exactly_twenty_one_return_err_statements`.
 ///
 /// **RENAMED, Task 12 closeout carry (c).** It was
 /// `backup_receipt_invariants_have_exactly_four_arms`, which Task 5b's fix
@@ -948,4 +953,506 @@ fn a_1_0_0_receipt_round_trips_byte_for_byte_through_the_1_1_0_type() {
         String::from_utf8(bytes).unwrap(),
         "re-serialising a 1.0.0 receipt must not add a config_coverage key"
     );
+}
+
+// ---------------------------------------------------------------------------
+// PROD-05.1: format 1.3.0's `topic_configuration` block and arms 12-21
+// ---------------------------------------------------------------------------
+
+fn entry(value: Option<&str>, source: &str, portability: &str) -> ConfigEntry {
+    ConfigEntry {
+        value: value.map(str::to_string),
+        source: source.to_string(),
+        portability: portability.to_string(),
+    }
+}
+
+/// A 1.3.0 receipt that satisfies all twenty-one arms: `orders` a compacted,
+/// min-in-sync-2 topic with an inherited retention and a removed-in-4.0
+/// override, owned by a Strimzi `KafkaTopic`; `payments` with a secret and a
+/// provider-only override, declared externally owned; and the run looked in
+/// both places (`owner_detection`).
+fn pristine_1_3() -> BackupReceipt {
+    let mut doc = pristine_1_1();
+    doc.format_version = "1.3.0".to_string();
+    let mut orders = BTreeMap::new();
+    orders.insert(
+        "cleanup.policy".to_string(),
+        entry(Some("compact"), "dynamicTopicConfig", "portable"),
+    );
+    orders.insert(
+        "min.insync.replicas".to_string(),
+        entry(Some("2"), "dynamicTopicConfig", "portable"),
+    );
+    orders.insert(
+        "retention.ms".to_string(),
+        entry(Some("604800000"), "defaultConfig", "inherited"),
+    );
+    orders.insert(
+        "message.format.version".to_string(),
+        entry(Some("3.0-IV1"), "dynamicTopicConfig", "removedInKafka4"),
+    );
+    let mut payments = BTreeMap::new();
+    payments.insert(
+        "vendor.token".to_string(),
+        entry(None, "dynamicTopicConfig", "secret"),
+    );
+    payments.insert(
+        "confluent.placement.constraints".to_string(),
+        entry(Some("{}"), "dynamicTopicConfig", "providerOnly"),
+    );
+    let mut model = BTreeMap::new();
+    model.insert(
+        "orders".to_string(),
+        TopicConfiguration {
+            partitions: Some(3),
+            replication_factor: Some(3),
+            entries: Some(orders),
+            owner: Some(TopicOwner {
+                kind: "strimzi".into(),
+                basis: "kafkaTopicResource".into(),
+                reference: "kafka/orders".into(),
+            }),
+        },
+    );
+    model.insert(
+        "payments".to_string(),
+        TopicConfiguration {
+            partitions: Some(1),
+            replication_factor: Some(1),
+            entries: Some(payments),
+            owner: Some(TopicOwner {
+                kind: "external".into(),
+                basis: "declared".into(),
+                reference: "terraform: kafka_topic.payments".into(),
+            }),
+        },
+    );
+    doc.topic_configuration = Some(model);
+    doc.owner_detection = Some(vec!["declared".into(), "kafkaTopicResources".into()]);
+    doc
+}
+
+fn topic<'a>(doc: &'a mut BackupReceipt, name: &str) -> &'a mut TopicConfiguration {
+    doc.topic_configuration
+        .as_mut()
+        .unwrap()
+        .get_mut(name)
+        .unwrap()
+}
+
+#[test]
+fn a_1_3_0_receipt_with_every_class_and_owner_satisfies_every_invariant() {
+    assert_eq!(pristine_1_3().validate_invariants(), Ok(()));
+    // A denied and a failed read record no entries, and a read whose manifest
+    // differed records them; partitions and the factor are the archive's and
+    // stand either way.
+    let mut doc = pristine_1_3();
+    doc.config_coverage
+        .as_mut()
+        .unwrap()
+        .insert("orders".into(), coverage("captureDenied", None, None));
+    topic(&mut doc, "orders").entries = None;
+    doc.config_coverage.as_mut().unwrap().insert(
+        "payments".into(),
+        coverage("notCaptured", Some("manifestDiffers"), None),
+    );
+    assert_eq!(doc.validate_invariants(), Ok(()));
+    let mut doc = pristine_1_3();
+    doc.config_coverage.as_mut().unwrap().insert(
+        "orders".into(),
+        coverage("notCaptured", Some("describeFailed"), None),
+    );
+    let t = topic(&mut doc, "orders");
+    t.entries = None;
+    t.owner = None;
+    t.partitions = None;
+    t.replication_factor = None;
+    assert_eq!(doc.validate_invariants(), Ok(()));
+    // Every class the table defines, as an override; and `inherited` from
+    // every broker source.
+    let mut doc = pristine_1_3();
+    let e = topic(&mut doc, "orders").entries.as_mut().unwrap();
+    for class in logweir_core::topic_configuration::PORTABILITY_CLASSES {
+        if class != "inherited" && class != "secret" {
+            e.insert(
+                format!("k.{class}"),
+                entry(Some("v"), "dynamicTopicConfig", class),
+            );
+        }
+    }
+    for source in [
+        "dynamicBrokerConfig",
+        "dynamicDefaultBrokerConfig",
+        "staticBrokerConfig",
+        "defaultConfig",
+        "unknown",
+    ] {
+        e.insert(format!("i.{source}"), entry(Some("v"), source, "inherited"));
+    }
+    assert_eq!(doc.validate_invariants(), Ok(()));
+}
+
+#[test]
+fn a_receipt_without_topic_configuration_is_decided_as_before() {
+    // Every earlier minor, and a 1.3.0 that omits the block (weaker: NOT
+    // RECORDED), all accepted.
+    for version in ["1.1.0", "1.2.0", "1.3.0"] {
+        let mut doc = pristine_1_1();
+        doc.format_version = version.into();
+        assert_eq!(doc.validate_invariants(), Ok(()), "{version}");
+    }
+}
+
+#[test]
+fn arm_12_refuses_topic_configuration_under_a_minor_before_3() {
+    for version in ["1.0.0", "1.1.0", "1.2.9"] {
+        let mut doc = pristine_1_3();
+        doc.format_version = version.to_string();
+        // 1.0.x would be arm 6's first; drop the 1.1 block so arm 12 is reached.
+        let want = if version == "1.0.0" {
+            doc.config_coverage = None;
+            format!(
+                "topic_configuration is present but format_version \"{version}\" predates it: \
+                 the field is defined from 1.3.0"
+            )
+        } else {
+            format!(
+                "topic_configuration is present but format_version \"{version}\" predates it: \
+                 the field is defined from 1.3.0"
+            )
+        };
+        refused_with(&doc, &want, "arm 12");
+    }
+}
+
+#[test]
+fn arm_13_refuses_topic_configuration_without_config_coverage() {
+    let mut doc = pristine_1_3();
+    doc.config_coverage = None;
+    refused_with(
+        &doc,
+        "topic_configuration is present under format_version \"1.3.0\" but config_coverage \
+         is not: a topic's configuration entries cannot be judged without the read that \
+         produced them",
+        "arm 13",
+    );
+}
+
+#[test]
+fn arm_14_refuses_topic_configuration_that_does_not_cover_the_named_topic_set() {
+    let mut doc = pristine_1_3();
+    doc.topic_configuration.as_mut().unwrap().remove("payments");
+    refused_with(
+        &doc,
+        "topic_configuration covers {\"orders\"} but the named topic set is {\"orders\", \
+         \"payments\"}",
+        "arm 14, a missing topic",
+    );
+    let mut doc = pristine_1_3();
+    let extra = topic(&mut doc, "orders").clone();
+    doc.topic_configuration
+        .as_mut()
+        .unwrap()
+        .insert("invoices".into(), extra);
+    refused_with(
+        &doc,
+        "topic_configuration covers {\"invoices\", \"orders\", \"payments\"} but the named \
+         topic set is {\"orders\", \"payments\"}",
+        "arm 14, an extra topic",
+    );
+}
+
+#[test]
+fn arm_15_refuses_entries_that_do_not_fit_the_read() {
+    // Entries beside a denied read: an observation that could not exist.
+    let mut doc = pristine_1_3();
+    doc.config_coverage
+        .as_mut()
+        .unwrap()
+        .insert("orders".into(), coverage("captureDenied", None, None));
+    refused_with(
+        &doc,
+        "topic_configuration[\"orders\"].entries present does not fit its config_coverage \
+         \"captureDenied\": entries are recorded exactly when the configuration read \
+         succeeded (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")",
+        "arm 15, entries beside a denied read",
+    );
+    let mut doc = pristine_1_3();
+    doc.config_coverage.as_mut().unwrap().insert(
+        "orders".into(),
+        coverage("notCaptured", Some("describeFailed"), None),
+    );
+    refused_with(
+        &doc,
+        "topic_configuration[\"orders\"].entries present does not fit its config_coverage \
+         \"notCaptured/describeFailed\": entries are recorded exactly when the configuration \
+         read succeeded (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")",
+        "arm 15, entries beside a failed read",
+    );
+    // No entries beside a read that succeeded: "not recorded" masquerading.
+    let mut doc = pristine_1_3();
+    topic(&mut doc, "payments").entries = None;
+    refused_with(
+        &doc,
+        "topic_configuration[\"payments\"].entries absent does not fit its config_coverage \
+         \"captured\": entries are recorded exactly when the configuration read succeeded \
+         (\"captured\", or \"notCaptured\" with reason \"manifestDiffers\")",
+        "arm 15, no entries beside a successful read",
+    );
+}
+
+#[test]
+fn arm_16_refuses_a_source_or_class_outside_the_closed_sets() {
+    let mut doc = pristine_1_3();
+    topic(&mut doc, "orders").entries.as_mut().unwrap().insert(
+        "segment.ms".into(),
+        entry(Some("1"), "dynamicTopicConfig", "portableish"),
+    );
+    let tail = " are not a source and class this format defines: the source is \
+                \"dynamicTopicConfig\", \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \
+                \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\", and the class is \
+                \"portable\", \"inherited\", \"removedInKafka4\", \"clusterBound\", \
+                \"requiresTieredStorage\", \"providerOnly\" or \"secret\"";
+    refused_with(
+        &doc,
+        &format!(
+            "topic_configuration[\"orders\"].entries[\"segment.ms\"] source \
+             \"dynamicTopicConfig\" and portability \"portableish\"{tail}"
+        ),
+        "arm 16, a class",
+    );
+    let mut doc = pristine_1_3();
+    topic(&mut doc, "orders").entries.as_mut().unwrap().insert(
+        "segment.ms".into(),
+        entry(Some("1"), "DEFAULT_CONFIG", "inherited"),
+    );
+    refused_with(
+        &doc,
+        &format!(
+            "topic_configuration[\"orders\"].entries[\"segment.ms\"] source \
+             \"DEFAULT_CONFIG\" and portability \"inherited\"{tail}"
+        ),
+        "arm 16, a source",
+    );
+}
+
+#[test]
+fn arm_17_refuses_a_class_that_does_not_fit_its_source_or_value() {
+    let tail = ": an entry is \"secret\" exactly when it carries no value, and otherwise \
+                \"inherited\" exactly when its source is not \"dynamicTopicConfig\"";
+    let cases = [
+        // A broker default passed off as the topic's own portable override.
+        (
+            entry(Some("604800000"), "defaultConfig", "portable"),
+            "is \"portable\" from \"defaultConfig\" with a value",
+        ),
+        // The topic's own override passed off as inherited.
+        (
+            entry(Some("compact"), "dynamicTopicConfig", "inherited"),
+            "is \"inherited\" from \"dynamicTopicConfig\" with a value",
+        ),
+        // A secret that carries its value.
+        (
+            entry(Some("hunter2"), "dynamicTopicConfig", "secret"),
+            "is \"secret\" from \"dynamicTopicConfig\" with a value",
+        ),
+        // A value missing from something that is not a secret.
+        (
+            entry(None, "dynamicTopicConfig", "portable"),
+            "is \"portable\" from \"dynamicTopicConfig\" with no value",
+        ),
+    ];
+    for (bad, said) in cases {
+        let mut doc = pristine_1_3();
+        topic(&mut doc, "orders")
+            .entries
+            .as_mut()
+            .unwrap()
+            .insert("k".into(), bad);
+        refused_with(
+            &doc,
+            &format!("topic_configuration[\"orders\"].entries[\"k\"] {said}{tail}"),
+            "arm 17",
+        );
+    }
+}
+
+#[test]
+fn arm_18_refuses_an_owner_outside_the_closed_sets() {
+    let tail = " is not an owner this format defines: the kind is \"strimzi\" or \
+                \"external\", the basis is \"kafkaTopicResource\" (for \"strimzi\" only) or \
+                \"declared\", and the reference is 1 to 256 characters with no control \
+                character";
+    let cases = [
+        ("terraform", "declared", "x".to_string()),
+        ("external", "kafkaTopicResource", "kafka/orders".to_string()),
+        ("strimzi", "label", "kafka/orders".to_string()),
+        ("strimzi", "declared", "  ".to_string()),
+        ("strimzi", "declared", "a\u{7}b".to_string()),
+        ("external", "declared", "x".repeat(257)),
+    ];
+    for (kind, basis, reference) in cases {
+        let mut doc = pristine_1_3();
+        topic(&mut doc, "orders").owner = Some(TopicOwner {
+            kind: kind.into(),
+            basis: basis.into(),
+            reference,
+        });
+        refused_with(
+            &doc,
+            &format!("topic_configuration[\"orders\"].owner \"{kind}\" by \"{basis}\"{tail}"),
+            "arm 18",
+        );
+    }
+    // The boundary: 256 characters is a reference.
+    let mut doc = pristine_1_3();
+    topic(&mut doc, "orders").owner.as_mut().unwrap().reference = "x".repeat(256);
+    assert_eq!(doc.validate_invariants(), Ok(()));
+}
+
+#[test]
+fn arm_19_refuses_a_zero_count() {
+    let mut doc = pristine_1_3();
+    topic(&mut doc, "payments").partitions = Some(0);
+    refused_with(
+        &doc,
+        "topic_configuration[\"payments\"] records partitions 0 and replication_factor 1: a \
+         recorded count is at least 1",
+        "arm 19, partitions",
+    );
+    let mut doc = pristine_1_3();
+    let t = topic(&mut doc, "payments");
+    t.partitions = None;
+    t.replication_factor = Some(0);
+    refused_with(
+        &doc,
+        "topic_configuration[\"payments\"] records partitions absent and replication_factor \
+         0: a recorded count is at least 1",
+        "arm 19, the factor",
+    );
+}
+
+const ARM_20_TAIL: &str = " is not a detection this format defines: it is present only \
+                           beside topic_configuration, and lists \"declared\" and \
+                           \"kafkaTopicResources\" each at most once";
+
+/// **Arm 20 (fix round, M2).** `owner_detection` is the closed set, each word
+/// at most once, and only beside the model it qualifies. An EMPTY list is a
+/// run that looked nowhere — legal — and so is an absent one.
+#[test]
+fn arm_20_refuses_a_detection_outside_the_closed_set_or_beside_no_model() {
+    for bad in [
+        vec!["labels".to_string()],
+        vec!["declared".to_string(), "declared".to_string()],
+        vec!["Declared".to_string()],
+        vec!["kafkaTopicResource".to_string()],
+    ] {
+        let mut doc = pristine_1_3();
+        doc.owner_detection = Some(bad.clone());
+        refused_with(
+            &doc,
+            &format!("owner_detection {bad:?}{ARM_20_TAIL}"),
+            "arm 20",
+        );
+    }
+    // Beside no model: a 1.1.0 document claiming where it looked for owners
+    // it records none of.
+    let mut doc = pristine_1_1();
+    doc.owner_detection = Some(Vec::new());
+    refused_with(
+        &doc,
+        &format!("owner_detection []{ARM_20_TAIL}"),
+        "arm 20, no model",
+    );
+    // Legal: empty, absent, one, both — with the owners arm 21 then allows.
+    let mut doc = pristine_1_3();
+    for t in ["orders", "payments"] {
+        topic(&mut doc, t).owner = None;
+    }
+    for ok in [None, Some(vec![]), Some(vec!["declared".to_string()])] {
+        doc.owner_detection = ok.clone();
+        assert_eq!(doc.validate_invariants(), Ok(()), "{ok:?}");
+    }
+}
+
+/// **Arm 21 (fix round, M2).** An owner is recorded only from a source the
+/// run looked in: a `declared` owner needs `declared`, a `kafkaTopicResource`
+/// owner `kafkaTopicResources`. An absent detection reads as empty.
+#[test]
+fn arm_21_refuses_an_owner_from_a_source_the_run_did_not_look_in() {
+    let tail = ": a \"declared\" owner needs \"declared\", a \"kafkaTopicResource\" owner \
+                \"kafkaTopicResources\"";
+    let mut doc = pristine_1_3();
+    doc.owner_detection = Some(vec!["declared".into()]);
+    refused_with(
+        &doc,
+        &format!(
+            "topic_configuration[\"orders\"].owner by \"kafkaTopicResource\" names no source \
+             owner_detection [\"declared\"] lists{tail}"
+        ),
+        "arm 21, resources not read",
+    );
+    let mut doc = pristine_1_3();
+    doc.owner_detection = Some(vec!["kafkaTopicResources".into()]);
+    refused_with(
+        &doc,
+        &format!(
+            "topic_configuration[\"payments\"].owner by \"declared\" names no source \
+             owner_detection [\"kafkaTopicResources\"] lists{tail}"
+        ),
+        "arm 21, nothing declared",
+    );
+    let mut doc = pristine_1_3();
+    doc.owner_detection = None;
+    refused_with(
+        &doc,
+        &format!(
+            "topic_configuration[\"orders\"].owner by \"kafkaTopicResource\" names no source \
+             owner_detection [] lists{tail}"
+        ),
+        "arm 21, absent reads as empty",
+    );
+}
+
+/// The 1.0.0-1.1.0 arms run before the 1.3.0 ones: a document with both a
+/// coverage fault and a model fault is refused for the coverage fault.
+#[test]
+fn the_config_coverage_arms_are_evaluated_before_the_topic_configuration_arms() {
+    let mut doc = pristine_1_3();
+    doc.config_coverage
+        .as_mut()
+        .unwrap()
+        .get_mut("orders")
+        .unwrap()
+        .coverage = "nope".into();
+    topic(&mut doc, "orders").partitions = Some(0);
+    let got = doc.validate_invariants().unwrap_err();
+    assert!(
+        got.starts_with("config_coverage[\"orders\"].coverage"),
+        "{got}"
+    );
+}
+
+/// The written version and the first minor that defines the block move
+/// together, or every receipt this build signs refuses itself at arm 12.
+#[test]
+fn the_written_version_defines_topic_configuration() {
+    use logweir_core::backup_receipt::{
+        format_version_for, FORMAT_VERSION_WITH_TOPIC_CONFIGURATION,
+        TOPIC_CONFIGURATION_SINCE_MINOR,
+    };
+    let minor: u64 = FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
+        .split('.')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(minor, TOPIC_CONFIGURATION_SINCE_MINOR);
+    let mut archive = pristine().archive;
+    assert_eq!(format_version_for(&archive, true), "1.3.0");
+    assert_eq!(format_version_for(&archive, false), "1.1.0");
+    archive.manifest_version_id = Some("v1".into());
+    assert_eq!(format_version_for(&archive, true), "1.3.0");
+    assert_eq!(format_version_for(&archive, false), "1.2.0");
 }
