@@ -218,6 +218,10 @@ pub fn run(
         "source.storage",
         &spec.source.storage,
     )?;
+    // **FX-20 fix round (review F1)**, purely local: a region that is not a
+    // region name, on the source archive or the evidence store.
+    logweir_core::guard::reject_invalid_storage_region("source.storage", &spec.source.storage)?;
+    logweir_core::guard::reject_invalid_storage_region("evidence", &spec.evidence)?;
 
     // **PROD-01.3**, purely local: SASL/PLAIN (and mTLS) without TLS on the
     // target is refused, exit 3, `refusal-reason=PlainWithoutTls` for PLAIN.

@@ -58,9 +58,13 @@
 //! * [`archive_location_binding`]: an inline (legacy) archive has no object of
 //!   its own — a `Backup` is one-shot and a schedule's `Backup`s are minted by
 //!   the controller — so its Secret is bound to the LOCATION the runner dials:
-//!   the scheme, the bucket and the endpoint, never the prefix. Any object in
-//!   the namespace may then use that credential, but only at that location,
-//!   which is what a `BackupDestination` in the same namespace already allows.
+//!   the scheme, the bucket, the endpoint, the region, the addressing style
+//!   and `allowHttp` — every field that shapes the URL or its transport —
+//!   never the prefix. Any object in the namespace may then use that
+//!   credential, but only at that location, which is what a
+//!   `BackupDestination` in the same namespace already allows. The region is
+//!   ALSO refused outright when it is not a region name
+//!   ([`crate::guard::reject_invalid_storage_region`]), FX-20's fix round F1.
 
 use crate::engine::StorageUrl;
 
@@ -205,6 +209,17 @@ fn binding(subject: &str, kind: &str, lines: &[(&str, &str)]) -> String {
 /// The ROUTE of an archive `StorageUrl`, every field that decides where a
 /// request goes and how, in a fixed order. `with_prefix` is `false` for an
 /// inline archive, whose binding is the location and not the key space.
+///
+/// **EVERY S3 FIELD BUT THE PREFIX IS IN BOTH FORMS** (FX-20 fix round,
+/// review F1). The location form once kept only scheme, bucket and endpoint;
+/// but with no endpoint `object_store` builds the host from the REGION
+/// (`s3.<region>.amazonaws.com`), so a plan keeping the victim's bucket and
+/// naming `region: "x@attacker/"` carried the victim's binding to the
+/// attacker's host. The addressing style decides whether the bucket is a host
+/// label, and `allowHttp` whether the request may travel in the clear, so
+/// they are bound too. The prefix only names keys under the bound bucket on
+/// the bound host (`object_store` encodes each path segment), which is why an
+/// inline location leaves it out.
 fn route_lines(storage: &StorageUrl, with_prefix: bool) -> Vec<(&'static str, String)> {
     match storage {
         StorageUrl::S3 {
@@ -222,10 +237,10 @@ fn route_lines(storage: &StorageUrl, with_prefix: bool) -> Vec<(&'static str, St
             ];
             if with_prefix {
                 lines.push(("prefix", prefix.clone()));
-                lines.push(("region", region.clone().unwrap_or_default()));
-                lines.push(("pathStyle", path_style.to_string()));
-                lines.push(("allowHttp", allow_http.to_string()));
             }
+            lines.push(("region", region.clone().unwrap_or_default()));
+            lines.push(("pathStyle", path_style.to_string()));
+            lines.push(("allowHttp", allow_http.to_string()));
             lines
         }
         StorageUrl::Gcs { bucket, prefix } => {
@@ -281,9 +296,10 @@ pub fn destination_binding(uid: &str, archive: &StorageUrl) -> String {
 }
 
 /// The binding of an inline archive's `secretRef`: the LOCATION the runner
-/// dials — scheme, bucket (or account and container) and endpoint — and no
-/// object UID. See the module header for why an inline archive has no object
-/// to bind to.
+/// dials — for S3 the scheme, bucket, endpoint, region, addressing style and
+/// `allowHttp` (every field but the prefix); the bucket for GCS; the account
+/// and container for Azure — and no object UID. See the module header for why
+/// an inline archive has no object to bind to.
 #[must_use]
 pub fn archive_location_binding(storage: &StorageUrl) -> String {
     let lines = route_lines(storage, false);
@@ -451,7 +467,38 @@ mod tests {
     }
 
     #[test]
-    fn the_location_binding_is_the_bucket_and_endpoint_and_never_the_prefix() {
+    fn the_location_binding_covers_the_region_and_every_url_field_but_never_the_prefix() {
+        // Review F1's probe shape: the victim's bucket, no endpoint, and a
+        // region that is a host injection. Each S3 field that shapes the URL
+        // or its transport moves the binding.
+        let aws = archive_location_binding(&s3("victim-backups", "team-a", None));
+        for (field, flip) in [("region", 0), ("pathStyle", 1), ("allowHttp", 2)] {
+            let mut url = s3("victim-backups", "team-a", None);
+            if let StorageUrl::S3 {
+                region,
+                path_style,
+                allow_http,
+                ..
+            } = &mut url
+            {
+                match flip {
+                    0 => *region = Some("x@127.0.0.1:9/".to_string()),
+                    1 => *path_style = false,
+                    _ => *allow_http = true,
+                }
+            }
+            assert_ne!(
+                archive_location_binding(&url),
+                aws,
+                "the location binding ignores {field}"
+            );
+        }
+        let mut no_region = s3("victim-backups", "team-a", None);
+        if let StorageUrl::S3 { region, .. } = &mut no_region {
+            *region = None;
+        }
+        assert_ne!(archive_location_binding(&no_region), aws);
+
         let a = archive_location_binding(&s3("b", "team-a", Some("https://minio:9000")));
         assert!(a.starts_with("v1:location:sha256:"), "{a}");
         assert_eq!(

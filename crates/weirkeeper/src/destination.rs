@@ -1764,21 +1764,35 @@ pub fn inline_archive_binding_env(
 }
 
 /// The location an inline-archive runner actually dials: the plan's (or the
-/// frozen) storage block, with an S3 endpoint the block leaves out filled from
-/// the `AWS_ENDPOINT_URL` the Job is handed — `object_store`'s own fall-back,
-/// so the binding covers the host the request really goes to.
+/// frozen) storage block, with an S3 endpoint and region the block leaves out
+/// filled from the `AWS_ENDPOINT_URL` and `AWS_REGION` the Job is handed —
+/// `object_store`'s own fall-back, so the binding covers the host the request
+/// really goes to. The region joined the location binding in FX-20's fix
+/// round (review F1); filling it here makes a `Restore` whose plan omits it
+/// expect the same binding as a `Backup` at that location, whose frozen block
+/// already carries the controller's `AWS_REGION`
+/// (`crate::retention::storage_url_for`).
 #[must_use]
 pub fn effective_inline_storage(
     storage: &StorageUrl,
     addressing: &[(String, String)],
 ) -> StorageUrl {
+    let forwarded = |var: &str| {
+        addressing
+            .iter()
+            .find(|(name, value)| name == var && !value.trim().is_empty())
+            .map(|(_, value)| value.clone())
+    };
     let mut effective = storage.clone();
-    if let StorageUrl::S3 { endpoint, .. } = &mut effective {
+    if let StorageUrl::S3 {
+        endpoint, region, ..
+    } = &mut effective
+    {
         if endpoint.as_deref().is_none_or(|e| e.trim().is_empty()) {
-            *endpoint = addressing
-                .iter()
-                .find(|(name, value)| name == AWS_ENDPOINT_URL_ENV && !value.trim().is_empty())
-                .map(|(_, value)| value.clone());
+            *endpoint = forwarded(AWS_ENDPOINT_URL_ENV);
+        }
+        if region.is_none() {
+            *region = forwarded(AWS_REGION_ENV);
         }
     }
     effective

@@ -51,7 +51,7 @@
       "required": ["bucket"],
       "properties": {
         "endpoint": { "type": "string" },
-        "region": { "type": "string" },
+        "region": { "type": "string", "pattern": "^([a-z0-9-]{1,32})?$", "description": "An S3 region name, or empty. Without an endpoint the region is part of the host a request is sent to (FX-20, review F1)." },
         "bucket": { "type": "string", "minLength": 1 }
       }
     },
@@ -332,7 +332,7 @@
           "additionalProperties": false,
           "properties": {
             "endpoint": { "type": "string" },
-            "region": { "type": "string" },
+            "region": { "type": "string", "pattern": "^([a-z0-9-]{1,32})?$", "description": "An S3 region name, or empty; rendered as the runner's AWS_REGION. Without an endpoint the region is part of the host a request is sent to (FX-20, review F1)." },
             "allowHttp": { "type": "boolean" },
             "virtualHostedStyle": { "type": "boolean" }
           }

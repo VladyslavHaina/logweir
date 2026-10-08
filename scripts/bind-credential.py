@@ -27,7 +27,19 @@ nothing written) when:
 * the Secret already carries a binding that is not this one (re-binding is
   never automatic; see docs/kubernetes.md §20.10 for adding a second one by
   hand, deliberately);
-* the object has not published its binding yet (upgrade the controller first).
+* the object has not published its binding yet (upgrade the controller first);
+* the binding the object PUBLISHED (`status`) is not the binding this tool
+  computes from the object's `spec` — the spec it prints, and the owner
+  confirms (FX-20 fix round, review F2). A status that lags its spec (a
+  `RetentionPolicy` whose destination was re-created elsewhere and back, a
+  PagerDuty endpoint edited a moment ago) would otherwise bind the credential
+  to a route nobody confirmed.
+
+The binding written is computed here from `metadata.uid` and the `spec`, in
+the product's own canonical forms (`logweir_core::credential_binding` and, for
+a `KafkaCluster`, `logweir_core::connection::credential_binding`); the Rust
+crate and `scripts/test_bind_credential_rows.py` both check those forms
+against `e2e/fixtures/credential-binding/bindings.json`.
 
 It is a DRY RUN unless `--apply` is given, and `--apply` also needs
 `--confirm-endpoint` set to the endpoint the dry run printed — the credential's
@@ -42,8 +54,17 @@ Usage:
         --name OBJECT [--route ROUTE] --secret SECRET [--apply --confirm-endpoint E]
 
     python3 scripts/bind-credential.py --context CTX --namespace NS \\
-        --location s3://BUCKET[/PREFIX] --endpoint URL|aws --secret SECRET \\
+        --location s3://BUCKET[/PREFIX] --endpoint URL|aws --region REGION|none \\
+        --path-style true|false --allow-http true|false --secret SECRET \\
         [--apply --confirm-endpoint E]
+
+An `s3://` location is bound over every field that shapes the URL the runner
+dials — endpoint, bucket, region, addressing style and `allowHttp` — so all
+five are stated; for a `Restore` they are its plan's `source.storage` (and
+`evidence`), and for a `Backup` or a schedule the controller's
+`AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` (path
+style is its negation) and `AWS_ALLOW_HTTP`. A region that is not a region
+name (`^[a-z0-9-]{1,32}$`) is refused.
 
 `--context` is required: this tool never uses a kubeconfig's current context.
 It needs `kubectl`, read on the Logweir kinds, `get` on the one Secret (its
@@ -71,34 +92,44 @@ EXIT_REFUSED = 3
 BINDING_KEY = "logweir-binding"
 KUBECTL_TIMEOUT_SECONDS = 60
 
+# Fully qualified: a bare `backups` or `restores` may resolve to another API
+# group's kind (Velero's `backups.velero.io`) on a cluster that has both, and
+# the inventory would then silently miss Logweir's own references (review S2).
+GROUP = "logweir.dev"
+
+
+def fq(plural: str) -> str:
+    return f"{plural}.{GROUP}"
+
+
 OBJECT_KINDS = {
-    "KafkaCluster": "kafkaclusters",
-    "BackupDestination": "backupdestinations",
-    "RetentionPolicy": "retentionpolicies",
-    "ProtectionPolicy": "protectionpolicies",
+    "KafkaCluster": fq("kafkaclusters"),
+    "BackupDestination": fq("backupdestinations"),
+    "RetentionPolicy": fq("retentionpolicies"),
+    "ProtectionPolicy": fq("protectionpolicies"),
 }
 
 # Every Logweir kind that can name a credential Secret, and the paths it names
 # one at. `object` kinds bind to the object's UID; `inline` kinds bind to the
 # archive LOCATION (their URL is the second path).
 INVENTORY = [
-    ("kafkaclusters", "KafkaCluster", "object",
+    (fq("kafkaclusters"), "KafkaCluster", "object",
      [("spec", "auth", "secretRef", "name"), ("spec", "auth", "clientCertificate", "name")], None),
-    ("backupdestinations", "BackupDestination", "object",
+    (fq("backupdestinations"), "BackupDestination", "object",
      [("spec", "access", role, "secret", "name")
       for role in ("archiveWrite", "archiveRead", "evidenceWrite", "evidenceRead")], None),
-    ("retentionpolicies", "RetentionPolicy", "object",
+    (fq("retentionpolicies"), "RetentionPolicy", "object",
      [("spec", "enforcement", "credentialSecretRef", "name")], None),
-    ("protectionpolicies", "ProtectionPolicy", "object", "routes", None),
-    ("backups", "Backup", "inline",
+    (fq("protectionpolicies"), "ProtectionPolicy", "object", "routes", None),
+    (fq("backups"), "Backup", "inline",
      [("spec", "archive", "secretRef", "name")], ("spec", "archive", "url")),
-    ("backupschedules", "BackupSchedule", "inline",
+    (fq("backupschedules"), "BackupSchedule", "inline",
      [("spec", "archive", "secretRef", "name")], ("spec", "archive", "url")),
-    ("restores", "Restore", "inline",
+    (fq("restores"), "Restore", "inline",
      [("spec", "sourceArchive", "secretRef", "name")], ("spec", "sourceArchive", "url")),
-    ("recoverycatalogs", "RecoveryCatalog", "inline",
+    (fq("recoverycatalogs"), "RecoveryCatalog", "inline",
      [("spec", "legacyArchive", "secretRef", "name")], ("spec", "legacyArchive", "url")),
-    ("preflights", "Preflight", "inline",
+    (fq("preflights"), "Preflight", "inline",
      [("spec", "request", "backup", "legacyArchive", "secretRef", "name"),
       ("spec", "request", "restore", "legacySourceArchive", "secretRef", "name")],
      None),
@@ -137,10 +168,11 @@ class Target:
     kind: str
     name: str
     uid: str
-    binding: str
-    endpoint: str
+    binding: str  # computed here, from metadata.uid and the spec
+    endpoint: str  # read from that same spec
     names_secret: bool
     detail: list[str] = field(default_factory=list)
+    published: str = ""  # status's binding, compared and never written
 
 
 def dig(obj, path):
@@ -151,21 +183,144 @@ def dig(obj, path):
     return obj
 
 
-def location_binding(url: str, endpoint: str) -> str:
-    """The binding of an inline archive's Secret: the scheme, the bucket (or
-    account and container) and the endpoint, never the prefix — the same
-    canonical form as `logweir_core::credential_binding::archive_location_binding`,
-    which `scripts/test_bind_credential_rows.py` and the Rust crate both check
-    against `e2e/fixtures/credential-binding/location.json`."""
+# ---------------------------------------------------------------- the forms
+# Ports of the product's canonical binding forms. Each is checked against
+# `e2e/fixtures/credential-binding/bindings.json`, which the Rust crate checks
+# too, so a drift on either side fails a gate rather than a migration.
+
+REGION_PATTERN = "^[a-z0-9-]{1,32}$"
+
+
+def is_region(region: str) -> bool:
+    return (0 < len(region) <= 32
+            and all(c in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in region))
+
+
+def _ascii_lower(text: str) -> str:
+    return "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in text)
+
+
+def _binding(subject: str, kind: str, lines: list[tuple[str, str]]) -> str:
+    canonical = f"logweir-credential-binding/v1\nkind={kind}\nsubject={subject}\n"
+    canonical += "".join(f"{k}={v}\n" for k, v in lines)
+    return f"v1:{subject}:sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def normalized_endpoint(endpoint: str | None) -> str:
+    e = (endpoint or "").strip()
+    return "aws" if e == "" else _ascii_lower(e.rstrip("/"))
+
+
+def _flag(value: bool) -> str:
+    return "true" if value else "false"
+
+
+@dataclass
+class S3Route:
+    """An S3 `StorageUrl`'s route, as `credential_binding::route_lines` reads it."""
+
+    bucket: str
+    prefix: str
+    region: str | None
+    endpoint: str | None
+    path_style: bool
+    allow_http: bool
+
+    def lines(self, with_prefix: bool) -> list[tuple[str, str]]:
+        lines = [("scheme", "s3"), ("bucket", self.bucket),
+                 ("endpoint", normalized_endpoint(self.endpoint))]
+        if with_prefix:
+            lines.append(("prefix", self.prefix))
+        lines += [("region", self.region or ""), ("pathStyle", _flag(self.path_style)),
+                  ("allowHttp", _flag(self.allow_http))]
+        return lines
+
+    def where(self) -> str:
+        """What the credential's owner confirms: where it will be presented."""
+        return (f"{self.endpoint or 'aws'} bucket={self.bucket} "
+                f"region={self.region or 'none'}")
+
+
+def destination_route(spec: dict) -> S3Route:
+    """`DestinationLocation::archive_storage_url` over a `BackupDestination`'s
+    spec: `allowHttp` from `transport.security` and from nothing else."""
+    storage = spec.get("storage") or {}
+    return S3Route(
+        bucket=storage.get("bucket") or "",
+        prefix=storage.get("prefix") or "",
+        region=storage.get("region"),
+        endpoint=storage.get("endpoint"),
+        path_style=storage.get("addressing") == "PathStyle",
+        allow_http=dig(spec, ("transport", "security")) == "InsecureHTTP",
+    )
+
+
+def destination_binding(uid: str, spec: dict) -> str:
+    return _binding(uid, "BackupDestination", destination_route(spec).lines(True))
+
+
+def retention_binding(uid: str, destination_spec: dict, scope: str) -> str:
+    lines = destination_route(destination_spec).lines(True) + [("scope", scope)]
+    return _binding(uid, "RetentionPolicy", lines)
+
+
+def notification_binding(uid: str, sink: str, endpoint: str | None) -> str:
+    if sink == "pagerduty":
+        where = (endpoint or "").strip() or "default"
+    else:
+        where = "in-secret"
+    return _binding(uid, "ProtectionPolicy", [("sink", sink), ("endpoint", where)])
+
+
+def kafka_binding(uid: str, spec: dict) -> str:
+    """PROD-01.3's form (`logweir_core::connection::credential_binding`), which
+    has no `kind=` line: bootstrap set, mode, username, TLS and CA reference."""
+    auth = spec.get("auth") or {}
+    mode = auth.get("mode") or "plaintext"
+    sasl = mode in ("scramSha512", "scramSha256", "plain")
+    username = (auth.get("username") or "") if sasl else ""
+    if mode == "mtls":
+        tls = True  # the resolver refuses mtls without TLS; resolved, it is TLS
+    elif mode == "plaintext":
+        tls = False
+    else:
+        tls = bool(auth.get("tls"))
+    ca = "none"
+    source = auth.get("tlsCa") or {}
+    if source.get("secretKeyRef"):
+        ref = source["secretKeyRef"]
+        ca = f"secret/{ref.get('name')}/{ref.get('key')}"
+    elif source.get("configMapKeyRef"):
+        ref = source["configMapKeyRef"]
+        ca = f"configMap/{ref.get('name')}/{ref.get('key')}"
+    servers = sorted({str(s).strip() for s in spec.get("bootstrapServers") or []})
+    canonical = (f"logweir-credential-binding/v1\nuid={uid}\nbootstrap={','.join(servers)}\n"
+                 f"mode={mode}\nusername={username}\ntls={_flag(tls)}\nca={ca}\n")
+    return f"v1:{uid}:sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def location_route(url: str, endpoint: str | None, region: str | None,
+                   path_style: bool, allow_http: bool) -> S3Route:
+    rest = url.split("://", 1)[1].strip("/")
+    first, _, tail = rest.partition("/")
+    return S3Route(first, tail, region, None if endpoint in (None, "", "aws") else endpoint,
+                   path_style, allow_http)
+
+
+def location_binding(url: str, endpoint: str | None, region: str | None = None,
+                     path_style: bool = False, allow_http: bool = False) -> str:
+    """The binding of an inline archive's Secret: for `s3://` every field that
+    shapes the URL the runner dials (scheme, bucket, endpoint, region,
+    addressing style, `allowHttp`), never the prefix; the bucket for `gs://`;
+    account and container for `az://` — the same canonical form as
+    `logweir_core::credential_binding::archive_location_binding`."""
     if "://" not in url:
         raise Refused(f"`{url}` is not an object-store URL")
     scheme, rest = url.split("://", 1)
     rest = rest.strip("/")
     first, _, tail = rest.partition("/")
     if scheme == "s3":
-        e = (endpoint or "").strip()
-        normalized = "aws" if e in ("", "aws") else e.rstrip("/").lower()
-        lines = [("scheme", "s3"), ("bucket", first), ("endpoint", normalized)]
+        lines = location_route(url, endpoint, region, path_style, allow_http).lines(False)
     elif scheme == "gs":
         lines = [("scheme", "gs"), ("bucket", first)]
     elif scheme == "az":
@@ -173,9 +328,7 @@ def location_binding(url: str, endpoint: str) -> str:
         lines = [("scheme", "az"), ("account", first), ("container", container)]
     else:
         raise Refused(f"`{scheme}://` is not a location this tool can bind")
-    canonical = "logweir-credential-binding/v1\nkind=ArchiveLocation\nsubject=location\n"
-    canonical += "".join(f"{k}={v}\n" for k, v in lines)
-    return "v1:location:sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+    return _binding("location", "ArchiveLocation", lines)
 
 
 def bucket_of(url: str | None) -> str | None:
@@ -254,36 +407,48 @@ def inventory(kube: Kubectl, secret: str) -> list[Reference]:
 
 
 def object_target(kube: Kubectl, kind: str, name: str, secret: str, route: str | None) -> Target:
+    """The object, the binding COMPUTED from its `metadata.uid` and `spec`, and
+    what its owner confirms, read from that same spec. The published `status`
+    binding is only compared with it (`plan`), never written (review F2)."""
     obj = kube.get_json(OBJECT_KINDS[kind], name, missing_ok=True)
     if obj is None:
         raise Refused(f"{kind} {name} does not exist in this namespace")
     uid = dig(obj, ("metadata", "uid")) or ""
+    if not uid:
+        raise Refused(f"{kind} {name} carries no metadata.uid; nothing can be bound to it")
     status = obj.get("status") or {}
     spec = obj.get("spec") or {}
     detail: list[str] = []
     if kind == "KafkaCluster":
         names = {dig(spec, ("auth", "secretRef", "name")),
                  dig(spec, ("auth", "clientCertificate", "name"))}
-        binding = status.get("credentialBinding") or ""
+        computed = kafka_binding(uid, spec)
+        published = status.get("credentialBinding") or ""
         endpoint = ",".join(spec.get("bootstrapServers") or [])
     elif kind == "BackupDestination":
         names = {dig(spec, ("access", r, "secret", "name"))
                  for r in ("archiveWrite", "archiveRead", "evidenceWrite", "evidenceRead")}
-        binding = status.get("credentialBinding") or ""
-        storage = spec.get("storage") or {}
-        endpoint = f"{storage.get('endpoint') or 'aws'} bucket={storage.get('bucket', '')}"
+        computed = destination_binding(uid, spec)
+        published = status.get("credentialBinding") or ""
+        endpoint = destination_route(spec).where()
     elif kind == "RetentionPolicy":
         names = {dig(spec, ("enforcement", "credentialSecretRef", "name"))}
-        binding = status.get("credentialBinding") or ""
         dest_name = dig(spec, ("destinationRef", "name")) or ""
-        dest = kube.get_json("backupdestinations", dest_name, missing_ok=True) or {}
-        storage = dig(dest, ("spec", "storage")) or {}
-        endpoint = (f"{storage.get('endpoint') or 'aws'} bucket={storage.get('bucket', '')} "
-                    f"scope={dig(spec, ('scope', 'prefix')) or ''}")
-        detail.append(f"destination {dest_name} (uid {dig(dest, ('metadata', 'uid')) or '?'})")
+        dest = kube.get_json(OBJECT_KINDS["BackupDestination"], dest_name, missing_ok=True)
+        if dest is None:
+            raise Refused(f"RetentionPolicy {name} names BackupDestination {dest_name!r}, "
+                          "which does not exist: there is no route to bind its key to")
+        dest_spec = dest.get("spec") or {}
+        scope = dig(spec, ("scope", "prefix")) or ""
+        computed = retention_binding(uid, dest_spec, scope)
+        published = status.get("credentialBinding") or ""
+        endpoint = f"{destination_route(dest_spec).where()} scope={scope}"
+        detail.append(f"destination {dest_name} (uid {dig(dest, ('metadata', 'uid')) or '?'}), "
+                      "whose route the key is bound to")
     else:  # ProtectionPolicy
         names = set()
-        endpoints = {}
+        endpoints: dict[str, str] = {}
+        computed_by_entry: dict[tuple[str, str], str] = {}
         for r in dig(spec, ("notifications", "routes")) or []:
             if route and r.get("name") != route:
                 continue
@@ -292,20 +457,30 @@ def object_target(kube: Kubectl, kind: str, name: str, secret: str, route: str |
                 if value:
                     names.add(value)
                     if value == secret:
+                        pd_endpoint = dig(r, ("pagerDuty", "endpoint")) if sink == "pagerduty" else None
+                        computed_by_entry[(r.get("name") or "", sink)] = notification_binding(
+                            uid, sink, pd_endpoint)
                         endpoints[f"{r.get('name')}/{sink}"] = (
-                            dig(r, ("pagerDuty", "endpoint")) or "the PagerDuty default"
+                            (pd_endpoint or "").strip() or "the PagerDuty default"
                             if sink == "pagerduty" else "the URL inside the Secret")
-        entries = [b for b in status.get("credentialBindings") or []
-                   if b.get("secretName") == secret and (not route or b.get("route") == route)]
-        distinct = {b.get("binding") for b in entries}
+        distinct = set(computed_by_entry.values())
         if len(distinct) > 1:
             raise Refused(f"the Secret is named by routes with different bindings "
-                          f"({', '.join(sorted(e.get('route', '?') for e in entries))}); "
+                          f"({', '.join(sorted(r for r, _ in computed_by_entry))}); "
                           "name one with --route")
-        binding = next(iter(distinct), "") or ""
+        computed = next(iter(distinct), "")
+        published_entries = {(b.get("route") or "", b.get("sink") or ""): b.get("binding") or ""
+                             for b in status.get("credentialBindings") or []
+                             if b.get("secretName") == secret}
+        published_values = {published_entries.get(entry, "") for entry in computed_by_entry}
+        if len(published_values) > 1:
+            raise Refused("the policy's published bindings for this Secret's routes disagree "
+                          "with each other, so the status lags the spec; let the controller "
+                          "reconcile and run this again")
+        published = next(iter(published_values), "")
         endpoint = "; ".join(f"{k}: {v}" for k, v in sorted(endpoints.items()))
     names.discard(None)
-    return Target(kind, name, uid, binding, endpoint, secret in names, detail)
+    return Target(kind, name, uid, computed, endpoint, secret in names, detail, published)
 
 
 def check_secret(kube: Kubectl, secret: str, target: Target | None) -> tuple[str, str | None]:
@@ -347,8 +522,21 @@ def plan(kube: Kubectl, args) -> tuple[str, str, str, list[str]]:
     refs = inventory(kube, args.secret)
     lines: list[str] = []
     if args.location:
-        binding = location_binding(args.location, args.endpoint)
-        endpoint = f"{args.endpoint or 'aws'} bucket={bucket_of(args.location)}"
+        if args.location.startswith("s3://"):
+            region = None if args.region == "none" else args.region
+            if region is not None and not is_region(region):
+                raise Refused(f"--region is not an S3 region name (it must match "
+                              f"{REGION_PATTERN}); a region is part of the host a request "
+                              "without an endpoint is sent to")
+            route = location_route(args.location, args.endpoint, region,
+                                   args.path_style == "true", args.allow_http == "true")
+            binding = location_binding(args.location, args.endpoint, region,
+                                       route.path_style, route.allow_http)
+            endpoint = (f"{route.where()} pathStyle={_flag(route.path_style)} "
+                        f"allowHttp={_flag(route.allow_http)}")
+        else:
+            binding = location_binding(args.location, args.endpoint)
+            endpoint = f"{args.endpoint or 'aws'} bucket={bucket_of(args.location)}"
         object_bound = [r for r in refs if r.basis == "object"]
         if object_bound:
             raise Refused(f"Secret {args.secret} is also named by "
@@ -379,10 +567,17 @@ def plan(kube: Kubectl, args) -> tuple[str, str, str, list[str]]:
                           "creator, delete the one they do not recognise, and treat the "
                           "credential as exposed if it ever ran. Each legitimate object gets "
                           "its own credential, entered by its owner")
-        if not target.binding.startswith("v1:"):
+        if not target.published.startswith("v1:"):
             raise Refused(f"{args.kind} {args.name} has published no binding yet "
-                          f"(status is `{target.binding or 'absent'}`): upgrade the controller "
-                          "and let it reconcile first")
+                          f"(status is `{target.published or 'absent'}`): upgrade the "
+                          "controller and let it reconcile first")
+        if target.published != target.binding:
+            raise Refused(f"{args.kind} {args.name}'s published binding (status) is not the one "
+                          "computed from the spec printed below: the status was computed from "
+                          "another spec — it lags an edit, or the object it names was "
+                          "re-created — so binding it would bind the credential to a route "
+                          "nobody confirmed. Let the controller reconcile and run this again; "
+                          "if they still differ, investigate the object's history")
         binding = target.binding
         endpoint = target.endpoint
         lines.append(f"{args.kind}/{args.name} (uid {target.uid})")
@@ -414,6 +609,9 @@ def main(argv: list[str] | None = None, runner=None, out=sys.stdout, err=sys.std
     parser.add_argument("--route")
     parser.add_argument("--location")
     parser.add_argument("--endpoint")
+    parser.add_argument("--region")
+    parser.add_argument("--path-style", choices=("true", "false"))
+    parser.add_argument("--allow-http", choices=("true", "false"))
     parser.add_argument("--secret", required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm-endpoint")
@@ -424,6 +622,12 @@ def main(argv: list[str] | None = None, runner=None, out=sys.stdout, err=sys.std
     if bool(args.location) == bool(args.kind) or (args.kind and not args.name) or (
             args.location and args.endpoint is None):
         print("bind-credential: name exactly one of --kind/--name or --location/--endpoint",
+              file=err)
+        return EXIT_USAGE
+    if args.location and args.location.startswith("s3://") and None in (
+            args.region, args.path_style, args.allow_http):
+        print("bind-credential: an s3:// location is bound over its region, addressing style "
+              "and allowHttp too: state --region (or `none`), --path-style and --allow-http",
               file=err)
         return EXIT_USAGE
     kube = Kubectl(args.context, args.namespace, runner)

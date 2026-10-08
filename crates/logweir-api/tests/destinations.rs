@@ -1499,3 +1499,50 @@ async fn fx20_a_rotation_refuses_a_secret_the_destination_does_not_already_name(
     assert_eq!(response.status.as_u16(), 200, "{}", response.text());
     app.fake.assert_strict();
 }
+
+/// **FX-20 fix round (review F1), at the API.** A region is part of the host
+/// an endpoint-less S3 request is sent to, so a create whose `storage.region`
+/// is not a region name is refused, `422 region_invalid`, and nothing is
+/// written; the value is never echoed. CONTROL: the same request with a real
+/// region and no endpoint is created.
+#[tokio::test]
+async fn fx20_a_destination_region_that_is_not_a_region_name_is_refused() {
+    let app = TestApp::new();
+    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    for (i, region) in [
+        "x@attacker.example/",
+        "us-east-1.attacker.example#",
+        "US-EAST-1",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut body = support::destination_body("aws-archive");
+        body["storage"]["region"] = json!(region);
+        body["storage"].as_object_mut().unwrap().remove("endpoint");
+        body["transport"] = json!({"security": "tls"});
+        let refused = app
+            .post(&path, Some(&format!("fx20-region-{i}")), &body.to_string())
+            .await;
+        refused.assert_problem(422, "destination_invalid");
+        let errors = refused.json()["errors"].clone();
+        assert!(
+            errors
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["field"] == "storage.region" && e["code"] == "region_invalid"),
+            "{region}: {errors}"
+        );
+        assert!(!refused.text().contains("attacker"), "{}", refused.text());
+        assert_eq!(app.fake.count("backupdestinations", NS_A), 0);
+    }
+    let mut body = support::destination_body("aws-archive");
+    body["storage"]["region"] = json!("eu-west-1");
+    body["storage"].as_object_mut().unwrap().remove("endpoint");
+    body["transport"] = json!({"security": "tls"});
+    let created = app
+        .post(&path, Some("fx20-region-control"), &body.to_string())
+        .await;
+    assert_eq!(created.status.as_u16(), 201, "{}", created.text());
+}

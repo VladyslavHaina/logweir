@@ -302,3 +302,89 @@ fn a_dollar_brace_in_a_spec_topic_exits_3_at_phase_0_naming_the_expansion() {
     );
     assert!(stderr.contains("orders${X}"), "{stderr}");
 }
+
+/// **FX-20 fix round (review F1), on the restore runner.** The reviewer's
+/// probe: keep the plan's bucket, drop its endpoint (so the region becomes the
+/// host, `s3.<region>.amazonaws.com`) and set the region to `x@<sentinel>/`.
+/// An APPROVED plan of that shape exits 3 by name (`StorageRegionInvalid`,
+/// `refusal-reason=GuardRefused`) for the source archive and for the evidence
+/// store, before the archive is read and before any client exists: the
+/// sentinel is never dialled and the region never echoed.
+///
+/// CONTROL: the same edit with a real region is not refused on the region —
+/// the run goes on to phase 0, whose mapping check refuses this plan (an empty
+/// `topic_mapping_prefix`, as `an_unmapped_selected_topic_…` uses), which
+/// proves the region guard let it through rather than every run stopping
+/// early.
+#[test]
+fn fx20_an_injected_region_exits_3_before_the_archive_is_read() {
+    let example = std::fs::read_to_string("../../examples/drill.yaml").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let injected = format!("\"x@{address}/\"");
+    // Both blocks state `region: us-east-1` and `endpoint: http://localhost:9000`;
+    // the source's are indented four spaces, the evidence store's two.
+    let edit = |text: &str, indent: &str, region: &str| {
+        // Anchored on the newline, so two spaces never match inside four.
+        let text = text.replacen(
+            &format!("\n{indent}endpoint: http://localhost:9000\n"),
+            "\n",
+            1,
+        );
+        text.replacen(
+            &format!("\n{indent}region: us-east-1\n"),
+            &format!("\n{indent}region: {region}\n"),
+            1,
+        )
+    };
+    let unmapped = |text: String| {
+        text.replace(
+            "topic_mapping_prefix: \"drill-\"",
+            "topic_mapping_prefix: \"\"",
+        )
+    };
+    for (field, indent) in [("source.storage", "    "), ("evidence", "  ")] {
+        let spec = unmapped(edit(&example, indent, &injected));
+        assert_ne!(spec, unmapped(example.clone()), "{field}: the edit landed");
+        let (code, stdout, stderr) = run_with_spec_capturing_streams(&spec);
+        assert_eq!(
+            code,
+            Some(3),
+            "{field}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("StorageRegionInvalid: {field}.region")),
+            "{field}: the refusal is named:\n{stderr}"
+        );
+        assert_eq!(
+            last_line(&stdout),
+            "refusal-reason=GuardRefused",
+            "{stdout}"
+        );
+        assert!(
+            !stderr.contains(&address) && !stdout.contains(&address),
+            "{field}: the region is never echoed"
+        );
+        match listener.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok((_, peer)) => panic!("{field}: the sentinel was dialled from {peer}"),
+            Err(error) => panic!("{field}: inspect the sentinel: {error}"),
+        }
+    }
+    let control = unmapped(edit(&example, "    ", "eu-west-1"));
+    let (code, stdout, stderr) = run_with_spec_capturing_streams(&control);
+    assert_eq!(
+        code,
+        Some(3),
+        "control\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("StorageRegionInvalid"),
+        "a real region is not refused:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("topic_mapping entry") || stderr.contains("onto itself"),
+        "the control reached phase 0's mapping check:\n{stderr}"
+    );
+}

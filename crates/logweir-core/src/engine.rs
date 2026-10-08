@@ -90,6 +90,36 @@ impl StorageUrl {
             Self::Filesystem { .. } => "",
         }
     }
+
+    /// **FX-20 fix round (review F1).** An S3 location whose `region` is not a
+    /// region name ([`is_valid_s3_region`]). With no endpoint, `object_store`
+    /// builds the host as `s3.<region>.amazonaws.com`, so a region such as
+    /// `x@attacker.example/` moves the request — and the archive credential's
+    /// signature, access key id and session token — to another host. Every
+    /// runner refuses such a location before any client exists, and
+    /// `logweir-store` refuses to build one.
+    #[must_use]
+    pub fn has_invalid_region(&self) -> bool {
+        matches!(self, Self::S3 { region: Some(region), .. } if !is_valid_s3_region(region))
+    }
+}
+
+/// The one S3 region rule, `^[a-z0-9-]{1,32}$` — destination rule `region`
+/// (`crate::destination::validate`), the `BackupDestination` CRD's pattern,
+/// and the runner's and the store's refusal of any other spelling
+/// ([`StorageUrl::has_invalid_region`]). Lower-case letters, digits and `-`
+/// only: nothing that can end a host label, start a port, a path or a
+/// userinfo.
+pub const S3_REGION_PATTERN: &str = "^[a-z0-9-]{1,32}$";
+
+/// Whether `region` matches [`S3_REGION_PATTERN`].
+#[must_use]
+pub fn is_valid_s3_region(region: &str) -> bool {
+    !region.is_empty()
+        && region.len() <= 32
+        && region
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

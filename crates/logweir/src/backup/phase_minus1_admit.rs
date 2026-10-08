@@ -56,6 +56,11 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
     //     scheme; `render_storage_block`'s refusal is the backstop (exit 1).
     logweir_core::guard::reject_plaintext_endpoint_without_allow_http("storage", &spec.storage)?;
 
+    // 1b'. **FX-20 fix round (review F1)**: a region that is not a region
+    //      name is refused here, exit 3 (`StorageRegionInvalid`), before any
+    //      store or client exists; without an endpoint it is the host.
+    logweir_core::guard::reject_invalid_storage_region("storage", &spec.storage)?;
+
     // 1c. **PROD-01.3**: SASL/PLAIN without TLS (`refusal-reason=
     //     PlainWithoutTls`) and `mtls` without TLS are refused here, exit 3,
     //     before any client exists — so a PLAIN password never leaves this

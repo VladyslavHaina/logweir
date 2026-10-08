@@ -385,6 +385,123 @@ fn fx20_backup_run_refuses_an_unbound_or_foreign_destination_secret_before_any_s
     );
 }
 
+/// **FX-20 fix round (review F1): `backup run` refuses an S3 region that is
+/// not a region name before any store exists, even with a credential whose
+/// binding matches**, and never dials what the region would have made the
+/// host. The probe's shape: no endpoint, the victim's bucket, `region:
+/// "x@<sentinel>/"`. The binding pair is EQUAL here on purpose — the region
+/// rule is the second, independent refusal, so it must hold on its own.
+/// CONTROL: a real region with the same bound pair is not refused on the
+/// region (the run stops later, on the absent signing key).
+#[test]
+fn fx20_backup_run_refuses_an_injected_region_before_any_store() {
+    for (label, injected) in [("injected", true), ("real region", false)] {
+        let root = tempfile::tempdir().unwrap();
+        let (listener, address) = sentinel();
+        let region = if injected {
+            format!("x@{address}/")
+        } else {
+            "us-east-1".to_string()
+        };
+        let spec = format!(
+            "backup_id: region-row\nsource:\n  bootstrap_servers: [\"127.0.0.1:1\"]\n  \
+             auth:\n    mode: plaintext\n  topics: [orders]\nstorage:\n  backend: s3\n  bucket: \
+             victim-backups\n  prefix: team-a\n  region: \"{region}\"\n  path_style: false\n  \
+             allow_http: false\n"
+        );
+        let spec_path = root.path().join("backup.yaml");
+        std::fs::write(&spec_path, spec).unwrap();
+        let allowed = root.path().join("allowed.json");
+        std::fs::write(&allowed, r#"{"allowed_cluster_ids":[]}"#).unwrap();
+        let mut command = base(root.path());
+        command
+            .args(["backup", "run", "--spec"])
+            .arg(&spec_path)
+            .arg("--allowed-clusters")
+            .arg(&allowed)
+            .arg("--signing-key")
+            .arg(root.path().join("absent-signing-key.pem"))
+            .env("AWS_ACCESS_KEY_ID", "AKIASTOREROW")
+            .env("AWS_SECRET_ACCESS_KEY", SEEDED_S3)
+            .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED", EXPECTED)
+            .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", EXPECTED);
+        let out = run(command, label);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        if injected {
+            assert_eq!(out.status.code(), Some(3), "{label}: {stdout}\n{stderr}");
+            assert!(
+                stderr.contains("StorageRegionInvalid: storage.region"),
+                "{label}: the refusal is named: {stderr}"
+            );
+            assert_eq!(
+                last_line(&stdout),
+                "refusal-reason=GuardRefused",
+                "{label}: {stdout}"
+            );
+            assert!(
+                !stderr.contains(&address) && !stdout.contains(&address),
+                "{label}: the region is never echoed"
+            );
+        } else {
+            assert!(
+                !stderr.contains("StorageRegionInvalid")
+                    && !stdout.contains("StorageRegionInvalid"),
+                "{label}: a real region is not refused: {stdout}\n{stderr}"
+            );
+        }
+        assert!(!stdout.contains(SEEDED_S3) && !stderr.contains(SEEDED_S3));
+        assert_no_connection(&listener, label);
+    }
+}
+
+/// **Review F3: `logweir catalog list` checks the store pairs too**, before it
+/// builds a store, and never dials the endpoint. CONTROL: bound, it lists an
+/// empty filesystem catalog and exits 0.
+#[test]
+fn fx20_catalog_list_refuses_a_foreign_store_credential() {
+    for (label, binding) in [("foreign", Some(FOREIGN)), ("absent", None)] {
+        let root = tempfile::tempdir().unwrap();
+        let (listener, address) = sentinel();
+        let mut command = base(root.path());
+        command
+            .args(["catalog", "list", "--url", "s3://lw-a", "--endpoint"])
+            .arg(format!("http://{address}"))
+            .args(["--path-style", "--allow-http"])
+            .env("AWS_ACCESS_KEY_ID", "AKIASTOREROW")
+            .env("AWS_SECRET_ACCESS_KEY", SEEDED_S3)
+            .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED", EXPECTED);
+        if let Some(b) = binding {
+            command.env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", b);
+        }
+        let out = run(command, label);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(3), "{label}: {stdout}\n{stderr}");
+        assert!(
+            stderr.contains("CredentialBindingMismatch")
+                && stderr.contains("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING"),
+            "{label}: {stderr}"
+        );
+        assert!(!stdout.contains(SEEDED_S3) && !stderr.contains(SEEDED_S3));
+        assert_no_connection(&listener, label);
+    }
+    let root = tempfile::tempdir().unwrap();
+    let catalog = root.path().join("catalog");
+    std::fs::create_dir_all(&catalog).unwrap();
+    let mut command = base(root.path());
+    command
+        .args(["catalog", "list", "--url"])
+        .arg(&catalog)
+        .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED", EXPECTED)
+        .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", EXPECTED);
+    let out = run(command, "bound");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "bound: {stdout}\n{stderr}");
+    assert!(!stderr.contains("CredentialBindingMismatch"), "{stderr}");
+}
+
 /// **The restore runner refuses an evidence or archive Secret bound
 /// elsewhere, first thing**, before the approval, the signer or the spec is
 /// read — a Restore whose evidence destination reuses the source's Secret
