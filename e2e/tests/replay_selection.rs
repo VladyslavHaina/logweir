@@ -24,6 +24,7 @@
 //! | `refusals_before_anything_runs` | a start before coverage, an empty selection, an existing target name and a partition subset are exit 3 with no target topic and no signed scorecard |
 //! | `a_compaction_hole_inside_a_sub_window_…` | a compacted source restored from a stated start: exact, the hole disclosed |
 //! | `a_new_point_does_not_change_…` | a newer backup arriving after the plan was approved does not change what the plan restores |
+//! | `a_partition_with_nothing_in_the_window_…` | a start that leaves a partition with no record in the window is signed `preflight-failed` naming it, never `pass`, and creates nothing |
 //! | `an_older_runner_refuses_…` (ignored; needs `LOGWEIR_E2E_OLDER_RUNNER`) | main's runner from BEFORE PROD-11.1 refuses a plan stating a start (it cannot parse the interval), creates nothing and signs nothing; the same binary restores the same plan without the start (the control); and it IGNORES a hand-written `restore.partitions` (the residual the current runner closes by refusing it) |
 //!
 //! Each row's own check is shown able to fail: the observed output is mutated
@@ -370,6 +371,7 @@ impl Restored {
                 .map(|p| p["notes"].clone())
                 .unwrap_or(Value::Null),
             "refusal": self.refusal(),
+            "phases": self.scorecard["phases"],
             "stderr_tail": self.stderr.lines().rev().take(15).collect::<Vec<_>>(),
         })
     }
@@ -1051,6 +1053,65 @@ fn a_compaction_hole_inside_a_sub_window_is_restored_and_disclosed() {
     oracle_rejects_mutants(&want, &got, (1, T + 10, None, None), 0);
 }
 
+/// **A partition with nothing in the window is `preflight-failed`, never
+/// `pass`.** A start selects every partition; p2's records all precede it, so
+/// the engine's header preflight finds no record of p2 in the window
+/// (`empty`), which phase 5 holds is "explicitly not a positive pass" — the
+/// same rule as a partition with nothing before the window's end. The run is
+/// signed `preflight-failed` (exit 2) naming the partition, and nothing is
+/// created: target topics are created only after phase 5. A start makes this
+/// more likely than a point alone, so the row keeps it on record (the
+/// decision record's §8). Found by the live run of the fix round, where the
+/// new-point row's first fixture had such a partition.
+#[test]
+fn a_partition_with_nothing_in_the_window_is_preflight_failed_never_pass() {
+    let mut row = Row::new("emptypart");
+    let s = T + 10;
+    let topic = row.source_topic("ep", &[]);
+    let recs = layout(T, "ep", &[(0, &[0, 10, 20]), (1, &[5, 15]), (2, &[0, 1])]);
+    kafka::produce_plain(&topic, &recs).expect("produce");
+    let backup_id = row.backup_id("ep");
+    backup_ok(&backup_id, &[&topic], 1000);
+    let sel = Selection {
+        start: Some(s),
+        end: T + 60_000,
+        ..Selection::default()
+    };
+    let prefix = row.prefix("ep", &[&topic]);
+    let r = restore_run(
+        restore_spec(&backup_id, &[&topic], &prefix, &sel, (s, T + 60_000), true),
+        Vec::new(),
+    );
+    write_outcome("emptypart", &json!({"verdict": r.summary()}));
+    assert_eq!(
+        (r.exit, r.outcome()),
+        (Some(2), Some("preflight-failed")),
+        "{}",
+        r.summary()
+    );
+    let notes: Vec<String> = r.scorecard["phases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["phase"] == 5)
+        .flat_map(|p| p["notes"].as_array().cloned().unwrap_or_default())
+        .filter_map(|n| n.as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        notes,
+        vec![format!(
+            "{topic}/2 empty: no records in the selected window for this partition"
+        )],
+        "{}",
+        r.summary()
+    );
+    assert_eq!(signed_selection(&r)["window_start_ms"], json!(s));
+    assert!(
+        !topic_exists(&format!("{prefix}{topic}")),
+        "a preflight-failed run created a target topic"
+    );
+}
+
 /// **A new point arriving does not change an approved plan.** The plan is
 /// bound to backup set B1 (`source.backup`) and selects every partition from
 /// a start. More records arrive and a second backup B2 — a newer recovery point
@@ -1060,7 +1121,9 @@ fn a_compaction_hole_inside_a_sub_window_is_restored_and_disclosed() {
 fn a_new_point_does_not_change_an_approved_selection() {
     let mut row = Row::new("newpoint");
     let topic = row.source_topic("np", &[]);
-    let first = layout(T, "np1", &[(0, &[0, 10, 20]), (1, &[0, 10]), (2, &[0])]);
+    // Every partition holds a record at or after the start: a partition with
+    // none is `preflight-failed` (`a_partition_with_nothing_in_the_window_…`).
+    let first = layout(T, "np1", &[(0, &[0, 10, 20]), (1, &[0, 10]), (2, &[0, 15])]);
     kafka::produce_plain(&topic, &first).expect("produce");
     let b1 = row.backup_id("np1");
     backup_ok(&b1, &[&topic], 1000);

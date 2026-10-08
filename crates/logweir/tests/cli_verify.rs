@@ -1031,10 +1031,13 @@ fn a_sampled_pass_over_a_selection_says_so() {
         unqualified[0].starts_with("sample coverage: a sampled pass at format 1.6.0 or later"),
         "{unqualified:?}"
     );
-    assert!(
-        sampled_pass_lines_over(Outcome::FailIntegrity, Some(&sampled), "1.7.0", Some(&window))
-            .is_empty()
-    );
+    assert!(sampled_pass_lines_over(
+        Outcome::FailIntegrity,
+        Some(&sampled),
+        "1.7.0",
+        Some(&window)
+    )
+    .is_empty());
     let mut complete = sampled.clone();
     complete.coverage = COVERAGE_COMPLETE.into();
     assert!(
