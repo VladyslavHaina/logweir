@@ -28,7 +28,8 @@ binding), 34 (FX-16, a point-bound restore restores its point's set), 35
 early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
 one crate that may hold `unsafe` code, and the consumer-group and ACL reads
 behind it), 38 (FX-20, the binding for every other credential reference)
-and 39 (FX-24, a silent connection meets the console's header deadline)
+39 (FX-18, a topic phase 0 creates is used only once the cluster serves
+it) and 40 (FX-24, a silent connection meets the console's header deadline)
 so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
@@ -74,7 +75,12 @@ object to MinIO; a bound one backs up); it changes the controller, every
 runner, the retention worker, the product API, the console and three CRDs'
 status, and the PoC upgrade that carries it binds the `primary` destination's
 Secrets and runs the refusal rows against a sentinel.
-Item 39 is fix-now row FX-24, proven by rows on the built console binary and
+Item 39 is fix-now row FX-18, proven by unit and phase rows, a guard over
+every e2e helper that creates a topic, and the compose e2e suite (the
+`NotLeaderForPartition` race reproduced with the wait removed, 3 of 13 runs,
+and gone with it); it changes the runner's phase 0 only, and the PoC upgrade
+that carries it runs its restore rows unchanged.
+Item 40 is fix-now row FX-24, proven by rows on the built console binary and
 live on the host in localAdmin mode; it changes the console only, and the PoC
 upgrade that carries it repeats the silent-socket probe against the shared-mode
 console.
@@ -839,7 +845,38 @@ the new status fields; bound Secrets keep working with them. An older console
 offers `existing` again, which this API refuses — roll the console with the
 controller.
 
-#### 39. A connection that sends nothing is closed at the console's header deadline; the console speaks HTTP/1.1 only (FX-24)
+#### 39. A topic phase 0 creates is read, or handed to the engine, only once the cluster serves it (FX-18)
+
+**Changed.** Phase 0 creates the target topics (and, on a `LogAppendTime`
+broker, the one probe topic whose `message.timestamp.type` it reads back).
+Kafka answers a create before every broker serves the new topic, so a read or
+an engine produce that follows at once could meet `UnknownTopicOrPartition`,
+`LeaderNotAvailable` or `NotLeaderForPartition`. CI met the last one. Phase 0
+now waits, bounded, until every partition of each topic it created has a
+leader that answers. A topic still not served at the bound is exit 1 naming
+it, never a pass and never a guessed value. The probe's configuration read
+after the create retries the same propagation answers, plus the empty
+DescribeConfigs answer a topic gives while it propagates, and returns every
+other error at once.
+
+**Do:** nothing.
+**Scope:**
+- `crates/logweir-kafka` (the wait and the read classifications, each a
+  pure function with a unit row);
+- `crates/logweir/src/drill/phase0_admit.rs`, with phase rows, including a
+  created topic that is never served (exit 1);
+- the guard `e2e/tests/created_topics.rs`: every e2e helper that creates a
+  topic waits until it is served;
+- the compose e2e suite. With the wait removed, CI's `NotLeaderForPartition`
+  came back in 3 of 13 runs under load; with it, none did.
+
+A run whose target cluster never serves a created topic leaves those topics
+for an operator to remove, as a failed create in the same batch already did.
+
+**Rollback:** an older runner creates and uses the topics at once again. No
+document, archive or API object changes in either direction.
+
+#### 40. A connection that sends nothing is closed at the console's header deadline; the console speaks HTTP/1.1 only (FX-24)
 
 **Changed.** `logweir-api` (the console) closed a connection that sent part of
 a request head at its ten-second header deadline (R4), but never timed out a
@@ -864,15 +901,17 @@ console's Service with HTTP/2 (an `h2c` or gRPC backend, never the chart's
 setting): return it to HTTP/1.1, or the console is unreachable through it
 ([api.md](api.md#conventions)).
 **Scope:** rows on the built binary (`crates/logweir-api/tests/local_admin.rs`):
-a silent connection is closed no sooner than ten seconds and within 25 s, while
+a silent connection is closed no sooner than ten seconds and within fifteen, while
 one opened beside it that sends a complete request after three seconds is
 answered; 256 silent connections hold a queued request and then the deadline
 releases it, every silent socket closed by the server; an HTTP/2 preface is
-closed at once; the R4 partial-head row is unchanged. Seven mutants are each
-killed: the deadline removed two ways, raised to 300 s, started only once the
+closed at once; the R4 partial-head row is unchanged; the deadline the
+connection builder is handed is pinned to the documented ten seconds. Twelve
+mutants are each killed: the deadline removed two ways, raised to 300 s,
+doubled or set to twenty seconds at the call site, started only once the
 first byte is readable, the old version sniff restored, cut to one second (the
-three-second client fails), and the controller's health listener without its
-deadline. Live, the built binary on the host in localAdmin mode: a silent
+three-second client fails), the connection ceiling raised, removed or never
+released, and the controller's health listener without its deadline. Live, the built binary on the host in localAdmin mode: a silent
 socket closed at 10.0 s (still open at 16 s before), and a request behind 256
 silent sockets answered at 10.0 s (unanswered at 25 s before). The
 controller's in-pod health listener already dropped a silent connection at its
@@ -942,7 +981,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38 and 39, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39 and 40, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -958,8 +997,9 @@ library calls no command uses yet) and needs nothing; item 38 changes the
 controller, every runner, the retention worker, the product API, the
 console and the status of three CRDs, and needs each destination,
 retention, notification and inline-archive credential Secret bound; item 39
-changes the console only and needs nothing unless an ingress dials the
-console with HTTP/2. To roll back to
+changes the runner's phase 0 only and needs nothing; item 40 changes the
+console only and needs nothing unless an ingress dials the console with
+HTTP/2. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
