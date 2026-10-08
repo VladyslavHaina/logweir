@@ -1198,13 +1198,15 @@ named rather than silent:
   otherwise unrunnable, and never clamps one (`docs/kubernetes.md` §12).
   `Backup`, check, probe, delivery and retention Jobs state no resources, so
   in a namespace whose `ResourceQuota` requires limits they need a
-  `LimitRange` default, or their pods are rejected at creation. What the
-  object then reports depends on the kind: a `Backup` reports
-  `PodCreationForbidden`, a `Preflight` reports `PodCreateRejected`, and a
-  `TopicDiscovery`, a catalog sync, a `KafkaCluster` probe, a
-  `ProtectionPolicy` delivery and a retention run report only their own
-  Job's deadline (`DeadlineExceeded`, `NoExitCode`, a failed delivery, a
-  failed run). `docs/kubernetes.md` §12 lists each one.
+  `LimitRange` default, or their pods are rejected at creation. Every kind
+  then reports the rejection promptly, in the admission's own words, from the
+  Job's `FailedCreate` event: the check kinds (`Preflight`, `TopicDiscovery`,
+  a catalog sync, an evidence fetch) with `PodCreateRejected`, the runner
+  kinds (a `Backup` and its topic discovery, a `Restore`, a `KafkaCluster`
+  probe, a `ProtectionPolicy` delivery, a retention run) with
+  `PodCreationForbidden` — within 30 seconds of the Job for everything but a
+  `Backup`'s or `Restore`'s runner, which waits `failFastSeconds`.
+  `docs/kubernetes.md` §12 lists each one.
 
 `kubernetes.namespace` does **not** move the install. `helm -n` / `--namespace`
 decides that, and every object carries `Release.Namespace`; the key exists for

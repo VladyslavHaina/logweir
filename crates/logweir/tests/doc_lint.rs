@@ -1614,6 +1614,14 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// a larger factor costs, and the read that audits a Restore made from a
 /// resumed draft. The notes at main's `b8b9263f`, with twenty-one items, fail
 /// the twenty-two pin (FX-5 fix round, 2026-10-05).
+///
+/// Then to twenty-three: item 23 is FX-11's — every Job-owning controller now
+/// reports a pod the namespace refused at creation, with new reason values
+/// where alert rules match and a refused discovery no schedule retries. Its
+/// token is the read that shows an operator which namespaces refuse Logweir
+/// pods today. The notes at main's `55487071`, with twenty-two items, fail the
+/// twenty-three pin (FX-11, 2026-10-07). The number is provisional: the
+/// integrator renumbers it if another item lands first.
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1639,9 +1647,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=22).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty-two operator-facing changes, `#### 1.` \
-         to `#### 22.` in order; found {numbers:?}"
+        (1..=23).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-three operator-facing changes, `#### 1.` \
+         to `#### 23.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1686,6 +1694,12 @@ fn the_release_notes_carry_every_owed_operator_action() {
         (
             "a console restore's replication factor and topic subset",
             "*Discover topics*",
+        ),
+        // FX-11 (2026-10-07): every Job-owning controller reports a refused
+        // pod; the operator's read of which namespaces refuse one today.
+        (
+            "a refused Job pod is reported by every kind",
+            "--field-selector reason=FailedCreate",
         ),
     ]) {
         assert!(

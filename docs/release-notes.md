@@ -20,8 +20,8 @@ mark without one). The supported path these notes assume is
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
-published image. Items 21 (FX-2) and 22 (FX-5), from the product-expansion
-tracker's fix-now rows, land after `fdb48cd8`. No tag is cut at `fdb48cd8`, so the candidate
+published image. Items 21 (FX-2), 22 (FX-5) and 23 (FX-11), from the
+product-expansion tracker's fix-now rows, land after `fdb48cd8`. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
@@ -162,7 +162,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-two operator-facing changes
+### The twenty-three operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -824,6 +824,83 @@ stopping before Create. **Rollback:** rolling the console image back restores
 the fixed, read-only 1 and the draft that drops the subset, and an older
 product API omits `brokerCount`. Nothing stored changes: a `Restore` created
 with a factor above 1 keeps it.
+
+#### 23. A Job pod the namespace refuses is reported at once, in the admission's words, by every kind (FX-11)
+
+**Changed.** A pod a `ResourceQuota`, a `LimitRange`, an admission webhook or a
+missing ServiceAccount refuses at creation leaves one trace: the Job
+controller's `FailedCreate` event on the Job. Only a `Backup`'s and a
+`Restore`'s runner, a `Preflight` and an evidence fetch read it. The other
+Job-owning controllers read no events, so their objects waited out the Job's
+own deadline and then named only that: `PodNotStarted` and `DeadlineExceeded`
+on a `TopicDiscovery` and a catalog sync, `Resolving` and then
+`DiscoveryFailed` on a dynamic `Backup`, `ProbeRunning` for two minutes and
+then `NoExitCode` on a `KafkaCluster`, "the delivery Job finished with no exit
+code" three times on a `ProtectionPolicy`, and `RunFailed` "produced no exit
+code" on a `RetentionPolicy`. Every one of them now reads the event through the
+shared waiting classifier. Once the Job has had no pod for 30 seconds (the
+`Preflight` grace) and the event says why, the Job is cancelled and the object
+names the refusal with the admission's own words: `PodCreateRejected` for the
+check kinds, and `PodCreationForbidden` for the runner kinds. That is the
+`KafkaCluster`'s `Reachable` condition and `status.reason`, a delivery attempt's
+`lastError`, a retention run's `Enforced` condition, and a dynamic `Backup`'s
+terminal state ([kubernetes.md](kubernetes.md) §12, *The runner's requests
+and limits*, lists each kind).
+
+What changes on the upgrade:
+
+- **New values where alert rules and dashboards match.** A `KafkaCluster` can
+  carry `status.reason: PodCreationForbidden` where it carried `NoExitCode`, a
+  `RetentionPolicy` can carry `Enforced=False/PodCreationForbidden` where it
+  carried `RunFailed`, and a dynamic `Backup` whose discovery pod is refused
+  ends `PodCreationForbidden` where it ended `DiscoveryFailed`.
+- **A schedule no longer retries a refused discovery.** `DiscoveryFailed` is
+  retried by a `BackupSchedule`'s `spec.retry`; `PodCreationForbidden` is
+  not, exactly as for a `Backup` whose runner pod is refused. The next slot
+  runs normally.
+- **A refused probe is re-probed.** Its finished Job now gets the usual
+  five-minute TTL, so the next probe runs on the ordinary cadence and the
+  reason clears once the namespace admits the pod. Before, a podless probe Job
+  kept `NoExitCode` until someone deleted the Job.
+- **Retries stay bounded.** A refused delivery is a failed attempt, so it is
+  retried by the ordinary backoff, three attempts in all. A refused retention
+  run counts toward `EnforcementDegraded`, so three in a row stop scheduling.
+- **The cost.** One `list` of core `events`, by `involvedObject.uid` with
+  `limit=20`, per pass of a Job that has had no pod for 30 seconds. A Job
+  whose pod exists costs nothing. The `list` on `events` is the grant the
+  `weirkeeper` role has carried since `Preflight`, bound in every namespace
+  the controller acts in under both binding modes.
+
+**Do:** see which namespaces refuse Logweir pods today. Each line is a Job the
+Job controller could not give a pod:
+
+```bash
+kubectl --context <ctx> get events -A --field-selector reason=FailedCreate \
+  -o custom-columns=NS:.metadata.namespace,JOB:.involvedObject.name,WHY:.message
+```
+
+Give each namespace a `LimitRange` default, or room in its `ResourceQuota`,
+for Jobs that state no resources. Add `PodCreationForbidden` wherever an alert
+rule or dashboard matches `NoExitCode`, `DiscoveryFailed` or `RunFailed` on
+these kinds. A schedule that relied on `spec.retry` to ride out quota
+contention needs the quota fixed instead. **Scope:**
+`crates/weirkeeper/tests/topic_discovery_controller.rs` (a quota and a
+`LimitRange` refusal, the Job cancelled), `recovery_catalog_controller.rs` (the
+running pass and the harvest of the cancelled Job), `backup_selection.rs` (the
+`Backup` ends `PodCreationForbidden` and creates no runner Job),
+`kafka_cluster_controller.rs` (`reachable` untouched, the status before the
+TTL), `protection_controller.rs` (cancel, status, TTL, and the third attempt is
+the last) and `retention_policy_controller.rs` (harvested, counted, and degraded
+on the third). Each row has a negative control with no event, or another Job's,
+which keeps the path from before, and `check_framework.rs` pins both grace
+boundaries and the no-pod pre-filter. Planted mutants were each killed (FX-11).
+Not yet proven live: the PoC upgrade that carries FX-11 runs its rows.
+**Rollback:** an older controller reads no events in these kinds again, and
+refused pods wait out their Job's deadline as before. An object this build
+ended (a `TopicDiscovery`, a `Backup`) keeps its `PodCreateRejected` or
+`PodCreationForbidden`. A `KafkaCluster`, a delivery and a retention policy
+are rewritten by the older controller's next verdict. Nothing has to be
+deleted, and the role is unchanged.
 
 ### Verification scope: what "verified" means in this release
 
