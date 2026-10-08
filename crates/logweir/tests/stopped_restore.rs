@@ -385,7 +385,18 @@ fn build(
 /// over `c`. `selection` overrides phase 4 (the control that replays the old
 /// first-N truncation).
 fn drive(c: &Case, selection: Option<&[(&str, i32)]>) -> Run {
-    let (facts, store, reader, engine, plan, mapping) = build(c);
+    drive_with(c, selection, |_| {})
+}
+
+/// [`drive`], with the target cluster moved by `tweak` before any phase reads
+/// it.
+fn drive_with(
+    c: &Case,
+    selection: Option<&[(&str, i32)]>,
+    tweak: impl FnOnce(&mut MapReader),
+) -> Run {
+    let (facts, store, mut reader, engine, plan, mapping) = build(c);
+    tweak(&mut reader);
 
     // Phase 6 accepts this target: one partition is above 0.
     let mut ends = BTreeMap::new();
@@ -654,6 +665,51 @@ fn b_round_robin_samples_the_missing_topic_where_first_n_did_not() {
         IntegrityResult::Pass,
         "the control: the old first-N sample of the same restore passes: {:?}",
         old.out.integrity
+    );
+}
+
+/// **(a), the rest of the per-partition bound.** A healthy restore whose
+/// first `payments` partition holds MORE than its own segments can account for
+/// (150 against an upper of 125) while its sibling holds fewer: the sum is
+/// inside the aggregate bound and only the partition's own bound sees it. And
+/// a record in a target partition the manifest lists no partition for.
+/// KILLS: checking only each partition's lower edge; dropping the
+/// unlisted-partition arm.
+#[test]
+fn a_a_partition_outside_its_own_bound_fails_while_the_sum_is_inside_its() {
+    let healthy = Case {
+        payments_partitions: 2,
+        orders: Orders::Inside(25),
+        orders_restored: true,
+        max_partitions: None,
+        report: EngineReport::Absent,
+    };
+    assert_eq!(
+        drive(&healthy, None).out.integrity.result,
+        IntegrityResult::Pass,
+        "the control: the healthy restore passes"
+    );
+    let r = drive_with(&healthy, None, |reader| {
+        let pay = reader.topics.get_mut("drill-payments").unwrap();
+        pay.end_offsets = vec![(0, 150), (1, 30)];
+    });
+    assert_eq!(r.out.integrity.result, IntegrityResult::Fail);
+    assert_eq!(
+        reason(&r),
+        format!(
+            "payments/0: drill-payments/0 holds 150 records but the manifest bounds this \
+             partition's window [{}, {PIT}] at [26, 125]",
+            WINDOW.0
+        )
+    );
+    let r = drive_with(&healthy, None, |reader| {
+        let ord = reader.topics.get_mut("drill-orders").unwrap();
+        ord.end_offsets.push((1, 5));
+    });
+    assert_eq!(r.out.integrity.result, IntegrityResult::Fail);
+    assert_eq!(
+        reason(&r),
+        "drill-orders/1 holds 5 records but the manifest lists no partition 1 of orders"
     );
 }
 
