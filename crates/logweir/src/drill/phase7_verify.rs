@@ -609,6 +609,7 @@ fn roll_up(verdicts: &[SelectionVerdict], count_bound: Option<&str>) -> Integrit
             mismatches: 0,
             pass_rate_measured: None,
             restored_principal_could_consume: None,
+            verification: None,
         };
     }
 
@@ -729,6 +730,7 @@ fn roll_up(verdicts: &[SelectionVerdict], count_bound: Option<&str>) -> Integrit
         mismatches: sampled.saturating_sub(matching),
         pass_rate_measured,
         restored_principal_could_consume: None,
+        verification: None,
     }
 }
 

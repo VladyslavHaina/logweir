@@ -85,6 +85,8 @@ fn spec_in(mode: TargetMode, topic_naming: Option<TopicNaming>) -> DrillSpec {
             records_per_partition: 25,
             anchor: Anchor::Head,
             max_partitions: None,
+            coverage: logweir_core::spec::Coverage::Sampled,
+            complete_max_records: None,
         },
         restore: RestoreSpecBlock {
             point_in_time: Some(ts(POINT_IN_TIME)),

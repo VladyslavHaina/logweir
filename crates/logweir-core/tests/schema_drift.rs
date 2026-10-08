@@ -241,6 +241,76 @@ fn the_frozen_1_2_0_scorecard_schema_does_not_describe_the_time_basis() {
     );
 }
 
+/// PROD-08.1: FX-8's 1.3.0 scorecard schema is FROZEN beside the 1.4.0 one.
+/// It names itself 1.3.0, carries FX-8's `source.time_basis` and does NOT
+/// describe `integrity.verification`. The current schema does, as an OPTIONAL
+/// field (a document before 1.4.0 without it still validates), whose four
+/// descriptive strings and two range lists are required inside it and whose
+/// `complete` block is optional.
+#[test]
+fn the_frozen_1_3_0_scorecard_schema_does_not_describe_the_verification() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.3.0.json"
+    ))
+    .expect("the frozen 1.3.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.3.0.json"
+    );
+    assert!(frozen["definitions"]["SourceInfo"]["properties"]["time_basis"].is_object());
+    assert!(
+        frozen["definitions"]["Integrity"]["properties"]
+            .get("verification")
+            .is_none(),
+        "the frozen 1.3.0 schema must not describe the 1.4.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
+    let integrity = &current["definitions"]["Integrity"];
+    assert!(integrity["properties"]["verification"].is_object());
+    assert!(
+        !integrity["required"]
+            .as_array()
+            .expect("Integrity has required fields")
+            .iter()
+            .any(|r| r == "verification"),
+        "verification is OPTIONAL: a document before 1.4.0 without it must still validate"
+    );
+    let required = |def: &str| -> Vec<String> {
+        let mut r: Vec<String> = current["definitions"][def]["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{def} has required fields"))
+            .iter()
+            .filter_map(|r| r.as_str().map(str::to_string))
+            .collect();
+        r.sort();
+        r
+    };
+    assert_eq!(
+        required("Verification"),
+        vec![
+            "application",
+            "comparison_basis",
+            "coverage",
+            "gaps",
+            "header_order",
+            "pruned"
+        ],
+        "an absent coverage or range list is never read as sampled-and-clean; `complete` is \
+         optional (present exactly with coverage complete, arm IV-4)"
+    );
+    assert!(
+        required("CompleteVerification").contains(&"covered".to_string())
+            && required("CompleteVerification").contains(&"partitions".to_string()),
+        "a complete block always says whether it covered every partition, and which"
+    );
+    assert!(
+        current["definitions"]["SourceInfo"]["properties"]["time_basis"].is_object(),
+        "the current schema keeps FX-8's field"
+    );
+}
+
 #[test]
 fn schema_declares_the_format_version_const() {
     let v: serde_json::Value =

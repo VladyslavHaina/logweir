@@ -3689,6 +3689,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             mismatches: 0,
             pass_rate_measured: None,
             restored_principal_could_consume: None,
+            verification: None,
         },
         topic_parity: TopicParity {
             intentionally_deviated: Vec::new(),

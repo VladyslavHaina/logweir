@@ -116,6 +116,8 @@ pub fn sample_spec(
         records_per_partition: per_partition,
         anchor,
         max_partitions: None,
+        coverage: logweir_core::spec::Coverage::Sampled,
+        complete_max_records: None,
     }
 }
 
@@ -403,6 +405,7 @@ fn integ(
         mismatches: sampled - matching,
         pass_rate_measured: rate,
         restored_principal_could_consume: None,
+        verification: None,
     }
 }
 
