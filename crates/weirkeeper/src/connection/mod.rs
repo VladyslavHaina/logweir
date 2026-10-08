@@ -246,6 +246,25 @@ impl Side {
         format!("{}/{CA_FILE_NAME}", self.ca_mount_path())
     }
 
+    /// The variable the credential Secret's `logweir-binding` key is projected
+    /// into (optional), PROD-01.3 security follow-up.
+    #[must_use]
+    pub const fn credential_binding_env(self) -> &'static str {
+        match self {
+            Side::Source => logweir_core::connection::SOURCE_CREDENTIAL_BINDING_ENV,
+            Side::Target => logweir_core::connection::TARGET_CREDENTIAL_BINDING_ENV,
+        }
+    }
+
+    /// The variable carrying the binding the runner must find — a literal.
+    #[must_use]
+    pub const fn credential_binding_expected_env(self) -> &'static str {
+        match self {
+            Side::Source => logweir_core::connection::SOURCE_CREDENTIAL_BINDING_EXPECTED_ENV,
+            Side::Target => logweir_core::connection::TARGET_CREDENTIAL_BINDING_EXPECTED_ENV,
+        }
+    }
+
     /// The variable naming the projected `mtls` client certificate (PROD-01.3).
     #[must_use]
     pub const fn tls_cert_file_env(self) -> &'static str {
@@ -1053,8 +1072,57 @@ fn check_data_key(
 }
 
 impl ResolvedConnection {
+    /// The credential BINDING this connection's credential Secret must carry
+    /// under `logweir-binding` (PROD-01.3 security follow-up):
+    /// [`logweir_core::connection::credential_binding`] over this object's UID
+    /// and its endpoint — the bootstrap set, the mode, the username, the TLS
+    /// switch and the CA reference.
+    ///
+    /// `None` without a UID (a resolution of a spec, never a stored object);
+    /// [`ResolvedConnection::project`] then projects a value no Secret can
+    /// carry, so a Job built from such a resolution refuses its credential
+    /// rather than skipping the check.
+    #[must_use]
+    pub fn credential_binding(&self) -> Option<String> {
+        let uid = self.uid.as_deref().filter(|u| !u.is_empty())?;
+        let ca = self.tls_ca.as_ref().map(|ca| {
+            format!(
+                "{}/{}/{}",
+                match ca.kind {
+                    CaSourceKind::Secret => "secret",
+                    CaSourceKind::ConfigMap => "configMap",
+                },
+                ca.name,
+                ca.key
+            )
+        });
+        Some(logweir_core::connection::credential_binding(
+            uid,
+            &self.bootstrap_servers,
+            &self.auth,
+            ca.as_deref(),
+        ))
+    }
+
+    /// The Secret the connection's CREDENTIAL is in — the SASL password's or
+    /// the `mtls` client certificate's — when it has one.
+    #[must_use]
+    pub fn credential_secret(&self) -> Option<&str> {
+        self.password
+            .as_ref()
+            .map(|p| p.name.as_str())
+            .or(self.client_certificate.as_ref().map(|c| c.name.as_str()))
+    }
+
     /// The environment and mounts this connection contributes to its Job.
     /// References only: see this module's header.
+    ///
+    /// **The binding pair (PROD-01.3 security follow-up).** A connection with
+    /// a credential also projects the EXPECTED binding as a literal and the
+    /// Secret's own `logweir-binding` key as an OPTIONAL `secretKeyRef`, and
+    /// the runner refuses the credential (`CredentialBindingMismatch`) unless
+    /// the two are equal — so a `KafkaCluster` that names another connection's
+    /// Secret cannot make the runner present that credential anywhere.
     ///
     /// THE SIDE IS NOT AN ARGUMENT. It is `execution.side`, fixed by the
     /// [`ConnectionUse`] the caller resolved with, so a restore cannot be
@@ -1068,7 +1136,22 @@ impl ResolvedConnection {
             projection.env_from_secret.push(EnvFromSecret {
                 name: side.password_env().to_string(),
                 secret_name: password.name.clone(),
+                optional: false,
                 key: password.key.clone(),
+            });
+        }
+        if let Some(secret) = self.credential_secret() {
+            projection.env_literal.push((
+                side.credential_binding_expected_env().to_string(),
+                // FAIL CLOSED: no UID, no binding a Secret could carry.
+                self.credential_binding()
+                    .unwrap_or_else(|| "unbound:no-uid".to_string()),
+            ));
+            projection.env_from_secret.push(EnvFromSecret {
+                name: side.credential_binding_env().to_string(),
+                secret_name: secret.to_string(),
+                key: logweir_core::connection::CREDENTIAL_BINDING_KEY.to_string(),
+                optional: true,
             });
         }
         if let Some(ca) = self.tls_ca.as_ref() {

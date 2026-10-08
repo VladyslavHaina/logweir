@@ -166,6 +166,9 @@ pub const TERMINAL_STATES: &[&str] = &[
     // PROD-01.3: SASL/PLAIN without TLS — the resolver's refusal of such a
     // `KafkaCluster`, and the runner's `refusal-reason=` for such a plan.
     TERMINAL_STATE_PLAIN_WITHOUT_TLS,
+    // PROD-01.3 security follow-up: a projected credential whose binding does
+    // not name the connection the Job was built for, read off `refusal-reason=`.
+    TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
     "NoExitCode",
     TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
     "GuardRefusedUnknownReason",
@@ -393,6 +396,16 @@ pub const TERMINAL_STATE_CONNECTION_PLAN_MISMATCH: &str = "ConnectionPlanMismatc
 /// refuses the same shape first; this is what an object admitted by an older
 /// CRD meets.
 pub const TERMINAL_STATE_PLAIN_WITHOUT_TLS: &str = logweir_core::connection::PLAIN_WITHOUT_TLS;
+
+/// **PROD-01.3 security follow-up.** The runner refused the credential the
+/// Job projected because the Secret's `logweir-binding` is absent or names
+/// another connection or endpoint (`logweir_core::connection::
+/// CredentialBindingRefusal`) — the guard that stops a `KafkaCluster` naming
+/// another connection's Secret from turning Logweir into the deputy that
+/// presents it to a broker of its author's choosing. Nothing was dialled.
+/// SHARED WITH THE RUNNER'S OWN LIST, the same string.
+pub const TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH: &str =
+    logweir_core::connection::CREDENTIAL_BINDING_MISMATCH;
 
 /// A `scramSha512` `KafkaCluster` carries no `auth.username`, so the plan
 /// document cannot name the identity the run will present.

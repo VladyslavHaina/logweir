@@ -428,6 +428,10 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
             Ok(ca) => ca,
             Err(e) => return CheckResult::Failed(e),
         };
+    // PROD-01.3 security follow-up: the binding `drill run` will check.
+    if let Err(e) = crate::credential_binding::check_side(crate::tls_ca::Side::Target) {
+        return CheckResult::Failed(e.to_string());
+    }
     // PROD-01.3: the `mtls` pair, as `drill run` will present it.
     let target_client_certificate =
         match crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Target) {

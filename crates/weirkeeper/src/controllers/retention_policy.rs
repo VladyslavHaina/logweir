@@ -2436,11 +2436,13 @@ impl Pass<'_> {
             env_from_secret.push(crate::job::EnvFromSecret {
                 name: destination::AWS_ACCESS_KEY_ID_ENV.to_string(),
                 secret_name: secret.clone(),
+                optional: false,
                 key: crate::crds::backup_destination::DEFAULT_ACCESS_KEY_ID_KEY.to_string(),
             });
             env_from_secret.push(crate::job::EnvFromSecret {
                 name: destination::AWS_SECRET_ACCESS_KEY_ENV.to_string(),
                 secret_name: secret,
+                optional: false,
                 key: crate::crds::backup_destination::DEFAULT_SECRET_ACCESS_KEY_KEY.to_string(),
             });
         }
@@ -3681,11 +3683,13 @@ pub fn evidence_credential(
                 crate::job::EnvFromSecret {
                     name: destination::EVIDENCE_ACCESS_KEY_ID_ENV.to_string(),
                     secret_name: secret.clone(),
+                    optional: false,
                     key: access_key_id_key.clone(),
                 },
                 crate::job::EnvFromSecret {
                     name: destination::EVIDENCE_SECRET_ACCESS_KEY_ENV.to_string(),
                     secret_name: secret.clone(),
+                    optional: false,
                     key: secret_access_key_key.clone(),
                 },
             ];
@@ -3693,6 +3697,7 @@ pub fn evidence_credential(
                 out.push(crate::job::EnvFromSecret {
                     name: destination::EVIDENCE_SESSION_TOKEN_ENV.to_string(),
                     secret_name: secret.clone(),
+                    optional: false,
                     key: token.clone(),
                 });
             }

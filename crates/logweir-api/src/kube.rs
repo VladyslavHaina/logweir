@@ -258,7 +258,7 @@ impl ResultDocument {
 /// echoes `data` — is parsed into a value whose `data` is empty. The bytes
 /// exist in this process only between the request DTO and the outgoing body,
 /// and [`CreatedCredential`] is all a route ever sees of the answer.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WriteOnlyCredential {
     /// Name, namespace, labels, annotations and the owner reference.
     #[serde(default)]
@@ -271,6 +271,41 @@ pub struct WriteOnlyCredential {
     /// Base64 data keys. Written, never read.
     #[serde(default, skip_deserializing)]
     pub data: std::collections::BTreeMap<String, String>,
+}
+
+// `Debug` is HAND-WRITTEN (PROD-01.3 security follow-up): a derived one
+// printed `data` — the base64 credential — into any `{:?}`, tracing field or
+// panic message that reached this value. Metadata, the type and the KEY NAMES
+// only.
+impl std::fmt::Debug for WriteOnlyCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteOnlyCredential")
+            .field("metadata", &self.metadata)
+            .field("type", &self.type_)
+            .field("data_keys", &self.data.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl WriteOnlyCredential {
+    /// The create-only shape of a Secret built by
+    /// `weirkeeper::connection::credential` (PROD-01.3): the same metadata and
+    /// type, the data base64-encoded for the wire. The Secret is consumed, so
+    /// the bytes exist in one place only.
+    #[must_use]
+    pub fn from_secret(secret: k8s_openapi::api::core::v1::Secret) -> Self {
+        use base64::Engine as _;
+        Self {
+            metadata: secret.metadata,
+            type_: secret.type_,
+            data: secret
+                .data
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(k, v)| (k, base64::engine::general_purpose::STANDARD.encode(v.0)))
+                .collect(),
+        }
+    }
 }
 
 impl kube::Resource for WriteOnlyCredential {

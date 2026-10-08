@@ -128,7 +128,8 @@ pub enum AuthMode {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthBlock {
-    /// The SASL mechanism, or `plaintext` for none.
+    /// The SASL mechanism (`scramSha512`, `scramSha256`, `plain`), `mtls`
+    /// for a TLS client certificate, or `plaintext` for none.
     pub mode: AuthMode,
     /// The SASL principal. Required when `mode` is `scramSha512`,
     /// `scramSha256` or `plain`; it is what `planBytes` binds, so changing it
@@ -413,6 +414,17 @@ pub struct KafkaClusterStatus {
     // `-o jsonpath={.status.reason}` and through `custom-columns` meanwhile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// **PROD-01.3 security follow-up.** The binding this connection's
+    /// credential Secret must carry under its `logweir-binding` key —
+    /// `v1:<uid>:sha256:<digest of the endpoint>` — for the runner to present
+    /// the credential at all. Public (a UID and a digest, never a credential).
+    /// The console writes it into the Secret it creates; an operator who
+    /// creates the Secret with `kubectl` copies it from here. A Secret without
+    /// it, or with another connection's, is refused by every runner
+    /// (`CredentialBindingMismatch`). Absent for a connection with no
+    /// credential (`plaintext`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_binding: Option<String>,
     /// `Reachable`, and whatever else the controller reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,

@@ -1411,6 +1411,7 @@ async fn a_running_probe_job_writes_only_that_a_probe_is_running() {
 fn the_two_lines_are_read_by_name_from_a_bounded_tail() {
     let expected = ProbeReport {
         cluster_id: Some(CLUSTER_ID.to_string()),
+        credential_binding_refused: false,
         reachable: Some(true),
     };
 
@@ -1494,6 +1495,7 @@ fn the_verdict_is_a_function_of_the_log_alone() {
 
     let reachable = verdict(&ProbeReport {
         cluster_id: Some(CLUSTER_ID.to_string()),
+        credential_binding_refused: false,
         reachable: Some(true),
     });
     assert_eq!(reachable.reachable, Some(true));
@@ -1501,6 +1503,7 @@ fn the_verdict_is_a_function_of_the_log_alone() {
 
     let unreachable = verdict(&ProbeReport {
         cluster_id: Some("STALE".to_string()),
+        credential_binding_refused: false,
         reachable: Some(false),
     });
     assert_eq!(
@@ -1722,6 +1725,7 @@ fn every_status_write_is_one_condition_and_a_matching_scalar_reason() {
             &c,
             &verdict(&ProbeReport {
                 cluster_id: Some(CLUSTER_ID.to_string()),
+                credential_binding_refused: false,
                 reachable: Some(true),
             }),
             0,

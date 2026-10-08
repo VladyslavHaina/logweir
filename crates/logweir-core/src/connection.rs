@@ -231,9 +231,231 @@ impl std::fmt::Display for ClientCertificateRefusal {
 
 impl std::error::Error for ClientCertificateRefusal {}
 
+// ---------------------------------------------------------------------------
+// PROD-01.3 security follow-up: the credential BINDING.
+// ---------------------------------------------------------------------------
+//
+// THE THREAT. A connection names the Secret its credential is in. Without a
+// binding, anyone who may write a `KafkaCluster` (or ask the console to) could
+// name ANOTHER connection's credential Secret — one they cannot read — point
+// the bootstrap address at a host they control, and have Logweir's runner read
+// that Secret and present it there: Logweir would be the deputy that
+// exfiltrates it (SASL/PLAIN sends the password itself; SCRAM gives the host an
+// offline-guessable exchange). The binding closes it: a credential Secret is
+// used only when it carries, under [`CREDENTIAL_BINDING_KEY`], the binding of
+// the connection that names it, and the runner compares it with the value the
+// controller computed from that connection BEFORE any client exists.
+//
+// WHAT IS BOUND. The connection's UID — unpredictable before the object exists,
+// so no Secret written for one connection can name another — and a digest of
+// the endpoint the credential may be presented to: the bootstrap set, the auth
+// mode, the username, the TLS switch and the CA reference. `KafkaCluster.spec`
+// is immutable, so "change the endpoint, keep the password" is a new object
+// with a new UID, which no stored credential names: the credential must be
+// entered again. The endpoint digest is the same rule held a second time, for
+// an object whose spec changed by a route that bypassed the immutability rule.
+
+/// The data key, in a credential Secret, that holds its binding.
+pub const CREDENTIAL_BINDING_KEY: &str = "logweir-binding";
+
+/// **The named reason** a credential whose binding does not name the
+/// connection that projected it is refused — the runner's `refusal-reason=`,
+/// the controller's terminal state and the probe's condition reason.
+pub const CREDENTIAL_BINDING_MISMATCH: &str = "CredentialBindingMismatch";
+
+/// The SOURCE side's projected binding (from the credential Secret, optional:
+/// absent when the Secret carries none).
+pub const SOURCE_CREDENTIAL_BINDING_ENV: &str = "LOGWEIR_SOURCE_CREDENTIAL_BINDING";
+/// The SOURCE side's EXPECTED binding — a literal the controller computed from
+/// the connection the Job was built for. Public (a UID and a digest).
+pub const SOURCE_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
+    "LOGWEIR_SOURCE_CREDENTIAL_BINDING_EXPECTED";
+/// The TARGET side's twin of [`SOURCE_CREDENTIAL_BINDING_ENV`].
+pub const TARGET_CREDENTIAL_BINDING_ENV: &str = "LOGWEIR_TARGET_CREDENTIAL_BINDING";
+/// The TARGET side's twin of [`SOURCE_CREDENTIAL_BINDING_EXPECTED_ENV`].
+pub const TARGET_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
+    "LOGWEIR_TARGET_CREDENTIAL_BINDING_EXPECTED";
+
+/// The binding of a credential to ONE connection and its endpoint:
+/// `v1:<uid>:sha256:<hex>`, where the digest covers the endpoint fields named
+/// in this section's header. A pure function of public values, so the console
+/// API (which writes it into the Secret it creates), the controller (which
+/// projects it as the expected value) and an operator (who reads it from
+/// `KafkaCluster.status.credentialBinding`) compute one string.
+///
+/// `ca` is the CA REFERENCE as `<kind>/<name>/<key>`, or `None`.
+#[must_use]
+pub fn credential_binding(
+    uid: &str,
+    bootstrap_servers: &[String],
+    auth: &crate::spec::AuthSpec,
+    ca: Option<&str>,
+) -> String {
+    let servers: std::collections::BTreeSet<&str> =
+        bootstrap_servers.iter().map(|s| s.trim()).collect();
+    let canonical = format!(
+        "logweir-credential-binding/v1\nuid={uid}\nbootstrap={}\nmode={}\nusername={}\ntls={}\nca={}\n",
+        servers.into_iter().collect::<Vec<_>>().join(","),
+        auth.mode_str(),
+        auth.username().unwrap_or_default(),
+        auth.tls(),
+        ca.unwrap_or("none"),
+    );
+    let digest = crate::ids::sha256_prefixed(canonical.as_bytes());
+    format!("v1:{uid}:{digest}")
+}
+
+/// Why a projected credential is refused: its binding is absent or names
+/// another connection. The message opens with
+/// [`CREDENTIAL_BINDING_MISMATCH`] and names variables, never a value — not the
+/// credential, and not the foreign binding either (which would tell a reader
+/// which connection the Secret belongs to).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialBindingRefusal {
+    /// The variable that carried (or should have carried) the binding.
+    pub binding_env: &'static str,
+    /// `true` when the Secret carried no binding at all.
+    pub absent: bool,
+}
+
+impl std::fmt::Display for CredentialBindingRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.absent {
+            write!(
+                f,
+                "{CREDENTIAL_BINDING_MISMATCH}: the credential Secret projected for this \
+                 connection carries no `{CREDENTIAL_BINDING_KEY}` key (`{}` is unset), so \
+                 nothing shows it was entered for this connection; it is refused rather than \
+                 presented to the connection's brokers. Enter the credential through the \
+                 console, or add the key with the value in the connection's \
+                 status.credentialBinding. Nothing was dialled",
+                self.binding_env
+            )
+        } else {
+            write!(
+                f,
+                "{CREDENTIAL_BINDING_MISMATCH}: the credential Secret projected for this \
+                 connection is bound to a different connection or endpoint (`{}` does not equal \
+                 the connection's own binding), so it is refused rather than presented to this \
+                 connection's brokers. A changed endpoint is a new connection, and its \
+                 credential must be entered again. Nothing was dialled",
+                self.binding_env
+            )
+        }
+    }
+}
+
+impl std::error::Error for CredentialBindingRefusal {}
+
+/// The runner's comparison, pure: `expected` is the controller's literal and
+/// `projected` what the kubelet projected from the Secret (`None` when the
+/// key is absent; a blank value counts as absent).
+///
+/// `expected` of `None` means no controller asked for a binding — a hand-run
+/// `logweir` whose operator supplies their own environment — and is accepted.
+///
+/// # Errors
+///
+/// [`CredentialBindingRefusal`].
+pub fn check_credential_binding(
+    binding_env: &'static str,
+    expected: Option<&str>,
+    projected: Option<&str>,
+) -> Result<(), CredentialBindingRefusal> {
+    let Some(expected) = expected.map(str::trim).filter(|e| !e.is_empty()) else {
+        return Ok(());
+    };
+    match projected.map(str::trim).filter(|p| !p.is_empty()) {
+        None => Err(CredentialBindingRefusal {
+            binding_env,
+            absent: true,
+        }),
+        Some(p) if p == expected => Ok(()),
+        Some(_) => Err(CredentialBindingRefusal {
+            binding_env,
+            absent: false,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_binding_covers_the_uid_and_every_endpoint_field() {
+        use crate::spec::AuthSpec;
+        let servers = vec!["b1:9093".to_string(), "b2:9093".to_string()];
+        let auth = AuthSpec::Plain {
+            username: "u".into(),
+            tls: true,
+        };
+        let base = credential_binding("uid-1", &servers, &auth, Some("configMap/ca/ca.crt"));
+        assert!(base.starts_with("v1:uid-1:sha256:"), "{base}");
+        // Order and whitespace of the bootstrap list are not a different endpoint.
+        let reordered = vec![" b2:9093".to_string(), "b1:9093".to_string()];
+        assert_eq!(
+            credential_binding("uid-1", &reordered, &auth, Some("configMap/ca/ca.crt")),
+            base
+        );
+        // Every field moves it.
+        for other in [
+            credential_binding("uid-2", &servers, &auth, Some("configMap/ca/ca.crt")),
+            credential_binding(
+                "uid-1",
+                &["evil:9093".to_string()],
+                &auth,
+                Some("configMap/ca/ca.crt"),
+            ),
+            credential_binding(
+                "uid-1",
+                &servers,
+                &AuthSpec::ScramSha512 {
+                    username: "u".into(),
+                    tls: true,
+                },
+                Some("configMap/ca/ca.crt"),
+            ),
+            credential_binding(
+                "uid-1",
+                &servers,
+                &AuthSpec::Plain {
+                    username: "v".into(),
+                    tls: true,
+                },
+                Some("configMap/ca/ca.crt"),
+            ),
+            credential_binding("uid-1", &servers, &auth, None),
+            credential_binding("uid-1", &servers, &auth, Some("configMap/evil/ca.crt")),
+        ] {
+            assert_ne!(other, base);
+        }
+    }
+
+    #[test]
+    fn the_binding_check_refuses_absent_and_foreign_and_accepts_its_own() {
+        let env = SOURCE_CREDENTIAL_BINDING_ENV;
+        assert_eq!(check_credential_binding(env, None, None), Ok(()));
+        assert_eq!(check_credential_binding(env, Some(" "), Some("x")), Ok(()));
+        assert_eq!(
+            check_credential_binding(env, Some("v1:a"), Some("v1:a")),
+            Ok(())
+        );
+        let absent = check_credential_binding(env, Some("v1:a"), None).unwrap_err();
+        assert!(absent.absent);
+        assert!(absent
+            .to_string()
+            .starts_with("CredentialBindingMismatch: "));
+        assert_eq!(
+            check_credential_binding(env, Some("v1:a"), Some("")).unwrap_err(),
+            absent,
+            "a blank projected value is absent"
+        );
+        let foreign = check_credential_binding(env, Some("v1:a"), Some("v1:b")).unwrap_err();
+        assert!(!foreign.absent);
+        // The message names neither binding.
+        assert!(!foreign.to_string().contains("v1:a") && !foreign.to_string().contains("v1:b"));
+    }
 
     #[test]
     fn the_mode_sets_partition_the_five_modes() {

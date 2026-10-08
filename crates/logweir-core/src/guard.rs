@@ -356,14 +356,22 @@ pub const TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME: &str = "PointInTimeByPr
 /// state; its call sites are the runner's guards over a spec's auth
 /// (`crate::spec::AuthSpec::transport_refusal`).
 pub const TERMINAL_STATE_PLAIN_WITHOUT_TLS: &str = crate::connection::PLAIN_WITHOUT_TLS;
+/// [I9] **PROD-01.3 security follow-up.** A projected credential Secret whose
+/// `logweir-binding` is absent or names another connection or endpoint
+/// (`crate::connection::CredentialBindingRefusal`). Refused before any client
+/// exists, so a credential is never presented to brokers it was not entered
+/// for.
+pub const TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH: &str =
+    crate::connection::CREDENTIAL_BINDING_MISMATCH;
 /// [I9] Every tag-1 terminal state a guard refusal can name. **Task 20**
 /// (Phase B) is the only consumer.
-pub const TERMINAL_STATES: [&str; 5] = [
+pub const TERMINAL_STATES: [&str; 6] = [
     TERMINAL_STATE_GUARD_REFUSED,
     TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
     TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
     TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME,
     TERMINAL_STATE_PLAIN_WITHOUT_TLS,
+    TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
 ];
 
 /// [I9] A refusal message MAY open with `<State>: `, naming one of

@@ -40,7 +40,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: 'A Kafka cluster Logweir connects to (saved-connection contract v1): bootstrap servers, auth mode and username, the TLS switch and an optional private CA reference, role, and the marker topic that proves a scratch target. The password lives in a Secret and the CA in a Secret or ConfigMap, both in this namespace and both referenced, never copied; `status.clusterId` is read from the broker and never from this spec. `spec` is immutable.'
+        description: 'A Kafka cluster Logweir connects to (saved-connection contract v1): bootstrap servers, auth mode (plaintext, scramSha512, scramSha256, plain over TLS, or mtls) and username, the TLS switch, an optional private CA reference and an mtls client-certificate reference, role, and the marker topic that proves a scratch target. The password and the client key live in Secrets and the CA in a Secret or ConfigMap, all in this namespace and all referenced, never copied; `status.clusterId` is read from the broker and never from this spec. `spec` is immutable.'
         properties:
           spec:
             description: '`KafkaCluster.spec`.'
@@ -48,14 +48,44 @@ spec:
               auth:
                 description: How Logweir authenticates here.
                 properties:
+                  clientCertificate:
+                    description: 'The TLS client certificate and private key an `mtls` connection presents (PROD-01.3): two keys of ONE Secret in this namespace — `kubectl create secret tls` writes exactly the default keys. Required when `mode` is `mtls` and refused for every other mode. Logweir never reads the Secret: the kubelet projects it read-only into the runner pod, and both clients load the two files from there.'
+                    nullable: true
+                    properties:
+                      certificateKey:
+                        description: The data key holding the PEM client certificate (chain). Absent means `tls.crt`, the `kubernetes.io/tls` Secret's key.
+                        maxLength: 253
+                        minLength: 1
+                        nullable: true
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                      name:
+                        description: The Secret's `metadata.name`, in this namespace.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      privateKeyKey:
+                        description: The data key holding the PEM private key, UNENCRYPTED (PKCS#8, PKCS#1 or SEC1; the engine's loader takes no passphrase). Absent means `tls.key`.
+                        maxLength: 253
+                        minLength: 1
+                        nullable: true
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                    required:
+                    - name
+                    type: object
                   mode:
-                    description: The SASL mechanism, or `plaintext` for none.
+                    description: The SASL mechanism (`scramSha512`, `scramSha256`, `plain`), `mtls` for a TLS client certificate, or `plaintext` for none.
                     enum:
                     - plaintext
                     - scramSha512
+                    - scramSha256
+                    - plain
+                    - mtls
                     type: string
                   secretRef:
-                    description: A Secret in this namespace holding the SASL password, and the key it is under. Required when `mode` is `scramSha512`. Logweir never reads its value into a status field, a log line or a rendered document.
+                    description: A Secret in this namespace holding the SASL password, and the key it is under. Required when `mode` is `scramSha512`, `scramSha256` or `plain`. Logweir never reads its value into a status field, a log line or a rendered document.
                     nullable: true
                     properties:
                       name:
@@ -73,7 +103,7 @@ spec:
                     type: object
                   tls:
                     default: false
-                    description: 'Whether the transport is TLS — the only switch that turns TLS on. Independent of `mode`; in connection contract v1 TLS is supported with `scramSha512` (SASL_SSL), and `plaintext` with `tls: true` is refused rather than dialled without TLS.'
+                    description: 'Whether the transport is TLS — the only switch that turns TLS on. Independent of `mode`; TLS is supported with `scramSha512` and `scramSha256` (SASL_SSL), REQUIRED with `plain` (SASL_SSL) and `mtls` (SSL), and `plaintext` with `tls: true` is refused rather than dialled without TLS.'
                     type: boolean
                   tlsCa:
                     description: 'The certificate authority that signs the brokers'' certificates, when it is not one the runner image already trusts: exactly one key of a Secret or a ConfigMap in this namespace. It replaces the default trust store for this connection in BOTH clients (the engine''s `ssl_ca_location` and librdkafka''s `ssl.ca.location`). Requires `tls: true`.'
@@ -124,7 +154,7 @@ spec:
                     - message: auth.tlsCa names exactly one of secretKeyRef or configMapKeyRef
                       rule: has(self.secretKeyRef) != has(self.configMapKeyRef)
                   username:
-                    description: The SASL principal. Required when `mode` is `scramSha512`; it is what `planBytes` binds, so changing it after an approval invalidates that approval's plan hash. Never read from a Secret.
+                    description: The SASL principal. Required when `mode` is `scramSha512`, `scramSha256` or `plain`; it is what `planBytes` binds, so changing it after an approval invalidates that approval's plan hash. Never read from a Secret.
                     nullable: true
                     type: string
                 required:
@@ -133,6 +163,12 @@ spec:
                 x-kubernetes-validations:
                 - message: 'auth.tlsCa names a CA for a TLS transport, so it requires auth.tls: true'
                   rule: '!has(self.tlsCa) || self.tls'
+                - message: 'PlainWithoutTls: auth.mode plain (SASL/PLAIN) sends the password itself, so it is accepted only with auth.tls: true'
+                  rule: self.mode != 'plain' || self.tls
+                - message: 'auth.mode mtls presents a TLS client certificate, so it requires auth.tls: true'
+                  rule: self.mode != 'mtls' || self.tls
+                - message: auth.clientCertificate is required when auth.mode is mtls and refused for every other mode
+                  rule: (self.mode == 'mtls') == has(self.clientCertificate)
               bootstrapServers:
                 description: The broker bootstrap addresses, `host:port`.
                 items:
@@ -196,6 +232,10 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              credentialBinding:
+                description: '**PROD-01.3 security follow-up.** The binding this connection''s credential Secret must carry under its `logweir-binding` key — `v1:<uid>:sha256:<digest of the endpoint>` — for the runner to present the credential at all. Public (a UID and a digest, never a credential). The console writes it into the Secret it creates; an operator who creates the Secret with `kubectl` copies it from here. A Secret without it, or with another connection''s, is refused by every runner (`CredentialBindingMismatch`). Absent for a connection with no credential (`plaintext`).'
+                nullable: true
+                type: string
               observedAt:
                 description: When the probe above was performed.
                 format: date-time

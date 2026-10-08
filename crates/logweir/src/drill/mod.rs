@@ -2286,6 +2286,12 @@ fn execute_for_reporting(
                     .version)
         )
     );
+    // PROD-01.3 security follow-up, FIRST: a projected credential whose
+    // binding does not name the connection this Job was built for is refused
+    // before it is even validated (`CredentialBindingMismatch`, exit 3).
+    if let Err(error) = crate::credential_binding::check_projected_bindings() {
+        return (Err(error.into()), None);
+    }
     // I11, and BEFORE `context`: no client of any kind is constructed on this
     // refusal path.
     if let Err(error) = check_projected_credentials() {

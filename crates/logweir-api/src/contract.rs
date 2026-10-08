@@ -183,7 +183,7 @@ pub enum ConnectionAuthMode {
     Mtls,
 }
 
-/// One key of a ConfigMap or Secret in this namespace.
+/// One key of a ConfigMap in this namespace.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ObjectKeyRefRequest {
@@ -194,23 +194,56 @@ pub struct ObjectKeyRefRequest {
 }
 
 /// The CA that signs the brokers' certificates, when the runner image does
-/// not already trust it: exactly one of a ConfigMap key or a Secret key
-/// (PROD-01.3). A CA certificate is public, so a ConfigMap is the ordinary
-/// home for it. Requires `tls: true`.
+/// not already trust it (PROD-01.3): one key of a ConfigMap. Requires
+/// `tls: true`.
+///
+/// A REFERENCE, AND ONLY TO A CONFIGMAP. A CA certificate is public, and the
+/// runner uses it only as a local trust anchor — its bytes are never sent
+/// anywhere — so naming one cannot exfiltrate anything. Restricting this
+/// request to a ConfigMap keeps every Secret this service's connections use one
+/// it created itself (the credential, below); a CA that lives in a Secret is
+/// still set with `kubectl` on the `KafkaCluster` (`auth.tlsCa.secretKeyRef`).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TlsCaRequest {
-    /// A ConfigMap key holding the PEM CA certificate(s).
-    #[serde(default)]
-    pub config_map_key_ref: Option<ObjectKeyRefRequest>,
-    /// A Secret key holding the PEM CA certificate(s).
-    #[serde(default)]
-    pub secret_key_ref: Option<ObjectKeyRefRequest>,
+    /// The ConfigMap key holding the PEM CA certificate(s).
+    pub config_map_key_ref: ObjectKeyRefRequest,
 }
 
-/// Authentication for a new connection. Existing credentials only: this
-/// request names Secrets; it never carries a password or a private key, and no
-/// response ever returns one.
+/// **PROD-01.3 security follow-up: the credential, typed ONCE.**
+///
+/// WRITE-ONLY. The value becomes a Secret this service creates — owned by the
+/// connection, bound to it (`logweir-binding`) — and is never echoed in any
+/// response, log line, status, annotation or audit record; the only thing that
+/// comes out of it is the Secret's NAME. This replaces naming an existing
+/// Secret: a connection that could name any Secret in the namespace could make
+/// Logweir present another team's credential to a broker of its author's
+/// choosing.
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NewConnectionCredentialRequest {
+    /// The SASL password — `scramSha512`, `scramSha256` and `plain`.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// The PEM client certificate (chain) — `mtls`.
+    #[serde(default)]
+    pub certificate_pem: Option<String>,
+    /// The PEM private key, unencrypted — `mtls`.
+    #[serde(default)]
+    pub private_key_pem: Option<String>,
+}
+
+// `Debug` is HAND-WRITTEN so that a `dbg!`, a `tracing` field or a panic
+// message can never print a credential. The type has no `Display`.
+impl std::fmt::Debug for NewConnectionCredentialRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NewConnectionCredentialRequest(<redacted>)")
+    }
+}
+
+/// Authentication for a new connection. The credential is TYPED, never
+/// named: this request carries a password or a client certificate and key
+/// once (`credential`), and no response ever returns either.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ConnectionAuthRequest {
@@ -221,23 +254,36 @@ pub struct ConnectionAuthRequest {
     /// `plain`, refused for `plaintext` and `mtls`.
     #[serde(default)]
     pub username: Option<String>,
-    /// An existing Secret in this namespace holding the SASL password under
-    /// the key `password`; required for the three SASL modes, refused for
-    /// `plaintext` and `mtls`.
+    /// **NO LONGER ACCEPTED** (PROD-01.3 security follow-up). It named an
+    /// existing Secret, and a connection that may name any Secret can make the
+    /// runner present a credential its author could not read. A request that
+    /// sets it is refused (`existing_credential_refused`); enter the credential
+    /// in `credential` instead. Kept in the grammar only so the refusal can say
+    /// that, rather than an unknown-field error.
     #[serde(default)]
     pub credential_ref: Option<NameRef>,
     /// Whether the transport is TLS.
     pub tls: bool,
-    /// **PROD-01.3, `mtls` only.** An existing Secret in this namespace
-    /// holding the client certificate under `tls.crt` and its unencrypted
-    /// private key under `tls.key` (`kubectl create secret tls`). Required for
-    /// `mtls`, refused for every other mode.
+    /// The credential, typed once: `password` for the three SASL modes,
+    /// `certificatePem` and `privateKeyPem` for `mtls`; refused for
+    /// `plaintext`.
     #[serde(default)]
-    pub client_certificate_ref: Option<NameRef>,
-    /// **PROD-01.3.** A private CA for a TLS connection. Refused without
+    pub credential: Option<NewConnectionCredentialRequest>,
+    /// A private CA for a TLS connection, from a ConfigMap. Refused without
     /// `tls: true`.
     #[serde(default)]
     pub tls_ca: Option<TlsCaRequest>,
+}
+
+impl ConnectionAuthRequest {
+    /// Whether this request carries a credential VALUE — the case that needs
+    /// `credential.write` as well as `connection.create`.
+    #[must_use]
+    pub fn carries_a_value(&self) -> bool {
+        self.credential.as_ref().is_some_and(|c| {
+            c.password.is_some() || c.certificate_pem.is_some() || c.private_key_pem.is_some()
+        })
+    }
 }
 
 /// `POST /api/v1/namespaces/{ns}/connections`.
@@ -284,8 +330,9 @@ pub struct ConnectionAuthView {
     pub credential_ref: Option<NameRef>,
     /// Whether the transport is TLS.
     pub tls: bool,
-    /// The `mtls` client-certificate Secret's NAME (PROD-01.3). Never its
-    /// data: neither the certificate nor the key is ever returned.
+    /// The `mtls` client-certificate Secret's NAME (PROD-01.3) — the one this
+    /// service created from the entered certificate and key. Never its data:
+    /// neither the certificate nor the key is ever returned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_certificate_ref: Option<NameRef>,
     /// The private CA reference, when the connection names one (PROD-01.3).

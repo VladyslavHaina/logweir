@@ -15,6 +15,9 @@ pub mod catalog;
 /// commands.
 pub mod check;
 pub mod cli;
+/// PROD-01.3 security follow-up: the runner refuses a projected credential
+/// whose binding does not name the connection it was projected for.
+pub mod credential_binding;
 pub mod doctor;
 pub mod drill;
 /// The ONE engine-binary resolution `doctor` and `drill run` both consult.

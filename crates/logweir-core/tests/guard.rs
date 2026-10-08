@@ -296,7 +296,19 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
         refusal_reason_line(&logweir_core::connection::PlainWithoutTls.to_string()),
         "refusal-reason=PlainWithoutTls"
     );
-    assert_eq!(TERMINAL_STATES.len(), 5);
+    // The PROD-01.3 security follow-up's state, the sixth: a projected
+    // credential whose binding does not name this connection.
+    assert_eq!(
+        refusal_reason_line(
+            &logweir_core::connection::CredentialBindingRefusal {
+                binding_env: "LOGWEIR_SOURCE_CREDENTIAL_BINDING",
+                absent: true,
+            }
+            .to_string()
+        ),
+        "refusal-reason=CredentialBindingMismatch"
+    );
+    assert_eq!(TERMINAL_STATES.len(), 6);
     // The line carries no whitespace and no quoting: a controller reads it as
     // the final stdout line and splits on `=`.
     let line = refusal_reason_line("CredentialNotRenderable: x");

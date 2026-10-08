@@ -981,6 +981,14 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
     if let Err(e) = phase_minus1_admit::local(args, &inputs.spec, &inputs.spec_text) {
         return report(&run_id, Err(e));
     }
+    // PROD-01.3 security follow-up: a projected credential Secret whose
+    // `logweir-binding` does not name the connection this Job was built for is
+    // refused HERE — exit 3, `refusal-reason=CredentialBindingMismatch` —
+    // before any client exists, so the credential is never presented to a
+    // broker it was not entered for.
+    if let Err(refusal) = crate::credential_binding::check_projected_bindings() {
+        return report(&run_id, Err(refusal.into()));
+    }
 
     // Signing is a prerequisite for starting a backup, not a postcondition
     // checked after the engine has written an archive. Load, exercise and

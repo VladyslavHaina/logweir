@@ -1149,6 +1149,8 @@ fn a_credential_secret_is_create_only_one_key_and_labelled() {
         secret_name: "orders-sasl",
         connection_name: CLUSTER,
         password: credential::WriteOnlyPassword::new(SEEDED_PASSWORD.to_string()),
+        binding: None,
+        owner_uid: None,
         request_id: Some("01JB7Z0000000000000000000A"),
     })
     .expect("a well-formed entry builds");
@@ -1218,6 +1220,8 @@ fn a_credential_is_redacted_in_every_rendering_but_the_secret_itself() {
         secret_name: "orders-sasl",
         connection_name: CLUSTER,
         password,
+        binding: None,
+        owner_uid: None,
         request_id: None,
     };
     let debugged = format!("{request:?}");
@@ -1264,6 +1268,8 @@ fn a_credential_is_redacted_in_every_rendering_but_the_secret_itself() {
             secret_name: "orders-sasl",
             connection_name: CLUSTER,
             password: credential::WriteOnlyPassword::new(password),
+            binding: None,
+            owner_uid: None,
             request_id: None,
         })
         .expect_err("refused");
@@ -1304,6 +1310,8 @@ fn a_credential_entry_refuses_names_the_kubelet_could_never_resolve() {
             secret_name: secret,
             connection_name: connection,
             password: credential::WriteOnlyPassword::new(SEEDED_PASSWORD.to_string()),
+            binding: None,
+            owner_uid: None,
             request_id: None,
         })
         .expect_err("refused");
@@ -1320,6 +1328,8 @@ fn a_create_response_is_kept_as_metadata_only() {
         secret_name: "orders-sasl",
         connection_name: CLUSTER,
         password: credential::WriteOnlyPassword::new(SEEDED_PASSWORD.to_string()),
+        binding: None,
+        owner_uid: None,
         request_id: None,
     })
     .expect("builds");

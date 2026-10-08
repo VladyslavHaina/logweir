@@ -3160,11 +3160,13 @@ pub fn runner_job_spec_with_policy(
         env_from_secret.push(EnvFromSecret {
             name: ARCHIVE_ACCESS_KEY_ENV.to_string(),
             secret_name: secret.name.clone(),
+            optional: false,
             key: ARCHIVE_ACCESS_KEY.to_string(),
         });
         env_from_secret.push(EnvFromSecret {
             name: ARCHIVE_SECRET_KEY_ENV.to_string(),
             secret_name: secret.name.clone(),
+            optional: false,
             key: ARCHIVE_SECRET_KEY.to_string(),
         });
     }

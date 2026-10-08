@@ -191,6 +191,25 @@ pub fn outcome(observed: &Result<String, KafkaError>) -> ProbeOutcome {
     }
 }
 
+/// The outcome of a probe whose credential binding was refused (PROD-01.3
+/// security follow-up): interface **I14**'s unreachable lines on stdout,
+/// unchanged, and on stderr the diagnostic followed by
+/// `refusal-reason=CredentialBindingMismatch` — the line the `KafkaCluster`
+/// controller reads off the pod log into the `Reachable` condition's reason.
+/// Nothing was dialled.
+#[must_use]
+pub fn refused_by_binding(
+    refusal: &logweir_core::connection::CredentialBindingRefusal,
+) -> ProbeOutcome {
+    let mut o = outcome(&Err(KafkaError::Client(refusal.to_string())));
+    o.diagnostic = Some(format!(
+        "{}\n{}",
+        o.diagnostic.unwrap_or_default(),
+        logweir_core::guard::refusal_reason_line(&refusal.to_string())
+    ));
+    o
+}
+
 /// One `cluster_id()` read, turned into an outcome — the seam a
 /// `ClusterReader` double drives.
 ///
@@ -422,6 +441,15 @@ fn dial(args: &ProbeArgs) -> ProbeOutcome {
         Ok(s) => s,
         Err(e) => return outcome(&Err(e)),
     };
+    // PROD-01.3 security follow-up: a credential whose binding does not name
+    // this `KafkaCluster` is refused before the password or key is read and
+    // before any client exists. The probe's two stdout lines stay its
+    // contract (`reachable=false`); the named reason travels on STDERR as
+    // `refusal-reason=CredentialBindingMismatch`, which the controller reads
+    // off the pod log into the `Reachable` condition.
+    if let Err(refusal) = crate::credential_binding::check_side(crate::tls_ca::Side::Source) {
+        return refused_by_binding(&refusal);
+    }
     // The password is read from the environment HERE and handed to the one
     // construction site as a value, so nothing below this line has to know
     // which variable it came from. An EMPTY value is treated as unset: a

@@ -4795,11 +4795,13 @@ impl Inputs {
                     crate::job::EnvFromSecret {
                         name: vars.access_key_id.to_string(),
                         secret_name: secret.clone(),
+                        optional: false,
                         key: access_key_id_key.clone(),
                     },
                     crate::job::EnvFromSecret {
                         name: vars.secret_access_key.to_string(),
                         secret_name: secret.clone(),
+                        optional: false,
                         key: secret_access_key_key.clone(),
                     },
                 ];
@@ -4807,6 +4809,7 @@ impl Inputs {
                     from_secret.push(crate::job::EnvFromSecret {
                         name: vars.session_token.to_string(),
                         secret_name: secret.clone(),
+                        optional: false,
                         key: token.clone(),
                     });
                 }

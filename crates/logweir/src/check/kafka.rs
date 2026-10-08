@@ -214,6 +214,15 @@ pub fn client_certificate(
 /// # Errors
 /// [`CheckFailure`] with [`CheckCode::AuthenticationFailed`].
 pub fn auth_config(plan: &ConnectionPlan) -> Result<AuthConfig, CheckFailure> {
+    // PROD-01.3 security follow-up, FIRST: a projected credential whose
+    // binding does not name the connection this check Job was built for is
+    // refused before the password or key is read and before any client exists.
+    // `AuthenticationFailed` (nothing was unreachable) with the named reason
+    // `CredentialBindingMismatch` opening the message.
+    for side in [crate::tls_ca::Side::Source, crate::tls_ca::Side::Target] {
+        crate::credential_binding::check_side(side)
+            .map_err(|e| CheckFailure::new(CheckCode::AuthenticationFailed, e.to_string()))?;
+    }
     let spec = auth_spec(plan)?;
     let password = projected_password(plan);
     if spec.uses_password() && password.is_none() {
