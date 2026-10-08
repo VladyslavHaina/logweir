@@ -1280,7 +1280,9 @@ mutants on those guards and on `doctor`'s pin, and `crates/logweir/tests/engine_
 recorded `fail(e2e suite)` because the pin guard then ran in the package the
 matrix runs with each row's own engine, and stopped those rows before their
 drill suites; it is not an engine finding, and the guard has moved. The
-re-dispatch at the fix tip is pending, and the controller's
+re-dispatch at the fix tip, run 37736333362, recorded every one of the seven
+declared rows as declared: 0.21.0, 0.22.0 and both 0.23.3 rows `pass`, the
+three below-floor rows `unsupported(lever-absent)`. The controller's
 `LOGWEIR_ENGINE_VERSION` reaches a live runner Job only at the next PoC
 upgrade.
 **Rollback:** an older runner and controller run 0.21.0 again; `doctor` from
