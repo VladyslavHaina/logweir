@@ -2913,11 +2913,15 @@ fn execute_with_validated_approval(
     // and the `Selection` are both in scope.
     sel.bind_backup_set(&set);
     sc.sample = sample_info(&c.spec.sample, &sel);
-    // FX-23: a sample that names an unsampled topic is a 1.6.0 document; any
-    // other keeps the version `new_scorecard` chose, byte for byte.
-    sc.format_version =
-        logweir_core::scorecard::format_version_with_sample(&sc.format_version, &sc.sample)
-            .to_string();
+    // FX-23: every SAMPLED verification is a 1.6.0 document, so the version
+    // marks a build with FX-23's checks (review M2); a complete one keeps the
+    // version `new_scorecard` chose, byte for byte.
+    sc.format_version = logweir_core::scorecard::format_version_with_sample(
+        &sc.format_version,
+        &sc.sample,
+        c.spec.sample.coverage,
+    )
+    .to_string();
 
     // 5 — the engine's preflight runs INSIDE the phase-5 record, so the
     // record's own `duration_ms` is the number `compute_measured` subtracts
@@ -4039,8 +4043,8 @@ fn sample_info(
         } else {
             sel.notes.join("; ")
         },
-        // FX-23: absent unless `max_partitions` left a topic unsampled; a
-        // document carrying it is 1.6.0 (`format_version_with_sample`).
+        // FX-23: absent unless `max_partitions` left a topic unsampled; every
+        // sampled document is 1.6.0 (`format_version_with_sample`).
         unsampled_topics: (!sel.unsampled_topics.is_empty()).then(|| sel.unsampled_topics.clone()),
     }
 }
@@ -5719,15 +5723,17 @@ mod standing_approved_tests {
         }
     }
 
-    /// **FX-23: the writer's version follows the sample.** `sample_info`
-    /// signs the topics phase 4 left unsampled (absent when none), and
-    /// `execute_with_validated_approval` raises the document to 1.6.0 from that
-    /// block right after setting it, so a document naming an unsampled topic
-    /// is never written under a version arm US-1 refuses. KILLS: dropping the
-    /// field in `sample_info`; writing `Some(vec![])`; deleting or moving the
-    /// version step.
+    /// **FX-23: the writer's version follows the lane.** `sample_info` signs
+    /// the topics phase 4 left unsampled (absent when none), and
+    /// `execute_with_validated_approval` raises every SAMPLED document to 1.6.0
+    /// right after setting the block, from the plan's coverage, so the version
+    /// marks a build with FX-23's checks and a document naming an unsampled
+    /// topic is never written under a version arm US-1 refuses. KILLS:
+    /// dropping the field in `sample_info`; writing `Some(vec![])`; deleting or
+    /// moving the version step, or handing it anything but the plan's
+    /// coverage.
     #[test]
-    fn a_sample_that_names_an_unsampled_topic_is_written_as_1_6_0() {
+    fn a_sampled_document_is_written_as_1_6_0() {
         let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().to_utc();
         let spec = logweir_core::spec::SampleSpec {
             window_start: t("2026-08-29T00:00:00Z"),
@@ -5750,11 +5756,16 @@ mod standing_approved_tests {
         let named = sample_info(&spec, &sel(vec!["orders".into()]));
         assert_eq!(named.unsampled_topics, Some(vec!["orders".to_string()]));
         assert_eq!(
-            logweir_core::scorecard::format_version_with_sample("1.4.0", &named),
+            logweir_core::scorecard::format_version_with_sample("1.4.0", &named, spec.coverage),
             "1.6.0"
         );
         let none = sample_info(&spec, &sel(Vec::new()));
         assert_eq!(none.unsampled_topics, None, "none is ABSENT, never []");
+        assert_eq!(
+            logweir_core::scorecard::format_version_with_sample("1.4.0", &none, spec.coverage),
+            "1.6.0",
+            "every sampled document is 1.6.0, named topics or not"
+        );
 
         let src = include_str!("mod.rs");
         let start = src
@@ -5766,11 +5777,20 @@ mod standing_approved_tests {
             .find("sc.sample = sample_info(&c.spec.sample, &sel);")
             .expect("phase 4's sample block is set in this function");
         let step = body[set..]
-            .find("format_version_with_sample(&sc.format_version, &sc.sample)")
+            .find("format_version_with_sample(")
             .expect("the version step follows the sample block");
         assert!(
             step < 400,
             "the version step must follow the sample block at once, before anything signs"
+        );
+        let call = &body[set + step..];
+        let call = &call[..call.find(';').expect("the call ends")];
+        assert!(
+            call.contains("&sc.format_version")
+                && call.contains("&sc.sample")
+                && call.contains("c.spec.sample.coverage"),
+            "the version step reads the document's version, its sample block and the plan's \
+             coverage: {call}"
         );
     }
 }

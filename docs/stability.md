@@ -431,17 +431,20 @@ side:
   new optional **`sample.unsampled_topics`**, format **1.6.0**
   (`schemas/logweir-drill-scorecard-1.6.0.json`, with PROD-01.3's 1.5.0 frozen
   beside it; [the format](formats/drill-scorecard.md#sampleunsampled_topics-format-160)).
-  Only a scorecard that names one is 1.6.0; every other document is the 1.4.0
-  or 1.5.0 one it was. Three arms, US-1 to US-3, read only that field (US-3
+  Every SAMPLED-lane scorecard this build signs is 1.6.0, named topics or not;
+  a complete verification's is the 1.4.0 or 1.5.0 one it was. Three arms, US-1 to US-3, read only that field (US-3
   judges it against `integrity.verification.coverage`, as IV-6 judges
   `integrity.result`) and can only refuse: MINOR under OD-7 (a). The corpus and
   the parity gate re-prove them on every `just lint`; `verify_scorecard.py` is
   1.22.0.
-- **Only 1.6.0 marks the build (review M2).** A 1.4.0 or 1.5.0 sampled `pass`
-  is the same bytes whichever build signed it, so only a 1.6.0-or-later one
-  proves these checks ran; both readers print a `sample coverage:` line for
-  every sampled `pass` saying which, and an earlier document says what it
-  always said.
+- **1.6.0 marks the build (review M2; the orchestrator's decision,
+  2026-10-08).** Because every sampled scorecard this build signs is 1.6.0, a
+  1.6.0-or-later sampled `pass` proves these checks ran, and a sampled 1.4.0 or
+  1.5.0 `pass` comes from an earlier build and proves what it always proved.
+  Both readers print a `sample coverage:` line for every sampled `pass` saying
+  which. Every sampled document changes version, from 1.4.0 (or 1.5.0) to
+  1.6.0, and nothing else in it changes: a reader that predates 1.6.0 reads
+  it exactly as before (same major, an optional field it ignores).
 - **Readers built before FX-23** accept every 1.6.0 document — the major is
   unchanged and the field is nested and optional — and print nothing about
   the topics the sample left out.

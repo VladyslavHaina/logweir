@@ -15,11 +15,10 @@ use crate::scorecard::Scorecard;
 /// (`integrity.verification`), and **1.5.0 since PROD-01.3**: the closed set of
 /// `target.auth.mode` grows by three values, which a scorecard declares by
 /// being 1.5.0; the 1.1.0 to 1.4.0 files are frozen beside the current one the
-/// same way, and the 1.4.0 file still describes every scorecard of a
-/// `plaintext` or `scramSha512` target, which this build writes as 1.4.0.
-/// **1.6.0 since FX-23** (`sample.unsampled_topics`); the 1.5.0 file is frozen
-/// beside it, and still describes every scorecard of a PROD-01.3 mode that
-/// names no unsampled topic. The `$id` is built from
+/// same way. **1.6.0 since FX-23** (`sample.unsampled_topics`), which this
+/// build writes for every SAMPLED scorecard; the 1.5.0 file is frozen beside
+/// it. A complete verification's scorecard is still written as 1.4.0 (or 1.5.0
+/// for a PROD-01.3 mode), which those frozen files describe. The `$id` is built from
 /// [`crate::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`], the newest
 /// minor.
 pub fn scorecard_schema() -> String {

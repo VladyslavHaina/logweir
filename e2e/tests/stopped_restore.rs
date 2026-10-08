@@ -29,11 +29,11 @@
 //!   finished — and signed `pass`. Round-robin (FX-23 (b)) samples the second
 //!   topic too.
 //! - **`max1`**: `sample.max_partitions: 1`. The sample can reach one topic,
-//!   so the scorecard names the other in `sample.unsampled_topics` and is
-//!   format 1.6.0; the per-partition bound (a) and the engine's report (c)
-//!   decide.
+//!   so the scorecard names the other in `sample.unsampled_topics`; the
+//!   per-partition bound (a) and the engine's report (c) decide.
 //!
-//! Each must sign `fail-integrity` (exit 2), name every partition of the topic
+//! Each must sign `fail-integrity` (exit 2) as format 1.6.0 (every sampled
+//! document is, so the version marks the fixed build), name every partition of the topic
 //! the engine never started, carry the report's finding, and verify under both
 //! readers. `LOGWEIR_FX23_RECORD_ONLY=1` records the verdict without asserting
 //! it — how the row is run against a build from before FX-23, to show the hole
@@ -494,6 +494,11 @@ fn a_sigterm_stopped_restore_is_signed_fail_never_pass() {
             python_verify == Some(Some(0)),
             format!("verify_scorecard.py exited {python_verify:?}"),
         );
+        // Every sampled document is 1.6.0 (FX-23: the version marks the build).
+        check(
+            v["format_version"] == json!("1.6.0"),
+            format!("format_version {}", v["format_version"]),
+        );
         match variant {
             "max3" => {
                 // (b): round-robin reached the second topic.
@@ -510,10 +515,6 @@ fn a_sigterm_stopped_restore_is_signed_fail_never_pass() {
                 );
             }
             _ => {
-                check(
-                    v["format_version"] == json!("1.6.0"),
-                    format!("format_version {}", v["format_version"]),
-                );
                 check(
                     v["sample"]["unsampled_topics"] == json!([order[1]]),
                     format!("unsampled_topics {}", v["sample"]["unsampled_topics"]),

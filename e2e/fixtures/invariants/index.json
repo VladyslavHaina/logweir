@@ -702,6 +702,13 @@
   "reason": ""
  },
  {
+  "id": "unsampled_topics_1_6_none_named",
+  "file": "unsampled_topics_1_6_none_named.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
   "id": "unsampled_topics_under_format_1_5_0",
   "file": "unsampled_topics_under_format_1_5_0.json",
   "rust_exit": 4,

@@ -115,7 +115,8 @@ golden:
 # FX-23 moved the scorecard to 1.6.0 (`sample.unsampled_topics`), and
 # PROD-01.3's `-1.5.0.json` is frozen beside the new file the same way
 # (`the_frozen_1_5_0_scorecard_schema_does_not_describe_unsampled_topics`);
-# this build writes 1.6.0 only for a scorecard that names an unsampled topic.
+# this build writes 1.6.0 for every sampled-lane scorecard, and 1.4.0/1.5.0
+# for a complete verification's.
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant

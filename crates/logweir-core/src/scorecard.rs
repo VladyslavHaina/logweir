@@ -210,12 +210,16 @@ pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.5.0";
 /// follows it.
 pub const UNSAMPLED_TOPICS_SINCE_MINOR: u64 = 6;
 
-/// **FX-23.** The `format_version` of a scorecard that carries
+/// **FX-23.** The `format_version` of every SAMPLED-lane scorecard a build
+/// with FX-23's checks signs, and of every one that carries
 /// `sample.unsampled_topics` — a MINOR bump for a new optional field, under
-/// OD-7: arms US-1 and US-2 read only that field and can only refuse. Written
-/// only for such a document ([`format_version_with_sample`]), so every other
-/// scorecard is the 1.4.0 or 1.5.0 document it was. The newest minor: the
-/// current schema file is this version's.
+/// OD-7: arms US-1 to US-3 read only that field and can only refuse. Written
+/// for every sampled document so the version marks the fixed build (the
+/// orchestrator's decision on review M2, 2026-10-08): a 1.4.0 or 1.5.0
+/// document is otherwise the same bytes whichever build signed it. A
+/// complete verification's scorecard is the 1.4.0 or 1.5.0 document it was
+/// ([`format_version_with_sample`]). The newest minor: the current schema
+/// file is this version's.
 pub const FORMAT_VERSION_WITH_UNSAMPLED_TOPICS: &str = "1.6.0";
 
 /// **FX-23 review M2.** Whether a scorecard's `format_version` shows that a
@@ -232,15 +236,21 @@ pub fn proves_fx23_sampled_checks(format_version: &str) -> bool {
         && minor_version(format_version).is_some_and(|m| m >= UNSAMPLED_TOPICS_SINCE_MINOR)
 }
 
-/// The `format_version` a scorecard is written with once its `sample` block
-/// is known (FX-23): [`FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`] when the block
-/// names an unsampled topic, else `current` — the version
-/// [`format_version_for_target`] chose — unchanged. 1.6.0 defines everything
-/// 1.5.0 does, so a document of a PROD-01.3 mode with unsampled topics is
-/// 1.6.0 too.
+/// The `format_version` a scorecard is written with once its plan's coverage
+/// and its `sample` block are known (FX-23):
+/// [`FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`] for a SAMPLED verification — so
+/// a sampled `pass` reads with the guarantees only an FX-23 build gives — and
+/// for any block naming an unsampled topic; else `current`, the version
+/// [`format_version_for_target`] chose, unchanged (a complete verification).
+/// 1.6.0 defines everything 1.5.0 does, so a sampled document of a PROD-01.3
+/// auth mode is 1.6.0 too.
 #[must_use]
-pub fn format_version_with_sample<'a>(current: &'a str, sample: &SampleInfo) -> &'a str {
-    if sample.unsampled_topics.is_some() {
+pub fn format_version_with_sample<'a>(
+    current: &'a str,
+    sample: &SampleInfo,
+    coverage: crate::spec::Coverage,
+) -> &'a str {
+    if coverage == crate::spec::Coverage::Sampled || sample.unsampled_topics.is_some() {
         FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
     } else {
         current
@@ -3948,18 +3958,44 @@ mod tests {
         sc
     }
 
-    /// The writer's version rule: 1.6.0 exactly when the field is present,
-    /// the version it was handed otherwise. KILLS: always 1.6.0 (every
-    /// document changes by a byte); never 1.6.0 (US-1 refuses the writer's
-    /// own document).
+    /// The writer's version rule: 1.6.0 for every SAMPLED verification and
+    /// for a block naming an unsampled topic; the version it was handed for a
+    /// complete one. KILLS: the old version for a sampled document (a new
+    /// sampled pass would read without its guarantee line); 1.6.0 for a
+    /// complete one; never 1.6.0 beside the field (US-1 refuses it).
     #[test]
-    fn the_version_with_sample_is_1_6_0_only_for_a_document_naming_an_unsampled_topic() {
+    fn the_version_with_sample_is_1_6_0_for_every_sampled_document() {
+        use crate::spec::Coverage::{Complete, Sampled};
         let sc = with_unsampled(&["orders"]);
-        assert_eq!(format_version_with_sample("1.4.0", &sc.sample), "1.6.0");
-        assert_eq!(format_version_with_sample("1.5.0", &sc.sample), "1.6.0");
+        assert_eq!(
+            format_version_with_sample("1.4.0", &sc.sample, Sampled),
+            "1.6.0"
+        );
+        assert_eq!(
+            format_version_with_sample("1.5.0", &sc.sample, Sampled),
+            "1.6.0"
+        );
+        assert_eq!(
+            format_version_with_sample("1.4.0", &sc.sample, Complete),
+            "1.6.0"
+        );
         let sc = valid_scorecard();
-        assert_eq!(format_version_with_sample("1.4.0", &sc.sample), "1.4.0");
-        assert_eq!(format_version_with_sample("1.5.0", &sc.sample), "1.5.0");
+        assert_eq!(
+            format_version_with_sample("1.4.0", &sc.sample, Sampled),
+            "1.6.0"
+        );
+        assert_eq!(
+            format_version_with_sample("1.5.0", &sc.sample, Sampled),
+            "1.6.0"
+        );
+        assert_eq!(
+            format_version_with_sample("1.4.0", &sc.sample, Complete),
+            "1.4.0"
+        );
+        assert_eq!(
+            format_version_with_sample("1.5.0", &sc.sample, Complete),
+            "1.5.0"
+        );
         assert!(with_unsampled(&["audit", "orders"])
             .validate_invariants()
             .is_ok());

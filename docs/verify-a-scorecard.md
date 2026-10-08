@@ -572,14 +572,12 @@ reconciles a canary — the first `records_per_partition` records of each
 SELECTED partition — and holds the restored COUNTS to the archive manifest.
 
 **Only a scorecard of format 1.6.0 or later carries the guarantees below.**
-Only a build with FX-23's checks writes 1.6.0, but such a build writes 1.6.0
-only when its sample left a topic unsampled; its other sampled documents are
-1.4.0 (1.5.0 for a PROD-01.3 auth mode), and a 1.4.0 or 1.5.0 document is the
-same bytes whichever build signed it — the scorecard names the engine, not the
-`logweir` build. So a sampled `pass` before 1.6.0 proves what it always
-proved: the canary, and one count bound over every topic together. Unless you
-know independently which build signed it, read it as a pre-FX-23 document
-(the last paragraph of this section). Both readers say which, in a
+Only a build with FX-23's checks writes 1.6.0, and it writes 1.6.0 for every
+SAMPLED scorecard it signs, so the version marks that build. A sampled 1.4.0 or
+1.5.0 document comes from an earlier build — the scorecard names the engine,
+not the `logweir` build, and the version is the mark — so it proves what it
+always proved: the canary, and one count bound over every topic together.
+Read it as a pre-FX-23 document (the last paragraph of this section). Both readers say which, in a
 `sample coverage:` line printed for every sampled `pass`:
 
 ```
@@ -626,8 +624,8 @@ restore the engine performed faithfully — the safer verdict, but a failure the
 archive caused, not the restore
 ([the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
 
-A document signed by a build from before FX-23 — which a 1.4.0 or 1.5.0
-document may be — was judged by one count bound over all topics together, and its `max_partitions` kept the first partitions in
+A sampled document signed by a build from before FX-23 — any sampled 1.4.0 or
+1.5.0 document — was judged by one count bound over all topics together, and its `max_partitions` kept the first partitions in
 manifest order — the order the engine restores in. An engine stopped early
 restores a manifest-order prefix of the topics, so such a `pass` can cover a
 restore whose later topics are empty when the plan set `max_partitions` below
@@ -767,8 +765,8 @@ The Python report ends with `verifier: verify_scorecard.py 1.22.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
 since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, `1.5.0` for a
-restore into a target whose auth mode is one PROD-01.3 added, or `1.6.0` for a
-sampled drill whose `max_partitions` left a topic unsampled, since FX-23). It
+restore into a target whose auth mode is one PROD-01.3 added, or `1.6.0` for
+every sampled drill since FX-23). It
 changes when the reader's accepted-document set changes. The compatibility
 history is:
 

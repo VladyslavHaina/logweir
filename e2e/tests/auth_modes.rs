@@ -529,7 +529,9 @@ fn backup_restore_verify(row: Row) {
         "{label}: phase 9 left scratch topics on the auth cluster: {left:?}"
     );
     assert_eq!(sc["target"]["auth"]["mode"], row.mode, "{label}");
-    assert_eq!(sc["format_version"], "1.5.0", "{label}");
+    // FX-23: a sampled drill is 1.6.0 (which defines every 1.5.0 auth mode),
+    // so the version marks a build with FX-23's checks.
+    assert_eq!(sc["format_version"], "1.6.0", "{label}");
     assert_eq!(sc["target"]["cluster_id"], cluster_id, "{label}");
     assert!(
         logweir_verify(&r).success(),

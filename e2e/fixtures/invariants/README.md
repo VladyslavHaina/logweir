@@ -635,6 +635,7 @@ Three arms, US-1 to US-3, which both readers state in the same position (after
 | case | what it pins |
 |---|---|
 | `unsampled_topics_1_6_sampled` | ACCEPT: two topics `max_partitions` left unsampled, sorted, under 1.6.0, beside a sampled verification |
+| `unsampled_topics_1_6_none_named` | ACCEPT: a 1.6.0 sampled document with no field — what this build writes for every sampled drill whose sample reached every topic |
 | `unsampled_topics_under_format_1_5_0` | US-1: the field under `1.5.0` |
 | `unsampled_topics_empty` | US-2: `[]` (absent is the spelling of none) |
 | `unsampled_topics_unordered` | US-2: two topics out of order |

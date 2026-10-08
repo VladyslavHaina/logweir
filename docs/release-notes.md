@@ -653,8 +653,9 @@ point in time cuts across proves the one record whose timestamp opens or
 closes it inside the window — so an empty partition the archive proves holds
 records in the window fails, by name; (b) keeps one partition of every topic
 before a second of any under `max_partitions`, and names the topics it could
-not reach in the scorecard's new optional `sample.unsampled_topics` (format
-**1.6.0**, only for a scorecard that names one; MINOR,
+not reach in the scorecard's new optional `sample.unsampled_topics`. Every
+sampled scorecard this build signs is format **1.6.0** (MINOR), named topics
+or not, so the version marks the fixed build (
 [stability.md](stability.md#scorecard-format-160-sampleunsampled_topics-and-a-stricter-sampled-check-fx-23));
 and (c) fails a restore whose engine offset report has no entry for such a
 partition — read by streaming past the report's per-record section, so the
@@ -667,7 +668,10 @@ cap; a point of unknown size is kept, and its sample now reaches every topic
 first). `verify_scorecard.py` is 1.22.0; both readers say, for every sampled
 `pass`, whether its version proves these checks ran: only 1.6.0 or later does,
 because a 1.4.0 or 1.5.0 document is the same bytes whichever build signed it.
-**Do:** nothing. A correct restore of an archive whose timestamps do not run
+**Do:** a consumer that matches a scorecard's exact `format_version` must
+accept `1.6.0`: every sampled scorecard is 1.6.0 from this build on (the
+major is unchanged, so both readers and every older reader accept it).
+Otherwise nothing. A correct restore of an archive whose timestamps do not run
 backwards within a segment cannot fail the new checks (one whose timestamps do
 can now fail the per-partition bound where the sum absorbed a record every
 restore drops — [the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps));
