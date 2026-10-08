@@ -190,7 +190,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 2 | PROD-08.1a | Request and show complete coverage through the CRDs, the API and the console | P1 | M2 | impl | 08.1 | — | k8s | A | Proposed |
 | 1 | PROD-05.1 | Capture topic configuration with coverage | P1 | M2 | impl | FX-4, 01.5 | — | compose | A | In progress |
 | 2 | PROD-05.1a | Detect Strimzi `KafkaTopic` owners from the controller and mark them for desired-state export | P2 | M2 | impl | 05.1 | — | k8s | A | Proposed |
-| 1 | PROD-04.1 | Archive consumer position evidence | P1 | M2 | impl | 04.0, 04.0a, 04.0d, 01.4, FX-1 | — | compose | A | Proposed |
+| 1 | PROD-04.1 | Archive consumer position evidence | P1 | M2 | impl | 04.0, 04.0a, 04.0b, 04.0d, 01.4, FX-1 | — | compose | A | Proposed |
 | 1 | PROD-02.1 | Honest coverage for scheduled backups | P1 | M2 | impl | 01.4 | — | k8s | A | Proposed |
 | 1 | PROD-07.1 | Resolve checkpoint and delivery semantics | P2 | M3 | research | 01.1 | — | none | B | Proposed |
 | 1 | PROD-09.3 | Decide archive data protection | P2 | M3 | research | 00.1 | — | none | B | Proposed |
