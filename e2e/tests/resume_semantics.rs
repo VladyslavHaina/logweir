@@ -73,7 +73,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const PARTS: i32 = 3;
 const PER_PARTITION: i64 = 1_200;
 const SEGMENT_RECORDS: u64 = 300;
-const SEGMENTS_PER_TOPIC: usize = (PARTS as usize) * (PER_PARTITION as usize / 300);
 const PER_TOPIC: i64 = PER_PARTITION * PARTS as i64;
 const PRODUCE_BATCH: i64 = 100;
 const RATE_PER_PARTITION: i64 = 300;
@@ -137,7 +136,17 @@ impl Lab {
 
 impl Drop for Lab {
     fn drop(&mut self) {
+        // Every engine's whole log is kept beside the outcome files before its
+        // container goes; nothing here may panic while unwinding.
+        let keep = demo_dir().join("resume-semantics").join("engine-logs");
+        let _ = std::fs::create_dir_all(&keep);
         for c in &self.containers {
+            let mut cmd = Command::new("docker");
+            cmd.args(["logs", c]);
+            if let Ok(o) = kafka::output_within(cmd, 60) {
+                let text = format!("{}{}", o.stdout_utf8(), o.stderr_utf8());
+                let _ = std::fs::write(keep.join(format!("{c}.log")), strip_ansi(&text));
+            }
             let _ = run_quiet("docker", &["rm", "-f", c], 60);
         }
         for t in &self.topics {
@@ -192,7 +201,10 @@ fn run_quiet(program: &str, args: &[&str], secs: u64) -> String {
 /// target against it.
 struct Ctx {
     backup_id: String,
+    /// The two source topics in the order the engine restores them.
     sources: Vec<String>,
+    /// Segments per source topic, in the same order.
+    segments: Vec<usize>,
     archives: BTreeMap<String, Archive>,
     facts: logweir_core::engine::BackupSetFacts,
     window: (i64, i64),
@@ -219,8 +231,8 @@ fn fixture(tag: &str) -> Vec<Out> {
 fn setup(lab: &mut Lab) -> Ctx {
     let a = lab.topic("src-a");
     let b = lab.topic("src-b");
-    kafka::produce_plain(&a, &fixture("a")).expect("produce topic a");
-    kafka::produce_plain(&b, &fixture("b")).expect("produce topic b");
+    kafka::produce_plain(&a, &fixture("a")).expect("produce the first topic");
+    kafka::produce_plain(&b, &fixture("b")).expect("produce the second topic");
     let backup_id = lab.name("arch");
     lab.archives.push(backup_id.clone());
     let o = kafka::backup_run(&backup_id, &[&a, &b], SEGMENT_RECORDS);
@@ -239,13 +251,30 @@ fn setup(lab: &mut Lab) -> Ctx {
             PER_TOPIC,
             "{t}: the archive holds every fixture record"
         );
-        assert_eq!(
-            arc.segments.len(),
-            SEGMENTS_PER_TOPIC,
-            "{t}: {SEGMENT_RECORDS}-record segments"
+        assert!(
+            arc.segments.len() >= 2 * PARTS as usize,
+            "{t}: {SEGMENT_RECORDS}-record segments give every partition several segments, \
+             got {}",
+            arc.segments.len()
         );
         archives.insert(t.clone(), arc);
     }
+    // The engine restores topics in MANIFEST order (`filter_topics`,
+    // `restore/engine.rs:1168-1198`), which the backup engine chose; the
+    // scenarios speak of the first and second topic in THAT order.
+    let sources: Vec<String> = archives[&a].manifest["topics"]
+        .as_array()
+        .expect("topics")
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .filter(|n| n == &a || n == &b)
+        .collect();
+    assert_eq!(
+        sources.len(),
+        2,
+        "the manifest lists both topics: {sources:?}"
+    );
+    let segments = sources.iter().map(|s| archives[s].segments.len()).collect();
     let facts = facts_of(&backup_id, &archives[&a]);
     let floor = archives
         .values()
@@ -254,7 +283,8 @@ fn setup(lab: &mut Lab) -> Ctx {
         .expect("segments");
     Ctx {
         backup_id,
-        sources: vec![a, b],
+        sources,
+        segments,
         archives,
         facts,
         window: (floor, T + PER_PARTITION + 10_000),
@@ -651,9 +681,9 @@ fn verify(ctx: &Ctx, mapping: &BTreeMap<String, String>) -> Value {
 
 fn topic_role(ctx: &Ctx, src: &str) -> &'static str {
     if ctx.sources.first().map(String::as_str) == Some(src) {
-        "a"
+        "first"
     } else {
-        "b"
+        "second"
     }
 }
 
@@ -969,7 +999,7 @@ fn k1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     let v = verify(ctx, &m);
     o.put("verification", v.clone());
     o.expect(
-        "the kill landed while topic a was partly restored",
+        "the kill landed while the first topic was partly restored",
         reached && landed_a > 0 && landed_a < PER_TOPIC,
     );
     o.expect(
@@ -982,11 +1012,14 @@ fn k1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
         !log2.contains("Loaded checkpoint"),
     );
     o.expect(
-        "topic a: duplicates = every record attempt 1 left in the target",
-        count(&v, "a", "duplicates") == landed_a,
+        "the first topic: duplicates = every record attempt 1 left in the target",
+        count(&v, "first", "duplicates") == landed_a,
     );
-    o.expect("topic a: nothing missing", count(&v, "a", "missing") == 0);
-    o.expect("topic b: exact", exact(&v, "b"));
+    o.expect(
+        "the first topic: nothing missing",
+        count(&v, "first", "missing") == 0,
+    );
+    o.expect("the second topic: exact", exact(&v, "second"));
     o
 }
 
@@ -1031,8 +1064,8 @@ fn k2(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     o.put("verification", v.clone());
     let a_name = ctx.sources[0].clone();
     o.expect(
-        "the checkpoint lists exactly topic a's segments",
-        segs.len() == SEGMENTS_PER_TOPIC
+        "the checkpoint lists exactly the first topic's segments",
+        segs.len() == ctx.segments[0]
             && segs
                 .iter()
                 .all(|k| k.contains(&format!("/topics/{a_name}/"))),
@@ -1041,17 +1074,24 @@ fn k2(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     o.expect(
         "attempt 2 loads the checkpoint",
         log2.contains(&format!(
-            "Loaded checkpoint: {SEGMENTS_PER_TOPIC} segments completed"
+            "Loaded checkpoint: {} segments completed",
+            ctx.segments[0]
         )),
     );
-    o.expect("topic a: exact (its segments were skipped)", exact(&v, "a"));
     o.expect(
-        "topic b: duplicates = every record attempt 1 left in it",
-        count(&v, "b", "duplicates") == landed_b && landed_b > 0,
+        "the first topic: exact (its segments were skipped)",
+        exact(&v, "first"),
     );
-    o.expect("topic b: nothing missing", count(&v, "b", "missing") == 0);
     o.expect(
-        "attempt 2's offset report has no entry for topic a (skipped segments add nothing)",
+        "the second topic: duplicates = every record attempt 1 left in it",
+        count(&v, "second", "duplicates") == landed_b && landed_b > 0,
+    );
+    o.expect(
+        "the second topic: nothing missing",
+        count(&v, "second", "missing") == 0,
+    );
+    o.expect(
+        "attempt 2's offset report has no entry for the first topic (skipped segments add nothing)",
         !report_keys.iter().any(|k| k.starts_with(&format!("{ta}/")))
             && report_keys
                 .iter()
@@ -1094,20 +1134,20 @@ fn h1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     let v = verify(ctx, &m);
     o.put("verification", v.clone());
     o.expect(
-        "attempt 1's checkpoint (topic a) was carried",
-        carried && segs.len() == SEGMENTS_PER_TOPIC,
+        "attempt 1's checkpoint (the first topic) was carried",
+        carried && segs.len() == ctx.segments[0],
     );
     o.expect(
         "attempt 2 discards it on the hash (the path is inside the hash)",
         log2.contains("config hash mismatch"),
     );
     o.expect(
-        "topic a: re-produced whole, duplicates = every record of a",
-        count(&v, "a", "duplicates") == PER_TOPIC,
+        "the first topic: re-produced whole, duplicates = every record of a",
+        count(&v, "first", "duplicates") == PER_TOPIC,
     );
     o.expect(
-        "topic b: duplicates = every record attempt 1 left in it",
-        count(&v, "b", "duplicates") == landed_b,
+        "the second topic: duplicates = every record attempt 1 left in it",
+        count(&v, "second", "duplicates") == landed_b,
     );
     o
 }
@@ -1144,7 +1184,7 @@ fn t1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     o.put("attempt2_log", json!(interesting(&log2)));
     o.put("verification_after_attempt2", v2.clone());
     o.expect(
-        "the signal landed while topic a was partly restored",
+        "the signal landed while the first topic was partly restored",
         reached && at_signal < PER_TOPIC,
     );
     o.expect("attempt 1 exits 0 after SIGTERM", exit1 == Some(0));
@@ -1152,25 +1192,29 @@ fn t1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
         "attempt 1 logs the shutdown between topics",
         log1.contains("Shutdown signal received, stopping restore"),
     );
-    o.expect("attempt 1 finished topic a: exact", exact(&v1, "a"));
     o.expect(
-        "attempt 1 wrote nothing to topic b: all of it missing",
-        count(&v1, "b", "missing") == PER_TOPIC && count(&v1, "b", "restored") == 0,
+        "attempt 1 finished the first topic: exact",
+        exact(&v1, "first"),
     );
     o.expect(
-        "the checkpoint lists topic a's segments",
-        segs.len() == SEGMENTS_PER_TOPIC,
+        "attempt 1 wrote nothing to the second topic: all of it missing",
+        count(&v1, "second", "missing") == PER_TOPIC && count(&v1, "second", "restored") == 0,
+    );
+    o.expect(
+        "the checkpoint lists the first topic's segments",
+        segs.len() == ctx.segments[0],
     );
     o.expect("attempt 2 exits 0", exit2 == Some(0));
     o.expect(
         "attempt 2 loads the checkpoint",
         log2.contains(&format!(
-            "Loaded checkpoint: {SEGMENTS_PER_TOPIC} segments completed"
+            "Loaded checkpoint: {} segments completed",
+            ctx.segments[0]
         )),
     );
     o.expect(
         "after attempt 2 both topics are exact",
-        exact(&v2, "a") && exact(&v2, "b"),
+        exact(&v2, "first") && exact(&v2, "second"),
     );
     o
 }
@@ -1247,7 +1291,7 @@ fn k3(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     o.expect("the tail resume ran", resumed.is_ok());
     o.expect(
         "after the tail resume both topics are exact: no duplicate of the unacknowledged batch",
-        exact(&v, "a") && exact(&v, "b"),
+        exact(&v, "first") && exact(&v, "second"),
     );
     o
 }
@@ -1292,23 +1336,23 @@ fn s1(lab: &mut Lab, ctx: &Ctx) -> (Outcome, PathBuf) {
     o.put("verification_after_attempt2", v2.clone());
     o.expect(
         "the control: attempt 1 is exact",
-        exact(&v1, "a") && exact(&v1, "b"),
+        exact(&v1, "first") && exact(&v1, "second"),
     );
     o.expect(
         "the checkpoint lists every segment",
-        segs.len() == 2 * SEGMENTS_PER_TOPIC,
+        segs.len() == ctx.segments[0] + ctx.segments[1],
     );
     o.expect("attempt 2 exits 0", exit2 == Some(0));
     o.expect(
         "attempt 2 trusts the stale checkpoint",
         log2.contains(&format!(
             "Loaded checkpoint: {} segments completed",
-            2 * SEGMENTS_PER_TOPIC
+            ctx.segments[0] + ctx.segments[1]
         )),
     );
     o.expect(
         "the recreated target is left empty: every record missing",
-        count(&v2, "a", "missing") == PER_TOPIC && count(&v2, "b", "missing") == PER_TOPIC,
+        count(&v2, "first", "missing") == PER_TOPIC && count(&v2, "second", "missing") == PER_TOPIC,
     );
     (o, f.checkpoint)
 }
@@ -1343,15 +1387,19 @@ fn c1(lab: &mut Lab, ctx: &Ctx, valid: &Path) -> Outcome {
     o
 }
 
-/// W1 — two engines with the same document and checkpoint path, started
-/// together, into the same empty targets.
+/// W1 — two attempts of one execution at once (a second attempt beside the
+/// orphaned engine of a killed one): the same document, each with its own
+/// per-attempt checkpoint path as Logweir renders them, into the same empty
+/// targets.
 fn w1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     let mut o = Outcome::new("w1-two-workers");
     let m = targets(lab, ctx, "w1");
-    let f = files(lab, "w1", "stable");
-    write_doc(ctx, &m, &f.checkpoint, &f.offsets, &f.doc);
-    let e1 = start_engine(lab, "w1-e1", &f.doc);
-    let e2 = start_engine(lab, "w1-e2", &f.doc);
+    let f1 = files(lab, "w1", "worker-1");
+    let f2 = files(lab, "w1", "worker-2");
+    write_doc(ctx, &m, &f1.checkpoint, &f1.offsets, &f1.doc);
+    write_doc(ctx, &m, &f2.checkpoint, &f2.offsets, &f2.doc);
+    let e1 = start_engine(lab, "w1-e1", &f1.doc);
+    let e2 = start_engine(lab, "w1-e2", &f2.doc);
     let exit1 = wait_engine(&e1, ENGINE_DEADLINE_SECS);
     let exit2 = wait_engine(&e2, ENGINE_DEADLINE_SECS);
     let v = verify(ctx, &m);
@@ -1360,11 +1408,12 @@ fn w1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     o.expect("both workers exit 0", exit1 == Some(0) && exit2 == Some(0));
     o.expect(
         "every record is restored twice: duplicates = the whole archive",
-        count(&v, "a", "duplicates") == PER_TOPIC && count(&v, "b", "duplicates") == PER_TOPIC,
+        count(&v, "first", "duplicates") == PER_TOPIC
+            && count(&v, "second", "duplicates") == PER_TOPIC,
     );
     o.expect(
         "nothing missing",
-        count(&v, "a", "missing") == 0 && count(&v, "b", "missing") == 0,
+        count(&v, "first", "missing") == 0 && count(&v, "second", "missing") == 0,
     );
     o
 }
@@ -1416,11 +1465,11 @@ fn m1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
     o.expect("the re-run exits 0", exit2 == Some(0));
     o.expect(
         "the foreign records are unexpected under complete verification",
-        count(&v, "a", "unexpected") == 5,
+        count(&v, "first", "unexpected") == 5,
     );
     o.expect(
-        "topic a: duplicates = attempt 1's records",
-        count(&v, "a", "duplicates") == landed_a,
+        "the first topic: duplicates = attempt 1's records",
+        count(&v, "first", "duplicates") == landed_a,
     );
     o
 }
