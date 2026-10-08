@@ -1397,7 +1397,7 @@ Mutation bodies are strict: an unknown field is `422 validation_failed` naming
 the field, not a silently ignored key. So is an unknown or repeated query
 parameter (`400 malformed_request`). Bodies are capped at 1 MiB.
 
-**The listener speaks HTTP/1.1 only, and every connection is on a clock.**
+**The listener speaks HTTP/1.1 only, and the request head is on a clock.**
 A connection has ten seconds from the moment it is accepted to send a complete
 request head, and ten seconds again after each answer on a keep-alive
 connection; past that the server closes it, whether it sent part of a head or
@@ -1405,6 +1405,8 @@ nothing at all (R4; FX-24 extended it to a connection that sends no byte). A
 head larger than 32 KiB is refused. At most 256 connections are served at
 once, and further ones wait in the kernel's listen queue until one closes, so
 idle sockets cannot hold that ceiling for longer than the ten-second deadline.
+The clock covers the head only: a request body a handler is still reading, and
+an answer the client has stopped reading, have no deadline of their own.
 HTTP/2 is not served: a client that opens with the HTTP/2 preface (prior
 knowledge, `h2c`) is closed at its first line. A shutdown signal gives open
 connections ten seconds to finish, then drops them and exits 0.
