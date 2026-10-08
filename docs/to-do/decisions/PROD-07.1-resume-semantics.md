@@ -111,13 +111,250 @@ So a crashed restore is not resumable today, by three independent mechanisms (pe
 
 TODO-MEASURED
 
-TODO-CONTRACT
+## 5. The contract
 
-TODO-TABLE
+### 5.1 Terms
 
-TODO-ROWS
+- **Execution.** One approved restore of one plan, from one archive generation, into one set of targets.
+  - Its id is minted at the first attempt: for a `Restore`, its UID and execution number (PLAT-12.2's retry identity); for the CLI, the first attempt's run id.
+  - A changed plan, a changed archive generation or a fresh target makes a NEW execution (the tracker's PROD-07 boundary; PLAT-12.2).
+- **Attempt.** One runner pod, one `logweir restore run` process and one engine process, identified by its run id.
+- **Archive generation.** The catalog point id, `backup_id`, manifest sha256 and, where the store versions objects, `manifest_version_id`: the binding PROD-01.4 §7 gives PROD-07.1.
+- **Target identity.** For each target topic:
+  - the cluster id, the name and `topic_id` when available (PROD-01.4 §2; real ids need OD-6's FFI crate);
+  - else its creation marks (partition count, log start 0);
+  - and, at the end of every attempt, per partition, the end offset observed and the fingerprint of the record just below it (PROD-01.4 §7, "PROD-07.1").
+- **Durable progress.** Per target partition, the longest prefix of the target that PROD-08.1's model proves to be an exact, in-order copy of the archive. It is computed over the target's records up to its last `x-original-offset` (the **tail**). It lives in the target topic itself; the attempt record (5.4) only binds it. Nothing else is durable progress: not the engine's checkpoint, the engine's offset report, the engine's exit code, or a count of acknowledged requests.
 
-TODO-LIMITS
+### 5.2 The default contract, now (PROD-07.2): an interrupted restore is reconciled, never resumed
+
+1. **Interrupted is a state.** An attempt that ends without a signed verdict ends its execution as **Interrupted** (PROD-07.2's state), never as a generic failure, and is never retried into the same target automatically. That covers a killed runner, an engine exit other than 0, a lost pod or node, and a Logweir-side failure after the engine finished (PROD-01.1's 07-1b and 07-1c).
+2. **Reconcile** means running Logweir's complete verification (PROD-08.1) over each partial target. It gives, per partition, the tail and the missing, duplicate, out-of-order and unexpected counts at or below it. These go into the signed list of partial targets that PROD-07.2 publishes, so the operator sees the last durable progress.
+3. **Retry** is a new execution (PLAT-12.2) into fresh target names, behind the policy's approval. Phase 0's existing-target refusal (`L/crates/logweir/src/drill/phase0_admit.rs:579-600`) stays exactly as it is, so no execution can append into another's partial target. The partial targets stay until the operator resolves the interruption (PROD-07.2's hold and cleanup rules).
+4. **The engine's checkpoint is never durable, never carried and never read.**
+   - Logweir stops rendering `checkpoint_state` and `checkpoint_interval_secs`. With no `checkpoint_state` the engine keeps no checkpoint at all (2.2), so no file can be stale (S1), corrupt (C1) or carried (H1).
+   - Within one attempt the file does nothing: the engine reads it only at start (2.1).
+   - This supersedes PROD-00's A-C4-1 (stable per-execution paths) and absorbs A-C4-3 (§8).
+   - Until it lands, per-attempt paths keep the same property (2.2, H1).
+5. **An engine exit 0 is not completion.** A SIGTERM-stopped engine exits 0 with the remaining topics unrestored (T1). Once PROD-07.2 sends cancels, an attempt that was cancelled is Interrupted whatever the engine's exit, unless the complete verification passes. Phase 7 already decides the verdict from the target (§3).
+6. **A cancel stops the writer, then the attempt ends.**
+   - SIGTERM reaches the engine only between topics (2.6). So PROD-07.2's cancel is SIGTERM, then SIGKILL after a bounded grace.
+   - The attempt is not Interrupted, and its point not released for a retry, until the engine process or container is proved gone and the targets have stopped growing (PROD-01.1's 07-4).
+
+### 5.3 Resume, when PROD-07.3 delivers it: continue each partition from its verified tail
+
+**Recommended route: the target is the checkpoint.** A resume attempt reconciles the partial target, then restores, per partition, only the archived records after the tail. It selects them by source offset through PROD-00.3i's per-partition offset floor (C11). It does not use the engine's checkpoint.
+
+Preconditions. All six must hold; any one that fails gives "resume blocked: <reason>", and the execution falls back to 5.2:
+
+- **R1 Same execution.** The same plan hash and the same archive generation as the execution's earlier attempts, read from their attempt records (5.4), which must verify.
+- **R2 The earlier writer is gone and the target is quiet.**
+  - Every earlier attempt's engine is proved stopped: the process or container has exited, or the pod has terminated with its container's terminated state recorded.
+  - A pod on an unreachable node (phase `Unknown`) is NOT proved stopped: such a pod can keep writing. The resume waits for the node's removal, or the execution falls back to a fresh target.
+  - Then every target partition's end offset is unchanged over a quiet period at least the engine's `produce_timeout_ms` (30 s by default, `C23/config.rs:1162-1164`). That bounds a request a leader appended but had not yet committed when its writer died.
+  - Without producer fencing (no `InitProducerId`, 2.8), this wait is the only bound. PROD-00.3d with a transactional id per execution would make it exact.
+- **R3 Target identity unchanged since the last attempt record.** Equal `topic_id` when both are known. Otherwise:
+  - equal creation marks;
+  - no partition's end below its recorded end;
+  - and the record just below each recorded end has the recorded fingerprint.
+
+  Any difference refuses with `TargetGenerationChanged`, and the retry uses a fresh target (PROD-01.4 §7; rows TI-07.1-1 to -3). S1 shows what trusting a name alone does.
+- **R4 A clean prefix.** Below the tail, the reconciliation finds no `unexpected` record, no `out_of_order`, no `mismatched` and no `missing`.
+  - An unexpected record is one without lineage, as from a foreign writer (M1), or naming an offset the archive does not hold.
+  - Duplicates below the tail come only from re-sent requests (C5, 2.8). They do not block. They are counted, disclosed as bounded duplicates in the attempt record, and the final verdict still fails on them, as PROD-08.1 fails any target that holds one.
+- **R5 One writer.** One attempt at a time per execution, enforced by the controller (one Job per attempt, created only when R2 holds). W1 shows two writers duplicating everything. The CLI takes no lease, so the CLI offers no resume.
+- **R6 Selection by offset, never by time.**
+  - Per partition, the resume offset is the tail + 1, or the first archived offset in the window when the partition is empty (PROD-01.1's 07-2).
+  - The tail may be a transaction marker's lineage: markers are archived and restored as records (PROD-01.1's 07-3).
+  - The window, the mapping and every other key of the approved document are unchanged. Only the offset-floor rule block is added; it is derived mechanically from the reconciliation, and its digest goes into the attempt record.
+
+**After the resume:**
+
+- complete verification over the whole target, against the PLAN's expected set (PROD-08.1 §2), is the execution's verdict;
+- the offset floor is an execution detail, never a record filter in PROD-08.1's sense, so it never enters `complete.filter` or `excluded`;
+- the offset mapping is rebuilt from the target's lineage headers (2.7; PROD-08.1 §2.1), never taken from the engine's report;
+- the evidence records the attempts, each partition's resume offset and the prefix duplicates.
+
+**Bounds:**
+
+- **Duplicates a resume adds at the interruption:** 0, because the tail scan sees an appended batch whether or not it was acknowledged (measured with the prototype: K3, §4).
+- **Duplicates inside any attempt:** C5's re-sends, at most the re-sent requests × `produce_batch_size` per partition (PROD-01.1's 07-1), until PROD-00.3d.
+- **Loss:** none is assumed. The final complete verification proves the target or the verdict fails.
+
+**Approval and the existing-target refusal.** A resume is the same execution:
+
+- it writes only records the approved plan selects, into targets that execution created and that R3 re-identified;
+- phase 0's refusal gets exactly one exception, for those targets. This is not a restore into a live topic (`docs/stability.md` Never #1), because nothing but this execution has written them, and R4 proves it;
+- whether a resume needs a fresh approval is the policy's question under PLAT-12.2's retry identity, not this record's.
+
+### 5.4 The attempt record: what binds a resume
+
+The tracker's "checkpoints bind plan, execution, archive generation and target identity" becomes one create-only object per attempt in the evidence store (`logweir/restores/<execution>/attempt-<n>.json`), written by the runner at the end of every attempt that reached the engine, and when it can, on a cancel. It holds:
+
+- the plan hash, the execution id, the attempt's run id and the attempt number;
+- the archive generation (5.1);
+- per target topic: cluster id, name, `topic_id` or null, partition count and creation marks;
+- per partition at attempt end: end offset, tail, the fingerprint of the record below the end, and the reconciliation counts;
+- whether a cancel was sent, the engine's exit, and the resume block's digest when the attempt was a resume.
+
+The rules:
+
+- **Absent means unknown, and unknown never resumes** (TI-07.1-2).
+- **Records written before this contract are never read as resumable.** Neither are the engine's pod-local checkpoint files: none carries an identity block.
+- **It is versioned and verified like every other evidence document** (inherited rule 3): both readers and the parity script, absent-field behaviour stated.
+- **It lives in the evidence bucket,** so it survives the pod, the node and the controller. The controller may mirror the latest attempt in status for PLAT-14's progress.
+
+### 5.5 The replay ambiguity window
+
+**Definition.** The records the broker appended for an attempt that the attempt never saw acknowledged.
+
+**Bound.** At the instant an attempt ends, at most one in-flight produce request per partition being restored: `min(partitions, max_concurrent_partitions) × produce_batch_size` records per topic, 4 × 1,000 at the defaults (2.8). Within the attempt, add the re-sent copies of any request whose response was lost (C5).
+
+**Who can see it.**
+
+- The engine's checkpoint cannot: it lists only fully acknowledged segments (2.5), so a checkpoint-driven resume re-produces the window.
+- The target can, once R2's quiet period has passed: a tail scan reads every appended record, acknowledged or not.
+- Measured (K3): ⟪K3-WINDOW⟫.
+
+### 5.6 What per-segment checkpoints, path-free hashing and a persisted mapping would buy (option B), and why it is not recommended
+
+OD-3 now funds engine patches. So the alternative is real: make the engine's own checkpoint the resume mechanism.
+
+**It would need five patches:**
+
+- PROD-00.3g: save per segment or per `checkpoint_interval_secs`, and hash without the file paths (~2 days, PROD-00 §9);
+- an atomic save, write then rename (C1 shows the hazard; ~0.5 day);
+- target cluster id, topic ids and the manifest digest in the hash (S1 shows the hazard; ~1 day);
+- skipped segments' mappings re-added from the checkpoint (K2; ~0.5 day);
+- a durable place for the file. That is a PVC, `docs/stability.md` Later #12, a new lifecycle to own; or a runner that uploads the file at every save and downloads it at start (~2 days, and a new object type anyway).
+
+**It would buy** resume at segment granularity with no PROD-00.3i dependency.
+
+**It would still leave:**
+
+- **Duplicates up to one segment per partition**, plus the ambiguity window (2.5, 5.5). The checkpoint trails the target by construction, and per-topic saves today make it a topic (K1, K2).
+- **A file that has to be checked against the target before it is trusted.** S1 shows a checkpoint applied to a recreated target exiting 0 with every record missing. TI-07.1-1 to -3 then require the same identity reads and fingerprints as route C. Once those reads are taken, the target already says where to resume.
+- **Fencing and quiescence.** Two writers duplicate everything whatever the checkpoint says (W1).
+
+So option B costs about 6 days of engine and runner work. It needs the target scan anyway, and it ends with a weaker bound (a segment per partition, against 0). Route C costs:
+
+- PROD-00.3i's offset-range rule (+~1 day on C10's ~3 days, already on the ledger for PROD-09.3 and PROD-11.1);
+- the reconciliation, which is PROD-08.1's complete lane, already shipped;
+- the attempt record and the identity reads (PROD-01.4's, ~2 days);
+- the controller's single-flight and quiet-period gate (~1–2 days).
+
+**PROD-00.3g is therefore not on PROD-07.3's path.** Its fixes are bug-class (a documented key that does nothing, a non-atomic save, a hash that covers paths) and stay upstream-worthy. §7.3 gives its rows if the orchestrator keeps it; §8 proposes to keep it at lower priority.
+
+### 5.7 Process kill, lost node or storage, and competing workers
+
+Every event is a row of §6. In short:
+
+- **Process kill** before or after acknowledgements, and before or after checkpoint commits: today it is Interrupted (5.2); under 5.3 it resumes exactly once from the tail, whatever the engine's checkpoint held.
+- **Lost node:** a resume waits until the old pod is proved terminated (R2). A partitioned node's pod can still write.
+- **Lost checkpoint storage** (the `emptyDir`): no effect, because nothing reads the engine's file.
+- **Lost target storage** (topic deleted, recreated or truncated): R3 refuses, and the retry is a fresh target.
+- **Lost archive** (the manifest or a segment unreadable or changed): R1 fails, or the reconciliation cannot compute the expected set (PROD-08.1 §2: "not compared"), and the resume is blocked.
+- **Competing workers** (a second attempt, or the orphaned engine of a killed `logweir`): R2 and R5 refuse until the writer is gone; W1 measures what happens without them.
+
+## 6. Failure-state table
+
+"Engine next attempt" is what the pinned engine does when the next attempt runs the same document with the same checkpoint path. Logweir never does this today; it is the measured hazard. "Today" is Logweir as shipped; "5.2" and "5.3" are this contract.
+
+| # | Event | Engine next attempt (0.23.3) | Today | 5.2 (PROD-07.2) | 5.3 (PROD-07.3) |
+|---|---|---|---|---|---|
+| F1 | Runner or engine killed (SIGKILL, OOM, pod deleted) inside the first topic, before any checkpoint commit | No file was saved, so it starts over. Duplicates = every record already landed (K1: ⟪K1-DUP⟫) | Killed `logweir`: the engine finishes unrecorded (PROD-01.1 §5.2). Killed pod: no scorecard; a retry of the same spec is refused at phase 0 | Interrupted; reconcile; fresh-target retry | Resume after R2: 0 added duplicates, nothing missing |
+| F2 | Killed after a topic's checkpoint commit, inside a later topic | Skips the committed topic's segments. Duplicates = the later topic's landed records (K2: ⟪K2-DUP⟫); its offset report omits the skipped topic | As F1 | As F1 | As F1 |
+| F3 | As F2, with Logweir's per-attempt path and the file carried | Discards it on the hash ("config hash mismatch") and starts over; duplicates = everything landed (H1: ⟪H1-DUP⟫) | Not carried: as F1 | As F1 | As F1 (the engine file is irrelevant) |
+| F4 | Graceful stop (SIGTERM) mid-topic | Finishes the topic, saves, stops before the next and **exits 0** with later topics absent (T1) | No cancel reaches the engine (Later #13) | SIGTERM then SIGKILL; Interrupted whatever the exit (5.2 items 5–6) | As F1 |
+| F5 | Killed with produce requests in flight (the ambiguity window) | Re-produces the in-flight batches with everything else (no file) | As F1 | As F1; the reconciliation counts what landed, acknowledged or not | Tail scan after the quiet period: 0 duplicates (K3: ⟪K3-RESULT⟫) |
+| F6 | A response lost inside an attempt (C5) | Re-sends: one batch appended twice; can exit 0 (PROD-01.1 §5.1 samples 3, 5, 6) | Count bound or complete verification fails the run (PROD-01.1 §5.1 sample 6; PROD-08.1) | Same; the reconciliation names the duplicates | R4 lets them through, disclosed; the final verdict fails on them; 00.3d removes them |
+| F7 | Broker outage past the retry budget: the engine exits 1 with a partial target | Errored topics are still checkpointed (2.4); the next attempt skips their completed segments | Exit 1, no scorecard; the partial target stays (PROD-01.1 §5.1 sample 3) | Interrupted, partial targets listed (07-1b) | Resume after R2–R4 |
+| F8 | Engine exits 0, then Logweir's own read fails (07-1c) | n/a | Exit 1, no scorecard over a complete target (PROD-01.1 §5.1 samples 4, 5) | "Restore finished, verification not completed"; re-verify without re-restoring | Re-verify; nothing to resume |
+| F9 | Controller restarted | n/a: the Job runs on | The Job is unaffected | Unaffected: state is in the attempt record and the Job | Unaffected |
+| F10 | Node lost (runner pod `Unknown`) | n/a | The checkpoint is gone with the `emptyDir`; nothing to resume | Interrupted once the pod is proved terminated | Blocked until the pod is proved terminated (R2); then as F1 |
+| F11 | Checkpoint storage lost | Starts over: the same as F1 | No effect (never read) | No effect: no file is rendered | No effect |
+| F12 | Checkpoint file truncated (killed during the non-atomic save) | **Refuses to start**: exit ⟪C1-EXIT⟫, nothing produced (C1) | Unreachable: per-attempt paths | Unreachable: no file | Unreachable |
+| F13 | A stale checkpoint and a target deleted and recreated under the same names | **Trusts the file: skips every segment, exits 0, the target stays empty** (S1: ⟪S1-MISSING⟫ missing) | Unreachable: per-attempt paths and phase 0 | Unreachable: no file | R3 refuses: `TargetGenerationChanged`, fresh target (TI-07.1-1) |
+| F14 | Target truncated (delete-records, a retention change) | Skips segments it already wrote; the truncated records stay missing | n/a: the retry is a fresh target | Reconciliation reports them missing | R3 (end below the recorded end) or R4 (missing below the tail) refuses (TI-07.1-3) |
+| F15 | A foreign writer appends to the target | Re-produces around it; the foreign records stay (M1: ⟪M1-UNEXP⟫ unexpected after the re-run) | n/a | Reconciliation reports them unexpected | R4 refuses (M1: the prototype refused) |
+| F16 | Two writers for one execution: a second attempt, or the orphaned engine of a killed `logweir` | Both produce everything: duplicates = the whole archive (W1: ⟪W1-DUP⟫) | Possible today only through the orphan (PROD-01.1 §5.2) into the same target | The cancel must stop the writer before Interrupted (5.2 item 6) | R2 and R5 refuse until one writer remains |
+| F17 | Archive changed under the same backup id, or unreadable | Skips by key, so it trusts a rewritten archive (the hash does not cover the manifest, 2.3) | n/a | Reconciliation cannot compute the expected set: "not compared" (PROD-08.1 §2) | R1 refuses |
+| F18 | Plan changed between attempts | The hash differs, so it starts over | n/a | A new execution (PLAT-12.2) | A new execution; never a resume |
+| F19 | Cancel or SIGTERM before the engine subscribes to its shutdown channel | Lost: the restore runs to completion (2.6, from source; not measured) | n/a | SIGKILL after the grace (5.2 item 6) | As 5.2 |
+
+## 7. Acceptance rows for the dependent tasks
+
+Each row has a pass predicate, a negative control that must make it fail, and a fixture. "resume_semantics `<row>`" means that row of `e2e/tests/resume_semantics.rs`, whose steps the dependent task re-points at the product path (the runner, `logweir restore run`, or the controller) instead of the bare engine. PROD-01.1's and PROD-01.4's rows that already belong to these tasks are cited, not restated.
+
+### 7.1 PROD-07.2 — Make interruption honest
+
+| # | Pass predicate | Negative control | Fixture |
+|---|---|---|---|
+| 07.1-I1 | A restore whose runner is killed inside the first topic ends Interrupted. The signed list names every partial target, and per partition its tail and its missing/duplicate/unexpected counts, equal to a complete verification of the same target. Extends 07-1b. | A state that reads as a generic failure, or a list without per-partition coverage, fails. So does a list whose counts differ from the complete verification's. | resume_semantics k1 steps through the runner; 07-1b's broker-stop fixture |
+| 07.1-I2 | A cancel stops the writer: SIGTERM, then SIGKILL after the grace. After the grace no engine process or container of the attempt remains, the target's end offsets stop moving, and only then is the state Interrupted. | Today's `a_killed_restore_leaves_its_engine_writing` (PROD-01.1 07-4): the engine outlives the cancel and the target reaches the whole archive. That must fail the new "writer stopped" assertion. | the kill row, flipped |
+| 07.1-I3 | A restore cancelled inside the first of two topics is never Succeeded or `pass`, whatever the engine's exit code. | T1: the engine exits 0 with topic b absent. An implementation that reads exit 0 as "restore finished" fails. | resume_semantics t1 steps |
+| 07.1-I4 | The rendered restore document carries neither `checkpoint_state` nor `checkpoint_interval_secs`. A test over the render fails if either key comes back (absorbs A-C4-3). | A mutant that renders a stable path. Its consequence is S1 (a stale file trusted: exit 0, every record missing), which the test cites. | render snapshot test; resume_semantics s1 |
+| 07.1-I5 | A retry of an Interrupted execution is a new execution into fresh targets. A second execution naming the old partial target is still refused at phase 0. | A retry that reuses the old target name. | PLAT-12.2's retry journey |
+| 07.1-I6 | A Logweir-side read failure after the engine exited 0 is "restore finished, verification not completed", and re-verifying needs no re-restore (PROD-01.1 07-1c). | As 07-1c. | 07-1c's pause-at-exit fixture |
+| 07.1-I7 | While an execution is Interrupted, the recovery point it restores from is held. Cleanup deletes only targets whose identity matches the execution's attempt record. | A cleanup that deletes a same-name target recreated by someone else, or a retention run that releases the held point. | resume_semantics s1 steps (recreated target) |
+
+### 7.2 PROD-07.3 — Resume within proven semantics
+
+| # | Pass predicate | Negative control | Fixture |
+|---|---|---|---|
+| 07.1-R1 | Killed with produce requests in flight (the broker frozen, the engine killed, the broker thawed), then resumed: complete verification is exact. No batch appended without acknowledgement appears twice. | The engine's own re-run of the same document: duplicates = every record landed (K1, K3's window included). | resume_semantics k3 (the prototype replaced by the product resume) |
+| 07.1-R2 | Killed inside topic 1 of 2, and again after topic 1's checkpoint commit: exact after resume, either way. Replaces A-C4-2. | Per-attempt paths with the file carried re-produce topic 1 whole (H1: duplicates = 3,600). | resume_semantics k1, k2, h1 |
+| 07.1-R3 | Resume selects by offset (PROD-01.1 07-2) and tolerates a marker at the tail (07-3). | As 07-2 and 07-3. | ts-pit row; TXN row |
+| 07.1-R4 | A target deleted and recreated between attempts refuses with `TargetGenerationChanged` before anything is produced; so does c02's refilled recreation (TI-07.1-1). | S1: the engine's checkpoint trusts the recreated target (exit 0, every record missing); an offsets-only identity passes c02. | resume_semantics s1; PROD-01.4 c02 steps on a restore target |
+| 07.1-R5 | A truncated target refuses (TI-07.1-3). An attempt record without an identity block is never resumed (TI-07.1-2). | As TI-07.1-2 and -3. | unit rows over recorded identities |
+| 07.1-R6 | A target holding a record the execution did not write refuses, naming the partition and offset. | M1: a re-run leaves the 5 foreign records unexpected and exits 0. | resume_semantics m1 |
+| 07.1-R7 | A resume is refused while the previous attempt's engine or pod is running or unknown, or while any target end moved within the quiet period. | W1: two writers duplicate the whole archive. The orphaned engine of the kill row keeps writing. | resume_semantics w1; the kill row |
+| 07.1-R8 | After a resume, the mapping rebuilt from the target's lineage covers every restored record, equal to the complete verification's restored set. The engine's offset report is not used. | K2: the engine's report after a checkpoint resume has no entry for the skipped topic. | resume_semantics k2 |
+| 07.1-R9 | Duplicates inside an attempt stay within the re-sent requests (PROD-01.1 07-1). R4 lets them through disclosed, and the final verdict fails on them. | 07-1's fault proxy. | the fault-proxy profile (§8) |
+| 07.1-R10 | The resumed attempt's document differs from the approved one only by the offset-floor block, whose digest is in its attempt record. The final verification uses the plan's expected set, with no `excluded` and no `complete.filter`. | A resume that changes the window, the mapping or any other key is refused. A verification that treats the floor as a filter passes a target missing its prefix. | render diff over two attempts; a complete verification with the prefix deleted |
+
+### 7.3 PROD-00.3g, if the orchestrator keeps it
+
+A-C4-4 stays. The rows below are added. None is a PROD-07.3 dependency.
+
+| # | Pass predicate | Negative control | Fixture |
+|---|---|---|---|
+| 07.1-G1 | A kill during a checkpoint save leaves the previous complete file (write to a temporary file, then rename). | C1: a truncated file stops the next attempt. | resume_semantics c1, with the kill injected during the save |
+| 07.1-G2 | The hash excludes `checkpoint_state` and `offset_report`, and includes the target cluster id and the archive's manifest digest. | H1: per-attempt paths discard the file. S1: a recreated target on the same cluster is not caught by the hash alone, and needs topic ids or the identity reads. | resume_semantics h1, s1 |
+| 07.1-G3 | Skipped segments' mappings are re-added from the checkpoint, so the report covers every restored record. | K2's report without topic a. | resume_semantics k2 |
+
+### 7.4 PROD-00.3i (its offset-range rule, for PROD-07.3)
+
+| # | Pass predicate | Negative control | Fixture |
+|---|---|---|---|
+| 07.1-F1 | A per-partition floor rule drops every source offset below the floor, produces the rest unchanged, and skips a segment wholly below the floor without producing from it. | A floor applied through the time window (07-2's ts-pit control). | A-C11-1 / A-C11-2 fixtures |
+
+## 8. Ledger changes proposed (the orchestrator's to record)
+
+1. **PROD-07.2** takes the default contract (5.2) and rows 07.1-I1 to I7. It also takes A-C4-3, as I4, and the `docs/kubernetes.md` `TMPDIR` row, which says the checkpoint lands there and must change with I4.
+2. **PROD-07.3's dependency "00.3 per OD-3" becomes "00.3i"** (C11's offset floor, 07.1-F1), plus PROD-01.4's target identity:
+   - `topic_id` needs OD-6's FFI crate; the creation-marks and fingerprint fallback is available now;
+   - PROD-00.3d is recommended (it removes C5's duplicates inside an attempt), not required;
+   - not 00.3g.
+3. **PROD-00.3g** leaves PROD-07.3's path. Keep it as a bug-class patch at lower priority (A-C4-4 and 07.1-G1 to G3), or drop it; the orchestrator decides. PROD-00's A-C4-1 (stable per-execution paths) is superseded by 07.1-I4, and A-C4-2 by 07.1-R2.
+4. **Proposed child row PROD-01.5d — a produce-response fault proxy profile** (compose, Tier B). It is a listener whose advertised address is a proxy that forwards produce requests and can drop or hold a response deterministically.
+   - Two rows wait on it: PROD-01.1's 07-1 (here 07.1-R9) and PROD-00.3d's oracle A-C5-1. PROD-01.1 §5.1 names it and PROD-01.1 §7 assigns it to PROD-07, but neither task owns a compose profile.
+   - K3's freeze-and-kill (§4) is deterministic for "kill with requests in flight", because the kill lands while the broker is frozen. It does not drop a single response, so it does not replace the proxy.
+
+## 9. Limits of this record
+
+- **One broker, no replication.** Slot 1 is one combined KRaft node, so an appended but uncommitted record (R2's quiet period) never occurs here; the bound comes from source and Kafka's acknowledgement semantics, not from a run.
+- **The engine runs in a container under `--platform linux/amd64`** on an arm64 host, through a copy of `engine-docker.sh`'s invocation with a container name. The engine binary and image are the pin's.
+- **Pacing keys.** Two keys Logweir does not render (`produce_batch_size: 100`, `rate_limit_records_per_sec: 300`) were appended to every document, identically across a scenario's attempts. They change timing and batch size, not the checkpoint or produce semantics. The defaults' window (4 × 1,000) is from source.
+- **One run per row,** small fixtures (7,200 records). They establish the behaviours, not rates.
+- **The resume is a prototype.** It produces the remaining archived records through librdkafka with idempotence on, not through the engine with an offset floor, which does not exist until PROD-00.3i. It shows what a tail-driven resume yields. It does not test 00.3i.
+- **Not run:**
+  - a lost node or a Kubernetes runner (F10 is from source and Kubernetes semantics);
+  - a signal before the engine subscribes (F19);
+  - detached sibling partitions (2.9);
+  - a broker outage past the retry budget (F7 cites PROD-01.1);
+  - a rewritten archive under the same backup id (F17).
+- **Routes and ledger changes are proposals.** OD-3 is decided; which 00.3 rows exist and their priority is the orchestrator's.
 
 ---
 
