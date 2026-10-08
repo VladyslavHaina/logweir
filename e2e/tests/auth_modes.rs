@@ -374,7 +374,17 @@ fn drill_spec(row: Row, backup_id: &str, window: (i64, i64)) -> serde_yaml::Valu
         serde_yaml::from_str(&format!("[\"{}\"]", row.bootstrap())).unwrap();
     v["target"]["auth"] = row.auth_yaml();
     v["target"]["teardown"] = "delete".into();
-    v["sample"]["window_start"] = rfc3339(window.0 - 3_600_000).into();
+    // THE WINDOW STARTS BEFORE EVERY RECORD THE TOPIC HOLDS. `orders` on the
+    // auth listener accumulates one batch per row per run, and a backup takes
+    // the whole topic as one segment per partition. A window starting an hour
+    // back stops covering the earliest batches once the stack is an hour old:
+    // the segment then straddles the window, the engine restores it whole
+    // (recovery-point selection is by segment, docs/stability.md), and the
+    // head-anchored sample compares the window's first records with the
+    // target's first records, which are older — a false `fail-integrity` that
+    // depends on the stack's age, not on the auth mode. Thirty days back keeps
+    // every batch inside, so the head of the window IS the head of the topic.
+    v["sample"]["window_start"] = rfc3339(window.0 - 30 * 86_400_000).into();
     v["sample"]["window_end"] = rfc3339(window.1 + 60_000).into();
     v
 }
