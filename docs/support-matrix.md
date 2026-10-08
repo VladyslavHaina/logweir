@@ -39,10 +39,13 @@ raises against that engine or against an operator that defaults to it.**
 
 | Engine version | Image digest | Outcome | Evidence |
 |---|---|---|---|
-| **0.21.0** | `sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317` | **`pass`** | **The engine floor: `0.21.0` is the minimum supported `kafka-backup` version, the version this row was run against, and the version the shipped digest pins. [install.md](install.md) leads with it.** Full drill, 2026-09-05, against the compose stack (Kafka 3.7.1 KRaft + MinIO) via `scripts/demo.sh`: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `pass_rate_measured: 1.0`, `rto_excluding_preflight_seconds: 6`, `rpo_seconds: 9`, all three objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. `header_preflight: honoured`. |
+| **0.21.0** | `sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317` | **`pass`** | **The engine floor: `0.21.0` is the minimum supported `kafka-backup` version and the version this row was run against; it was also the shipped pin until PROD-00.3f (2026-10-07). [install.md](install.md) leads with it.** Full drill, 2026-09-05, against the compose stack (Kafka 3.7.1 KRaft + MinIO) via `scripts/demo.sh`: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `pass_rate_measured: 1.0`, `rto_excluding_preflight_seconds: 6`, `rpo_seconds: 9`, all three objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. `header_preflight: honoured`. |
+
+| **0.23.3** | `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db` | **`pass`** | **The pin since PROD-00.3f.** Full drill, 2026-10-08, against the compose stack (slot 4, Kafka 3.7.1 KRaft + MinIO, the `linux/amd64` image under emulation), `scripts/demo.sh` steps 4–6: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `header_preflight: honoured`, objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. The same day CI's e2e command passed (177 tests, PROD-01.1's contract asserted on 0.23.3), and the record-semantics, G-PITR, FX-1, FX-7 and full-drill rows passed on Kafka 4.3.1. An archive 0.21.0 wrote drills `pass` with 0.23.3, and the reverse ([decision record](to-do/decisions/PROD-00-engine-route.md) §12.5). |
 
 That is **one green row at the declared floor**, which is the release
-requirement. It is also the only row that has been run.
+requirement, and one at the pin. These two are the rows that have been run
+by hand; the weekly job's rows are below.
 
 ## Versions with no row yet, and why
 
