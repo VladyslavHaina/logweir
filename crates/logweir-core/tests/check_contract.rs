@@ -1934,9 +1934,15 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
         ("30 February", format!("{SCHEDULE_UID}-20260230-000000")),
         // Attempt 0 carries no suffix; one digit is the minter's whole range.
         ("retry 0", format!("{SCHEDULE_UID}-20260925-065500-r0")),
-        ("two-digit retry", format!("{SCHEDULE_UID}-20260925-065500-r12")),
+        (
+            "two-digit retry",
+            format!("{SCHEDULE_UID}-20260925-065500-r12"),
+        ),
         // Anything after the slot.
-        ("a trailing word", format!("{SCHEDULE_UID}-20260925-065500-x")),
+        (
+            "a trailing word",
+            format!("{SCHEDULE_UID}-20260925-065500-x"),
+        ),
         // A Kubernetes UID is lower case; an upper-case one was not minted.
         (
             "an upper-case uid",
