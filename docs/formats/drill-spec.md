@@ -1,8 +1,9 @@
-# The drill spec: `name`, `source.point` and `notifications`
+# The drill spec: `name`, `source.point`, `restore.time_basis` and `notifications`
 
-**This is not yet a complete drill-spec reference.** It documents exactly three
-things — the top-level `name` key, `source.point`, and the `notifications`
-block — because those are what Task 14 and decision D3 created and changed. Every other key of a drill spec is
+**This is not yet a complete drill-spec reference.** It documents exactly four
+things — the top-level `name` key, `source.point`, `restore.time_basis` and the
+`notifications` block — because those are what Task 14, decision D3 and FX-8
+created and changed. Every other key of a drill spec is
 described today only by the commented example at
 [`examples/drill.yaml`](../../examples/drill.yaml) and by
 [`crates/logweir-core/src/spec.rs`](../../crates/logweir-core/src/spec.rs). A
@@ -142,6 +143,80 @@ enforced: a v1 invocation carrying `source.point` is a post-rollout Restore
 wearing an old version number, and it is refused by name with exit 3 before any
 data-plane work. Let the in-flight legacy Restore finish (or delete it) and
 create the new one; a legacy object is not upgraded in place.
+
+---
+
+## `restore.time_basis` (FX-8)
+
+```yaml
+restore:
+  point_in_time: "2026-09-07T14:05:00Z"
+  time_basis: producerTime
+```
+
+Optional, and **one value only**: `producerTime`. Any other spelling
+(`ProducerTime`, `producer_time`, `appendTime`, an empty string) does not parse,
+so a typo can never be read as consent. The key is snake_case like
+`point_in_time`; the value is camelCase like `target.mode`'s `newTopic`.
+
+**Why it exists.** The pinned engine archives each record's **producer**
+timestamp: it reads a batch's first timestamp plus the record's delta and
+discards the batch's max timestamp, the only place a broker on
+`message.timestamp.type=LogAppendTime` writes its append time. Every selection
+by time therefore reads producer time. For a `CreateTime` topic that is the
+topic's own clock; for a `LogAppendTime` topic it is not — PROD-01.1 restored,
+at a recovery point in 2001, six records the broker had appended in 2026, and
+the drill passed, because phase 7 compares the restored topic with the archive
+and both carry producer time
+([`docs/stability.md`](../stability.md#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time)).
+
+**What the runner does.** After the archive is described and before phase 2 —
+so before any target topic of the restore is created and before the engine
+starts — it decides, for each source topic the plan maps:
+
+| the topic's recorded timestamp type | the plan selects it by time | `time_basis` absent | `time_basis: producerTime` |
+|---|---|---|---|
+| `LogAppendTime` | yes | **refused**, exit 3, `PointInTimeByProducerTime` | runs; listed in the scorecard's `source.time_basis.producer_time` |
+| not recorded | yes | runs; listed in `source.time_basis.not_recorded` | the same |
+| `CreateTime` | yes | runs, listed nowhere | the same |
+| any | no | runs, listed nowhere | the same |
+
+* **Recorded** means one of two records, and never a live read of the source:
+  the archive manifest's `configurations["message.timestamp.type"]` (a topic
+  OVERRIDE — the engine keeps explicit overrides only), or the effective value
+  the bound, verified backup receipt recorded at backup time
+  (`config_coverage[topic].timestamp_type`, receipt format 1.1.0 and later —
+  the only record of a broker-wide default). `LogAppendTime` from either wins.
+  With neither — an unbound plan, a receipt from before format 1.1.0, or a
+  configuration read that failed — the type is **not recorded**, and it is
+  never assumed to be `CreateTime`.
+* **Selects by time** means: the plan states `restore.point_in_time` (always),
+  or it states none and its `sample.window_end` — the window's end in that case
+  — is earlier than the newest timestamp the archive manifest records for the
+  topic. A restore with no point in time whose `sample.window_end` is at or after
+  the archive's newest record takes the archive as written (a full restore) and
+  is never refused by this rule.
+
+The refusal names every refused topic and the record that made it
+`LogAppendTime`, and the runner's final stdout line is
+`refusal-reason=PointInTimeByProducerTime`, so a `Restore` object's
+`status.exitReason` carries it.
+
+**It is inside `plan_hash`.** The field is part of the plan bytes an approver
+signs, so an approval minted over a plan without it does not authorise the same
+plan with it, and the reverse. A `RehearsalSchedule` states it as
+`spec.point.timeBasis: producerTime`, rendered into every slot's plan and
+inside the standing authorization's `templateDigest`; a schedule that states
+none renders none, and its slots over a `LogAppendTime` topic are refused
+([kubernetes.md](../kubernetes.md) §7g).
+
+**Absent field, old plans, old runners.** Every plan written before FX-8 lacks
+the field and means "no time selection by producer time is accepted". A runner
+built before FX-8 ignores the key (the grammar ignores unknown keys) and runs
+the plan without refusing or labelling, which is the behaviour this field
+exists to end; the signed scorecard of such a run carries no
+`source.time_basis` block, and both readers print that the time basis was not
+recorded.
 
 ---
 

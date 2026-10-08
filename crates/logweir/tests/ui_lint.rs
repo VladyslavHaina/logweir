@@ -1575,6 +1575,69 @@ fn render_plan_bytes_emits_a_document_the_runner_parses() {
     );
 }
 
+// ---- 18c. the console's time-basis opt-in reaches the runner (FX-8)
+
+#[test]
+fn the_time_basis_opt_in_the_console_writes_is_the_one_the_runner_reads() {
+    // ARM 1 of the time-basis golden (arm 2 is `ui/tests/time-basis.spec.js`,
+    // which byte-compares the emitter's output with the same file, and
+    // `scripts/check-ui-behaviour.sh` re-runs the emitter and `diff -u`s it).
+    //
+    // `RestoreSpec` HAS NO `deny_unknown_fields`, so a golden that spelt the
+    // key `timeBasis:` would still parse -- into a plan with NO opt-in, which
+    // the runner refuses (`PointInTimeByProducerTime`) only AFTER an approver
+    // signed it. So this arm asserts the value ARRIVES.
+    let golden_path = ui_root()
+        .join("tests")
+        .join("fixtures")
+        .join("plan-time-basis.golden.yaml");
+    let golden = read(&golden_path);
+    let spec: logweir_core::spec::RestoreSpec = serde_yaml::from_str(&golden).unwrap_or_else(|e| {
+        panic!(
+            "{} does not deserialise into logweir_core::spec::RestoreSpec: {e}. Regenerate with \
+             `node ui/tests/emit-plan.js plan-time-basis-fields.json > \
+             ui/tests/fixtures/plan-time-basis.golden.yaml` AFTER fixing the emitter.",
+            shown(&golden_path)
+        )
+    });
+    let fields: serde_json::Value = serde_json::from_str(&read(
+        &ui_root()
+            .join("tests")
+            .join("fixtures")
+            .join("plan-time-basis-fields.json"),
+    ))
+    .expect("plan-time-basis-fields.json is JSON");
+    assert_eq!(
+        fields["timeBasis"], "producerTime",
+        "the fixture states the opt-in"
+    );
+    assert_eq!(
+        spec.restore.time_basis,
+        Some(logweir_core::spec::TimeBasis::ProducerTime),
+        "{} parsed with no `restore.time_basis: producerTime`: the console wrote the opt-in under \
+         a key or value the runner does not read",
+        shown(&golden_path)
+    );
+    // AND THE GOLDENS WITHOUT IT CARRY NONE: a plan the operator did not mark
+    // is never one that accepts a selection by producer time.
+    for plain in ["plan.golden.yaml", "plan-point.golden.yaml"] {
+        let spec: logweir_core::spec::RestoreSpec =
+            serde_yaml::from_str(&read(&ui_root().join("tests").join("fixtures").join(plain)))
+                .expect("the golden parses");
+        assert_eq!(
+            spec.restore.time_basis, None,
+            "{plain} must not accept producer time"
+        );
+    }
+    // The gate diffs this golden too.
+    let gate = read(&repo_root().join("scripts").join("check-ui-behaviour.sh"));
+    assert!(
+        gate.contains("plan-time-basis.golden.yaml")
+            && gate.contains("plan-time-basis-fields.json"),
+        "scripts/check-ui-behaviour.sh must re-emit and diff the time-basis golden as well"
+    );
+}
+
 // ---- 18b. the catalog-bound plan carries the recovery point binding (PLAT-15.2)
 
 #[test]

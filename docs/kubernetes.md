@@ -2583,6 +2583,36 @@ message names the field — and no child is created; the spec is sealed, so the
 remedy is a new schedule under a new authorization. Before FX-2 the block was
 copied onto the child and then dropped at the Job.
 
+**A `Restore` carries its signed time basis (FX-8).** When the controller reads
+a run's scorecard it copies `source.time_basis` (format 1.3.0) onto
+`status.timeBasis` — `{plan, producerTime, notRecorded}`, beside `outcome` and
+`integrity` and, like them, a claim until `status.evidence.verification` is
+`Valid` — so the console and the product API can show which topics were
+selected by the producers' clocks and which with an unrecorded timestamp type.
+Absent means not recorded. A refused run (`exitReason:
+PointInTimeByProducerTime`) signs nothing and carries none.
+
+**`spec.point.timeBasis` lets a rehearsal of a `LogAppendTime` topic run
+(FX-8).** Every slot's plan states `restore.point_in_time`, and the archive
+holds each record's PRODUCER timestamp, so over a source topic recorded as
+`LogAppendTime` — the archive manifest's topic override, or the bound receipt's
+effective value, a broker default included — the runner refuses the slot with
+`PointInTimeByProducerTime`, exit 3, before any target topic exists. The
+schedule then records `lastFailed.reason: PointInTimeByProducerTime` and sets
+`RehearsalHealthy=False`; it is never a silent failure. A schedule that states
+`spec.point.timeBasis: producerTime` renders `restore.time_basis: producerTime`
+into every slot's plan, exactly as the chosen point becomes
+`restore.point_in_time`: the slot runs, by the producers' clocks, and its
+signed scorecard lists the topic under `source.time_basis.producer_time`
+([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)). The field has
+one value, is sealed like the rest of the spec, and is inside
+`templateDigest`, so a schedule that states it needs an authorization signed
+for that digest; an authorization signed without it refuses every slot as
+`AuthorizationInvalid`. A schedule that states none serialises none, so every
+existing schedule's digest and authorization are unchanged. To opt an
+existing schedule in, create a new `RehearsalSchedule` with the field and sign
+a new authorization for its `status.templateDigest`.
+
 **A slot that came due before the `RehearsalSchedule` was created is not its
 slot.** The controller never rehearses a slot whose due time is before the
 object's `metadata.creationTimestamp`, even inside
@@ -6030,8 +6060,13 @@ Secrets" forbids one.
 
 ### Exit 3: the discriminator is a KEY NAME in a bounded tail
 
-`TargetTopicConfigRefused` and `CredentialNotRenderable` are both exit 3, and
-the only thing that tells them apart is the runner's `refusal-reason=` line.
+`TargetTopicConfigRefused`, `CredentialNotRenderable` and (since FX-8)
+`PointInTimeByProducerTime` — a point-in-time selection over a source topic
+recorded as `LogAppendTime`, in a plan that does not state
+`restore.time_basis: producerTime`
+([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)) — are all
+exit 3, and the only thing that tells them apart is the runner's
+`refusal-reason=` line.
 **Read §10's note on `refusal-reason=` before writing any reader of it**
 (plan erratum **E4**): the line is the last line of the runner's *stdout*, but
 a pod log is stdout and stderr merged in nondeterministic order, and the pod

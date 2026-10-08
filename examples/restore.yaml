@@ -123,6 +123,18 @@ restore:
   # exit 3, naming both integers — the window would hold no instant.
   point_in_time: "2026-09-07T14:05:00Z"
 
+  # WHICH CLOCK THE POINT IS READ ON (FX-8). The archive holds each record's
+  # PRODUCER timestamp; for a topic on `message.timestamp.type=LogAppendTime`
+  # that is not the broker's append time, so a point in time would select by
+  # the producers' clocks. A plan that names such a topic (recorded by the
+  # archive manifest's topic override, or by the bound receipt's
+  # `config_coverage`) is REFUSED, exit 3, `PointInTimeByProducerTime`, before
+  # any target topic is created — unless it says so, here, and is approved
+  # with it (the line is inside `plan_hash`). The signed scorecard then lists
+  # those topics under `source.time_basis.producer_time`.
+  #
+  # time_basis: producerTime
+
 sample:
   # THESE TWO DATES ARE ILLUSTRATIVE AND YOU MUST CHANGE THEM. They name the
   # window this restore SAMPLES for per-record reconciliation, so they are

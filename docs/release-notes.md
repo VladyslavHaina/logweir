@@ -21,8 +21,8 @@ The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
 published image. Items 21 (FX-2), 22 (FX-5), 23 (FX-10), 24 (FX-3), 25
-(FX-13) and 26 (FX-11), from the product-expansion tracker's fix-now rows,
-land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
+(FX-13), 26 (FX-11) and 27 (FX-8), from the product-expansion tracker's fix-now
+rows, land after `fdb48cd8`, and so do FX-7's additions to item 11 (the
 execution-claim set check, receipt and catalog format 1.2.0, the pin's read
 by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is cut at `fdb48cd8`, so the candidate
 record below stays empty. The shipped task list, the six publications the PoC ran, the
@@ -179,7 +179,7 @@ container, or refuses the object, where earlier builds ignored it. Run item 21's
 inventory before the controller rolls; no output means the upgrade changes
 nothing there.
 
-### The twenty-six operator-facing changes
+### The twenty-seven operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Items 1–20 were collected for
@@ -197,6 +197,8 @@ Item 25 is fix-now row FX-13 and is not proven live yet: the PoC upgrade that
 carries it runs two clients through Traefik. Item 26 is fix-now row
 FX-11 and is not proven live yet: the PoC upgrade that carries it runs its
 rows.
+Item 27 is fix-now row FX-8, proven on the compose stack; the PoC upgrade that
+carries it runs its refusal and opt-in rows.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -1158,6 +1160,81 @@ leaves a crashed probe's Job in place again, and an ExternalLifecycle policy's
 cleared `lastEvaluation` stays absent until its next evaluation. Nothing has to be
 deleted, and the role is unchanged.
 
+#### 27. A point-in-time restore of a `LogAppendTime` topic is refused unless its plan selects by producer time (FX-8)
+
+**Changed.** The archive holds each record's PRODUCER timestamp, so a
+point-in-time restore of a topic on `message.timestamp.type=LogAppendTime`
+selected records by the producers' clocks and was signed `pass`: PROD-01.1
+restored, at a recovery point in 2001, six records the broker had appended in
+2026. The runner now refuses a plan that selects such a topic by time — it
+states `restore.point_in_time`, or its `sample.window_end` cuts the archive —
+with exit 3 and `refusal-reason=PointInTimeByProducerTime`, after the archive
+is described and before any target topic is created. The topic counts as
+`LogAppendTime` when the archive manifest records that topic override, or when
+the bound, verified backup receipt recorded it as the topic's effective value
+(a broker-wide default; receipts since FX-4). A plan that states
+`restore.time_basis: producerTime`, approved with it, runs, and its signed
+scorecard — format **1.3.0** — lists the topic under
+`source.time_basis.producer_time`. A topic selected by time whose type nothing
+recorded runs and is listed under `source.time_basis.not_recorded`. Full
+restores still run. `logweir drill verify`, `verify_scorecard.py` 1.18.0 and
+`logweir drill show` print the label; both verifiers also say, for a backup
+receipt, which topics it records as `LogAppendTime`. The controller copies the
+signed label onto `Restore.status.timeBasis` (a new optional status field) and
+the product API serves it as `timeBasis`; the console's Restore detail shows the
+signed lists and warns about a topic whose type was not recorded. The console's
+restore wizard offers the opt-in, shows it on the review step and warns when a
+plan takes it
+([stability.md](stability.md#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time),
+[drill-spec.md](formats/drill-spec.md#restoretime_basis-fx-8),
+[the scorecard format](formats/drill-scorecard.md#sourcetime_basis-format-130)).
+
+What changes on the upgrade:
+
+- **A point-in-time `Restore` of a `LogAppendTime` topic** that ran before is
+  refused after the runner image is upgraded: `Failed`, exit 3, `exitReason:
+  PointInTimeByProducerTime`, nothing created. The remedy is a new plan with
+  `restore.time_basis: producerTime` and a new approval, when restoring by the
+  producers' clocks is what you want.
+- **A `RehearsalSchedule` over such a topic** that states no
+  `spec.point.timeBasis` has every slot refused the same way, and records
+  `lastFailed.reason: PointInTimeByProducerTime` with `RehearsalHealthy=False`.
+  The new optional `spec.point.timeBasis: producerTime` renders the opt-in into
+  every slot's plan; it is inside `templateDigest`, so it takes a new schedule
+  and a new standing authorization ([kubernetes.md](kubernetes.md) §7g). The CRD
+  gains the field: apply the CRDs before the controller rolls.
+- **A scorecard written by the new runner is format 1.3.0.** Readers built
+  before FX-8 accept it and ignore the block.
+
+**Do:** before the runner image rolls, find the source topics your
+point-in-time restores and rehearsals name that are `LogAppendTime`, by topic
+override or by the broker's default. With `--all` the describe prints every
+topic's EFFECTIVE value, a broker default included (its synonym reads
+`DYNAMIC_DEFAULT_BROKER_CONFIG`), so this one command names both kinds:
+
+```bash
+kafka-configs.sh --bootstrap-server <source> --describe --entity-type topics --all \
+  | awk '/configs for topic/ {t=$5} /^ *message.timestamp.type=LogAppendTime/ {print t}'
+```
+
+For each, decide whether a restore by the producers' clocks is acceptable; if
+it is, add `restore.time_basis: producerTime` to the plan and re-approve it.
+For a `RehearsalSchedule` over such a topic, create a new schedule with
+`spec.point.timeBasis: producerTime` and sign its authorization, or suspend the
+old one. **Scope:**
+`crates/logweir-core/src/time_basis.rs` (both arms, the opt-in, the unknown
+case and the `CreateTime` control), `crates/logweir/tests/orchestrator.rs`
+(refused before any target topic, the label, the opt-in inside the approved
+bytes, the broker-default arm), the four scorecard arms in both readers with
+the invariant corpus and the parity gate, the console rows, and planted
+mutants, each killed (FX-8). Live, on the compose stack:
+`e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output`
+and `e2e/tests/config_coverage.rs::fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt`.
+Not yet proven on the PoC: the upgrade that carries FX-8 runs those rows.
+**Rollback:** an older runner ignores `restore.time_basis` and runs the
+selections this build refuses, unlabelled, signing format 1.1.0 again. The 1.3.0
+scorecards already written stay valid under both readers.
+
 ### Verification scope: what "verified" means in this release
 
 - **A green badge** means the signed document's signature verified under a key
@@ -1266,7 +1343,7 @@ CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
-from `fdb48cd8` crosses items 21, 22, 23, 24, 25 and 26, and item 11's FX-7 additions:
+from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26 and 27, and item 11's FX-7 additions:
 grant `s3:GetObjectVersion` before the upgrade, or a pinned point whose current
 version differs fails closed at the binding, and let in-flight Backups finish
 before rolling the runner back.
@@ -1381,7 +1458,8 @@ policy or roster ([keys.md](keys.md)).
   submission, read-only protection, rehearsal, retention and trust policies,
   the namespace's approval policy, cadence previews, and the shared console's
   sign-in routes (`/auth/login`, `/auth/callback`, session logout). Its
-  component schemas grew from 66 to 257; none was removed.
+  component schemas grew from 66 to 258 (FX-8 added `RestoreTimeBasisView`,
+  served as a restore's optional `timeBasis`); none was removed.
 - **No in-place runner signing-key cutover** ([keys.md](keys.md), step 2 of
   *The supported procedure*).
 - **Restore admission does not hold on a retention lease** (above).

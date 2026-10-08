@@ -99,3 +99,50 @@ fn a_list_row_carries_the_runs_exit_code_and_a_restores_outcome() {
     let row = serde_json::to_value(backup(&running)).unwrap();
     assert_eq!(row["operation"].get("exitCode"), None::<&Value>);
 }
+
+/// **FX-8 review M-2: the signed time basis reaches the API.** A `Restore`
+/// whose controller copied the scorecard's `source.time_basis` onto
+/// `status.timeBasis` publishes it as `timeBasis`, verbatim — and the console
+/// fixture `console/restore-time-basis.json` is this projection, read by
+/// `ui/tests/time-basis.spec.js`, so the field names cannot drift. Absent
+/// stays absent (not recorded, never "none"), and a list past the view's
+/// bound is omitted rather than truncated (a partial list would be a claim
+/// the signed document does not make).
+///
+/// KILLS: the projection dropping the field; truncating instead of omitting.
+#[test]
+fn a_restore_publishes_its_signed_time_basis_or_nothing() {
+    let mut cr = support::fixture("restore-valid-pass.json");
+    cr["status"]["timeBasis"] = serde_json::json!({
+        "plan": "producerTime",
+        "producerTime": ["lat"],
+        "notRecorded": ["old"]
+    });
+    let restored: RestoreCr = serde_json::from_value(cr.clone()).unwrap();
+    let projected = serde_json::to_value(restore(&restored, true)).unwrap();
+    let golden = support::fixture("console/restore-time-basis.json");
+    assert_eq!(
+        projected["timeBasis"], golden["item"]["timeBasis"],
+        "the console fixture is this crate's projection of the same status"
+    );
+    assert_eq!(projected["timeBasis"]["producerTime"][0], "lat");
+
+    let bare: RestoreCr =
+        serde_json::from_value(support::fixture("restore-valid-pass.json")).unwrap();
+    let projected = serde_json::to_value(restore(&bare, true)).unwrap();
+    assert!(
+        projected.get("timeBasis").is_none(),
+        "no status.timeBasis, no key: {projected}"
+    );
+
+    let many: Vec<String> = (0..=logweir_api::projection::MAX_LIST_ENTRIES)
+        .map(|i| format!("t{i}"))
+        .collect();
+    cr["status"]["timeBasis"]["notRecorded"] = serde_json::json!(many);
+    let oversized: RestoreCr = serde_json::from_value(cr).unwrap();
+    let projected = serde_json::to_value(restore(&oversized, true)).unwrap();
+    assert!(
+        projected.get("timeBasis").is_none(),
+        "a list past the bound is omitted, never truncated"
+    );
+}
