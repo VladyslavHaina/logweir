@@ -214,10 +214,10 @@ pub fn check_rendered_selection(
             }
             _ => {}
         }
-        let (include, partitions) = rendered_run_selection(doc)?;
-        if include != expected.topics || partitions != expected.source_partitions {
+        let (topics, partitions) = rendered_run_selection(doc)?;
+        if topics != expected.topics || partitions != expected.source_partitions {
             return Err(DrillError::Guard(GuardRefusal(format!(
-                "a rendered engine run restores topics {include:?} with source_partitions \
+                "a rendered engine run restores topics {topics:?} with source_partitions \
                  {partitions:?}, where the approved restore.partitions put topics {:?} in a run \
                  with source_partitions {:?}; refused before the engine is handed a partition \
                  selection nobody approved",
