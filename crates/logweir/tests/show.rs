@@ -482,6 +482,16 @@ fn the_parity_row_says_what_was_not_assessed_and_never_reads_absent_as_assessed(
         "{}",
         row(&sc)
     );
+    // FX-21: a replication factor the source's record lacks is named in the
+    // same list, never read as a match.
+    sc.topic_parity.not_assessed = Some(vec![
+        "drill-orders: replication_factor (notRecorded)".to_string()
+    ]);
+    assert!(
+        row(&sc).ends_with("not assessed [drill-orders: replication_factor (notRecorded)]"),
+        "{}",
+        row(&sc)
+    );
     sc.topic_parity.not_assessed = Some(vec![]);
     assert!(row(&sc).ends_with("unexpected []"), "{}", row(&sc));
 }

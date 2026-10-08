@@ -818,12 +818,19 @@ cases = {
     "absent-1.0.0": ("1.0.0", None),
     "not-assessed-1.1.0": (current, ["drill-orders: configuration (captureDenied)"]),
     "all-assessed-1.1.0": (current, []),
+    # FX-21: a replication factor the source's record lacks is named in the
+    # same list, with its fail-safe twin, and never reads as a match.
+    "rf-not-recorded-1.1.0": (current, ["drill-orders: replication_factor (notRecorded)"]),
 }
 for name, (version, not_assessed) in cases.items():
     doc = json.loads(json.dumps(base))
     doc["format_version"] = version
     if not_assessed is not None:
         doc["topic_parity"]["not_assessed"] = not_assessed
+        doc["topic_parity"]["unexpected_divergence"] += [
+            e.replace(" (", " not assessed (", 1) for e in not_assessed
+            if "replication_factor" in e
+        ]
     payload = (json.dumps(doc, indent=2) + "\n").encode()
     t = pt.encode()
     msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
@@ -835,7 +842,7 @@ for name, (version, not_assessed) in cases.items():
          "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
 PYEOF
 
-for name in absent-1.0.0 not-assessed-1.1.0 all-assessed-1.1.0; do
+for name in absent-1.0.0 not-assessed-1.1.0 all-assessed-1.1.0 rf-not-recorded-1.1.0; do
     doc="$tmp/scorecard11/$name.json"
     sig="$tmp/scorecard11/$name.sig"
     set +e
@@ -862,6 +869,7 @@ for name in absent-1.0.0 not-assessed-1.1.0 all-assessed-1.1.0; do
         absent-1.0.0) want="not recorded" ;;
         not-assessed-1.1.0) want="NOT ASSESSED for drill-orders: configuration (captureDenied)" ;;
         all-assessed-1.1.0) want="" ;;
+        rf-not-recorded-1.1.0) want="NOT ASSESSED for drill-orders: replication_factor (notRecorded)" ;;
     esac
     if [ -z "$want" ]; then
         [ -z "$rust_parity" ] || fail "scorecard/$name: a document that assessed every topic printed: $rust_parity"

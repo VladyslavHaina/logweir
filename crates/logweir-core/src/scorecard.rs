@@ -3204,6 +3204,19 @@ mod tests {
         other
             .validate_invariants()
             .expect("a key the restore does not decide is not 'not reconstructed'");
+        // FX-21: the fail-safe twin of a partition count or replication factor
+        // the source's record lacks names neither setting as its `<key>`, so a
+        // newTopic document carrying it is accepted without the twin in
+        // `not_reconstructed` (the restore's deviation on it is unknown).
+        let mut unrecorded = new_topic_not_reconstructed();
+        unrecorded.topic_parity.unexpected_divergence = vec![
+            "restore-x-orders: partition_count not assessed (notRecorded)".into(),
+            "restore-x-orders: replication_factor not assessed (notRecorded)".into(),
+        ];
+        unrecorded.topic_parity.not_reconstructed = Some(vec![]);
+        unrecorded
+            .validate_invariants()
+            .expect("a twin of an unrecorded source value is not 'not reconstructed'");
         let mut scratch = empty.clone();
         scratch.target.mode = TargetMode::Scratch;
         scratch.target.marker_topic = Some("logweir.scratch".into());
@@ -3237,6 +3250,10 @@ mod tests {
             "configuration not assessed (unknown)"
         );
         assert_eq!(parity_key("a: b: retention.ms"), "retention.ms");
+        assert_eq!(
+            parity_key("t: replication_factor not assessed (notRecorded)"),
+            "replication_factor not assessed (notRecorded)"
+        );
     }
 
     /// ORDER: a deviation COPIED into the new field and left intended violates
