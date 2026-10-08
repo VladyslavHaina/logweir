@@ -846,12 +846,17 @@ fn the_k8s_advertised_host_is_a_parameter() {
         full.args(["compose", "-f", "e2e/compose/docker-compose.yml", "config"]);
         // A pure render of the FILE's defaults, whichever slot this process
         // addresses (PROD-01.5): the slot's own variables would move the three
-        // host-facing ports, which `stack_params.rs` tests separately.
+        // host-facing ports, which `stack_params.rs` tests separately. And no
+        // profile: CI's e2e job runs with `COMPOSE_PROFILES=auth`, whose
+        // `kafka-auth` service renders its own KAFKA_ADVERTISED_LISTENERS line
+        // BEFORE the default broker's, so the line read below would be
+        // another service's.
         for c in [&mut quiet, &mut full] {
             for v in stack::all_ports() {
                 c.env_remove(v.var);
             }
             c.env_remove(stack::PROJECT_VAR);
+            c.env_remove("COMPOSE_PROFILES");
         }
         if let Some(h) = host {
             quiet.env("LOGWEIR_K8S_ADVERTISED_HOST", h);
