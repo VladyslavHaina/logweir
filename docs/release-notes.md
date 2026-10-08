@@ -964,7 +964,7 @@ the bound, verified backup receipt recorded it as the topic's effective value
 scorecard — format **1.3.0** — lists the topic under
 `source.time_basis.producer_time`. A topic selected by time whose type nothing
 recorded runs and is listed under `source.time_basis.not_recorded`. Full
-restores still run. `logweir drill verify`, `verify_scorecard.py` 1.17.0 and
+restores still run. `logweir drill verify`, `verify_scorecard.py` 1.18.0 and
 `logweir drill show` print the label; both verifiers also say, for a backup
 receipt, which topics it records as `LogAppendTime`. The console's restore
 wizard offers the opt-in and shows it on the review step
@@ -986,12 +986,13 @@ What changes on the upgrade:
 
 **Do:** before the runner image rolls, find the source topics your
 point-in-time restores and rehearsals name that are `LogAppendTime`, by topic
-override or by the broker's default:
+override or by the broker's default. With `--all` the describe prints every
+topic's EFFECTIVE value, a broker default included (its synonym reads
+`DYNAMIC_DEFAULT_BROKER_CONFIG`), so this one command names both kinds:
 
 ```bash
 kafka-configs.sh --bootstrap-server <source> --describe --entity-type topics --all \
-  | grep -B1 'message.timestamp.type=LogAppendTime'
-kafka-configs.sh --bootstrap-server <source> --describe --entity-type brokers --entity-default
+  | awk '/configs for topic/ {t=$5} /^ *message.timestamp.type=LogAppendTime/ {print t}'
 ```
 
 For each, decide whether a restore by the producers' clocks is acceptable; if

@@ -1813,14 +1813,17 @@ fn the_release_notes_carry_every_owed_operator_action() {
     }
 
     // ITEM 24 OWES the inventory an operator runs before the runner rolls --
-    // which source topics are LogAppendTime, by override or broker default --
-    // and the opt-in that restores them knowingly (FX-8).
+    // which source topics are LogAppendTime, by override or broker default,
+    // printed by name (review L-4) -- and the opt-in that restores them
+    // knowingly (FX-8).
     let (_, fx8) = items
         .iter()
         .find(|(n, _)| *n == 24)
         .expect("docs/release-notes.md carries item 24");
     for owed in [
-        "--entity-type brokers --entity-default",
+        // Review L-4: the inventory prints topic NAMES, and `--all` covers
+        // a broker default too.
+        "/^ *message.timestamp.type=LogAppendTime/ {print t}",
         "restore.time_basis: producerTime",
         "RehearsalSchedule",
     ] {

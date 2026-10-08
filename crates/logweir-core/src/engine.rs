@@ -280,10 +280,14 @@ impl TopicFacts {
     ///
     /// A LOWER bound on the newest archived timestamp, never the value itself:
     /// a record inside a segment can be later than both ends, which only
-    /// decoding the segment shows (PROD-01.1b). `crate::time_basis` therefore
-    /// uses it in one direction only — a window END below it certainly
-    /// excludes an archived record, so that window is a time selection — and
-    /// never to conclude that a window excludes nothing.
+    /// decoding the segment shows (PROD-01.1b). `crate::time_basis` reads it
+    /// both ways, and only one is certain (review L-1): a window END below it
+    /// certainly excludes an archived record, so that window is a time
+    /// selection; a window end at or after it excludes nothing THE MANIFEST
+    /// SHOWS, and is treated as no selection, though with out-of-order
+    /// timestamps inside a segment the engine can still drop a later record.
+    /// That residue is PROD-01.1b's, and the scorecard format and
+    /// `docs/stability.md` say so where the empty lists are described.
     #[must_use]
     pub fn newest_recorded_timestamp_ms(&self) -> Option<i64> {
         self.partitions

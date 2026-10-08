@@ -213,6 +213,24 @@ test("fx8_a_restores_detail_names_the_time_basis_its_approved_plan_states", asyn
     "NEGATIVE CONTROL: a reader that answers `producerTime` for every plan fails this");
   // Only inside `restore:`, and only the one value the grammar has.
   assert.equal(planTimeBasis("sample:\n  time_basis: \"producerTime\"\n"), "");
+  // REVIEW L-3: every shape the runner parses as the opt-in reads as it --
+  // any indentation, a flow mapping, a trailing comment -- and a commented-out
+  // or nested key does not.
+  for (const shape of [
+    "restore:\n    point_in_time: x\n    time_basis: producerTime\n",
+    "restore: {point_in_time: \"2026-01-01T00:00:00Z\", time_basis: producerTime}\nsample:\n",
+    "restore: {\n  point_in_time: x,\n  time_basis: \"producerTime\"\n}\n",
+    "restore:\n  time_basis: producerTime # accepted by the approver\n",
+  ]) {
+    assert.equal(planTimeBasis(shape), "producerTime",
+      "NEGATIVE CONTROL: the 2-space-only reader fails this: " + JSON.stringify(shape));
+  }
+  for (const shape of [
+    "restore:\n  point_in_time: x\n  # time_basis: producerTime\n",
+    "restore:\n  point_in_time: x\n  other:\n    time_basis: producerTime\n",
+  ]) {
+    assert.equal(planTimeBasis(shape), "", JSON.stringify(shape));
+  }
   assert.equal(planTimeBasis("restore:\n  time_basis: \"ProducerTime\"\n"), "");
   assert.equal(planTimeBasis("restore:\n  point_in_time: \"x\"\n  time_basis: producerTime\n"),
     "producerTime");
@@ -223,12 +241,35 @@ test("fx8_a_restores_detail_names_the_time_basis_its_approved_plan_states", asyn
   });
   const span = (html) => visible(/<span id="restore-time-basis">([^<]*)<\/span>/.exec(html)[1]);
   assert.equal(span(renderRestoreDetail(restore(opted))),
-    "producer time (restore.time_basis: producerTime): a LogAppendTime topic was selected " +
-      "by its producers' clocks",
+    "producer time (restore.time_basis: producerTime): a LogAppendTime topic at this point " +
+      "is selected by its producers' clocks",
     "NEGATIVE CONTROL: a detail page with no time-basis row fails this");
   const refused = renderRestoreDetail(restore(plain));
   assert.equal(span(refused),
-    "not stated in the plan: a LogAppendTime topic at this point is refused");
+    "no restore.time_basis: producerTime found in the plan by this page; without it a " +
+      "LogAppendTime topic at a point is refused, and the signed result below is authoritative",
+    "NEGATIVE CONTROL (review L-3): a page that says the plan states none fails this");
   assert.ok(visible(refused).includes("PointInTimeByProducerTime"),
     "the refusal's own reason is printed verbatim beside it");
+});
+
+// --------------------------------------------- review L-3's class sweep
+
+test("fx8_review_l3_the_evidence_bucket_reader_is_as_tolerant_as_the_time_basis_one", async () => {
+  // `planEvidenceBucket` read only the console's two-space block too; a
+  // CLI-written plan with four spaces, a flow mapping or a trailing comment
+  // rendered the placeholder in the fetch command. One reader serves both.
+  const { planEvidenceBucket, planBlockValue } = await import("../render.js");
+  for (const shape of [
+    "evidence:\n    backend: s3\n    bucket: logweir-evidence\n",
+    "evidence: {backend: s3, bucket: \"logweir-evidence\"}\n",
+    "evidence:\n  bucket: logweir-evidence # the auditors' bucket\n",
+  ]) {
+    assert.equal(planEvidenceBucket(shape), "logweir-evidence",
+      "NEGATIVE CONTROL: the 2-space-only reader fails this: " + JSON.stringify(shape));
+  }
+  // The source block's nested bucket is never the evidence bucket.
+  assert.equal(planEvidenceBucket("source:\n  storage:\n    bucket: aaa\n"), "");
+  assert.equal(planBlockValue("restore:\n  point_in_time: x\n", "restore", "time_basis"), null);
+  assert.equal(planBlockValue(undefined, "restore", "time_basis"), null);
 });

@@ -3947,6 +3947,82 @@ mod tests {
         );
     }
 
+    /// **FX-8 review X3b: the time-basis opt-in is read in ONE place, from
+    /// the approved plan, and from nothing else.** A behaviour test cannot see
+    /// an opt-in that is ALSO honoured from an environment variable or a
+    /// flag: every plan it runs is honoured the same way. So the sources are
+    /// read: `time_basis::decide` reads `spec.restore.time_basis` once for the
+    /// decision, reaches no environment, and is called exactly once, with the
+    /// context's `spec` — parsed from the bytes phase 1 verified against the
+    /// approval — and nothing in the runner writes the field.
+    #[test]
+    fn the_time_basis_opt_in_is_read_once_from_the_approved_plan() {
+        let core = include_str!("../../../logweir-core/src/time_basis.rs");
+        let core = core
+            .split("#[cfg(test)]")
+            .next()
+            .expect("time_basis.rs has a production half");
+        assert_eq!(
+            core.matches(
+                "let accepted = spec.restore.time_basis == Some(TimeBasis::ProducerTime);"
+            )
+            .count(),
+            1,
+            "the decision reads the opt-in once, from the spec"
+        );
+        assert_eq!(
+            core.matches("accepted").count(),
+            2,
+            "`accepted` is bound once and read once, in the LogAppendTime arm"
+        );
+        for banned in [
+            "std::env",
+            "env::var",
+            "var_os",
+            "getenv",
+            "OnceLock",
+            "lazy_static",
+        ] {
+            assert!(
+                !core.contains(banned),
+                "time_basis.rs must not reach `{banned}`: the opt-in is the approved plan's alone"
+            );
+        }
+        let src = include_str!("mod.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("mod.rs production half");
+        assert_eq!(
+            prod.matches("logweir_core::time_basis::decide(").count(),
+            1,
+            "one decision per run"
+        );
+        let call = prod
+            .split("logweir_core::time_basis::decide(")
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .expect("the decide call");
+        assert!(
+            call.trim_start().starts_with("&c.spec,"),
+            "decide must be given the context's approved spec: {call}"
+        );
+        for file in [
+            include_str!("mod.rs"),
+            include_str!("phase0_admit.rs"),
+            include_str!("phase1_approval.rs"),
+            include_str!("binding.rs"),
+        ] {
+            let prod = file.split("#[cfg(test)]").next().unwrap_or(file);
+            assert!(
+                !prod.contains("restore.time_basis =")
+                    && !prod.contains("TimeBasis::ProducerTime")
+                    && !prod.contains("RestoreSpecBlock {"),
+                "nothing in the runner writes the plan's time basis"
+            );
+        }
+    }
+
     fn a_scorecard() -> Scorecard {
         serde_json::from_str(include_str!("../../../../e2e/fixtures/scorecard-pass.json"))
             .expect("the checked-in fixture parses")

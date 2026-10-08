@@ -104,9 +104,8 @@ frozen `1.0.0` one:
 FX-8 adds one nested optional block to the drill scorecard,
 `source.time_basis`, and moves the scorecard to **1.3.0**
 (`schemas/logweir-drill-scorecard-1.3.0.json`, with 1.1.0 frozen beside it).
-1.3.0 and not 1.2.0 because FX-3 holds 1.2.0 on its branch; the number is
-assigned at integration and a renumber moves the files listed in
-[the scorecard format](formats/drill-scorecard.md#sourcetime_basis-format-130). The block says which
+(1.2.0 is FX-3's; a renumber moves the files listed in
+[the scorecard format](formats/drill-scorecard.md#sourcetime_basis-format-130).) The block says which
 source topics a restore's time selection read by **producer time** (recorded as
 `LogAppendTime`, accepted by the plan's `restore.time_basis: producerTime`) and
 which it selected by time with **no recorded timestamp type**
@@ -116,7 +115,11 @@ which it selected by time with **no recorded timestamp type**
   scorecard before 1.3.0 — never reads as "every selection used the topics' own
   clocks", and both readers print a `time basis: not recorded` line for it.
   Every 1.3.0 run that reaches the decision writes the block, so its two empty
-  lists are a claim.
+  lists are a claim, as far as the archive manifest's segment bounds show: a
+  plan with no point in time whose window end is at or after every segment's
+  first and last timestamp is not counted as a selection, though out-of-order
+  timestamps inside a segment can still leave a later record out (PROD-01.1b,
+  [the limitation](#recovery-point-selection-uses-segment-first-and-last-timestamps)).
 - **The block is additive and optional: MINOR.** The owner's 2026-10-07
   ruling on OD-7's third case names this field: a field that labels a result is
   additive and optional.

@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.17.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.18.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -917,7 +917,7 @@ def test_the_version_line_names_the_current_invariant_set():
         assert (
             "target.mode absent or one of the two values the format defines"
         ) in r.stdout, r.stdout
-        # 1.17.0's addition (FX-8): `source.time_basis`'s four arms.
+        # 1.18.0's addition (FX-8): `source.time_basis`'s four arms.
         assert (
             "source.time_basis only from 1.3.0, its plan only producerTime, producer time "
             "only under it, and no topic in both of its lists"
@@ -931,7 +931,7 @@ def test_the_script_version_is_not_the_format_version():
     mod = _verifier_module()
     assert mod.SCRIPT_VERSION != mod.FORMAT_VERSION
     # 1.1.0 since FX-4 (`topic_parity.not_assessed`, a MINOR bump); 1.3.0
-    # since FX-8 (`source.time_basis`; FX-3 holds 1.2.0 on its branch).
+    # since FX-8 (`source.time_basis`; 1.2.0 is FX-3's).
     assert mod.FORMAT_VERSION == "1.3.0"
 
 
@@ -2194,11 +2194,11 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # — and prints the pin (receipt and catalog point format 1.2.0). A change to
     # what is checked, so a minor bump; no arm, map five.
     #
-    # 1.17.0 (FX-8) adds the scorecard's four `source.time_basis` arms and its
-    # shape check (1.16.0 is FX-7's). Map still five.
+    # 1.18.0 (FX-8) adds the scorecard's four `source.time_basis` arms and its
+    # shape check (1.16.0 is FX-7's, 1.17.0 FX-3's). Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.17.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.18.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -2557,7 +2557,8 @@ def test_the_time_basis_minor_is_the_rust_readers():
     m = re.search(r"pub const TIME_BASIS_SINCE_MINOR: u64 = (\d+);", rust)
     assert m, "scorecard.rs no longer declares TIME_BASIS_SINCE_MINOR"
     assert mod.SCORECARD_TIME_BASIS_SINCE_MINOR == int(m.group(1))
-    assert mod._minor(mod.FORMAT_VERSION) == mod.SCORECARD_TIME_BASIS_SINCE_MINOR
+    # `>=` (review L-6): a later MINOR still defines the field.
+    assert mod._minor(mod.FORMAT_VERSION) >= mod.SCORECARD_TIME_BASIS_SINCE_MINOR
 
 
 def test_a_time_basis_block_is_accepted_in_every_shape_the_writer_produces():

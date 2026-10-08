@@ -17,9 +17,8 @@
 ///
 /// `1.3.0` since FX-8, which added `source.time_basis`: which source topics a
 /// restore selected by producer time, and which it selected by time with no
-/// recorded timestamp type. **1.3.0 and not 1.2.0** because FX-3 holds 1.2.0
-/// for `topic_parity.not_reconstructed` on its own branch; the orchestrator
-/// assigns the final number at integration. Its first minor is
+/// recorded timestamp type (1.2.0 is FX-3's, `topic_parity.not_reconstructed`).
+/// Its first minor is
 /// [`scorecard::TIME_BASIS_SINCE_MINOR`]; a renumber moves both, the justfile's
 /// `scorecard_schema_version`, `docs/verify_scorecard.py`'s `FORMAT_VERSION`
 /// and `SCORECARD_TIME_BASIS_SINCE_MINOR`, and the parity script's

@@ -164,8 +164,7 @@ PAYLOAD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 #
 # `1.3.0` since FX-8 (`source.time_basis`: which source topics a restore
 # selected by producer time, and which it selected by time with no recorded
-# timestamp type). 1.3.0 and not 1.2.0 because FX-3 holds 1.2.0 on its branch;
-# the orchestrator assigns the final number at integration.
+# timestamp type). 1.2.0 is FX-3's (`topic_parity.not_reconstructed`).
 FORMAT_VERSION = "1.3.0"
 
 # This SCRIPT's own version — NOT the format version (GC12: FORMAT_VERSION stays
@@ -378,7 +377,7 @@ FORMAT_VERSION = "1.3.0"
 # payload type is added; a 1.15.0 reader reads a 1.2.0 receipt as the 1.1.0
 # document under it and prints no version line.
 #
-# 1.17.0 (FX-8) knows scorecard format 1.3.0 and its `source.time_basis`: the
+# 1.18.0 (FX-8) knows scorecard format 1.3.0 and its `source.time_basis`: the
 # approved plan's `restore.time_basis`, the source topics a restore selected by
 # producer time (recorded `LogAppendTime`, accepted by the plan) and the ones it
 # selected by time with no recorded timestamp type. Four arms, TB-1 to TB-4,
@@ -391,12 +390,10 @@ FORMAT_VERSION = "1.3.0"
 # `time basis:` lines say which topics were selected by producer time or with
 # an unrecorded type, and that a document before 1.3.0 does not say; a backup
 # receipt's `time basis:` lines name its LogAppendTime topics, whose covered
-# window is their producers' time. 1.16.0 is FX-7's (on main); FX-3 also holds
-# 1.16.0 (and scorecard format 1.2.0) on its branch, so whichever of FX-3 and
-# FX-8 merges second renumbers; the orchestrator assigns the final number at
-# integration (this line, the literal pins in docs/test_verify_scorecard.py and
-# the guide's table move together).
-SCRIPT_VERSION = "1.17.0"
+# window is their producers' time. 1.16.0 is FX-7's and 1.17.0 FX-3's. A
+# renumber moves this line, the literal pins in docs/test_verify_scorecard.py
+# and the guide's table together.
+SCRIPT_VERSION = "1.18.0"
 
 # The first minor of SCORECARD format 1 that defines `source.time_basis` (arm
 # TB-1) -- `TIME_BASIS_SINCE_MINOR` in `crates/logweir-core/src/scorecard.rs`,

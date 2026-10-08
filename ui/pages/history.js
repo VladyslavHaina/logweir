@@ -358,14 +358,17 @@ export function renderRestoreDetail(object, operation) {
       ["target mode", cell((spec.target || {}).mode)],
       ["operation", rowOperationCell(object, (object.metadata || {}).namespace)],
       ["point in time", when(spec.pointInTime)],
-      // FX-8: WHICH CLOCK THAT POINT WAS READ ON, from the approved plan bytes.
-      // A `LogAppendTime` topic at a point is refused unless the plan accepted
-      // producer time; when it did, the signed scorecard lists the topic.
-      ["time basis", "<span id=\"restore-time-basis\">" +
+      // FX-8: WHAT THE APPROVED PLAN ACCEPTED, read from its bytes. A
+      // `LogAppendTime` topic at a point is refused unless the plan accepted
+      // producer time. "Not found" is said as such and never as "the plan
+      // states none" (review L-3): the signed result is the row below.
+      ["time basis (plan)", "<span id=\"restore-time-basis\">" +
         esc(planTimeBasis(spec.planBytes) === "producerTime"
-          ? "producer time (restore.time_basis: producerTime): a LogAppendTime topic was " +
-            "selected by its producers' clocks"
-          : "not stated in the plan: a LogAppendTime topic at this point is refused") +
+          ? "producer time (restore.time_basis: producerTime): a LogAppendTime topic at this " +
+            "point is selected by its producers' clocks"
+          : "no restore.time_basis: producerTime found in the plan by this page; without it a " +
+            "LogAppendTime topic at a point is refused, and the signed result below is " +
+            "authoritative") +
         "</span>"],
       ["backup set", cell(spec.backupSetRef)],
     ]) +

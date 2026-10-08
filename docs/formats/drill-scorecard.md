@@ -196,7 +196,12 @@ time, is in neither list. **Absent means not recorded** — every document befor
 1.3.0 — and is never read as "every selection used the topics' own clocks".
 Every 1.3.0 run that reaches the decision writes the block, so a 1.3.0 block
 with both lists empty is the claim that no topic was selected by producer time
-or with an unrecorded type.
+or with an unrecorded type **as far as the archive manifest's segment bounds
+show**. A plan with no point in time whose `sample.window_end` is at or after
+every segment's first and last timestamp is not counted as a selection; with
+out-of-order timestamps inside a segment the restore can still leave out a
+record later than both of its segment's ends, which is PROD-01.1b's
+([the limitation](../stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
 
 Four arms, enforced by both readers in the same position (after `target.auth`,
 before `redactions`) and words, fire only on a document carrying the block:
@@ -212,8 +217,7 @@ Both readers print one `time basis:` line per non-empty list, or the one line
 saying it was not recorded for a document without the block; `logweir drill
 show` renders the same in its qualifiers footer (`source.time_basis`).
 
-**The number.** 1.3.0, not 1.2.0, because FX-3 holds 1.2.0 on its branch; the
-orchestrator assigns the final number at integration. A renumber moves
+**The number.** 1.3.0; 1.2.0 is FX-3's. A renumber moves
 `logweir_core::FORMAT_VERSION` and `scorecard::TIME_BASIS_SINCE_MINOR`
 together, the justfile's `scorecard_schema_version` and this schema file's
 name, `docs/verify_scorecard.py`'s `FORMAT_VERSION` and

@@ -144,7 +144,10 @@ pub fn recorded_timestamp_type(
 ///   selects by time when that end is EARLIER than the newest timestamp the
 ///   manifest records for the topic: a record the archive certainly holds is
 ///   then outside the window. At or after it, the restore takes the archive
-///   as recorded (a full restore, which FX-6 discloses).
+///   as the manifest records it (a full restore, which FX-6 discloses) — as
+///   far as the segment bounds show: with out-of-order timestamps inside a
+///   segment a record later than both ends can still fall outside the window,
+///   which is PROD-01.1b's (review L-1).
 ///
 /// `None` for the topic's facts (the manifest does not describe it) counts as
 /// "no recorded timestamp", so only a stated point selects it by time.
@@ -579,6 +582,40 @@ mod tests {
             &plan(&["lat"], Some(T1), None, T1),
             f.topics.first()
         ));
+    }
+
+    /// **Review L-2 (mutant X4).** A segment whose FIRST record is later than
+    /// its LAST (out-of-order timestamps, PROD-01.1 S6): the newest timestamp
+    /// the manifest records is the first record's, so a `sample.window_end`
+    /// between the two ends cuts the archive — a selection by time, refused
+    /// for a `LogAppendTime` topic. A reader of the last timestamp alone sees
+    /// the window end past it, calls the restore full, and signs nothing.
+    #[test]
+    fn a_segment_whose_first_record_is_the_later_one_still_bounds_the_window() {
+        let mut lat = topic("lat", &[(TIMESTAMP_TYPE_KEY, LOG_APPEND_TIME)]);
+        let seg = &mut lat.partitions[0].segments[0];
+        seg.start_timestamp = T1;
+        seg.end_timestamp = T0;
+        assert_eq!(lat.newest_recorded_timestamp_ms(), Some(T1));
+        let f = facts(vec![lat]);
+        let between = plan(&["lat"], None, None, T1 - 1);
+        assert!(selects_by_time(&between, f.topics.first()));
+        let err = decide(
+            &between,
+            &f,
+            &SourceConfigCoverage::unknown(),
+            &names(&["lat"]),
+        )
+        .expect_err("a window end below the segment's first record cuts the archive");
+        assert!(err.starts_with("PointInTimeByProducerTime: "), "{err}");
+        assert!(err.contains("sample.window_end"), "{err}");
+        // The control: at the first record's timestamp, the manifest shows
+        // nothing beyond the window.
+        let at = plan(&["lat"], None, None, T1);
+        assert_eq!(
+            decide(&at, &f, &SourceConfigCoverage::unknown(), &names(&["lat"])),
+            Ok(TimeBasisLabel::default())
+        );
     }
 
     /// The plan grammar: `producerTime` and nothing else parses, and an

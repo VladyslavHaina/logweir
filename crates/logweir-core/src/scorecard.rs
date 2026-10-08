@@ -110,8 +110,13 @@ pub struct SourceInfo {
     /// point-in-time restore over a `LogAppendTime` source was signed `pass`
     /// with no label at all (PROD-01.1, `lat`). Every run that reaches the
     /// time-basis decision writes `Some`, so a 1.3.0 document whose two lists
-    /// are empty is the CLAIM that no selected topic was selected by producer
-    /// time or with an unrecorded timestamp type.
+    /// are empty is the CLAIM that no topic was selected by producer time or
+    /// with an unrecorded timestamp type AS FAR AS THE ARCHIVE MANIFEST'S
+    /// SEGMENT BOUNDS SHOW (review L-1). A plan that states no point and whose
+    /// `sample.window_end` is at or after every segment's first and last
+    /// timestamp is not counted as a selection, yet with out-of-order
+    /// timestamps inside a segment the engine's end filter can still drop a
+    /// record later than both ends; that case is PROD-01.1b's.
     ///
     /// Global Constraint 12 as amended permits this as a NESTED optional
     /// field: `SourceInfo`'s properties are not the scorecard's 21.
@@ -2532,10 +2537,13 @@ mod tests {
     #[test]
     fn the_written_version_defines_time_basis() {
         assert_eq!(major_version(crate::FORMAT_VERSION), Some(1));
-        assert_eq!(
-            minor_version(crate::FORMAT_VERSION),
-            Some(TIME_BASIS_SINCE_MINOR),
-            "the writer's minor is the one that introduced source.time_basis"
+        // `>=`, not `==` (review L-6): a later MINOR still defines the
+        // field; the literal pin of the writer's version is `lib.rs`'s.
+        assert!(
+            minor_version(crate::FORMAT_VERSION)
+                .is_some_and(|minor| minor >= TIME_BASIS_SINCE_MINOR),
+            "the writer's version must define source.time_basis, which TB-1 admits from 1.{}.0",
+            TIME_BASIS_SINCE_MINOR
         );
         assert_eq!(
             crate::spec::TimeBasis::ProducerTime.as_str(),
