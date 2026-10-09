@@ -28,7 +28,7 @@ use crate::drill::DrillError;
 use logweir_core::execution_contract::{self as wire, PointBinding};
 use logweir_core::guard::GuardRefusal;
 use logweir_core::spec::{AllowedClusters, DrillSpec};
-use logweir_engine_oso::storage::{Store, StoreError};
+use logweir_engine_oso::storage::{caps, Store, StoreError};
 use logweir_evidence::{
     keys::VerifyingKey, verify::verify_detached, Error as EvidenceError, Sidecar,
 };
@@ -181,7 +181,7 @@ pub fn verify_point_binding(
     // report every present point as missing on any destination whose archive
     // sits under a prefix.
     let qualified = point.receipt_key.clone();
-    let receipt_bytes = match archive.get(&qualified) {
+    let receipt_bytes = match archive.get_capped(&qualified, caps::SIGNED_DOCUMENT) {
         Ok((bytes, _)) => bytes,
         Err(StoreError::NotFound(_)) => {
             return Err(DrillError::Operational(format!(
@@ -306,7 +306,8 @@ pub fn verify_point_binding(
     // `store.get(&set.manifest_key)` on the value `list_manifests` returned),
     // so it is already in the same space.
     let manifest_key = receipt.archive.manifest_key.clone();
-    let (manifest_bytes, current_version) = match archive.get(&manifest_key) {
+    let (manifest_bytes, current_version) = match archive.get_capped(&manifest_key, caps::MANIFEST)
+    {
         Ok(read) => read,
         Err(StoreError::NotFound(_)) => {
             return Err(DrillError::Operational(format!(
@@ -343,7 +344,7 @@ pub fn verify_point_binding(
         &point.manifest_sha256,
         |version| {
             archive
-                .get_version(&manifest_key, version)
+                .get_version_capped(&manifest_key, version, caps::MANIFEST)
                 .map(|(bytes, _)| bytes)
         },
     ) {
@@ -665,7 +666,7 @@ fn verify_receipt_signature(
     use logweir_core::trust::{decide, EvidenceClaim, IndependentObservation, KeyUsage};
 
     let sidecar_key = crate::catalog::cli::sidecar_key_of(receipt_key);
-    let sidecar_bytes = match archive.get(&sidecar_key) {
+    let sidecar_bytes = match archive.get_capped(&sidecar_key, caps::SIDECAR) {
         Ok((bytes, _)) => bytes,
         Err(StoreError::NotFound(_)) => {
             return Err(refuse(format!(
@@ -1603,7 +1604,9 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// mirror`, rclone — anything but version-preserving replication.
     fn copy_every_object(from: &Store, to: &Store) {
         for key in from.list_keys("").expect("the source lists") {
-            let (bytes, _) = from.get(&key).expect("the source reads");
+            let (bytes, _) = from
+                .get_capped(&key, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
+                .expect("the source reads");
             to.put_create_only(&key, &bytes)
                 .expect("the copy is written");
         }
@@ -1611,7 +1614,13 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
 
     /// The version a read of the fixture manifest answers in `store` now.
     fn current_version(store: &Store) -> Option<String> {
-        store.get(MANIFEST_KEY).expect("the manifest reads").1
+        store
+            .get_capped(
+                MANIFEST_KEY,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
+            .expect("the manifest reads")
+            .1
     }
 
     // ------------------------------------------------------------- FX-16
@@ -2083,8 +2092,19 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         let (a, _bucket) = versioned_point(true);
         let (copy, copy_bucket) = Store::in_memory_versioned(ARCHIVE_PREFIX);
         copy_every_object(&a.store, &copy);
-        let (_, original_version) = a.store.get(MANIFEST_KEY).expect("the original reads");
-        let (_, copy_version) = copy.get(MANIFEST_KEY).expect("the copy reads");
+        let (_, original_version) = a
+            .store
+            .get_capped(
+                MANIFEST_KEY,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
+            .expect("the original reads");
+        let (_, copy_version) = copy
+            .get_capped(
+                MANIFEST_KEY,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
+            .expect("the copy reads");
         assert_ne!(
             copy_version, original_version,
             "the copy's version ids are its own (the precondition of this row)"
@@ -2165,7 +2185,10 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
             let bytes = if key == MANIFEST_KEY {
                 br#"{"topics":["swapped"]}"#.to_vec()
             } else {
-                a.store.get(&key).expect("reads").0
+                a.store
+                    .get_capped(&key, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
+                    .expect("reads")
+                    .0
             };
             copy.put_create_only(&key, &bytes).expect("written");
         }

@@ -495,7 +495,12 @@ impl OsoCliEngine {
             .rsplit_once('/')
             .map(|(dir, _)| format!("{dir}/{name}"))
             .unwrap_or_else(|| name.to_string());
-        match self.store.get(&key) {
+        // FX-31: under the engine-document cap. An object over it is an
+        // error like any other read failure that leaves presence unknown.
+        match self
+            .store
+            .get_capped(&key, crate::storage::caps::ENGINE_DOCUMENT)
+        {
             Ok((bytes, _)) => Ok(Some((key, bytes))),
             Err(crate::storage::StoreError::NotFound(_)) => Ok(None),
             Err(other) => Err(other.into()),
@@ -637,7 +642,9 @@ impl DataEngine for OsoCliEngine {
         &self,
         set: &BackupSetRef,
     ) -> Result<(BackupSetFacts, Vec<ArchiveNotice>), EngineError> {
-        let (bytes, version_id) = self.store.get(&set.manifest_key)?;
+        let (bytes, version_id) = self
+            .store
+            .get_capped(&set.manifest_key, crate::storage::caps::MANIFEST)?;
         let m: vendored::manifest::BackupManifest = serde_json::from_slice(&bytes)
             .map_err(|e| EngineError::Operational(format!("{}: {e}", set.manifest_key)))?;
         let created_at = chrono::DateTime::from_timestamp_millis(m.created_at)
@@ -917,7 +924,9 @@ impl DataEngine for OsoCliEngine {
             sel.partition,
             sel.window,
         )? {
-            let (bytes, _) = self.store.get(&key)?;
+            // FX-31: one segment, under the segment ceiling (FX-30 owns the
+            // decode's own caps).
+            let (bytes, _) = self.store.get_capped(&key, crate::storage::caps::SEGMENT)?;
             for r in crate::kbak::decode_segment(&bytes)? {
                 // Err(Unsupported) propagates
                 if r.timestamp < sel.window.0 || r.timestamp > sel.window.1 {

@@ -102,7 +102,12 @@ impl Fixture {
     }
 
     fn receipt(&self, store: &Store, outcome: &BackupOutcome) -> (Vec<u8>, BackupReceipt) {
-        let (bytes, _) = store.get(&outcome.receipt_key).unwrap();
+        let (bytes, _) = store
+            .get_capped(
+                &outcome.receipt_key,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
+            .unwrap();
         let receipt = serde_json::from_slice(&bytes).unwrap();
         (bytes, receipt)
     }
@@ -272,7 +277,11 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
     );
     assert!(receipt.topic_configuration.is_some());
     let (pinned, _) = store
-        .get_version(&receipt.archive.manifest_key, &last)
+        .get_version_capped(
+            &receipt.archive.manifest_key,
+            &last,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .unwrap();
     assert_eq!(
         logweir_core::ids::sha256_prefixed(&pinned),
@@ -299,7 +308,12 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
         .catalog_key
         .clone()
         .expect("the run wrote its catalog point");
-    let (record, _) = store.get(&record_key).unwrap();
+    let (record, _) = store
+        .get_capped(
+            &record_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
     assert_eq!(
         record["format_version"],
@@ -355,7 +369,12 @@ fn an_unversioned_run_writes_the_unpinned_receipt_with_no_pin_field() {
         "absent from the bytes, not null: {}",
         raw["archive"]
     );
-    let (record, _) = store.get(outcome.catalog_key.as_ref().unwrap()).unwrap();
+    let (record, _) = store
+        .get_capped(
+            outcome.catalog_key.as_ref().unwrap(),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
     assert_eq!(
         record["format_version"],
@@ -553,7 +572,13 @@ fn a_backfill_never_infers_a_pin_the_receipt_does_not_carry() {
     };
     let outcome = f.run(&plain, &engine);
     let (bytes, _) = f.receipt(&plain, &outcome);
-    let sig = plain.get(&outcome.sidecar_key).unwrap().0;
+    let sig = plain
+        .get_capped(
+            &outcome.sidecar_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap()
+        .0;
     // …copied, receipt and sidecar only, into a VERSIONED bucket that also
     // holds a manifest under the receipt's key.
     let (versioned, _bucket) = Store::in_memory_versioned("logweir/");
@@ -591,7 +616,12 @@ fn a_backfill_never_infers_a_pin_the_receipt_does_not_carry() {
     .unwrap();
     assert_eq!(report.written, 1, "{report:?}");
     let record_key = logweir::catalog::record::record_key(&report.points[0].1);
-    let (record, _) = versioned.get(&record_key).unwrap();
+    let (record, _) = versioned
+        .get_capped(
+            &record_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
     // The receipt is this build's 1.3.0 (PROD-05.1), so its record is too —
     // and still names no pin.

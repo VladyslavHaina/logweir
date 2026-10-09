@@ -20,7 +20,12 @@ const UID: &str = "3f1c9d2e-8a7b-4c6d-9e0f-1a2b3c4d5e6f";
 fn an_enforcing_store_is_written_then_already_present() {
     let store = Store::in_memory("logweir/");
     assert_eq!(put_marker(&store, UID).unwrap(), MarkerOutcome::Written);
-    assert!(store.get(&marker_key(UID)).is_ok());
+    assert!(store
+        .get_capped(
+            &marker_key(UID),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+        )
+        .is_ok());
     // The next probe: the precondition refused, so the grant AND the
     // enforcement are both proven.
     assert_eq!(

@@ -392,7 +392,10 @@ pub fn evaluate(
     let mut sets: Vec<(String, DateTime<Utc>)> = Vec::with_capacity(keys.len());
     let mut skipped: Vec<SkippedManifest> = Vec::new();
     for key in &keys {
-        match store.manifest_facts(key) {
+        // FX-31: under `caps::CONTROLLER_MANIFEST`, parsed as a stream. A
+        // manifest over the cap is skipped below with the sentence naming
+        // the cap: neither kept nor listed as removable.
+        match store.manifest_facts(key, logweir_store::caps::CONTROLLER_MANIFEST) {
             Ok(facts) => sets.push((facts.backup_id, from_ms(facts.newest_record_ms))),
             Err(e) => {
                 tracing::warn!(

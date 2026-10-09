@@ -130,7 +130,7 @@ use logweir_core::trust::{
     decide, ClaimAbsence, EvidenceClaim, IndependentObservation, KeyUsage, TrustBasis, TrustResult,
     TrustedKey, UntrustReason, Verdict,
 };
-use logweir_store::{Store, StoreError};
+use logweir_store::{caps, Store, StoreError};
 use logweir_verify::{verify_detached, Sidecar, VerifyingKey};
 use serde_json::{json, Value};
 
@@ -779,11 +779,21 @@ pub fn verify_evidence(
 
     // STEP 2. Both objects, through the read-only handle. EVERY StoreError is
     // NotAttempted — `NotFound` and the rest alike.
-    let payload = match store.get(payload_key) {
+    //
+    // FX-31: EACH UNDER ITS CAP, and never whole. This process serves every
+    // namespace, so a tenant's multi-gigabyte object at its receipt key must
+    // not take memory the other reconciles need: the document is read under
+    // `caps::CONTROLLER_DOCUMENT` (the evidence relay's 1 MiB, so the two read
+    // paths agree on what can be verified) and the sidecar under
+    // `caps::SIDECAR`. An object over its cap is refused on the size the store
+    // reports, before a body byte is read, and is `NotAttempted` naming the
+    // cap — a FINAL verdict (`not_attempted_class`): the object will not
+    // shrink, so it is not read again on the schedule.
+    let payload = match store.get_capped(payload_key, caps::CONTROLLER_DOCUMENT) {
         Ok((bytes, _version)) => bytes,
         Err(e) => return VerificationResult::not_attempted(payload_type, store_detail(&e)),
     };
-    let sidecar_bytes = match store.get(sidecar_key) {
+    let sidecar_bytes = match store.get_capped(sidecar_key, caps::SIDECAR) {
         Ok((bytes, _version)) => bytes,
         Err(e) => return VerificationResult::not_attempted(payload_type, store_detail(&e)),
     };
@@ -1048,15 +1058,33 @@ pub async fn verify_relayed(
 /// (PoC defect P12, [`not_attempted_class`]): a definite absence is final, and
 /// a store that would not answer — a missing credential, a denial, a timeout —
 /// is read again.
+///
+/// **FX-31: an object over the controller's read cap is a third sentence**,
+/// [`over_read_cap_detail`], and a FINAL one: the read was answered, the
+/// object is too big for this process to hold, and a later read reads the
+/// same object. It names the key, the cap and the size the store reported.
 #[must_use]
 pub fn store_detail(e: &StoreError) -> String {
     match e {
         StoreError::NotFound(key) => {
             format!("the evidence object {key}{EVIDENCE_OBJECT_ABSENT_SUFFIX}")
         }
+        StoreError::TooLarge { key, cap, observed } => over_read_cap_detail(key, *cap, observed),
         other => format!("{EVIDENCE_OBJECT_UNREADABLE_PREFIX}{other}"),
     }
 }
+
+/// [`store_detail`]'s sentence for an object over the controller's read cap —
+/// FX-31. The twin of the evidence relay's "is larger than the N-byte cap an
+/// evidence fetch relays" (`evidence_fetch`), and FINAL like it: it begins
+/// with the key, so no transient prefix of [`not_attempted_class`] matches.
+#[must_use]
+pub fn over_read_cap_detail(key: &str, cap: u64, observed: &logweir_store::OverCap) -> String {
+    format!("{key} is larger than the {cap}{CONTROLLER_READ_CAP_PHRASE} ({observed}); nothing was verified")
+}
+
+/// What every [`over_read_cap_detail`] says after the cap's byte count.
+pub const CONTROLLER_READ_CAP_PHRASE: &str = "-byte cap weirkeeper reads";
 
 /// How [`store_detail`] begins for every store failure that is NOT a definite
 /// absence — the transient class of [`not_attempted_class`].
@@ -2676,7 +2704,8 @@ pub fn read_signing_time(store: Option<&Store>, need: &SigningTimeNeed) -> Signi
     let Some(store) = store else {
         return SigningTime::NotAttempted(NO_CREDENTIAL_DETAIL.to_string());
     };
-    match store.get(&need.payload_key) {
+    // FX-31: under the same cap as `verify_evidence`'s read of the document.
+    match store.get_capped(&need.payload_key, caps::CONTROLLER_DOCUMENT) {
         Ok((bytes, _version)) => signing_time_in(&bytes, need),
         Err(e) => SigningTime::Unreadable(store_detail(&e)),
     }

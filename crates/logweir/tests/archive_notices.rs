@@ -447,7 +447,10 @@ fn a_backup_tells_an_unreadable_snapshot_and_still_writes_its_receipt() {
     assert_eq!(told[0]["fields"]["key"], snapshot_key);
     assert_eq!(told[0]["fields"]["backup_id"], BACKUP_ID);
     let (receipt, _) = evidence
-        .get(&outcome.receipt_key)
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("the receipt was written");
     let receipt = String::from_utf8(receipt).unwrap();
     assert!(receipt.contains(BACKUP_ID), "{receipt}");

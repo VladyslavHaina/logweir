@@ -1331,6 +1331,8 @@ fn describe_returns_segment_keys_that_store_get_can_actually_resolve() {
             segment,
         )
         .unwrap();
-    let (bytes, _) = store2.get(key).unwrap();
+    let (bytes, _) = store2
+        .get_capped(key, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
+        .unwrap();
     assert_eq!(bytes, segment);
 }

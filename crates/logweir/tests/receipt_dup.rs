@@ -174,9 +174,19 @@ enum Verdict {
 /// digest the receipt attests (`drill/binding.rs`'s final comparison and
 /// `catalog_sync.rs`'s deep check are both this comparison).
 fn verdict(evidence: &Store, archive: &Store, receipt_key: &str, key: &VerifyingKey) -> Verdict {
-    let (bytes, _) = evidence.get(receipt_key).expect("the receipt is readable");
+    let (bytes, _) = evidence
+        .get_capped(
+            receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .expect("the receipt is readable");
     let sidecar_key = receipt_key.replace(".receipt.json", ".receipt.sig");
-    let (sidecar, _) = evidence.get(&sidecar_key).expect("the sidecar is readable");
+    let (sidecar, _) = evidence
+        .get_capped(
+            &sidecar_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .expect("the sidecar is readable");
     let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(&sidecar).unwrap();
     if let Err(e) = logweir_evidence::verify::verify_detached(
         key,
@@ -187,7 +197,10 @@ fn verdict(evidence: &Store, archive: &Store, receipt_key: &str, key: &Verifying
         return Verdict::Invalid(format!("signature: {e}"));
     }
     let receipt: BackupReceipt = serde_json::from_slice(&bytes).unwrap();
-    let manifest = match archive.get(&receipt.archive.manifest_key) {
+    let manifest = match archive.get_capped(
+        &receipt.archive.manifest_key,
+        logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+    ) {
         Ok((m, _)) => m,
         Err(e) => return Verdict::Invalid(format!("manifest unreadable: {e}")),
     };
@@ -473,7 +486,7 @@ fn the_first_run_claims_its_execution_before_the_engine_starts() {
     );
     let (bytes, _) = f
         .evidence()
-        .get(&key)
+        .get_capped(&key, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
         .expect("the claim is in the evidence root");
     let claim: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(claim["backup_id"], EXECUTION_ID);
@@ -712,7 +725,10 @@ fn an_old_archive_with_no_claim_still_verifies_and_syncs_beside_a_new_run() {
     )
     .expect("the old receipt still verifies");
     assert!(evidence
-        .get(&logweir::backup::phase_run::claim_key(&old.backup_id))
+        .get_capped(
+            &logweir::backup::phase_run::claim_key(&old.backup_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+        )
         .is_err());
 
     let signer = logweir::backup::phase_run::load_signer(&f.args.signing_key).unwrap();
@@ -1007,14 +1023,29 @@ struct SetReads {
 }
 
 impl logweir::check::store::ObjectAccess for SetReads {
-    fn get(&self, key: &str) -> Result<Vec<u8>, logweir_engine_oso::storage::StoreError> {
-        use logweir_engine_oso::storage::StoreError;
+    /// Held to the cap the way `Store::get_capped` is (FX-31): a present
+    /// object over `max_bytes` is `TooLarge`, unread — which is how the set
+    /// check's existence probe (`caps::PROBE`) sees every non-empty object.
+    fn get(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, logweir_engine_oso::storage::StoreError> {
+        use logweir_engine_oso::storage::{OverCap, StoreError};
         self.asked.borrow_mut().push(format!("get {key}"));
         if let Some(text) = self.get_error {
             return Err(StoreError::Io(format!("{key}: {text}")));
         }
         if self.keys.iter().any(|k| k == key) {
-            Ok(b"{}".to_vec())
+            let body = b"{}".to_vec();
+            if body.len() as u64 > max_bytes {
+                return Err(StoreError::TooLarge {
+                    key: key.to_string(),
+                    cap: max_bytes,
+                    observed: OverCap::Reported(body.len() as u64),
+                });
+            }
+            Ok(body)
         } else {
             Err(StoreError::NotFound(key.to_string()))
         }

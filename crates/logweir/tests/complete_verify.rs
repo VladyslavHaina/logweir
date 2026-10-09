@@ -736,7 +736,10 @@ fn a_corrupt_segment_outside_the_sample_fails_complete_and_passes_sampled() {
         facts,
     } = case.archive.build();
     let corrupt = facts.topics[0].partitions[1].segments[1].key.clone();
-    let mut bytes = store.get(&corrupt).unwrap().0;
+    let mut bytes = store
+        .get_capped(&corrupt, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
+        .unwrap()
+        .0;
     bytes[40] ^= 0xFF;
     bucket.overwrite(&corrupt, &bytes);
     let v = case

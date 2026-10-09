@@ -1995,7 +1995,10 @@ fn a_whole_drill_outside_the_manifest_bound_signs_fail_integrity_and_both_reader
     let uploaded = f
         .ctx
         .store
-        .get(&format!("logweir/drills/{}.json", f.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.json", f.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("phase 8 uploaded the scorecard")
         .0;
     assert_eq!(
@@ -2297,7 +2300,10 @@ fn a_whole_drill_sampling_across_a_straddling_segment_signs_pass_and_both_reader
     let uploaded = f
         .ctx
         .store
-        .get(&format!("logweir/drills/{}.json", f.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.json", f.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("phase 8 uploaded the scorecard")
         .0;
     assert_eq!(

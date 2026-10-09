@@ -196,7 +196,12 @@ fn a_read_only_handle_can_page_and_still_cannot_write() {
     // and is asserted by this file compiling at all; the runtime half is that
     // paging left the object untouched.
     assert_eq!(
-        s.get("logweir/catalog/v1/log/2026/09/15/x.json").unwrap().0,
+        s.get_capped(
+            "logweir/catalog/v1/log/2026/09/15/x.json",
+            logweir_store::caps::SIGNED_DOCUMENT
+        )
+        .unwrap()
+        .0,
         b"{}"
     );
 }

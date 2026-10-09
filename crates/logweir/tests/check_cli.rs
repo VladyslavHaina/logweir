@@ -218,6 +218,9 @@ struct ObjectState {
     /// principal was only ever asked to create one key") is an assertion and
     /// not a reading of the code.
     calls: Vec<String>,
+    /// FX-31: every read's key and the cap it was made with, in call order —
+    /// so "this read is bounded by THAT cap" is an assertion too.
+    read_caps: Vec<(String, u64)>,
     prefix: String,
     /// FX-7: a key's VERSION history, oldest first; the last entry is the
     /// current version, and its bytes are also the key's entry in `objects`.
@@ -315,22 +318,43 @@ impl FakeObjects {
     fn calls(&self) -> Vec<String> {
         self.state.lock().unwrap().calls.clone()
     }
+
+    fn read_caps(&self) -> Vec<(String, u64)> {
+        self.state.lock().unwrap().read_caps.clone()
+    }
+}
+
+/// `Store::get_capped`'s first fence, in memory (FX-31): an object over the
+/// caller's cap is `TooLarge` and its bytes are not handed back.
+fn within_cap(key: &str, bytes: Vec<u8>, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+    let size = bytes.len() as u64;
+    if size > max_bytes {
+        return Err(StoreError::TooLarge {
+            key: key.to_string(),
+            cap: max_bytes,
+            observed: logweir_engine_oso::storage::OverCap::Reported(size),
+        });
+    }
+    Ok(bytes)
 }
 
 impl ObjectAccess for FakeObjects {
-    fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
+    fn get(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
         let mut s = self.state.lock().unwrap();
         s.calls.push(format!("get {key}"));
+        s.read_caps.push((key.to_string(), max_bytes));
         if let Some(f) = s.key_faults.get(key) {
             return Err(f.to_error(key));
         }
         if let Some(f) = &s.get_fault {
             return Err(f.to_error(key));
         }
-        s.objects
+        let bytes = s
+            .objects
             .get(key)
             .cloned()
-            .ok_or_else(|| StoreError::NotFound(key.to_string()))
+            .ok_or_else(|| StoreError::NotFound(key.to_string()))?;
+        within_cap(key, bytes, max_bytes)
     }
 
     /// `Store::list_page`'s contract, in memory: ascending keys under
@@ -391,8 +415,12 @@ impl ObjectAccess for FakeObjects {
     }
 
     /// FX-7: the current version, when the key has a history.
-    fn get_with_version(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
-        let bytes = self.get(key)?;
+    fn get_with_version(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        let bytes = self.get(key, max_bytes)?;
         let s = self.state.lock().unwrap();
         let current = s
             .versions
@@ -404,10 +432,11 @@ impl ObjectAccess for FakeObjects {
 
     /// FX-7: one retained version by id; an unversioned key cannot be read by
     /// version at all, which is an error and never the current bytes.
-    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
+    fn get_version(&self, key: &str, version: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
         let mut s = self.state.lock().unwrap();
         let at = format!("{key}?versionId={version}");
         s.calls.push(format!("get {at}"));
+        s.read_caps.push((at.clone(), max_bytes));
         // A fault scoped to ONE version read (FX-7 fix round): `failing_key`
         // with the `<key>?versionId=<id>` spelling.
         if let Some(f) = s.key_faults.get(&at) {
@@ -421,7 +450,8 @@ impl ObjectAccess for FakeObjects {
                 .iter()
                 .find(|(id, _)| id == version)
                 .map(|(_, bytes)| bytes.clone())
-                .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version}"))),
+                .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version}")))
+                .and_then(|bytes| within_cap(&at, bytes, max_bytes)),
         }
     }
 }
@@ -435,8 +465,8 @@ impl ObjectAccess for FakeObjects {
 struct SharedStore(Arc<logweir_engine_oso::storage::Store>);
 
 impl ObjectAccess for SharedStore {
-    fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
-        ObjectAccess::get(&*self.0, key)
+    fn get(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+        ObjectAccess::get(&*self.0, key, max_bytes)
     }
     fn list_page(
         &self,
@@ -452,11 +482,15 @@ impl ObjectAccess for SharedStore {
     fn qualify(&self, relative_key: &str) -> String {
         ObjectAccess::qualify(&*self.0, relative_key)
     }
-    fn get_with_version(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
-        ObjectAccess::get_with_version(&*self.0, key)
+    fn get_with_version(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        ObjectAccess::get_with_version(&*self.0, key, max_bytes)
     }
-    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
-        ObjectAccess::get_version(&*self.0, key, version)
+    fn get_version(&self, key: &str, version: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+        ObjectAccess::get_version(&*self.0, key, version, max_bytes)
     }
 }
 
@@ -4060,7 +4094,10 @@ fn the_pure_manifest_window_agrees_with_the_store() {
     })
     .unwrap();
     let facts = store
-        .manifest_facts(&format!("kafka-backups/{BACKUP_ID}/manifest.json"))
+        .manifest_facts(
+            &format!("kafka-backups/{BACKUP_ID}/manifest.json"),
+            logweir_engine_oso::storage::caps::CONTROLLER_MANIFEST,
+        )
         .expect("the store reads its own manifest");
     let ours = logweir::check::archive::window(&manifest).expect("a bounded window");
     assert_eq!(ours.oldest_ms, facts.oldest_record_ms);

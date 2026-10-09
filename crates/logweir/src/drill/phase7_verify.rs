@@ -858,7 +858,11 @@ fn segment_evidence(store: &Store, segs: &[&SegmentFacts]) -> Result<Evidence, D
         // conversion (`logweir-engine-oso/src/storage.rs`) so `?` can then use
         // `DrillError`'s existing `#[from] EngineError`, rather than adding a
         // second `From` impl for a type this crate does not own.
-        let (bytes, _vid) = store.get(&seg.key).map_err(EngineError::from)?;
+        // FX-31: under the segment ceiling; an object over it is an
+        // operational failure naming the cap, never a pass.
+        let (bytes, _vid) = store
+            .get_capped(&seg.key, logweir_engine_oso::storage::caps::SEGMENT)
+            .map_err(EngineError::from)?;
         // Compared as BARE HEX on both sides. `SegmentFacts.sha256` is copied
         // verbatim out of the engine's manifest, where the field is bare hex
         // (`"sha256": "27f6c448…"` — measured against a real 0.21.0 manifest);
