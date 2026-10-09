@@ -279,8 +279,10 @@ const WORST_CASE_DOCUMENT_KEY_BYTES: usize = 1024;
 /// the block larger than the bound it claimed.
 #[must_use]
 pub fn worst_case_block_bytes(selected: &[String]) -> usize {
-    let at =
-        DateTime::<Utc>::from_timestamp(i64::from(i32::MAX), 999_999_999).unwrap_or_else(Utc::now);
+    // 2038-01-19T03:14:07.999999999Z: a four-digit year with nine fraction
+    // digits, as long as any instant a capture records. In range, so the
+    // default (never taken) is only there to keep the pure layer clock-free.
+    let at = DateTime::<Utc>::from_timestamp(i64::from(i32::MAX), 999_999_999).unwrap_or_default();
     let counts = PositionCounts {
         related: u32::MAX,
         not_related: u32::MAX,
@@ -938,8 +940,8 @@ mod tests {
         }
         // A real block of the same ids is never larger than the worst case.
         let real = ConsumerPositions {
-            observed_from: Utc::now(),
-            observed_to: Utc::now(),
+            observed_from: DateTime::<Utc>::from_timestamp(1_700_000_000, 123_456_789).unwrap(),
+            observed_to: DateTime::<Utc>::from_timestamp(1_700_000_001, 0).unwrap(),
             listing: "complete".into(),
             document: DocumentRef {
                 key: document_key("backup", "run"),
