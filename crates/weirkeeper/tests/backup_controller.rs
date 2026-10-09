@@ -14783,3 +14783,108 @@ fn fx20_an_inline_archive_secret_is_bound_to_the_location_the_backup_writes() {
         .iter()
         .all(|(n, _)| n != cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV));
 }
+
+// ===========================================================================
+// FX-19 CLASS SWEEP — the reaping of a finished runner Job flaps nothing here
+// ===========================================================================
+
+/// This run's finished runner Job as the TTL controller's FOREGROUND delete
+/// leaves it: the TTL the terminal pass set, a `deletionTimestamp` and the
+/// `foregroundDeletion` finalizer — with its pod already gone. PoC batch 2
+/// found the `KafkaCluster` probe reading exactly this shape as a crash.
+fn runner_job_being_collected() -> String {
+    let mut job: Value = serde_json::from_str(&job_body("Complete")).expect("the fixture is JSON");
+    job["spec"]["ttlSecondsAfterFinished"] = serde_json::json!(TTL_SECONDS_AFTER_FINISHED);
+    job["metadata"]["deletionTimestamp"] = serde_json::json!("2026-11-16T03:20:00Z");
+    job["metadata"]["finalizers"] = serde_json::json!(["foregroundDeletion"]);
+    job.to_string()
+}
+
+/// **FX-19 CLASS SWEEP, `Backup`: THE REAPING OF A FINISHED RUNNER JOB
+/// CANNOT FLAP THE STATUS OR LOG A WARN.** The TTL is patched only after the
+/// terminal status write (`controllers/backup.rs`, "ONLY NOW" after the
+/// terminal `patch_status_if_changed`), so a Job the TTL controller collects
+/// belongs to a TERMINAL `Backup`, and step 2b's guard (`status_is_terminal`
+/// before `find_pod`) reads nothing from it: no pod list, no status write, no
+/// TTL patch (it has one), and nothing above debug.
+///
+/// NEGATIVE CONTROL: the same Job and the same empty pod list under the
+/// NON-terminal copy of the object is judged — it writes — so the zero below
+/// is the guard's and can fail.
+#[tokio::test]
+async fn fx19_a_terminal_backup_whose_job_is_being_collected_is_not_rejudged() {
+    let no_pods = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#;
+    let routes = || {
+        let mut routes = finished_routes(no_pods, log_body(""), 200, "Complete");
+        for route in &mut routes {
+            if route.path_suffix == "/jobs/logweir-backup-nightly-20261109-031700" {
+                route.body = runner_job_being_collected();
+            }
+        }
+        routes
+    };
+    let mut terminal = frozen_backup();
+    terminal.status.as_mut().expect("a status").phase = Some("Succeeded".to_string());
+    terminal.status.as_mut().expect("a status").exit_code = Some(0);
+
+    let log = weirkeeper::testing::CapturedLog::start();
+    let (client, _seen, bodies) = mock_client_recording_bodies(routes());
+    let outcome = reconcile_backup(
+        &terminal,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 16, 3, 20),
+    )
+    .await
+    .expect("a Job being collected is not a reconcile error");
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(status_patch_count(&seen), 0, "{:?}", calls(&seen));
+    assert!(
+        !seen.iter().any(|b| path(&b.uri).ends_with("/pods")),
+        "the pod list is not read: {:?}",
+        calls(&seen)
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|b| b.method == "PATCH" && b.uri.contains("/jobs/")),
+        "the Job already carries its TTL: {:?}",
+        calls(&seen)
+    );
+    assert_eq!(outcome.exit_code, Some(0), "the code already on the object");
+    assert!(
+        log.at("WARN").is_empty(),
+        "no WARN: {:?}",
+        log.messages_at("WARN")
+    );
+    drop(log);
+
+    // NEGATIVE CONTROL: the non-terminal copy is judged, and writes.
+    let (client, _seen, bodies) = mock_client_recording_bodies(routes());
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 16, 3, 20),
+    )
+    .await
+    .expect("the reconcile completes");
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    let written: Vec<String> = seen
+        .iter()
+        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
+        .map(|b| b.body.clone())
+        .collect();
+    assert!(
+        written.iter().any(|b| b.contains("NoExitCode")),
+        "without the terminal guard the same Job IS judged a crash: {written:?}"
+    );
+}

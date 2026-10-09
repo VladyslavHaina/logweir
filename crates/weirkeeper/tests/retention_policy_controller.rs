@@ -7432,3 +7432,106 @@ async fn fx20_a_binding_refusal_is_named_on_the_enforced_condition() {
         Some("CredentialBindingMismatch")
     );
 }
+
+// ===========================================================================
+// FX-19 CLASS SWEEP — the reaping of a finished run Job flaps nothing here
+// ===========================================================================
+
+/// **FX-19 CLASS SWEEP, retention: A HARVESTED RUN'S JOB THE TTL CONTROLLER
+/// IS COLLECTING IS NEVER READ.** The TTL is patched only after the harvest
+/// landed (`controllers/retention_policy.rs` `harvest`, "THE TTL AFTER THE
+/// STATUS, and only then"), and `tracked_run` returns on a recorded
+/// `lastEnforcement.finishedAt` BEFORE its Job `GET` — so the next day's pass,
+/// with yesterday's Job mid-deletion (`deletionTimestamp`, TTL, pod gone),
+/// does not ask for it at all, starts the day's run and logs nothing above
+/// debug. (The TTL patch itself already answers a `404` as `Ok`,
+/// `patch_job_ttl`.)
+///
+/// NEGATIVE CONTROL: the same pass over the record WITHOUT `finishedAt` (the
+/// run started, never harvested) does read yesterday's Job — the `GET` this
+/// row's zero is about is reachable.
+#[tokio::test]
+async fn fx19_a_harvested_runs_job_being_collected_is_never_read() {
+    let digest = learned_digest().await;
+    let spec = unattended_enforcing();
+    let day0 = now();
+    let (started, run_id) = start_pass(&spec, &json!({}), day0, &digest).await;
+    let harvested = harvest_pass(
+        &spec,
+        &started,
+        day0 + chrono::Duration::minutes(1),
+        &run_id,
+        0,
+        &digest,
+    )
+    .await;
+    assert!(harvested["lastEnforcement"]["finishedAt"].is_string());
+
+    let old_job = format!("{}-{run_id}", stem());
+    let old_path: &'static str = Box::leak(format!("/jobs/{old_job}").into_boxed_str());
+    let collected = {
+        let mut job: Value =
+            serde_json::from_str(&job_body(&old_job, true)).expect("the fixture is JSON");
+        job["spec"]["ttlSecondsAfterFinished"] = json!(check::job::TTL_SECONDS);
+        job["metadata"]["deletionTimestamp"] = json!("2026-09-18T04:00:00Z");
+        job["metadata"]["finalizers"] = json!(["foregroundDeletion"]);
+        job.to_string()
+    };
+    let day1 = day0 + chrono::Duration::days(1);
+    let routes = || {
+        let mut routes = happy_routes(&six_points());
+        routes.push(route("GET", old_path, collected.clone()));
+        routes.push(route(
+            "GET",
+            "/pods",
+            json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}).to_string(),
+        ));
+        routes.push(route(
+            "GET",
+            "/events",
+            json!({"apiVersion": "v1", "kind": "EventList", "metadata": {}, "items": []})
+                .to_string(),
+        ));
+        routes.push(route("PATCH", old_path, "{}".to_string()));
+        routes.push(plan_config_map_route(&digest));
+        routes.push(route("POST", "/configmaps", "{}".to_string()));
+        routes.extend(absent_job_routes(&digest, day1));
+        routes.push(route("POST", "/jobs", "{}".to_string()));
+        routes
+    };
+    let read_old = |f: &Fixture| {
+        f.seen()
+            .iter()
+            .any(|(m, u)| m == "GET" && u.split('?').next().unwrap_or(u).ends_with(old_path))
+    };
+
+    let log = weirkeeper::testing::CapturedLog::start();
+    let f = fixture(routes());
+    let outcome = run_at(&f, &policy(spec.clone(), harvested.clone()), day1).await;
+    assert_eq!(
+        outcome.phase,
+        ctrl::RetentionPhase::Started,
+        "{:?}",
+        f.seen()
+    );
+    assert!(
+        !read_old(&f),
+        "the harvested run's Job is not read: {:?}",
+        f.seen()
+    );
+    assert!(
+        log.at("WARN").is_empty(),
+        "no WARN: {:?}",
+        log.messages_at("WARN")
+    );
+    drop(log);
+
+    // NEGATIVE CONTROL: never harvested — yesterday's Job IS read.
+    let f = fixture(routes());
+    run_at(&f, &policy(spec.clone(), started.clone()), day1).await;
+    assert!(
+        read_old(&f),
+        "the unharvested run's Job is read: {:?}",
+        f.seen()
+    );
+}

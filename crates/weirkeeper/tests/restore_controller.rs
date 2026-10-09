@@ -10580,3 +10580,94 @@ fn a_real_run_that_did_not_cover_is_named_complete_not_covered() {
         "the control: the signature is judged before anything the status says"
     );
 }
+
+// ===========================================================================
+// FX-19 CLASS SWEEP — the reaping of a finished runner Job flaps nothing here
+// ===========================================================================
+
+/// **FX-19 CLASS SWEEP, `Restore`: THE REAPING OF A FINISHED RUNNER JOB
+/// CANNOT FLAP THE STATUS OR LOG A WARN.** The TTL is patched only after the
+/// terminal status write (`controllers/restore.rs`, "ONLY NOW" after the
+/// terminal `patch_status_if_changed`), so the Job the TTL controller's
+/// foreground delete leaves — TTL set, `deletionTimestamp`, pod gone — belongs
+/// to a TERMINAL `Restore`, and step 2b (`status_is_terminal` before
+/// `find_pod`) reads nothing from it: no pod list, no status write, no TTL
+/// patch, nothing above debug.
+///
+/// NEGATIVE CONTROL: `a_terminal_verified_restore_whose_pod_is_gone_is_not_re_patched`
+/// is the same guard with its KILLS line (the guard removed, the pass takes
+/// the crashed branch and patches); this row adds the Job's deletion and the
+/// log level, and its own control below: the non-terminal copy writes.
+#[tokio::test]
+async fn fx19_a_terminal_restore_whose_job_is_being_collected_is_not_rejudged() {
+    let (settled, _) = settled_verified_restore().await;
+    let no_pods = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#.to_string();
+    let routes = || {
+        let mut routes = finished_routes(no_pods.clone(), log_body(""), "Complete");
+        for route in &mut routes {
+            if route.path_suffix == "/jobs/logweir-restore-incident-4471" {
+                let mut job: Value =
+                    serde_json::from_str(&job_body("Complete")).expect("the fixture is JSON");
+                job["spec"]["ttlSecondsAfterFinished"] =
+                    serde_json::json!(weirkeeper::controllers::backup::TTL_SECONDS_AFTER_FINISHED);
+                job["metadata"]["deletionTimestamp"] = serde_json::json!("2026-09-17T12:30:00Z");
+                job["metadata"]["finalizers"] = serde_json::json!(["foregroundDeletion"]);
+                route.body = job.to_string();
+            }
+        }
+        routes
+    };
+
+    let log = weirkeeper::testing::CapturedLog::start();
+    let (client, rec, bodies) = mock_client_recording_bodies(routes());
+    let outcome = reconcile_restore(
+        &settled,
+        &client,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 11, 18, 45)),
+        utc(2026, 9, 17, 12, 30),
+    )
+    .await
+    .expect("a Job being collected is not a reconcile error");
+    let seen = bodies.lock().expect("readable").clone();
+    assert!(
+        patched_statuses(&seen).is_empty(),
+        "nothing written: {seen:?}"
+    );
+    let requests = rec.lock().expect("readable").clone();
+    assert!(
+        !requests.iter().any(|r| path(&r.uri).ends_with("/pods")),
+        "the pod list is not read"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.method == "PATCH" && r.uri.contains("/jobs/")),
+        "the Job already carries its TTL"
+    );
+    assert_eq!(outcome.exit_code, Some(0), "the code already on the object");
+    assert!(
+        log.at("WARN").is_empty(),
+        "no WARN: {:?}",
+        log.messages_at("WARN")
+    );
+    drop(log);
+
+    // NEGATIVE CONTROL: the non-terminal copy is judged, and writes.
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes());
+    reconcile_restore(
+        &restore(),
+        &client,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 11, 18, 45)),
+        utc(2026, 9, 17, 12, 30),
+    )
+    .await
+    .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    let written = patched_statuses(&seen);
+    assert!(
+        written.iter().any(|s| s.to_string().contains("NoExitCode")),
+        "without the terminal guard the same Job IS judged a crash: {written:?}"
+    );
+}
