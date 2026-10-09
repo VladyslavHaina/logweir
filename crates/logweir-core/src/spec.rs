@@ -240,10 +240,12 @@ pub fn parse_point_in_time(text: &str) -> Result<(Option<DateTime<Utc>>, DateTim
     parse_point_in_time_form(text).map(|(start, end, _)| (start, end))
 }
 
+/// `restore.point_in_time` as written: its start (an interval's), its end,
+/// and the form it was written in.
+pub type PointInTimeParts = (Option<DateTime<Utc>>, DateTime<Utc>, PointInTimeForm);
+
 /// [`parse_point_in_time`], with the form it was written in.
-pub fn parse_point_in_time_form(
-    text: &str,
-) -> Result<(Option<DateTime<Utc>>, DateTime<Utc>, PointInTimeForm), String> {
+pub fn parse_point_in_time_form(text: &str) -> Result<PointInTimeParts, String> {
     match text.split_once('/') {
         None => Ok((None, parse_instant(text)?, PointInTimeForm::Instant)),
         Some((start, end)) if start.trim() == OPEN_INTERVAL_START => {
