@@ -2812,7 +2812,14 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
     assert_eq!(
         at(
             selection,
-            &["properties", "partitions", "items", "properties", "partitions", "maxItems"]
+            &[
+                "properties",
+                "partitions",
+                "items",
+                "properties",
+                "partitions",
+                "maxItems"
+            ]
         )
         .as_u64(),
         Some(1024)
