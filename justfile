@@ -59,7 +59,7 @@ golden:
 # as revised): the drill scorecard and the backup receipt; PLAT-17.1 adds a
 # THIRD, `schemas/logweir-api-v1.openapi.json`, the product API's OpenAPI
 # document generated from `crates/logweir-api`'s DTOs; PLAT-15.1 adds a
-# FOURTH, `schemas/logweir-catalog-point-1.3.0.json` (1.0.0, 1.1.0 and 1.2.0 frozen beside it), the recovery catalog's
+# FOURTH, `schemas/logweir-catalog-point-1.5.0.json` (1.0.0 to 1.4.0 frozen beside it), the recovery catalog's
 # point record, generated from `crates/logweir`'s own type (the type is runner
 # vocabulary, so its emitter lives beside it rather than in `logweir-core`).
 # `logweir schema` still accepts exactly the two names Global Constraint 13
@@ -120,16 +120,23 @@ golden:
 # this build writes 1.6.0 for every sampled-lane scorecard, and 1.4.0/1.5.0
 # for a complete verification's.
 #
+# PROD-01.4a moved the receipt and the catalog point to 1.5.0 (`generations`,
+# `topics[].identity`: the topic ID before and after the engine), and
+# PROD-01.3's `-1.4.0.json` files are frozen beside the new ones the same way
+# (`the_frozen_1_4_0_receipt_schema_is_still_prod_01_3s`,
+# `the_frozen_1_4_0_catalog_point_schema_is_still_prod_01_3s`); every receipt
+# this build signs is 1.5.0.
+#
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
 # (`scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`,
-# `backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES`,
-# `catalog::record::FORMAT_VERSION_WITH_AUTH_MODES`), which also builds the
+# `backup_receipt::FORMAT_VERSION_WITH_GENERATIONS`,
+# `catalog::record::FORMAT_VERSION_WITH_GENERATIONS`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
 scorecard_schema_version := "1.6.0"
-receipt_schema_version := "1.4.0"
-catalog_schema_version := "1.4.0"
+receipt_schema_version := "1.5.0"
+catalog_schema_version := "1.5.0"
 
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json

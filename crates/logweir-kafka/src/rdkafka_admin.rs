@@ -19,8 +19,10 @@ use crate::groups::{
 use crate::positions::TopicPartition;
 use crate::rdkafka_reader::RdKafkaReader;
 use crate::reader::{ClusterReader, KafkaError};
+use crate::topic_ids::{call_failure as topic_call_failure, TopicAnswer, TopicIdRead};
 use logweir_rdkafka_ffi::groups::{AssignedPartition, DescribedGroup, MAX_DESCRIBE_GROUPS};
-use logweir_rdkafka_ffi::{acls, cluster, groups, CText, CallError};
+use logweir_rdkafka_ffi::topics::{DescribedTopic, MAX_DESCRIBE_TOPICS};
+use logweir_rdkafka_ffi::{acls, cluster, groups, topics, CText, CallError};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -39,6 +41,31 @@ fn call_failure(e: &CallError) -> (i32, String) {
         CallError::Call { code, message } => (*code, message.display()),
         CallError::Options { code, message } => (*code, message.clone()),
         other => (-1, other.to_string()),
+    }
+}
+
+/// **PROD-01.4a.** A whole DescribeTopics failure, named: a transport failure
+/// (no result within the bound, or librdkafka's transport codes) is
+/// `Unreachable`, never "not found" ([`crate::topic_ids::call_failure`]).
+fn topics_call_failure(e: &CallError) -> KafkaError {
+    match e {
+        CallError::Call { code, message } => {
+            topic_call_failure(Some(*code), false, &message.display())
+        }
+        CallError::NoResult { .. } => topic_call_failure(None, true, &e.to_string()),
+        CallError::Options { code, message } => topic_call_failure(Some(*code), false, message),
+        other => topic_call_failure(None, false, &other.to_string()),
+    }
+}
+
+/// One DescribeTopics entry as plain values for [`crate::topic_ids`].
+fn topic_answer(d: DescribedTopic) -> TopicAnswer {
+    TopicAnswer {
+        name: id(d.name),
+        halves: d
+            .topic_id
+            .map(|u| (u.most_significant_bits, u.least_significant_bits)),
+        error: d.error.map(|e| (e.code, e.message.display())),
     }
 }
 
@@ -109,6 +136,34 @@ impl RdKafkaReader {
             Ok(d) => ClusterAccess::from_operations(d.authorized_operations),
             Err(e) => ClusterAccess::Unread(e.to_string()),
         }
+    }
+
+    /// **PROD-01.4a: each named topic's ID, through DescribeTopics** (the
+    /// FFI crate's [`topics::describe_topics`]), at most
+    /// [`MAX_DESCRIBE_TOPICS`] names per call, each call bounded by the admin
+    /// bound. One verdict per requested name, in order; see
+    /// [`crate::topic_ids`] for what each answer means.
+    ///
+    /// # Errors
+    ///
+    /// The first whole-call failure: [`KafkaError::Unreachable`] when no
+    /// broker answered (never `TopicNotFound`), [`KafkaError::Client`]
+    /// otherwise — including a name the FFI crate refuses before sending
+    /// (blank, over 249 bytes, a NUL).
+    pub fn read_topic_ids(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, TopicIdRead)>, KafkaError> {
+        let names = crate::topic_ids::distinct(topics);
+        let mut answers = Vec::with_capacity(names.len());
+        for chunk in names.chunks(MAX_DESCRIBE_TOPICS) {
+            let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            let described =
+                topics::describe_topics(self.admin_client().inner(), &refs, self.admin_bound())
+                    .map_err(|e| topics_call_failure(&e))?;
+            answers.extend(described.into_iter().map(topic_answer));
+        }
+        Ok(crate::topic_ids::join(topics, &answers))
     }
 
     /// **Both group listings and the cluster access, read once**: the input

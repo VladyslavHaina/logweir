@@ -1171,9 +1171,31 @@ fn backup_run_writes_a_signed_receipt() {
     // The document says what the run measured — spot-checked on the fields an
     // auditor reads first, so a receipt full of defaults cannot pass this row.
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
-    // PROD-05.1: every receipt this build signs carries `topic_configuration`,
-    // so every one is 1.3.0.
-    assert_eq!(receipt.format_version, "1.3.0");
+    // PROD-05.1 and PROD-01.4a: every receipt this build signs carries
+    // `topic_configuration` and `generations`, so every one is 1.5.0.
+    assert_eq!(receipt.format_version, "1.5.0");
+    // PROD-01.4a: one `generations` entry per named topic. This seam's reader
+    // reads no topic IDs, so each ID is null and SAYS so (`notRead`) — never
+    // a guessed ID, never omitted.
+    let generations = receipt
+        .generations
+        .as_ref()
+        .expect("every receipt this build signs carries generations");
+    assert_eq!(
+        generations.keys().cloned().collect::<Vec<_>>(),
+        vec!["orders".to_string()]
+    );
+    assert_eq!(generations["orders"].topic_id, None);
+    assert_eq!(generations["orders"].topic_id_after, None);
+    assert_eq!(
+        generations["orders"].topic_id_reason.as_deref(),
+        Some("notRead")
+    );
+    assert_eq!(
+        generations["orders"].topic_id_after_reason.as_deref(),
+        Some("notRead")
+    );
+    assert_eq!(generations["orders"].topic_id_source, None);
     // …one model entry per named topic, and — the read having failed — NO
     // entries: NOT RECORDED, never an empty "no configuration".
     let model = receipt

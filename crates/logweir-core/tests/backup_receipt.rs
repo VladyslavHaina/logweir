@@ -1,15 +1,16 @@
-//! `BackupReceipt::validate_invariants` has exactly TWENTY-ONE arms — the four
+//! `BackupReceipt::validate_invariants` has exactly TWENTY-SIX arms — the four
 //! SELF-CONTRADICTION invariants and, since Task 5b fix round 1, the one
 //! CLOSED VALUE SET (`source.auth.mode`), plus since FX-4 the six arms (6-11)
 //! that read ONLY the 1.1.0 `config_coverage` block, plus since PROD-05.1 the
 //! eight (12-19) that run only on the 1.3.0 `topic_configuration` block and
-//! the two (20-21) over its `owner_detection` — and each one refuses with an
-//! exact message.
+//! the two (20-21) over its `owner_detection`, plus since PROD-01.4a the five
+//! (22-26) that read only the 1.5.0 `generations` block — and each one refuses
+//! with an exact message.
 //!
 //! The four and the five are asserted SEPARATELY and on purpose:
 //! `arm_cases()` carries the four self-contradiction arms and
 //! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` closes over them, while
-//! `validate_invariants_has_exactly_twenty_three_return_err_statements` closes over
+//! `validate_invariants_has_exactly_twenty_eight_return_err_statements` closes over
 //! the function's TOTAL by reading its source text. So an arm added to the
 //! function without a case here fails the second test, and a case deleted
 //! from `arm_cases()` fails the first — neither number can go stale under
@@ -42,7 +43,7 @@
 use logweir_core::backup_receipt::{
     BackupReceipt, ConfigCoverage, ConfigEntry, EffectiveConfigValue, ReceiptArchive, ReceiptAuth,
     ReceiptCovered, ReceiptEngine, ReceiptSource, SourceConfigCoverage, TopicConfigCoverage,
-    TopicConfiguration, TopicOwner,
+    TopicConfiguration, TopicIdentity, TopicOwner,
 };
 use std::collections::BTreeMap;
 
@@ -89,6 +90,7 @@ fn pristine() -> BackupReceipt {
         config_coverage: None,
         topic_configuration: None,
         owner_detection: None,
+        generations: None,
     }
 }
 
@@ -101,7 +103,7 @@ fn pristine() -> BackupReceipt {
 /// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
 /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` keeps saying exactly
 /// what its name says while
-/// `validate_invariants_has_exactly_twenty_three_return_err_statements` pins the
+/// `validate_invariants_has_exactly_twenty_eight_return_err_statements` pins the
 /// total.
 fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     // Arm 1: a major this reader has never seen.
@@ -336,16 +338,16 @@ fn the_written_version_follows_the_auth_mode() {
             username: None,
         };
         assert_eq!(
-            format_version_for(&doc.archive, false, &auth),
+            format_version_for(&doc.archive, false, &auth, false),
             RECEIPT_FORMAT_VERSION
         );
         assert_eq!(
-            format_version_for(&pinned, false, &auth),
+            format_version_for(&pinned, false, &auth, false),
             FORMAT_VERSION_WITH_MANIFEST_VERSION
         );
         for archive in [&doc.archive, &pinned] {
             assert_eq!(
-                format_version_for(archive, true, &auth),
+                format_version_for(archive, true, &auth, false),
                 FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
             );
         }
@@ -358,7 +360,7 @@ fn the_written_version_follows_the_auth_mode() {
         for archive in [&doc.archive, &pinned] {
             for topic_configuration in [false, true] {
                 assert_eq!(
-                    format_version_for(archive, topic_configuration, &auth),
+                    format_version_for(archive, topic_configuration, &auth, false),
                     FORMAT_VERSION_WITH_AUTH_MODES,
                     "{mode}, topic_configuration={topic_configuration}"
                 );
@@ -373,7 +375,9 @@ fn the_written_version_follows_the_auth_mode() {
     );
 }
 
-/// **THE TOTAL.** `validate_invariants` has exactly twenty-three refusing statements.
+/// **THE TOTAL.** `validate_invariants` has exactly twenty-eight refusing
+/// statements: twenty-one arms, arm 5 written as three (5a-5c), and PROD-01.4a's
+/// five (22-26).
 ///
 /// Read out of the SOURCE TEXT, which is the only way to make the count a
 /// claim about the function rather than about this file's case list: an arm
@@ -386,7 +390,7 @@ fn the_written_version_follows_the_auth_mode() {
 /// `crates/logweir/tests/two_reader_parity.rs::
 /// every_invariant_arm_has_a_corpus_case` applies to the scorecard's arms).
 #[test]
-fn validate_invariants_has_exactly_twenty_three_return_err_statements() {
+fn validate_invariants_has_exactly_twenty_eight_return_err_statements() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/backup_receipt.rs"
@@ -407,9 +411,9 @@ fn validate_invariants_has_exactly_twenty_three_return_err_statements() {
 
     let total = body.matches("return Err(format!(").count();
     assert_eq!(
-        total, 23,
+        total, 28,
         "BackupReceipt::validate_invariants has {total} `return Err(format!(` \
-         statement(s), not 23. Every one of them needs a per-arm test in this file with \
+         statement(s), not 28. Every one of them needs a per-arm test in this file with \
          its exact message AND a case in \
          e2e/fixtures/invariants/backup-receipt-index.json — \
          scripts/check-invariant-corpus.sh derives the list from this same slice and \
@@ -435,7 +439,7 @@ fn validate_invariants_has_exactly_twenty_three_return_err_statements() {
 /// exact message, and a pristine receipt accepted. Arm 5 — the closed value
 /// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
 /// function's total is
-/// `validate_invariants_has_exactly_twenty_three_return_err_statements`.
+/// `validate_invariants_has_exactly_twenty_eight_return_err_statements`.
 ///
 /// **RENAMED, Task 12 closeout carry (c).** It was
 /// `backup_receipt_invariants_have_exactly_four_arms`, which Task 5b's fix
@@ -1566,9 +1570,365 @@ fn the_written_version_defines_topic_configuration() {
     assert_eq!(minor, TOPIC_CONFIGURATION_SINCE_MINOR);
     let mut archive = pristine().archive;
     let auth = pristine().source.auth;
-    assert_eq!(format_version_for(&archive, true, &auth), "1.3.0");
-    assert_eq!(format_version_for(&archive, false, &auth), "1.1.0");
+    assert_eq!(format_version_for(&archive, true, &auth, false), "1.3.0");
+    assert_eq!(format_version_for(&archive, false, &auth, false), "1.1.0");
     archive.manifest_version_id = Some("v1".into());
-    assert_eq!(format_version_for(&archive, true, &auth), "1.3.0");
-    assert_eq!(format_version_for(&archive, false, &auth), "1.2.0");
+    assert_eq!(format_version_for(&archive, true, &auth, false), "1.3.0");
+    assert_eq!(format_version_for(&archive, false, &auth, false), "1.2.0");
+}
+
+// ---------------------------------------------------------------------------
+// PROD-01.4a: format 1.5.0's `generations` block and arms 22-26
+// ---------------------------------------------------------------------------
+
+/// Two topic IDs as `kafka-topics.sh --describe` printed them (PROD-01.4's
+/// `ffi-route-evidence.txt`).
+const ID_A: &str = "gtOq2VXiTCK1QM2UtERijA";
+const ID_B: &str = "tpWwuKExQo2lN9NziDMpYg";
+
+fn identity(
+    before: Option<&str>,
+    after: Option<&str>,
+    source: Option<&str>,
+    reasons: (Option<&str>, Option<&str>),
+) -> TopicIdentity {
+    TopicIdentity {
+        topic_id: before.map(str::to_string),
+        topic_id_after: after.map(str::to_string),
+        topic_id_source: source.map(str::to_string),
+        topic_id_reason: reasons.0.map(str::to_string),
+        topic_id_after_reason: reasons.1.map(str::to_string),
+    }
+}
+
+/// A 1.5.0 receipt that satisfies all twenty-six arms: `orders` read with the
+/// same ID before and after the engine, `payments` on a broker that has no IDs.
+fn pristine_1_5() -> BackupReceipt {
+    let mut doc = pristine_1_3();
+    doc.format_version = "1.5.0".to_string();
+    let mut block = BTreeMap::new();
+    block.insert(
+        "orders".to_string(),
+        identity(Some(ID_A), Some(ID_A), Some("describeTopics"), (None, None)),
+    );
+    block.insert(
+        "payments".to_string(),
+        identity(None, None, None, (Some("noTopicId"), Some("noTopicId"))),
+    );
+    doc.generations = Some(block);
+    doc
+}
+
+fn generation<'a>(doc: &'a mut BackupReceipt, name: &str) -> &'a mut TopicIdentity {
+    doc.generations.as_mut().unwrap().get_mut(name).unwrap()
+}
+
+#[test]
+fn a_1_5_0_receipt_with_every_identity_shape_satisfies_every_invariant() {
+    let mut doc = pristine_1_5();
+    assert_eq!(doc.validate_invariants(), Ok(()));
+    for (label, shape) in [
+        (
+            "recreated during the capture: a fact, not a contradiction",
+            identity(Some(ID_A), Some(ID_B), Some("describeTopics"), (None, None)),
+        ),
+        (
+            "deleted during the capture",
+            identity(
+                Some(ID_A),
+                None,
+                Some("describeTopics"),
+                (None, Some("topicNotFound")),
+            ),
+        ),
+        (
+            "created during the capture",
+            identity(
+                None,
+                Some(ID_B),
+                Some("describeTopics"),
+                (Some("topicNotFound"), None),
+            ),
+        ),
+        (
+            "refused, then failed",
+            identity(
+                None,
+                None,
+                None,
+                (Some("notAuthorized"), Some("readFailed")),
+            ),
+        ),
+        (
+            "a reader that reads no IDs",
+            identity(None, None, None, (Some("notRead"), Some("notRead"))),
+        ),
+        (
+            "the engine route's source",
+            identity(Some(ID_A), Some(ID_A), Some("engineManifest"), (None, None)),
+        ),
+    ] {
+        *generation(&mut doc, "payments") = shape;
+        assert_eq!(doc.validate_invariants(), Ok(()), "{label}");
+    }
+}
+
+/// A null ID is written as `null`, never omitted, and its reason beside it.
+#[test]
+fn a_null_topic_id_is_written_as_null_with_its_reason() {
+    let doc = pristine_1_5();
+    let v = serde_json::to_value(&doc).expect("serialises");
+    assert_eq!(
+        v["generations"]["payments"],
+        serde_json::json!({
+            "topic_id": null,
+            "topic_id_after": null,
+            "topic_id_reason": "noTopicId",
+            "topic_id_after_reason": "noTopicId",
+        })
+    );
+    assert_eq!(
+        v["generations"]["orders"],
+        serde_json::json!({
+            "topic_id": ID_A,
+            "topic_id_after": ID_A,
+            "topic_id_source": "describeTopics",
+        })
+    );
+    // A reader reads absent IDs as null.
+    let back: TopicIdentity =
+        serde_json::from_value(serde_json::json!({"topic_id_reason": "notRead"}))
+            .expect("absent IDs read as null");
+    assert_eq!(back.topic_id, None);
+    assert_eq!(back.topic_id_after, None);
+}
+
+#[test]
+fn a_receipt_without_generations_is_decided_as_before() {
+    assert_eq!(pristine().validate_invariants(), Ok(()));
+    assert_eq!(pristine_1_1().validate_invariants(), Ok(()));
+    assert_eq!(pristine_1_3().validate_invariants(), Ok(()));
+    // A 1.5.0 document without the block is legal too (a writer that read no
+    // IDs would omit it; this build always writes it).
+    let mut doc = pristine_1_5();
+    doc.generations = None;
+    assert_eq!(doc.validate_invariants(), Ok(()));
+}
+
+#[test]
+fn arm_22_refuses_generations_under_a_minor_before_5() {
+    for version in ["1.0.0", "1.2.0", "1.4.0"] {
+        // The 1.0.0 document, so no earlier block's own version arm fires.
+        let mut doc = pristine();
+        doc.generations = pristine_1_5().generations;
+        doc.format_version = version.to_string();
+        refused_with(
+            &doc,
+            &format!(
+                "generations is present but format_version \"{version}\" predates it: the \
+                 field is defined from 1.5.0"
+            ),
+            "arm 22",
+        );
+    }
+    let mut doc = pristine_1_5();
+    doc.format_version = "1.6.0".to_string();
+    assert_eq!(
+        doc.validate_invariants(),
+        Ok(()),
+        "a later minor defines it"
+    );
+}
+
+#[test]
+fn arm_23_refuses_generations_that_do_not_cover_the_named_topic_set() {
+    let mut doc = pristine_1_5();
+    doc.generations.as_mut().unwrap().remove("payments");
+    refused_with(
+        &doc,
+        "generations covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
+        "arm 23, a missing topic",
+    );
+    let mut doc = pristine_1_5();
+    doc.generations.as_mut().unwrap().insert(
+        "invoices".to_string(),
+        identity(None, None, None, (Some("notRead"), Some("notRead"))),
+    );
+    refused_with(
+        &doc,
+        "generations covers {\"invoices\", \"orders\", \"payments\"} but the named topic set \
+         is {\"orders\", \"payments\"}",
+        "arm 23, an unlisted topic",
+    );
+}
+
+#[test]
+fn arm_24_refuses_an_id_that_is_not_canonical() {
+    let tail = " is not a topic ID this format defines: 22 characters of URL-safe base64 \
+                without padding over the ID's 16 bytes, and never the all-zero ID";
+    for bad in [
+        // Kafka's "no ID" is never an identity.
+        "AAAAAAAAAAAAAAAAAAAAAA",
+        // C4: librdkafka's helper's STANDARD alphabet for a real ID.
+        "Cf6zT/mcTNCoxuPmv1Ztxw",
+        "gtOq2VXiTCK1QM2UtERijA==",
+        "gtOq2VXiTCK1QM2UtERij",
+        "gtOq2VXiTCK1QM2UtERijB",
+        "orders",
+    ] {
+        let mut doc = pristine_1_5();
+        generation(&mut doc, "orders").topic_id = Some(bad.to_string());
+        refused_with(
+            &doc,
+            &format!("generations[\"orders\"].topic_id \"{bad}\"{tail}"),
+            "arm 24, before",
+        );
+        let mut doc = pristine_1_5();
+        generation(&mut doc, "orders").topic_id_after = Some(bad.to_string());
+        refused_with(
+            &doc,
+            &format!("generations[\"orders\"].topic_id_after \"{bad}\"{tail}"),
+            "arm 24, after",
+        );
+    }
+    // The URL-safe twin of C4's text is a real ID.
+    let mut doc = pristine_1_5();
+    let e = generation(&mut doc, "orders");
+    e.topic_id = Some("Cf6zT_mcTNCoxuPmv1Ztxw".into());
+    e.topic_id_after = Some("Cf6zT_mcTNCoxuPmv1Ztxw".into());
+    assert_eq!(doc.validate_invariants(), Ok(()));
+}
+
+#[test]
+fn arm_25_refuses_a_reason_that_does_not_fit_its_id() {
+    let tail = ": a reason is present exactly when the ID is null, and is \"noTopicId\", \
+                \"notAuthorized\", \"topicNotFound\", \"readFailed\" or \"notRead\"";
+    // A reason beside a recorded ID.
+    let mut doc = pristine_1_5();
+    generation(&mut doc, "orders").topic_id_reason = Some("readFailed".into());
+    refused_with(
+        &doc,
+        &format!(
+            "generations[\"orders\"].topic_id_reason \"readFailed\" does not fit a recorded \
+             topic_id{tail}"
+        ),
+        "arm 25, a reason beside an ID",
+    );
+    // No reason beside null: an unknown that does not say why.
+    let mut doc = pristine_1_5();
+    generation(&mut doc, "payments").topic_id_after_reason = None;
+    refused_with(
+        &doc,
+        &format!(
+            "generations[\"payments\"].topic_id_after_reason absent does not fit a null \
+             topic_id_after{tail}"
+        ),
+        "arm 25, null without a reason",
+    );
+    // A reason outside the closed set.
+    for bad in ["absent", "NotAuthorized", "transport"] {
+        let mut doc = pristine_1_5();
+        generation(&mut doc, "payments").topic_id_reason = Some(bad.into());
+        refused_with(
+            &doc,
+            &format!(
+                "generations[\"payments\"].topic_id_reason \"{bad}\" does not fit a null \
+                 topic_id{tail}"
+            ),
+            "arm 25, an unknown reason",
+        );
+    }
+}
+
+#[test]
+fn arm_26_refuses_a_source_that_does_not_fit_the_ids() {
+    let tail = " does not fit its IDs: a source is present exactly when an ID is recorded, \
+                and is \"describeTopics\" or \"engineManifest\"";
+    let mut doc = pristine_1_5();
+    generation(&mut doc, "orders").topic_id_source = None;
+    refused_with(
+        &doc,
+        &format!("generations[\"orders\"].topic_id_source absent{tail}"),
+        "arm 26, IDs without a source",
+    );
+    let mut doc = pristine_1_5();
+    generation(&mut doc, "payments").topic_id_source = Some("describeTopics".into());
+    refused_with(
+        &doc,
+        &format!("generations[\"payments\"].topic_id_source \"describeTopics\"{tail}"),
+        "arm 26, a source without an ID",
+    );
+    let mut doc = pristine_1_5();
+    generation(&mut doc, "orders").topic_id_source = Some("metadata".into());
+    refused_with(
+        &doc,
+        &format!("generations[\"orders\"].topic_id_source \"metadata\"{tail}"),
+        "arm 26, an unknown source",
+    );
+}
+
+/// Per topic, arm 24 before 25 before 26, and `topic_id` before
+/// `topic_id_after`; the earlier blocks' arms before all of them.
+#[test]
+fn the_generations_arms_run_in_their_order() {
+    let mut doc = pristine_1_5();
+    let e = generation(&mut doc, "orders");
+    e.topic_id_after = Some("AAAAAAAAAAAAAAAAAAAAAA".into());
+    e.topic_id_reason = Some("readFailed".into());
+    e.topic_id_source = None;
+    let got = doc.validate_invariants().unwrap_err();
+    assert!(
+        got.starts_with("generations[\"orders\"].topic_id_after \"AAAA"),
+        "{got}"
+    );
+    let mut doc = pristine_1_5();
+    let e = generation(&mut doc, "orders");
+    e.topic_id_reason = Some("readFailed".into());
+    e.topic_id_source = None;
+    let got = doc.validate_invariants().unwrap_err();
+    assert!(
+        got.starts_with("generations[\"orders\"].topic_id_reason"),
+        "{got}"
+    );
+    let mut doc = pristine_1_5();
+    topic(&mut doc, "orders").partitions = Some(0);
+    generation(&mut doc, "orders").topic_id_source = None;
+    let got = doc.validate_invariants().unwrap_err();
+    assert!(got.starts_with("topic_configuration[\"orders\"]"), "{got}");
+}
+
+/// The written version and the first minor that defines the block move
+/// together, or every receipt this build signs refuses itself at arm 22.
+#[test]
+fn the_written_version_defines_generations() {
+    use logweir_core::backup_receipt::{
+        format_version_for, FORMAT_VERSION_WITH_GENERATIONS, GENERATIONS_SINCE_MINOR,
+    };
+    assert_eq!(FORMAT_VERSION_WITH_GENERATIONS, "1.5.0");
+    let minor: u64 = FORMAT_VERSION_WITH_GENERATIONS
+        .split('.')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(minor, GENERATIONS_SINCE_MINOR);
+    let mut archive = pristine().archive;
+    for mode in ["plaintext", "scramSha512", "scramSha256", "plain", "mtls"] {
+        let auth = ReceiptAuth {
+            mode: mode.to_string(),
+            username: None,
+        };
+        for topic_configuration in [false, true] {
+            assert_eq!(
+                format_version_for(&archive, topic_configuration, &auth, true),
+                "1.5.0",
+                "{mode}"
+            );
+        }
+    }
+    archive.manifest_version_id = Some("v1".into());
+    assert_eq!(
+        format_version_for(&archive, true, &pristine().source.auth, true),
+        "1.5.0"
+    );
 }

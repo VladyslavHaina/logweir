@@ -59,6 +59,7 @@
 pub mod config_coverage;
 pub mod phase_minus1_admit;
 pub mod phase_run;
+pub mod topic_ids;
 
 use crate::exit::ExitCode;
 use logweir_core::engine::{AuthRender, BackupFacts, BackupPlan, DataEngine};
@@ -181,6 +182,12 @@ pub struct BackupOutcome {
     /// without an owner reads "not checked", never "applied through the admin
     /// API".
     pub owner_detection: Vec<String>,
+    /// **PROD-01.4a.** Per named topic, the topic ID Logweir's DescribeTopics
+    /// read returned before the engine and after it, or why there is none
+    /// (`topic_ids::block`). One entry per named topic;
+    /// `phase_run::build_receipt` writes it as the receipt's 1.5.0
+    /// `generations` block.
+    pub generations: BTreeMap<String, logweir_core::backup_receipt::TopicIdentity>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -731,9 +738,19 @@ fn execute_with_signer(
             );
             BTreeMap::new()
         });
+    // PROD-01.4a: each named topic's ID, read by LOGWEIR through the same
+    // reader, as the LAST read of phase −1 — as close to the engine's start as
+    // this process can get. Never fatal: a broker with no IDs, a refused or a
+    // failed read is a reason the receipt records (`topic_ids`).
+    let ids_before = topic_ids::observe(reader, &plan.topics, "before the engine");
 
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
+    // ...and again the moment the engine has exited: a topic whose ID differs
+    // was deleted and recreated WHILE it ran (decision §4.4).
+    let ids_after = topic_ids::observe(reader, &plan.topics, "after the engine");
+    let generations = topic_ids::block(&plan.topics, &ids_before, &ids_after);
+    topic_ids::log_changes(&generations);
     let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
     let topic_configuration =
         config_coverage::model(&observed, &ran.manifest_layouts, &factors, &inputs.owners);
@@ -762,6 +779,7 @@ fn execute_with_signer(
         config_coverage: coverage,
         topic_configuration,
         owner_detection: inputs.owner_detection.clone(),
+        generations,
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

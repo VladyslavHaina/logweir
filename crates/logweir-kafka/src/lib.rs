@@ -9,6 +9,7 @@ pub mod inventory;
 pub mod positions;
 pub mod reader;
 pub mod token;
+pub mod topic_ids;
 
 #[cfg(feature = "client")]
 mod rdkafka_admin;

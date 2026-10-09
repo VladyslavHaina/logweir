@@ -264,6 +264,7 @@ pub fn cross_check(
     disagreements.extend(unbacked_coverage(point, receipt));
     disagreements.extend(unbacked_configuration(point, receipt));
     disagreements.extend(unbacked_owner_detection(point, receipt));
+    disagreements.extend(unbacked_identity(point, receipt));
     if disagreements.is_empty() {
         CrossCheck::Agrees
     } else {
@@ -364,6 +365,71 @@ fn unbacked_owner_detection(point: &CatalogPoint, receipt: &BackupReceipt) -> Op
                 .map_or_else(|| "none in the receipt".to_string(), |d| format!("{d:?}"))
         )
     })
+}
+
+/// **PROD-01.4a, rule 3 for `topics[].identity`.** The same one-way rule as
+/// [`unbacked_coverage`]: a record may carry no topic IDs (an older writer:
+/// absent is UNKNOWN, rule 2), never IDs its receipt does not back. A record
+/// that could swap an ID would turn a recreated topic into the same
+/// generation — offsets of one incarnation read as the other's.
+fn unbacked_identity(point: &CatalogPoint, receipt: &BackupReceipt) -> Vec<String> {
+    point
+        .topics
+        .iter()
+        .filter_map(|t| {
+            let claimed = t.identity.as_ref()?;
+            let backed = receipt
+                .generations
+                .as_ref()
+                .and_then(|block| block.get(&t.name));
+            (backed != Some(claimed)).then(|| {
+                format!(
+                    "topics[{:?}].identity: {} vs {}",
+                    t.name,
+                    identity_summary(claimed),
+                    backed.map_or_else(|| "none in the receipt".to_string(), identity_summary)
+                )
+            })
+        })
+        .collect()
+}
+
+/// A topic's IDs in one phrase, for a disagreement line.
+fn identity_summary(i: &logweir_core::backup_receipt::TopicIdentity) -> String {
+    let side = |id: &Option<String>, reason: &Option<String>| match (id, reason) {
+        (Some(id), _) => id.clone(),
+        (None, Some(reason)) => format!("null ({reason})"),
+        (None, None) => "null".to_string(),
+    };
+    format!(
+        "{} before, {} after",
+        side(&i.topic_id, &i.topic_id_reason),
+        side(&i.topic_id_after, &i.topic_id_after_reason)
+    )
+}
+
+/// **PROD-01.4a, rule 4 for `topics[].identity`.** Two records of one point
+/// must agree on a topic's IDs wherever BOTH carry them.
+fn identity_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
+    a.topics
+        .iter()
+        .filter_map(|ta| {
+            let ia = ta.identity.as_ref()?;
+            let ib = b
+                .topics
+                .iter()
+                .find(|tb| tb.name == ta.name)
+                .and_then(|tb| tb.identity.as_ref())?;
+            (ia != ib).then(|| {
+                format!(
+                    "topics[{:?}].identity: {} vs {}",
+                    ta.name,
+                    identity_summary(ia),
+                    identity_summary(ib)
+                )
+            })
+        })
+        .collect()
 }
 
 /// A model entry in one short phrase, for a disagreement line: counts, the
@@ -470,6 +536,7 @@ pub fn reconcile(a: &CatalogPoint, b: &CatalogPoint) -> Duplicate {
     let mut disagreements = ReceiptFacts::of_record(a).disagreements(&ReceiptFacts::of_record(b));
     disagreements.extend(coverage_conflicts(a, b));
     disagreements.extend(configuration_conflicts(a, b));
+    disagreements.extend(identity_conflicts(a, b));
     if !disagreements.is_empty() {
         return Duplicate::Conflict(disagreements);
     }

@@ -368,6 +368,57 @@ pub fn coverage_lines(
         .collect()
 }
 
+/// One line per topic of a backup receipt's `generations` (PROD-01.4a), or
+/// the one line that says it is absent: the topic ID before and after the
+/// capture, and what those two reads say about the point's generation
+/// (`logweir_core::topic_identity::within_capture`). `docs/verify_scorecard.py`
+/// prints the same lines, and `scripts/check-verifier-parity.sh` compares every
+/// line starting `generations` between the two readers.
+///
+/// An unknown ID is never read as "the same": a topic whose reads recorded no
+/// ID says why, and that its generation is not established by ID.
+#[must_use]
+pub fn generation_lines(
+    block: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicIdentity>>,
+) -> Vec<String> {
+    use logweir_core::topic_identity::{within_capture, WithinCapture};
+    let Some(block) = block else {
+        return vec![
+            "generations: not recorded, so no topic ID is known from this receipt and each \
+             topic's generation is UNKNOWN, never the same as another point's"
+                .to_string(),
+        ];
+    };
+    let side = |id: &Option<String>, reason: &Option<String>| match (id, reason) {
+        (Some(id), _) => id.clone(),
+        (None, Some(reason)) => format!("not recorded ({reason})"),
+        (None, None) => "not recorded".to_string(),
+    };
+    block
+        .iter()
+        .map(|(topic, entry)| {
+            let said = match within_capture(entry) {
+                WithinCapture::Unchanged { topic_id } => format!(
+                    "topic ID {topic_id} before and after the capture ({}), one generation",
+                    entry.topic_id_source.as_deref().unwrap_or("no source")
+                ),
+                WithinCapture::Changed { before, after } => format!(
+                    "topic ID CHANGED during the capture ({before} before, {after} after): the \
+                     topic was deleted and recreated while it ran, so this point mixes two \
+                     generations"
+                ),
+                WithinCapture::NotEstablished => format!(
+                    "topic ID {} before the capture and {} after it, so its generation is not \
+                     established by ID and is UNKNOWN",
+                    side(&entry.topic_id, &entry.topic_id_reason),
+                    side(&entry.topic_id_after, &entry.topic_id_after_reason)
+                ),
+            };
+            format!("generations[{topic:?}]: {said}")
+        })
+        .collect()
+}
+
 /// One line per topic of a backup receipt's `topic_configuration`
 /// (PROD-05.1), or the one line that says it is absent.
 /// `docs/verify_scorecard.py` prints the same lines, and
@@ -550,6 +601,9 @@ pub enum Verdict {
         /// The 1.3.0 `owner_detection` (PROD-05.1), as read: where the run
         /// looked for owners. `None` reads as empty (arm 21).
         owner_detection: Option<Vec<String>>,
+        /// The 1.5.0 block (PROD-01.4a), as read; `None` is UNKNOWN for every
+        /// topic.
+        generations: Option<BTreeMap<String, logweir_core::backup_receipt::TopicIdentity>>,
     },
     /// The signature verified over these exact bytes under this key, and the
     /// sidecar's `payloadType` is the one asked for. **Nothing about the
@@ -714,6 +768,7 @@ pub fn verify_scorecard(
             config_coverage: receipt.config_coverage,
             topic_configuration: receipt.topic_configuration,
             owner_detection: receipt.owner_detection,
+            generations: receipt.generations,
         });
     }
     if payload_type != PAYLOAD_TYPE_SCORECARD {
@@ -865,6 +920,8 @@ struct ReceiptBlocks<'a> {
         Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>>,
     /// PROD-05.1's `owner_detection`; `None` reads as empty.
     owner_detection: Option<&'a [String]>,
+    /// PROD-01.4a's 1.5.0 block; `None` is UNKNOWN.
+    generations: Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicIdentity>>,
 }
 
 /// What a `BackupReceipt` verdict prints.
@@ -920,16 +977,24 @@ fn print_backup_receipt(
     for line in topic_configuration_lines(topic_configuration, blocks.owner_detection) {
         println!("model:     {line}");
     }
+    // PROD-01.4a: the topic ID before and after the capture, one line per
+    // topic — or the line that says it was not recorded, which is UNKNOWN and
+    // never "the same generation".
+    for line in generation_lines(blocks.generations) {
+        println!("identity:  {line}");
+    }
     println!(
-        "checked:   the signature AND all twenty-one backup-receipt invariants \
+        "checked:   the signature AND all twenty-six backup-receipt invariants \
          (format_version, exit_code/manifest_key, records/topics, covered window, \
          source.auth.mode, config_coverage's six: its version, its topic set, \
          coverage, reason, timestamp-after-a-read, timestamp value and source, \
          topic_configuration's eight: its version, beside config_coverage, its topic \
          set, entries exactly where the read succeeded, closed source and class, \
-         secret and inherited, the owner, counts of at least one, and \
+         secret and inherited, the owner, counts of at least one, \
          owner_detection's two: its closed set beside the model, an owner only from \
-         a source it lists)"
+         a source it lists, and the topic IDs' five: their version, their topic set, \
+         Kafka's text and never the zero ID, a reason exactly for a null ID, a source \
+         exactly for a recorded one)"
     );
 }
 
@@ -973,6 +1038,7 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             config_coverage,
             topic_configuration,
             owner_detection,
+            generations,
         }) => {
             print_backup_receipt(
                 &payload_type,
@@ -985,6 +1051,7 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
                     config_coverage: config_coverage.as_ref(),
                     topic_configuration: topic_configuration.as_ref(),
                     owner_detection: owner_detection.as_deref(),
+                    generations: generations.as_ref(),
                 },
             );
             ExitCode::Ok

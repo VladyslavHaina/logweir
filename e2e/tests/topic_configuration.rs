@@ -900,7 +900,9 @@ fn a_backup_records_each_topics_model_and_its_owner() {
     );
 
     // The document.
-    assert_eq!(r.format_version, "1.3.0");
+    // 1.5.0 since PROD-01.4a: every receipt this build signs also carries
+    // `generations`, and 1.5.0 defines every earlier minor.
+    assert_eq!(r.format_version, "1.5.0");
     assert_eq!(r.validate_invariants(), Ok(()));
     for t in all {
         assert_eq!(
@@ -1026,7 +1028,7 @@ fn a_backup_records_each_topics_model_and_its_owner() {
     assert!(verified["rust_checked"]
         .as_str()
         .unwrap()
-        .contains("all twenty-one"));
+        .contains("all twenty-six"));
     // WHERE THE RUN LOOKED for owners (fix round, M2): the plan's
     // declarations and the `KafkaTopic` resources — so a topic neither owns is
     // "no declarative owner found", applied through the admin API, and an
@@ -1055,7 +1057,7 @@ fn a_backup_records_each_topics_model_and_its_owner() {
     }
 
     // THE CATALOG POINT copies the model and the partition count.
-    assert_eq!(record["format_version"], "1.3.0");
+    assert_eq!(record["format_version"], "1.5.0");
     for topic in record["topics"].as_array().expect("topics") {
         let name = topic["name"].as_str().unwrap();
         let m = model_of(&b, name);

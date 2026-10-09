@@ -684,6 +684,7 @@ mod tests {
             config_coverage: Some(block),
             topic_configuration: None,
             owner_detection: None,
+            generations: None,
         };
         assert_eq!(receipt.validate_invariants(), Ok(()));
     }
@@ -887,6 +888,7 @@ mod tests {
             config_coverage: Some(coverage),
             topic_configuration: Some(m),
             owner_detection: Some(vec!["declared".into()]),
+            generations: None,
         };
         assert_eq!(receipt.validate_invariants(), Ok(()));
     }

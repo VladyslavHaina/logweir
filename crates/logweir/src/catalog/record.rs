@@ -50,6 +50,17 @@ pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
 /// document it was.
 pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 
+/// **PROD-01.4a.** The format of a record whose topics carry the receipt's
+/// `generations` entry (`topics[].identity`: the topic ID before and after the
+/// engine) — copied from a receipt that is itself 1.5.0
+/// (`logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS`). A MINOR
+/// bump over [`FORMAT_VERSION_WITH_AUTH_MODES`]: an optional field, which an
+/// older reader ignores (reading rule 2), and a 1.5.0 record carries every
+/// earlier minor's fields. Written exactly when the receipt carries the block,
+/// which every receipt this build signs does; a record backfilled from an older
+/// receipt keeps the format it would have had.
+pub const FORMAT_VERSION_WITH_GENERATIONS: &str = "1.5.0";
+
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
 /// It is part of the id and not metadata beside it, so a future scheme cannot
@@ -162,7 +173,9 @@ pub struct CatalogPoint {
     /// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] (`1.3.0`) for one whose
     /// topics carry the receipt's configuration model (PROD-05.1), or
     /// [`FORMAT_VERSION_WITH_AUTH_MODES`] (`1.4.0`) for one whose
-    /// `source.auth_mode` is a mode PROD-01.3 added. Major `1`; a higher major is
+    /// `source.auth_mode` is a mode PROD-01.3 added, or
+    /// [`FORMAT_VERSION_WITH_GENERATIONS`] (`1.5.0`) for one whose topics carry
+    /// the receipt's topic IDs (PROD-01.4a). Major `1`; a higher major is
     /// [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry,
     /// never fatal for the sync (D3 §5.2 rule 1).
     #[schemars(regex(pattern = r"^1\.[0-9]+\.[0-9]+$"))]
@@ -320,6 +333,20 @@ pub struct RecordTopic {
     /// that predates 1.3.0. Never read as "no configuration".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration: Option<logweir_core::backup_receipt::TopicConfiguration>,
+    /// **Format 1.5.0 (PROD-01.4a).** The receipt's `generations` entry for
+    /// this topic, copied and never recomputed: the topic ID (KIP-516)
+    /// Logweir's DescribeTopics read returned before the engine and after it,
+    /// or `null` with the reason. It is what tells a topic deleted and
+    /// recreated under the same name — a new generation, whose offsets mean
+    /// other records — from the same topic
+    /// (`logweir_core::topic_identity::by_topic_id`).
+    ///
+    /// Receipt-derived under rule 3 — `reader::cross_check` refuses a record
+    /// whose copy the receipt does not back. ABSENT means UNKNOWN (rule 2):
+    /// every record before 1.5.0, and every record derived from a receipt that
+    /// predates 1.5.0. Never read as "the same generation".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<logweir_core::backup_receipt::TopicIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
