@@ -1366,10 +1366,11 @@ evidence destination's `evidenceWrite` — and projects each one's
 `logweir-binding` key, and nothing else of it, beside its destination's
 expected binding. The new blocking row **`destination.credentialBound`**
 compares them in the check pod with no request: `ready`/`CredentialBound`, or
-`notReady`/`CredentialBindingMismatch` naming each refused grant by its
-`spec.access` field, its destination and its Secret, and whether its binding
-was absent or written for another object or endpoint, with one
-`<grant>=bound|CredentialBindingMismatch` fact per grant. The controller
+`notReady`/`CredentialBindingMismatch`, leading with each refused grant's
+`spec.access` field, its Secret, and whether its binding was absent or
+foreign, with one `<grant>=bound|CredentialBindingMismatch` fact per grant;
+its remedy gives the destination its own Secret and never suggests binding the
+refused one to it (every binding refusal's text now says the same). The controller
 expects the row whenever a grant is listed, so a check that does not answer it
 is `unknown`, never `ready`. No Secret value and no binding value reaches a
 status, the API or the console, and nothing is dialled with a foreign
@@ -1379,8 +1380,10 @@ panel shows it among the blocking rows. A workload-identity grant carries no
 binding and is not listed (FX-20b). The same sweep fixed one more surface: a
 `RetentionPolicy` whose run was refused `CredentialBindingMismatch` read
 `Enforced=True` again on the next evaluation pass (`UnattendedDeletionEnabled`
-or `RunInProgress`); the refusal now stands on `Enforced` until a later run is
-harvested.
+or `RunInProgress`), and its console panel said "enforced by Logweir"
+throughout; the refusal now stands until a later run is harvested, with
+`status.enforcement: RecommendationOnly` and `guarantees.ageExpiry:
+NotEnforced`, and the panel prints the `Enforced=False` reason.
 **Do:** roll the controller and the runner image together (the chart does):
 an older runner refuses a plan that lists a grant (`phase: Failed`,
 `CheckContractMismatch`, naming `grantBindings`). Re-run *Test access* on each
@@ -1405,7 +1408,11 @@ with the row, `unknown` without it, `ready` only when it is ready)
 (`ui/tests/credential-binding.spec.js`) over one fixture, which the runner's
 and the controller's rows hold their output to; the retention hold over real
 passes, with a generic refusal and a later successful run as its controls
-(`crates/weirkeeper/tests/retention_policy_controller.rs`). The live row — PoC batch 4's
+(`crates/weirkeeper/tests/retention_policy_controller.rs`) and the console's
+retention panel over the fields it writes (`ui/tests/credential-binding.spec.js`);
+a thief's Test access through the controller's real reconcile, the plan and
+Job it POSTs (`preflight_controller.rs`); and every binding refusal's text
+(`crates/logweir-core/src/credential_binding.rs`). The live row — PoC batch 4's
 F6 thief re-created, tested and deleted — is the next PoC upgrade's.
 **Rollback:** an older controller lists no grant and an older runner emits no
 binding row: *Test access* reverts to the overclaim this item fixes (and a

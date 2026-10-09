@@ -8575,10 +8575,13 @@ request**, and refuses an absent or different binding with
   run would present, probed or not (below);
 * `logweir-retention`: exit 3, `retention-refusal=CredentialBindingMismatch`,
   `Enforced=False/CredentialBindingMismatch` on the `RetentionPolicy`; nothing
-  is deleted. The refusal **stands** on `Enforced` until a later run is
-  harvested (FX-20c): the controller reads no Secret, so only the next run can
-  see a rebound one, and the evaluation passes in between no longer publish
-  `Enforced=True` over it;
+  is deleted. The refusal **stands** until a later run is harvested (FX-20c):
+  the controller reads no Secret, so only the next run can see a rebound one,
+  and the evaluation passes in between publish neither `Enforced=True` nor
+  "enforced by Logweir" over it — `status.enforcement` reads
+  `RecommendationOnly` and `status.guarantees.ageExpiry` `NotEnforced`, the two
+  fields the console's retention panel reads, which also prints the
+  `Enforced=False` reason;
 * `logweir notify deliver`: `notify-result=<sink>:refused` for that sink only
   (the others are still attempted), and
   `NotificationsDelivered=False/CredentialBindingMismatch` (§7e).
@@ -8623,12 +8626,21 @@ said `Projected` — while every backup of it was refused
   comparing each pair the way every run does (several bindings in one key are
   accepted, an absent expectation is refused). `ready`/`CredentialBound` when
   every listed grant is bound; otherwise `notReady`/`CredentialBindingMismatch`,
-  and the message names **each refused grant** by its `spec.access` field, its
-  destination and its Secret, and says whether the binding was absent or
-  written for another object or endpoint; the row's facts carry one
+  and the message LEADS with one entry per refused grant — its `spec.access`
+  field, its Secret, and `no binding` or `foreign binding` — so the per-grant
+  answer survives the 512-character status cap; the destination is the row's
+  scope (the refused grant's, on a restore spanning two destinations, where the
+  entry names it too). The row's facts carry one
   `<grant>=bound|CredentialBindingMismatch` per listed grant (rendered into the
   message as `[archiveWrite=CredentialBindingMismatch; …]`). Neither binding
-  value is ever written.
+  value is ever written. **The remedy never tells anyone to bind the refused
+  Secret to this destination** — on a thief's row that Secret is another
+  destination's: give this destination its own Secret (enter the credential
+  through the console, or bind a Secret only it names with
+  `scripts/bind-credential.py`, which refuses a Secret another object names),
+  and treat a Secret two objects name as an incident. Every
+  `CredentialBindingMismatch` text the runners and the controller write says
+  the same (FX-20c review).
 * The controller expects the row whenever the plan lists a grant, so a runner
   that does not answer it leaves the verdict `unknown` — **readiness is never
   `ready` for a destination a run would refuse on a binding**. The product API
@@ -8638,11 +8650,10 @@ said `Projected` — while every backup of it was refused
 
 ```text
 destination.credentialBound  notReady  blocking  CredentialBindingMismatch
-  `archiveWrite` of destination `fx20-thief` (Secret `lwd-primary-archive-write`:
-  bound to another object or endpoint) is not bound to its destination: every
-  run that presents that grant is refused CredentialBindingMismatch before it
-  builds a store, and this check compared the binding in the pod and dialled
-  nothing with it [archiveWrite=CredentialBindingMismatch]
+  archiveWrite (Secret `lwd-primary-archive-write`: foreign binding): a run that
+  presents it is refused before it builds a store; nothing was dialled
+  [archiveWrite=CredentialBindingMismatch]
+  scope: BackupDestination/fx20-thief
 ```
 
 Upgrade and rollback: roll the controller and the runner together (the chart
