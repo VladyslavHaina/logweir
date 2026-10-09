@@ -141,6 +141,13 @@ weirkeeper = { path = "../weirkeeper" }
 zeroize = "1"
 
 [dev-dependencies]
+# FX-28: the unit row that reads TCP keepalive back off a socket the OIDC
+# provider's connector dialled (`auth::oidc` tests). `std` and `tokio` expose
+# no getter for `SO_KEEPALIVE` or its timers, and this crate forbids `unsafe`.
+# ADDS NO PACKAGE: socket2 0.6.5 is already in `Cargo.lock` (hyper-util's
+# connector dials through it, with the same `all` feature), and a
+# dev-dependency is never linked into the binary.
+socket2 = { version = "0.6", features = ["all"] }
 
 [features]
 default = []

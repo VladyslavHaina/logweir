@@ -49,8 +49,41 @@ pub const CLOCK_SKEW: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
 pub const MAX_ID_TOKEN_AGE: chrono::TimeDelta = chrono::TimeDelta::seconds(600);
 /// The largest document this module will read from the provider, 512 KiB.
 pub const MAX_PROVIDER_BODY: usize = 512 * 1024;
-/// The deadline on every provider request.
+/// The deadline on every provider request, from the first byte sent to the
+/// LAST BYTE OF THE BODY (FX-28).
+///
+/// One timer covers the connection, the request, the response head and the
+/// whole body together. Before FX-28 it ended at the response head, and the
+/// body was collected with no timer at all, so a provider (or a path to it)
+/// that sent headers and then stalled held the sign-in handler, and the
+/// browser connection's permit, for as long as the socket stayed open. A
+/// stalled request now fails [`OidcError::ProviderTimeout`] at this bound.
+///
+/// Each provider REQUEST has this bound, not each sign-in step. `/auth/login`
+/// makes at most one request (discovery, when its cache is stale), so it
+/// answers within one deadline. `/auth/callback` makes at most four
+/// (discovery, the token, the key set and one forced key refetch for an
+/// unknown `kid`); a stalled one ends the callback at once, so a stall answers
+/// within one deadline after the requests before it, and only a provider that
+/// answers each request just inside the bound can take the callback to four.
 pub const PROVIDER_DEADLINE: Duration = Duration::from_secs(10);
+/// TCP keepalive on every provider connection: how long a connection is idle
+/// before the first probe (FX-28).
+///
+/// The deadline bounds a request in flight. Keepalive is for the connection
+/// between requests: the client pools connections, and a pooled connection
+/// whose peer has gone (a provider pod rescheduled, a NAT that dropped its
+/// state) would otherwise only be found dead by the next sign-in, which would
+/// spend its whole deadline writing into it. With keepalive the kernel
+/// notices within [`PROVIDER_KEEPALIVE`] plus
+/// [`PROVIDER_KEEPALIVE_RETRIES`] × [`PROVIDER_KEEPALIVE_INTERVAL`] and the
+/// pool drops the connection.
+pub const PROVIDER_KEEPALIVE: Duration = Duration::from_secs(30);
+/// The interval between two keepalive probes. See [`PROVIDER_KEEPALIVE`].
+pub const PROVIDER_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Unanswered keepalive probes before the connection is dropped. See
+/// [`PROVIDER_KEEPALIVE`].
+pub const PROVIDER_KEEPALIVE_RETRIES: u32 = 3;
 
 /// The two signature algorithms this service verifies.
 ///
@@ -68,6 +101,14 @@ pub enum OidcError {
     /// The provider could not be reached, or answered a non-2xx status.
     #[error("the identity provider is unreachable: {0}")]
     ProviderUnreachable(String),
+    /// A provider request — connection, request, head and the whole body —
+    /// did not complete within [`PROVIDER_DEADLINE`] (FX-28). The provider,
+    /// or the path to it, accepted the request and then stalled.
+    #[error(
+        "the identity provider did not complete a request within the {}-second provider deadline",
+        PROVIDER_DEADLINE.as_secs()
+    )]
+    ProviderTimeout,
     /// The discovery document or JWKS did not parse, or disagreed with the
     /// configured issuer.
     #[error("the identity provider's metadata is not usable: {0}")]
@@ -111,6 +152,7 @@ impl OidcError {
     pub const fn code(&self) -> &'static str {
         match self {
             OidcError::ProviderUnreachable(_) => "provider_unreachable",
+            OidcError::ProviderTimeout => "provider_timeout",
             OidcError::ProviderMetadata(_) => "provider_metadata",
             OidcError::Malformed => "id_token_malformed",
             OidcError::AlgorithmNotAllowed(_) => "algorithm_not_allowed",
@@ -131,19 +173,69 @@ impl OidcError {
 // ======================================================================
 
 /// A boxed future, so the trait stays object-safe without a macro crate.
-pub type HttpFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>>;
+pub type HttpFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, HttpError>> + Send + 'a>>;
+
+/// Why a provider request returned no document.
+///
+/// Two cases, because they need two different operator actions: a request
+/// that FAILED (a refused connection, a certificate, a non-2xx status, a body
+/// over [`MAX_PROVIDER_BODY`]) says what is wrong, and a request that was
+/// accepted and then never finished says the provider or the path to it is
+/// stalled (FX-28). The provider maps them to [`OidcError::ProviderTimeout`]
+/// and the other variants, so the audit record names which it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HttpError {
+    /// The connection, the request, the response head and the whole body
+    /// together did not complete within [`PROVIDER_DEADLINE`].
+    Deadline,
+    /// Any other failure: a bounded sentence that carries no credential and
+    /// no part of the provider's body.
+    Failed(String),
+}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HttpError::Deadline => write!(
+                f,
+                "the request did not complete within the {}-second provider deadline",
+                PROVIDER_DEADLINE.as_secs()
+            ),
+            HttpError::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl From<String> for HttpError {
+    fn from(reason: String) -> Self {
+        HttpError::Failed(reason)
+    }
+}
+
+impl From<HttpError> for OidcError {
+    /// A discovery or key-set request that produced no document.
+    fn from(error: HttpError) -> Self {
+        match error {
+            HttpError::Deadline => OidcError::ProviderTimeout,
+            HttpError::Failed(reason) => OidcError::ProviderUnreachable(reason),
+        }
+    }
+}
 
 /// The three provider requests this module makes, and nothing else.
 ///
 /// It is a trait so the tests can serve a provider in-process with no socket
 /// and no network at all, and so the one implementation that opens a socket
-/// ([`HyperHttpClient`]) is the only place TLS is configured.
+/// ([`HyperHttpClient`]) is the only place TLS, the [`PROVIDER_DEADLINE`] and
+/// TCP keepalive are configured.
 pub trait HttpClient: Send + Sync + 'static {
-    /// `GET url`, returning at most [`MAX_PROVIDER_BODY`] bytes.
+    /// `GET url`, returning at most [`MAX_PROVIDER_BODY`] bytes, whole, within
+    /// [`PROVIDER_DEADLINE`] ([`HttpError::Deadline`] otherwise).
     fn get<'a>(&'a self, url: &'a str) -> HttpFuture<'a>;
 
     /// `POST url` with an `application/x-www-form-urlencoded` body and an
-    /// optional `Authorization` header.
+    /// optional `Authorization` header, under the same two bounds as
+    /// [`HttpClient::get`].
     fn post_form<'a>(
         &'a self,
         url: &'a str,
@@ -421,11 +513,7 @@ impl Provider {
             return Ok(cached.value.clone());
         }
         let url = format!("{}/.well-known/openid-configuration", self.settings.issuer);
-        let body = self
-            .http
-            .get(&url)
-            .await
-            .map_err(OidcError::ProviderUnreachable)?;
+        let body = self.http.get(&url).await.map_err(OidcError::from)?;
         let discovery: Discovery = serde_json::from_slice(&body).map_err(|e| {
             OidcError::ProviderMetadata(format!(
                 "the discovery document is not the expected shape: {}",
@@ -546,8 +634,9 @@ impl Provider {
                 });
                 Ok(set.keys)
             }
-            Err(reason) => {
-                // OUTAGE: keep serving the cached keys until JWKS_MAX_AGE.
+            Err(error) => {
+                // OUTAGE: keep serving the cached keys until JWKS_MAX_AGE. A
+                // stalled key-set request (FX-28) is an outage like any other.
                 let state = self.cache.lock().expect("the cache lock is never poisoned");
                 match state
                     .jwks
@@ -555,7 +644,7 @@ impl Provider {
                     .filter(|c| c.fetched.elapsed() < JWKS_MAX_AGE)
                 {
                     Some(cached) => Ok(cached.value.clone()),
-                    None => Err(OidcError::ProviderUnreachable(reason)),
+                    None => Err(OidcError::from(error)),
                 }
             }
         }
@@ -603,7 +692,12 @@ impl Provider {
             .http
             .post_form(&token_endpoint, &body, authorization.as_deref())
             .await
-            .map_err(|reason| OidcError::CodeExchange(reason_code(&reason)))?;
+            .map_err(|error| match error {
+                // A stalled token endpoint is not a refused code: it is named
+                // as the timeout it is, like a stalled discovery or key set.
+                HttpError::Deadline => OidcError::ProviderTimeout,
+                HttpError::Failed(reason) => OidcError::CodeExchange(reason_code(&reason)),
+            })?;
         let token: TokenResponse = serde_json::from_slice(&response).map_err(|_| {
             OidcError::CodeExchange("the token response carries no id_token".to_string())
         })?;
@@ -1088,9 +1182,15 @@ impl HyperHttpClient {
             .with_no_client_auth();
         let builder = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls);
         let connector = if allow_plain_http {
-            builder.https_or_http().enable_http1().build()
+            builder
+                .https_or_http()
+                .enable_http1()
+                .wrap_connector(provider_tcp_connector())
         } else {
-            builder.https_only().enable_http1().build()
+            builder
+                .https_only()
+                .enable_http1()
+                .wrap_connector(provider_tcp_connector())
         };
         Ok(Self {
             http: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
@@ -1098,29 +1198,83 @@ impl HyperHttpClient {
         })
     }
 
+    /// One provider request, under ONE deadline that ends with the body's
+    /// last byte (FX-28).
+    ///
+    /// The timer is around [`Self::exchange`] — the connection, the request,
+    /// the head AND the collect — and nowhere else. A timer around
+    /// `self.http.request(..)` alone is what this replaced: that future ends
+    /// at the response head, so a provider that sent its head and then
+    /// stalled was collected with no bound. When the timer fires the
+    /// in-flight future is dropped, and with it the response body and the
+    /// connection, so a stalled provider holds nothing here afterwards either.
     async fn send(
         &self,
         request: http::Request<http_body_util::Full<bytes::Bytes>>,
-    ) -> Result<Vec<u8>, String> {
-        use http_body_util::BodyExt as _;
-        let response = tokio::time::timeout(PROVIDER_DEADLINE, self.http.request(request))
+    ) -> Result<Vec<u8>, HttpError> {
+        tokio::time::timeout(PROVIDER_DEADLINE, self.exchange(request))
             .await
-            .map_err(|_| "the request exceeded the provider deadline".to_string())?
-            .map_err(|e| crate::validate::bounded(&error_chain(&e), 320))?;
+            .map_err(|_| HttpError::Deadline)?
+    }
+
+    /// The request and its whole body, at most [`MAX_PROVIDER_BODY`] bytes.
+    /// It carries no timer of its own: [`Self::send`] is the only caller.
+    async fn exchange(
+        &self,
+        request: http::Request<http_body_util::Full<bytes::Bytes>>,
+    ) -> Result<Vec<u8>, HttpError> {
+        use http_body_util::BodyExt as _;
+        let response = self
+            .http
+            .request(request)
+            .await
+            .map_err(|e| HttpError::Failed(crate::validate::bounded(&error_chain(&e), 320)))?;
         let status = response.status();
         let body = http_body_util::Limited::new(response.into_body(), MAX_PROVIDER_BODY)
             .collect()
             .await
-            .map_err(|_| "the provider response could not be read".to_string())?
+            .map_err(|e| {
+                HttpError::Failed(
+                    if e.downcast_ref::<http_body_util::LengthLimitError>()
+                        .is_some()
+                    {
+                        format!(
+                            "the provider response is larger than {} KiB",
+                            MAX_PROVIDER_BODY / 1024
+                        )
+                    } else {
+                        "the provider response could not be read".to_string()
+                    },
+                )
+            })?
             .to_bytes()
             .to_vec();
         if !status.is_success() {
             // The provider's body is NOT propagated: a token endpoint puts the
             // client secret's failure and sometimes the code in it.
-            return Err(format!("the provider answered HTTP {}", status.as_u16()));
+            return Err(HttpError::Failed(format!(
+                "the provider answered HTTP {}",
+                status.as_u16()
+            )));
         }
         Ok(body)
     }
+}
+
+/// The TCP connector under the provider's TLS: hyper-util's own, with TCP
+/// keepalive on (FX-28; [`PROVIDER_KEEPALIVE`] says why).
+///
+/// `enforce_http(false)` is what `HttpsConnectorBuilder::build` sets on the
+/// connector it would have made: the scheme is the TLS layer's to enforce
+/// (`https_only`, or `https_or_http` for the loopback escape hatch), and this
+/// layer only dials.
+fn provider_tcp_connector() -> hyper_util::client::legacy::connect::HttpConnector {
+    let mut tcp = hyper_util::client::legacy::connect::HttpConnector::new();
+    tcp.enforce_http(false);
+    tcp.set_keepalive(Some(PROVIDER_KEEPALIVE));
+    tcp.set_keepalive_interval(Some(PROVIDER_KEEPALIVE_INTERVAL));
+    tcp.set_keepalive_retries(Some(PROVIDER_KEEPALIVE_RETRIES));
+    tcp
 }
 
 /// An error and every `source()` beneath it, joined with `: `.
@@ -1286,6 +1440,71 @@ mod tests {
         assert!(select_key(&keys, None, "RS256").is_some());
         // Wrong family for the algorithm.
         assert!(select_key(&keys, Some("current"), "ES256").is_none());
+    }
+
+    /// **FX-28: every provider connection carries TCP keepalive**, with the
+    /// three documented values, read back off a socket the provider's own
+    /// connector dialled. NEGATIVE CONTROL: hyper-util's default connector,
+    /// which the client used before, dials the same listener with keepalive
+    /// off, so this row cannot pass on a platform default.
+    #[tokio::test]
+    async fn the_provider_connector_turns_tcp_keepalive_on() {
+        use tower::ServiceExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let uri: http::Uri = format!("http://{}/", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+
+        let dialled = provider_tcp_connector()
+            .oneshot(uri.clone())
+            .await
+            .expect("the loopback listener accepts");
+        let socket = socket2::SockRef::from(dialled.inner());
+        assert!(socket.keepalive().unwrap(), "SO_KEEPALIVE is on");
+        assert_eq!(socket.tcp_keepalive_time().unwrap(), PROVIDER_KEEPALIVE);
+        assert_eq!(
+            socket.tcp_keepalive_interval().unwrap(),
+            PROVIDER_KEEPALIVE_INTERVAL
+        );
+        assert_eq!(
+            socket.tcp_keepalive_retries().unwrap(),
+            PROVIDER_KEEPALIVE_RETRIES
+        );
+
+        let default = hyper_util::client::legacy::connect::HttpConnector::new()
+            .oneshot(uri)
+            .await
+            .expect("the loopback listener accepts");
+        assert!(
+            !socket2::SockRef::from(default.inner()).keepalive().unwrap(),
+            "the default connector dials without keepalive, so the row above is the setting"
+        );
+    }
+
+    /// **A stalled request and a failed one stay apart** all the way to the
+    /// audit code: the deadline is `provider_timeout`, anything else from
+    /// discovery or the key set is `provider_unreachable`.
+    #[test]
+    fn a_deadline_is_named_apart_from_a_failure() {
+        assert_eq!(
+            OidcError::from(HttpError::Deadline).code(),
+            "provider_timeout"
+        );
+        assert_eq!(
+            OidcError::from(HttpError::Failed("refused".into())).code(),
+            "provider_unreachable"
+        );
+        assert_eq!(
+            HttpError::Deadline.to_string(),
+            "the request did not complete within the 10-second provider deadline"
+        );
+        assert_eq!(
+            OidcError::ProviderTimeout.to_string(),
+            "the identity provider did not complete a request within the 10-second provider \
+             deadline"
+        );
     }
 
     #[test]
