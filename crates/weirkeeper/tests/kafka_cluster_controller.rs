@@ -3220,6 +3220,23 @@ async fn fx19_a_refused_probe_pod_warns_once_per_job() {
     assert_eq!(warns.len(), 1, "the first record WARNs: {warns:?}");
     drop(log);
 
+    // ---- pass 1b: the cancelled Job read again before it has failed --------
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
+        podless_probe_job("2026-09-10T11:59:15Z", false),
+        probe_events(Some(QUOTA_REFUSAL)),
+    ));
+    reconcile_cluster(&refused, &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(
+        count(&bodies.lock().expect("readable"), "PATCH", "/status"),
+        0,
+        "the same refusal is not written twice"
+    );
+    warns.extend(log.messages_at("WARN"));
+    drop(log);
+
     // ---- pass 2: the cancelled Job has failed; the status already says it ---
     let log = CapturedLog::start();
     let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
@@ -3674,6 +3691,18 @@ async fn fx19_a_stalled_deletion_clears_reachable_once_the_reading_is_stale() {
         0
     );
     assert!(!reachable_is_stale(&reachable, now()));
+    let mut no_instant = reachable.clone();
+    if let Some(status) = no_instant.status.as_mut() {
+        status.observed_at = None;
+    }
+    assert!(
+        reachable_is_stale(&no_instant, now()),
+        "a `reachable` with no instant beside it vouches for nothing"
+    );
+    assert!(
+        !reachable_is_stale(&cluster(), past_the_bound()),
+        "a status that asserts nothing has nothing to clear"
+    );
 
     // ---- past the bound: cleared, once -------------------------------------
     let mut warns = Vec::new();
@@ -3822,6 +3851,26 @@ async fn fx19_a_stale_reading_is_not_written_as_a_verdict() {
         serde_json::json!(JOB_UID)
     );
     assert_eq!(log.messages_at("WARN").len(), 1);
+    drop(log);
+
+    // The same Job again (now marked), over the status that pass left: the
+    // same stale reading changes nothing and logs at debug.
+    let stale = after_status(&cluster(), status);
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(answering(
+        finished_routes(0, log_body(&i14_tail())),
+        "GET",
+        "/jobs/logweir-probe-orders-prod",
+        200,
+        annotated(&job_body("Complete"), VERDICT_RECORDED_ANNOTATION, JOB_UID),
+    ));
+    reconcile_cluster(&stale, &client, past_the_bound())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(count(&seen, "PATCH", "/status"), 0, "{seen:?}");
+    assert_eq!(count(&seen, "PATCH", "/jobs/logweir-probe-orders-prod"), 0);
+    assert!(log.at("WARN").is_empty(), "{:?}", log.messages_at("WARN"));
     drop(log);
 
     // CONTROL: inside the bound, the verdict.
