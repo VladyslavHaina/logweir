@@ -2489,11 +2489,10 @@ fn the_rate_floor_and_peer_cap_these_rows_measure_are_mains() {
         1,
         "every accepted connection is admitted once, by its socket peer"
     );
-    assert!(
-        PEER_CAP < 256,
-        "a cap at or above the 256-connection ceiling caps nothing"
-    );
 }
+
+// A cap at or above the 256-connection ceiling caps nothing.
+const _: () = assert!(PEER_CAP < 256);
 
 /// **A client that reads one byte every twenty seconds is ended at the stall
 /// deadline (FX-24c, correcting the FX-24b review's M1).**

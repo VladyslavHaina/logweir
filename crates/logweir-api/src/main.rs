@@ -239,9 +239,11 @@ const BODY_MIN_PROGRESS: usize = 32 * 1024;
 /// closed as soon as it is accepted, before anything is read.
 ///
 /// WHY A COUNT. A client that reads fast enough to keep the kernel waking the
-/// writer — about 15 KiB/s per connection on macOS, measured — keeps each
-/// connection for as long as its pipelined answers last, and no window can
-/// tell it from a slow, honest reader. A count can bound it, at any rate.
+/// writer keeps each connection for as long as its pipelined answers last —
+/// on macOS one reading a steady 16 KiB/s kept its connection to the end,
+/// while one reading 16 KiB every twenty seconds was ended at 35.1 s
+/// (measured) — and no window can tell it from a slow, honest reader. A count
+/// can bound it, at any rate.
 ///
 /// WHY 32. A peer that is not the ingress is one machine — a kubelet probe, a
 /// `kubectl port-forward`, a pod — and a browser opens at most six HTTP/1.1
