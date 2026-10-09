@@ -123,12 +123,12 @@ golden:
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
 # (`scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`,
-# `backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES`,
+# `backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`,
 # `catalog::record::FORMAT_VERSION_WITH_AUTH_MODES`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
 scorecard_schema_version := "1.6.0"
-receipt_schema_version := "1.4.0"
+receipt_schema_version := "1.5.0"
 catalog_schema_version := "1.4.0"
 
 schema:

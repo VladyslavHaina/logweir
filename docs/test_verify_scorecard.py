@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.22.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.23.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -2244,9 +2244,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.22.0 (FX-23) adds the scorecard's three `sample.unsampled_topics` arms
     # (US-1 to US-3, format 1.6.0), its shape check and the `sample coverage:`
     # line. Map still five.
+    #
+    # 1.23.0 (PROD-04.1) adds the backup receipt's thirteen
+    # `consumer_positions` arms (22-34, format 1.5.0), their shape checks and
+    # the `consumer_positions` lines. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.22.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.23.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -3681,3 +3685,225 @@ def test_a_sampled_pass_says_what_it_proves_at_its_version():
     assert mod._sampled_pass_lines(_not_a_pass(_scorecard_1_6(None))) == []
     rust = (ROOT / "crates/logweir/src/verify.rs").read_text()
     assert "sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition \\" in rust
+
+
+# ===================================================================== PROD-04.1
+
+CP_FIXTURE = "e2e/fixtures/invariants/receipt_1_5_with_consumer_positions.json"
+
+
+def test_the_consumer_positions_minor_is_the_rust_readers():
+    # Arm 22's minor is ONE number in each reader (PROD-04.1); a renumber must
+    # move both, and the arm's message is built from it on both sides.
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    m = re.search(r"pub const CONSUMER_POSITIONS_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "backup_receipt.rs no longer declares CONSUMER_POSITIONS_SINCE_MINOR"
+    assert mod.RECEIPT_CONSUMER_POSITIONS_SINCE_MINOR == int(m.group(1))
+
+
+def test_the_consumer_positions_vocabulary_is_the_rust_readers():
+    # Every closed set arms 27-34 read, in the Rust declaration order: a word
+    # added on one side only fails here before it splits the readers.
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/consumer_positions.rs").read_text()
+
+    def array(name):
+        block = rust.split(f"pub const {name}:", 1)[1].split("];", 1)[0]
+        return tuple(re.findall(r'"([^"]+)"', block.split("=", 1)[1]))
+
+    assert array("EXCLUDED_REASONS") == mod.CP_EXCLUDED_REASONS
+    assert array("FAILED_REASONS") == mod.CP_FAILED_REASONS
+    assert array("CAPTURED_TYPES") == mod.CP_CAPTURED_TYPES
+    assert array("GROUP_STATES") == mod.CP_GROUP_STATES
+    assert array("INACTIVE_STATES") == mod.CP_INACTIVE_STATES
+    assert array("POSITION_STATUSES") == mod.CP_POSITION_STATUSES
+    assert array("POSITION_FAILED_REASONS") == mod.CP_POSITION_FAILED_REASONS
+    assert array("NOT_OBSERVED_REASONS") == mod.CP_NOT_OBSERVED_REASONS
+    assert array("COVERAGE_RELATIONS") == mod.CP_COVERAGE_RELATIONS
+    assert array("RELATED") == mod.CP_RELATED
+    assert array("LISTING_VALUES") == mod.CP_LISTING_VALUES
+
+
+def test_the_relation_rule_is_the_rust_readers():
+    # `relation`'s table at every boundary, the rows of the Rust unit test
+    # `the_relation_follows_the_table_at_every_boundary`.
+    mod = _verifier_module()
+    f = {"log_start": 5, "high_watermark": 20, "archived_first": 8, "archived_last": 15}
+    rows = [(21, "PositionBeyondEnd"), (20, "beyondArchive"), (17, "beyondArchive"),
+            (16, "atArchiveEnd"), (15, "withinArchive"), (8, "withinArchive"),
+            (7, "beforeArchive"), (5, "beforeArchive"), (4, "beforeLogStart"),
+            (0, "beforeLogStart")]
+    for position, want in rows:
+        assert mod._cp_relation(position, f) == want, position
+    empty = {"log_start": 5, "high_watermark": 20}
+    assert mod._cp_relation(10, empty) == "noArchivedData"
+    assert mod._cp_relation(4, empty) == "beforeLogStart"
+    assert mod._cp_relation(3, {"high_watermark": 20}) == "MarksNotRead"
+    assert mod._cp_relation(0, {"log_start": 0, "high_watermark": 0}) == "noArchivedData"
+    assert mod._cp_changed([{"log_start": 5, "high_watermark": 20,
+                             "log_start_after": 5, "high_watermark_after": 19}])
+    assert not mod._cp_changed([{"log_start": 5, "high_watermark": 20}])
+    assert mod._cp_active("Stable", "Empty") and not mod._cp_active("Dead", "Empty")
+
+
+def test_the_consumer_positions_shape_is_the_rust_deserialisers():
+    # Rust refuses each of these at DESERIALISATION, so the Python reader must
+    # refuse them in its shape layer and never reach arm 22 with them.
+    mod = _verifier_module()
+    base = json.loads((ROOT / CP_FIXTURE).read_text())
+    assert mod._receipt_shape(base) == ""
+    t = ["consumer_positions", "topics", "orders"]
+    g = ["consumer_positions", "groups", "billing"]
+    cases = [
+        (["consumer_positions"], [], "consumer_positions is not an object"),
+        (["consumer_positions", "observed_from"], 1, "consumer_positions.observed_from is not a string"),
+        (["consumer_positions", "groups"], [], "consumer_positions.groups is not an object"),
+        (t + ["changed_during_capture"], 0,
+         'consumer_positions.topics["orders"].changed_during_capture is not a boolean'),
+        (t + ["partitions", 0, "partition"], -1,
+         'consumer_positions.topics["orders"].partitions[0].partition is not a u32'),
+        (t + ["partitions", 0, "observed"], None,
+         'consumer_positions.topics["orders"].partitions[0].observed is not a boolean'),
+        (t + ["partitions", 0, "log_start"], 2 ** 63,
+         'consumer_positions.topics["orders"].partitions[0].log_start is not an i64'),
+        (t + ["partitions", 0, "archived_last"], 1.5,
+         'consumer_positions.topics["orders"].partitions[0].archived_last is not an i64'),
+        (g + ["members"], True, 'consumer_positions.groups["billing"].members is not a u32'),
+        (g + ["active"], "true", 'consumer_positions.groups["billing"].active is not a boolean'),
+        (g + ["positions", 0, "position"], "12",
+         'consumer_positions.groups["billing"].positions[0].position is not an i64'),
+        (g + ["positions", 0, "partition"], 2 ** 32,
+         'consumer_positions.groups["billing"].positions[0].partition is not a u32'),
+    ]
+    for path, value, want in cases:
+        doc = json.loads(json.dumps(base))
+        at = doc
+        for step in path[:-1]:
+            at = at[step]
+        at[path[-1]] = value
+        assert mod._receipt_shape(doc) == want, (path, value)
+    doc = json.loads(json.dumps(base))
+    doc["consumer_positions"] = None
+    assert mod._receipt_shape(doc) == "", "null is absent"
+
+
+def test_the_consumer_positions_lines_say_each_outcome_and_what_relates():
+    mod = _verifier_module()
+    doc = json.loads((ROOT / CP_FIXTURE).read_text())
+    assert mod._consumer_positions_lines(doc["consumer_positions"]) == [
+        "consumer_positions: 5 group(s), listing complete",
+        'consumer_positions["audit"]: captured consumer, state Empty (listed Empty), 0 member(s), '
+        "inactive; positions: 0 related to archived data, 1 not related, 0 never committed, "
+        "1 beyond the end, 1 failed, 1 not observed",
+        'consumer_positions["billing"]: captured classic, state Stable (listed Stable), 2 '
+        "member(s), active; positions: 2 related to archived data, 0 not related, 1 never "
+        "committed, 0 beyond the end, 0 failed, 1 not observed",
+        'consumer_positions["gone"]: excluded (GroupNotFound), no position recorded',
+        'consumer_positions["hidden"]: failed (NotVisibleToPrincipal), no position recorded',
+        'consumer_positions["share-1"]: excluded (GroupTypeNotCaptured), group type other, no '
+        "position recorded",
+    ]
+    assert mod._consumer_positions_lines(None) == []
+
+
+def test_each_half_of_the_consumer_positions_arms_refuses_with_its_exact_message():
+    # The halves the corpus does not exercise, with the Rust reader's exact
+    # words (`crates/logweir-core/tests/backup_receipt.rs`).
+    mod = _verifier_module()
+    base = json.loads((ROOT / CP_FIXTURE).read_text())
+    assert mod.check_backup_receipt_invariants(base) == ""
+    arm25 = ('records marks that are not well formed: a log start and its high watermark are '
+             'recorded together with 0 <= log start <= high watermark, the archived range is '
+             'recorded whole with 0 <= first <= last, and a partition the capture did not '
+             'observe has no group-capture marks')
+    arm33 = ('the status is one this format defines, a position is present exactly when it is '
+             '"captured" or "excluded", a reason exactly when it is "excluded", "failed" or '
+             '"notObserved" and from that status\'s set, and "notObserved" is exactly a '
+             'partition the capture did not observe')
+    arm34 = ('a coverage word is recorded exactly on a captured position, and a kept '
+             "position's coverage, or its PositionBeyondEnd, follows from the marks and the "
+             'archived range')
+
+    def cp(d):
+        return d["consumer_positions"]
+
+    def facts(i, **changes):
+        def apply(d):
+            p = cp(d)["topics"]["orders"]["partitions"][i]
+            for k, v in changes.items():
+                if v is None:
+                    p.pop(k, None)
+                else:
+                    p[k] = v
+        return apply
+
+    def position(group, i, **changes):
+        def apply(d):
+            e = cp(d)["groups"][group]["positions"][i]
+            for k, v in changes.items():
+                if v is None:
+                    e.pop(k, None)
+                else:
+                    e[k] = v
+        return apply
+
+    def regress(d):
+        cp(d)["topics"]["orders"]["partitions"][1]["high_watermark_after"] = 8
+
+    def flag(d):
+        cp(d)["topics"]["payments"]["changed_during_capture"] = True
+
+    def listing(d):
+        cp(d)["listing"] = "partial"
+
+    def blame(d):
+        cp(d)["groups"]["hidden"]["reason"] = "GenerationChangedDuringCapture"
+
+    def drop_last(d):
+        cp(d)["groups"]["billing"]["positions"].pop()
+
+    o0 = 'consumer_positions.topics["orders"].partitions[0]'
+    cases = [
+        (facts(0, log_start=21), f"{o0} {arm25}"),
+        (facts(0, log_start=-1), f"{o0} {arm25}"),
+        (facts(0, archived_first=24), f"{o0} {arm25}"),
+        (facts(0, high_watermark_after=-1), f"{o0} {arm25}"),
+        (facts(0, observed=False), f"{o0} {arm25}"),
+        (regress, 'consumer_positions.topics["orders"].changed_during_capture is false but '
+                  'its marks say true: a topic changed during the capture exactly when a mark '
+                  'read after the engine is below the one read at group capture'),
+        (flag, 'consumer_positions.topics["payments"].changed_during_capture is true but its '
+               'marks say false: a topic changed during the capture exactly when a mark read '
+               'after the engine is below the one read at group capture'),
+        (listing, 'consumer_positions records listing "partial" and 5 group(s): the listing is '
+                  '"complete" or "notComplete", and at least one group is recorded'),
+        (blame, 'consumer_positions.groups["hidden"] is "failed" with reason '
+                '"GenerationChangedDuringCapture" while the topics that changed during the '
+                'capture are {}: a group holding a position on such a topic fails '
+                'GenerationChangedDuringCapture, and no group fails so when none changed'),
+        (drop_last, 'consumer_positions.groups["billing"].positions[3] is absent where '
+                    '"payments":0 is expected: a captured group records one position per '
+                    'partition of every named topic, topics in name order, partitions in order'),
+        (position("billing", 0, position=None),
+         f'consumer_positions.groups["billing"].positions[0] has status "captured", position '
+         f'absent and reason absent: {arm33}'),
+        (position("billing", 3, position=-1),
+         f'consumer_positions.groups["billing"].positions[3] has status "captured", position '
+         f'-1 and reason absent: {arm33}'),
+        (position("billing", 2, status="noCommittedPosition", reason=None),
+         f'consumer_positions.groups["billing"].positions[2] has status "noCommittedPosition", '
+         f'position absent and reason absent: {arm33}'),
+        (position("audit", 0, position=20),
+         'consumer_positions.groups["audit"].positions[0] is "excluded" with coverage absent '
+         f"at position 20, but its partition's facts make it withinArchive: {arm34}"),
+        (position("billing", 1, coverage="withinArchive"),
+         'consumer_positions.groups["billing"].positions[1] is "noCommittedPosition" with '
+         'coverage "withinArchive" at position absent, but its partition\'s facts make it '
+         f"unjudged: {arm34}"),
+    ]
+    for mutate, want in cases:
+        doc = json.loads(json.dumps(base))
+        mutate(doc)
+        assert mod._receipt_shape(doc) == "", want
+        assert mod.check_backup_receipt_invariants(doc) == want

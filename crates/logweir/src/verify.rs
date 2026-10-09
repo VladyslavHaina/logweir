@@ -443,6 +443,74 @@ pub fn topic_configuration_lines(
         .collect()
 }
 
+/// The consumer position lines both readers print for a backup receipt
+/// (PROD-04.1): a header with the number of groups and the listing word, then
+/// one line per selected group, in id order — its outcome, and for a captured
+/// one its type, both states, members, whether it was active, and how many of
+/// its positions relate to archived data. NOTHING when the receipt carries no
+/// block: the backup selected no group. `docs/verify_scorecard.py` prints the
+/// same lines, and `scripts/check-verifier-parity.sh` compares every line
+/// starting `consumer_positions` between the two readers.
+#[must_use]
+pub fn consumer_positions_lines(
+    block: Option<&logweir_core::consumer_positions::ConsumerPositions>,
+) -> Vec<String> {
+    use logweir_core::consumer_positions as model;
+    let Some(block) = block else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!(
+        "consumer_positions: {} group(s), listing {}",
+        block.groups.len(),
+        block.listing
+    )];
+    for (id, g) in &block.groups {
+        let line = match (g.outcome.as_str(), &g.positions) {
+            ("captured", Some(positions)) => {
+                let count = |f: &dyn Fn(&model::PositionEntry) -> bool| {
+                    positions.iter().filter(|p| f(p)).count()
+                };
+                let related = count(&|p| {
+                    p.coverage
+                        .as_deref()
+                        .is_some_and(|c| model::RELATED.contains(&c))
+                });
+                let captured = count(&|p| p.status == "captured");
+                format!(
+                    "consumer_positions[{id:?}]: captured {}, state {} (listed {}), {} \
+                     member(s), {}; positions: {related} related to archived data, {} not \
+                     related, {} never committed, {} beyond the end, {} failed, {} not observed",
+                    g.group_type.as_deref().unwrap_or(""),
+                    g.state.as_deref().unwrap_or(""),
+                    g.listed_state.as_deref().unwrap_or(""),
+                    g.members.unwrap_or(0),
+                    if g.active == Some(false) {
+                        "inactive"
+                    } else {
+                        "active"
+                    },
+                    captured - related,
+                    count(&|p| p.status == "noCommittedPosition"),
+                    count(&|p| p.status == "excluded"),
+                    count(&|p| p.status == "failed"),
+                    count(&|p| p.status == "notObserved"),
+                )
+            }
+            (outcome, _) => format!(
+                "consumer_positions[{id:?}]: {outcome} ({}){}, no position recorded",
+                g.reason.as_deref().unwrap_or(""),
+                if g.group_type.as_deref() == Some(model::OTHER_TYPE) {
+                    ", group type other"
+                } else {
+                    ""
+                }
+            ),
+        };
+        lines.push(line);
+    }
+    lines
+}
+
 /// The time-basis lines both readers print for a scorecard (FX-8): one per
 /// non-empty list of `source.time_basis`, the one line that says it was not
 /// recorded, or nothing when the restore selected no topic by producer time
@@ -550,6 +618,9 @@ pub enum Verdict {
         /// The 1.3.0 `owner_detection` (PROD-05.1), as read: where the run
         /// looked for owners. `None` reads as empty (arm 21).
         owner_detection: Option<Vec<String>>,
+        /// The 1.5.0 block (PROD-04.1), as read; `None` is "no group
+        /// selected".
+        consumer_positions: Option<logweir_core::consumer_positions::ConsumerPositions>,
     },
     /// The signature verified over these exact bytes under this key, and the
     /// sidecar's `payloadType` is the one asked for. **Nothing about the
@@ -714,6 +785,7 @@ pub fn verify_scorecard(
             config_coverage: receipt.config_coverage,
             topic_configuration: receipt.topic_configuration,
             owner_detection: receipt.owner_detection,
+            consumer_positions: receipt.consumer_positions,
         });
     }
     if payload_type != PAYLOAD_TYPE_SCORECARD {
@@ -865,6 +937,8 @@ struct ReceiptBlocks<'a> {
         Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>>,
     /// PROD-05.1's `owner_detection`; `None` reads as empty.
     owner_detection: Option<&'a [String]>,
+    /// PROD-04.1's 1.5.0 block; `None` when no group was selected.
+    consumer_positions: Option<&'a logweir_core::consumer_positions::ConsumerPositions>,
 }
 
 /// What a `BackupReceipt` verdict prints.
@@ -920,16 +994,24 @@ fn print_backup_receipt(
     for line in topic_configuration_lines(topic_configuration, blocks.owner_detection) {
         println!("model:     {line}");
     }
+    // PROD-04.1: the consumer position evidence, one line per selected group.
+    for line in consumer_positions_lines(blocks.consumer_positions) {
+        println!("groups:    {line}");
+    }
     println!(
-        "checked:   the signature AND all twenty-one backup-receipt invariants \
+        "checked:   the signature AND all thirty-four backup-receipt invariants \
          (format_version, exit_code/manifest_key, records/topics, covered window, \
          source.auth.mode, config_coverage's six: its version, its topic set, \
          coverage, reason, timestamp-after-a-read, timestamp value and source, \
          topic_configuration's eight: its version, beside config_coverage, its topic \
          set, entries exactly where the read succeeded, closed source and class, \
-         secret and inherited, the owner, counts of at least one, and \
+         secret and inherited, the owner, counts of at least one, \
          owner_detection's two: its closed set beside the model, an owner only from \
-         a source it lists)"
+         a source it lists, and consumer_positions' thirteen: its version, its topic \
+         set, partitions in order, well-formed marks, a derived changed flag, the \
+         listing and at least one group, outcome and reason, fields that fit the \
+         outcome, a derived active, no position on a changed topic, one position per \
+         partition, status, value and reason, and a derived coverage)"
     );
 }
 
@@ -973,6 +1055,7 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             config_coverage,
             topic_configuration,
             owner_detection,
+            consumer_positions,
         }) => {
             print_backup_receipt(
                 &payload_type,
@@ -985,6 +1068,7 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
                     config_coverage: config_coverage.as_ref(),
                     topic_configuration: topic_configuration.as_ref(),
                     owner_detection: owner_detection.as_deref(),
+                    consumer_positions: consumer_positions.as_ref(),
                 },
             );
             ExitCode::Ok

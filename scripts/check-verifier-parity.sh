@@ -262,6 +262,7 @@ receipt_tb_cases=0
 receipt_model_cases=0
 receipt_unchecked_cases=0
 receipt_admin_cases=0
+receipt_cp_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
     receipt_count=$((receipt_count + 1))
@@ -414,6 +415,40 @@ $rust_tc"
         fi
         case "$want_route" in *"owner not checked"*) receipt_unchecked_cases=$((receipt_unchecked_cases + 1)) ;; esac
         case "$want_route" in *"applied through the admin API"*) receipt_admin_cases=$((receipt_admin_cases + 1)) ;; esac
+        # PROD-04.1: both readers print the consumer position evidence — a
+        # header and one line per selected group, or nothing when the backup
+        # selected none — and the SAME lines. The groups, their outcomes and
+        # how many positions relate to archived data are read from the
+        # DOCUMENT, so a reader that dropped a group, or counted a position the
+        # receipt does not relate, fails here; and at least one accepted case
+        # must carry the block (below).
+        rust_cp="$(grep -oE 'consumer_positions(\[|:).*' "$tmp/rust.all" || true)"
+        py_cp="$(grep -oE 'consumer_positions(\[|:).*' "$tmp/py.all" || true)"
+        if [ "$rust_cp" != "$py_cp" ]; then
+            fail "$name: the two readers print DIFFERENT consumer position lines.
+  rust:
+$rust_cp
+  python:
+$py_cp"
+        fi
+        want_cp="$("$PY" -c 'import json, sys
+cp = json.load(open(sys.argv[1])).get("consumer_positions")
+related = ("withinArchive", "atArchiveEnd")
+for g in sorted((cp or {}).get("groups") or {}):
+    entry = cp["groups"][g]
+    n = sum(1 for p in entry.get("positions") or [] if p.get("coverage") in related)
+    print("consumer_positions[" + json.dumps(g) + "]: " + entry["outcome"] + " " + str(n))' "$doc")"
+        got_cp="$(printf '%s\n' "$rust_cp" | sed -n \
+            -e 's/^\(consumer_positions\[".*"\]: captured\) .*positions: \([0-9]*\) related to archived data.*/\1 \2/p' \
+            -e 's/^\(consumer_positions\[".*"\]: [a-z]*\) (.*/\1 0/p')"
+        if [ "$got_cp" != "$want_cp" ]; then
+            fail "$name: the consumer position lines do not name exactly the receipt's groups, outcomes and related positions.
+  want:
+$want_cp
+  got:
+$rust_cp"
+        fi
+        [ -z "$want_cp" ] || receipt_cp_cases=$((receipt_cp_cases + 1))
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -427,6 +462,9 @@ if [ "$receipt_tb_cases" -eq 0 ]; then
 fi
 if [ "$receipt_model_cases" -eq 0 ]; then
     fail "no accepted backup-receipt case carries topic_configuration, so the model lines (PROD-05.1) were never compared"
+fi
+if [ "$receipt_cp_cases" -eq 0 ]; then
+    fail "no accepted backup-receipt case carries consumer_positions, so the consumer position lines (PROD-04.1) were never compared"
 fi
 if [ "$receipt_unchecked_cases" -eq 0 ] || [ "$receipt_admin_cases" -eq 0 ]; then
     fail "the accepted backup-receipt cases do not include both an owner NOT CHECKED ($receipt_unchecked_cases) and one looked for and not found ($receipt_admin_cases), so the route words (PROD-05.1 M2) were never told apart"

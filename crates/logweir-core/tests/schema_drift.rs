@@ -42,7 +42,7 @@ fn the_justfile_schema_versions_are_the_writers_constants() {
     );
     assert_eq!(
         justfile_schema_version("receipt"),
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     );
 }
 
@@ -410,7 +410,7 @@ fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
     let checked_in = current_schema(
         "backup-receipt",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS,
     );
     assert_eq!(
         generated.trim_end(),
@@ -419,7 +419,7 @@ fn backup_receipt_schema_has_no_drift() {
          review the diff — a field added is a MINOR bump, a field removed or \
          retyped is a MAJOR bump (Global Constraint 12), and the receipt's \
          format_version is its own and not the scorecard's.",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     );
 }
 
@@ -441,7 +441,7 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         v["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-            logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
         )
     );
     assert!(
@@ -676,6 +676,43 @@ fn the_frozen_1_2_0_receipt_schema_is_still_fx7s() {
         "the current schema is a NEW file beside the frozen one, never the 1.2.0 file regenerated"
     );
     assert!(current["properties"]["topic_configuration"].is_object());
+}
+
+/// **PROD-04.1: PROD-01.3's 1.4.0 receipt schema is FROZEN** beside the 1.5.0
+/// one, and still describes every receipt of a backup that selects no consumer
+/// group and names a PROD-01.3 auth mode, which this build writes as 1.4.0: it
+/// names itself 1.4.0, defines the five auth modes, and has no
+/// `consumer_positions`. The current file carries it.
+#[test]
+fn the_frozen_1_4_0_receipt_schema_is_still_prod_01_3s() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.4.0.json"
+    ))
+    .expect("the frozen 1.4.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.4.0.json"
+    );
+    assert!(frozen["properties"]["consumer_positions"].is_null());
+    assert!(frozen["properties"]["topic_configuration"].is_object());
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    assert!(
+        current["properties"]["consumer_positions"].is_object(),
+        "the current file describes PROD-04.1's block"
+    );
+    assert!(
+        !current["required"]
+            .as_array()
+            .expect("a required array")
+            .iter()
+            .any(|r| r == "consumer_positions"),
+        "consumer_positions is OPTIONAL: a backup that selects no group writes none"
+    );
+    assert_eq!(
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS,
+        "1.5.0"
+    );
 }
 
 /// **PROD-01.3: PROD-05.1's 1.3.0 receipt schema is FROZEN** beside the 1.4.0

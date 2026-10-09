@@ -3,13 +3,14 @@
 //! CLOSED VALUE SET (`source.auth.mode`), plus since FX-4 the six arms (6-11)
 //! that read ONLY the 1.1.0 `config_coverage` block, plus since PROD-05.1 the
 //! eight (12-19) that run only on the 1.3.0 `topic_configuration` block and
-//! the two (20-21) over its `owner_detection` — and each one refuses with an
-//! exact message.
+//! the two (20-21) over its `owner_detection`, plus since PROD-04.1 the
+//! thirteen (22-34) that run only on the 1.5.0 `consumer_positions` block —
+//! and each one refuses with an exact message.
 //!
 //! The four and the five are asserted SEPARATELY and on purpose:
 //! `arm_cases()` carries the four self-contradiction arms and
 //! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` closes over them, while
-//! `validate_invariants_has_exactly_twenty_three_return_err_statements` closes over
+//! `validate_invariants_has_exactly_thirty_six_return_err_statements` closes over
 //! the function's TOTAL by reading its source text. So an arm added to the
 //! function without a case here fails the second test, and a case deleted
 //! from `arm_cases()` fails the first — neither number can go stale under
@@ -102,7 +103,7 @@ fn pristine() -> BackupReceipt {
 /// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
 /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` keeps saying exactly
 /// what its name says while
-/// `validate_invariants_has_exactly_twenty_three_return_err_statements` pins the
+/// `validate_invariants_has_exactly_thirty_six_return_err_statements` pins the
 /// total.
 fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     // Arm 1: a major this reader has never seen.
@@ -387,7 +388,7 @@ fn the_written_version_follows_the_auth_mode() {
 /// `crates/logweir/tests/two_reader_parity.rs::
 /// every_invariant_arm_has_a_corpus_case` applies to the scorecard's arms).
 #[test]
-fn validate_invariants_has_exactly_twenty_three_return_err_statements() {
+fn validate_invariants_has_exactly_thirty_six_return_err_statements() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/backup_receipt.rs"
@@ -408,9 +409,9 @@ fn validate_invariants_has_exactly_twenty_three_return_err_statements() {
 
     let total = body.matches("return Err(format!(").count();
     assert_eq!(
-        total, 23,
+        total, 36,
         "BackupReceipt::validate_invariants has {total} `return Err(format!(` \
-         statement(s), not 23. Every one of them needs a per-arm test in this file with \
+         statement(s), not 36. Every one of them needs a per-arm test in this file with \
          its exact message AND a case in \
          e2e/fixtures/invariants/backup-receipt-index.json — \
          scripts/check-invariant-corpus.sh derives the list from this same slice and \
@@ -436,7 +437,7 @@ fn validate_invariants_has_exactly_twenty_three_return_err_statements() {
 /// exact message, and a pristine receipt accepted. Arm 5 — the closed value
 /// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
 /// function's total is
-/// `validate_invariants_has_exactly_twenty_three_return_err_statements`.
+/// `validate_invariants_has_exactly_thirty_six_return_err_statements`.
 ///
 /// **RENAMED, Task 12 closeout carry (c).** It was
 /// `backup_receipt_invariants_have_exactly_four_arms`, which Task 5b's fix
@@ -1572,4 +1573,535 @@ fn the_written_version_defines_topic_configuration() {
     archive.manifest_version_id = Some("v1".into());
     assert_eq!(format_version_for(&archive, true, &auth, false), "1.3.0");
     assert_eq!(format_version_for(&archive, false, &auth, false), "1.2.0");
+}
+
+// ===================================================================== 1.5.0
+
+/// A partition's facts, as JSON.
+fn facts(
+    p: u32,
+    marks: Option<(i64, i64)>,
+    after: Option<(i64, i64)>,
+    archived: Option<(i64, i64)>,
+) -> serde_json::Value {
+    let mut v = serde_json::json!({"partition": p, "observed": marks.is_some()});
+    if let Some((a, b)) = marks {
+        v["log_start"] = a.into();
+        v["high_watermark"] = b.into();
+    }
+    if let Some((a, b)) = after {
+        v["log_start_after"] = a.into();
+        v["high_watermark_after"] = b.into();
+    }
+    if let Some((a, b)) = archived {
+        v["archived_first"] = a.into();
+        v["archived_last"] = b.into();
+    }
+    v
+}
+
+/// A 1.5.0 receipt that satisfies all thirty-four arms. `orders` has three
+/// partitions, the third added during the capture; `payments` one. Group
+/// `billing` is captured (every position status but `excluded`), `audit`
+/// captured with a position beyond the end, `share-1` excluded
+/// GroupTypeNotCaptured, `gone` excluded GroupNotFound, `hidden` failed
+/// NotVisibleToPrincipal.
+fn pristine_1_5() -> BackupReceipt {
+    let mut doc = pristine_1_3();
+    doc.format_version = "1.5.0".to_string();
+    let block = serde_json::json!({
+        "observed_from": "2026-09-09T11:02:15Z",
+        "observed_to": "2026-09-09T11:02:16Z",
+        "listing": "complete",
+        "topics": {
+            "orders": {
+                "partitions": [
+                    facts(0, Some((0, 20)), Some((0, 24)), Some((0, 23))),
+                    facts(1, Some((5, 9)), Some((5, 9)), Some((5, 8))),
+                    facts(2, None, Some((0, 3)), Some((0, 2))),
+                ],
+                "changed_during_capture": false
+            },
+            "payments": {
+                "partitions": [facts(0, Some((0, 7)), None, Some((0, 6)))],
+                "changed_during_capture": false
+            }
+        },
+        "groups": {
+            "billing": {
+                "outcome": "captured", "group_type": "classic", "state": "Stable",
+                "listed_state": "Stable", "members": 2, "active": true,
+                "positions": [
+                    {"topic": "orders", "partition": 0, "status": "captured", "position": 12, "coverage": "withinArchive"},
+                    {"topic": "orders", "partition": 1, "status": "noCommittedPosition"},
+                    {"topic": "orders", "partition": 2, "status": "notObserved", "reason": "PartitionAddedDuringCapture"},
+                    {"topic": "payments", "partition": 0, "status": "captured", "position": 7, "coverage": "atArchiveEnd"}
+                ]
+            },
+            "audit": {
+                "outcome": "captured", "group_type": "consumer", "state": "Empty",
+                "listed_state": "Empty", "members": 0, "active": false,
+                "positions": [
+                    {"topic": "orders", "partition": 0, "status": "excluded", "position": 21, "reason": "PositionBeyondEnd"},
+                    {"topic": "orders", "partition": 1, "status": "captured", "position": 2, "coverage": "beforeLogStart"},
+                    {"topic": "orders", "partition": 2, "status": "notObserved", "reason": "PartitionAddedDuringCapture"},
+                    {"topic": "payments", "partition": 0, "status": "failed", "reason": "Unstable"}
+                ]
+            },
+            "share-1": {"outcome": "excluded", "reason": "GroupTypeNotCaptured", "group_type": "other"},
+            "gone": {"outcome": "excluded", "reason": "GroupNotFound"},
+            "hidden": {"outcome": "failed", "reason": "NotVisibleToPrincipal"}
+        }
+    });
+    doc.consumer_positions = Some(serde_json::from_value(block).expect("a block"));
+    doc
+}
+
+fn cp(doc: &mut BackupReceipt) -> &mut logweir_core::consumer_positions::ConsumerPositions {
+    doc.consumer_positions.as_mut().expect("a 1.5.0 block")
+}
+
+fn pos<'a>(
+    doc: &'a mut BackupReceipt,
+    group: &str,
+    i: usize,
+) -> &'a mut logweir_core::consumer_positions::PositionEntry {
+    &mut cp(doc)
+        .groups
+        .get_mut(group)
+        .unwrap()
+        .positions
+        .as_mut()
+        .unwrap()[i]
+}
+
+#[test]
+fn a_1_5_0_receipt_with_every_outcome_and_status_satisfies_every_invariant() {
+    assert_eq!(pristine_1_5().validate_invariants(), Ok(()));
+    // Without the block the document is decided exactly as 1.3.0 was.
+    let mut doc = pristine_1_5();
+    doc.consumer_positions = None;
+    assert_eq!(doc.validate_invariants(), Ok(()));
+}
+
+#[test]
+fn arm_22_refuses_consumer_positions_under_a_minor_before_5() {
+    let mut doc = pristine_1_5();
+    doc.format_version = "1.4.0".to_string();
+    refused_with(
+        &doc,
+        "consumer_positions is present but format_version \"1.4.0\" predates it: the field is \
+         defined from 1.5.0",
+        "a 1.4 document carrying the block",
+    );
+}
+
+#[test]
+fn arm_23_refuses_topics_that_are_not_the_named_set() {
+    let mut doc = pristine_1_5();
+    cp(&mut doc).topics.remove("payments");
+    refused_with(
+        &doc,
+        "consumer_positions.topics covers {\"orders\"} but the named topic set is {\"orders\", \
+         \"payments\"}",
+        "a named topic missing",
+    );
+}
+
+#[test]
+fn arm_24_refuses_partitions_out_of_order() {
+    let mut doc = pristine_1_5();
+    cp(&mut doc).topics.get_mut("orders").unwrap().partitions[1].partition = 2;
+    refused_with(
+        &doc,
+        "consumer_positions.topics[\"orders\"].partitions[1] is partition 2: each topic lists its \
+         partitions from 0, one entry each, in order",
+        "a partition out of place",
+    );
+}
+
+#[test]
+fn arm_25_refuses_marks_that_are_not_well_formed() {
+    let want = "consumer_positions.topics[\"orders\"].partitions[0] records marks that are not \
+                well formed: a log start and its high watermark are recorded together with 0 <= \
+                log start <= high watermark, the archived range is recorded whole with 0 <= first \
+                <= last, and a partition the capture did not observe has no group-capture marks";
+    let cases: Vec<Box<dyn Fn(&mut logweir_core::consumer_positions::PartitionFacts)>> = vec![
+        Box::new(|p| p.high_watermark = None),
+        Box::new(|p| p.log_start = Some(21)),
+        Box::new(|p| p.log_start = Some(-1)),
+        Box::new(|p| p.archived_last = None),
+        Box::new(|p| p.archived_first = Some(24)),
+        Box::new(|p| p.high_watermark_after = Some(-1)),
+        Box::new(|p| p.observed = false),
+    ];
+    for (i, mutate) in cases.iter().enumerate() {
+        let mut doc = pristine_1_5();
+        mutate(&mut cp(&mut doc).topics.get_mut("orders").unwrap().partitions[0]);
+        refused_with(&doc, want, &format!("malformed marks, case {i}"));
+    }
+}
+
+#[test]
+fn arm_26_refuses_a_changed_flag_the_marks_do_not_derive() {
+    let mut doc = pristine_1_5();
+    cp(&mut doc)
+        .topics
+        .get_mut("payments")
+        .unwrap()
+        .changed_during_capture = true;
+    refused_with(
+        &doc,
+        "consumer_positions.topics[\"payments\"].changed_during_capture is true but its marks say \
+         false: a topic changed during the capture exactly when a mark read after the engine is \
+         below the one read at group capture",
+        "a changed flag with stable marks",
+    );
+    // And the other direction: a regressed mark the flag hides.
+    let mut doc = pristine_1_5();
+    cp(&mut doc).topics.get_mut("orders").unwrap().partitions[1].high_watermark_after = Some(8);
+    refused_with(
+        &doc,
+        "consumer_positions.topics[\"orders\"].changed_during_capture is false but its marks say \
+         true: a topic changed during the capture exactly when a mark read after the engine is \
+         below the one read at group capture",
+        "a hidden regression",
+    );
+}
+
+#[test]
+fn arm_27_refuses_a_listing_outside_the_set_or_no_group() {
+    let mut doc = pristine_1_5();
+    cp(&mut doc).listing = "partial".into();
+    refused_with(
+        &doc,
+        "consumer_positions records listing \"partial\" and 5 group(s): the listing is \
+         \"complete\" or \"notComplete\", and at least one group is recorded",
+        "a listing word outside the set",
+    );
+    let mut doc = pristine_1_5();
+    cp(&mut doc).groups.clear();
+    refused_with(
+        &doc,
+        "consumer_positions records listing \"complete\" and 0 group(s): the listing is \
+         \"complete\" or \"notComplete\", and at least one group is recorded",
+        "no group",
+    );
+}
+
+#[test]
+fn arm_28_refuses_an_outcome_or_reason_that_does_not_fit() {
+    let want = |id: &str, outcome: &str, reason: &str| {
+        format!(
+            "consumer_positions.groups[{id:?}] has outcome {outcome} and reason {reason}: the \
+             outcome is \"captured\", \"excluded\" or \"failed\", a reason is present exactly \
+             when it is not \"captured\", and it is one this format defines for that outcome"
+        )
+    };
+    let mut doc = pristine_1_5();
+    cp(&mut doc).groups.get_mut("gone").unwrap().reason = Some("NotVisibleToPrincipal".into());
+    refused_with(
+        &doc,
+        &want("gone", "\"excluded\"", "\"NotVisibleToPrincipal\""),
+        "a failure reason on an exclusion",
+    );
+    let mut doc = pristine_1_5();
+    cp(&mut doc).groups.get_mut("hidden").unwrap().reason = None;
+    refused_with(
+        &doc,
+        &want("hidden", "\"failed\"", "absent"),
+        "a failure with no reason",
+    );
+    let mut doc = pristine_1_5();
+    cp(&mut doc).groups.get_mut("billing").unwrap().reason = Some("GroupNotFound".into());
+    refused_with(
+        &doc,
+        &want("billing", "\"captured\"", "\"GroupNotFound\""),
+        "a capture with a reason",
+    );
+    let mut doc = pristine_1_5();
+    cp(&mut doc).groups.get_mut("gone").unwrap().outcome = "absent".into();
+    refused_with(
+        &doc,
+        &want("gone", "\"absent\"", "\"GroupNotFound\""),
+        "an outcome outside the set",
+    );
+}
+
+#[test]
+fn arm_29_refuses_fields_that_do_not_fit_the_outcome() {
+    let mut doc = pristine_1_5();
+    cp(&mut doc).groups.get_mut("billing").unwrap().group_type = Some("share".into());
+    refused_with(
+        &doc,
+        "consumer_positions.groups[\"billing\"] is \"captured\" with group_type \"share\", state \
+         \"Stable\", listed_state \"Stable\", members 2, active true and positions present: a \
+         captured group records a type of \"classic\" or \"consumer\", both states from the \
+         closed set, its members, active and its positions; a GroupTypeNotCaptured group records \
+         group_type \"other\" and nothing else; any other group records none of them",
+        "a captured share group",
+    );
+    // A failed group that still carries positions: positions on a group that
+    // was not captured would read as captured ones.
+    let mut doc = pristine_1_5();
+    let billing = cp(&mut doc).groups["billing"].positions.clone();
+    cp(&mut doc).groups.get_mut("hidden").unwrap().positions = billing;
+    refused_with(
+        &doc,
+        "consumer_positions.groups[\"hidden\"] is \"failed\" with group_type absent, state \
+         absent, listed_state absent, members absent, active absent and positions present: a \
+         captured group records a type of \"classic\" or \"consumer\", both states from the \
+         closed set, its members, active and its positions; a GroupTypeNotCaptured group records \
+         group_type \"other\" and nothing else; any other group records none of them",
+        "positions on a failed group",
+    );
+    // GroupTypeNotCaptured without `other`.
+    let mut doc = pristine_1_5();
+    cp(&mut doc).groups.get_mut("share-1").unwrap().group_type = None;
+    assert!(doc.validate_invariants().unwrap_err().starts_with(
+        "consumer_positions.groups[\"share-1\"] is \"excluded\" with group_type absent"
+    ));
+    // A captured group without its positions.
+    let mut doc = pristine_1_5();
+    cp(&mut doc).groups.get_mut("audit").unwrap().positions = None;
+    assert!(doc.validate_invariants().unwrap_err().starts_with(
+        "consumer_positions.groups[\"audit\"] is \"captured\" with group_type \"consumer\""
+    ));
+}
+
+#[test]
+fn arm_30_refuses_an_active_flag_the_states_do_not_derive() {
+    let mut doc = pristine_1_5();
+    cp(&mut doc).groups.get_mut("audit").unwrap().listed_state = Some("PreparingRebalance".into());
+    refused_with(
+        &doc,
+        "consumer_positions.groups[\"audit\"].active is false but its states \"Empty\" and \
+         \"PreparingRebalance\" say true: a group is active unless both its states are \"Empty\" \
+         or \"Dead\"",
+        "an inactive group that rebalanced during the capture",
+    );
+}
+
+#[test]
+fn arm_31_refuses_a_position_on_a_changed_topic_and_a_blame_without_a_change() {
+    let want = |id: &str, outcome: &str, reason: &str, changed: &str| {
+        format!(
+            "consumer_positions.groups[{id:?}] is {outcome} with reason {reason} while the topics \
+             that changed during the capture are {changed}: a group holding a position on such a \
+             topic fails GenerationChangedDuringCapture, and no group fails so when none changed"
+        )
+    };
+    // `orders` partition 1 regressed: `audit` holds a kept position there.
+    let mut doc = pristine_1_5();
+    let orders = cp(&mut doc).topics.get_mut("orders").unwrap();
+    orders.partitions[1].log_start_after = Some(0);
+    orders.changed_during_capture = true;
+    refused_with(
+        &doc,
+        &want("audit", "\"captured\"", "absent", "{\"orders\"}"),
+        "a kept position on a changed topic",
+    );
+    // A group blamed on a change that did not happen.
+    let mut doc = pristine_1_5();
+    cp(&mut doc).groups.get_mut("hidden").unwrap().reason =
+        Some("GenerationChangedDuringCapture".into());
+    refused_with(
+        &doc,
+        &want(
+            "hidden",
+            "\"failed\"",
+            "\"GenerationChangedDuringCapture\"",
+            "{}",
+        ),
+        "a blame with no change",
+    );
+}
+
+#[test]
+fn arm_32_refuses_a_missing_or_extra_position() {
+    // Absence is never offset 0: dropping the never-committed partition.
+    let mut doc = pristine_1_5();
+    cp(&mut doc)
+        .groups
+        .get_mut("billing")
+        .unwrap()
+        .positions
+        .as_mut()
+        .unwrap()
+        .remove(1);
+    refused_with(
+        &doc,
+        "consumer_positions.groups[\"billing\"].positions[1] is \"orders\":2 where \"orders\":1 \
+         is expected: a captured group records one position per partition of every named topic, \
+         topics in name order, partitions in order",
+        "a partition dropped",
+    );
+    let mut doc = pristine_1_5();
+    cp(&mut doc)
+        .groups
+        .get_mut("billing")
+        .unwrap()
+        .positions
+        .as_mut()
+        .unwrap()
+        .pop();
+    refused_with(
+        &doc,
+        "consumer_positions.groups[\"billing\"].positions[3] is absent where \"payments\":0 is \
+         expected: a captured group records one position per partition of every named topic, \
+         topics in name order, partitions in order",
+        "the last partition dropped",
+    );
+}
+
+#[test]
+fn arm_33_refuses_a_status_position_or_reason_that_does_not_fit() {
+    let want = |i: usize, status: &str, position: &str, reason: &str| {
+        format!(
+            "consumer_positions.groups[\"billing\"].positions[{i}] has status {status}, position \
+             {position} and reason {reason}: the status is one this format defines, a position \
+             is present exactly when it is \"captured\" or \"excluded\", a reason exactly when it \
+             is \"excluded\", \"failed\" or \"notObserved\" and from that status's set, and \
+             \"notObserved\" is exactly a partition the capture did not observe"
+        )
+    };
+    // NEGATIVE CONTROL of "absent is never 0": no committed position, with 0.
+    let mut doc = pristine_1_5();
+    pos(&mut doc, "billing", 1).position = Some(0);
+    refused_with(
+        &doc,
+        &want(1, "\"noCommittedPosition\"", "0", "absent"),
+        "absent read as 0",
+    );
+    let mut doc = pristine_1_5();
+    pos(&mut doc, "billing", 0).position = None;
+    refused_with(
+        &doc,
+        &want(0, "\"captured\"", "absent", "absent"),
+        "a capture with no position",
+    );
+    let mut doc = pristine_1_5();
+    pos(&mut doc, "billing", 2).status = "noCommittedPosition".into();
+    pos(&mut doc, "billing", 2).reason = None;
+    refused_with(
+        &doc,
+        &want(2, "\"noCommittedPosition\"", "absent", "absent"),
+        "an unobserved partition read as answered",
+    );
+    let mut doc = pristine_1_5();
+    pos(&mut doc, "billing", 3).position = Some(-1);
+    refused_with(
+        &doc,
+        &want(3, "\"captured\"", "-1", "absent"),
+        "a negative position",
+    );
+    let mut doc = pristine_1_5();
+    pos(&mut doc, "billing", 1).status = "lost".into();
+    refused_with(
+        &doc,
+        &want(1, "\"lost\"", "absent", "absent"),
+        "a status outside the set",
+    );
+}
+
+#[test]
+fn arm_34_refuses_a_coverage_the_facts_do_not_derive() {
+    let want = |g: &str, i: usize, status: &str, coverage: &str, position: &str, derived: &str| {
+        format!(
+            "consumer_positions.groups[{g:?}].positions[{i}] is {status} with coverage {coverage} \
+             at position {position}, but its partition's facts make it {derived}: a coverage word \
+             is recorded exactly on a captured position, and a kept position's coverage, or its \
+             PositionBeyondEnd, follows from the marks and the archived range"
+        )
+    };
+    let mut doc = pristine_1_5();
+    pos(&mut doc, "billing", 3).coverage = Some("withinArchive".into());
+    refused_with(
+        &doc,
+        &want(
+            "billing",
+            3,
+            "\"captured\"",
+            "\"withinArchive\"",
+            "7",
+            "atArchiveEnd",
+        ),
+        "an archive-end position claimed within the archive",
+    );
+    // A position beyond the end recorded as captured.
+    let mut doc = pristine_1_5();
+    let e = pos(&mut doc, "audit", 0);
+    e.status = "captured".into();
+    e.reason = None;
+    e.coverage = Some("beyondArchive".into());
+    refused_with(
+        &doc,
+        &want(
+            "audit",
+            0,
+            "\"captured\"",
+            "\"beyondArchive\"",
+            "21",
+            "PositionBeyondEnd",
+        ),
+        "PositionBeyondEnd recorded as captured",
+    );
+    // An excluded position at the end, which the facts capture.
+    let mut doc = pristine_1_5();
+    pos(&mut doc, "audit", 0).position = Some(20);
+    refused_with(
+        &doc,
+        &want("audit", 0, "\"excluded\"", "absent", "20", "withinArchive"),
+        "the end itself excluded",
+    );
+    // A coverage word on a position that is not captured.
+    let mut doc = pristine_1_5();
+    pos(&mut doc, "billing", 1).coverage = Some("withinArchive".into());
+    refused_with(
+        &doc,
+        &want(
+            "billing",
+            1,
+            "\"noCommittedPosition\"",
+            "\"withinArchive\"",
+            "absent",
+            "unjudged",
+        ),
+        "coverage on an uncommitted partition",
+    );
+}
+
+#[test]
+fn the_consumer_positions_arms_run_after_every_earlier_arm() {
+    let mut doc = pristine_1_5();
+    cp(&mut doc).listing = "partial".into();
+    topic(&mut doc, "orders").partitions = Some(0);
+    let got = doc.validate_invariants().unwrap_err();
+    assert!(
+        got.starts_with("topic_configuration[\"orders\"] records partitions 0"),
+        "{got}"
+    );
+}
+
+/// The written version and the first minor that defines the block move
+/// together, or every receipt that selects groups refuses itself at arm 22.
+#[test]
+fn the_written_version_defines_consumer_positions() {
+    use logweir_core::backup_receipt::{
+        format_version_for, CONSUMER_POSITIONS_SINCE_MINOR, FORMAT_VERSION_WITH_CONSUMER_POSITIONS,
+    };
+    let minor: u64 = FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+        .split('.')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(minor, CONSUMER_POSITIONS_SINCE_MINOR);
+    let mut archive = pristine().archive;
+    let mut auth = pristine().source.auth;
+    assert_eq!(format_version_for(&archive, true, &auth, true), "1.5.0");
+    archive.manifest_version_id = Some("v1".into());
+    auth.mode = "mtls".into();
+    assert_eq!(format_version_for(&archive, true, &auth, true), "1.5.0");
+    assert_eq!(format_version_for(&archive, true, &auth, false), "1.4.0");
 }

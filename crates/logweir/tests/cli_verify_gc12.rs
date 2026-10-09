@@ -99,7 +99,7 @@ fn schema_backup_receipt_is_byte_identical_to_the_checked_in_file() {
     // `…::the_frozen_1_2_0_receipt_schema_is_still_fx7s`).
     let checked_in = std::fs::read(format!(
         "../../schemas/logweir-backup-receipt-{}.json",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     ))
     .expect("read the schema");
     assert_eq!(
