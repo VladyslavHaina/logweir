@@ -1729,7 +1729,11 @@ fn the_original_name_plan_the_console_writes_is_the_one_the_runner_reads() {
         .target
         .original_name()
         .unwrap_or_else(|| panic!("{} carries no original_name block", shown(&golden_path)));
-    assert_eq!(block.owners.as_deref(), Some(&[][..]), "the owner statement: owners: []");
+    assert_eq!(
+        block.owners.as_deref(),
+        Some(&[][..]),
+        "the owner statement: owners: []"
+    );
     assert!(!block.owner_path);
     assert!(logweir_core::original_name::is_original_name_restore(&spec));
     assert_eq!(logweir_core::original_name::refuse_shape(&spec), None);
