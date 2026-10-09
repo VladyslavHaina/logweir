@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyper::body::Incoming;
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use hyper_util::server::conn::auto;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use tokio::sync::Semaphore;
@@ -164,12 +164,17 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
     serve(listener, logweir_api::app::router(state)).await
 }
 
-/// How long a connection may take to send its request headers.
+/// How long a connection may take to send its request headers, counted from
+/// the moment it is accepted — so a connection that sends NOTHING is closed at
+/// this deadline too — and again from the end of each answer on a keep-alive
+/// connection.
 ///
-/// Hyper's default is NO deadline: a client that opens a connection and sends
-/// one header byte a minute holds a task and a file descriptor indefinitely.
-/// Ten seconds is generous for a browser on loopback and for a kubelet probe,
-/// and it bounds the classic slow-loris shape.
+/// Without one, a client that opens a connection and sends one header byte a
+/// minute holds a task, a file descriptor and a connection permit
+/// indefinitely. Ten seconds is generous for a browser on loopback, for an
+/// ingress controller's pooled connection and for a kubelet probe, and it
+/// bounds the classic slow-loris shape (review finding R4) and the silent
+/// socket (FX-24). See [`serve`] on why the deadline starts at the accept.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The largest request head hyper will buffer, 32 KiB.
@@ -203,12 +208,34 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// header-read timeout and a header-size cap cannot be set through it at all.
 /// The loop below is the same shape — accept, wrap, spawn, watch for shutdown —
 /// with those two configured and with a permit and a shutdown deadline added.
+///
+/// HTTP/1.1 ONLY, AND THAT IS WHAT BOUNDS THE FIRST BYTE (FX-24). This loop
+/// used hyper-util's `auto` builder, which reads a connection's first bytes to
+/// choose HTTP/1 or HTTP/2 — with no timer — and only then builds the HTTP/1
+/// connection that owns [`HEADER_READ_TIMEOUT`]. A socket that sent nothing
+/// therefore never reached a deadline: measured on the built binary
+/// (2026-10-08), a partial head closed at 10.0 s and a silent socket was still
+/// open at 16 s, and 256 silent sockets held every permit until the client let
+/// go. A timeout around that version read alone would not have been enough,
+/// because hyper's HTTP/2 server has no header deadline of its own: a client
+/// that sent the 24-byte HTTP/2 preface and stopped was still open at 16 s
+/// too, on the same binary. hyper's HTTP/1 connection arms the deadline in its
+/// first read of the head, which runs when the spawned task first polls it,
+/// so serving HTTP/1 directly bounds zero bytes, a partial head and an idle
+/// keep-alive alike, with one mechanism.
+///
+/// Nothing that talks to this listener speaks HTTP/2: browsers use it only
+/// over TLS, and this listener is plain HTTP (TLS terminates at the ingress in
+/// shared mode, and localAdmin mode is loopback); an ingress controller dials
+/// a plain-HTTP backend with HTTP/1.1 unless told the Service speaks `h2c`,
+/// which the chart never says; kubelet probes are HTTP/1.1. A client that
+/// tries HTTP/2 with prior knowledge is closed at its first request line,
+/// because `PRI * HTTP/2.0` is not an HTTP/1 request.
 async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> ExitCode {
-    let mut builder = auto::Builder::new(TokioExecutor::new());
+    let mut builder = http1::Builder::new();
     builder
-        .http1()
-        // The timer is not optional: hyper PANICS on a `header_read_timeout`
-        // configured without one.
+        // The timer is not optional: without one hyper ignores the default
+        // deadline and PANICS on a configured one.
         .timer(TokioTimer::new())
         .header_read_timeout(HEADER_READ_TIMEOUT)
         .max_buf_size(MAX_HEADER_BYTES);
@@ -262,11 +289,10 @@ async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> ExitC
                 }
             },
         ));
-        // `into_owned` ends the borrow of `builder`, so the connection can be
-        // moved into a task while the loop keeps configuring the next one.
-        let connection = builder
-            .serve_connection_with_upgrades(TokioIo::new(stream), service)
-            .into_owned();
+        // No `with_upgrades`: no route here switches protocols (the event
+        // stream is server-sent events, an ordinary HTTP/1.1 response), so a
+        // request asking to upgrade is answered like any other.
+        let connection = builder.serve_connection(TokioIo::new(stream), service);
         let connection = graceful.watch(connection);
         tokio::spawn(async move {
             // Held for the connection's life; dropped with it, which is what

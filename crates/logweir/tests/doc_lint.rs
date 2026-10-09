@@ -2032,6 +2032,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a created topic is used only once served",
             "until every partition of each topic it created has a",
         ),
+        // FX-24 (2026-10-08): a connection that sends nothing meets the
+        // console's header deadline, and the console no longer serves HTTP/2,
+        // so an ingress configured for an `h2c` backend must go back to 1.1.
+        (
+            "a silent connection meets the console's header deadline",
+            "h2c",
+        ),
         // PROD-08.1a (2026-10-08, item 41): complete coverage requested
         // through the CRDs, the API and the console, and a standing scope
         // that signs it.
