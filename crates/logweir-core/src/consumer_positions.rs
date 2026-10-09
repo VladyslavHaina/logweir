@@ -13,9 +13,10 @@
 //!   group, its outcome, type, states, members, whether it was active and its
 //!   position COUNTS, the observation window, and the positions document's
 //!   key, digest and length. Its size depends on the number of groups only
-//!   (at most [`MAX_SELECTED_GROUPS`]), never on partitions:
-//!   [`MAX_BLOCK_BYTES`] bounds it, and a unit row proves the bound at the
-//!   largest selection.
+//!   (at most [`MAX_SELECTED_GROUPS`]), never on partitions, and
+//!   [`MAX_BLOCK_BYTES`] is ENFORCED on its encoded bytes:
+//!   [`refuse_selection`] refuses, by name, a selection whose block could be
+//!   larger as JSON writes it ([`worst_case_block_bytes`]), escapes counted.
 //! - **The positions document** ([`PositionsDocument`],
 //!   `logweir/backups/<backup_id>/<run_id>.consumer-positions.json`, beside
 //!   the receipt) carries every named partition's facts and every captured
@@ -250,14 +251,74 @@ pub const MAX_SELECTED_GROUPS: usize = 100;
 /// characters, because the bound below is over the receipt's bytes.
 pub const MAX_GROUP_ID_BYTES: usize = 255;
 
-/// **The receipt block's size bound**: the deterministic JSON of a block over
-/// [`MAX_SELECTED_GROUPS`] groups of [`MAX_GROUP_ID_BYTES`]-byte ids,
-/// each with every field at its longest, stays under this — under a third of
-/// the catalog's 256 KiB read cap, whatever the number of partitions
-/// (`tests::the_block_is_bounded_by_the_selection_never_by_partitions`). A
-/// selection of ASCII ids of a few dozen characters is a few hundred bytes a
-/// group.
+/// **The receipt block's size cap, ENFORCED on its encoded bytes** (PROD-04.1
+/// review N1). [`refuse_selection`] measures the block a selection could
+/// produce AFTER JSON encoding ([`worst_case_block_bytes`]: every group
+/// captured, every field at its longest) and refuses one over this, by name
+/// ([`SELECTION_TOO_LARGE`]) and before anything runs — never a truncated
+/// block. Measured, not assumed: an id's characters count as JSON writes them,
+/// so `"` and `\` count two bytes each. Under a third of the catalog's 256 KiB
+/// read cap, whatever the number of partitions. 100 groups of 255-byte ids
+/// that need no escape fit (71,236 bytes at worst, four-byte characters
+/// included); ids of 255 `"` or `\` fit 84 to a selection (81,220 bytes at
+/// worst), and the 85th is refused (82,171).
 pub const MAX_BLOCK_BYTES: usize = 80 * 1024;
+
+/// The longest document key [`worst_case_block_bytes`] assumes: an object
+/// key's limit in S3, so no real `<backup_id>/<run_id>` key is longer.
+const WORST_CASE_DOCUMENT_KEY_BYTES: usize = 1024;
+
+/// **The encoded size of the largest block `selected` can produce**: the
+/// deterministic JSON (the receipt's own encoding) of a block in which every
+/// selected group is captured with its longest type and states, `u32::MAX`
+/// members and counts, beside the longest capture window and document
+/// reference. A real block of the same selection is never larger: a group
+/// that is not captured carries fewer fields, and every other value is a
+/// word from a closed set or a bounded number. Measured AFTER encoding, so an
+/// id's escapes count as written — the review's N1, where `"` and `\` made
+/// the block larger than the bound it claimed.
+#[must_use]
+pub fn worst_case_block_bytes(selected: &[String]) -> usize {
+    let at = DateTime::<Utc>::from_timestamp(i64::from(i32::MAX), 999_999_999)
+        .unwrap_or_else(Utc::now);
+    let counts = PositionCounts {
+        related: u32::MAX,
+        not_related: u32::MAX,
+        never_committed: u32::MAX,
+        beyond_end: u32::MAX,
+        failed: u32::MAX,
+        not_observed: u32::MAX,
+    };
+    let block = ConsumerPositions {
+        observed_from: at,
+        observed_to: at,
+        listing: "notComplete".to_string(),
+        document: DocumentRef {
+            key: "x".repeat(WORST_CASE_DOCUMENT_KEY_BYTES),
+            sha256: format!("sha256:{}", "f".repeat(64)),
+            bytes: u64::MAX,
+        },
+        groups: selected
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    GroupSnapshot {
+                        outcome: "captured".to_string(),
+                        reason: None,
+                        group_type: Some("consumer".to_string()),
+                        state: Some("stateUnknownToClient".to_string()),
+                        listed_state: Some("stateUnknownToClient".to_string()),
+                        members: Some(u32::MAX),
+                        active: Some(true),
+                        counts: Some(counts),
+                    },
+                )
+            })
+            .collect(),
+    };
+    crate::det_json::to_deterministic_json(&block).map_or(usize::MAX, |bytes| bytes.len())
+}
 
 /// The named refusal of a selection over [`MAX_SELECTED_GROUPS`] groups.
 pub const SELECTION_TOO_LARGE: &str = "ConsumerGroupSelectionTooLarge";
@@ -637,8 +698,10 @@ impl PositionCounts {
 /// Why a selection is refused before anything runs, or `None`: more than
 /// [`MAX_SELECTED_GROUPS`] ids ([`SELECTION_TOO_LARGE`]); a blank id, an id
 /// with a control character or longer than [`MAX_GROUP_ID_BYTES`] bytes
-/// ([`SELECTION_ID_INVALID`]); the same id twice ([`SELECTION_REPEATED`]).
-/// The message starts with the refusal's name.
+/// ([`SELECTION_ID_INVALID`]); the same id twice ([`SELECTION_REPEATED`]);
+/// and a selection whose block could be over [`MAX_BLOCK_BYTES`] as JSON
+/// writes it ([`SELECTION_TOO_LARGE`], [`worst_case_block_bytes`]). The
+/// message starts with the refusal's name.
 #[must_use]
 pub fn refuse_selection(selected: &[String]) -> Option<String> {
     if selected.len() > MAX_SELECTED_GROUPS {
@@ -668,6 +731,15 @@ pub fn refuse_selection(selected: &[String]) -> Option<String> {
                  selected once"
             ));
         }
+    }
+    let encoded = worst_case_block_bytes(selected);
+    if encoded > MAX_BLOCK_BYTES {
+        return Some(format!(
+            "{SELECTION_TOO_LARGE}: the receipt's summary of these {} consumer groups could be \
+             {encoded} bytes as JSON writes it (each id with its escapes, every group \
+             captured), over the {MAX_BLOCK_BYTES}-byte cap; select fewer groups or shorter ids",
+            selected.len()
+        ));
     }
     None
 }
@@ -811,61 +883,93 @@ mod tests {
         assert!(refuse_selection(&many[..MAX_SELECTED_GROUPS]).is_none());
     }
 
-    /// **H1's bound, proved at the largest selection.** A block over
-    /// [`MAX_SELECTED_GROUPS`] groups whose ids are [`MAX_GROUP_ID_BYTES`]
-    /// bytes of four-byte characters, every field at its longest and every
-    /// count at `u32::MAX`,
-    /// serialises under [`MAX_BLOCK_BYTES`] — and nothing in it depends on
-    /// how many partitions the named topics have.
+    /// **The cap is enforced on the ENCODED bytes (review N1).** Ids that need
+    /// no escape fit at the most groups and the longest ids: 100 ids of 255
+    /// bytes of four-byte characters (71,236 bytes at worst). Ids of `"` or
+    /// `\` double as JSON writes them: the review's construction (100 ids of
+    /// 255) is refused by name, and AT the cap the largest such selection (84
+    /// ids) is accepted and one more id is refused — never truncated. Raw
+    /// lengths would have admitted it. Every accepted selection's worst case
+    /// is within the cap, a third of the catalog's read cap.
     #[test]
-    fn the_block_is_bounded_by_the_selection_never_by_partitions() {
-        let at = DateTime::<Utc>::from_timestamp(4_000_000_000, 999_999_999).expect("an instant");
-        let groups = (0..MAX_SELECTED_GROUPS)
-            .map(|i| {
-                let id = format!("{i:03}{}", "\u{1F600}".repeat((MAX_GROUP_ID_BYTES - 3) / 4));
-                assert!(refuse_selection(std::slice::from_ref(&id)).is_none());
-                (
-                    id,
-                    GroupSnapshot {
-                        outcome: "captured".into(),
-                        reason: None,
-                        group_type: Some("consumer".into()),
-                        state: Some("stateUnknownToClient".into()),
-                        listed_state: Some("CompletingRebalance".into()),
-                        members: Some(u32::MAX),
-                        active: Some(true),
-                        counts: Some(PositionCounts {
-                            related: u32::MAX,
-                            not_related: u32::MAX,
-                            never_committed: u32::MAX,
-                            beyond_end: u32::MAX,
-                            failed: u32::MAX,
-                            not_observed: u32::MAX,
-                        }),
-                    },
-                )
-            })
-            .collect();
-        let id = "x".repeat(200);
-        let block = ConsumerPositions {
-            observed_from: at,
-            observed_to: at,
-            listing: "notComplete".into(),
-            document: DocumentRef {
-                key: document_key(&id, &id),
-                sha256: format!("sha256:{}", "f".repeat(64)),
-                bytes: u64::MAX,
-            },
-            groups,
+    fn the_cap_is_enforced_on_the_encoded_bytes_with_escape_heavy_ids_at_and_over_it() {
+        let ids = |n: usize, ch: &str, per: usize| -> Vec<String> {
+            (0..n)
+                .map(|i| format!("{i:03}{}", ch.repeat((MAX_GROUP_ID_BYTES - 3) / per)))
+                .collect()
         };
-        let bytes = crate::det_json::to_deterministic_json(&block).expect("serialises");
-        assert!(
-            bytes.len() < MAX_BLOCK_BYTES,
-            "the largest block is {} bytes, over the {MAX_BLOCK_BYTES}-byte bound",
-            bytes.len()
-        );
-        // The bound leaves two thirds of the catalog's read cap to the rest of
-        // the receipt.
+        // No escape: the most groups of the longest ids fit.
+        let emoji = ids(MAX_SELECTED_GROUPS, "\u{1F600}", 4);
+        assert!(emoji.iter().all(|i| i.len() <= MAX_GROUP_ID_BYTES));
+        assert!(worst_case_block_bytes(&emoji) <= MAX_BLOCK_BYTES);
+        assert_eq!(refuse_selection(&emoji), None);
+        for ch in ["\"", "\\"] {
+            // The review's construction: 100 ids of 255 escape-doubled bytes.
+            let all = ids(MAX_SELECTED_GROUPS, ch, 1);
+            assert!(all.iter().all(|i| i.len() == MAX_GROUP_ID_BYTES));
+            let encoded = worst_case_block_bytes(&all);
+            assert!(encoded > MAX_BLOCK_BYTES, "{encoded}");
+            let refused = refuse_selection(&all).expect("refused");
+            assert!(
+                refused.starts_with(&format!("{SELECTION_TOO_LARGE}: ")),
+                "{refused}"
+            );
+            assert!(
+                refused.contains(&format!("{encoded} bytes as JSON writes it")),
+                "{refused}"
+            );
+            // AT the cap: the largest such selection fits, one id more does
+            // not.
+            let at = (1..=MAX_SELECTED_GROUPS)
+                .take_while(|&n| worst_case_block_bytes(&all[..n]) <= MAX_BLOCK_BYTES)
+                .last()
+                .expect("one id fits");
+            assert_eq!(at, 84, "{ch}: the documented count");
+            assert_eq!(refuse_selection(&all[..at]), None, "{ch} x {at} fits");
+            let over = refuse_selection(&all[..=at]).expect("one more is refused");
+            assert!(
+                over.starts_with(&format!("{SELECTION_TOO_LARGE}: ")),
+                "{over}"
+            );
+            // What the cap measures is the encoding: the raw bytes of the
+            // refused selection are far under it.
+            let raw: usize = all[..=at].iter().map(String::len).sum();
+            assert!(raw < MAX_BLOCK_BYTES, "{raw}");
+        }
+        // A real block of the same ids is never larger than the worst case.
+        let real = ConsumerPositions {
+            observed_from: Utc::now(),
+            observed_to: Utc::now(),
+            listing: "complete".into(),
+            document: DocumentRef {
+                key: document_key("backup", "run"),
+                sha256: format!("sha256:{}", "0".repeat(64)),
+                bytes: 1,
+            },
+            groups: ids(3, "\"", 1)
+                .into_iter()
+                .map(|id| {
+                    (
+                        id,
+                        GroupSnapshot {
+                            outcome: "failed".into(),
+                            reason: Some("GenerationChangedDuringCapture".into()),
+                            group_type: None,
+                            state: None,
+                            listed_state: None,
+                            members: None,
+                            active: None,
+                            counts: None,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let real_bytes = crate::det_json::to_deterministic_json(&real)
+            .unwrap()
+            .len();
+        let real_ids: Vec<String> = real.groups.keys().cloned().collect();
+        assert!(real_bytes <= worst_case_block_bytes(&real_ids));
         const { assert!(MAX_BLOCK_BYTES * 3 <= 256 * 1024) };
     }
 
