@@ -20,9 +20,21 @@ use crate::scorecard::Scorecard;
 /// it. A complete verification's scorecard is still written as 1.4.0 (or 1.5.0
 /// for a PROD-01.3 mode), which those frozen files describe. **1.7.0 since
 /// PROD-11.1** (`source.selection`), written only for a narrowed restore; the
-/// 1.6.0 file is frozen beside it. The `$id` is built from
-/// [`crate::scorecard::FORMAT_VERSION_WITH_SELECTION`], the newest minor.
+/// 1.6.0 file is frozen beside it.
+///
+/// **2.0.0 since PROD-11.1b** (the owner's decision OD-9 (a)), the format's
+/// first MAJOR, written ONLY for a restore that states a partition subset:
+/// 1.7.0's fields, with `source.selection` REQUIRED and its `partitions` (a
+/// non-empty list of non-empty lists) and `engine_runs` (at least one)
+/// required in it, and `format_version` pinned to `2.x.y`. The 1.7.0 file is
+/// FROZEN beside it and still describes every other document this build
+/// writes (every 1.x one). The generator emits the 2.0.0 file: the Rust type
+/// reads both majors, so the requirements that make a document 2.0.0's are
+/// added here, on top of what the type derives. The `$id` is built from
+/// [`crate::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS`], the newest
+/// version.
 pub fn scorecard_schema() -> String {
+    use schemars::schema::{Schema, SchemaObject};
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
         s.option_nullable = true;
         s.option_add_null_type = false;
@@ -32,8 +44,38 @@ pub fn scorecard_schema() -> String {
         .into_root_schema_for::<Scorecard>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-        crate::scorecard::FORMAT_VERSION_WITH_SELECTION
+        crate::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
     ));
+    fn def<'a>(
+        definitions: &'a mut schemars::Map<String, Schema>,
+        name: &str,
+    ) -> &'a mut SchemaObject {
+        match definitions.get_mut(name) {
+            Some(Schema::Object(o)) => o,
+            _ => panic!("the scorecard schema defines {name}"),
+        }
+    }
+    fn property<'a>(o: &'a mut SchemaObject, name: &str) -> &'a mut SchemaObject {
+        match o.object().properties.get_mut(name) {
+            Some(Schema::Object(p)) => p,
+            _ => panic!("the scorecard schema's object has a {name} property"),
+        }
+    }
+    // A 2.0.0 document is a partition-subset restore's: it carries the
+    // selection block (arm PS-1), with its subsets and its engine runs.
+    let source = def(&mut root.definitions, "SourceInfo");
+    source.object().required.insert("selection".into());
+    property(source, "selection").extensions.remove("nullable");
+    let selection = def(&mut root.definitions, "SelectionLabel");
+    for name in ["partitions", "engine_runs"] {
+        selection.object().required.insert(name.into());
+        property(selection, name).extensions.remove("nullable");
+    }
+    property(selection, "partitions").array().min_items = Some(1);
+    property(selection, "engine_runs").number().minimum = Some(1.0);
+    property(def(&mut root.definitions, "TopicPartitions"), "partitions")
+        .array()
+        .min_items = Some(1);
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');
     out

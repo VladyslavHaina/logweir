@@ -102,6 +102,15 @@ pub struct DrillSpec {
 /// reason: a key an older build would ignore cannot carry a narrowing. A plan
 /// that states no start keeps the instant form byte for byte.
 ///
+/// # Partition subsets ride on the same mechanism (PROD-11.1b)
+///
+/// `restore.partitions` IS a key of its own, which a runner built before
+/// PROD-11.1 ignores. So a plan stating one must write its point in time in an
+/// interval form — `"<start>/<end>"`, or `"../<end>"` when it states no start
+/// (ISO 8601's open start: from the archive's floor) — and every older runner
+/// refuses the plan at parse instead of restoring every partition
+/// ([`RestoreSpecBlock::partitions`]).
+///
 /// # It is INCLUSIVE, and its receipt twin is not
 ///
 /// The window is a closed interval: the engine filters `timestamp >= start &&
@@ -161,19 +170,35 @@ pub struct RestoreSpecBlock {
     /// `restore.time_basis` rule applies to it as it does to `point_in_time`.
     /// Present only beside a `point_in_time`: the interval states both ends.
     pub window_start: Option<DateTime<Utc>>,
-    /// **PROD-11.1, REFUSED until the owner decides OD-9.** Per-topic
-    /// partition subsets, `{topic: [partition, …]}`. The key parses so it can
-    /// be refused BY NAME (`PartitionSubsetsAwaitOwnerDecision`, exit 3, at
-    /// phase 0 and in the restore preflight): a reader that predates a subset
-    /// restore's scorecard would read it as a full restore, so how such a
-    /// scorecard is versioned is the owner's decision
-    /// (`docs/to-do/product-expansion.md`, OD-9). Empty for every plan that
-    /// runs.
+    /// **PROD-11.1b (owner decision OD-9 (a)).** Per-topic partition subsets,
+    /// `{topic: [partition, …]}`: each named topic restores ONLY the listed
+    /// partitions; a selected topic not named restores every partition. A run
+    /// that states one signs scorecard format **2.0.0**, which every reader
+    /// before it refuses as an unsupported major instead of reading it as a
+    /// full restore.
+    ///
+    /// **Only beside the interval form of `point_in_time`** (the PROD-11.1
+    /// record §6, "the residual"): a runner built before PROD-11.1 ignores an
+    /// unknown `partitions` key and would restore EVERY partition of the plan
+    /// an approver narrowed. So a plan stating a subset writes its point in
+    /// time as `"<start>/<end>"`, or `"../<end>"` (an ISO 8601 interval with an
+    /// open start: from the archive's floor), which no older runner can parse:
+    /// it refuses the plan (`drill spec does not parse`, exit 1) before any
+    /// client exists. A subset beside a plain instant, or with no
+    /// `point_in_time`, is refused at parse; so is `"../<end>"` without a
+    /// subset, so each plan has one spelling. Empty for every plan that states
+    /// none, which keeps its bytes.
     pub partitions: BTreeMap<String, Vec<i32>>,
 }
 
+/// The open start of an ISO 8601 interval (ISO 8601-2, `"../<end>"`): the
+/// spelling of a partition-subset plan's point in time when it states no
+/// window start of its own, so the window starts at the archive's floor.
+pub const OPEN_INTERVAL_START: &str = "..";
+
 /// The YAML/JSON form of [`RestoreSpecBlock`]: `point_in_time` is an RFC 3339
-/// instant or `"<start>/<end>"`, and a `window_start` key is refused.
+/// instant, `"<start>/<end>"` or (beside `partitions` only) `"../<end>"`, and a
+/// `window_start` key is refused.
 #[derive(Deserialize)]
 struct RestoreSpecBlockWire {
     #[serde(default)]
@@ -196,14 +221,37 @@ fn parse_instant(text: &str) -> Result<DateTime<Utc>, String> {
         .map_err(|e| format!("`{text}` is not an RFC 3339 instant: {e}"))
 }
 
+/// How `restore.point_in_time` was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointInTimeForm {
+    /// One RFC 3339 instant: the window's end, from the archive's floor.
+    Instant,
+    /// `"<start>/<end>"`: a stated inclusive start.
+    Interval,
+    /// `"../<end>"`: an interval whose start is open, so the window starts at
+    /// the archive's floor — the spelling of a partition-subset plan that
+    /// states no start ([`OPEN_INTERVAL_START`]).
+    OpenStart,
+}
+
 /// `restore.point_in_time` as written: `(start, end)`, the start present only
 /// for the interval form `"<start>/<end>"`.
 pub fn parse_point_in_time(text: &str) -> Result<(Option<DateTime<Utc>>, DateTime<Utc>), String> {
+    parse_point_in_time_form(text).map(|(start, end, _)| (start, end))
+}
+
+/// [`parse_point_in_time`], with the form it was written in.
+pub fn parse_point_in_time_form(
+    text: &str,
+) -> Result<(Option<DateTime<Utc>>, DateTime<Utc>, PointInTimeForm), String> {
     match text.split_once('/') {
-        None => Ok((None, parse_instant(text)?)),
+        None => Ok((None, parse_instant(text)?, PointInTimeForm::Instant)),
+        Some((start, end)) if start.trim() == OPEN_INTERVAL_START => {
+            Ok((None, parse_instant(end)?, PointInTimeForm::OpenStart))
+        }
         Some((start, end)) => {
             let (start, end) = (parse_instant(start)?, parse_instant(end)?);
-            Ok((Some(start), end))
+            Ok((Some(start), end, PointInTimeForm::Interval))
         }
     }
 }
@@ -219,14 +267,37 @@ impl<'de> Deserialize<'de> for RestoreSpecBlock {
                  instead of restoring the whole archive",
             ));
         }
-        let (window_start, point_in_time) = match wire.point_in_time.as_deref() {
-            None => (None, None),
+        let (window_start, point_in_time, form) = match wire.point_in_time.as_deref() {
+            None => (None, None, None),
             Some(text) => {
-                let (start, end) = parse_point_in_time(text)
+                let (start, end, form) = parse_point_in_time_form(text)
                     .map_err(|e| D::Error::custom(format!("restore.point_in_time: {e}")))?;
-                (start, Some(end))
+                (start, Some(end), Some(form))
             }
         };
+        // PROD-11.1b: a partition subset is carried ONLY beside a point in
+        // time an older runner cannot parse, so no runner that would ignore
+        // the key ever restores every partition of a narrowed plan; and the
+        // open-start form is a subset plan's alone, so one plan has one
+        // spelling (and one `plan_hash`).
+        match (wire.partitions.is_empty(), form) {
+            (false, None | Some(PointInTimeForm::Instant)) => {
+                return Err(D::Error::custom(
+                    "restore.partitions is written only beside the interval form of \
+                     restore.point_in_time, \"<start>/<end>\" or \"../<end>\" (from the archive's \
+                     floor), which a runner that predates partition subsets refuses instead of \
+                     restoring every partition",
+                ))
+            }
+            (true, Some(PointInTimeForm::OpenStart)) => {
+                return Err(D::Error::custom(
+                    "restore.point_in_time: \"../<end>\" is the form of a plan that states \
+                     restore.partitions; a plan without a partition subset writes its point in \
+                     time as one instant",
+                ))
+            }
+            _ => {}
+        }
         Ok(RestoreSpecBlock {
             point_in_time,
             time_basis: wire.time_basis,
@@ -258,12 +329,24 @@ struct RestoreSpecBlockOut<'a> {
 impl Serialize for RestoreSpecBlock {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::Error;
+        let instant = |t: DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
         let point_in_time = match (self.window_start, self.point_in_time) {
+            // PROD-11.1b: a subset with no stated start is the OPEN-START
+            // interval, the one form its parse accepts.
+            (None, Some(end)) if !self.partitions.is_empty() => Some(PointInTimeOut::Interval(
+                format!("{OPEN_INTERVAL_START}/{}", instant(end)),
+            )),
+            (None, None) if !self.partitions.is_empty() => {
+                return Err(S::Error::custom(
+                    "restore.partitions without restore.point_in_time: a partition subset is \
+                     written beside the interval form, which states the window's end",
+                ))
+            }
             (None, end) => end.map(PointInTimeOut::Instant),
             (Some(start), Some(end)) => Some(PointInTimeOut::Interval(format!(
                 "{}/{}",
-                start.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
-                end.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+                instant(start),
+                instant(end)
             ))),
             (Some(_), None) => {
                 return Err(S::Error::custom(
