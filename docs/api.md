@@ -1843,7 +1843,10 @@ initialise, and that a valid session continues to its signed expiry: an IdP
 outage later must not take every replica out of rotation and cut sessions that
 need nothing from the provider. During such an outage sign-in fails closed on
 its own path, and existing sessions keep working until they expire. The body
-still names no endpoint and no reason.
+still names no endpoint and no reason. Until the provider has initialised, a
+readiness check reads discovery and the key set under the provider deadline
+(*Sign-in*, below), so a provider that stalls adds at most twenty seconds to
+it.
 
 ### Sign-in
 
@@ -1866,6 +1869,52 @@ that is what makes a provider's key rotation work without a restart, and what
 stops an attacker-chosen `kid` from becoming a request amplifier. While the
 provider is unreachable the cached keys keep working for a day, then validation
 fails closed.
+
+**Every provider request has a ten-second deadline, its body included
+(FX-28).** Discovery, the key set and the token exchange must each complete —
+connection, request, response head and the whole body — within ten seconds,
+and a document over 512 KiB is refused. A provider, or a path to it, that
+answers a head and then stops sending no longer holds a sign-in, or the
+browser's connection to the console, open: at the deadline the console drops
+its own connection to the provider and answers.
+
+| the request that stalled | the answer | audit `failureCode` |
+|---|---|---|
+| discovery, at `GET /auth/login` (fetched whenever the hour-long cache is stale; a failed fetch is not cached) | `503 kubernetes_unavailable`, "The identity provider could not be reached. Try again shortly." | `provider_timeout` |
+| the token or the key set, at `GET /auth/callback` | `401 unauthenticated`, "The sign-in could not be completed." | `provider_timeout` |
+
+The console's warning — `the identity provider is not usable` at login, `a
+sign-in was refused` at the callback — says "did not complete a request within
+the 10-second provider deadline". A provider that refused or failed the
+request (a transport cause, a non-2xx status, a document over the cap) is
+still `provider_unreachable` for discovery and the key set and
+`code_exchange_failed` for the token, and the same warning names the cause. The bound is per
+request, not per sign-in: `/auth/login` makes at most one request, so it
+answers within ten seconds; a callback makes at most four (discovery when
+stale, the token, the key set, and one refetch for an unknown `kid`), and one
+that stalls ends the callback, so only a provider that answers every request
+just inside the bound can take a callback to about forty seconds. A key-set
+request that stalls while cached keys are less than a day old is an outage
+like any other: the cached keys are used. A dial (the TCP connect and the TLS
+handshake) has a twelve-second bound of its own, for the dial that outlives
+its sign-in when the client's pool hands the request a connection that freed
+up meanwhile; inside a request the request's ten seconds always end first.
+
+Provider connections carry TCP keepalive (30 s idle, then three probes ten
+seconds apart), so a pooled connection to a provider that has gone silently is
+dropped after about a minute of idleness. A sign-in inside that minute can
+still pick the dead connection up and meet the deadline once.
+
+**What the deadline does not stop.** A failed discovery is not cached, and
+concurrent sign-ins do not share one fetch. While a provider stalls, every
+`/auth/login` whose discovery cache is stale dials the provider and holds its
+browser connection for the full ten seconds. At the sign-in limit (20 requests
+a minute per client, *Rate limits* below) one client holds about three of the
+console's 256 connections on average (20 × 10 s a minute), so about 77 client
+addresses can keep them all busy for as long as the provider stalls. Signed-in sessions are
+not affected by the provider, but they need a connection too. The bound is
+real (ten seconds per sign-in) and it needs a stalled provider first; a
+short negative cache or a single shared fetch is the follow-up.
 
 ### The session and the CSRF token
 
@@ -2075,8 +2124,9 @@ operator does about the residual:
 * **Alert** on the audit note `loginRateUntracked` (below), and on refused
   exchanges: the callback's audit failure is `code_exchange_failed`, and the
   console's warning `a sign-in was refused` carries the provider's status,
-  e.g. `the provider answered HTTP 429`. Watch the provider's own throttling
-  metrics for this client too.
+  e.g. `the provider answered HTTP 429`. A provider that stalls is
+  `provider_timeout` instead (*Sign-in* above). Watch the provider's own
+  throttling metrics for this client too.
 * **Keep a break-glass path** that does not sign in through the provider: the
   in-cluster administrator mode (`api.console.mode: localAdmin`, reached only
   by `kubectl port-forward deploy/<release>-api`; *What ships today, and what

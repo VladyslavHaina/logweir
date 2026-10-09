@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
-use logweir_api::auth::oidc::{HttpClient, HttpFuture};
+use logweir_api::auth::oidc::{HttpClient, HttpError, HttpFuture};
 use ring::rand::SystemRandom;
 use ring::signature::{self, EcdsaKeyPair, KeyPair, RsaKeyPair};
 use serde_json::{json, Value};
@@ -314,7 +314,9 @@ impl HttpClient for MockIdp {
                 return idp.with(|s| {
                     s.discovery_fetches += 1;
                     if s.discovery_down {
-                        return Err("the provider answered HTTP 503".to_string());
+                        return Err(HttpError::Failed(
+                            "the provider answered HTTP 503".to_string(),
+                        ));
                     }
                     let issuer = s
                         .issuer_override
@@ -341,12 +343,16 @@ impl HttpClient for MockIdp {
                 return idp.with(|s| {
                     s.jwks_fetches += 1;
                     if s.jwks_down {
-                        return Err("the provider answered HTTP 503".to_string());
+                        return Err(HttpError::Failed(
+                            "the provider answered HTTP 503".to_string(),
+                        ));
                     }
                     Ok(serde_json::to_vec(&json!({ "keys": s.published })).unwrap())
                 });
             }
-            Err(format!("the mock provider serves no {url}"))
+            Err(HttpError::Failed(format!(
+                "the mock provider serves no {url}"
+            )))
         })
     }
 
@@ -361,7 +367,9 @@ impl HttpClient for MockIdp {
         let body = body.to_string();
         Box::pin(async move {
             if url != format!("{}/token", idp.inner.issuer) {
-                return Err(format!("the mock provider serves no {url}"));
+                return Err(HttpError::Failed(format!(
+                    "the mock provider serves no {url}"
+                )));
             }
             let form: BTreeMap<String, String> =
                 serde_urlencoded::from_str(&body).unwrap_or_default();
@@ -370,17 +378,23 @@ impl HttpClient for MockIdp {
                 s.last_token_form = body.clone();
                 let code = form.get("code").cloned().unwrap_or_default();
                 let Some(grant) = s.grants.get(&code).cloned() else {
-                    return Err("the provider answered HTTP 400".to_string());
+                    return Err(HttpError::Failed(
+                        "the provider answered HTTP 400".to_string(),
+                    ));
                 };
                 if let Some(expected) = &grant.code_challenge {
                     let verifier = form.get("code_verifier").cloned().unwrap_or_default();
                     if &MockIdp::challenge(&verifier) != expected {
-                        return Err("the provider answered HTTP 400".to_string());
+                        return Err(HttpError::Failed(
+                            "the provider answered HTTP 400".to_string(),
+                        ));
                     }
                 }
                 if let Some(expected) = &grant.redirect_uri {
                     if form.get("redirect_uri") != Some(expected) {
-                        return Err("the provider answered HTTP 400".to_string());
+                        return Err(HttpError::Failed(
+                            "the provider answered HTTP 400".to_string(),
+                        ));
                     }
                 }
                 Ok(serde_json::to_vec(&json!({
