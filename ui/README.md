@@ -1375,7 +1375,12 @@ point recorded before format 1.5.0, a catalog synced by an older runner, a
 point listed without its topics, or a topic the backup could not judge
 (`noRecords`, `segmentUnreadable`, `segmentTooLargeForDetection`,
 `detectionTimeBudgetExceeded`) is said to be not assessed, by name; only a
-topic the point says `notDetected` for reads "no schema framing detected".
+topic the point says `notDetected` for reads "no Confluent wire-format framing
+detected" -- "in any archived record of" the topics when every one was judged
+whole (`basis: complete`), "in the sampled records of" them, with how many were
+sampled, when any was judged over the bounded sample. Only Confluent's payload
+prefix is looked for: ids carried in record headers, Apicurio's 8-byte ids and
+other formats read `notDetected` (see `docs/formats/backup-receipt.md`).
 `tests/schema-dependency.spec.js` holds each sentence, over the fixture the
 API's own row answers (`tests/fixtures/console/catalog-point-schema-dependency.json`).
 

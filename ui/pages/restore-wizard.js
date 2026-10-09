@@ -2918,10 +2918,24 @@ export function pointSchemaDependencyText(state) {
     return SCHEMA_REGISTRY_NOT_CAPTURED + " Schema-dependent topics: " + dependent.join(", ");
   }
   const notDetected = facts.topics
-    .filter((t) => (t.schemaDependency || {}).verdict === "notDetected").length;
-  return notDetected === facts.topics.length
-    ? "no schema framing detected in this point's archived records"
-    : "not assessed for " + (facts.topics.length - notDetected) + " of this point's topics";
+    .map((t) => t.schemaDependency || {})
+    .filter((d) => d.verdict === "notDetected");
+  return notDetected.length === facts.topics.length
+    ? noFramingDetectedText(notDetected, "this point's topics")
+    : "not assessed for " + (facts.topics.length - notDetected.length) + " of this point's topics";
+}
+
+/** The `notDetected` answer, worded by what was read. Only Confluent's wire
+ *  format is looked for, so the sentence names it; and when any of the topics
+ *  was judged over a bounded sample (`basis: sampled`), the sentence says the
+ *  sample, with how many of the topics it covers, never "the archived
+ *  records" -- framing outside the sample is not ruled out. */
+export function noFramingDetectedText(verdicts, scope) {
+  const sampled = verdicts.filter((d) => (d || {}).basis !== "complete").length;
+  return sampled === 0
+    ? "no Confluent wire-format framing detected in any archived record of " + scope
+    : "no Confluent wire-format framing detected in the sampled records of " + scope +
+      " (sampled for " + sampled + " of " + verdicts.length + ")";
 }
 
 /** The review's one-line answer for the selected topics. */
@@ -2935,9 +2949,17 @@ export function schemaDependencyText(state) {
   if (review.notAssessed.length > 0) {
     return "not assessed for " + review.notAssessed.join(", ");
   }
-  return selectedTopics(state).length > 0
-    ? "no schema framing detected in the selected topics' archived records"
-    : "no topic selected";
+  const topics = selectedTopics(state);
+  if (topics.length === 0) {
+    return "no topic selected";
+  }
+  const facts = sourceFactsOf(state);
+  const byName = new Map(
+    (Array.isArray(facts.topics) ? facts.topics : []).map((t) => [String(t.name), t]),
+  );
+  return noFramingDetectedText(
+    topics.map((name) => (byName.get(String(name)) || {}).schemaDependency || {}),
+    "the selected topics");
 }
 
 /** The review's warning block: the sentence, the topics with their ids, and

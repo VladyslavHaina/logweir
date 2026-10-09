@@ -153,7 +153,31 @@ test("prod030_no_warning_when_every_selected_topic_is_not_detected", async () =>
   assert.equal(byId(step6, "review-schema-dependency-warning"), null);
   assert.equal(byId(step6, "review-schema-dependency-not-assessed"), null);
   assert.equal(visible(byId(step6, "review-schema-dependency")),
-    "no schema framing detected in the selected topics' archived records");
+    "no Confluent wire-format framing detected in any archived record of the selected topics");
+});
+
+test("prod030_a_sampled_not_detected_topic_says_the_sample_never_every_record", async () => {
+  // `audit` judged over the bounded sample (`basis: sampled`): framing outside
+  // the sample is not ruled out, so the sentence says the sample and how many
+  // of the topics it covers. NEGATIVE CONTROL: the row above, `complete`.
+  const sampled = CHAIN.pointTopics.map((t) => t.name !== "audit" ? t
+    : Object.assign({}, t, { schemaDependency: { verdict: "notDetected", basis: "sampled" } }));
+  const state = await wizardOver(entry(sampled), ["audit"]);
+  const step6 = renderPlanStep(await preparePlan(state), state);
+  assert.equal(visible(byId(step6, "review-schema-dependency")),
+    "no Confluent wire-format framing detected in the sampled records of the selected " +
+    "topics (sampled for 1 of 1)");
+  assert.ok(!visible(step6).includes("any archived record"), "the sample is never 'every record'");
+  // The recovery-point step says the same of a point whose topics are all
+  // `notDetected`, one of the two sampled.
+  const two = [sampled[0], { name: "ledger", applyRoute: "unknown",
+    schemaDependency: { verdict: "notDetected", basis: "complete" } }];
+  assert.equal(pointSchemaDependencyText(await wizardOver(entry(two), ["audit"])),
+    "no Confluent wire-format framing detected in the sampled records of this point's " +
+    "topics (sampled for 1 of 2)");
+  const whole = [CHAIN.pointTopics[0], two[1]];
+  assert.equal(pointSchemaDependencyText(await wizardOver(entry(whole), ["audit"])),
+    "no Confluent wire-format framing detected in any archived record of this point's topics");
 });
 
 test("prod030_an_old_point_reads_not_assessed_never_no_registry_needed", async () => {
@@ -168,7 +192,7 @@ test("prod030_an_old_point_reads_not_assessed_never_no_registry_needed", async (
   assert.ok(note.startsWith(SCHEMA_DEPENDENCY_NOT_ASSESSED), note);
   assert.ok(note.endsWith("Not assessed: orders, audit."), note);
   assert.equal(schemaDependencyText(state), "not assessed for orders, audit");
-  assert.ok(!visible(step6).includes("no schema framing detected"),
+  assert.ok(!visible(step6).includes("framing detected"),
     "NEGATIVE CONTROL: absent read as 'none' fails this");
   // The `notAssessed` verdict is said the same way.
   const empty = await wizardOver(entry(), ["empty"]);
@@ -185,6 +209,16 @@ test("prod030_the_recovery_point_step_names_the_points_schema_dependent_topics",
   const bare = await wizardOver(entry([]), ["orders"]);
   assert.equal(pointSchemaDependencyText(bare),
     "not assessed: this point's topics are not listed by its catalog");
+  // NEGATIVE CONTROL: no dependent topic, one `notDetected` and one
+  // `notAssessed` -- never "no framing detected", which would read the
+  // unjudged topic as none.
+  const mixed = await wizardOver(entry(CHAIN.pointTopics.slice(0, 2)), ["audit"]);
+  assert.equal(pointSchemaDependencyText(mixed), "not assessed for 1 of this point's topics");
+  assert.ok(!visible(renderCatalogPointStep(mixed)).includes("framing detected"));
+  // ... and with the unjudged topic gone, the point says none was detected.
+  const judged = await wizardOver(entry(CHAIN.pointTopics.slice(0, 1)), ["audit"]);
+  assert.equal(pointSchemaDependencyText(judged),
+    "no Confluent wire-format framing detected in any archived record of this point's topics");
 });
 
 test("prod030_the_catalog_page_names_each_points_schema_dependent_topics", () => {
