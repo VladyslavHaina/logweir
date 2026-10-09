@@ -106,16 +106,24 @@ pub fn from_receipt(
     // signs — else FX-7's `FORMAT_VERSION_WITH_MANIFEST_VERSION` (1.2.0) when
     // the pin does, else FX-4's `FORMAT_VERSION` (1.1.0).
     let manifest_version_id = receipt.archive.manifest_version_id.clone();
-    let format_version =
-        if logweir_core::connection::is_prod_01_3_auth_mode(&receipt.source.auth.mode) {
-            crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES
-        } else if receipt.topic_configuration.is_some() {
-            FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
-        } else if manifest_version_id.is_some() {
-            FORMAT_VERSION_WITH_MANIFEST_VERSION
-        } else {
-            FORMAT_VERSION
-        };
+    // PROD-04.1: the receipt's consumer position evidence, summarised and
+    // bound by its digest; 1.5.0 when it travels.
+    let consumer_positions = receipt
+        .consumer_positions
+        .as_ref()
+        .map(crate::catalog::record::RecordConsumerPositions::of)
+        .transpose()?;
+    let format_version = if consumer_positions.is_some() {
+        crate::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+    } else if logweir_core::connection::is_prod_01_3_auth_mode(&receipt.source.auth.mode) {
+        crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES
+    } else if receipt.topic_configuration.is_some() {
+        FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
+    } else if manifest_version_id.is_some() {
+        FORMAT_VERSION_WITH_MANIFEST_VERSION
+    } else {
+        FORMAT_VERSION
+    };
     Ok(CatalogPoint {
         format_version: format_version.to_string(),
         point_id: point_id(receipt_bytes),
@@ -155,6 +163,7 @@ pub fn from_receipt(
         execution: execution_block(receipt, inputs),
         signing: inputs.signing.clone(),
         installation: inputs.installation.clone(),
+        consumer_positions,
     })
 }
 

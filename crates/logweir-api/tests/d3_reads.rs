@@ -1816,3 +1816,84 @@ async fn a_topic_whose_factor_or_count_was_not_recorded_is_published_without_it(
         "{listed}"
     );
 }
+
+/// Seed one catalog page whose FIRST entry carries `consumerPositions`;
+/// return that point as the point view lists it, and the other points.
+async fn listed_with_positions(cp: Value) -> (Value, Vec<Value>) {
+    let fake = seeded();
+    let mut lines = entry_lines();
+    let mut first: Value = serde_json::from_str(&lines[0]).expect("the fixture's entry is JSON");
+    first["consumerPositions"] = cp;
+    lines[0] = serde_json::to_string(&first).unwrap();
+    let digest = seed_page(&fake, "primary-g1-p0", &lines);
+    let mut catalog = fixture("recovery-catalog.json");
+    catalog["status"]["pages"] = json!([{
+        "configMapName": "primary-g1-p0",
+        "index": 0,
+        "count": lines.len(),
+        "sha256": digest,
+    }]);
+    fake.seed("recoverycatalogs", NS_A, catalog);
+    let app = TestApp::with(fake, Options::default());
+    let v = app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await
+        .json();
+    app.fake.assert_strict();
+    let items = v["items"].as_array().unwrap().clone();
+    let listed = items
+        .iter()
+        .find(|i| i["pointId"] == first["pointId"])
+        .expect("the point is listed")
+        .clone();
+    let others = items
+        .into_iter()
+        .filter(|i| i["pointId"] != first["pointId"])
+        .collect();
+    (listed, others)
+}
+
+/// **PROD-04.1: the point view publishes the consumer position evidence** —
+/// when the positions were observed, how long before the recovery point
+/// (the snapshot's freshness), and per group its outcome and how many
+/// positions relate to archived data; a point that carries none publishes
+/// none (NOT PUBLISHED, never "no groups").
+#[tokio::test]
+async fn the_point_view_publishes_the_consumer_position_summary_and_its_freshness() {
+    let (_, baseline) = listed_with_positions(json!(null)).await;
+    let first: Value = serde_json::from_str(&entry_lines()[0]).unwrap();
+    let recovery_ms = first["recoveryPointAtMs"]
+        .as_i64()
+        .expect("the fixture's point");
+    let (listed, others) = listed_with_positions(json!({
+        "observedFromMs": recovery_ms - 2500,
+        "observedToMs": recovery_ms - 1500,
+        "listing": "complete",
+        "groups": [
+            {"groupId": "billing", "outcome": "captured", "groupType": "consumer", "active": true,
+             "positions": {"related": 5, "notRelated": 1, "neverCommitted": 2, "beyondEnd": 0,
+                           "failed": 0, "notObserved": 0}},
+            {"groupId": "word-count", "outcome": "excluded", "reason": "GroupTypeNotCaptured",
+             "groupType": "other"},
+        ],
+    }))
+    .await;
+    let cp = &listed["consumerPositions"];
+    assert_eq!(cp["observedBeforeRecoveryPointMs"], 1500, "{listed}");
+    assert_eq!(cp["listing"], "complete", "{listed}");
+    assert_eq!(
+        cp["groups"],
+        json!([
+            {"groupId": "billing", "outcome": "captured", "groupType": "consumer", "active": true,
+             "positions": {"related": 5, "notRelated": 1, "neverCommitted": 2, "beyondEnd": 0,
+                           "failed": 0, "notObserved": 0}},
+            {"groupId": "word-count", "outcome": "excluded", "reason": "GroupTypeNotCaptured",
+             "groupType": "other"},
+        ]),
+        "{listed}"
+    );
+    assert!(cp["observedTo"].is_string(), "{listed}");
+    for other in others.iter().chain(baseline.iter()) {
+        assert!(other.get("consumerPositions").is_none(), "{other}");
+    }
+}

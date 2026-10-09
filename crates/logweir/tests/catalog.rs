@@ -1567,7 +1567,7 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // PROD-01.3's auth modes), so a renumber moves the constant and the
     // justfile, not this test; the 1.0.0, 1.1.0, 1.2.0 and 1.3.0 files are
     // frozen beside it.
-    let version = logweir::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES;
+    let version = logweir::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS;
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../schemas/logweir-catalog-point-{version}.json"
     ));
@@ -2425,4 +2425,164 @@ fn the_point_id_fixture_is_the_catalogs() {
         logweir::catalog::record::point_id(&bytes),
         fixture["pointId"].as_str().unwrap()
     );
+}
+
+// ===================================================================== PROD-04.1
+
+/// A 1.5.0 receipt: `receipt_1_3` plus a consumer position block over its one
+/// topic — `billing` captured (one related position, one never committed),
+/// `share-1` excluded GroupTypeNotCaptured, `hidden` failed.
+fn receipt_1_5() -> BackupReceipt {
+    let mut r = receipt_1_3();
+    r.format_version = "1.5.0".into();
+    r.consumer_positions = Some(
+        serde_json::from_value(serde_json::json!({
+            "observed_from": "2026-09-15T02:59:58Z",
+            "observed_to": "2026-09-15T02:59:59.250Z",
+            "listing": "complete",
+            "topics": {"orders": {"partitions": [
+                {"partition": 0, "observed": true, "log_start": 0, "high_watermark": 40,
+                 "log_start_after": 0, "high_watermark_after": 41,
+                 "archived_first": 0, "archived_last": 40},
+                {"partition": 1, "observed": true, "log_start": 0, "high_watermark": 3,
+                 "archived_first": 0, "archived_last": 2}
+            ], "changed_during_capture": false}},
+            "groups": {
+                "billing": {"outcome": "captured", "group_type": "classic", "state": "Empty",
+                            "listed_state": "Empty", "members": 0, "active": false,
+                            "positions": [
+                                {"topic": "orders", "partition": 0, "status": "captured",
+                                 "position": 17, "coverage": "withinArchive"},
+                                {"topic": "orders", "partition": 1, "status": "noCommittedPosition"}
+                            ]},
+                "share-1": {"outcome": "excluded", "reason": "GroupTypeNotCaptured",
+                            "group_type": "other"},
+                "hidden": {"outcome": "failed", "reason": "NotVisibleToPrincipal"}
+            }
+        }))
+        .expect("a block"),
+    );
+    r.validate_invariants().expect("the 1.5.0 fixture is valid");
+    r
+}
+
+/// The record summarises the receipt's block, bound by its digest, and is
+/// 1.5.0; a receipt without the block writes the record it wrote before.
+#[test]
+fn a_1_5_0_record_summarises_and_binds_the_receipts_consumer_positions() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_5();
+    let p = point_for(&r, "s3://kafka-backups/prod", &key);
+    assert_eq!(
+        p.format_version,
+        logweir::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+    );
+    let cp = p.consumer_positions.as_ref().expect("the summary travels");
+    assert_eq!(
+        cp.sha256,
+        r.consumer_positions.as_ref().unwrap().digest().unwrap()
+    );
+    assert_eq!(cp.observed_to, ts("2026-09-15T02:59:59.250Z"));
+    assert_eq!(cp.listing, "complete");
+    let ids: Vec<&str> = cp.groups.iter().map(|g| g.group_id.as_str()).collect();
+    assert_eq!(ids, ["billing", "hidden", "share-1"], "id order");
+    let billing = &cp.groups[0];
+    assert_eq!(billing.outcome, "captured");
+    assert_eq!(billing.active, Some(false));
+    let counts = billing.positions.expect("captured groups carry counts");
+    assert_eq!((counts.related, counts.never_committed), (1, 1));
+    assert_eq!(
+        cp.groups[1].reason.as_deref(),
+        Some("NotVisibleToPrincipal")
+    );
+    assert_eq!(cp.groups[1].positions, None);
+    assert_eq!(cp.groups[2].group_type.as_deref(), Some("other"));
+    assert_eq!(
+        reader::cross_check(&p, &r, &receipt_bytes(&r)),
+        CrossCheck::Agrees
+    );
+    // Without the block: 1.3.0, no field.
+    let mut none = r.clone();
+    none.consumer_positions = None;
+    none.format_version = "1.3.0".into();
+    let q = point_for(&none, "s3://kafka-backups/prod", &key);
+    assert_eq!(q.format_version, "1.3.0");
+    assert!(q.consumer_positions.is_none());
+    let bytes = q.canonical_bytes().unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("consumer_positions"));
+}
+
+/// **Rule 3 for the summary.** A record may carry none; never one its receipt
+/// does not back — a group made captured, a position made to relate, a digest
+/// changed, or a summary beside a receipt without the block.
+#[test]
+fn a_consumer_positions_summary_the_receipt_does_not_back_is_a_record_mismatch() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_5();
+    let bytes = receipt_bytes(&r);
+    let honest = point_for(&r, "s3://kafka-backups/prod", &key);
+    let mismatch = |p: &CatalogPoint, receipt: &BackupReceipt, want: &str| match reader::cross_check(
+        p,
+        receipt,
+        &receipt_bytes(receipt),
+    ) {
+        CrossCheck::RecordMismatch(d) => {
+            assert!(d.iter().any(|m| m.starts_with(want)), "{want}: {d:?}")
+        }
+        other => panic!("{want}: must not agree: {other:?}"),
+    };
+    let mut promoted = honest.clone();
+    let hidden = &mut promoted.consumer_positions.as_mut().unwrap().groups[1];
+    hidden.outcome = "captured".into();
+    hidden.reason = None;
+    mismatch(&promoted, &r, "consumer_positions: the summary of");
+    let mut related = honest.clone();
+    let counts = related.consumer_positions.as_mut().unwrap().groups[0]
+        .positions
+        .as_mut()
+        .unwrap();
+    counts.related = 2;
+    counts.never_committed = 0;
+    mismatch(&related, &r, "consumer_positions: the summary of");
+    let mut redigested = honest.clone();
+    redigested.consumer_positions.as_mut().unwrap().sha256 = format!("sha256:{}", "e".repeat(64));
+    mismatch(&redigested, &r, "consumer_positions.sha256");
+    let old = receipt_1_3();
+    let mut invented = point_for(&old, "s3://kafka-backups/prod", &key);
+    invented.consumer_positions = honest.consumer_positions.clone();
+    mismatch(&invented, &old, "consumer_positions: sha256:");
+    // Knowing less is not a contradiction.
+    let mut quieter = honest.clone();
+    quieter.consumer_positions = None;
+    assert_eq!(
+        reader::cross_check(&quieter, &r, &bytes),
+        CrossCheck::Agrees
+    );
+}
+
+/// **Rule 4 for the summary.** Two records of one point conflict only where
+/// both carry one and they differ.
+#[test]
+fn two_records_conflict_on_consumer_positions_only_where_both_carry_them() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_5();
+    let a = point_for(&r, "s3://kafka-backups/prod", &key);
+    let mut b = point_for(&r, "s3://dr-copy/prod", &key);
+    b.consumer_positions = None;
+    assert!(matches!(
+        reader::reconcile(&a, &b),
+        Duplicate::SameIdentity { .. }
+    ));
+    let mut c = a.clone();
+    c.archive.location_id = "s3://dr-copy/prod".into();
+    c.consumer_positions.as_mut().unwrap().listing = "notComplete".into();
+    match reader::reconcile(&a, &c) {
+        Duplicate::Conflict(d) => {
+            assert!(
+                d.iter().any(|m| m.starts_with("consumer_positions:")),
+                "{d:?}"
+            )
+        }
+        other => panic!("two copies disagreeing on the summary are a conflict: {other:?}"),
+    }
 }

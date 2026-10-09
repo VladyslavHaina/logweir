@@ -1019,6 +1019,76 @@ pub const MAX_ENTRY_TOPICS: usize = 64;
 pub const MAX_OWNER_DETECTION: usize =
     logweir_core::topic_configuration::OWNER_DETECTION_SOURCES.len();
 
+/// **PROD-04.1.** The most consumer groups one entry may list — the runner's
+/// own cap (`logweir::check::kinds::catalog_sync::MAX_ENTRY_GROUPS`, held
+/// equal by `the_grammar_this_runner_writes_is_the_grammar_the_controller_parses`).
+/// An entry listing more is MALFORMED, for [`MAX_ENTRY_TOPICS`]' reason.
+pub const MAX_ENTRY_GROUPS: usize = 32;
+
+/// **PROD-04.1.** A point's consumer position evidence, as the runner lists
+/// it: when the positions were observed, the listing word, and per selected
+/// group its outcome and how many positions relate to archived data — never a
+/// position. Informational: the runner's rule-3 cross-check tied it to the
+/// verified receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsumerPositions {
+    /// When the group capture started, epoch milliseconds.
+    pub observed_from_ms: i64,
+    /// When it ended, before the engine.
+    pub observed_to_ms: i64,
+    /// `complete` or `notComplete`.
+    pub listing: String,
+    /// The groups, bounded by [`MAX_ENTRY_GROUPS`]; empty when left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<EntryGroup>,
+    /// How many groups the runner left out of `groups`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups_omitted: Option<u32>,
+}
+
+/// **PROD-04.1.** One selected group of a point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryGroup {
+    /// The group id.
+    pub group_id: String,
+    /// `captured`, `excluded` or `failed`.
+    pub outcome: String,
+    /// The receipt's reason, when not captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// `classic`, `consumer` or `other`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_type: Option<String>,
+    /// Whether it had members at capture (captured only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// A captured group's positions, counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions: Option<EntryPositionCounts>,
+}
+
+/// **PROD-04.1.** A captured group's positions, counted by what they say about
+/// archived data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryPositionCounts {
+    /// Related to archived data (within the archive, or at its end).
+    pub related: u32,
+    /// Captured, not related (before or beyond the archive, before the log
+    /// start, or with nothing archived).
+    pub not_related: u32,
+    /// No committed offset: never offset 0.
+    pub never_committed: u32,
+    /// Above the partition's end at capture.
+    pub beyond_end: u32,
+    /// Not read.
+    pub failed: u32,
+    /// A partition the capture did not observe.
+    pub not_observed: u32,
+}
+
 /// **PROD-05.1.** One topic of a point, as the runner lists it: the record's
 /// layout and how its configuration is held — never a configuration value.
 /// Informational: two observations of one point are not compared on it (the
@@ -1123,6 +1193,12 @@ pub struct RunnerEntry {
     /// entry carrying more is malformed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_detection: Option<Vec<String>>,
+    /// **PROD-04.1.** The point's consumer position evidence. ABSENT is NOT
+    /// PUBLISHED — no group selected, an older runner or record, a point that
+    /// is not `Available`. Its groups are bounded by [`MAX_ENTRY_GROUPS`]; an
+    /// entry listing more is malformed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_positions: Option<EntryConsumerPositions>,
 }
 
 impl RunnerEntry {
@@ -1253,6 +1329,9 @@ pub struct ViewEntry {
     /// See [`RunnerEntry::owner_detection`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_detection: Option<Vec<String>>,
+    /// See [`RunnerEntry::consumer_positions`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_positions: Option<EntryConsumerPositions>,
 }
 
 /// What the sync counted over the WHOLE walk, not only over the window.
@@ -1701,6 +1780,15 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
                 {
                     skipped = skipped.saturating_add(1);
                 }
+                // PROD-04.1: and for the consumer groups.
+                Ok(entry)
+                    if entry
+                        .consumer_positions
+                        .as_ref()
+                        .is_some_and(|c| c.groups.len() > MAX_ENTRY_GROUPS) =>
+                {
+                    skipped = skipped.saturating_add(1);
+                }
                 Ok(entry) => entries.push(entry),
                 // SKIPPED AND COUNTED, NEVER FATAL — D3 §5.2's reading rules:
                 // a malformed entry is one point this build cannot show, not a
@@ -1839,6 +1927,16 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
                     kept.owner_detection = entry.owner_detection;
                 } else if kept.topics.is_empty() && kept.topics_omitted.is_none() {
                     kept.topics_omitted = entry.topics_omitted;
+                }
+                // PROD-04.1: the same rule for the consumer position summary:
+                // a copy that lists the groups fills one that does not, and a
+                // copy that carries any summary fills one that carries none.
+                match (&kept.consumer_positions, &entry.consumer_positions) {
+                    (None, Some(_)) => kept.consumer_positions = entry.consumer_positions,
+                    (Some(k), Some(e)) if k.groups.is_empty() && !e.groups.is_empty() => {
+                        kept.consumer_positions = entry.consumer_positions;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2276,6 +2374,7 @@ pub fn view_entry(entry: RunnerEntry, trust: &TrustView, now: DateTime<Utc>) -> 
         topics: entry.topics,
         topics_omitted: entry.topics_omitted,
         owner_detection: entry.owner_detection,
+        consumer_positions: entry.consumer_positions,
     }
 }
 

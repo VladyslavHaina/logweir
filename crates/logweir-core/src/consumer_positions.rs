@@ -391,6 +391,47 @@ impl ConsumerPositions {
     }
 }
 
+/// One captured group's positions, counted by what they say about archived
+/// data: the summary the catalog point record, the catalog's view, the
+/// product API and both receipt readers' lines carry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PositionCounts {
+    /// Captured, with a coverage in [`RELATED`].
+    pub related: u32,
+    /// Captured, with any other coverage word.
+    pub not_related: u32,
+    /// `noCommittedPosition`.
+    pub never_committed: u32,
+    /// `excluded: PositionBeyondEnd`.
+    pub beyond_end: u32,
+    /// `failed`.
+    pub failed: u32,
+    /// `notObserved`.
+    pub not_observed: u32,
+}
+
+impl PositionCounts {
+    /// The counts of `positions`.
+    #[must_use]
+    pub fn of(positions: &[PositionEntry]) -> Self {
+        let mut c = Self::default();
+        for p in positions {
+            let slot = match p.status.as_str() {
+                "captured" if p.coverage.as_deref().is_some_and(|w| RELATED.contains(&w)) => {
+                    &mut c.related
+                }
+                "captured" => &mut c.not_related,
+                "noCommittedPosition" => &mut c.never_committed,
+                "excluded" => &mut c.beyond_end,
+                "failed" => &mut c.failed,
+                _ => &mut c.not_observed,
+            };
+            *slot = slot.saturating_add(1);
+        }
+        c
+    }
+}
+
 /// Why a selection is refused at phase −1, or `None`. A blank id, an id with
 /// a control character or longer than [`MAX_GROUP_ID_CHARS`], the same id
 /// twice, or more than [`MAX_SELECTED_GROUPS`] ids.

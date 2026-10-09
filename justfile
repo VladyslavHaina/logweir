@@ -124,12 +124,12 @@ golden:
 # each must equal its writer's newest constant
 # (`scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`,
 # `backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`,
-# `catalog::record::FORMAT_VERSION_WITH_AUTH_MODES`), which also builds the
+# `catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
 scorecard_schema_version := "1.6.0"
 receipt_schema_version := "1.5.0"
-catalog_schema_version := "1.4.0"
+catalog_schema_version := "1.5.0"
 
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json

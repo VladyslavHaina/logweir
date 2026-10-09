@@ -264,6 +264,7 @@ pub fn cross_check(
     disagreements.extend(unbacked_coverage(point, receipt));
     disagreements.extend(unbacked_configuration(point, receipt));
     disagreements.extend(unbacked_owner_detection(point, receipt));
+    disagreements.extend(unbacked_consumer_positions(point, receipt));
     if disagreements.is_empty() {
         CrossCheck::Agrees
     } else {
@@ -364,6 +365,49 @@ fn unbacked_owner_detection(point: &CatalogPoint, receipt: &BackupReceipt) -> Op
                 .map_or_else(|| "none in the receipt".to_string(), |d| format!("{d:?}"))
         )
     })
+}
+
+/// **PROD-04.1, rule 3 for `consumer_positions`.** The same one-way rule: a
+/// record may carry none (an older writer, or a backup that selected no
+/// group), never a summary or digest its verified receipt does not back. A
+/// record that claimed a group captured, or its positions related to archived
+/// data, where the receipt says otherwise would hand a cutover positions
+/// nobody signed — so the whole summary is recomputed from the receipt's block
+/// and compared, its digest first.
+fn unbacked_consumer_positions(point: &CatalogPoint, receipt: &BackupReceipt) -> Option<String> {
+    let claimed = point.consumer_positions.as_ref()?;
+    let backed = receipt
+        .consumer_positions
+        .as_ref()
+        .map(crate::catalog::record::RecordConsumerPositions::of);
+    match backed {
+        None => Some(format!(
+            "consumer_positions: {} vs none in the receipt",
+            claimed.sha256
+        )),
+        Some(Err(e)) => Some(format!("consumer_positions: {} vs {e}", claimed.sha256)),
+        Some(Ok(b)) if b.sha256 != claimed.sha256 => Some(format!(
+            "consumer_positions.sha256: {} vs {}",
+            claimed.sha256, b.sha256
+        )),
+        Some(Ok(b)) if &b != claimed => Some(format!(
+            "consumer_positions: the summary of {} is not the receipt block's",
+            claimed.sha256
+        )),
+        Some(Ok(_)) => None,
+    }
+}
+
+/// **PROD-04.1, rule 4.** Two records of one point must carry the same
+/// consumer position summary wherever BOTH carry one.
+fn consumer_positions_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Option<String> {
+    match (a.consumer_positions.as_ref(), b.consumer_positions.as_ref()) {
+        (Some(ca), Some(cb)) if ca != cb => Some(format!(
+            "consumer_positions: {} vs {}",
+            ca.sha256, cb.sha256
+        )),
+        _ => None,
+    }
 }
 
 /// A model entry in one short phrase, for a disagreement line: counts, the
@@ -470,6 +514,7 @@ pub fn reconcile(a: &CatalogPoint, b: &CatalogPoint) -> Duplicate {
     let mut disagreements = ReceiptFacts::of_record(a).disagreements(&ReceiptFacts::of_record(b));
     disagreements.extend(coverage_conflicts(a, b));
     disagreements.extend(configuration_conflicts(a, b));
+    disagreements.extend(consumer_positions_conflicts(a, b));
     if !disagreements.is_empty() {
         return Duplicate::Conflict(disagreements);
     }

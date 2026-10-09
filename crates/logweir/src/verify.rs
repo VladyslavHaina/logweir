@@ -467,19 +467,11 @@ pub fn consumer_positions_lines(
     for (id, g) in &block.groups {
         let line = match (g.outcome.as_str(), &g.positions) {
             ("captured", Some(positions)) => {
-                let count = |f: &dyn Fn(&model::PositionEntry) -> bool| {
-                    positions.iter().filter(|p| f(p)).count()
-                };
-                let related = count(&|p| {
-                    p.coverage
-                        .as_deref()
-                        .is_some_and(|c| model::RELATED.contains(&c))
-                });
-                let captured = count(&|p| p.status == "captured");
+                let c = model::PositionCounts::of(positions);
                 format!(
                     "consumer_positions[{id:?}]: captured {}, state {} (listed {}), {} \
-                     member(s), {}; positions: {related} related to archived data, {} not \
-                     related, {} never committed, {} beyond the end, {} failed, {} not observed",
+                     member(s), {}; positions: {} related to archived data, {} not related, {} \
+                     never committed, {} beyond the end, {} failed, {} not observed",
                     g.group_type.as_deref().unwrap_or(""),
                     g.state.as_deref().unwrap_or(""),
                     g.listed_state.as_deref().unwrap_or(""),
@@ -489,11 +481,12 @@ pub fn consumer_positions_lines(
                     } else {
                         "active"
                     },
-                    captured - related,
-                    count(&|p| p.status == "noCommittedPosition"),
-                    count(&|p| p.status == "excluded"),
-                    count(&|p| p.status == "failed"),
-                    count(&|p| p.status == "notObserved"),
+                    c.related,
+                    c.not_related,
+                    c.never_committed,
+                    c.beyond_end,
+                    c.failed,
+                    c.not_observed,
                 )
             }
             (outcome, _) => format!(

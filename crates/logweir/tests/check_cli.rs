@@ -6735,6 +6735,101 @@ fn a_point_with_more_topics_than_the_cap_lists_none_and_counts_them() {
     assert!(entry.get("ownerDetection").is_none(), "{entry}");
 }
 
+/// **PROD-04.1.** A 1.5.0 receipt over `orders` (one partition) selecting
+/// `ids`: the first captured at a position the archive holds, every other
+/// excluded GroupNotFound.
+fn positioned_catalog_receipt(ids: &[String]) -> BackupReceipt {
+    let mut r = modelled_catalog_receipt(&[("orders", 3, 1)]);
+    r.format_version =
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.to_string();
+    let mut groups = serde_json::Map::new();
+    for (i, id) in ids.iter().enumerate() {
+        groups.insert(
+            id.clone(),
+            if i == 0 {
+                serde_json::json!({"outcome": "captured", "group_type": "classic",
+                    "state": "Stable", "listed_state": "Stable", "members": 1, "active": true,
+                    "positions": [{"topic": "orders", "partition": 0, "status": "captured",
+                                   "position": 3, "coverage": "withinArchive"}]})
+            } else {
+                serde_json::json!({"outcome": "excluded", "reason": "GroupNotFound"})
+            },
+        );
+    }
+    r.consumer_positions = Some(
+        serde_json::from_value(serde_json::json!({
+            "observed_from": "2026-09-16T02:59:58Z",
+            "observed_to": "2026-09-16T02:59:59Z",
+            "listing": "complete",
+            "topics": {"orders": {"partitions": [{"partition": 0, "observed": true,
+                "log_start": 0, "high_watermark": 9, "archived_first": 0, "archived_last": 8}],
+                "changed_during_capture": false}},
+            "groups": groups,
+        }))
+        .expect("a block"),
+    );
+    assert_eq!(r.validate_invariants(), Ok(()));
+    r
+}
+
+/// **PROD-04.1: the catalog view shows the snapshot's freshness and whether
+/// each group's positions relate to archived data.** An `Available` 1.5.0
+/// point publishes when its positions were observed and, per group, its
+/// outcome and counts; the control — a 1.3.0 point — publishes nothing (NOT
+/// PUBLISHED).
+#[test]
+fn an_available_1_5_0_point_publishes_its_consumer_position_summary() {
+    let receipt = positioned_catalog_receipt(&["billing".into(), "gone".into()]);
+    let (objects, _) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Available", "{entry}");
+    let cp = &entry["consumerPositions"];
+    assert_eq!(
+        cp["observedToMs"],
+        catalog_ts("2026-09-16T02:59:59Z").timestamp_millis(),
+        "{entry}"
+    );
+    // Freshness: one second before the recovery point.
+    assert_eq!(
+        entry["recoveryPointAtMs"].as_i64().unwrap() - cp["observedToMs"].as_i64().unwrap(),
+        1000,
+        "{entry}"
+    );
+    assert_eq!(cp["listing"], "complete", "{entry}");
+    assert_eq!(
+        cp["groups"],
+        serde_json::json!([
+            {"groupId": "billing", "outcome": "captured", "groupType": "classic", "active": true,
+             "positions": {"related": 1, "notRelated": 0, "neverCommitted": 0, "beyondEnd": 0,
+                           "failed": 0, "notObserved": 0}},
+            {"groupId": "gone", "outcome": "excluded", "reason": "GroupNotFound"},
+        ]),
+        "{entry}"
+    );
+    let (control, _) = versioned_objects(
+        &modelled_catalog_receipt(&[("orders", 3, 1)]),
+        &[("v1", CATALOG_MANIFEST)],
+    );
+    let control = only_entry(control);
+    assert!(control.get("consumerPositions").is_none(), "{control}");
+}
+
+/// More groups than the cap: none listed, the count said; the freshness stays.
+#[test]
+fn a_point_with_more_groups_than_the_cap_lists_none_and_counts_them() {
+    use logweir::check::kinds::catalog_sync::MAX_ENTRY_GROUPS;
+    let ids: Vec<String> = (0..=MAX_ENTRY_GROUPS).map(|i| format!("g{i:03}")).collect();
+    let (objects, _) = versioned_objects(
+        &positioned_catalog_receipt(&ids),
+        &[("v1", CATALOG_MANIFEST)],
+    );
+    let entry = only_entry(objects);
+    let cp = &entry["consumerPositions"];
+    assert!(cp.get("groups").is_none(), "{entry}");
+    assert_eq!(cp["groupsOmitted"], MAX_ENTRY_GROUPS + 1, "{entry}");
+    assert_eq!(cp["listing"], "complete", "{entry}");
+}
+
 /// A pinned point whose pinned version IS the current one is `Available`,
 /// with the record's own (pinned) format reported.
 #[test]
@@ -8860,6 +8955,7 @@ fn the_grammar_this_runner_writes_is_the_grammar_the_controller_parses() {
     assert_eq!(usize_const("MAX_BODY_SIGNERS"), cs::MAX_BODY_SIGNERS);
     assert_eq!(usize_const("MAX_ENTRY_LOCATIONS"), cs::MAX_ENTRY_LOCATIONS);
     assert_eq!(usize_const("MAX_ENTRY_TOPICS"), cs::MAX_ENTRY_TOPICS);
+    assert_eq!(usize_const("MAX_ENTRY_GROUPS"), cs::MAX_ENTRY_GROUPS);
     assert_eq!(usize_const("MAX_BODY_PAGES"), cs::MAX_BODY_PAGES);
     assert_eq!(usize_const("MAX_HISTOGRAM_DAYS"), cs::MAX_HISTOGRAM_DAYS);
     assert!(
