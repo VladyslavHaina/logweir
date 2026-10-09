@@ -3098,6 +3098,14 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
                         .or_default()
                         .insert("list discovery.k8s.io/endpointslices".to_string());
                 }
+                // FX-13a: a shared console claims each sign-in `state` by
+                // creating one Event in its OWN namespace before the code is
+                // exchanged (`KubeAdapter::claim_sign_in_state`, the
+                // `create events` pair `linkage.rs` pins). That one atom, in
+                // the release namespace only, and no other verb on events.
+                want.entry(RENDER_NAMESPACE.to_string())
+                    .or_default()
+                    .insert("create core/events".to_string());
             }
         }
         assert_grants(

@@ -444,6 +444,26 @@ check_console_grants() {
       sort -u "$dir/expected.variant" -o "$dir/expected.variant"
     fi
 
+    # FX-13a — THE THIRD CONDITIONAL PAIR. A render whose console runs in
+    # shared mode spends `create events` in the release namespace: a sign-in
+    # claims its `state` by creating one Event before the code is exchanged
+    # (`KubeAdapter::claim_sign_in_state`, pinned by `linkage.rs` as
+    # `create events`), and readiness dry-runs it. localAdmin mode has no
+    # sign-in and must not be granted it.
+    if grep -q '^    mode: shared$' "$render_file"; then
+      case "$(sed '/^[[:space:]]*\/\//d' "$adapter")" in
+        *'"create", "events"'*) ;;
+        *)
+          rm -rf "$dir"
+          echo "render-install: $render_file runs a shared console but $adapter no longer" >&2
+          echo "  spends \`create events\` (the sign-in claim); the grant would be one nobody uses." >&2
+          exit 1
+          ;;
+      esac
+      printf '%s\n' 'create events' >> "$dir/expected.variant"
+      sort -u "$dir/expected.variant" -o "$dir/expected.variant"
+    fi
+
     if [ ! -s "$dir/granted" ]; then
       if [ "$render_file" = "$demo" ]; then
         rm -rf "$dir"

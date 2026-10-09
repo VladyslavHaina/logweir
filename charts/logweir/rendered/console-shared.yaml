@@ -8063,6 +8063,23 @@ rules:
     resources: ["endpointslices"]
     verbs: ["list"]
 ---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: logweir-api-signin
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
 # Source: logweir/templates/controller-scope.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -8247,6 +8264,27 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: logweir-api-trusted-proxy
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
+    namespace: logweir-system
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: logweir-api-signin
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: logweir-api-signin
 subjects:
   - kind: ServiceAccount
     name: logweir-api
