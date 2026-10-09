@@ -425,7 +425,7 @@ librdkafka directly — in Kafka's text form, or `null` with the reason
   arm 7 judges `config_coverage`. No document without the block changes
   verdict; the corpus (`e2e/fixtures/invariants/`, a case per refusing arm and
   three accepted shapes) and the parity gate re-prove that on every `just
-  lint`; `verify_scorecard.py` is 1.23.0. Two different recorded IDs are not
+  lint`; `verify_scorecard.py` is 1.24.0. Two different recorded IDs are not
   refused — they are what the run observed — and both readers say so.
 - **Readers built before PROD-01.4a** accept every 1.5.0 document — the major
   is unchanged and the block is an optional field they ignore — print no topic

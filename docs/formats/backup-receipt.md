@@ -1069,7 +1069,7 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
   PROD-01.3 mode is accepted by readers from PROD-01.3 on, exactly as a 1.4.0
   one. Arms 22–26 read only the new block, so this is MINOR under OD-7 (a).
   Older readers print no IDs; an auditor who needs them verifies with script
-  1.23.0 or a `logweir` built from PROD-01.4a on.
+  1.24.0 or a `logweir` built from PROD-01.4a on.
 - **Old receipts are never reinterpreted.** A receipt before 1.5.0 records no
   topic ID: every topic's generation in it is UNKNOWN, never the same as
   another point's.
