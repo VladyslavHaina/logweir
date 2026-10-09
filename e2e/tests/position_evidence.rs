@@ -1,10 +1,12 @@
 #![cfg(feature = "e2e")]
 //! **PROD-04.1 — consumer position evidence, through the shipped `logweir
 //! backup run`, against a real broker.** Every row reads the signed receipt
-//! back from the archive bucket and checks it against the broker's OWN tools
-//! (`kafka-consumer-groups.sh`, `e2e/compose/groups.sh list`), never against
-//! the code under test alone; every accepted receipt is verified by both
-//! readers, which must print the same `consumer_positions` lines.
+//! and the positions document it binds back from the bucket and checks them
+//! against the broker's OWN tools (`kafka-consumer-groups.sh`,
+//! `e2e/compose/groups.sh list`), never against the code under test alone;
+//! every accepted receipt is verified by both readers WITH its positions
+//! document, which must print the same `consumer_positions` lines, and both
+//! readers refuse the same document with one byte changed (arm CP-2).
 //!
 //! | row | proves | negative control |
 //! |---|---|---|
@@ -15,6 +17,7 @@
 //! | `expired_records_and_deleted_offsets_are_never_read_as_positions` | a position below the log start (DeleteRecords) is `beforeLogStart`; a group whose offsets on one topic were deleted (the shape offset expiry leaves) is `noCommittedPosition` there, never 0, and keeps its other topic's position | the CLI shows no row for the deleted offsets |
 //! | `a_partition_added_during_the_capture_is_listed_not_observed` | a partition added while the engine runs is listed for each captured group as `notObserved: PartitionAddedDuringCapture` | the partitions read at capture are captured |
 //! | `the_capture_is_readable_after_the_source_topic_and_group_are_gone` | after the backup the source topic and group are deleted; the receipt still verifies under both readers and still says where the group was | the source itself now answers the group absent |
+//! | `a_large_selection_keeps_the_receipt_small_and_its_positions_verified` | review H1's two sizes live — 100 groups (the most) over 10 topics of 11 partitions, and 10 groups over 20 of 12, every group committed on every partition: the signed receipt stays under 64 KiB (a quarter of the catalog's read cap), every group is captured with counts over every partition, the positions document holds all of them and both readers verify it, and the catalog point carries the summary | the positions document itself is over 256 KiB at both sizes: inline, the receipt would have been `Unreadable` to the catalog |
 //!
 //! # Running them
 //!
@@ -35,7 +38,9 @@ mod harness;
 
 use harness::{bin, demo_dir, engine_bin, engine_digest, engine_mount, engine_version, root};
 use logweir_core::backup_receipt::BackupReceipt;
-use logweir_core::consumer_positions::{ConsumerPositions, GroupSnapshot, RELATED};
+use logweir_core::consumer_positions::{
+    ConsumerPositions, GroupSnapshot, PositionEntry, PositionsDocument, RELATED,
+};
 use logweir_kafka::positions::{CommittedPosition, TopicPartition};
 use logweir_kafka::rdkafka_reader::RdKafkaReader;
 use logweir_kafka::reader::AuthConfig;
@@ -488,6 +493,9 @@ struct Backup {
     receipt_bytes: Vec<u8>,
     receipt: BackupReceipt,
     catalog_key: Option<String>,
+    /// The positions document the receipt binds, read back from the evidence
+    /// store at the key the receipt names, and its exact bytes.
+    document: Option<(Vec<u8>, PositionsDocument)>,
 }
 
 impl Backup {
@@ -502,6 +510,58 @@ impl Backup {
             .groups
             .get(id)
             .unwrap_or_else(|| panic!("no outcome for {id}: {:#?}", self.block().groups))
+    }
+    /// The positions document, as put beside the receipt.
+    fn doc(&self) -> &PositionsDocument {
+        &self
+            .document
+            .as_ref()
+            .expect("a run that selects groups puts its positions document")
+            .1
+    }
+    /// `group`'s document entry for one partition, when it lists one.
+    fn entry(&self, id: &str, topic: &str, partition: u32) -> Option<PositionEntry> {
+        self.doc()
+            .groups
+            .get(id)?
+            .positions
+            .iter()
+            .find(|e| e.topic == topic && e.partition == partition)
+            .cloned()
+    }
+    /// `group`'s positions over EVERY partition the document names:
+    /// `(topic, partition)` → `(status, position, coverage)`, a partition the
+    /// sparse entry does not list read as `noCommittedPosition` — exactly
+    /// what its `no_committed_position` count says, and checked to add up.
+    fn positions_of(&self, id: &str) -> BTreeMap<(String, i32), Recorded> {
+        let doc = self.doc();
+        let g = doc
+            .groups
+            .get(id)
+            .unwrap_or_else(|| panic!("{id} has no positions: it was not captured"));
+        let mut out = BTreeMap::new();
+        let mut unlisted = 0u32;
+        for (topic, t) in &doc.topics {
+            for f in &t.partitions {
+                let key = (topic.clone(), f.partition as i32);
+                match g
+                    .positions
+                    .iter()
+                    .find(|e| &e.topic == topic && e.partition == f.partition)
+                {
+                    Some(e) => out.insert(key, (e.status.clone(), e.position, e.coverage.clone())),
+                    None => {
+                        unlisted += 1;
+                        out.insert(key, ("noCommittedPosition".to_string(), None, None))
+                    }
+                };
+            }
+        }
+        assert_eq!(
+            unlisted, g.no_committed_position,
+            "{id}: the unlisted partitions are exactly the ones counted"
+        );
+        out
     }
 }
 
@@ -612,12 +672,20 @@ fn finished(backup_id: &str, out: Output) -> Backup {
         .get(&receipt_key)
         .unwrap_or_else(|e| panic!("read {receipt_key}: {e}"));
     let receipt: BackupReceipt = serde_json::from_slice(&receipt_bytes).expect("a receipt");
+    let document = receipt.consumer_positions.as_ref().map(|cp| {
+        let (bytes, _) = archive_store(backup_id)
+            .get(&cp.document.key)
+            .unwrap_or_else(|e| panic!("read {}: {e}", cp.document.key));
+        let doc: PositionsDocument = serde_json::from_slice(&bytes).expect("a positions document");
+        (bytes, doc)
+    });
     Backup {
         backup_id: backup_id.to_string(),
         receipt_key,
         receipt_bytes,
         receipt,
         catalog_key,
+        document,
     }
 }
 
@@ -639,27 +707,73 @@ fn verify_both(b: &Backup) -> Value {
         .expect("the sidecar");
     std::fs::write(&sig, sidecar).expect("written");
     let pubkey = root().join("e2e/fixtures/signed/public.pem");
-    let mut rust = Command::new(bin());
-    rust.args([
-        "drill",
-        "verify",
-        "--payload-type",
-        "backup-receipt",
-        "--scorecard",
-    ])
-    .arg(&doc)
-    .arg("--signature")
-    .arg(&sig)
-    .arg("--public-key")
-    .arg(&pubkey);
-    let rust = output_within(rust, 60);
-    let mut py = Command::new(harness::auditor_python());
-    py.arg(root().join("docs/verify_scorecard.py"))
-        .args(["--payload-type", "backup-receipt"])
+    // The positions document, exactly as put, beside the receipt.
+    let positions = dir.join("receipt.consumer-positions.json");
+    std::fs::write(
+        &positions,
+        &b.document.as_ref().expect("the positions document").0,
+    )
+    .expect("written");
+    let readers = |positions: &std::path::Path| {
+        let mut rust = Command::new(bin());
+        rust.args([
+            "drill",
+            "verify",
+            "--payload-type",
+            "backup-receipt",
+            "--scorecard",
+        ])
         .arg(&doc)
+        .arg("--signature")
         .arg(&sig)
-        .arg(&pubkey);
-    let py = output_within(py, 60);
+        .arg("--public-key")
+        .arg(&pubkey)
+        .arg("--consumer-positions")
+        .arg(positions);
+        let mut py = Command::new(harness::auditor_python());
+        py.arg(root().join("docs/verify_scorecard.py"))
+            .args(["--payload-type", "backup-receipt", "--consumer-positions"])
+            .arg(positions)
+            .arg(&doc)
+            .arg(&sig)
+            .arg(&pubkey);
+        (output_within(rust, 60), output_within(py, 60))
+    };
+    // NEGATIVE CONTROL: one byte of the document changed after signing is
+    // refused by BOTH readers at arm CP-2, never read as positions.
+    let mut tampered_bytes = b.document.as_ref().unwrap().0.clone();
+    let at = tampered_bytes
+        .iter()
+        .rposition(|c| c.is_ascii_digit())
+        .expect("a digit");
+    tampered_bytes[at] = if tampered_bytes[at] == b'9' {
+        b'8'
+    } else {
+        tampered_bytes[at] + 1
+    };
+    let tampered = dir.join("tampered.consumer-positions.json");
+    std::fs::write(&tampered, &tampered_bytes).expect("written");
+    let (rust_t, py_t) = readers(&tampered);
+    assert_eq!(
+        rust_t.status.code(),
+        Some(4),
+        "drill verify:\n{}",
+        text(&rust_t)
+    );
+    assert_eq!(
+        py_t.status.code(),
+        Some(1),
+        "verify_scorecard.py:\n{}",
+        text(&py_t)
+    );
+    for o in [&rust_t, &py_t] {
+        assert!(
+            text(o).contains("it is not the document this receipt signed"),
+            "a tampered positions document is refused at CP-2:\n{}",
+            text(o)
+        );
+    }
+    let (rust, py) = readers(&positions);
     let lines = |o: &Output| -> Vec<String> {
         text(o)
             .lines()
@@ -692,7 +806,13 @@ fn verify_both(b: &Backup) -> Value {
         r, p,
         "the two readers print different consumer position lines"
     );
-    json!({"rust_exit": 0, "python_exit": 0, "lines": r})
+    assert!(
+        r.iter()
+            .any(|l| l.contains("verified against this receipt")),
+        "{r:#?}"
+    );
+    json!({"rust_exit": 0, "python_exit": 0, "lines": r,
+           "tampered": {"rust_exit": 4, "python_exit": 1}})
 }
 
 fn catalog_summary(b: &Backup) -> Value {
@@ -720,24 +840,9 @@ fn write_evidence(broker: &Broker, row: &str, v: &Value) {
     eprintln!("[prod-04-1] evidence: {}", p.display());
 }
 
-/// `group`'s positions as the receipt records them: `(topic, partition)` →
-/// `(status, position, coverage)`.
-/// `(status, position, coverage)`.
+/// `(status, position, coverage)` of one partition, as the document records
+/// it (or `noCommittedPosition` where its sparse entry counts the partition).
 type Recorded = (String, Option<i64>, Option<String>);
-
-fn positions_of(g: &GroupSnapshot) -> BTreeMap<(String, i32), Recorded> {
-    g.positions
-        .as_ref()
-        .expect("a captured group lists its positions")
-        .iter()
-        .map(|p| {
-            (
-                (p.topic.clone(), p.partition as i32),
-                (p.status.clone(), p.position, p.coverage.clone()),
-            )
-        })
-        .collect()
-}
 
 // ============================================================ row 1
 
@@ -781,7 +886,7 @@ fn every_selected_group_gets_one_outcome_in_the_signed_receipt() {
         block.listing, "complete",
         "the super user's listing is complete"
     );
-    let partitions = block.topics["pa-orders"].partitions.len();
+    let partitions = b.doc().topics["pa-orders"].partitions.len();
     assert_eq!(partitions, 3, "pa-orders has three partitions");
 
     let mut observed = serde_json::Map::new();
@@ -811,7 +916,7 @@ fn every_selected_group_gets_one_outcome_in_the_signed_receipt() {
                 // Every partition listed; each position the CLI's; NEVER 0
                 // for a partition the CLI has no committed offset for.
                 let cli = broker.cli_offsets(group);
-                let recorded = positions_of(g);
+                let recorded = b.positions_of(group);
                 assert_eq!(
                     recorded.len(),
                     partitions,
@@ -885,7 +990,7 @@ fn every_selected_group_gets_one_outcome_in_the_signed_receipt() {
             "typed_line": typed,
             "fixture": fixture,
             "groups": observed,
-            "topics": block.topics,
+            "topics": b.doc().topics,
             "verify": verify,
             "catalog_summary": summary,
         }),
@@ -939,12 +1044,12 @@ fn a_group_hidden_from_the_backup_principal_is_never_absent() {
         (
             hidden.outcome.as_str(),
             hidden.reason.as_deref(),
-            hidden.positions.is_none()
+            hidden.counts.is_none()
         ),
         ("failed", Some("NotVisibleToPrincipal"), true),
         "NEVER GroupNotFound: the group may exist, and this principal may not see it"
     );
-    let visible = positions_of(restricted.group("pa-visible"));
+    let visible = restricted.positions_of("pa-visible");
     assert_eq!(
         visible[&("pa-orders".to_string(), 0)].1,
         Some(5),
@@ -969,7 +1074,10 @@ fn a_group_hidden_from_the_backup_principal_is_never_absent() {
     });
     let seen = superuser.group("pa-hidden");
     assert_eq!(seen.outcome, "captured", "{seen:#?}");
-    assert_eq!(positions_of(seen)[&("pa-orders".to_string(), 0)].1, Some(7));
+    assert_eq!(
+        superuser.positions_of("pa-hidden")[&("pa-orders".to_string(), 0)].1,
+        Some(7)
+    );
     write_evidence(
         &broker,
         "a_group_hidden_from_the_backup_principal_is_never_absent",
@@ -1076,7 +1184,7 @@ fn a_group_that_rebalances_during_the_capture_is_captured_active() {
         "NEGATIVE CONTROL: a rebalancing group is never quiescent"
     );
     let cli = broker.cli_offsets(&group);
-    for ((t, p), (status, position, _)) in positions_of(g) {
+    for ((t, p), (status, position, _)) in b.positions_of(&group) {
         assert_eq!(status, "captured");
         assert_eq!(
             position,
@@ -1127,17 +1235,11 @@ fn a_position_beyond_the_end_is_excluded_and_the_end_is_captured() {
         cli_groups: vec![],
     });
     let key = (topic.clone(), 0);
-    let facts = &b.block().topics[&topic].partitions[0];
+    let facts = &b.doc().topics[&topic].partitions[0];
     assert_eq!(facts.high_watermark, Some(4));
     let p = |g: &str| {
-        b.group(g)
-            .positions
-            .as_ref()
-            .expect("captured")
-            .iter()
-            .find(|e| (e.topic.clone(), e.partition as i32) == key)
-            .cloned()
-            .expect("listed")
+        b.entry(g, &key.0, key.1 as u32)
+            .expect("a committed partition is listed")
     };
     let e = p(&beyond);
     assert_eq!(
@@ -1159,7 +1261,8 @@ fn a_position_beyond_the_end_is_excluded_and_the_end_is_captured() {
     write_evidence(
         &broker,
         "a_position_beyond_the_end_is_excluded_and_the_end_is_captured",
-        &json!({"topic": b.block().topics, "groups": b.block().groups, "verify": verify}),
+        &json!({"topic": b.doc().topics, "groups": b.block().groups,
+                "positions": b.doc().groups, "verify": verify}),
     );
 }
 
@@ -1235,8 +1338,8 @@ fn expired_records_and_deleted_offsets_are_never_read_as_positions() {
         plan_groups: vec![behind.clone(), deleted.clone()],
         cli_groups: vec![],
     });
-    assert_eq!(b.block().topics[&expired].partitions[0].log_start, Some(6));
-    let behind_positions = positions_of(b.group(&behind));
+    assert_eq!(b.doc().topics[&expired].partitions[0].log_start, Some(6));
+    let behind_positions = b.positions_of(&behind);
     assert_eq!(
         behind_positions[&(expired.clone(), 0)],
         (
@@ -1246,7 +1349,7 @@ fn expired_records_and_deleted_offsets_are_never_read_as_positions() {
         ),
         "the records it would read next expired from the source"
     );
-    let deleted_positions = positions_of(b.group(&deleted));
+    let deleted_positions = b.positions_of(&deleted);
     assert_eq!(
         deleted_positions[&(expired.clone(), 0)],
         ("noCommittedPosition".to_string(), None, None),
@@ -1257,7 +1360,8 @@ fn expired_records_and_deleted_offsets_are_never_read_as_positions() {
     write_evidence(
         &broker,
         "expired_records_and_deleted_offsets_are_never_read_as_positions",
-        &json!({"topics": b.block().topics, "groups": b.block().groups, "verify": verify}),
+        &json!({"topics": b.doc().topics, "groups": b.block().groups,
+                "positions": b.doc().groups, "verify": verify}),
     );
 }
 
@@ -1333,18 +1437,20 @@ fn a_partition_added_during_the_capture_is_listed_not_observed() {
             stderr: t_err.join().unwrap_or_default(),
         },
     );
-    let facts = &b.block().topics[&topic].partitions;
+    let facts = &b.doc().topics[&topic].partitions;
     assert_eq!(
         facts.len(),
         3,
         "the partition read after the engine is listed: {:#?}",
-        b.block().topics
+        b.doc().topics
     );
     assert!(facts[0].observed && facts[1].observed && !facts[2].observed);
-    let positions = positions_of(b.group(&group));
+    let positions = b.positions_of(&group);
     assert_eq!(positions[&(topic.clone(), 0)].1, Some(2));
     assert_eq!(positions[&(topic.clone(), 1)].1, Some(3));
-    let added_entry = b.group(&group).positions.as_ref().unwrap()[2].clone();
+    let added_entry = b
+        .entry(&group, &topic, 2)
+        .expect("the added partition is listed, notObserved");
     assert_eq!(
         (
             added_entry.status.as_str(),
@@ -1358,7 +1464,8 @@ fn a_partition_added_during_the_capture_is_listed_not_observed() {
     write_evidence(
         &broker,
         "a_partition_added_during_the_capture_is_listed_not_observed",
-        &json!({"topic": b.block().topics, "groups": b.block().groups, "verify": verify}),
+        &json!({"topic": b.doc().topics, "groups": b.block().groups,
+                "positions": b.doc().groups, "verify": verify}),
     );
 }
 
@@ -1390,10 +1497,7 @@ fn the_capture_is_readable_after_the_source_topic_and_group_are_gone() {
         plan_groups: vec![group.clone()],
         cli_groups: vec![],
     });
-    assert_eq!(
-        positions_of(b.group(&group))[&(topic.clone(), 0)].1,
-        Some(3)
-    );
+    assert_eq!(b.positions_of(&group)[&(topic.clone(), 0)].1, Some(3));
     // The source loses the group and the topic.
     drop(cleanup);
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1436,5 +1540,90 @@ fn the_capture_is_readable_after_the_source_topic_and_group_are_gone() {
         &broker,
         "the_capture_is_readable_after_the_source_topic_and_group_are_gone",
         &json!({"verify": verify, "catalog_summary": summary, "group": b.group(&group)}),
+    );
+}
+
+// ============================================================ row 8
+
+/// **Review H1, live: the receipt stays small however many partitions the
+/// selected groups hold.** See the module doc.
+#[test]
+#[ignore = "needs a broker that types groups (3.9 or 4.x)"]
+fn a_large_selection_keeps_the_receipt_small_and_its_positions_verified() {
+    let broker = default_broker();
+    require_typed(&broker);
+    let mut measured = Vec::new();
+    for (groups, topics, partitions) in [(100usize, 10usize, 11i32), (10, 20, 12)] {
+        let n = nonce();
+        let names: Vec<String> = (0..topics)
+            .map(|t| format!("p041-h1-{n}-t{t:02}"))
+            .collect();
+        let ids: Vec<String> = (0..groups)
+            .map(|g| format!("p041-h1-{n}-g{g:03}"))
+            .collect();
+        let _cleanup = Cleanup {
+            broker: &broker,
+            topics: names.clone(),
+            groups: ids.clone(),
+            members: vec![],
+        };
+        for t in &names {
+            broker.create_topic(t, partitions as u32);
+        }
+        let every: Vec<(&str, i32, i64)> = names
+            .iter()
+            .flat_map(|t| (0..partitions).map(move |p| (t.as_str(), p, 0)))
+            .collect();
+        for id in &ids {
+            broker.commit(id, &every);
+        }
+        let topic_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let b = backup(&Plan {
+            backup_id: format!("p041-h1-{n}"),
+            bootstrap: broker.plaintext.clone(),
+            scram: false,
+            topics: &topic_refs,
+            plan_groups: ids.clone(),
+            cli_groups: vec![],
+        });
+        let total = topics * partitions as usize;
+        let (doc_bytes, doc) = b.document.as_ref().expect("the positions document");
+        let size = json!({
+            "groups": groups, "topics": topics, "partitions": partitions,
+            "receipt_bytes": b.receipt_bytes.len(), "document_bytes": doc_bytes.len(),
+        });
+        eprintln!("[prod-04-1] h1 {size}");
+        assert!(
+            b.receipt_bytes.len() < 64 * 1024,
+            "the receipt is not well under the catalog's 256 KiB read cap: {size}"
+        );
+        assert!(
+            doc_bytes.len() > 256 * 1024,
+            "NEGATIVE CONTROL: the positions are over the cap inline: {size}"
+        );
+        for id in &ids {
+            let g = b.group(id);
+            assert_eq!(g.outcome, "captured", "{id}: {g:#?}");
+            let c = g.counts.expect("counts");
+            assert_eq!(c.total(), total as u64, "{id}: every partition counted");
+            assert_eq!(c.never_committed, 0, "{id} committed everywhere");
+            assert_eq!(doc.groups[id].positions.len(), total, "{id}");
+        }
+        let verify = verify_both(&b);
+        let summary = catalog_summary(&b);
+        assert_eq!(
+            summary["groups"].as_array().map(Vec::len),
+            Some(groups),
+            "the catalog point summarises every group"
+        );
+        measured.push(
+            json!({"size": size, "verify_exit": [verify["rust_exit"], verify["python_exit"]],
+                             "tampered": verify["tampered"]}),
+        );
+    }
+    write_evidence(
+        &broker,
+        "a_large_selection_keeps_the_receipt_small_and_its_positions_verified",
+        &json!({"measured": measured}),
     );
 }
