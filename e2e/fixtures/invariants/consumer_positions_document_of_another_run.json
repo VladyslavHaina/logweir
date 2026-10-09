@@ -106,7 +106,7 @@
     "observed_to": "2026-09-09T11:02:16Z",
     "listing": "complete",
     "document": {
-      "key": "logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json",
+      "key": "logweir/backups/logweir-backup-01J8Z9QK7V/another-run.consumer-positions.json",
       "sha256": "sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8",
       "bytes": 2581
     },
@@ -145,7 +145,7 @@
       },
       "gone": {
         "outcome": "excluded",
-        "reason": "NotVisibleToPrincipal"
+        "reason": "GroupNotFound"
       },
       "hidden": {
         "outcome": "failed",

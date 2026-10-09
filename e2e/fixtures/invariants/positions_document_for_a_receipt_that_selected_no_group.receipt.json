@@ -1,5 +1,5 @@
 {
-  "format_version": "1.5.0",
+  "format_version": "1.3.0",
   "run_id": "01J8Z9QK7V6M3F2R5T8W1XB0CD",
   "backup_id": "logweir-backup-01J8Z9QK7V",
   "requested_at": "2026-09-09T11:02:14Z",
@@ -100,62 +100,5 @@
   "owner_detection": [
     "declared",
     "kafkaTopicResources"
-  ],
-  "consumer_positions": {
-    "observed_from": "2026-09-09T11:02:15Z",
-    "observed_to": "2026-09-09T11:02:16Z",
-    "listing": "complete",
-    "document": {
-      "key": "logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json",
-      "sha256": "sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8",
-      "bytes": 2581
-    },
-    "groups": {
-      "audit": {
-        "outcome": "captured",
-        "group_type": "consumer",
-        "state": "Empty",
-        "listed_state": "Empty",
-        "members": 0,
-        "active": false,
-        "counts": {
-          "related": 0,
-          "not_related": 1,
-          "never_committed": 0,
-          "beyond_end": 1,
-          "failed": 1,
-          "not_observed": 1
-        }
-      },
-      "billing": {
-        "outcome": "captured",
-        "group_type": "classic",
-        "state": "Stable",
-        "listed_state": "Stable",
-        "members": 2,
-        "active": true,
-        "counts": {
-          "related": 2,
-          "not_related": 0,
-          "never_committed": 1,
-          "beyond_end": 0,
-          "failed": 0,
-          "not_observed": 1
-        }
-      },
-      "gone": {
-        "outcome": "excluded",
-        "reason": "NotVisibleToPrincipal"
-      },
-      "hidden": {
-        "outcome": "failed",
-        "reason": "NotVisibleToPrincipal"
-      },
-      "share-1": {
-        "outcome": "excluded",
-        "reason": "GroupTypeNotCaptured",
-        "group_type": "other"
-      }
-    }
-  }
+  ]
 }

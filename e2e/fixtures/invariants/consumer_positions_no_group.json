@@ -105,53 +105,10 @@
     "observed_from": "2026-09-09T11:02:15Z",
     "observed_to": "2026-09-09T11:02:16Z",
     "listing": "complete",
-    "topics": {
-      "orders": {
-        "partitions": [
-          {
-            "partition": 0,
-            "observed": true,
-            "log_start": 0,
-            "high_watermark": 20,
-            "log_start_after": 0,
-            "high_watermark_after": 24,
-            "archived_first": 0,
-            "archived_last": 23
-          },
-          {
-            "partition": 1,
-            "observed": true,
-            "log_start": 5,
-            "high_watermark": 9,
-            "log_start_after": 5,
-            "high_watermark_after": 9,
-            "archived_first": 5,
-            "archived_last": 8
-          },
-          {
-            "partition": 2,
-            "observed": false,
-            "log_start_after": 0,
-            "high_watermark_after": 3,
-            "archived_first": 0,
-            "archived_last": 2
-          }
-        ],
-        "changed_during_capture": false
-      },
-      "payments": {
-        "partitions": [
-          {
-            "partition": 0,
-            "observed": true,
-            "log_start": 0,
-            "high_watermark": 7,
-            "archived_first": 0,
-            "archived_last": 6
-          }
-        ],
-        "changed_during_capture": false
-      }
+    "document": {
+      "key": "logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json",
+      "sha256": "sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8",
+      "bytes": 2581
     },
     "groups": {}
   }

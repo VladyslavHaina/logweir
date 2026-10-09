@@ -679,3 +679,34 @@ a value outside `i64`) are pinned by
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.
+
+## PROD-04.1: `consumer_positions` (receipt 1.5.0) and `consumer-positions-index.json`
+
+A 1.5.0 receipt carries a bounded SUMMARY of the selected consumer groups and
+binds, by SHA-256 and length, a positions document beside it. So the corpus is
+two-sided:
+
+- **`backup-receipt-index.json`**, ids `receipt_1_5_with_consumer_positions`
+  (the accept-control) and `consumer_positions_*`: one refusing case per
+  receipt arm 22–27, and for arm 26 one per clause of its captured branch
+  (`active`, `members`, `listed_state`, `counts` missing, and a group described
+  `Dead` with no member recorded as captured).
+- **`consumer-positions-index.json`**: a receipt (`receipt`) and the positions
+  document (`document`) both readers are handed with `--consumer-positions`,
+  one refusing case per document arm CP-1 to CP-14 and one accept-control. Its
+  entries carry SEVEN fields — `id`, `receipt`, `document`, `rust_exit`,
+  `python_exit`, `reason`, `arm` — and `scripts/check-invariant-corpus.sh`
+  closes the same arithmetic over
+  `BackupReceipt::validate_consumer_positions_document` and
+  `check_consumer_positions_document` that it closes over the receipt's arms.
+  The two-reader half is
+  `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_positions_document_corpus`
+  and `scripts/check-verifier-parity.sh`'s positions loop.
+
+**These cases are GENERATED** by `scripts/fixtures/consumer_positions_corpus.py`
+(idempotent; rerun after changing a case or an arm's message). A document case
+needs a receipt that binds THAT document's exact bytes — otherwise it tests
+CP-2 instead of the arm it names — so each one is the accepted receipt and the
+accepted document with one change, rebound. The recorded `reason` is the
+Python reader's; the Rust reader is held to it by the two-reader walk, and
+every Rust message by `crates/logweir-core/tests/backup_receipt.rs`.

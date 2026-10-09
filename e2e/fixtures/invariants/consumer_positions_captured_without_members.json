@@ -132,7 +132,6 @@
         "group_type": "classic",
         "state": "Stable",
         "listed_state": "Stable",
-        "members": 2,
         "active": true,
         "counts": {
           "related": 2,
@@ -145,7 +144,7 @@
       },
       "gone": {
         "outcome": "excluded",
-        "reason": "NotVisibleToPrincipal"
+        "reason": "GroupNotFound"
       },
       "hidden": {
         "outcome": "failed",

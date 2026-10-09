@@ -145,11 +145,11 @@
       },
       "gone": {
         "outcome": "excluded",
-        "reason": "NotVisibleToPrincipal"
+        "reason": "GroupNotFound"
       },
       "hidden": {
         "outcome": "failed",
-        "reason": "NotVisibleToPrincipal"
+        "reason": "GenerationChangedDuringCapture"
       },
       "share-1": {
         "outcome": "excluded",

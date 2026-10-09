@@ -408,52 +408,36 @@
     "arm": "consumer_positions is present but format_version \"1.4.0\" predates it: the field is defined from 1.5.0"
   },
   {
-    "id": "consumer_positions_missing_a_named_topic",
-    "file": "consumer_positions_missing_a_named_topic.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "consumer_positions.topics covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
-    "arm": "consumer_positions.topics covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}"
-  },
-  {
-    "id": "consumer_positions_partition_out_of_order",
-    "file": "consumer_positions_partition_out_of_order.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "consumer_positions.topics[\"orders\"].partitions[1] is partition 2: each topic lists its partitions from 0, one entry each, in order",
-    "arm": "consumer_positions.topics[\"orders\"].partitions[1] is partition 2: each topic lists its partitions from 0, one entry each, in order"
-  },
-  {
-    "id": "consumer_positions_mark_pair_half_recorded",
-    "file": "consumer_positions_mark_pair_half_recorded.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "consumer_positions.topics[\"orders\"].partitions[0] records marks that are not well formed: a log start and its high watermark are recorded together with 0 <= log start <= high watermark, the archived range is recorded whole with 0 <= first <= last, and a partition the capture did not observe has no group-capture marks",
-    "arm": "consumer_positions.topics[\"orders\"].partitions[0] records marks that are not well formed: a log start and its high watermark are recorded together with 0 <= log start <= high watermark, the archived range is recorded whole with 0 <= first <= last, and a partition the capture did not observe has no group-capture marks"
-  },
-  {
-    "id": "consumer_positions_unobserved_partition_with_marks",
-    "file": "consumer_positions_unobserved_partition_with_marks.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "consumer_positions.topics[\"orders\"].partitions[2] records marks that are not well formed: a log start and its high watermark are recorded together with 0 <= log start <= high watermark, the archived range is recorded whole with 0 <= first <= last, and a partition the capture did not observe has no group-capture marks",
-    "arm": "consumer_positions.topics[\"orders\"].partitions[2] records marks that are not well formed: a log start and its high watermark are recorded together with 0 <= log start <= high watermark, the archived range is recorded whole with 0 <= first <= last, and a partition the capture did not observe has no group-capture marks"
-  },
-  {
-    "id": "consumer_positions_changed_flag_hides_a_regression",
-    "file": "consumer_positions_changed_flag_hides_a_regression.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "consumer_positions.topics[\"orders\"].changed_during_capture is false but its marks say true: a topic changed during the capture exactly when a mark read after the engine is below the one read at group capture",
-    "arm": "consumer_positions.topics[\"orders\"].changed_during_capture is false but its marks say true: a topic changed during the capture exactly when a mark read after the engine is below the one read at group capture"
-  },
-  {
     "id": "consumer_positions_no_group",
     "file": "consumer_positions_no_group.json",
     "rust_exit": 4,
     "python_exit": 1,
-    "reason": "consumer_positions records listing \"complete\" and 0 group(s): the listing is \"complete\" or \"notComplete\", and at least one group is recorded",
-    "arm": "consumer_positions records listing \"complete\" and 0 group(s): the listing is \"complete\" or \"notComplete\", and at least one group is recorded"
+    "reason": "consumer_positions records listing \"complete\", 0 group(s) and a capture that ends at or after it starts: the capture ends at or after it starts, the listing is \"complete\" or \"notComplete\", and at least one group is recorded",
+    "arm": "consumer_positions records listing \"complete\", 0 group(s) and a capture that ends at or after it starts: the capture ends at or after it starts, the listing is \"complete\" or \"notComplete\", and at least one group is recorded"
+  },
+  {
+    "id": "consumer_positions_capture_ends_before_it_starts",
+    "file": "consumer_positions_capture_ends_before_it_starts.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions records listing \"complete\", 5 group(s) and a capture that ends before it starts: the capture ends at or after it starts, the listing is \"complete\" or \"notComplete\", and at least one group is recorded",
+    "arm": "consumer_positions records listing \"complete\", 5 group(s) and a capture that ends before it starts: the capture ends at or after it starts, the listing is \"complete\" or \"notComplete\", and at least one group is recorded"
+  },
+  {
+    "id": "consumer_positions_document_of_another_run",
+    "file": "consumer_positions_document_of_another_run.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.document is \"logweir/backups/logweir-backup-01J8Z9QK7V/another-run.consumer-positions.json\" with sha256 \"sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8\" over 2581 bytes: the positions document is \"logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json\", its digest \"sha256:\" and 64 lowercase hex digits, over at least one byte",
+    "arm": "consumer_positions.document is \"logweir/backups/logweir-backup-01J8Z9QK7V/another-run.consumer-positions.json\" with sha256 \"sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8\" over 2581 bytes: the positions document is \"logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json\", its digest \"sha256:\" and 64 lowercase hex digits, over at least one byte"
+  },
+  {
+    "id": "consumer_positions_document_digest_not_lowercase_hex",
+    "file": "consumer_positions_document_digest_not_lowercase_hex.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.document is \"logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json\" with sha256 \"sha256:85A55CAB18337C24B8C7CD2219105766CABC855741AACCEDF89ADBE0D8D03EE8\" over 2581 bytes: the positions document is \"logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json\", its digest \"sha256:\" and 64 lowercase hex digits, over at least one byte",
+    "arm": "consumer_positions.document is \"logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json\" with sha256 \"sha256:85A55CAB18337C24B8C7CD2219105766CABC855741AACCEDF89ADBE0D8D03EE8\" over 2581 bytes: the positions document is \"logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json\", its digest \"sha256:\" and 64 lowercase hex digits, over at least one byte"
   },
   {
     "id": "consumer_positions_exclusion_with_a_failure_reason",
@@ -464,12 +448,52 @@
     "arm": "consumer_positions.groups[\"gone\"] has outcome \"excluded\" and reason \"NotVisibleToPrincipal\": the outcome is \"captured\", \"excluded\" or \"failed\", a reason is present exactly when it is not \"captured\", and it is one this format defines for that outcome"
   },
   {
-    "id": "consumer_positions_positions_on_a_failed_group",
-    "file": "consumer_positions_positions_on_a_failed_group.json",
+    "id": "consumer_positions_counts_on_a_failed_group",
+    "file": "consumer_positions_counts_on_a_failed_group.json",
     "rust_exit": 4,
     "python_exit": 1,
-    "reason": "consumer_positions.groups[\"hidden\"] is \"failed\" with group_type absent, state absent, listed_state absent, members absent, active absent and positions present: a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and its positions; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them",
-    "arm": "consumer_positions.groups[\"hidden\"] is \"failed\" with group_type absent, state absent, listed_state absent, members absent, active absent and positions present: a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and its positions; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them"
+    "reason": "consumer_positions.groups[\"hidden\"] is \"failed\" with group_type absent, state absent, listed_state absent, members absent, active absent and counts over 0 partition(s): a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them",
+    "arm": "consumer_positions.groups[\"hidden\"] is \"failed\" with group_type absent, state absent, listed_state absent, members absent, active absent and counts over 0 partition(s): a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them"
+  },
+  {
+    "id": "consumer_positions_captured_without_active",
+    "file": "consumer_positions_captured_without_active.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.groups[\"billing\"] is \"captured\" with group_type \"classic\", state \"Stable\", listed_state \"Stable\", members 2, active absent and counts over 4 partition(s): a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them",
+    "arm": "consumer_positions.groups[\"billing\"] is \"captured\" with group_type \"classic\", state \"Stable\", listed_state \"Stable\", members 2, active absent and counts over 4 partition(s): a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them"
+  },
+  {
+    "id": "consumer_positions_captured_without_members",
+    "file": "consumer_positions_captured_without_members.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.groups[\"billing\"] is \"captured\" with group_type \"classic\", state \"Stable\", listed_state \"Stable\", members absent, active true and counts over 4 partition(s): a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them",
+    "arm": "consumer_positions.groups[\"billing\"] is \"captured\" with group_type \"classic\", state \"Stable\", listed_state \"Stable\", members absent, active true and counts over 4 partition(s): a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them"
+  },
+  {
+    "id": "consumer_positions_captured_without_listed_state",
+    "file": "consumer_positions_captured_without_listed_state.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.groups[\"billing\"] is \"captured\" with group_type \"classic\", state \"Stable\", listed_state absent, members 2, active true and counts over 4 partition(s): a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them",
+    "arm": "consumer_positions.groups[\"billing\"] is \"captured\" with group_type \"classic\", state \"Stable\", listed_state absent, members 2, active true and counts over 4 partition(s): a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them"
+  },
+  {
+    "id": "consumer_positions_captured_without_counts",
+    "file": "consumer_positions_captured_without_counts.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.groups[\"billing\"] is \"captured\" with group_type \"classic\", state \"Stable\", listed_state \"Stable\", members 2, active true and counts absent: a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them",
+    "arm": "consumer_positions.groups[\"billing\"] is \"captured\" with group_type \"classic\", state \"Stable\", listed_state \"Stable\", members 2, active true and counts absent: a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them"
+  },
+  {
+    "id": "consumer_positions_vanished_group_recorded_as_captured",
+    "file": "consumer_positions_vanished_group_recorded_as_captured.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.groups[\"audit\"] is \"captured\" with group_type \"consumer\", state \"Dead\", listed_state \"Stable\", members 0, active true and counts over 4 partition(s): a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them",
+    "arm": "consumer_positions.groups[\"audit\"] is \"captured\" with group_type \"consumer\", state \"Dead\", listed_state \"Stable\", members 0, active true and counts over 4 partition(s): a captured group records a type of \"classic\" or \"consumer\", both states from the closed set, its members, active and counts over at least one partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group records group_type \"other\" and nothing else; any other group records none of them"
   },
   {
     "id": "consumer_positions_rebalancing_group_called_inactive",
@@ -478,45 +502,5 @@
     "python_exit": 1,
     "reason": "consumer_positions.groups[\"audit\"].active is false but its states \"Empty\" and \"PreparingRebalance\" say true: a group is active unless both its states are \"Empty\" or \"Dead\"",
     "arm": "consumer_positions.groups[\"audit\"].active is false but its states \"Empty\" and \"PreparingRebalance\" say true: a group is active unless both its states are \"Empty\" or \"Dead\""
-  },
-  {
-    "id": "consumer_positions_position_on_a_changed_topic",
-    "file": "consumer_positions_position_on_a_changed_topic.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "consumer_positions.groups[\"audit\"] is \"captured\" with reason absent while the topics that changed during the capture are {\"orders\"}: a group holding a position on such a topic fails GenerationChangedDuringCapture, and no group fails so when none changed",
-    "arm": "consumer_positions.groups[\"audit\"] is \"captured\" with reason absent while the topics that changed during the capture are {\"orders\"}: a group holding a position on such a topic fails GenerationChangedDuringCapture, and no group fails so when none changed"
-  },
-  {
-    "id": "consumer_positions_never_committed_partition_dropped",
-    "file": "consumer_positions_never_committed_partition_dropped.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "consumer_positions.groups[\"billing\"].positions[1] is \"orders\":2 where \"orders\":1 is expected: a captured group records one position per partition of every named topic, topics in name order, partitions in order",
-    "arm": "consumer_positions.groups[\"billing\"].positions[1] is \"orders\":2 where \"orders\":1 is expected: a captured group records one position per partition of every named topic, topics in name order, partitions in order"
-  },
-  {
-    "id": "consumer_positions_no_committed_position_read_as_zero",
-    "file": "consumer_positions_no_committed_position_read_as_zero.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "consumer_positions.groups[\"billing\"].positions[1] has status \"noCommittedPosition\", position 0 and reason absent: the status is one this format defines, a position is present exactly when it is \"captured\" or \"excluded\", a reason exactly when it is \"excluded\", \"failed\" or \"notObserved\" and from that status's set, and \"notObserved\" is exactly a partition the capture did not observe",
-    "arm": "consumer_positions.groups[\"billing\"].positions[1] has status \"noCommittedPosition\", position 0 and reason absent: the status is one this format defines, a position is present exactly when it is \"captured\" or \"excluded\", a reason exactly when it is \"excluded\", \"failed\" or \"notObserved\" and from that status's set, and \"notObserved\" is exactly a partition the capture did not observe"
-  },
-  {
-    "id": "consumer_positions_beyond_end_recorded_as_captured",
-    "file": "consumer_positions_beyond_end_recorded_as_captured.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "consumer_positions.groups[\"audit\"].positions[0] is \"captured\" with coverage \"beyondArchive\" at position 21, but its partition's facts make it PositionBeyondEnd: a coverage word is recorded exactly on a captured position, and a kept position's coverage, or its PositionBeyondEnd, follows from the marks and the archived range",
-    "arm": "consumer_positions.groups[\"audit\"].positions[0] is \"captured\" with coverage \"beyondArchive\" at position 21, but its partition's facts make it PositionBeyondEnd: a coverage word is recorded exactly on a captured position, and a kept position's coverage, or its PositionBeyondEnd, follows from the marks and the archived range"
-  },
-  {
-    "id": "consumer_positions_coverage_the_facts_do_not_derive",
-    "file": "consumer_positions_coverage_the_facts_do_not_derive.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "consumer_positions.groups[\"billing\"].positions[3] is \"captured\" with coverage \"withinArchive\" at position 7, but its partition's facts make it atArchiveEnd: a coverage word is recorded exactly on a captured position, and a kept position's coverage, or its PositionBeyondEnd, follows from the marks and the archived range",
-    "arm": "consumer_positions.groups[\"billing\"].positions[3] is \"captured\" with coverage \"withinArchive\" at position 7, but its partition's facts make it atArchiveEnd: a coverage word is recorded exactly on a captured position, and a kept position's coverage, or its PositionBeyondEnd, follows from the marks and the archived range"
   }
 ]

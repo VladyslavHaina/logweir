@@ -114,10 +114,10 @@
       "audit": {
         "outcome": "captured",
         "group_type": "consumer",
-        "state": "Empty",
-        "listed_state": "Empty",
+        "state": "Dead",
+        "listed_state": "Stable",
         "members": 0,
-        "active": false,
+        "active": true,
         "counts": {
           "related": 0,
           "not_related": 1,
@@ -145,7 +145,7 @@
       },
       "gone": {
         "outcome": "excluded",
-        "reason": "NotVisibleToPrincipal"
+        "reason": "GroupNotFound"
       },
       "hidden": {
         "outcome": "failed",

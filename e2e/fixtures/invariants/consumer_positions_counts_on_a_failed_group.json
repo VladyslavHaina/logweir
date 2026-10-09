@@ -145,11 +145,19 @@
       },
       "gone": {
         "outcome": "excluded",
-        "reason": "NotVisibleToPrincipal"
+        "reason": "GroupNotFound"
       },
       "hidden": {
         "outcome": "failed",
-        "reason": "NotVisibleToPrincipal"
+        "reason": "NotVisibleToPrincipal",
+        "counts": {
+          "related": 0,
+          "not_related": 0,
+          "never_committed": 0,
+          "beyond_end": 0,
+          "failed": 0,
+          "not_observed": 0
+        }
       },
       "share-1": {
         "outcome": "excluded",

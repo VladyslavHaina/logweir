@@ -105,90 +105,12 @@
     "observed_from": "2026-09-09T11:02:15Z",
     "observed_to": "2026-09-09T11:02:16Z",
     "listing": "complete",
-    "topics": {
-      "orders": {
-        "partitions": [
-          {
-            "partition": 0,
-            "observed": true,
-            "log_start": 0,
-            "high_watermark": 20,
-            "log_start_after": 0,
-            "high_watermark_after": 24,
-            "archived_first": 0,
-            "archived_last": 23
-          },
-          {
-            "partition": 1,
-            "observed": true,
-            "log_start": 5,
-            "high_watermark": 9,
-            "log_start_after": 0,
-            "high_watermark_after": 9,
-            "archived_first": 5,
-            "archived_last": 8
-          },
-          {
-            "partition": 2,
-            "observed": false,
-            "log_start_after": 0,
-            "high_watermark_after": 3,
-            "archived_first": 0,
-            "archived_last": 2
-          }
-        ],
-        "changed_during_capture": true
-      },
-      "payments": {
-        "partitions": [
-          {
-            "partition": 0,
-            "observed": true,
-            "log_start": 0,
-            "high_watermark": 7,
-            "archived_first": 0,
-            "archived_last": 6
-          }
-        ],
-        "changed_during_capture": false
-      }
+    "document": {
+      "key": "logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json",
+      "sha256": "sha256:3be436a1fce95c9f37e806788006d53e14ec1a0ed08f99840e45c1c34f6825bf",
+      "bytes": 2580
     },
     "groups": {
-      "billing": {
-        "outcome": "captured",
-        "group_type": "classic",
-        "state": "Stable",
-        "listed_state": "Stable",
-        "members": 2,
-        "active": true,
-        "positions": [
-          {
-            "topic": "orders",
-            "partition": 0,
-            "status": "captured",
-            "position": 12,
-            "coverage": "withinArchive"
-          },
-          {
-            "topic": "orders",
-            "partition": 1,
-            "status": "noCommittedPosition"
-          },
-          {
-            "topic": "orders",
-            "partition": 2,
-            "status": "notObserved",
-            "reason": "PartitionAddedDuringCapture"
-          },
-          {
-            "topic": "payments",
-            "partition": 0,
-            "status": "captured",
-            "position": 7,
-            "coverage": "atArchiveEnd"
-          }
-        ]
-      },
       "audit": {
         "outcome": "captured",
         "group_type": "consumer",
@@ -196,39 +118,30 @@
         "listed_state": "Empty",
         "members": 0,
         "active": false,
-        "positions": [
-          {
-            "topic": "orders",
-            "partition": 0,
-            "status": "excluded",
-            "position": 21,
-            "reason": "PositionBeyondEnd"
-          },
-          {
-            "topic": "orders",
-            "partition": 1,
-            "status": "captured",
-            "position": 2,
-            "coverage": "beforeLogStart"
-          },
-          {
-            "topic": "orders",
-            "partition": 2,
-            "status": "notObserved",
-            "reason": "PartitionAddedDuringCapture"
-          },
-          {
-            "topic": "payments",
-            "partition": 0,
-            "status": "failed",
-            "reason": "Unstable"
-          }
-        ]
+        "counts": {
+          "related": 0,
+          "not_related": 1,
+          "never_committed": 0,
+          "beyond_end": 1,
+          "failed": 1,
+          "not_observed": 1
+        }
       },
-      "share-1": {
-        "outcome": "excluded",
-        "reason": "GroupTypeNotCaptured",
-        "group_type": "other"
+      "billing": {
+        "outcome": "captured",
+        "group_type": "classic",
+        "state": "Stable",
+        "listed_state": "Stable",
+        "members": 2,
+        "active": true,
+        "counts": {
+          "related": 2,
+          "not_related": 0,
+          "never_committed": 1,
+          "beyond_end": 0,
+          "failed": 0,
+          "not_observed": 1
+        }
       },
       "gone": {
         "outcome": "excluded",
@@ -237,6 +150,11 @@
       "hidden": {
         "outcome": "failed",
         "reason": "NotVisibleToPrincipal"
+      },
+      "share-1": {
+        "outcome": "excluded",
+        "reason": "GroupTypeNotCaptured",
+        "group_type": "other"
       }
     }
   }

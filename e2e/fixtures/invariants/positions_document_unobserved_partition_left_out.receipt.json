@@ -107,8 +107,8 @@
     "listing": "complete",
     "document": {
       "key": "logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json",
-      "sha256": "sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8",
-      "bytes": 2581
+      "sha256": "sha256:9732cadc9aaf08d104eb7c509c3da7355a12393541ee757d986b0b02988be5a0",
+      "bytes": 2420
     },
     "groups": {
       "audit": {
@@ -145,7 +145,7 @@
       },
       "gone": {
         "outcome": "excluded",
-        "reason": "NotVisibleToPrincipal"
+        "reason": "GroupNotFound"
       },
       "hidden": {
         "outcome": "failed",
