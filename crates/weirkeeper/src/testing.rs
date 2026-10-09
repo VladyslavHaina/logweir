@@ -932,10 +932,64 @@ impl std::io::Write for SharedLogBuffer {
     }
 }
 
+/// A dispatcher that is never dropped and enables nothing, held so that a
+/// capture is never the ONLY live dispatcher — see [`CapturedLog::start`].
+static INTEREST_KEEPER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+
+/// [`INTEREST_KEEPER`]'s subscriber: every callsite is `sometimes`, so the
+/// decision is made per event by the thread's own dispatcher; it enables and
+/// records nothing itself.
+struct InterestKeeper;
+
+impl tracing::Subscriber for InterestKeeper {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::OFF)
+    }
+
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {}
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 impl CapturedLog {
     /// Start capturing on this thread. Capture ends when the value drops.
+    ///
+    /// # Why a second, permanent dispatcher exists
+    ///
+    /// `tracing-core` 0.1.36 caches each callsite's interest the first time
+    /// the callsite is hit, and while exactly ONE dispatcher is registered it
+    /// computes that interest from the registering THREAD's default
+    /// (`callsite.rs`, `has_just_one`). In a parallel suite that is another
+    /// test's thread, with no subscriber at all: the callsite is cached
+    /// `never`, and this capture then misses a WARN its own reconcile emits —
+    /// measured as a row that passed alone and failed in the full suite. With
+    /// [`INTEREST_KEEPER`] alive there are always two, so a callsite first hit
+    /// anywhere while a capture lives is `sometimes`, and one first hit while
+    /// none lives is recomputed when the next capture registers.
     #[must_use]
     pub fn start() -> Self {
+        INTEREST_KEEPER.get_or_init(|| tracing::Dispatch::new(InterestKeeper));
         let lines = Arc::new(Mutex::new(Vec::new()));
         let sink = SharedLogBuffer(Arc::clone(&lines));
         let subscriber = tracing_subscriber::fmt()
