@@ -160,19 +160,26 @@ pub struct VerifyReport {
     /// `source.selection` (scorecard 1.7.0, PROD-11.1), carried as read:
     /// `None` is a restore of every partition from the archive's floor.
     pub selection: Option<logweir_core::scorecard::SelectionLabel>,
+    /// What the document proves about records before a stated start (review
+    /// N1), from its `integrity.result` and `integrity.verification`.
+    pub before_the_start: logweir_core::scorecard::BeforeTheStart,
 }
 
-/// The replay-selection line both readers print for a narrowed restore
-/// (PROD-11.1): the same sentence the writer puts at the head of
-/// `sample.coverage_note` (`SelectionLabel::coverage_note`), so what a reader
-/// of either kind sees is what was restored. Nothing for a document without
+/// The replay-selection line both readers print for a restore from a stated
+/// start (PROD-11.1): the writer's sentence (`SelectionLabel::sentence`),
+/// ending in what THIS document proves about the records before the start
+/// (`BeforeTheStart::of`, review N1) — "restored or expected" only over a
+/// complete verification that passed. Nothing for a document without
 /// `source.selection`: it restored every partition from the archive's floor.
 /// `docs/verify_scorecard.py::_selection_lines` prints the same line, and
 /// `scripts/check-verifier-parity.sh` compares every line starting
 /// `replay selection:` between the two readers.
 #[must_use]
-pub fn selection_lines(selection: Option<&logweir_core::scorecard::SelectionLabel>) -> Vec<String> {
-    selection.map(|s| s.coverage_note()).into_iter().collect()
+pub fn selection_lines(
+    selection: Option<&logweir_core::scorecard::SelectionLabel>,
+    before: logweir_core::scorecard::BeforeTheStart,
+) -> Vec<String> {
+    selection.map(|s| s.sentence(before)).into_iter().collect()
 }
 
 /// The line both readers print for a SAMPLED `pass` (FX-23 review M2): what
@@ -194,9 +201,12 @@ pub fn sampled_pass_lines(
 /// [`sampled_pass_lines`] for a document that may carry `source.selection`
 /// (PROD-11.1 review H1): over a narrowed window the guarantee is QUALIFIED
 /// by that window — the count bound, the per-partition presence and the
-/// engine-report check were judged over `[start, end]`, and a record before
-/// the start was neither restored nor expected — so the line a 1.7.0 reader
-/// prints never reads as a pass over the whole archive.
+/// engine-report check were judged over `[start, end]`, and no record before
+/// the start was expected — so the line a 1.7.0 reader prints never reads as
+/// a pass over the whole archive. It says the sampled check does NOT show
+/// that no record before the start was restored (review N1): the sample is
+/// drawn from the window, and a segment straddling the start counts all of
+/// its records into the bound.
 /// `docs/verify_scorecard.py::_sampled_pass_lines` prints the same line.
 #[must_use]
 pub fn sampled_pass_lines_over(
@@ -216,7 +226,8 @@ pub fn sampled_pass_lines_over(
              epoch-ms {}: every mapped partition was held to its own count bound over that \
              window, max_partitions reached every topic before a second partition of any, and a \
              readable engine report lacking a partition with records in that window was \
-             refused; no record before the start was restored or expected",
+             refused; no record before the start was expected, and a sampled check does not \
+             prove that none was restored",
             window.window_start_ms, window.window_end_ms
         )];
     }
@@ -837,6 +848,10 @@ pub fn verify_scorecard(
         verification: sc.integrity.verification.clone().map(Box::new),
         unsampled_topics: sc.sample.unsampled_topics.clone(),
         selection: sc.source.selection.clone(),
+        before_the_start: logweir_core::scorecard::BeforeTheStart::of(
+            &sc.integrity.result,
+            sc.integrity.verification.as_ref(),
+        ),
         format_version: sc.format_version.clone(),
     }))
 }
@@ -903,7 +918,7 @@ fn print_report(r: &VerifyReport) {
     }
     // PROD-11.1: nor a restore of the whole archive when it restored a
     // selection.
-    for line in selection_lines(r.selection.as_ref()) {
+    for line in selection_lines(r.selection.as_ref(), r.before_the_start) {
         println!("coverage:  {line}");
     }
 }

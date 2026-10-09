@@ -164,17 +164,84 @@ pub struct SelectionLabel {
 }
 
 impl SelectionLabel {
-    /// The `sample.coverage_note` sentence that names the window in an
-    /// EXISTING field (PROD-11.1 §5.2), and the `replay selection:` line both
-    /// readers print.
+    /// The `replay selection:` sentence, ending in what the document proves
+    /// about records BEFORE the start (review N1): the same words in the
+    /// writer's `sample.coverage_note` ([`Self::coverage_note`]) and in the
+    /// line both readers print (`logweir::verify::selection_lines`,
+    /// `docs/verify_scorecard.py::_selection_lines`).
     #[must_use]
-    pub fn coverage_note(&self) -> String {
+    pub fn sentence(&self, before: BeforeTheStart) -> String {
         format!(
             "replay selection: every partition of every restored topic, from epoch-ms {} (the \
-             plan's stated window start, inclusive) to epoch-ms {} (inclusive); no record \
-             before the start was restored or expected",
-            self.window_start_ms, self.window_end_ms
+             plan's stated window start, inclusive) to epoch-ms {} (inclusive); {}",
+            self.window_start_ms,
+            self.window_end_ms,
+            before.words()
         )
+    }
+
+    /// The sentence that opens the writer's `sample.coverage_note`, naming
+    /// the window in an EXISTING field (PROD-11.1 §5.2). Written before phase
+    /// 7 judges anything, so it claims only what the plan's lane can say then:
+    /// a sampled lane says it cannot show that no record before the start was
+    /// restored; a complete lane says only that none was expected (whether
+    /// none was restored is the complete block's verdict, which a reader
+    /// states — [`BeforeTheStart::of`]).
+    #[must_use]
+    pub fn coverage_note(&self, coverage: crate::spec::Coverage) -> String {
+        self.sentence(match coverage {
+            crate::spec::Coverage::Sampled => BeforeTheStart::SampledUnproved,
+            crate::spec::Coverage::Complete => BeforeTheStart::Expected,
+        })
+    }
+}
+
+/// What a document from a stated start proves about the records BEFORE that
+/// start (PROD-11.1 review N1). Only a COMPLETE verification whose
+/// `integrity.result` is `pass` shows that none was restored: there a
+/// restored record below the start is `unexpected`, and IV-6 holds a
+/// complete pass to no unexpected record in any partition. A SAMPLED check
+/// cannot: its sample is drawn from the window, and its per-partition count
+/// bound counts every record of a segment that straddles the start, so an
+/// engine that restored a straddling segment's earlier records stays inside
+/// every bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeforeTheStart {
+    /// A complete verification that passed: none was restored or expected.
+    ProvedNoneRestored,
+    /// A sampled verification: none was expected; the check does not show
+    /// that none was restored.
+    SampledUnproved,
+    /// Anything else — a complete verification that did not pass, or no
+    /// verification (phase 7 never ran): none was expected, nothing more.
+    Expected,
+}
+
+impl BeforeTheStart {
+    /// What THIS document proves, from its `integrity.result` and its
+    /// `integrity.verification`. The one predicate both readers use.
+    #[must_use]
+    pub fn of(integrity: &IntegrityResult, verification: Option<&Verification>) -> Self {
+        match verification {
+            Some(v) if v.coverage == COVERAGE_COMPLETE && *integrity == IntegrityResult::Pass => {
+                Self::ProvedNoneRestored
+            }
+            Some(v) if v.coverage == COVERAGE_SAMPLED => Self::SampledUnproved,
+            _ => Self::Expected,
+        }
+    }
+
+    /// The clause that ends the `replay selection:` sentence.
+    #[must_use]
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::ProvedNoneRestored => "no record before the start was restored or expected",
+            Self::SampledUnproved => {
+                "no record before the start was expected; a sampled check does not prove that \
+                 none was restored"
+            }
+            Self::Expected => "no record before the start was expected",
+        }
     }
 }
 
@@ -4405,16 +4472,66 @@ mod tests {
         assert!(sel_err(&sc).starts_with("source.selection is present"));
     }
 
-    /// The `sample.coverage_note` sentence names the window.
+    /// The `sample.coverage_note` sentence names the window, and claims about
+    /// the records before the start only what the lane can show (review N1):
+    /// the writer's note never says none was restored — a sampled lane says it
+    /// cannot show it, a complete lane says only that none was expected, its
+    /// verdict being the complete block's. KILLS: the sampled note claiming
+    /// "restored"; the complete note claiming it before phase 7 has judged.
     #[test]
-    fn the_coverage_note_names_the_window() {
+    fn the_coverage_note_names_the_window_and_claims_per_lane() {
+        use crate::spec::Coverage;
+        let label = with_selection(1_760_000_001_000).source.selection.unwrap();
+        let head = "replay selection: every partition of every restored topic, from epoch-ms 1760000001000 (the plan's stated window start, inclusive) to epoch-ms 1760000005000 (inclusive); ";
         assert_eq!(
-            with_selection(1_760_000_001_000)
-                .source
-                .selection
-                .unwrap()
-                .coverage_note(),
-            "replay selection: every partition of every restored topic, from epoch-ms 1760000001000 (the plan's stated window start, inclusive) to epoch-ms 1760000005000 (inclusive); no record before the start was restored or expected"
+            label.coverage_note(Coverage::Sampled),
+            format!("{head}no record before the start was expected; a sampled check does not prove that none was restored")
         );
+        assert_eq!(
+            label.coverage_note(Coverage::Complete),
+            format!("{head}no record before the start was expected")
+        );
+        for lane in [Coverage::Sampled, Coverage::Complete] {
+            assert!(!label
+                .coverage_note(lane)
+                .contains("was restored or expected"));
+        }
+    }
+
+    /// **Review N1, the reader's predicate, a row per lane.** Only a complete
+    /// verification whose integrity passed proves no record before the start
+    /// was restored (IV-6: no unexpected record anywhere); a sampled one
+    /// never does, pass or not; a complete one that did not pass, and a
+    /// document with no verification (phase 7 never ran), say only that none
+    /// was expected. KILLS: a sampled pass printing "restored"; a failed
+    /// complete verification printing it; a missing verification printing it.
+    #[test]
+    fn what_a_document_proves_before_the_start_follows_its_lane_and_verdict() {
+        use crate::outcome::IntegrityResult::{Fail, Pass};
+        let (sampled, complete) = (sampled_verification(), complete_verification());
+        assert_eq!(
+            BeforeTheStart::of(&Pass, Some(&complete)),
+            BeforeTheStart::ProvedNoneRestored
+        );
+        assert_eq!(
+            BeforeTheStart::of(&Fail, Some(&complete)),
+            BeforeTheStart::Expected
+        );
+        assert_eq!(
+            BeforeTheStart::of(&Pass, Some(&sampled)),
+            BeforeTheStart::SampledUnproved
+        );
+        assert_eq!(
+            BeforeTheStart::of(&Fail, Some(&sampled)),
+            BeforeTheStart::SampledUnproved
+        );
+        assert_eq!(BeforeTheStart::of(&Pass, None), BeforeTheStart::Expected);
+        assert_eq!(
+            BeforeTheStart::ProvedNoneRestored.words(),
+            "no record before the start was restored or expected"
+        );
+        for unproved in [BeforeTheStart::SampledUnproved, BeforeTheStart::Expected] {
+            assert!(!unproved.words().contains("restored or"), "{unproved:?}");
+        }
     }
 }

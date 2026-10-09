@@ -1558,14 +1558,19 @@ echo "check-verifier-parity: both readers accept $SCORECARD_UNSAMPLED_VERSION sc
 # what an exit 0 says about a narrowed restore.
 # ---------------------------------------------------------------------------
 #
-# Three documents both readers ACCEPT, and the `replay selection:` and
+# Four documents both readers ACCEPT, and the `replay selection:` and
 # `sample coverage:` lines each must print — the SAME lines from both,
 # compared WHOLE:
 #
 #   sampled   a 1.7.0 sampled pass narrowed by a start: the selection line and
-#             the sampled-pass line QUALIFIED by the window (review H1)
-#   complete  a 1.7.0 complete pass narrowed by a start: the selection line,
-#             no sampled-pass line
+#             the sampled-pass line QUALIFIED by the window (review H1), both
+#             saying the sampled check does NOT prove that no record before
+#             the start was restored (review N1)
+#   complete  a 1.7.0 complete pass narrowed by a start: the selection line
+#             saying no record before the start was restored or expected (a
+#             complete pass proves it), no sampled-pass line
+#   complete-fail  the same complete block under a fail-integrity outcome:
+#             the selection line says only that none was expected
 #   absent    a 1.7.0 sampled pass with no block: no selection line, the
 #             unqualified 1.6.0-or-later sampled-pass line
 #
@@ -1614,6 +1619,14 @@ def doc(selection, version=current, block=None):
     return d
 
 
+def not_a_pass(d):
+    d["outcome"] = "fail-integrity"
+    d["integrity"]["result"] = "fail"
+    d["integrity"]["partial_reason"] = "not a pass"
+    d["engine"]["matrix_verdict"] = "pass-degraded"
+    return d
+
+
 def windowed(start):
     b = json.loads(json.dumps(complete))
     b["complete"]["window"] = {"end_ms": END} if start is None else {"start_ms": start, "end_ms": END}
@@ -1623,6 +1636,7 @@ def windowed(start):
 cases = {
     "sampled": doc(sel()),
     "complete": doc(sel(), block=windowed(START)),
+    "complete-fail": not_a_pass(doc(sel(), block=windowed(START))),
     "absent": doc(None),
     "sel1-under-1.6.0": doc(sel(), version="1.6.0"),
     "sel2-start-at-end": doc(sel(start=END)),
@@ -1642,7 +1656,7 @@ for name, d in cases.items():
 PYEOF
 read -r SEL_START SEL_END <"$tmp/scorecard-sel/window.txt"
 
-for name in sampled complete absent; do
+for name in sampled complete complete-fail absent; do
     doc="$tmp/scorecard-sel/$name.json"
     sig="$tmp/scorecard-sel/$name.sig"
     set +e
@@ -1665,12 +1679,14 @@ for name in sampled complete absent; do
   rust:   $rust_lines
   python: $py_lines"
     fi
-    selection_line="replay selection: every partition of every restored topic, from epoch-ms $SEL_START (the plan's stated window start, inclusive) to epoch-ms $SEL_END (inclusive); no record before the start was restored or expected"
-    narrowed_pass="sample coverage: a sampled pass over a replay selection from epoch-ms $SEL_START to epoch-ms $SEL_END: every mapped partition was held to its own count bound over that window, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in that window was refused; no record before the start was restored or expected"
+    selection_head="replay selection: every partition of every restored topic, from epoch-ms $SEL_START (the plan's stated window start, inclusive) to epoch-ms $SEL_END (inclusive); "
+    sampled_before="no record before the start was expected; a sampled check does not prove that none was restored"
+    narrowed_pass="sample coverage: a sampled pass over a replay selection from epoch-ms $SEL_START to epoch-ms $SEL_END: every mapped partition was held to its own count bound over that window, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in that window was refused; no record before the start was expected, and a sampled check does not prove that none was restored"
     case "$name" in
         sampled) want="$narrowed_pass
-$selection_line" ;;
-        complete) want="$selection_line" ;;
+${selection_head}${sampled_before}" ;;
+        complete) want="${selection_head}no record before the start was restored or expected" ;;
+        complete-fail) want="${selection_head}no record before the start was expected" ;;
         absent) want="sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition was held to its own count bound, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in the window was refused" ;;
     esac
     if [ "$rust_lines" != "$want" ]; then
@@ -1713,4 +1729,4 @@ for name in sel1-under-1.6.0 sel2-start-at-end sel3-window; do
     fi
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (selection refused)"
 done
-echo "check-verifier-parity: both readers accept $SCORECARD_SELECTION_VERSION scorecards, say the same about the selection and what a narrowed sampled pass proves, and refuse each of the three selection arms with the same words"
+echo "check-verifier-parity: both readers accept $SCORECARD_SELECTION_VERSION scorecards, say the same about the selection, what a narrowed sampled pass proves and what each lane proves before the start, and refuse each of the three selection arms with the same words"

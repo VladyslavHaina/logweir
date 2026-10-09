@@ -2982,7 +2982,7 @@ fn execute_with_validated_approval(
         };
         sc.sample.coverage_note = format!(
             "{}{limit}; {}",
-            label.coverage_note(),
+            label.coverage_note(c.spec.sample.coverage),
             sc.sample.coverage_note
         );
     }

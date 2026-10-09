@@ -2787,7 +2787,8 @@ def _sampled_pass_lines(doc):
             "partition was held to its own count bound over that window, max_partitions "
             "reached every topic before a second partition of any, and a readable engine "
             "report lacking a partition with records in that window was refused; no record "
-            "before the start was restored or expected"
+            "before the start was expected, and a sampled check does not prove that none was "
+            "restored"
         ]
     version = doc.get("format_version")
     if (
@@ -2809,19 +2810,41 @@ def _sampled_pass_lines(doc):
     ]
 
 
-def _selection_lines(block):
+def _before_the_start(doc):
+    """What a document from a stated start proves about the records BEFORE
+    that start -- the twin of `BeforeTheStart::of` in `crates/logweir-core/
+    src/scorecard.rs` (PROD-11.1 review N1), in the same words. Only a
+    COMPLETE verification whose `integrity.result` is `pass` shows none was
+    restored (a restored record below the start is `unexpected` there, and
+    IV-6 holds a complete pass to none); a SAMPLED check cannot (its sample is
+    drawn from the window, and a segment straddling the start counts all of
+    its records into the bound); anything else says only that none was
+    expected."""
+    block = doc["integrity"].get("verification")
+    coverage = None if block is None else block.get("coverage")
+    if coverage == "complete" and doc["integrity"].get("result") == "pass":
+        return "no record before the start was restored or expected"
+    if coverage == "sampled":
+        return (
+            "no record before the start was expected; a sampled check does not prove that "
+            "none was restored"
+        )
+    return "no record before the start was expected"
+
+
+def _selection_lines(block, before):
     """`source.selection` as lines -- the twin of `crates/logweir/src/
-    verify.rs::selection_lines` (PROD-11.1): the sentence the writer puts at
-    the head of `sample.coverage_note` (`SelectionLabel::coverage_note`), in
-    the same words. Absent prints nothing: the restore selected every record
-    from the archive's floor."""
+    verify.rs::selection_lines` (PROD-11.1): the writer's sentence
+    (`SelectionLabel::sentence`), ending in `before`, what this document
+    proves about the records before the start (`_before_the_start`, review
+    N1). Absent prints nothing: the restore selected every record from the
+    archive's floor."""
     if block is None:
         return []
     return [
         f"replay selection: every partition of every restored topic, from epoch-ms "
         f"{block['window_start_ms']} (the plan's stated window start, inclusive) to epoch-ms "
-        f"{block['window_end_ms']} (inclusive); no record before the start was restored or "
-        "expected"
+        f"{block['window_end_ms']} (inclusive); {before}"
     ]
 
 
@@ -3167,7 +3190,7 @@ def main(
             print(f"       coverage: {line}")
         # PROD-11.1: the replay selection a narrowed restore restored, in the
         # words `logweir drill verify` prints (`selection_lines`).
-        for line in _selection_lines(doc["source"].get("selection")):
+        for line in _selection_lines(doc["source"].get("selection"), _before_the_start(doc)):
             print(f"       coverage: {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an

@@ -738,7 +738,8 @@ fn selection_lines(out: &str) -> Vec<String> {
 /// `format_version` 1.7.0 and `source.selection` = exactly the plan's window
 /// (`window_start_ms`, `window_end_ms`, nothing else). Both readers accept each
 /// scorecard and print the same `replay selection:` line, and the sampled one
-/// prints the QUALIFIED sampled-pass line (review H1). The two signed
+/// prints the QUALIFIED sampled-pass line (review H1); only the complete one
+/// says no record before the start was restored (review N1). The two signed
 /// scorecards are kept as `scorecard-<coverage>.json` for the older-reader
 /// rows (`docs/decisions/prod-11-1-replay-selection.md` §10).
 #[test]
@@ -836,10 +837,17 @@ fn a_topic_subset_from_a_start_is_restored_and_signed_under_both_coverages() {
             selection_lines(&py_out),
             "{label}: the readers differ"
         );
+        // Review N1: only the complete pass proves no record before the
+        // start was restored; the sampled lane says it does not.
+        let before = if complete {
+            "no record before the start was restored or expected"
+        } else {
+            "no record before the start was expected; a sampled check does not prove that none \
+             was restored"
+        };
         let selection_line = format!(
             "replay selection: every partition of every restored topic, from epoch-ms {start} \
-             (the plan's stated window start, inclusive) to epoch-ms {end} (inclusive); no record \
-             before the start was restored or expected"
+             (the plan's stated window start, inclusive) to epoch-ms {end} (inclusive); {before}"
         );
         assert!(lines.contains(&selection_line), "{label}: {lines:#?}");
         let qualified = lines

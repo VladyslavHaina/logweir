@@ -3756,14 +3756,37 @@ def test_the_selection_shape_is_refused_before_its_arms():
 
 def test_the_selection_lines_are_the_rust_readers():
     mod = _verifier_module()
-    assert mod._selection_lines(None) == []
-    assert mod._selection_lines(_selection()) == [
-        "replay selection: every partition of every restored topic, from epoch-ms 1760000001000 "
-        "(the plan's stated window start, inclusive) to epoch-ms 1760000005000 (inclusive); no "
-        "record before the start was restored or expected"]
+    head = ("replay selection: every partition of every restored topic, from epoch-ms "
+            "1760000001000 (the plan's stated window start, inclusive) to epoch-ms "
+            "1760000005000 (inclusive); ")
+    assert mod._selection_lines(None, "x") == []
+    # Review N1, a row per lane: only a complete verification that PASSED
+    # proves no record before the start was restored; a sampled one never
+    # does; a complete one that did not pass, or no verification, says only
+    # that none was expected.
+    sampled = _scorecard_1_7(_selection())
+    complete = _scorecard_1_7(_selection(), block=_complete_block())
+    failed = _not_a_pass(_scorecard_1_7(_selection(), block=_complete_block()))
+    bare = _scorecard_1_7(_selection(), block=None)
+    bare["integrity"].pop("verification", None)
+    for doc, want in (
+        (complete, "no record before the start was restored or expected"),
+        (sampled, "no record before the start was expected; a sampled check does not prove "
+                  "that none was restored"),
+        (_not_a_pass(_scorecard_1_7(_selection())),
+         "no record before the start was expected; a sampled check does not prove that none "
+         "was restored"),
+        (failed, "no record before the start was expected"),
+        (bare, "no record before the start was expected"),
+    ):
+        before = mod._before_the_start(doc)
+        assert before == want, doc["integrity"]
+        assert mod._selection_lines(doc["source"]["selection"], before) == [head + want]
     rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
     assert '"replay selection: every partition of every restored topic, from epoch-ms {} (the \\' in rust
-    # The narrowed sampled-pass line (review H1), and the unchanged one beside it.
+    assert '"no record before the start was restored or expected"' in rust
+    # The narrowed sampled-pass line (review H1), qualified about the records
+    # before the start (review N1), and the unchanged one beside it.
     doc = _scorecard_1_7(_selection())
     doc["outcome"] = "pass"
     assert mod._sampled_pass_lines(doc) == [
@@ -3771,7 +3794,8 @@ def test_the_selection_lines_are_the_rust_readers():
         "epoch-ms 1760000005000: every mapped partition was held to its own count bound over "
         "that window, max_partitions reached every topic before a second partition of any, and "
         "a readable engine report lacking a partition with records in that window was refused; "
-        "no record before the start was restored or expected"]
+        "no record before the start was expected, and a sampled check does not prove that none "
+        "was restored"]
     plain = _scorecard_1_7(None, version="1.6.0")
     plain["outcome"] = "pass"
     assert mod._sampled_pass_lines(plain)[0].startswith(

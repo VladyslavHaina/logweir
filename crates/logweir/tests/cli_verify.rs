@@ -1021,7 +1021,8 @@ fn a_sampled_pass_over_a_selection_says_so() {
              to epoch-ms 1760000015000: every mapped partition was held to its own count bound \
              over that window, max_partitions reached every topic before a second partition of \
              any, and a readable engine report lacking a partition with records in that window \
-             was refused; no record before the start was restored or expected"
+             was refused; no record before the start was expected, and a sampled check does \
+             not prove that none was restored"
                 .to_string()
         ]
     );
@@ -1043,4 +1044,67 @@ fn a_sampled_pass_over_a_selection_says_so() {
     assert!(
         sampled_pass_lines_over(Outcome::Pass, Some(&complete), "1.7.0", Some(&window)).is_empty()
     );
+}
+
+/// **PROD-11.1 review N1, a row per lane.** The `replay selection:` line says
+/// "no record before the start was restored" ONLY over a complete
+/// verification whose integrity passed (IV-6: a restored record below the
+/// start is `unexpected`, and a complete pass has none). A sampled document
+/// never says it, pass or not — its sample is drawn from the window and a
+/// segment straddling the start counts all of its records into the bound; a
+/// complete one that did not pass, and one with no verification, say only
+/// that none was expected. KILLS: the sampled line claiming "restored"; a
+/// failed complete verification claiming it.
+#[test]
+fn the_selection_line_claims_only_what_its_lane_proves() {
+    use logweir::verify::selection_lines;
+    use logweir_core::outcome::IntegrityResult;
+    use logweir_core::scorecard::*;
+    let sampled = Verification {
+        coverage: COVERAGE_SAMPLED.into(),
+        comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
+        header_order: HEADER_ORDER_NOT_VERIFIED.into(),
+        application: APPLICATION_NOT_ATTEMPTED.into(),
+        gaps: vec![],
+        pruned: vec![],
+        complete: None,
+    };
+    let mut complete = sampled.clone();
+    complete.coverage = COVERAGE_COMPLETE.into();
+    let window = SelectionLabel {
+        window_start_ms: 1_760_000_010_000,
+        window_end_ms: 1_760_000_015_000,
+    };
+    let head = "replay selection: every partition of every restored topic, from epoch-ms \
+                1760000010000 (the plan's stated window start, inclusive) to epoch-ms \
+                1760000015000 (inclusive); ";
+    let line = |result: IntegrityResult, v: Option<&Verification>| {
+        selection_lines(Some(&window), BeforeTheStart::of(&result, v))
+    };
+    assert_eq!(
+        line(IntegrityResult::Pass, Some(&complete)),
+        vec![format!(
+            "{head}no record before the start was restored or expected"
+        )]
+    );
+    for result in [IntegrityResult::Pass, IntegrityResult::Fail] {
+        assert_eq!(
+            line(result, Some(&sampled)),
+            vec![format!(
+                "{head}no record before the start was expected; a sampled check does not prove \
+                 that none was restored"
+            )],
+            "{result:?}"
+        );
+    }
+    for (result, v) in [
+        (IntegrityResult::Fail, Some(&complete)),
+        (IntegrityResult::Pass, None),
+    ] {
+        assert_eq!(
+            line(result, v),
+            vec![format!("{head}no record before the start was expected")]
+        );
+    }
+    assert!(selection_lines(None, BeforeTheStart::ProvedNoneRestored).is_empty());
 }

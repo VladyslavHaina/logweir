@@ -2442,6 +2442,21 @@ fn a_stated_window_start_is_restored_and_signed_with_its_window() {
         "{}",
         sc.sample.coverage_note
     );
+    // Review N1: the sampled lane's signed note never says no record before
+    // the start was restored — it cannot show that.
+    assert!(
+        sc.sample.coverage_note.contains(
+            "no record before the start was expected; a sampled check does not prove that none \
+             was restored"
+        ),
+        "{}",
+        sc.sample.coverage_note
+    );
+    assert!(
+        !sc.sample.coverage_note.contains("was restored or expected"),
+        "{}",
+        sc.sample.coverage_note
+    );
     assert!(sc.validate_invariants().is_ok());
 
     let control = fixtures::orchestrator_fixture(Drill::Passes);
