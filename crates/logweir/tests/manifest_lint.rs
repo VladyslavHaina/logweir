@@ -432,8 +432,9 @@ fn weirkeeper_has_no_verb_on_secrets() {
 /// declaration is scoped to the text from itself to whichever comes first: the
 /// end of the enclosing item (`"\n}"`), or the next declaration binding the
 /// same identifier. Inside that region, `ident.method(` records
-/// `(T, method)`, and `Controller::new(ident`, `.owns(ident` or
-/// `.watches(ident` records `(T, <controller-watch>)` — a watcher LISTs and
+/// `(T, method)`, and `Controller::new(ident`, `.owns(ident`,
+/// `.watches(ident` or `watcher(ident` records `(T, <controller-watch>)` — a
+/// watcher LISTs and
 /// then WATCHes, which is the only caller `list`/`watch` on a reconciled kind
 /// ever has.
 fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
@@ -537,7 +538,12 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
                     }
                 }
                 let head = region[..hit].trim_end();
-                if ["Controller::new(", ".owns(", ".watches("]
+                // `watcher(ident` IS THE SAME LIST-THEN-WATCH (FX-29): the
+                // `BackupSchedule` reconciler builds its trigger stream from
+                // `kube::runtime::watcher(api, …)` and hands it to
+                // `Controller::for_stream`, so its kind's `list`/`watch`
+                // caller is that call and not `Controller::new`.
+                if ["Controller::new(", ".owns(", ".watches(", "watcher("]
                     .iter()
                     .any(|k| head.ends_with(k))
                 {
