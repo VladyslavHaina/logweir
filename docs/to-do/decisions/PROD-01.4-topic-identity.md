@@ -611,7 +611,7 @@ Arms 22–26 (both readers, byte for byte): the block only from 1.5.0; covering 
 
 | Line | product ID = CLI's | recreation between two real backups | refusal by name (`acl`) | absent topic | oracle (`topic_identity.rs`) |
 | --- | --- | --- | --- | --- | --- |
-| 3.7.1 | 4 topics, 3 IDs with `-`/`_` | `New`; control `Same`; readers agree; catalog copies | `NotAuthorized`; super user reads the ID; restored after the ACL is removed | `NotFound` | 52 passed, c10 ignored |
+| 3.7.1 | 4 topics per run, 3 and 4 IDs with `-`/`_` in two runs | `New`; control `Same`; readers agree; catalog copies | `NotAuthorized`; super user reads the ID; restored after the ACL is removed | `NotFound` | 52 passed, c10 ignored |
 | 3.9.2 | 4 topics, all 4 IDs with `-`/`_` | `New`; control `Same`; readers agree; catalog copies | `NotAuthorized`; super user reads the ID; restored after the ACL is removed | `NotFound` | 52 passed, c10 ignored |
 | 4.3.1 | 6 topics, 2 IDs with `-`/`_` | `New`; control `Same`; readers agree; catalog copies | `NotAuthorized`; super user reads the ID; restored after the ACL is removed | `NotFound` | 52 passed, c10 ignored |
 
