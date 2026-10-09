@@ -566,6 +566,11 @@ pub struct Persisted {
     pub receipt_key: String,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.sig`
     pub sidecar_key: String,
+    /// `logweir/backups/<backup_id>/<run_id>.consumer-positions.json`, when
+    /// the run selected consumer groups (PROD-04.1): the positions document
+    /// the receipt binds by digest, put BEFORE the receipt so a receipt never
+    /// names a document that is not there.
+    pub positions_key: Option<String>,
     /// `sha256:<lowercase hex>` over the exact receipt bytes uploaded above.
     /// Public capture metadata; it says nothing about whether a controller has
     /// verified the receipt's signature.
@@ -594,6 +599,7 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
     Persisted {
         receipt_key: format!("logweir/backups/{backup_id}/{run_id}.receipt.json"),
         sidecar_key: format!("logweir/backups/{backup_id}/{run_id}.receipt.sig"),
+        positions_key: None,
         receipt_sha256: String::new(),
         // Not knowable from the two ids: the point id is derived from the
         // receipt's BYTES (D3 §5.1), which do not exist yet at this call.
@@ -768,6 +774,41 @@ pub(crate) fn persist_receipt(
              logweir, not in the spec — please report it with this line."
         ))
     })?;
+    // 1b. PROD-04.1: the positions document the receipt binds holds against
+    //     it, through the same arms a reader runs (CP-1 to CP-14) — over the
+    //     exact bytes that will be put.
+    let positions = match (
+        &receipt.consumer_positions,
+        &outcome.consumer_positions_document,
+    ) {
+        (None, None) => None,
+        (Some(_), Some(bytes)) => {
+            let doc: logweir_core::consumer_positions::PositionsDocument =
+                serde_json::from_slice(bytes).map_err(|e| {
+                    sig(format!(
+                        "the consumer positions document does not parse: {e}"
+                    ))
+                })?;
+            receipt
+                .validate_consumer_positions_document(bytes, &doc)
+                .map_err(|e| {
+                    sig(format!(
+                        "the consumer positions document this run measured violates its own \
+                         invariants and NOTHING was signed: {e}. The archive may exist; the \
+                         evidence does not. This is a bug in logweir — please report it with \
+                         this line."
+                    ))
+                })?;
+            Some(bytes.as_slice())
+        }
+        _ => {
+            return Err(sig(
+                "the consumer positions block and its document are not both present; nothing \
+                 was signed. This is a bug in logweir."
+                    .to_string(),
+            ))
+        }
+    };
 
     // 2. The EXACT bytes.
     let bytes = logweir_core::det_json::to_deterministic_json(&receipt)
@@ -790,6 +831,14 @@ pub(crate) fn persist_receipt(
     let mut keys = receipt_keys(&outcome.backup_id, &outcome.run_id);
     keys.receipt_sha256 = receipt_sha256;
     crate::backup::print_progress_step(crate::backup::PROGRESS_STEP_UPLOAD);
+    // PROD-04.1: the positions document FIRST, at the key the receipt names:
+    // a receipt is never put that names a document that is not there.
+    if let (Some(cp), Some(doc)) = (&receipt.consumer_positions, positions) {
+        store
+            .put_create_only(&cp.document.key, doc)
+            .map_err(|e| sig(e.to_string()))?;
+        keys.positions_key = Some(cp.document.key.clone());
+    }
     store
         .put_create_only(&keys.receipt_key, &bytes)
         .map_err(|e| sig(e.to_string()))?;
@@ -846,9 +895,30 @@ pub(crate) fn persist_receipt(
                 keys.sidecar_key
             ))
         })?;
+        // PROD-04.1: the positions document beside them, as
+        // `<receipt-out stem>.consumer-positions.json`.
+        if let Some(doc) = positions {
+            let doc_path = positions_out(path);
+            std::fs::write(&doc_path, doc).map_err(|e| {
+                BackupError::Operational(format!(
+                    "{}: {e} — the positions document IS in the evidence bucket at {}; only \
+                     the local copy could not be written",
+                    doc_path.display(),
+                    keys.positions_key.as_deref().unwrap_or_default()
+                ))
+            })?;
+        }
     }
 
     Ok(keys)
+}
+
+/// Where `--receipt-out <path>` writes the positions document: beside the
+/// receipt, `<path stem>.consumer-positions.json` (`r.json` →
+/// `r.consumer-positions.json`), as the sidecar is `<path stem>.sig`.
+#[must_use]
+pub fn positions_out(receipt_out: &Path) -> std::path::PathBuf {
+    receipt_out.with_extension("consumer-positions.json")
 }
 
 /// **PLAT-15.1, D3 §5.2** — the catalog point record for this run, written as

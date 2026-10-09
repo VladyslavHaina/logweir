@@ -141,6 +141,7 @@ schema:
     cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-{{receipt_schema_version}}.json
     cargo run -p logweir-api --example emit_openapi > schemas/logweir-api-v1.openapi.json
     cargo run -p logweir --example emit_catalog_point_schema > schemas/logweir-catalog-point-{{catalog_schema_version}}.json
+    cargo run -p logweir-core --example emit_consumer_positions_schema > schemas/logweir-consumer-positions-1.0.0.json
 
 # Compare regenerated schemas without changing the working tree.
 schema-check:
@@ -153,10 +154,12 @@ schema-check:
     cargo run --locked -p logweir-core --example emit_backup_receipt_schema > "$tmp/receipt.json"
     cargo run --locked -p logweir-api --example emit_openapi > "$tmp/api.json"
     cargo run --locked -p logweir --example emit_catalog_point_schema > "$tmp/catalog-point.json"
+    cargo run --locked -p logweir-core --example emit_consumer_positions_schema > "$tmp/consumer-positions.json"
     diff -u schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json "$tmp/scorecard.json"
     diff -u schemas/logweir-backup-receipt-{{receipt_schema_version}}.json "$tmp/receipt.json"
     diff -u schemas/logweir-api-v1.openapi.json "$tmp/api.json"
     diff -u schemas/logweir-catalog-point-{{catalog_schema_version}}.json "$tmp/catalog-point.json"
+    diff -u schemas/logweir-consumer-positions-1.0.0.json "$tmp/consumer-positions.json"
 
 # Compatibility alias; the main check runs schema-check only once.
 receipt-schema-check: schema-check

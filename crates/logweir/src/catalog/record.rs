@@ -229,7 +229,8 @@ pub struct CatalogPoint {
     /// summarised ([`RecordConsumerPositions::of`]) and BOUND by the digest of
     /// the receipt's block: when the positions were observed, and per selected
     /// group its outcome and how many positions relate to archived data. The
-    /// positions themselves are the receipt's.
+    /// positions themselves are in the positions document the receipt's block
+    /// binds by its own digest, so this digest binds them too.
     ///
     /// Receipt-derived under rule 3 — `reader::cross_check` refuses a record
     /// whose summary or digest the verified receipt does not back. ABSENT
@@ -244,7 +245,9 @@ pub struct CatalogPoint {
 pub struct RecordConsumerPositions {
     /// `sha256:<hex>` over the deterministic JSON of the receipt's
     /// `consumer_positions` block (`ConsumerPositions::digest`): the binding a
-    /// reader recomputes from the verified receipt.
+    /// reader recomputes from the verified receipt. The block carries the
+    /// positions document's digest, so one position moved is a different
+    /// block and a different digest here.
     pub sha256: String,
     /// When the group capture started (the receipt's `observed_from`).
     pub observed_from: DateTime<Utc>,
@@ -300,10 +303,7 @@ impl RecordConsumerPositions {
                     reason: g.reason.clone(),
                     group_type: g.group_type.clone(),
                     active: g.active,
-                    positions: g
-                        .positions
-                        .as_deref()
-                        .map(logweir_core::consumer_positions::PositionCounts::of),
+                    positions: g.counts,
                 })
                 .collect(),
         })

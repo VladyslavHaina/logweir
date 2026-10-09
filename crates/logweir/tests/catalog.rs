@@ -2430,16 +2430,17 @@ fn the_point_id_fixture_is_the_catalogs() {
 // ===================================================================== PROD-04.1
 
 /// A 1.5.0 receipt: `receipt_1_3` plus a consumer position block over its one
-/// topic — `billing` captured (one related position, one never committed),
-/// `share-1` excluded GroupTypeNotCaptured, `hidden` failed.
-fn receipt_1_5() -> BackupReceipt {
+/// topic — `billing` captured (one related position, at `position`, and one
+/// partition never committed), `share-1` excluded GroupTypeNotCaptured,
+/// `hidden` failed — bound to the positions document that holds them.
+fn receipt_1_5_at(position: i64) -> BackupReceipt {
     let mut r = receipt_1_3();
     r.format_version = "1.5.0".into();
-    r.consumer_positions = Some(
+    let doc: logweir_core::consumer_positions::PositionsDocument =
         serde_json::from_value(serde_json::json!({
-            "observed_from": "2026-09-15T02:59:58Z",
-            "observed_to": "2026-09-15T02:59:59.250Z",
-            "listing": "complete",
+            "format_version": "1.0.0",
+            "backup_id": r.backup_id,
+            "run_id": r.run_id,
             "topics": {"orders": {"partitions": [
                 {"partition": 0, "observed": true, "log_start": 0, "high_watermark": 40,
                  "log_start_after": 0, "high_watermark_after": 41,
@@ -2447,14 +2448,28 @@ fn receipt_1_5() -> BackupReceipt {
                 {"partition": 1, "observed": true, "log_start": 0, "high_watermark": 3,
                  "archived_first": 0, "archived_last": 2}
             ], "changed_during_capture": false}},
+            "groups": {"billing": {"positions": [
+                {"topic": "orders", "partition": 0, "status": "captured",
+                 "position": position, "coverage": "withinArchive"}
+            ], "no_committed_position": 1}}
+        }))
+        .expect("a document");
+    let bytes = doc.to_bytes().unwrap();
+    r.consumer_positions = Some(
+        serde_json::from_value(serde_json::json!({
+            "observed_from": "2026-09-15T02:59:58Z",
+            "observed_to": "2026-09-15T02:59:59.250Z",
+            "listing": "complete",
+            "document": {
+                "key": logweir_core::consumer_positions::document_key(&r.backup_id, &r.run_id),
+                "sha256": logweir_core::ids::sha256_prefixed(&bytes),
+                "bytes": bytes.len()
+            },
             "groups": {
                 "billing": {"outcome": "captured", "group_type": "classic", "state": "Empty",
                             "listed_state": "Empty", "members": 0, "active": false,
-                            "positions": [
-                                {"topic": "orders", "partition": 0, "status": "captured",
-                                 "position": 17, "coverage": "withinArchive"},
-                                {"topic": "orders", "partition": 1, "status": "noCommittedPosition"}
-                            ]},
+                            "counts": {"related": 1, "not_related": 0, "never_committed": 1,
+                                       "beyond_end": 0, "failed": 0, "not_observed": 0}},
                 "share-1": {"outcome": "excluded", "reason": "GroupTypeNotCaptured",
                             "group_type": "other"},
                 "hidden": {"outcome": "failed", "reason": "NotVisibleToPrincipal"}
@@ -2463,7 +2478,16 @@ fn receipt_1_5() -> BackupReceipt {
         .expect("a block"),
     );
     r.validate_invariants().expect("the 1.5.0 fixture is valid");
+    assert_eq!(
+        r.validate_consumer_positions_document(&bytes, &doc),
+        Ok(()),
+        "and its document holds"
+    );
     r
+}
+
+fn receipt_1_5() -> BackupReceipt {
+    receipt_1_5_at(17)
 }
 
 /// The record summarises the receipt's block, bound by its digest, and is
@@ -2556,6 +2580,39 @@ fn a_consumer_positions_summary_the_receipt_does_not_back_is_a_record_mismatch()
     quieter.consumer_positions = None;
     assert_eq!(
         reader::cross_check(&quieter, &r, &bytes),
+        CrossCheck::Agrees
+    );
+}
+
+/// **The review's A8: the digest binds the positions themselves.** Two
+/// receipts whose documents differ in ONE position — the same coverage, so the
+/// same counts — carry different blocks and different digests, and a record
+/// carrying the other's digest is refused by the cross-check; nothing but the
+/// digest tells them apart.
+#[test]
+fn one_position_moved_is_another_digest_and_a_record_carrying_it_is_refused() {
+    let key = SigningKey::generate_ed25519();
+    let (a, b) = (receipt_1_5_at(17), receipt_1_5_at(18));
+    let (ca, cb) = (
+        a.consumer_positions.as_ref().unwrap(),
+        b.consumer_positions.as_ref().unwrap(),
+    );
+    assert_eq!(ca.groups, cb.groups, "the same outcomes and counts");
+    assert_ne!(ca.document.sha256, cb.document.sha256);
+    assert_ne!(ca.digest().unwrap(), cb.digest().unwrap());
+    let mut swapped = point_for(&a, "s3://kafka-backups/prod", &key);
+    swapped.consumer_positions.as_mut().unwrap().sha256 = cb.digest().unwrap();
+    match reader::cross_check(&swapped, &a, &receipt_bytes(&a)) {
+        CrossCheck::RecordMismatch(d) => assert!(
+            d.iter().any(|m| m.starts_with("consumer_positions.sha256")),
+            "{d:?}"
+        ),
+        other => panic!("another receipt's digest must not agree: {other:?}"),
+    }
+    // The control: its own digest agrees.
+    let own = point_for(&a, "s3://kafka-backups/prod", &key);
+    assert_eq!(
+        reader::cross_check(&own, &a, &receipt_bytes(&a)),
         CrossCheck::Agrees
     );
 }

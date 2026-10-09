@@ -6737,39 +6737,248 @@ fn a_point_with_more_topics_than_the_cap_lists_none_and_counts_them() {
 
 /// **PROD-04.1.** A 1.5.0 receipt over `orders` (one partition) selecting
 /// `ids`: the first captured at a position the archive holds, every other
-/// excluded GroupNotFound.
+/// excluded GroupNotFound — built by the RUNNER's own builder, so the block is
+/// the one `backup run` signs.
 fn positioned_catalog_receipt(ids: &[String]) -> BackupReceipt {
     let mut r = modelled_catalog_receipt(&[("orders", 3, 1)]);
+    let built = built_positions(&r, ids, &[("orders", 1)], |i| i == 0);
     r.format_version =
         logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.to_string();
-    let mut groups = serde_json::Map::new();
-    for (i, id) in ids.iter().enumerate() {
-        groups.insert(
-            id.clone(),
-            if i == 0 {
-                serde_json::json!({"outcome": "captured", "group_type": "classic",
-                    "state": "Stable", "listed_state": "Stable", "members": 1, "active": true,
-                    "positions": [{"topic": "orders", "partition": 0, "status": "captured",
-                                   "position": 3, "coverage": "withinArchive"}]})
-            } else {
-                serde_json::json!({"outcome": "excluded", "reason": "GroupNotFound"})
-            },
-        );
-    }
-    r.consumer_positions = Some(
-        serde_json::from_value(serde_json::json!({
-            "observed_from": "2026-09-16T02:59:58Z",
-            "observed_to": "2026-09-16T02:59:59Z",
-            "listing": "complete",
-            "topics": {"orders": {"partitions": [{"partition": 0, "observed": true,
-                "log_start": 0, "high_watermark": 9, "archived_first": 0, "archived_last": 8}],
-                "changed_during_capture": false}},
-            "groups": groups,
-        }))
-        .expect("a block"),
-    );
+    r.consumer_positions = Some(built.block);
     assert_eq!(r.validate_invariants(), Ok(()));
     r
+}
+
+/// A capturable classic group, from a real classification (only `classify`
+/// makes one).
+fn capturable_group(id: &str) -> logweir_kafka::groups::CapturableGroup {
+    use logweir_kafka::groups::{code, GroupListings, GroupVerdict, NameEntry, TypedEntry};
+    let listings = GroupListings {
+        typed: vec![TypedEntry {
+            group_id: id.into(),
+            is_simple: false,
+            state: code::STATE_STABLE,
+            group_type: code::TYPE_CLASSIC,
+        }],
+        typed_errors: vec![],
+        names: vec![NameEntry {
+            group_id: id.into(),
+            error: 0,
+        }],
+        names_incomplete: None,
+        access: logweir_kafka::access::ClusterAccess::Reported(vec![8]),
+        unreadable_ids: 0,
+    };
+    match listings
+        .classify(&[id.to_string()], &BTreeMap::new())
+        .remove(0)
+        .1
+    {
+        GroupVerdict::Capture(c) => c,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// **`backup run`'s own builder** over `ids`, the `(topic, partitions)` named,
+/// every partition's marks `[0, 10]` read before and after the engine and
+/// `[0, 9]` archived. A group `captured(i)` selects is a live classic group
+/// committed at 5 on EVERY partition of every topic — the review's worst
+/// case, the one that grows the positions — and every other id is absent.
+fn built_positions(
+    receipt: &BackupReceipt,
+    ids: &[String],
+    topics: &[(&str, i32)],
+    captured: impl Fn(usize) -> bool,
+) -> logweir::backup::consumer_positions::Built {
+    use logweir_kafka::capture::{GroupsObservation, Marks, ObservedGroup, TopicMarks};
+    use logweir_kafka::groups::{
+        Absence, Excluded, GroupDescription, GroupState, GroupType, GroupVerdict,
+        ListingCompleteness, MemberDescription,
+    };
+    use logweir_kafka::positions::{
+        CommittedPosition, GroupPositions, PartitionPosition, TopicPartition,
+    };
+    let marks = |n: i32| -> TopicMarks {
+        Ok((0..n)
+            .map(|p| {
+                (
+                    p,
+                    Ok(Marks {
+                        log_start: 0,
+                        high_watermark: 10,
+                    }),
+                )
+            })
+            .collect())
+    };
+    let every: Vec<TopicPartition> = topics
+        .iter()
+        .flat_map(|(t, n)| (0..*n).map(move |p| TopicPartition::new(*t, p)))
+        .collect();
+    let groups = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            if captured(i) {
+                ObservedGroup {
+                    group_id: id.clone(),
+                    verdict: GroupVerdict::Capture(capturable_group(id)),
+                    description: Some(Ok(GroupDescription {
+                        group_id: id.clone(),
+                        group_type: GroupType::Classic,
+                        state: GroupState::Stable,
+                        is_simple: false,
+                        partition_assignor: None,
+                        coordinator: Some(1),
+                        members: vec![MemberDescription {
+                            client_id: None,
+                            consumer_id: None,
+                            group_instance_id: None,
+                            host: None,
+                            assignment: vec![],
+                            target_assignment: None,
+                        }],
+                    })),
+                    positions: Some(Ok(GroupPositions {
+                        group: id.clone(),
+                        partitions: every
+                            .iter()
+                            .map(|tp| {
+                                (
+                                    tp.clone(),
+                                    PartitionPosition::Committed(CommittedPosition {
+                                        offset: 5,
+                                        leader_epoch: None,
+                                        metadata: Some(String::new()),
+                                    }),
+                                )
+                            })
+                            .collect(),
+                    })),
+                }
+            } else {
+                ObservedGroup {
+                    group_id: id.clone(),
+                    verdict: GroupVerdict::Excluded(Excluded::GroupNotFound {
+                        evidence: Absence::CompleteListing,
+                    }),
+                    description: None,
+                    positions: None,
+                }
+            }
+        })
+        .collect();
+    let observation = GroupsObservation {
+        completeness: Some(ListingCompleteness::Complete),
+        groups,
+        topics: topics
+            .iter()
+            .map(|(t, n)| ((*t).to_string(), marks(*n)))
+            .collect(),
+        unavailable: None,
+    };
+    let after: BTreeMap<String, TopicMarks> = topics
+        .iter()
+        .map(|(t, n)| ((*t).to_string(), marks(*n)))
+        .collect();
+    let archived: logweir::backup::consumer_positions::ArchivedRanges = topics
+        .iter()
+        .map(|(t, n)| ((*t).to_string(), (0..*n).map(|p| (p, (0, 9))).collect()))
+        .collect();
+    let names: Vec<String> = topics.iter().map(|(t, _)| (*t).to_string()).collect();
+    let started = catalog_ts("2026-09-16T02:59:58Z");
+    logweir::backup::consumer_positions::build(&logweir::backup::consumer_positions::Capture {
+        backup_id: &receipt.backup_id,
+        run_id: &receipt.run_id,
+        selected: ids,
+        topics: &names,
+        observed_from: started,
+        observed_to: started + chrono::Duration::seconds(1),
+        observation: &observation,
+        after: &after,
+        archived: &archived,
+    })
+    .expect("the builder builds")
+}
+
+/// **PROD-04.1 review H1: the receipt stays small however many partitions the
+/// selected groups hold, and the point stays `Available`.** The review's two
+/// sizes, through the runner's own builder with every group committed on every
+/// partition: 10 groups over 20 topics of 12 partitions, and 100 groups — the
+/// most a backup may select — over 10 topics of 11. Each receipt is far under
+/// the catalog's 256 KiB read cap (and the evidence fetch's 1 MiB), the catalog
+/// reads the point `Available` with its summary, and the receipt's block alone
+/// is under its proved bound. NEGATIVE CONTROL: the positions themselves —
+/// the document the receipt binds — are over the 256 KiB cap at both sizes,
+/// which is what the receipt carried inline before the fix, so these sizes
+/// would read `Unreadable` had the positions stayed in it.
+#[test]
+fn the_reviews_two_sizes_keep_the_receipt_small_and_the_point_available() {
+    use logweir::check::kinds::catalog_sync::{MAX_CATALOG_DOCUMENT_BYTES, MAX_ENTRY_GROUPS};
+    use logweir_core::consumer_positions::{MAX_BLOCK_BYTES, MAX_SELECTED_GROUPS};
+    for (groups, topics, partitions) in [(10usize, 20usize, 12i32), (MAX_SELECTED_GROUPS, 10, 11)] {
+        let names: Vec<String> = (0..topics).map(|t| format!("topic-{t:02}")).collect();
+        let layout: Vec<(&str, u32, u32)> = names
+            .iter()
+            .map(|n| (n.as_str(), 3, partitions as u32))
+            .collect();
+        let mut r = modelled_catalog_receipt(&layout);
+        let ids: Vec<String> = (0..groups)
+            .map(|i| format!("consumer-group-{i:03}"))
+            .collect();
+        let named: Vec<(&str, i32)> = names.iter().map(|n| (n.as_str(), partitions)).collect();
+        let built = built_positions(&r, &ids, &named, |_| true);
+        r.format_version =
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.to_string();
+        r.consumer_positions = Some(built.block.clone());
+        assert_eq!(r.validate_invariants(), Ok(()));
+        assert_eq!(
+            r.validate_consumer_positions_document(&built.document_bytes, &built.document),
+            Ok(())
+        );
+        let receipt_bytes = logweir_core::det_json::to_deterministic_json(&r).unwrap();
+        let block_bytes = logweir_core::det_json::to_deterministic_json(&built.block).unwrap();
+        let size = format!(
+            "{groups} groups over {topics}x{partitions}: receipt {} bytes, block {} bytes, \
+             document {} bytes",
+            receipt_bytes.len(),
+            block_bytes.len(),
+            built.document_bytes.len()
+        );
+        eprintln!("[h1] {size}");
+        assert!(
+            receipt_bytes.len() * 4 < MAX_CATALOG_DOCUMENT_BYTES,
+            "the receipt is not well under the catalog's cap: {size}"
+        );
+        assert!(
+            (receipt_bytes.len() as u64) < logweir_core::check_contract::MAX_EVIDENCE_PAYLOAD_BYTES,
+            "{size}"
+        );
+        assert!(block_bytes.len() < MAX_BLOCK_BYTES, "{size}");
+        assert!(
+            built.document_bytes.len() > MAX_CATALOG_DOCUMENT_BYTES,
+            "NEGATIVE CONTROL: inline, these positions would be over the cap: {size}"
+        );
+        // Every partition of every group is accounted for in the document.
+        for g in built.document.groups.values() {
+            assert_eq!(g.positions.len(), topics * partitions as usize);
+        }
+        let (objects, _) = versioned_objects(&r, &[("v1", CATALOG_MANIFEST)]);
+        let entry = only_entry(objects);
+        assert_eq!(entry["availability"], "Available", "{size}: {entry}");
+        let cp = &entry["consumerPositions"];
+        assert_eq!(cp["listing"], "complete", "{entry}");
+        if groups > MAX_ENTRY_GROUPS {
+            assert_eq!(cp["groupsOmitted"], groups, "{entry}");
+        } else {
+            assert_eq!(cp["groups"].as_array().unwrap().len(), groups, "{entry}");
+            assert_eq!(
+                cp["groups"][0]["positions"]["related"],
+                topics * partitions as usize,
+                "{entry}"
+            );
+        }
+    }
 }
 
 /// **PROD-04.1: the catalog view shows the snapshot's freshness and whether
@@ -6812,6 +7021,46 @@ fn an_available_1_5_0_point_publishes_its_consumer_position_summary() {
     );
     let control = only_entry(control);
     assert!(control.get("consumerPositions").is_none(), "{control}");
+}
+
+/// **The review's A7: a summary the receipt does not back is never shown.**
+/// A record whose consumer position summary was changed after it was written
+/// — a failed group made captured — is a `Conflict` (rule 3), and the entry
+/// publishes NO `consumerPositions`: the view never shows a summary the sync
+/// could not stand behind. The control — the record as written — is
+/// `Available` and publishes it.
+#[test]
+fn a_record_whose_position_summary_the_receipt_does_not_back_publishes_none() {
+    let receipt = positioned_catalog_receipt(&["billing".into(), "gone".into()]);
+    let (_, f) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
+    let mut record = f.point.clone();
+    let cp = record
+        .consumer_positions
+        .as_mut()
+        .expect("the summary travels");
+    let gone = cp
+        .groups
+        .iter_mut()
+        .find(|g| g.group_id == "gone")
+        .expect("gone");
+    gone.outcome = "captured".into();
+    gone.reason = None;
+    let objects = FakeObjects::new()
+        .with_object(&f.log_key, &f.log_bytes)
+        .with_object(&f.record_key, &record.canonical_bytes().unwrap())
+        .with_object(&f.receipt_key, &f.receipt_bytes)
+        .with_object(&f.sidecar_key, &f.sidecar_bytes)
+        .with_versions(&f.manifest_key, &[("v1", CATALOG_MANIFEST)]);
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Conflict", "{entry}");
+    assert!(
+        entry.get("consumerPositions").is_none(),
+        "a summary the receipt does not back is not published: {entry}"
+    );
+    let (control, _) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
+    let control = only_entry(control);
+    assert_eq!(control["availability"], "Available", "{control}");
+    assert!(control.get("consumerPositions").is_some(), "{control}");
 }
 
 /// More groups than the cap: none listed, the count said; the freshness stays.

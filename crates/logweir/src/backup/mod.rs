@@ -205,6 +205,10 @@ pub struct BackupOutcome {
     /// (`consumer_positions::build`), or `None` when the run selected none:
     /// the receipt's 1.5.0 `consumer_positions` block.
     pub consumer_positions: Option<logweir_core::consumer_positions::ConsumerPositions>,
+    /// **PROD-04.1.** The exact bytes of the positions document the block
+    /// binds (`<run_id>.consumer-positions.json`, beside the receipt), put
+    /// before the receipt is: `Some` exactly when `consumer_positions` is.
+    pub consumer_positions_document: Option<Vec<u8>>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -775,20 +779,35 @@ fn execute_with_signer(
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
     // PROD-04.1: the marks again, after the engine, and the archive's offsets:
     // what each position is judged against.
-    let consumer_positions = group_capture.map(|(observed_from, observed_to, observation)| {
-        let after = reader.partition_marks(&plan.topics);
-        let block = consumer_positions::build(&consumer_positions::Capture {
-            selected: &selected,
-            topics: &plan.topics,
-            observed_from,
-            observed_to,
-            observation: &observation,
-            after: &after,
-            archived: &ran.manifest_ranges,
-        });
-        consumer_positions::log(&block, &observation);
-        block
-    });
+    // Only when a group was described: a capture that asked no position needs
+    // no marks (PROD-04.1 review L8).
+    let built = group_capture
+        .map(|(observed_from, observed_to, observation)| {
+            let after = if consumer_positions::positions_were_asked(&observation) {
+                reader.partition_marks(&plan.topics)
+            } else {
+                BTreeMap::new()
+            };
+            let built = consumer_positions::build(&consumer_positions::Capture {
+                backup_id: &backup_id,
+                run_id,
+                selected: &selected,
+                topics: &plan.topics,
+                observed_from,
+                observed_to,
+                observation: &observation,
+                after: &after,
+                archived: &ran.manifest_ranges,
+            })
+            .map_err(BackupError::Signing)?;
+            consumer_positions::log(&built.block, &observation);
+            Ok::<_, BackupError>(built)
+        })
+        .transpose()?;
+    let (consumer_positions, consumer_positions_document) = match built {
+        Some(b) => (Some(b.block), Some(b.document_bytes)),
+        None => (None, None),
+    };
     let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
     let topic_configuration =
         config_coverage::model(&observed, &ran.manifest_layouts, &factors, &inputs.owners);
@@ -818,6 +837,7 @@ fn execute_with_signer(
         topic_configuration,
         owner_detection: inputs.owner_detection.clone(),
         consumer_positions,
+        consumer_positions_document,
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

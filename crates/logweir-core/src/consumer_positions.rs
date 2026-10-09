@@ -1,8 +1,30 @@
 //! **PROD-04.1: consumer position evidence** — the backup receipt's
-//! `consumer_positions` block (format 1.5.0), its closed vocabularies and the
-//! pure rules both the writer and the receipt's arms 22–34 decide with.
+//! `consumer_positions` block (format 1.5.0), the positions DOCUMENT it binds,
+//! their closed vocabularies and the pure rules both the writer and the
+//! readers decide with.
 //!
-//! # What the block says
+//! # Two documents, and why
+//!
+//! The receipt is one signed document that the catalog reads whole (at most
+//! 256 KiB) and the evidence fetch relays (at most 1 MiB). Positions grow with
+//! groups × partitions, so they are NOT in it (PROD-04.1 review H1):
+//!
+//! - **The receipt's block** ([`ConsumerPositions`]) carries, per selected
+//!   group, its outcome, type, states, members, whether it was active and its
+//!   position COUNTS, the observation window, and the positions document's
+//!   key, digest and length. Its size depends on the number of groups only
+//!   (at most [`MAX_SELECTED_GROUPS`]), never on partitions:
+//!   [`MAX_BLOCK_BYTES`] bounds it, and a unit row proves the bound at the
+//!   largest selection.
+//! - **The positions document** ([`PositionsDocument`],
+//!   `logweir/backups/<backup_id>/<run_id>.consumer-positions.json`, beside
+//!   the receipt) carries every named partition's facts and every captured
+//!   group's positions. It is not signed itself: the receipt's signature
+//!   covers its SHA-256 and length (`document`), so a reader that fetches it
+//!   verifies it against the signed receipt (arms CP-1 to CP-14,
+//!   `BackupReceipt::validate_consumer_positions_document`).
+//!
+//! # What the receipt says per group
 //!
 //! A backup that names consumer groups (`source.consumer_groups`, the
 //! `Backup`/`BackupSchedule` `spec.consumerGroups`, or `logweir backup run
@@ -10,20 +32,22 @@
 //!
 //! | `outcome` | `reason` | carries |
 //! |---|---|---|
-//! | `captured` | — | the group's type (`classic` or `consumer`), the state its listing and its description gave, its member count, whether it was `active`, and one position entry per partition of every named topic |
+//! | `captured` | — | the group's type (`classic` or `consumer`), the state its listing and its description gave, its member count, whether it was `active`, and its position `counts`; its positions are in the document |
 //! | `excluded` | `GroupTypeNotCaptured` (a share or streams group, a non-consumer protocol, or a type the client cannot name: every group on a broker below ListGroups v5) | `group_type: other` |
 //! | `excluded` | `GroupNotFound` | nothing: the listings were complete, or a targeted describe answered the id as absent |
 //! | `failed` | one of [`FAILED_REASONS`] | nothing: the group may exist and hold positions, and none is claimed |
 //!
 //! **Absence is never offset 0.** A group that is not `captured` carries no
-//! position at all, and a captured group carries one entry for every
-//! partition of every named topic, so a partition is never silently missing:
-//! a partition with no committed offset is `noCommittedPosition`, never 0.
+//! position at all. A captured group's document entry lists every partition
+//! with something to say — a committed position, a failed read, a partition
+//! the capture did not observe — and COUNTS every other partition of every
+//! named topic as having no committed position (`no_committed_position`), so
+//! a partition is never silently missing and never read as 0 (arm CP-11).
 //!
 //! # Which positions relate to archived data
 //!
-//! Each captured position is judged against the partition's facts, which the
-//! block records ONCE per partition ([`PartitionFacts`]): the log start and
+//! Each committed position is judged against the partition's facts, which the
+//! document records ONCE per partition ([`PartitionFacts`]): the log start and
 //! high watermark read right after the positions (the group-capture marks,
 //! READ_UNCOMMITTED), the same marks read again after the engine, and the
 //! offsets the archive's manifest records for the partition. [`relation`] is
@@ -41,9 +65,12 @@
 //! | otherwise | `beyondArchive` |
 //!
 //! Only `withinArchive` and `atArchiveEnd` RELATE to archived data
-//! ([`RELATED`]). Both receipt readers re-derive every coverage word from the
-//! recorded facts (arm 32), so a receipt cannot claim a relation its own
-//! numbers do not support.
+//! ([`RELATED`]). Both readers re-derive every coverage word from the recorded
+//! facts (arm CP-13), so a document cannot claim a relation its own numbers do
+//! not support, and the receipt's counts are what the document's positions
+//! say (arm CP-14). A `read_committed` group fully caught up past a trailing
+//! transaction marker sits at the last archived offset + 2 and reads
+//! `beyondArchive`: an under-claim, on the safe side.
 //!
 //! # Positions are not atomic with the records
 //!
@@ -56,10 +83,21 @@
 //! # A topic that changed during the capture
 //!
 //! A topic whose marks after the engine REGRESS against the group-capture
-//! marks (a log start or a high watermark moved backwards: the topic was
-//! recreated or truncated) is `changed_during_capture`, and no group may
-//! claim a position on it: a group holding one is `failed:
-//! GenerationChangedDuringCapture` (PROD-01.4 TI-04.1-3), never captured.
+//! marks (a log start or a high watermark moved backwards) is
+//! `changed_during_capture`, and no group may claim a position on it: a group
+//! holding one is `failed: GenerationChangedDuringCapture` (PROD-01.4
+//! TI-04.1-3, arm CP-9), never captured. Detection is a REGRESSION of marks
+//! only: a topic recreated and refilled past its old marks before the read
+//! after the engine is not seen, and a read after the engine that failed
+//! decides nothing. Topic identity (PROD-01.4a) is what closes that gap.
+//!
+//! # A topic whose partitions were never read
+//!
+//! A named topic none of the three reads (the capture, the read after the
+//! engine, the archive) gave a partition for records `partitions: []`. A group
+//! cannot be captured over it — its positions there are unknown, and absence
+//! would read as "no partition" — so every group that would have been is
+//! `failed: PartitionsNotRead` (arm CP-10, PROD-04.1 review L4).
 //!
 //! # Generation
 //!
@@ -73,13 +111,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// `GroupSnapshot::outcome`'s closed set (arm 27).
+/// `GroupSnapshot::outcome`'s closed set (arm 25).
 pub const GROUP_OUTCOMES: [&str; 3] = ["captured", "excluded", "failed"];
 
-/// `GroupSnapshot::reason`'s closed set for an `excluded` group (arm 27).
+/// `GroupSnapshot::reason`'s closed set for an `excluded` group (arm 25).
 pub const EXCLUDED_REASONS: [&str; 2] = ["GroupTypeNotCaptured", "GroupNotFound"];
 
-/// `GroupSnapshot::reason`'s closed set for a `failed` group (arm 27).
+/// `GroupSnapshot::reason`'s closed set for a `failed` group (arm 25).
 ///
 /// - `NotVisibleToPrincipal`: no listing shows it and a targeted call was
 ///   refused GROUP_AUTHORIZATION_FAILED; it may exist (PROD-04.0 §5, T14).
@@ -94,9 +132,14 @@ pub const EXCLUDED_REASONS: [&str; 2] = ["GroupTypeNotCaptured", "GroupNotFound"
 /// - `DescribeFailed`, `PositionsFailed`: the description or the fetch failed
 ///   for another reason.
 /// - `GenerationChangedDuringCapture`: the group held a position on a topic
-///   that changed during the capture.
+///   that changed during the capture (arm CP-9).
 /// - `CaptureUnavailable`: the run's reader could not read consumer groups.
-pub const FAILED_REASONS: [&str; 12] = [
+/// - `GroupVanishedDuringCapture`: its description answered `Dead` with no
+///   member — the stand-in for "no such group" (PROD-04.0 T2) — so it was
+///   deleted, or its offsets expired, while it was being read (arm 26).
+/// - `PartitionsNotRead`: a named topic's partitions were never read, so its
+///   positions there are unknown (arm CP-10).
+pub const FAILED_REASONS: [&str; 14] = [
     "NotVisibleToPrincipal",
     "NotVisibleOrUnreachable",
     "NotAuthorized",
@@ -109,21 +152,30 @@ pub const FAILED_REASONS: [&str; 12] = [
     "PositionsFailed",
     "GenerationChangedDuringCapture",
     "CaptureUnavailable",
+    "GroupVanishedDuringCapture",
+    "PartitionsNotRead",
 ];
 
 /// The reason a group holding a position on a changed topic fails with.
 pub const GENERATION_CHANGED: &str = "GenerationChangedDuringCapture";
 
+/// The reason a group described `Dead` with no member fails with.
+pub const GROUP_VANISHED: &str = "GroupVanishedDuringCapture";
+
+/// The reason a group fails with when a named topic's partitions were never
+/// read.
+pub const PARTITIONS_NOT_READ: &str = "PartitionsNotRead";
+
 /// The reason an excluded group of a type Logweir does not capture carries.
 pub const GROUP_TYPE_NOT_CAPTURED: &str = "GroupTypeNotCaptured";
 
-/// The group types a `captured` group carries (arm 28).
+/// The group types a `captured` group carries (arm 26).
 pub const CAPTURED_TYPES: [&str; 2] = ["classic", "consumer"];
 
-/// The type an `excluded: GroupTypeNotCaptured` group carries (arm 28).
+/// The type an `excluded: GroupTypeNotCaptured` group carries (arm 26).
 pub const OTHER_TYPE: &str = "other";
 
-/// `GroupSnapshot::state` and `listed_state`'s closed set (arm 28): the states
+/// `GroupSnapshot::state` and `listed_state`'s closed set (arm 26): the states
 /// librdkafka names, and `stateUnknownToClient` for any other (KIP-848's
 /// `Assigning` and `Reconciling` among them), which counts as active.
 pub const GROUP_STATES: [&str; 6] = [
@@ -139,20 +191,20 @@ pub const GROUP_STATES: [&str; 6] = [
 /// one included, is active (PROD-04.0 T4).
 pub const INACTIVE_STATES: [&str; 2] = ["Empty", "Dead"];
 
-/// `PositionEntry::status`'s closed set (arm 31).
-pub const POSITION_STATUSES: [&str; 5] = [
-    "captured",
-    "noCommittedPosition",
-    "excluded",
-    "failed",
-    "notObserved",
-];
+/// The state a group being removed is described in. A captured group is never
+/// `Dead` with no member (arm 26).
+pub const DEAD_STATE: &str = "Dead";
+
+/// `PositionEntry::status`'s closed set (arm CP-12). A partition with no
+/// committed offset has NO entry: the group's `no_committed_position` counts
+/// it.
+pub const POSITION_STATUSES: [&str; 4] = ["captured", "excluded", "failed", "notObserved"];
 
 /// The reason an `excluded` position carries: its offset is above the
 /// partition's high watermark at capture (PROD-01.4 TI-04.1-2).
 pub const POSITION_BEYOND_END: &str = "PositionBeyondEnd";
 
-/// `PositionEntry::reason`'s closed set for a `failed` position (arm 31).
+/// `PositionEntry::reason`'s closed set for a `failed` position (arm CP-12).
 pub const POSITION_FAILED_REASONS: [&str; 5] = [
     "TopicNotAuthorized",
     "Unstable",
@@ -165,12 +217,12 @@ pub const POSITION_FAILED_REASONS: [&str; 5] = [
 /// with: without them it cannot be judged against the partition's end.
 pub const MARKS_NOT_READ: &str = "MarksNotRead";
 
-/// `PositionEntry::reason`'s closed set for a `notObserved` position (arm 31):
-/// the partition was added after the group capture read the topic's
+/// `PositionEntry::reason`'s closed set for a `notObserved` position (arm
+/// CP-12): the partition was added after the group capture read the topic's
 /// partitions, or that read failed for the topic.
 pub const NOT_OBSERVED_REASONS: [&str; 2] = ["PartitionAddedDuringCapture", "TopicNotObserved"];
 
-/// `PositionEntry::coverage`'s closed set (arm 32), in [`relation`]'s order.
+/// `PositionEntry::coverage`'s closed set (arm CP-13), in [`relation`]'s order.
 pub const COVERAGE_RELATIONS: [&str; 6] = [
     "beforeLogStart",
     "noArchivedData",
@@ -183,18 +235,54 @@ pub const COVERAGE_RELATIONS: [&str; 6] = [
 /// The coverage words that RELATE a position to archived data.
 pub const RELATED: [&str; 2] = ["withinArchive", "atArchiveEnd"];
 
-/// `ConsumerPositions::listing`'s closed set (arm 26).
+/// `ConsumerPositions::listing`'s closed set (arm 23).
 pub const LISTING_VALUES: [&str; 2] = ["complete", "notComplete"];
 
-/// The most groups one backup may select. A larger selection is refused at
-/// phase −1 (exit 3): each captured group records one entry per partition of
-/// every named topic, and the receipt is one signed document.
+/// **The most groups one backup may select.** A larger selection is refused
+/// before anything runs ([`SELECTION_TOO_LARGE`]: phase −1 exits 3, the
+/// controller refuses the spec, and the CRDs' `maxItems` is the same number):
+/// the receipt records one summary per group, and [`MAX_BLOCK_BYTES`] is the
+/// bound that number buys.
 pub const MAX_SELECTED_GROUPS: usize = 100;
 
-/// The longest group id a selection may name.
-pub const MAX_GROUP_ID_CHARS: usize = 255;
+/// The longest group id a selection may name, in BYTES of UTF-8 (an ASCII id
+/// of 255 characters; fewer characters outside ASCII). Bytes, not
+/// characters, because the bound below is over the receipt's bytes.
+pub const MAX_GROUP_ID_BYTES: usize = 255;
 
-/// **Receipt format 1.5.0.** The consumer position evidence of one backup.
+/// **The receipt block's size bound**: the deterministic JSON of a block over
+/// [`MAX_SELECTED_GROUPS`] groups of [`MAX_GROUP_ID_BYTES`]-byte ids,
+/// each with every field at its longest, stays under this — under a third of
+/// the catalog's 256 KiB read cap, whatever the number of partitions
+/// (`tests::the_block_is_bounded_by_the_selection_never_by_partitions`). A
+/// selection of ASCII ids of a few dozen characters is a few hundred bytes a
+/// group.
+pub const MAX_BLOCK_BYTES: usize = 80 * 1024;
+
+/// The named refusal of a selection over [`MAX_SELECTED_GROUPS`] groups.
+pub const SELECTION_TOO_LARGE: &str = "ConsumerGroupSelectionTooLarge";
+
+/// The named refusal of a blank id, one with a control character, or one
+/// longer than [`MAX_GROUP_ID_BYTES`].
+pub const SELECTION_ID_INVALID: &str = "ConsumerGroupIdInvalid";
+
+/// The named refusal of an id selected twice.
+pub const SELECTION_REPEATED: &str = "ConsumerGroupSelectedTwice";
+
+/// The positions document's own format. Major 1; arm CP-3 refuses any other.
+pub const DOCUMENT_FORMAT_VERSION: &str = "1.0.0";
+
+/// Where a run's positions document lives: beside its receipt
+/// (`logweir/backups/<backup_id>/<run_id>.receipt.json`). Arm 24 holds the
+/// receipt's `document.key` to exactly this.
+#[must_use]
+pub fn document_key(backup_id: &str, run_id: &str) -> String {
+    format!("logweir/backups/{backup_id}/{run_id}.consumer-positions.json")
+}
+
+/// **Receipt format 1.5.0.** The consumer position evidence of one backup:
+/// per selected group its outcome and counts, and the positions document
+/// that carries the positions themselves.
 ///
 /// Field order is byte order (`det_json`); appended fields only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -203,29 +291,97 @@ pub struct ConsumerPositions {
     /// descriptions and the positions.
     pub observed_from: DateTime<Utc>,
     /// When it ended, after the group-capture marks and BEFORE the engine
-    /// started. At or after `observed_from` (arm 26).
+    /// started. At or after `observed_from` (arm 23).
     pub observed_to: DateTime<Utc>,
     /// `complete` when the group listings were complete (Describe on the
     /// cluster, no listing error), else `notComplete`: an unlisted id was then
     /// classified by a targeted describe (PROD-04.0 §5).
     pub listing: String,
-    /// Per named topic, the facts of each partition. Exactly `source.topics`
-    /// (arm 23).
-    pub topics: BTreeMap<String, TopicPartitions>,
-    /// One entry per selected group id, keyed by it. Never empty (arm 26): a
+    /// The positions document this receipt binds (arm 24).
+    pub document: DocumentRef,
+    /// One entry per selected group id, keyed by it. Never empty (arm 23): a
     /// backup that selects no group carries no block.
     pub groups: BTreeMap<String, GroupSnapshot>,
+}
+
+/// The positions document a receipt binds: where it is, and the digest and
+/// length of its exact bytes. The receipt's signature covers these, so the
+/// document needs none of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentRef {
+    /// [`document_key`] of the receipt's own backup and run.
+    pub key: String,
+    /// `sha256:<64 lowercase hex>` over the document's bytes.
+    pub sha256: String,
+    /// The document's length in bytes, at least 1.
+    pub bytes: u64,
+}
+
+/// One selected group's outcome, as the receipt records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GroupSnapshot {
+    /// [`GROUP_OUTCOMES`].
+    pub outcome: String,
+    /// Present exactly when `outcome` is not `captured`: [`EXCLUDED_REASONS`]
+    /// or [`FAILED_REASONS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// `classic` or `consumer` for a captured group; `other` for one excluded
+    /// `GroupTypeNotCaptured`; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_type: Option<String>,
+    /// The state the group's DESCRIPTION gave (captured only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// The state the group's LISTING gave, read before the description
+    /// (captured only). The two differ when the group changed between them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed_state: Option<String>,
+    /// The members the description listed (captured only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<u32>,
+    /// Whether either state says the group had members, so its positions may
+    /// have moved after they were read ([`active`], arm 27; captured only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// Its positions, counted by what they say about archived data, over
+    /// every partition of every named topic (captured only; arm 26). The
+    /// positions themselves are the document's, and arm CP-14 holds these
+    /// counts to them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counts: Option<PositionCounts>,
+}
+
+/// **The positions document** (`<run_id>.consumer-positions.json`, format
+/// 1.0.0): every named partition's facts and every captured group's
+/// positions. Bound to its receipt by the receipt's `document` (arm CP-2).
+///
+/// Field order is byte order (`det_json`); appended fields only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PositionsDocument {
+    /// [`DOCUMENT_FORMAT_VERSION`].
+    pub format_version: String,
+    /// The receipt's `backup_id` (arm CP-3).
+    pub backup_id: String,
+    /// The receipt's `run_id` (arm CP-3).
+    pub run_id: String,
+    /// Per named topic, the facts of each partition. Exactly `source.topics`
+    /// (arm CP-4).
+    pub topics: BTreeMap<String, TopicPartitions>,
+    /// One entry per CAPTURED group, keyed by its id (arm CP-8).
+    pub groups: BTreeMap<String, GroupPositions>,
 }
 
 /// One named topic's partitions, as the capture saw them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TopicPartitions {
-    /// One entry per partition, `partition` equal to its index (arm 24): the
+    /// One entry per partition, `partition` equal to its index (arm CP-5): the
     /// partitions the group capture read, then any the read after the engine
-    /// or the archive shows beyond them.
+    /// or the archive shows beyond them. EMPTY only when no read gave one,
+    /// and then no group is captured (arm CP-10).
     pub partitions: Vec<PartitionFacts>,
     /// Whether any partition's marks after the engine regress against its
-    /// group-capture marks ([`changed_during_capture`], arm 25).
+    /// group-capture marks ([`changed_during_capture`], arm CP-7).
     pub changed_during_capture: bool,
 }
 
@@ -258,37 +414,18 @@ pub struct PartitionFacts {
     pub archived_last: Option<i64>,
 }
 
-/// One selected group's outcome.
+/// One captured group's positions, SPARSE: an entry for each partition with
+/// something to say, and a count of the rest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct GroupSnapshot {
-    /// [`GROUP_OUTCOMES`].
-    pub outcome: String,
-    /// Present exactly when `outcome` is not `captured`: [`EXCLUDED_REASONS`]
-    /// or [`FAILED_REASONS`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// `classic` or `consumer` for a captured group; `other` for one excluded
-    /// `GroupTypeNotCaptured`; absent otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group_type: Option<String>,
-    /// The state the group's DESCRIPTION gave (captured only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
-    /// The state the group's LISTING gave, read before the description
-    /// (captured only). The two differ when the group changed between them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub listed_state: Option<String>,
-    /// The members the description listed (captured only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub members: Option<u32>,
-    /// Whether either state says the group had members, so its positions may
-    /// have moved after they were read ([`active`], arm 29; captured only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active: Option<bool>,
-    /// One entry per partition of every named topic, topics in name order
-    /// (captured only; arm 30).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub positions: Option<Vec<PositionEntry>>,
+pub struct GroupPositions {
+    /// Topics in name order, partitions in order (arm CP-11): every committed
+    /// position, every failed read, and every partition the capture did not
+    /// observe.
+    pub positions: Vec<PositionEntry>,
+    /// How many partitions of the named topics have NO committed offset:
+    /// exactly every partition `positions` does not list (arm CP-11). Never
+    /// read as offset 0.
+    pub no_committed_position: u32,
 }
 
 /// One partition's position for one captured group.
@@ -299,7 +436,7 @@ pub struct PositionEntry {
     /// [`POSITION_STATUSES`].
     pub status: String,
     /// The committed next-to-consume offset: present exactly when `status` is
-    /// `captured` or `excluded`. NEVER present for `noCommittedPosition`.
+    /// `captured` or `excluded`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<i64>,
     /// Present exactly when `status` is `excluded`, `failed` or `notObserved`.
@@ -322,8 +459,8 @@ pub enum Relation {
 }
 
 /// **The one rule** for a committed position against its partition's facts
-/// (module doc's table). Pure; the writer and arm 32 both decide with it, and
-/// `docs/verify_scorecard.py` mirrors it.
+/// (module doc's table). Pure; the writer and arm CP-13 both decide with it,
+/// and `docs/verify_scorecard.py` mirrors it.
 #[must_use]
 pub fn relation(position: i64, facts: &PartitionFacts) -> Relation {
     let (Some(log_start), Some(high)) = (facts.log_start, facts.high_watermark) else {
@@ -353,7 +490,8 @@ pub fn relation(position: i64, facts: &PartitionFacts) -> Relation {
 /// of marks has a log start or a high watermark after the engine BELOW the one
 /// read at group capture. Kafka never moves either backwards on one topic
 /// generation, so a regression is a recreation or a truncation (PROD-01.4
-/// §4.4).
+/// §4.4). A recreation refilled past the old marks is not a regression, and
+/// an unread pair decides nothing (the module doc's limit).
 #[must_use]
 pub fn changed_during_capture(partitions: &[PartitionFacts]) -> bool {
     partitions.iter().any(|p| {
@@ -370,10 +508,18 @@ pub fn active(state: &str, listed_state: &str) -> bool {
     !INACTIVE_STATES.contains(&state) || !INACTIVE_STATES.contains(&listed_state)
 }
 
+/// Whether a description answers "no such group": `Dead` with no member
+/// (PROD-04.0 T2). A group described so is never captured (arm 26).
+#[must_use]
+pub fn vanished(state: &str, members: u32) -> bool {
+    state == DEAD_STATE && members == 0
+}
+
 impl ConsumerPositions {
     /// `sha256:<hex>` over the block's deterministic JSON: the digest the
     /// catalog point record binds (`consumer_positions.sha256`), recomputed
-    /// by a reader from the verified receipt.
+    /// by a reader from the verified receipt. The block carries the positions
+    /// document's own digest, so this binds the positions too.
     ///
     /// # Errors
     ///
@@ -391,16 +537,39 @@ impl ConsumerPositions {
     }
 }
 
+impl PositionsDocument {
+    /// The document's exact bytes: deterministic JSON, the bytes the receipt's
+    /// `document.sha256` is over.
+    ///
+    /// # Errors
+    ///
+    /// The document does not serialise (it always does).
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        crate::det_json::to_deterministic_json(self)
+            .map_err(|e| format!("the positions document does not serialise: {e}"))
+    }
+
+    /// The number of partitions of the named topics: what a captured group's
+    /// entries and `no_committed_position` together account for.
+    #[must_use]
+    pub fn partition_count(&self) -> u64 {
+        self.topics
+            .values()
+            .map(|t| t.partitions.len() as u64)
+            .sum()
+    }
+}
+
 /// One captured group's positions, counted by what they say about archived
-/// data: the summary the catalog point record, the catalog's view, the
-/// product API and both receipt readers' lines carry.
+/// data: the summary the receipt, the catalog point record, the catalog's
+/// view, the product API and both receipt readers' lines carry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PositionCounts {
     /// Captured, with a coverage in [`RELATED`].
     pub related: u32,
     /// Captured, with any other coverage word.
     pub not_related: u32,
-    /// `noCommittedPosition`.
+    /// No committed offset (the document's `no_committed_position`).
     pub never_committed: u32,
     /// `excluded: PositionBeyondEnd`.
     pub beyond_end: u32,
@@ -411,17 +580,19 @@ pub struct PositionCounts {
 }
 
 impl PositionCounts {
-    /// The counts of `positions`.
+    /// The counts of one captured group's document entry.
     #[must_use]
-    pub fn of(positions: &[PositionEntry]) -> Self {
-        let mut c = Self::default();
-        for p in positions {
+    pub fn of(group: &GroupPositions) -> Self {
+        let mut c = Self {
+            never_committed: group.no_committed_position,
+            ..Self::default()
+        };
+        for p in &group.positions {
             let slot = match p.status.as_str() {
                 "captured" if p.coverage.as_deref().is_some_and(|w| RELATED.contains(&w)) => {
                     &mut c.related
                 }
                 "captured" => &mut c.not_related,
-                "noCommittedPosition" => &mut c.never_committed,
                 "excluded" => &mut c.beyond_end,
                 "failed" => &mut c.failed,
                 _ => &mut c.not_observed,
@@ -430,35 +601,71 @@ impl PositionCounts {
         }
         c
     }
+
+    /// Every partition counted: what a captured group accounts for.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        [
+            self.related,
+            self.not_related,
+            self.never_committed,
+            self.beyond_end,
+            self.failed,
+            self.not_observed,
+        ]
+        .iter()
+        .map(|n| u64::from(*n))
+        .sum()
+    }
+
+    /// The counts as both readers' refusals and lines spell them.
+    #[must_use]
+    pub fn render(&self) -> String {
+        format!(
+            "{} related, {} not related, {} never committed, {} beyond the end, {} failed, {} \
+             not observed",
+            self.related,
+            self.not_related,
+            self.never_committed,
+            self.beyond_end,
+            self.failed,
+            self.not_observed
+        )
+    }
 }
 
-/// Why a selection is refused at phase −1, or `None`. A blank id, an id with
-/// a control character or longer than [`MAX_GROUP_ID_CHARS`], the same id
-/// twice, or more than [`MAX_SELECTED_GROUPS`] ids.
+/// Why a selection is refused before anything runs, or `None`: more than
+/// [`MAX_SELECTED_GROUPS`] ids ([`SELECTION_TOO_LARGE`]); a blank id, an id
+/// with a control character or longer than [`MAX_GROUP_ID_BYTES`] bytes
+/// ([`SELECTION_ID_INVALID`]); the same id twice ([`SELECTION_REPEATED`]).
+/// The message starts with the refusal's name.
 #[must_use]
 pub fn refuse_selection(selected: &[String]) -> Option<String> {
     if selected.len() > MAX_SELECTED_GROUPS {
         return Some(format!(
-            "the backup selects {} consumer groups and at most {MAX_SELECTED_GROUPS} may be \
-             selected",
+            "{SELECTION_TOO_LARGE}: the backup selects {} consumer groups and at most \
+             {MAX_SELECTED_GROUPS} may be selected",
             selected.len()
         ));
     }
     let mut seen = std::collections::BTreeSet::new();
     for id in selected {
         if id.trim().is_empty() {
-            return Some("a selected consumer group id is blank".to_string());
-        }
-        if id.chars().any(char::is_control) || id.chars().count() > MAX_GROUP_ID_CHARS {
             return Some(format!(
-                "the selected consumer group id {:?} carries a control character or is longer \
-                 than {MAX_GROUP_ID_CHARS} characters",
+                "{SELECTION_ID_INVALID}: a selected consumer group id is blank"
+            ));
+        }
+        if id.chars().any(char::is_control) || id.len() > MAX_GROUP_ID_BYTES {
+            return Some(format!(
+                "{SELECTION_ID_INVALID}: the selected consumer group id {:?} carries a control \
+                 character or is longer than {MAX_GROUP_ID_BYTES} bytes",
                 id.chars().take(64).collect::<String>()
             ));
         }
         if !seen.insert(id.as_str()) {
             return Some(format!(
-                "the consumer group {id:?} is selected twice; each group is selected once"
+                "{SELECTION_REPEATED}: the consumer group {id:?} is selected twice; each group is \
+                 selected once"
             ));
         }
     }
@@ -567,17 +774,140 @@ mod tests {
         }
     }
 
+    /// M2: `Dead` with no member is the absent stand-in; `Dead` with a member
+    /// and `Empty` with none are not.
     #[test]
-    fn a_selection_is_refused_for_blank_control_long_repeated_or_too_many_ids() {
+    fn only_dead_with_no_member_is_a_vanished_group() {
+        assert!(vanished("Dead", 0));
+        assert!(!vanished("Dead", 1));
+        assert!(!vanished("Empty", 0));
+        assert!(!vanished("Stable", 0));
+    }
+
+    #[test]
+    fn a_selection_is_refused_for_blank_control_long_repeated_or_too_many_ids_by_name() {
         let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(refuse_selection(&ids(&["a", "b"])), None);
-        assert!(refuse_selection(&ids(&[" "])).is_some());
-        assert!(refuse_selection(&ids(&["a\nb"])).is_some());
-        assert!(refuse_selection(&ids(&["a", "a"])).is_some());
-        assert!(refuse_selection(&[("x".repeat(MAX_GROUP_ID_CHARS))]).is_none());
-        assert!(refuse_selection(&[("x".repeat(MAX_GROUP_ID_CHARS + 1))]).is_some());
+        let named = |r: Option<String>, name: &str| {
+            let r = r.expect("refused");
+            assert!(r.starts_with(&format!("{name}: ")), "{r}");
+        };
+        named(refuse_selection(&ids(&[" "])), SELECTION_ID_INVALID);
+        named(refuse_selection(&ids(&["a\nb"])), SELECTION_ID_INVALID);
+        named(refuse_selection(&ids(&["a", "a"])), SELECTION_REPEATED);
+        assert!(refuse_selection(&[("x".repeat(MAX_GROUP_ID_BYTES))]).is_none());
+        named(
+            refuse_selection(&[("x".repeat(MAX_GROUP_ID_BYTES + 1))]),
+            SELECTION_ID_INVALID,
+        );
+        // Bytes, not characters: 64 four-byte characters are 256 bytes.
+        named(
+            refuse_selection(&["\u{1F600}".repeat(64)]),
+            SELECTION_ID_INVALID,
+        );
+        assert!(refuse_selection(&["\u{1F600}".repeat(63)]).is_none());
         let many: Vec<String> = (0..=MAX_SELECTED_GROUPS).map(|i| format!("g{i}")).collect();
-        assert!(refuse_selection(&many).is_some());
+        named(refuse_selection(&many), SELECTION_TOO_LARGE);
         assert!(refuse_selection(&many[..MAX_SELECTED_GROUPS]).is_none());
+    }
+
+    /// **H1's bound, proved at the largest selection.** A block over
+    /// [`MAX_SELECTED_GROUPS`] groups whose ids are [`MAX_GROUP_ID_BYTES`]
+    /// bytes of four-byte characters, every field at its longest and every
+    /// count at `u32::MAX`,
+    /// serialises under [`MAX_BLOCK_BYTES`] — and nothing in it depends on
+    /// how many partitions the named topics have.
+    #[test]
+    fn the_block_is_bounded_by_the_selection_never_by_partitions() {
+        let at = DateTime::<Utc>::from_timestamp(4_000_000_000, 999_999_999).expect("an instant");
+        let groups = (0..MAX_SELECTED_GROUPS)
+            .map(|i| {
+                let id = format!("{i:03}{}", "\u{1F600}".repeat((MAX_GROUP_ID_BYTES - 3) / 4));
+                assert!(refuse_selection(std::slice::from_ref(&id)).is_none());
+                (
+                    id,
+                    GroupSnapshot {
+                        outcome: "captured".into(),
+                        reason: None,
+                        group_type: Some("consumer".into()),
+                        state: Some("stateUnknownToClient".into()),
+                        listed_state: Some("CompletingRebalance".into()),
+                        members: Some(u32::MAX),
+                        active: Some(true),
+                        counts: Some(PositionCounts {
+                            related: u32::MAX,
+                            not_related: u32::MAX,
+                            never_committed: u32::MAX,
+                            beyond_end: u32::MAX,
+                            failed: u32::MAX,
+                            not_observed: u32::MAX,
+                        }),
+                    },
+                )
+            })
+            .collect();
+        let id = "x".repeat(200);
+        let block = ConsumerPositions {
+            observed_from: at,
+            observed_to: at,
+            listing: "notComplete".into(),
+            document: DocumentRef {
+                key: document_key(&id, &id),
+                sha256: format!("sha256:{}", "f".repeat(64)),
+                bytes: u64::MAX,
+            },
+            groups,
+        };
+        let bytes = crate::det_json::to_deterministic_json(&block).expect("serialises");
+        assert!(
+            bytes.len() < MAX_BLOCK_BYTES,
+            "the largest block is {} bytes, over the {MAX_BLOCK_BYTES}-byte bound",
+            bytes.len()
+        );
+        // The bound leaves two thirds of the catalog's read cap to the rest of
+        // the receipt.
+        const { assert!(MAX_BLOCK_BYTES * 3 <= 256 * 1024) };
+    }
+
+    /// The counts of a sparse entry: the listed entries by status and
+    /// coverage, and every unlisted partition never committed.
+    #[test]
+    fn counts_take_every_unlisted_partition_as_never_committed() {
+        let e = |status: &str, coverage: Option<&str>| PositionEntry {
+            topic: "t".into(),
+            partition: 0,
+            status: status.into(),
+            position: None,
+            reason: None,
+            coverage: coverage.map(str::to_string),
+        };
+        let c = PositionCounts::of(&GroupPositions {
+            positions: vec![
+                e("captured", Some("withinArchive")),
+                e("captured", Some("atArchiveEnd")),
+                e("captured", Some("beyondArchive")),
+                e("excluded", None),
+                e("failed", None),
+                e("notObserved", None),
+            ],
+            no_committed_position: 4,
+        });
+        assert_eq!(
+            c,
+            PositionCounts {
+                related: 2,
+                not_related: 1,
+                never_committed: 4,
+                beyond_end: 1,
+                failed: 1,
+                not_observed: 1
+            }
+        );
+        assert_eq!(c.total(), 10);
+        assert_eq!(
+            c.render(),
+            "2 related, 1 not related, 4 never committed, 1 beyond the end, 1 failed, 1 not \
+             observed"
+        );
     }
 }

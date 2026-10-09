@@ -1,0 +1,182 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://logweir.dev/schemas/logweir-consumer-positions-1.0.0.json",
+  "title": "PositionsDocument",
+  "description": "**The positions document** (`<run_id>.consumer-positions.json`, format 1.0.0): every named partition's facts and every captured group's positions. Bound to its receipt by the receipt's `document` (arm CP-2).\n\nField order is byte order (`det_json`); appended fields only.",
+  "type": "object",
+  "required": [
+    "backup_id",
+    "format_version",
+    "groups",
+    "run_id",
+    "topics"
+  ],
+  "properties": {
+    "backup_id": {
+      "description": "The receipt's `backup_id` (arm CP-3).",
+      "type": "string"
+    },
+    "format_version": {
+      "description": "[`DOCUMENT_FORMAT_VERSION`].",
+      "type": "string"
+    },
+    "groups": {
+      "description": "One entry per CAPTURED group, keyed by its id (arm CP-8).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/GroupPositions"
+      }
+    },
+    "run_id": {
+      "description": "The receipt's `run_id` (arm CP-3).",
+      "type": "string"
+    },
+    "topics": {
+      "description": "Per named topic, the facts of each partition. Exactly `source.topics` (arm CP-4).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/TopicPartitions"
+      }
+    }
+  },
+  "definitions": {
+    "GroupPositions": {
+      "description": "One captured group's positions, SPARSE: an entry for each partition with something to say, and a count of the rest.",
+      "type": "object",
+      "required": [
+        "no_committed_position",
+        "positions"
+      ],
+      "properties": {
+        "no_committed_position": {
+          "description": "How many partitions of the named topics have NO committed offset: exactly every partition `positions` does not list (arm CP-11). Never read as offset 0.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "positions": {
+          "description": "Topics in name order, partitions in order (arm CP-11): every committed position, every failed read, and every partition the capture did not observe.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PositionEntry"
+          }
+        }
+      }
+    },
+    "PartitionFacts": {
+      "description": "One partition's facts. Every mark is ABSENT when it was not read, never 0.",
+      "type": "object",
+      "required": [
+        "observed",
+        "partition"
+      ],
+      "properties": {
+        "archived_first": {
+          "description": "The lowest offset the archive's manifest records for the partition.",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "archived_last": {
+          "description": "The highest offset the archive's manifest records for the partition (inclusive).",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "high_watermark": {
+          "description": "The high watermark read with `log_start`.",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "high_watermark_after": {
+          "description": "The high watermark read again after the engine.",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "log_start": {
+          "description": "The log start offset read right after the positions (READ_UNCOMMITTED).",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "log_start_after": {
+          "description": "The log start offset read again after the engine.",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "observed": {
+          "description": "Whether the group capture read this partition: `false` for one added after it read the topic's partitions (or when that read failed), whose positions were therefore never asked for.",
+          "type": "boolean"
+        },
+        "partition": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PositionEntry": {
+      "description": "One partition's position for one captured group.",
+      "type": "object",
+      "required": [
+        "partition",
+        "status",
+        "topic"
+      ],
+      "properties": {
+        "coverage": {
+          "description": "[`COVERAGE_RELATIONS`], present exactly when `status` is `captured`.",
+          "type": "string",
+          "nullable": true
+        },
+        "partition": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "position": {
+          "description": "The committed next-to-consume offset: present exactly when `status` is `captured` or `excluded`.",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "reason": {
+          "description": "Present exactly when `status` is `excluded`, `failed` or `notObserved`.",
+          "type": "string",
+          "nullable": true
+        },
+        "status": {
+          "description": "[`POSITION_STATUSES`].",
+          "type": "string"
+        },
+        "topic": {
+          "type": "string"
+        }
+      }
+    },
+    "TopicPartitions": {
+      "description": "One named topic's partitions, as the capture saw them.",
+      "type": "object",
+      "required": [
+        "changed_during_capture",
+        "partitions"
+      ],
+      "properties": {
+        "changed_during_capture": {
+          "description": "Whether any partition's marks after the engine regress against its group-capture marks ([`changed_during_capture`], arm CP-7).",
+          "type": "boolean"
+        },
+        "partitions": {
+          "description": "One entry per partition, `partition` equal to its index (arm CP-5): the partitions the group capture read, then any the read after the engine or the archive shows beyond them. EMPTY only when no read gave one, and then no group is captured (arm CP-10).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PartitionFacts"
+          }
+        }
+      }
+    }
+  }
+}

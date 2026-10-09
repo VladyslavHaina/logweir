@@ -423,6 +423,40 @@ fn backup_receipt_schema_has_no_drift() {
     );
 }
 
+/// **PROD-04.1.** The checked-in consumer positions DOCUMENT schema is exactly
+/// what the generator emits, and names its own format: the document a 1.5.0
+/// receipt binds by digest (`schemas/logweir-consumer-positions-1.0.0.json`).
+#[test]
+fn consumer_positions_document_schema_has_no_drift() {
+    let generated = logweir_core::schema::consumer_positions_document_schema();
+    let checked_in = current_schema(
+        "consumer-positions",
+        logweir_core::consumer_positions::DOCUMENT_FORMAT_VERSION,
+    );
+    assert_eq!(
+        generated.trim_end(),
+        checked_in.trim_end(),
+        "schemas/logweir-consumer-positions-{}.json is stale. Run `just schema` and review \
+         the diff.",
+        logweir_core::consumer_positions::DOCUMENT_FORMAT_VERSION
+    );
+    let v: serde_json::Value = serde_json::from_str(&generated).unwrap();
+    assert_eq!(
+        v["$id"],
+        "https://logweir.dev/schemas/logweir-consumer-positions-1.0.0.json"
+    );
+    let required: Vec<&str> = v["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        required,
+        ["backup_id", "format_version", "groups", "run_id", "topics"]
+    );
+}
+
 /// The receipt schema names itself, pins its major with a pattern, and types
 /// the covered window as two INTEGERS.
 ///

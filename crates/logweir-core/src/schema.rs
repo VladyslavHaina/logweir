@@ -79,3 +79,25 @@ pub fn backup_receipt_schema() -> String {
     out.push('\n');
     out
 }
+
+/// **PROD-04.1.** The JSON Schema of the consumer positions DOCUMENT
+/// (`<run_id>.consumer-positions.json`, format
+/// [`crate::consumer_positions::DOCUMENT_FORMAT_VERSION`]) a 1.5.0 receipt
+/// binds by digest: `schemas/logweir-consumer-positions-1.0.0.json`, its `$id`
+/// built from that one constant.
+pub fn consumer_positions_document_schema() -> String {
+    let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
+        s.option_nullable = true;
+        s.option_add_null_type = false;
+    });
+    let mut root = settings
+        .into_generator()
+        .into_root_schema_for::<crate::consumer_positions::PositionsDocument>();
+    root.schema.metadata().id = Some(format!(
+        "https://logweir.dev/schemas/logweir-consumer-positions-{}.json",
+        crate::consumer_positions::DOCUMENT_FORMAT_VERSION
+    ));
+    let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
+    out.push('\n');
+    out
+}

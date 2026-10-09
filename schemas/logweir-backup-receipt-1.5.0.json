@@ -36,7 +36,7 @@
       "nullable": true
     },
     "consumer_positions": {
-      "description": "**Format 1.5.0 (PROD-04.1).** The consumer position evidence of the groups the backup SELECTED: one outcome per group, and for a captured group one position per partition of every named topic, each judged against the partition's marks and the archive's offsets ([`crate::consumer_positions`]). Arms 22-34 read it, and only when it is present.\n\nABSENT means the backup selected no group — every receipt before 1.5.0, and every later one whose plan names none — and never \"the groups had no positions\". Appended LAST and skipped when absent, so a backup that selects no group writes the document it wrote before, byte for byte.",
+      "description": "**Format 1.5.0 (PROD-04.1).** The consumer position evidence of the groups the backup SELECTED: one outcome per group with its position counts, the observation window, and the positions DOCUMENT beside this receipt that holds the positions, bound by its SHA-256 and length ([`crate::consumer_positions`]). Its size depends on the selection only, never on partitions. Arms 22-27 read it, and only when it is present; a reader given the document checks it with [`BackupReceipt::validate_consumer_positions_document`].\n\nABSENT means the backup selected no group — every receipt before 1.5.0, and every later one whose plan names none — and never \"the groups had no positions\". Appended LAST and skipped when absent, so a backup that selects no group writes the document it wrote before, byte for byte.",
       "allOf": [
         {
           "$ref": "#/definitions/ConsumerPositions"
@@ -137,18 +137,26 @@
       }
     },
     "ConsumerPositions": {
-      "description": "**Receipt format 1.5.0.** The consumer position evidence of one backup.\n\nField order is byte order (`det_json`); appended fields only.",
+      "description": "**Receipt format 1.5.0.** The consumer position evidence of one backup: per selected group its outcome and counts, and the positions document that carries the positions themselves.\n\nField order is byte order (`det_json`); appended fields only.",
       "type": "object",
       "required": [
+        "document",
         "groups",
         "listing",
         "observed_from",
-        "observed_to",
-        "topics"
+        "observed_to"
       ],
       "properties": {
+        "document": {
+          "description": "The positions document this receipt binds (arm 24).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/DocumentRef"
+            }
+          ]
+        },
         "groups": {
-          "description": "One entry per selected group id, keyed by it. Never empty (arm 26): a backup that selects no group carries no block.",
+          "description": "One entry per selected group id, keyed by it. Never empty (arm 23): a backup that selects no group carries no block.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/definitions/GroupSnapshot"
@@ -164,16 +172,34 @@
           "format": "date-time"
         },
         "observed_to": {
-          "description": "When it ended, after the group-capture marks and BEFORE the engine started. At or after `observed_from` (arm 26).",
+          "description": "When it ended, after the group-capture marks and BEFORE the engine started. At or after `observed_from` (arm 23).",
           "type": "string",
           "format": "date-time"
+        }
+      }
+    },
+    "DocumentRef": {
+      "description": "The positions document a receipt binds: where it is, and the digest and length of its exact bytes. The receipt's signature covers these, so the document needs none of its own.",
+      "type": "object",
+      "required": [
+        "bytes",
+        "key",
+        "sha256"
+      ],
+      "properties": {
+        "bytes": {
+          "description": "The document's length in bytes, at least 1.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
         },
-        "topics": {
-          "description": "Per named topic, the facts of each partition. Exactly `source.topics` (arm 23).",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/definitions/TopicPartitions"
-          }
+        "key": {
+          "description": "[`document_key`] of the receipt's own backup and run.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "`sha256:<64 lowercase hex>` over the document's bytes.",
+          "type": "string"
         }
       }
     },
@@ -196,15 +222,24 @@
       }
     },
     "GroupSnapshot": {
-      "description": "One selected group's outcome.",
+      "description": "One selected group's outcome, as the receipt records it.",
       "type": "object",
       "required": [
         "outcome"
       ],
       "properties": {
         "active": {
-          "description": "Whether either state says the group had members, so its positions may have moved after they were read ([`active`], arm 29; captured only).",
+          "description": "Whether either state says the group had members, so its positions may have moved after they were read ([`active`], arm 27; captured only).",
           "type": "boolean",
+          "nullable": true
+        },
+        "counts": {
+          "description": "Its positions, counted by what they say about archived data, over every partition of every named topic (captured only; arm 26). The positions themselves are the document's, and arm CP-14 holds these counts to them.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/PositionCounts"
+            }
+          ],
           "nullable": true
         },
         "group_type": {
@@ -228,14 +263,6 @@
           "description": "[`GROUP_OUTCOMES`].",
           "type": "string"
         },
-        "positions": {
-          "description": "One entry per partition of every named topic, topics in name order (captured only; arm 30).",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/PositionEntry"
-          },
-          "nullable": true
-        },
         "reason": {
           "description": "Present exactly when `outcome` is not `captured`: [`EXCLUDED_REASONS`] or [`FAILED_REASONS`].",
           "type": "string",
@@ -248,97 +275,53 @@
         }
       }
     },
-    "PartitionFacts": {
-      "description": "One partition's facts. Every mark is ABSENT when it was not read, never 0.",
+    "PositionCounts": {
+      "description": "One captured group's positions, counted by what they say about archived data: the summary the receipt, the catalog point record, the catalog's view, the product API and both receipt readers' lines carry.",
       "type": "object",
       "required": [
-        "observed",
-        "partition"
+        "beyond_end",
+        "failed",
+        "never_committed",
+        "not_observed",
+        "not_related",
+        "related"
       ],
       "properties": {
-        "archived_first": {
-          "description": "The lowest offset the archive's manifest records for the partition.",
-          "type": "integer",
-          "format": "int64",
-          "nullable": true
-        },
-        "archived_last": {
-          "description": "The highest offset the archive's manifest records for the partition (inclusive).",
-          "type": "integer",
-          "format": "int64",
-          "nullable": true
-        },
-        "high_watermark": {
-          "description": "The high watermark read with `log_start`.",
-          "type": "integer",
-          "format": "int64",
-          "nullable": true
-        },
-        "high_watermark_after": {
-          "description": "The high watermark read again after the engine.",
-          "type": "integer",
-          "format": "int64",
-          "nullable": true
-        },
-        "log_start": {
-          "description": "The log start offset read right after the positions (READ_UNCOMMITTED).",
-          "type": "integer",
-          "format": "int64",
-          "nullable": true
-        },
-        "log_start_after": {
-          "description": "The log start offset read again after the engine.",
-          "type": "integer",
-          "format": "int64",
-          "nullable": true
-        },
-        "observed": {
-          "description": "Whether the group capture read this partition: `false` for one added after it read the topic's partitions (or when that read failed), whose positions were therefore never asked for.",
-          "type": "boolean"
-        },
-        "partition": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0.0
-        }
-      }
-    },
-    "PositionEntry": {
-      "description": "One partition's position for one captured group.",
-      "type": "object",
-      "required": [
-        "partition",
-        "status",
-        "topic"
-      ],
-      "properties": {
-        "coverage": {
-          "description": "[`COVERAGE_RELATIONS`], present exactly when `status` is `captured`.",
-          "type": "string",
-          "nullable": true
-        },
-        "partition": {
+        "beyond_end": {
+          "description": "`excluded: PositionBeyondEnd`.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
         },
-        "position": {
-          "description": "The committed next-to-consume offset: present exactly when `status` is `captured` or `excluded`. NEVER present for `noCommittedPosition`.",
+        "failed": {
+          "description": "`failed`.",
           "type": "integer",
-          "format": "int64",
-          "nullable": true
+          "format": "uint32",
+          "minimum": 0.0
         },
-        "reason": {
-          "description": "Present exactly when `status` is `excluded`, `failed` or `notObserved`.",
-          "type": "string",
-          "nullable": true
+        "never_committed": {
+          "description": "No committed offset (the document's `no_committed_position`).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         },
-        "status": {
-          "description": "[`POSITION_STATUSES`].",
-          "type": "string"
+        "not_observed": {
+          "description": "`notObserved`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         },
-        "topic": {
-          "type": "string"
+        "not_related": {
+          "description": "Captured, with any other coverage word.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "related": {
+          "description": "Captured, with a coverage in [`RELATED`].",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },
@@ -546,27 +529,6 @@
         "reference": {
           "description": "Where the desired state lives: `<namespace>/<name>` of the `KafkaTopic`, or the plan's own words. 1 to 256 characters.",
           "type": "string"
-        }
-      }
-    },
-    "TopicPartitions": {
-      "description": "One named topic's partitions, as the capture saw them.",
-      "type": "object",
-      "required": [
-        "changed_during_capture",
-        "partitions"
-      ],
-      "properties": {
-        "changed_during_capture": {
-          "description": "Whether any partition's marks after the engine regress against its group-capture marks ([`changed_during_capture`], arm 25).",
-          "type": "boolean"
-        },
-        "partitions": {
-          "description": "One entry per partition, `partition` equal to its index (arm 24): the partitions the group capture read, then any the read after the engine or the archive shows beyond them.",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/PartitionFacts"
-          }
         }
       }
     }

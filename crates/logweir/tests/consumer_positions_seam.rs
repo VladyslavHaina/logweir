@@ -5,10 +5,11 @@
 //!
 //! | row | proves | negative control |
 //! |---|---|---|
-//! | `a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point` | one outcome per selected id (plan then CLI), a captured group's position judged against the archive (`withinArchive`), a share group `GroupTypeNotCaptured`, the receipt 1.5.0 and VALID, the catalog point's summary bound by the block's digest | the same run selecting nothing writes a 1.3.0 receipt that never names the block |
-//! | `a_reader_that_cannot_read_groups_fails_every_selected_group` | the default `ClusterReader` (every double written before PROD-04.1) records each selected group `failed: CaptureUnavailable` | absence read as offset 0, or the group dropped, would fail arm 32 or the count |
+//! | `a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point` | one outcome per selected id (plan then CLI), a captured group's position — in the positions document put beside the receipt, which the receipt binds by digest — judged against the archive (`withinArchive`), a share group `GroupTypeNotCaptured`, the receipt 1.5.0 and VALID, the document VALID against it, the catalog point's summary bound by the block's digest | the same run selecting nothing writes a 1.3.0 receipt that never names the block, and no document |
+//! | `a_reader_that_cannot_read_groups_fails_every_selected_group` | the default `ClusterReader` (every double written before PROD-04.1) records each selected group `failed: CaptureUnavailable` | absence read as offset 0, or the group dropped, would fail arm 26, CP-11 or the count |
 //! | `a_selection_that_is_not_one_is_refused_before_anything_runs` | a group selected twice (plan and CLI), a blank id and a control character are refused at phase −1, exit 3, before the engine | a valid selection runs |
 //! | `a_topic_recreated_during_the_capture_fails_the_groups_holding_positions_on_it` | marks after the engine below the group-capture marks (TI-04.1-3): the group is `GenerationChangedDuringCapture` | stable marks capture it |
+//! | `a_capture_that_asked_no_position_reads_no_marks_after_the_engine` | every selected group excluded: no mark is read after the engine (review L8) | one captured group: the marks are read once |
 #[path = "backup_seam/mod.rs"]
 mod backup_seam;
 
@@ -193,19 +194,7 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
     );
     let billing = &block.groups["billing"];
     assert_eq!(billing.outcome, "captured");
-    let p = &billing.positions.as_ref().unwrap()[0];
-    assert_eq!(
-        (p.status.as_str(), p.position, p.coverage.as_deref()),
-        ("captured", Some(1000), Some("withinArchive"))
-    );
-    assert_eq!(
-        block.topics["orders"].partitions[0].archived_last,
-        Some(1233)
-    );
-    assert_eq!(
-        block.topics["orders"].partitions[0].high_watermark_after,
-        Some(1240)
-    );
+    assert_eq!(billing.counts.map(|c| c.related), Some(1));
     assert_eq!(
         block.groups["share-1"].reason.as_deref(),
         Some("GroupTypeNotCaptured")
@@ -220,6 +209,37 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
     assert_eq!(receipt.format_version, "1.5.0");
     assert_eq!(receipt.validate_invariants(), Ok(()));
     assert_eq!(receipt.consumer_positions.as_ref(), Some(block));
+
+    // The positions are in the document beside it, bound by digest, and the
+    // document holds against the signed receipt.
+    assert_eq!(
+        block.document.key,
+        "logweir/backups/nightly-20260915/01J9X2QK7C4V0R8YB3ZP6MTS5A.consumer-positions.json"
+    );
+    let (doc_bytes, _) = store
+        .get(&block.document.key)
+        .expect("the positions document was put");
+    assert_eq!(
+        outcome.consumer_positions_document.as_deref(),
+        Some(doc_bytes.as_slice())
+    );
+    let doc: logweir_core::consumer_positions::PositionsDocument =
+        serde_json::from_slice(&doc_bytes).unwrap();
+    assert_eq!(
+        receipt.validate_consumer_positions_document(&doc_bytes, &doc),
+        Ok(())
+    );
+    let p = &doc.groups["billing"].positions[0];
+    assert_eq!(
+        (p.status.as_str(), p.position, p.coverage.as_deref()),
+        ("captured", Some(1000), Some("withinArchive"))
+    );
+    assert_eq!(doc.topics["orders"].partitions[0].archived_last, Some(1233));
+    assert_eq!(
+        doc.topics["orders"].partitions[0].high_watermark_after,
+        Some(1240)
+    );
+    assert!(!doc.groups.contains_key("share-1"), "only captured groups");
 
     // The catalog point binds it by digest.
     let key = outcome
@@ -240,11 +260,18 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
         .execute_reading(&store, &reader, Vec::new())
         .expect("the backup succeeds");
     assert!(outcome.consumer_positions.is_none());
+    assert!(outcome.consumer_positions_document.is_none());
     let (bytes, _) = store.get(&outcome.receipt_key).unwrap();
     let text = String::from_utf8(bytes).unwrap();
     assert!(!text.contains("consumer_positions"), "{text}");
     let plain: logweir_core::backup_receipt::BackupReceipt = serde_json::from_str(&text).unwrap();
     assert_eq!(plain.format_version, "1.3.0");
+    let keys = store.list_page("logweir/backups/", None, 10).unwrap().0;
+    assert!(
+        keys.iter()
+            .all(|k| !k.ends_with(".consumer-positions.json")),
+        "no document without a selection: {keys:?}"
+    );
 }
 
 #[test]
@@ -259,11 +286,7 @@ fn a_reader_that_cannot_read_groups_fails_every_selected_group() {
     assert_eq!(block.groups.len(), 2, "NEGATIVE CONTROL: a group dropped");
     for g in block.groups.values() {
         assert_eq!(
-            (
-                g.outcome.as_str(),
-                g.reason.as_deref(),
-                g.positions.is_none()
-            ),
+            (g.outcome.as_str(), g.reason.as_deref(), g.counts.is_none()),
             ("failed", Some("CaptureUnavailable"), true)
         );
     }
@@ -322,7 +345,9 @@ fn a_topic_recreated_during_the_capture_fails_the_groups_holding_positions_on_it
     f.select_in_plan(&["billing"]);
     let outcome = f.execute_reading(&evidence(), &reader, Vec::new()).unwrap();
     let block = outcome.consumer_positions.unwrap();
-    assert!(block.topics["orders"].changed_during_capture);
+    let doc: logweir_core::consumer_positions::PositionsDocument =
+        serde_json::from_slice(&outcome.consumer_positions_document.unwrap()).unwrap();
+    assert!(doc.topics["orders"].changed_during_capture);
     assert_eq!(
         block.groups["billing"].reason.as_deref(),
         Some("GenerationChangedDuringCapture")
@@ -335,5 +360,95 @@ fn a_topic_recreated_during_the_capture_fails_the_groups_holding_positions_on_it
     assert_eq!(
         outcome.consumer_positions.unwrap().groups["billing"].outcome,
         "captured"
+    );
+}
+
+/// A [`GroupsReader`] that counts the reads after the engine.
+struct CountingReader {
+    inner: GroupsReader,
+    marks_reads: std::sync::atomic::AtomicUsize,
+}
+
+impl ClusterReader for CountingReader {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        self.inner.cluster_id()
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        self.inner.list_topics()
+    }
+    fn end_offsets(&self, t: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        self.inner.end_offsets(t)
+    }
+    fn topic_configs(&self, t: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        self.inner.topic_configs(t)
+    }
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        self.inner.broker_configs()
+    }
+    fn consume_range(
+        &self,
+        t: &str,
+        p: i32,
+        o: i64,
+        n: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        self.inner.consume_range(t, p, o, n)
+    }
+    fn observe_consumer_groups(&self, selected: &[String], topics: &[String]) -> GroupsObservation {
+        self.inner.observe_consumer_groups(selected, topics)
+    }
+    fn partition_marks(&self, topics: &[String]) -> BTreeMap<String, TopicMarks> {
+        self.marks_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.partition_marks(topics)
+    }
+}
+
+/// **Review L8.** A capture that described no group — every selected group
+/// excluded, as on a broker that types none — asked no position, so the run
+/// reads no marks after the engine: an unavailable leader costs it nothing.
+/// The control: one captured group, and the marks are read once.
+#[test]
+fn a_capture_that_asked_no_position_reads_no_marks_after_the_engine() {
+    let reader = CountingReader {
+        inner: GroupsReader {
+            captured: vec![],
+            share: vec!["share-1"],
+            position: 0,
+            marks: (0, 1),
+            after: (0, 1),
+        },
+        marks_reads: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let f = Fixture::new();
+    f.select_in_plan(&["share-1"]);
+    let outcome = f.execute_reading(&evidence(), &reader, Vec::new()).unwrap();
+    assert_eq!(
+        outcome.consumer_positions.unwrap().groups["share-1"]
+            .reason
+            .as_deref(),
+        Some("GroupTypeNotCaptured")
+    );
+    assert_eq!(
+        reader.marks_reads.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no group was described, so no mark is read"
+    );
+    let reader = CountingReader {
+        inner: GroupsReader {
+            captured: vec!["billing"],
+            share: vec![],
+            position: 1000,
+            marks: (0, 1234),
+            after: (0, 1234),
+        },
+        marks_reads: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let f = Fixture::new();
+    f.select_in_plan(&["billing"]);
+    f.execute_reading(&evidence(), &reader, Vec::new()).unwrap();
+    assert_eq!(
+        reader.marks_reads.load(std::sync::atomic::Ordering::SeqCst),
+        1
     );
 }

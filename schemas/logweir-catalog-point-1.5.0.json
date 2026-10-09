@@ -35,7 +35,7 @@
       ]
     },
     "consumer_positions": {
-      "description": "**Format 1.5.0 (PROD-04.1).** The receipt's consumer position evidence, summarised ([`RecordConsumerPositions::of`]) and BOUND by the digest of the receipt's block: when the positions were observed, and per selected group its outcome and how many positions relate to archived data. The positions themselves are the receipt's.\n\nReceipt-derived under rule 3 — `reader::cross_check` refuses a record whose summary or digest the verified receipt does not back. ABSENT means the backup selected no group, or the record predates 1.5.0 — never \"no positions\".",
+      "description": "**Format 1.5.0 (PROD-04.1).** The receipt's consumer position evidence, summarised ([`RecordConsumerPositions::of`]) and BOUND by the digest of the receipt's block: when the positions were observed, and per selected group its outcome and how many positions relate to archived data. The positions themselves are in the positions document the receipt's block binds by its own digest, so this digest binds them too.\n\nReceipt-derived under rule 3 — `reader::cross_check` refuses a record whose summary or digest the verified receipt does not back. ABSENT means the backup selected no group, or the record predates 1.5.0 — never \"no positions\".",
       "allOf": [
         {
           "$ref": "#/definitions/RecordConsumerPositions"
@@ -160,7 +160,7 @@
       }
     },
     "PositionCounts": {
-      "description": "One captured group's positions, counted by what they say about archived data: the summary the catalog point record, the catalog's view, the product API and both receipt readers' lines carry.",
+      "description": "One captured group's positions, counted by what they say about archived data: the summary the receipt, the catalog point record, the catalog's view, the product API and both receipt readers' lines carry.",
       "type": "object",
       "required": [
         "beyond_end",
@@ -184,7 +184,7 @@
           "minimum": 0.0
         },
         "never_committed": {
-          "description": "`noCommittedPosition`.",
+          "description": "No committed offset (the document's `no_committed_position`).",
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
@@ -293,7 +293,7 @@
           "format": "date-time"
         },
         "sha256": {
-          "description": "`sha256:<hex>` over the deterministic JSON of the receipt's `consumer_positions` block (`ConsumerPositions::digest`): the binding a reader recomputes from the verified receipt.",
+          "description": "`sha256:<hex>` over the deterministic JSON of the receipt's `consumer_positions` block (`ConsumerPositions::digest`): the binding a reader recomputes from the verified receipt. The block carries the positions document's digest, so one position moved is a different block and a different digest here.",
           "type": "string"
         }
       }

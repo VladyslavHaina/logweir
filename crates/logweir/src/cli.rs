@@ -631,6 +631,14 @@ pub enum DrillCmd {
         // auditor runs the two readers with one command line.
         #[arg(long, default_value = "scorecard")]
         payload_type: String,
+        /// **PROD-04.1.** With `--payload-type backup-receipt`: the positions
+        /// document the receipt binds (`<run_id>.consumer-positions.json`,
+        /// beside it in the evidence store), checked against the verified
+        /// receipt by digest and by its own fourteen arms; each position is
+        /// then printed. Without it the receipt's position counts are printed
+        /// and the document is reported as not checked.
+        #[arg(long)]
+        consumer_positions: Option<PathBuf>,
     },
 }
 

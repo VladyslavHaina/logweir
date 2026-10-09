@@ -280,7 +280,14 @@ fn main() -> std::process::ExitCode {
             signature,
             public_key,
             payload_type,
-        }) => verify::run(&scorecard, &signature, &public_key, &payload_type),
+            consumer_positions,
+        }) => verify::run_with(
+            &scorecard,
+            &signature,
+            &public_key,
+            &payload_type,
+            consumer_positions.as_deref(),
+        ),
         // THE ONE FUNCTION, TWO NAMES (interface I20). Both arms build the
         // same `RunArgs` through the same `From` impl and call
         // `drill::run_named`; the only difference between them is the

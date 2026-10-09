@@ -1,38 +1,48 @@
-//! **PROD-04.1: the receipt's `consumer_positions` block**, built from what
-//! the run observed of the selected consumer groups before the engine, the
-//! partitions' marks after it, and the offsets the archive's manifest records.
+//! **PROD-04.1: the receipt's `consumer_positions` block and the positions
+//! document it binds**, built from what the run observed of the selected
+//! consumer groups before the engine, the partitions' marks after it, and the
+//! offsets the archive's manifest records.
 //!
 //! Pure: [`build`] is a function of its [`Capture`], so every rule below is a
 //! unit row with no broker. The vocabulary and the coverage rule are
 //! `logweir_core::consumer_positions`'s, the same ones the receipt's arms
-//! 22-34 re-derive, so a block this module writes is one both readers accept.
+//! 22-27 and the document's arms CP-1 to CP-14 re-derive, so what this module
+//! writes is what both readers accept.
 //!
 //! # The rules
 //!
 //! - **One outcome per selected id**, in the receipt's id order. An id the
 //!   observation does not answer for — the reader could not read groups at
 //!   all — is `failed: CaptureUnavailable`, never absent.
-//! - **A captured group lists every partition of every named topic**: the
-//!   partitions the capture read, then any the read after the engine or the
-//!   archive shows beyond them, which are `notObserved`
-//!   (`PartitionAddedDuringCapture`, or `TopicNotObserved` when the capture
-//!   could not read the topic). A partition with no committed offset is
-//!   `noCommittedPosition`: never offset 0.
+//! - **A group described `Dead` with no member** — the stand-in for "no such
+//!   group" (PROD-04.0 T2) — was deleted, or its offsets expired, while it was
+//!   read: `failed: GroupVanishedDuringCapture`, never captured with every
+//!   partition "never committed" (PROD-04.1 review M2).
+//! - **A group is captured only over topics whose partitions were read**: a
+//!   named topic no read gave a partition for fails every group that would
+//!   have been captured, `PartitionsNotRead` (review L4).
+//! - **A captured group accounts for every partition of every named topic**,
+//!   SPARSELY: an entry for each committed position, each failed read and each
+//!   partition the capture did not observe (`notObserved`:
+//!   `PartitionAddedDuringCapture`, or `TopicNotObserved` when the capture
+//!   could not read the topic), and a COUNT of the partitions with no
+//!   committed offset. Never offset 0.
 //! - **A committed position is judged against its partition's facts**
 //!   (`logweir_core::consumer_positions::relation`): `failed: MarksNotRead`
 //!   without the marks, `excluded: PositionBeyondEnd` above the high
 //!   watermark, otherwise `captured` with its coverage word.
-//! - **A group holding a kept position on a topic that changed during the
-//!   capture** is `failed: GenerationChangedDuringCapture`: its positions may
-//!   be about records that no longer exist at those offsets.
+//! - **A group holding a kept position — captured or excluded — on a topic
+//!   that changed during the capture** is `failed:
+//!   GenerationChangedDuringCapture`: its positions may be about records that
+//!   no longer exist at those offsets.
 //! - **Only well-formed facts are recorded**: a manifest range whose first
 //!   offset is negative or above its last is NOT recorded (the partition then
 //!   reads "nothing archived"), and the reader refuses marks that are not
 //!   `0 <= log start <= high watermark`.
 use chrono::{DateTime, Utc};
 use logweir_core::consumer_positions::{
-    self as model, ConsumerPositions, GroupSnapshot, PartitionFacts, PositionEntry, Relation,
-    TopicPartitions,
+    self as model, ConsumerPositions, DocumentRef, GroupPositions, GroupSnapshot, PartitionFacts,
+    PositionCounts, PositionEntry, PositionsDocument, Relation, TopicPartitions,
 };
 use logweir_kafka::capture::{GroupsObservation, ObservedGroup, TopicMarks};
 use logweir_kafka::groups::{
@@ -67,6 +77,10 @@ pub fn archived_ranges(
 
 /// Everything [`build`] decides from.
 pub struct Capture<'a> {
+    /// The receipt's `backup_id` and `run_id`: the positions document names
+    /// them, and lives beside the receipt.
+    pub backup_id: &'a str,
+    pub run_id: &'a str,
     /// The selected group ids, in selection order (phase −1 refused blanks
     /// and repeats).
     pub selected: &'a [String],
@@ -84,6 +98,25 @@ pub struct Capture<'a> {
     pub archived: &'a ArchivedRanges,
 }
 
+/// What [`build`] produces: the receipt's block, and the positions document
+/// with the exact bytes the block's `document` is the digest of.
+#[derive(Debug, Clone)]
+pub struct Built {
+    pub block: ConsumerPositions,
+    pub document: PositionsDocument,
+    pub document_bytes: Vec<u8>,
+}
+
+/// Whether the capture asked any group for its positions: the marks are only
+/// worth reading for a group that was described (PROD-04.1 review L8).
+#[must_use]
+pub fn positions_were_asked(observation: &GroupsObservation) -> bool {
+    observation
+        .groups
+        .iter()
+        .any(|g| matches!(g.description, Some(Ok(_))))
+}
+
 /// A topic's partitions as `partition -> marks`, when the read succeeded:
 /// `None` for a failed metadata read, and a partition whose marks were not
 /// read maps to `None`.
@@ -98,7 +131,7 @@ fn marks_by_partition(
     )
 }
 
-/// The `topics` half of the block: each named topic's partition facts and
+/// The `topics` half of the document: each named topic's partition facts and
 /// whether it changed during the capture.
 fn topic_facts(c: &Capture<'_>) -> BTreeMap<String, TopicPartitions> {
     let names: BTreeSet<&String> = c.topics.iter().collect();
@@ -161,12 +194,12 @@ fn not_captured(outcome: &str, reason: &str) -> GroupSnapshot {
         listed_state: None,
         members: None,
         active: None,
-        positions: None,
+        counts: None,
     }
 }
 
-fn failed(reason: &str) -> GroupSnapshot {
-    not_captured("failed", reason)
+fn failed(reason: &str) -> (GroupSnapshot, Option<GroupPositions>) {
+    (not_captured("failed", reason), None)
 }
 
 /// PROD-04.0b's classification failures, by name.
@@ -220,13 +253,16 @@ fn entry(topic: &str, p: u32, status: &str) -> PositionEntry {
     }
 }
 
-/// One captured group's positions over every partition of every named topic.
+/// One captured group's positions over every partition of every named topic,
+/// SPARSE: an entry where there is something to say, and a count of the
+/// partitions with no committed offset.
 fn position_entries(
     topics: &BTreeMap<String, TopicPartitions>,
     observation: &GroupsObservation,
     answered: &logweir_kafka::positions::GroupPositions,
-) -> Vec<PositionEntry> {
+) -> GroupPositions {
     let mut out = Vec::new();
+    let mut no_committed_position: u32 = 0;
     for (topic, facts) in topics {
         // Whether the capture read the topic's partitions at all.
         let topic_read = matches!(observation.topics.get(topic), Some(Ok(_)));
@@ -262,10 +298,13 @@ fn position_entries(
                         e.coverage = Some(word.into());
                     }
                 },
-                // NEVER offset 0 (PROD-04.0 T7).
+                // NEVER offset 0 (PROD-04.0 T7): counted, never listed.
                 Some(PartitionPosition::NoCommittedPosition) => {
-                    e.status = "noCommittedPosition".into();
+                    no_committed_position = no_committed_position.saturating_add(1);
+                    continue;
                 }
+                // A refused or failed read says nothing about what the group
+                // committed: it is a failure, never "no committed position".
                 Some(PartitionPosition::Failed(why)) => {
                     e.status = "failed".into();
                     e.reason = Some(partition_failure(why).into());
@@ -280,24 +319,30 @@ fn position_entries(
             out.push(e);
         }
     }
-    out
+    GroupPositions {
+        positions: out,
+        no_committed_position,
+    }
 }
 
-/// One selected group's snapshot.
-fn group_snapshot(
+/// One selected group's outcome, and its positions when it is captured.
+fn group_outcome(
     observed: Option<&ObservedGroup>,
     topics: &BTreeMap<String, TopicPartitions>,
     observation: &GroupsObservation,
-) -> GroupSnapshot {
+) -> (GroupSnapshot, Option<GroupPositions>) {
     let Some(g) = observed else {
         return failed("CaptureUnavailable");
     };
     let capturable = match &g.verdict {
         GroupVerdict::Excluded(Excluded::GroupTypeNotCaptured { .. }) => {
-            return not_captured("excluded", model::GROUP_TYPE_NOT_CAPTURED);
+            return (
+                not_captured("excluded", model::GROUP_TYPE_NOT_CAPTURED),
+                None,
+            );
         }
         GroupVerdict::Excluded(Excluded::GroupNotFound { .. }) => {
-            return not_captured("excluded", "GroupNotFound");
+            return (not_captured("excluded", "GroupNotFound"), None);
         }
         GroupVerdict::Failed(f) => return failed(classification_failure(f)),
         GroupVerdict::Capture(c) => c,
@@ -307,14 +352,26 @@ fn group_snapshot(
         Some(Err(f)) => return failed(description_failure(f)),
         Some(Ok(d)) => d,
     };
+    let state = description.state.wire_name();
+    let members = u32::try_from(description.members.len()).unwrap_or(u32::MAX);
+    // M2: `Dead` with no member is "no such group" — it vanished while it was
+    // read, and its fetch can only answer "never committed" everywhere.
+    if model::vanished(state, members) {
+        return failed(model::GROUP_VANISHED);
+    }
     let answered = match &g.positions {
         None => return failed("PositionsFailed"),
         Some(Err(e)) => return failed(positions_failure(e)),
         Some(Ok(p)) => p,
     };
+    // L4: a topic no read gave a partition for. Its positions are unknown.
+    if topics.values().any(|t| t.partitions.is_empty()) {
+        return failed(model::PARTITIONS_NOT_READ);
+    }
     let positions = position_entries(topics, observation, answered);
-    // A kept position on a topic that changed during the capture.
-    if positions.iter().any(|e| {
+    // A KEPT position — captured or excluded — on a topic that changed during
+    // the capture (review A3: an excluded one counts too).
+    if positions.positions.iter().any(|e| {
         e.position.is_some()
             && topics
                 .get(&e.topic)
@@ -322,23 +379,28 @@ fn group_snapshot(
     }) {
         return failed(model::GENERATION_CHANGED);
     }
-    let state = description.state.wire_name();
     let listed = capturable.state().wire_name();
-    GroupSnapshot {
-        outcome: "captured".to_string(),
-        reason: None,
-        group_type: Some(capturable.group_type().wire_name().to_string()),
-        state: Some(state.to_string()),
-        listed_state: Some(listed.to_string()),
-        members: Some(u32::try_from(description.members.len()).unwrap_or(u32::MAX)),
-        active: Some(model::active(state, listed)),
-        positions: Some(positions),
-    }
+    (
+        GroupSnapshot {
+            outcome: "captured".to_string(),
+            reason: None,
+            group_type: Some(capturable.group_type().wire_name().to_string()),
+            state: Some(state.to_string()),
+            listed_state: Some(listed.to_string()),
+            members: Some(members),
+            active: Some(model::active(state, listed)),
+            counts: Some(PositionCounts::of(&positions)),
+        },
+        Some(positions),
+    )
 }
 
-/// **The block.** See the module doc for the rules.
-#[must_use]
-pub fn build(c: &Capture<'_>) -> ConsumerPositions {
+/// **The block and its document.** See the module doc for the rules.
+///
+/// # Errors
+///
+/// The document does not serialise (it always does).
+pub fn build(c: &Capture<'_>) -> Result<Built, String> {
     let topics = topic_facts(c);
     let by_id: BTreeMap<&str, &ObservedGroup> = c
         .observation
@@ -346,17 +408,25 @@ pub fn build(c: &Capture<'_>) -> ConsumerPositions {
         .iter()
         .map(|g| (g.group_id.as_str(), g))
         .collect();
-    let groups = c
-        .selected
-        .iter()
-        .map(|id| {
-            (
-                id.clone(),
-                group_snapshot(by_id.get(id.as_str()).copied(), &topics, c.observation),
-            )
-        })
-        .collect();
-    ConsumerPositions {
+    let mut groups = BTreeMap::new();
+    let mut positioned = BTreeMap::new();
+    for id in c.selected {
+        let (snapshot, positions) =
+            group_outcome(by_id.get(id.as_str()).copied(), &topics, c.observation);
+        if let Some(p) = positions {
+            positioned.insert(id.clone(), p);
+        }
+        groups.insert(id.clone(), snapshot);
+    }
+    let document = PositionsDocument {
+        format_version: model::DOCUMENT_FORMAT_VERSION.to_string(),
+        backup_id: c.backup_id.to_string(),
+        run_id: c.run_id.to_string(),
+        topics,
+        groups: positioned,
+    };
+    let document_bytes = document.to_bytes()?;
+    let block = ConsumerPositions {
         observed_from: c.observed_from,
         observed_to: c.observed_to.max(c.observed_from),
         listing: match c.observation.completeness {
@@ -364,9 +434,18 @@ pub fn build(c: &Capture<'_>) -> ConsumerPositions {
             _ => "notComplete",
         }
         .to_string(),
-        topics,
+        document: DocumentRef {
+            key: model::document_key(c.backup_id, c.run_id),
+            sha256: logweir_core::ids::sha256_prefixed(&document_bytes),
+            bytes: document_bytes.len() as u64,
+        },
         groups,
-    }
+    };
+    Ok(Built {
+        block,
+        document,
+        document_bytes,
+    })
 }
 
 /// One log event per group, WARN for a group that is not captured, with what
@@ -393,23 +472,13 @@ pub fn log(block: &ConsumerPositions, observation: &GroupsObservation) {
         })
         .collect();
     for (id, g) in &block.groups {
-        let related = g
-            .positions
-            .iter()
-            .flatten()
-            .filter(|p| {
-                p.coverage
-                    .as_deref()
-                    .is_some_and(|c| model::RELATED.contains(&c))
-            })
-            .count();
         match g.outcome.as_str() {
             "captured" => tracing::info!(
                 group = %id,
                 group_type = g.group_type.as_deref().unwrap_or(""),
                 state = g.state.as_deref().unwrap_or(""),
                 active = g.active.unwrap_or(true),
-                positions_related_to_archive = related,
+                positions_related_to_archive = g.counts.map_or(0, |c| c.related),
                 "consumer group captured"
             ),
             outcome => tracing::warn!(
@@ -425,16 +494,17 @@ pub fn log(block: &ConsumerPositions, observation: &GroupsObservation) {
 
 #[cfg(test)]
 mod tests {
-    //! One row per rule; each names the mutant it kills. The block every row
-    //! builds is also put through the receipt's own arms (`valid`), so a rule
-    //! that wrote something the readers refuse fails here first.
+    //! One row per rule; each names the mutant it kills. What every row
+    //! builds is also put through the receipt's own arms AND the document's
+    //! (`valid`), so a rule that wrote something the readers refuse fails
+    //! here first.
     use super::*;
     use logweir_kafka::access::ClusterAccess;
     use logweir_kafka::capture::Marks;
     use logweir_kafka::groups::{
         code, GroupDescription, GroupListings, GroupState, GroupType, NameEntry, TypedEntry,
     };
-    use logweir_kafka::positions::{CommittedPosition, GroupPositions};
+    use logweir_kafka::positions::{CommittedPosition, GroupPositions as Answered};
     use std::time::Duration;
 
     const T: &str = "orders";
@@ -511,7 +581,7 @@ mod tests {
             group_id: id.into(),
             verdict: GroupVerdict::Capture(c),
             description: Some(Ok(described(id, GroupType::Classic, GroupState::Empty, 0))),
-            positions: Some(Ok(GroupPositions {
+            positions: Some(Ok(Answered {
                 group: id.into(),
                 partitions: answers
                     .into_iter()
@@ -552,9 +622,11 @@ mod tests {
                 archived: BTreeMap::new(),
             }
         }
-        fn build(&self) -> ConsumerPositions {
+        fn build(&self) -> Built {
             let at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).expect("an instant");
             build(&Capture {
+                backup_id: "b",
+                run_id: "r",
                 selected: &self.selected,
                 topics: &self.topics,
                 observed_from: at,
@@ -563,11 +635,15 @@ mod tests {
                 after: &self.after,
                 archived: &self.archived,
             })
+            .expect("builds")
         }
     }
 
-    /// The block inside a minimal 1.5.0 receipt satisfies every arm.
-    fn valid(block: &ConsumerPositions) {
+    /// The block inside a minimal 1.5.0 receipt satisfies every arm, and the
+    /// document every one of its own.
+    fn valid(built: &Built) {
+        let topics: Vec<&String> = built.document.topics.keys().collect();
+        let records: BTreeMap<&String, u64> = topics.iter().map(|t| (*t, 1)).collect();
         let receipt: logweir_core::backup_receipt::BackupReceipt =
             serde_json::from_value(serde_json::json!({
                 "format_version": "1.5.0",
@@ -578,28 +654,43 @@ mod tests {
                 "exit_code": 0, "triggered_by": "",
                 "source": {"cluster_id": "c", "bootstrap_servers": ["k:9092"],
                            "auth": {"mode": "plaintext", "username": null},
-                           "topics": [T]},
+                           "topics": topics},
                 "engine": {"id": "oso-cli", "version": "v0.23.3", "digest": "sha256:00"},
                 "archive": {"manifest_key": "m", "manifest_sha256": "sha256:00", "prefix": "p"},
-                "records": {T: 1},
+                "records": records,
                 "covered": {"from_ms": 1, "to_ms": 2},
-                "consumer_positions": block,
+                "consumer_positions": built.block,
             }))
             .expect("a receipt");
-        assert_eq!(receipt.validate_invariants(), Ok(()), "{block:#?}");
+        assert_eq!(receipt.validate_invariants(), Ok(()), "{:#?}", built.block);
+        assert_eq!(
+            receipt.validate_consumer_positions_document(&built.document_bytes, &built.document),
+            Ok(()),
+            "{:#?}",
+            built.document
+        );
     }
 
-    fn group<'a>(b: &'a ConsumerPositions, id: &str) -> &'a GroupSnapshot {
-        b.groups
+    fn group<'a>(b: &'a Built, id: &str) -> &'a GroupSnapshot {
+        b.block
+            .groups
             .get(id)
             .unwrap_or_else(|| panic!("no entry for {id}"))
     }
 
-    /// Absent is never offset 0: a partition with no commit is
-    /// `noCommittedPosition` with NO position, and every partition is listed.
-    /// Kills: mapping NoCommittedPosition to a captured 0; dropping it.
+    fn positions<'a>(b: &'a Built, id: &str) -> &'a GroupPositions {
+        b.document
+            .groups
+            .get(id)
+            .unwrap_or_else(|| panic!("{id} is not captured"))
+    }
+
+    /// Absent is never offset 0: a partition with no commit is COUNTED, never
+    /// listed with a position, and every partition is accounted for.
+    /// Kills: mapping NoCommittedPosition to a captured 0; dropping it from
+    /// the count.
     #[test]
-    fn a_partition_without_a_commit_is_never_offset_zero_and_never_missing() {
+    fn a_partition_without_a_commit_is_counted_never_offset_zero_and_never_missing() {
         let mut f = Fixture::new(
             observation(
                 vec![captured_group(
@@ -614,15 +705,17 @@ mod tests {
             .insert(T.into(), [(0, (0, 9)), (1, (0, 9))].into_iter().collect());
         let b = f.build();
         valid(&b);
-        let positions = group(&b, "g").positions.as_ref().expect("captured");
-        assert_eq!(positions.len(), 2);
-        assert_eq!(positions[0].status, "captured");
-        assert_eq!(positions[0].position, Some(7));
-        assert_eq!(positions[0].coverage.as_deref(), Some("withinArchive"));
-        assert_eq!(positions[1].status, "noCommittedPosition");
+        let p = positions(&b, "g");
+        assert_eq!(p.positions.len(), 1, "NEGATIVE CONTROL: absent listed as 0");
+        assert_eq!(p.positions[0].status, "captured");
+        assert_eq!(p.positions[0].position, Some(7));
+        assert_eq!(p.positions[0].coverage.as_deref(), Some("withinArchive"));
+        assert_eq!(p.no_committed_position, 1);
         assert_eq!(
-            positions[1].position, None,
-            "NEGATIVE CONTROL: absent read as 0"
+            group(&b, "g")
+                .counts
+                .map(|c| (c.related, c.never_committed)),
+            Some((1, 1))
         );
     }
 
@@ -639,7 +732,7 @@ mod tests {
         );
         let b = f.build();
         valid(&b);
-        let p = group(&b, "g").positions.as_ref().expect("captured");
+        let p = &positions(&b, "g").positions;
         assert_eq!(
             (p[0].status.as_str(), p[0].reason.as_deref(), p[0].position),
             ("excluded", Some("PositionBeyondEnd"), Some(10))
@@ -715,7 +808,7 @@ mod tests {
                 g.outcome.clone(),
                 g.reason.clone(),
                 g.group_type.clone(),
-                g.positions.is_some(),
+                g.counts.is_some(),
             )
         };
         let s = |x: &str| Some(x.to_string());
@@ -748,7 +841,8 @@ mod tests {
             said("never-observed"),
             ("failed".into(), s("CaptureUnavailable"), None, false)
         );
-        assert_eq!(b.groups.len(), 6, "exactly one entry per selected id");
+        assert_eq!(b.block.groups.len(), 6, "exactly one entry per selected id");
+        assert!(b.document.groups.is_empty(), "no group was captured");
     }
 
     /// A reader that observes nothing records every selected group failed,
@@ -764,12 +858,13 @@ mod tests {
             .insert(T.into(), [(0, (0, 3))].into_iter().collect());
         let b = f.build();
         valid(&b);
-        assert_eq!(b.listing, "notComplete");
+        assert_eq!(b.block.listing, "notComplete");
         for id in ["a", "b"] {
             assert_eq!(group(&b, id).reason.as_deref(), Some("CaptureUnavailable"));
         }
         // The archived partition is listed, unobserved.
-        assert!(!b.topics[T].partitions[0].observed);
+        assert!(!b.document.topics[T].partitions[0].observed);
+        assert!(!positions_were_asked(&f.observation));
     }
 
     /// A partition the capture did not read (added during it) is
@@ -791,13 +886,14 @@ mod tests {
             .insert(T.into(), [(0, (0, 5)), (1, (0, 1))].into_iter().collect());
         let b = f.build();
         valid(&b);
-        let p = group(&b, "g").positions.as_ref().expect("captured");
+        let p = &positions(&b, "g").positions;
         assert_eq!(p.len(), 2, "NEGATIVE CONTROL: the added partition dropped");
         assert_eq!(
             (p[1].status.as_str(), p[1].reason.as_deref(), p[1].position),
             ("notObserved", Some("PartitionAddedDuringCapture"), None)
         );
-        assert!(b.topics[T].partitions[0].observed && !b.topics[T].partitions[1].observed);
+        let facts = &b.document.topics[T].partitions;
+        assert!(facts[0].observed && !facts[1].observed);
 
         // The capture could not read the topic at all.
         let mut o = observation(vec![captured_group("g", vec![])], vec![]);
@@ -807,7 +903,7 @@ mod tests {
             .insert(T.into(), [(0, (0, 5))].into_iter().collect());
         let b = f.build();
         valid(&b);
-        let p = group(&b, "g").positions.as_ref().expect("captured");
+        let p = &positions(&b, "g").positions;
         assert_eq!(p[0].reason.as_deref(), Some("TopicNotObserved"));
     }
 
@@ -827,7 +923,7 @@ mod tests {
         f.after.insert(T.into(), Ok(vec![(0, marks(0, 2))]));
         let b = f.build();
         valid(&b);
-        assert!(b.topics[T].changed_during_capture);
+        assert!(b.document.topics[T].changed_during_capture);
         assert_eq!(
             group(&b, "holds").reason.as_deref(),
             Some("GenerationChangedDuringCapture")
@@ -837,8 +933,33 @@ mod tests {
         f.after.insert(T.into(), Ok(vec![(0, marks(0, 9))]));
         let b = f.build();
         valid(&b);
-        assert!(!b.topics[T].changed_during_capture);
+        assert!(!b.document.topics[T].changed_during_capture);
         assert_eq!(group(&b, "holds").outcome, "captured");
+    }
+
+    /// The review's A3: a KEPT position that is excluded (beyond the end) on a
+    /// changed topic fails the group too — or arm CP-9 would refuse the
+    /// runner's own receipt and the backup would lose its evidence. Kills:
+    /// counting only `captured` positions.
+    #[test]
+    fn a_beyond_the_end_position_on_a_changed_topic_fails_the_group() {
+        let o = observation(
+            vec![captured_group("beyond", vec![committed(12)])],
+            vec![(0, marks(0, 8))],
+        );
+        let mut f = Fixture::new(o, &["beyond"]);
+        f.after.insert(T.into(), Ok(vec![(0, marks(0, 2))]));
+        let b = f.build();
+        valid(&b);
+        assert_eq!(
+            group(&b, "beyond").reason.as_deref(),
+            Some("GenerationChangedDuringCapture")
+        );
+        // The control: the same position on a stable topic is kept, excluded.
+        f.after.insert(T.into(), Ok(vec![(0, marks(0, 9))]));
+        let b = f.build();
+        valid(&b);
+        assert_eq!(positions(&b, "beyond").positions[0].status, "excluded");
     }
 
     /// Marks not read: the position is failed `MarksNotRead`, never judged
@@ -855,7 +976,7 @@ mod tests {
         );
         let b = f.build();
         valid(&b);
-        let p = &group(&b, "g").positions.as_ref().expect("captured")[0];
+        let p = &positions(&b, "g").positions[0];
         assert_eq!(
             (p.status.as_str(), p.reason.as_deref(), p.position),
             ("failed", Some("MarksNotRead"), None)
@@ -889,8 +1010,8 @@ mod tests {
     }
 
     /// A partition the fetch did not answer for is `failed: PartitionFailed`,
-    /// never `noCommittedPosition`: an unanswered partition says nothing about
-    /// what the group committed. Kills: reading a missing answer as "no
+    /// never counted as never committed: an unanswered partition says nothing
+    /// about what the group committed. Kills: reading a missing answer as "no
     /// committed offset".
     #[test]
     fn a_partition_the_fetch_did_not_answer_is_failed_never_uncommitted() {
@@ -903,16 +1024,169 @@ mod tests {
         );
         let b = f.build();
         valid(&b);
-        let p = &group(&b, "g").positions.as_ref().expect("captured")[1];
+        let g = positions(&b, "g");
+        let p = &g.positions[1];
         assert_eq!(
             (p.status.as_str(), p.reason.as_deref(), p.position),
             ("failed", Some("PartitionFailed"), None)
+        );
+        assert_eq!(g.no_committed_position, 0);
+    }
+
+    /// The review's A1: a partition whose read was REFUSED or answered
+    /// something that is not a position is `failed` with that reason — never
+    /// "never committed". Kills: mapping `PartitionPosition::Failed` to the
+    /// no-commit count.
+    #[test]
+    fn a_refused_or_impossible_partition_read_is_failed_never_never_committed() {
+        let f = Fixture::new(
+            observation(
+                vec![captured_group(
+                    "g",
+                    vec![
+                        PartitionPosition::Failed(PartitionFailure::TopicNotAuthorized),
+                        PartitionPosition::Failed(PartitionFailure::NotAPosition { raw: -3 }),
+                        PartitionPosition::NoCommittedPosition,
+                    ],
+                )],
+                vec![(0, marks(0, 5)), (1, marks(0, 5)), (2, marks(0, 5))],
+            ),
+            &["g"],
+        );
+        let b = f.build();
+        valid(&b);
+        let g = positions(&b, "g");
+        let said: Vec<(&str, Option<&str>)> = g
+            .positions
+            .iter()
+            .map(|p| (p.status.as_str(), p.reason.as_deref()))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("failed", Some("TopicNotAuthorized")),
+                ("failed", Some("NotAPosition"))
+            ]
+        );
+        assert_eq!(
+            g.no_committed_position, 1,
+            "only the partition that answered none"
+        );
+        let c = group(&b, "g").counts.expect("captured");
+        assert_eq!((c.failed, c.never_committed), (2, 1));
+    }
+
+    /// The review's M2: a group listed live and described `Dead` with no
+    /// member was deleted (or expired) while it was read — `failed:
+    /// GroupVanishedDuringCapture`, never captured with every partition
+    /// "never committed". The control: described `Empty` with no member, it is
+    /// captured.
+    #[test]
+    fn a_group_that_vanished_during_the_capture_is_failed_never_captured_empty() {
+        let mut vanished = captured_group("gone", vec![PartitionPosition::NoCommittedPosition; 3]);
+        vanished.verdict =
+            GroupVerdict::Capture(capturable("gone", code::TYPE_CLASSIC, code::STATE_STABLE));
+        vanished.description = Some(Ok(described(
+            "gone",
+            GroupType::Classic,
+            GroupState::Dead,
+            0,
+        )));
+        let f = Fixture::new(
+            observation(
+                vec![vanished],
+                vec![(0, marks(0, 5)), (1, marks(0, 5)), (2, marks(0, 5))],
+            ),
+            &["gone"],
+        );
+        let b = f.build();
+        valid(&b);
+        let g = group(&b, "gone");
+        assert_eq!(
+            (g.outcome.as_str(), g.reason.as_deref()),
+            ("failed", Some("GroupVanishedDuringCapture"))
+        );
+        assert!(g.counts.is_none() && b.document.groups.is_empty());
+        // The control.
+        let empty = captured_group("still", vec![PartitionPosition::NoCommittedPosition; 3]);
+        let f = Fixture::new(
+            observation(
+                vec![empty],
+                vec![(0, marks(0, 5)), (1, marks(0, 5)), (2, marks(0, 5))],
+            ),
+            &["still"],
+        );
+        let b = f.build();
+        valid(&b);
+        assert_eq!(group(&b, "still").outcome, "captured");
+        assert_eq!(positions(&b, "still").no_committed_position, 3);
+    }
+
+    /// The review's L4: a named topic no read gave a partition for (the
+    /// capture's and the later metadata read both failed, nothing archived)
+    /// fails every group that would have been captured `PartitionsNotRead`
+    /// — never captured with no entry for it. The control: the same topic
+    /// with one archived partition captures the group.
+    #[test]
+    fn a_topic_whose_partitions_were_never_read_fails_the_groups() {
+        let mut o = observation(
+            vec![captured_group("g", vec![committed(1)])],
+            vec![(0, marks(0, 5))],
+        );
+        o.topics
+            .insert("ledger".into(), Err("metadata refused".into()));
+        let mut f = Fixture::new(o, &["g"]);
+        f.topics.push("ledger".into());
+        f.after
+            .insert("ledger".into(), Err("metadata refused".into()));
+        let b = f.build();
+        valid(&b);
+        assert!(b.document.topics["ledger"].partitions.is_empty());
+        assert_eq!(group(&b, "g").reason.as_deref(), Some("PartitionsNotRead"));
+        // The control: the archive names one of its partitions.
+        f.archived
+            .insert("ledger".into(), [(0, (0, 2))].into_iter().collect());
+        let b = f.build();
+        valid(&b);
+        assert_eq!(group(&b, "g").outcome, "captured");
+        // Topics in name order: `ledger` before `orders`.
+        assert_eq!(
+            positions(&b, "g").positions[0].reason.as_deref(),
+            Some("TopicNotObserved")
+        );
+    }
+
+    /// The receipt binds the document's exact bytes, and the document names
+    /// its receipt's run.
+    #[test]
+    fn the_block_binds_the_documents_exact_bytes() {
+        let f = Fixture::new(
+            observation(
+                vec![captured_group("g", vec![committed(1)])],
+                vec![(0, marks(0, 5))],
+            ),
+            &["g"],
+        );
+        let b = f.build();
+        valid(&b);
+        assert_eq!(
+            b.block.document.sha256,
+            logweir_core::ids::sha256_prefixed(&b.document_bytes)
+        );
+        assert_eq!(b.block.document.bytes, b.document_bytes.len() as u64);
+        assert_eq!(
+            b.block.document.key,
+            "logweir/backups/b/r.consumer-positions.json"
+        );
+        assert_eq!(
+            (b.document.backup_id.as_str(), b.document.run_id.as_str()),
+            ("b", "r")
         );
     }
 
     /// The manifest's ranges: only well-formed ones, per partition, from the
     /// lowest start to the highest end. Kills: min/max swapped; a negative
-    /// range recorded (the receipt would then fail its own arm 25).
+    /// range recorded (the document would then fail its own arm CP-6).
     #[test]
     fn archived_ranges_take_the_lowest_start_and_highest_end_and_drop_nonsense() {
         let seg = |s: i64, e: i64| logweir_core::engine::SegmentFacts {
