@@ -901,3 +901,45 @@ fn ci_changes_classifies_docs_only_diffs() {
     assert_eq!(classify(dir, &"0".repeat(40), &lookalike), "code=true");
     assert_eq!(classify(dir, &"f".repeat(40), &lookalike), "code=true");
 }
+
+/// EVERY IMAGE BASE IS PINNED BY DIGEST. `images.yml` pulls Docker Hub bases
+/// through a public mirror (rate limits); a digest makes the mirror serve
+/// exactly those bytes or nothing, because BuildKit verifies the content
+/// address. A tag would let the mirror choose. So every `FROM` in every
+/// Dockerfile names `image@sha256:<64 hex>` or an earlier build stage.
+#[test]
+fn every_dockerfile_base_is_pinned_by_digest() {
+    let mut checked = 0;
+    for entry in std::fs::read_dir(root()).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if !name.starts_with("Dockerfile") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut stages: Vec<String> = Vec::new();
+        for line in text.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("FROM ") else {
+                continue;
+            };
+            let words: Vec<&str> = rest
+                .split_whitespace()
+                .filter(|w| !w.starts_with("--platform="))
+                .collect();
+            let image = words[0];
+            if let Some(i) = words.iter().position(|w| w.eq_ignore_ascii_case("AS")) {
+                stages.push(words[i + 1].to_string());
+            }
+            let is_stage = stages.iter().any(|s| s == image) || image.contains("${");
+            let pinned = image
+                .split_once("@sha256:")
+                .is_some_and(|(_, d)| d.len() == 64 && d.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(
+                is_stage || pinned,
+                "{name}: `{line}` names a base by tag; pin it by digest (image@sha256:...)"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 8, "only {checked} FROM lines checked");
+}
