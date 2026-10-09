@@ -5,7 +5,7 @@
 //! compare the key's CURRENT version with that pin and read the pinned version
 //! by its id. Two properties of `Store` carry that, and both are pinned here:
 //!
-//! 1. `Store::get_version` returns the pinned bytes or fails — it NEVER hands
+//! 1. `Store::get_version_capped` returns the pinned bytes or fails — it NEVER hands
 //!    back the current object as if it were the pinned one. `object_store`'s
 //!    in-memory and local-filesystem backends ignore a version request and
 //!    answer with the current object; a reader that believed that answer would
@@ -22,7 +22,7 @@ use logweir_store::{Store, StoreError};
 const KEY: &str = "logweir/archive/set-1/manifest.json";
 
 /// A backend that cannot read by version answers a version read with ITS
-/// CURRENT OBJECT and no version id. `get_version` must refuse that answer.
+/// CURRENT OBJECT and no version id. `get_version_capped` must refuse that answer.
 #[test]
 fn a_store_that_ignores_the_version_is_an_error_not_the_current_object() {
     let store = Store::in_memory("logweir/");

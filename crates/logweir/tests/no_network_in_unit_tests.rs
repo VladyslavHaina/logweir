@@ -115,7 +115,7 @@ const DIAL_TOKENS: [&str; 17] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 33] = [
+const ALLOWED: [(&str, &str); 34] = [
     (
         "crates/logweir/src/check/kafka.rs",
         "production: D2 §4.2's check runner dials BY DESIGN, and this module is the one \
@@ -217,6 +217,12 @@ const ALLOWED: [(&str, &str); 33] = [
         "crates/logweir/tests/backup_run.rs",
         "test support: builds BackupSpec YAML strings whose bootstrap_servers is \
          localhost:9092, handed to a ClusterReader double; constructs no client",
+    ),
+    (
+        "crates/logweir/tests/schema_dependency_backup.rs",
+        "test support (PROD-03.0): one BackupSpec YAML whose bootstrap_servers is \
+         localhost:9092 and storage endpoint 127.0.0.1, handed to a ClusterReader double \
+         and Store::in_memory; constructs no client",
     ),
     (
         "crates/logweir/src/drill/phase0_admit.rs",

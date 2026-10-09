@@ -853,7 +853,7 @@ fn segment_evidence(store: &Store, segs: &[&SegmentFacts]) -> Result<Evidence, D
             skipped.push(seg.key.clone());
             continue;
         }
-        // `Store::get` returns `StoreError`, not directly convertible to
+        // `Store::get_capped` returns `StoreError`, not directly convertible to
         // `DrillError` — routed through the existing `StoreError -> EngineError`
         // conversion (`logweir-engine-oso/src/storage.rs`) so `?` can then use
         // `DrillError`'s existing `#[from] EngineError`, rather than adding a

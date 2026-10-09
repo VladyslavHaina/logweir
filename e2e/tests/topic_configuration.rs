@@ -906,7 +906,11 @@ fn a_backup_records_each_topics_model_and_its_owner() {
     );
 
     // The document.
-    assert_eq!(r.format_version, "1.3.0");
+    harness::assert_format_at_least(
+        &r.format_version,
+        "1.3.0",
+        "a receipt with topic_configuration",
+    );
     assert_eq!(r.validate_invariants(), Ok(()));
     for t in all {
         assert_eq!(
@@ -1061,7 +1065,11 @@ fn a_backup_records_each_topics_model_and_its_owner() {
     }
 
     // THE CATALOG POINT copies the model and the partition count.
-    assert_eq!(record["format_version"], "1.3.0");
+    harness::assert_format_at_least(
+        record["format_version"].as_str().expect("format_version"),
+        "1.3.0",
+        "a catalog record with topics[].configuration",
+    );
     for topic in record["topics"].as_array().expect("topics") {
         let name = topic["name"].as_str().unwrap();
         let m = model_of(&b, name);

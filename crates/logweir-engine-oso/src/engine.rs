@@ -214,7 +214,7 @@ pub struct OsoCliEngine {
     digest: String,
     workdir: PathBuf,
     /// Reads the archive: `list_backup_sets`, `describe` and `fingerprints`
-    /// all go through this handle and only ever call `Store::get` /
+    /// all go through this handle and only ever call `Store::get_capped` /
     /// `list_manifests` / `segment_keys_for_set` — never `put_create_only`.
     /// Nothing in this file writes evidence, so the caller should construct
     /// this engine with `Store::read_only_from_url` over the OSO archive
@@ -710,7 +710,7 @@ impl DataEngine for OsoCliEngine {
                                     // `Store::qualify`), and `SegmentFacts.key`
                                     // is consumed by `phase7_verify::
                                     // segment_evidence` as an argument to
-                                    // `Store::get`. Passing the relative key
+                                    // `Store::get_capped`. Passing the relative key
                                     // through made every segment of a real
                                     // archive with a non-empty prefix 404 in
                                     // `get` — so the byte-fingerprint segment
@@ -888,7 +888,7 @@ impl DataEngine for OsoCliEngine {
         // `BackupSetRef`. Refusing here, with a message naming exactly what
         // is wrong, turns a forgotten patch step into a loud, specific
         // `EngineError::Operational` rather than relying on
-        // `Store::get("")`'s incidental "object not found" (harmless today,
+        // `Store::get_capped("", …)`'s incidental "object not found" (harmless today,
         // but a guard that depends on a downstream error happening to be
         // legible is not a guard).
         if sel.set.manifest_key.is_empty() {

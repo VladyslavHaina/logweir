@@ -331,6 +331,54 @@ pub struct EntryTopic {
     /// one: such a topic is restored by desired-state export.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// **PROD-03.0.** The record's schema dependency for the topic, when it
+    /// carries one (record format 1.5.0): the verdict, the DEPENDENT sides and
+    /// the schema ids they name. Absent is NOT ASSESSED.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_dependency: Option<EntrySchemaDependency>,
+}
+
+/// **PROD-03.0.** One topic's schema dependency as this Job reports it — the
+/// controller's `catalog_view::EntrySchemaDependency`, field for field. The
+/// ids are the dependent sides' listed ids, merged
+/// (`logweir_core::schema_dependency::dependent_ids`), so at most
+/// `SCHEMA_IDS_LISTED` of them. An id is bytes 1-4 of a framed key or value:
+/// a registry's schema id for real Confluent framing, four bytes of the key
+/// itself for the stated residual (big-endian 64-bit integers from 2^24 to
+/// 2^56); nothing else of a payload is listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntrySchemaDependency {
+    pub verdict: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sides: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schema_ids: Vec<u32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub schema_ids_omitted: bool,
+}
+
+impl EntrySchemaDependency {
+    /// The entry the view lists for a record's `schema_dependency`.
+    #[must_use]
+    pub fn of(d: &logweir_core::backup_receipt::TopicSchemaDependency) -> Self {
+        let (schema_ids, schema_ids_omitted) = logweir_core::schema_dependency::dependent_ids(d);
+        Self {
+            verdict: redact(&d.verdict),
+            basis: d.basis.as_deref().map(redact),
+            reason: d.reason.as_deref().map(redact),
+            sides: logweir_core::schema_dependency::dependent_sides(d)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            schema_ids,
+            schema_ids_omitted,
+        }
+    }
 }
 
 /// One point, as this Job reports it.
@@ -1601,7 +1649,10 @@ fn entry_topics(
     availability: Availability,
 ) -> (Vec<EntryTopic>, Option<u32>) {
     if availability != Availability::Available
-        || !point.topics.iter().any(|t| t.configuration.is_some())
+        || !point
+            .topics
+            .iter()
+            .any(|t| t.configuration.is_some() || t.schema_dependency.is_some())
     {
         return (Vec::new(), None);
     }
@@ -1621,6 +1672,8 @@ fn entry_topics(
                 .as_ref()
                 .and_then(|c| c.owner.as_ref())
                 .map(|o| redact(&o.kind)),
+            // PROD-03.0: the record's own entry, as the view lists it.
+            schema_dependency: t.schema_dependency.as_ref().map(EntrySchemaDependency::of),
         })
         .collect();
     (topics, None)
@@ -1968,6 +2021,7 @@ mod tests {
                 replication_factor: None,
                 config_coverage: Some("captured".into()),
                 owner: None,
+                schema_dependency: None,
             }],
             topics_omitted: None,
             owner_detection: Some(Vec::new()),

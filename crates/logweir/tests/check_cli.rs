@@ -6634,6 +6634,7 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
         config_coverage: None,
         topic_configuration: None,
         owner_detection: None,
+        schema_dependency: None,
     }
 }
 
@@ -9172,6 +9173,12 @@ fn the_grammar_this_runner_writes_is_the_grammar_the_controller_parses() {
     assert_eq!(usize_const("MAX_BODY_SIGNERS"), cs::MAX_BODY_SIGNERS);
     assert_eq!(usize_const("MAX_ENTRY_LOCATIONS"), cs::MAX_ENTRY_LOCATIONS);
     assert_eq!(usize_const("MAX_ENTRY_TOPICS"), cs::MAX_ENTRY_TOPICS);
+    // PROD-03.0: the controller skips an entry listing more schema ids than
+    // the receipt format lists, so the runner never writes more.
+    assert_eq!(
+        usize_const("MAX_ENTRY_SCHEMA_IDS"),
+        logweir_core::schema_dependency::SCHEMA_IDS_LISTED
+    );
     assert_eq!(usize_const("MAX_BODY_PAGES"), cs::MAX_BODY_PAGES);
     assert_eq!(usize_const("MAX_HISTOGRAM_DAYS"), cs::MAX_HISTOGRAM_DAYS);
     assert!(
@@ -9509,5 +9516,34 @@ fn the_preview_and_execution_resolve_the_same_selection() {
             )
         };
         assert_eq!(shape(&preview), shape(&execution), "start {start}");
+    }
+}
+
+/// **PROD-03.0: the sync lists each topic's schema dependency as the shared
+/// fixture says.** `ui/tests/fixtures/console/catalog-point-schema-dependency.json`
+/// holds a point record's `topics[].schema_dependency` (`recordTopics`) and the
+/// entry the view must list for each (`entryTopics`): the verdict, the basis or
+/// reason, the DEPENDENT sides only, their ids merged (never a not-dependent
+/// side's id), and `schemaIdsOmitted` when more were seen than listed. The API
+/// row (`d3_reads.rs`) and the console spec read the same file.
+#[test]
+fn the_sync_lists_each_topics_schema_dependency_as_the_fixture_says() {
+    use logweir::check::kinds::catalog_sync::EntrySchemaDependency;
+    let path = repo_root().join("ui/tests/fixtures/console/catalog-point-schema-dependency.json");
+    let fixture: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let records = fixture["recordTopics"].as_array().unwrap();
+    let entries = fixture["entryTopics"].as_array().unwrap();
+    assert_eq!(records.len(), entries.len());
+    assert!(
+        records.len() >= 4,
+        "the chain covers every verdict and the cap"
+    );
+    for (record, entry) in records.iter().zip(entries) {
+        assert_eq!(record["name"], entry["name"]);
+        let d: logweir_core::backup_receipt::TopicSchemaDependency =
+            serde_json::from_value(record["schema_dependency"].clone()).unwrap();
+        let listed = serde_json::to_value(EntrySchemaDependency::of(&d)).unwrap();
+        assert_eq!(listed, entry["schemaDependency"], "{}", record["name"]);
     }
 }

@@ -303,7 +303,7 @@ pub fn verify_point_binding(
     // failure this binding exists to move earlier.
     // `receipt.archive.manifest_key` is likewise the key the backup runner
     // read the manifest back through (`backup::phase_run::run` calls
-    // `store.get(&set.manifest_key)` on the value `list_manifests` returned),
+    // `store.get_capped(&set.manifest_key, …)` on the value `list_manifests` returned),
     // so it is already in the same space.
     let manifest_key = receipt.archive.manifest_key.clone();
     let (manifest_bytes, current_version) = match archive.get_capped(&manifest_key, caps::MANIFEST)
@@ -1064,6 +1064,7 @@ mod tests {
             config_coverage: None,
             topic_configuration: None,
             owner_detection: None,
+            schema_dependency: None,
         }
     }
 

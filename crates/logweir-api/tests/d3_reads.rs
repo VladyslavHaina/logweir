@@ -1816,3 +1816,30 @@ async fn a_topic_whose_factor_or_count_was_not_recorded_is_published_without_it(
         "{listed}"
     );
 }
+
+/// **PROD-03.0: the point view publishes each topic's schema dependency** —
+/// the verdict, the basis or reason, the sides that need a registry and the
+/// ids they name — exactly as the shared fixture
+/// `ui/tests/fixtures/console/catalog-point-schema-dependency.json` says: its
+/// `entryTopics` are seeded as the runner lists them, and the API must answer
+/// its `pointTopics`, which the console's spec renders. An entry without the
+/// field publishes none (NOT ASSESSED, never "not schema-dependent").
+#[tokio::test]
+async fn the_point_view_publishes_each_topics_schema_dependency() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ui/tests/fixtures/console/catalog-point-schema-dependency.json");
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let (listed, _) = listed_with_topics(fixture["entryTopics"].clone(), None).await;
+    assert_eq!(listed["topics"], fixture["pointTopics"], "{listed}");
+    // The control: the same topics without the field publish none of it.
+    let bare: Vec<Value> = fixture["entryTopics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| json!({"name": t["name"]}))
+        .collect();
+    let (listed, _) = listed_with_topics(Value::Array(bare), None).await;
+    for t in listed["topics"].as_array().unwrap() {
+        assert!(t.get("schemaDependency").is_none(), "{t}");
+    }
+}

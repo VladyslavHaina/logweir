@@ -2501,7 +2501,7 @@ pub struct ArchiveObservation {
 ///
 /// # WHY IT IS ASYNC, AND WHY THAT IS NOT DECORATION
 ///
-/// `Store::get` is a **blocking** method that drives its own current-thread
+/// `Store::get_capped` is a **blocking** method that drives its own current-thread
 /// runtime, and `kube` drives every reconciler ON a runtime: a direct call
 /// COMPILES CLEANLY and panics with *Cannot start a runtime from within a
 /// runtime* at the first reconcile. So every `Store` call in this crate goes
@@ -6022,7 +6022,7 @@ async fn reconcile_with_trust(
                         crate::verification::SigningTime::NotNeeded
                     }
                     // THE BACKOFF SHORT-CIRCUITS BEFORE `evidence_source`, so a
-                    // deferred pass costs neither a `Store::get` NOR the
+                    // deferred pass costs neither a `Store::get_capped` NOR the
                     // destination read that resolving the handle would need.
                     crate::verification::ReadPlan::Deferred => {
                         crate::verification::SigningTime::Deferred

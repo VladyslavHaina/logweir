@@ -784,7 +784,7 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.23.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.24.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
 since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, `1.5.0` for a
@@ -819,6 +819,7 @@ history is:
 | `1.21.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.4.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.4.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
 | `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line naming them; for every sampled `pass` it also prints a `sample coverage:` line saying whether the document's version proves FX-23's checks ran (only 1.6.0 or later does). Every document without the field is decided exactly as before. |
 | `1.23.0` | Knows scorecard format `1.7.0` (PROD-11.1). Adds `source.selection`'s three arms (SEL-1 to SEL-3: only from 1.7.0; a start before the end; a complete block over the block's window) and its shape check (an object with two integers), prints the `replay selection:` coverage line — saying no record before the start was RESTORED only over a complete verification that passed, and for a sampled document that the sampled check does not prove it — and for a sampled `pass` over a selection prints the `sample coverage:` line QUALIFIED by the window (`a sampled pass over a replay selection from epoch-ms S to epoch-ms E: …`) instead of the unqualified 1.6.0 line. Every document without the block is decided exactly as before. |
+| `1.24.0` | Knows backup receipt format `1.5.0` (PROD-03.0). Adds `schema_dependency`'s eight arms (22 to 29: only from 1.5.0; covering exactly the named topics; a closed verdict, reason and basis; both sides exactly when judged; a judged count that fits `records`; distinct plausible schema ids within the cap of 16 and a count; the one-in-ten threshold; a verdict its sides give) and its shape check, and prints one `schema_dependency["<topic>"]:` line per topic — `schema-dependent, registry not captured`, `no schema framing detected` or `not assessed (<reason>)`, with the framed share and the schema ids — or `schema_dependency: not assessed, …` for a receipt without the block. Every receipt without the block is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust

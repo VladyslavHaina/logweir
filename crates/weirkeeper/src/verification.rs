@@ -1766,13 +1766,13 @@ pub const ROSTER_UNREADABLE_DETAIL: &str =
 ///
 /// # Interface I13, and it is not decoration
 ///
-/// `Store::get` drives its own current-thread runtime and `kube` drives every
+/// `Store::get_capped` drives its own current-thread runtime and `kube` drives every
 /// reconciler ON a runtime, so calling [`verify_evidence`] straight from the
 /// `async move` block below COMPILES CLEANLY and panics with *Cannot start a
 /// runtime from within a runtime* at the first verification.
 /// `tests/retention.rs::no_store_call_is_made_outside_spawn_blocking` names
 /// `verify_evidence(` in its `STORE_CALL_TOKENS` for exactly that reason: this
-/// call site holds a `Store::get` while naming no `Store` at all, which is the
+/// call site holds a `Store::get_capped` while naming no `Store` at all, which is the
 /// same blindness the Task 20 review found in `observe_archive(` and
 /// `observe_scorecard(`.
 ///
@@ -2405,7 +2405,7 @@ fn unverified_detail(
 /// absence, [`decide`] refuses it exactly as before, and the completed read
 /// records `trust.signingTimeRead: absent` so the object is never asked again.
 /// It buys the only thing that can tell the two apart — reading the document —
-/// for exactly one `Store::get`; guessing the other way is what left five sound
+/// for exactly one `Store::get_capped`; guessing the other way is what left five sound
 /// archives marked `Untrusted`.
 ///
 /// **THE BOUND IS ON THE OBJECT, BECAUSE RECONCILES ARE NOT RARE** (review
@@ -2470,7 +2470,7 @@ const SIGNING_TIME_ABSENT: &str = "absent";
 /// POLICY EVENT.** The re-trust hook wraps `reconcile`, which requeues every
 /// object unconditionally, so "one bounded re-read" was bounded per pass and
 /// not over time: a namespace holding a thousand objects whose archive cannot
-/// answer issued ~67 `Store::get`s a second, for ever, for verdicts that
+/// answer issued ~67 `Store::get_capped`s a second, for ever, for verdicts that
 /// provably cannot change. Fifteen minutes is sixty reconciles, so the steady
 /// cost is one `get` and one small patch per object per quarter hour, and an
 /// archive that comes back is noticed within one window.
@@ -2490,7 +2490,7 @@ pub enum ReadPlan {
     /// An attempt is owed and due. The caller performs it.
     Read(SigningTimeNeed),
     /// An attempt was made recently and learned nothing; `trust.retryAfter`
-    /// has not passed. No `Store::get`, no `evidence_source` resolution, and
+    /// has not passed. No `Store::get_capped`, no `evidence_source` resolution, and
     /// the stored sentence is carried forward unchanged.
     Deferred,
 }
@@ -2696,7 +2696,7 @@ pub fn signing_time_in(bytes: &[u8], need: &SigningTimeNeed) -> SigningTime {
 ///
 /// Synchronous on purpose: this is the body of a `spawn_blocking` closure, for
 /// the reason this module's header gives. It is named in
-/// `tests/retention.rs::STORE_CALL_TOKENS` because it holds a `Store::get`
+/// `tests/retention.rs::STORE_CALL_TOKENS` because it holds a `Store::get_capped`
 /// while its callers name no `Store` at all — the same blindness that let a
 /// planted call survive that guard once.
 #[must_use]

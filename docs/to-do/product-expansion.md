@@ -221,7 +221,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-04.0d | Fixtures for groups and ACLs (`acl` profile, `groups` helper, streams-protocol variant, share-state settings) | P1 | M2 | infra | 04.0, 01.5 | — | compose | B | Done |
 | 3 | PROD-01.4b | Upstream DescribeTopics in rust-rdkafka (the exit for 01.4a) | P3 | M3 | impl | 01.4a | — | none | B | Proposed |
 | 2 | PROD-02.2 | Capture incrementally | P1 | M2 | impl | 02.1, 00.1 | — | compose | A | Proposed |
-| 2 | PROD-03.0 | Flag schema-dependent topics | P1 | M2 | impl | — | — | compose | A | Proposed |
+| 2 | PROD-03.0 | Flag schema-dependent topics | P1 | M2 | impl | — | — | compose | A | Done |
 | 2 | PROD-04.2 | Translate positions; reviewed cutover | P1 | M2 | impl | 04.1, 08.1 | — | k8s | A | Proposed |
 | 2 | PROD-05.2 | Apply a reviewed target topic configuration | P1 | M2 | impl | 05.1, 08.1 | — | k8s | A | Proposed |
 | 2 | PROD-11.1 | Replay selection and safe clones | P1 | M2 | impl | 01.1, 08.1 | — | k8s | A | In progress |
@@ -696,6 +696,23 @@ Provenance is attested per index by design (`images.yml`), so a platform digest 
 - **Acceptance:** Restore review and evidence name schema-dependent topics and the IDs they reference; no registry is contacted; old evidence reads as "not assessed".
 - **Tests/evidence:** Avro-, JSON- and Protobuf-framed and unframed payloads in keys and values, nulls, and false-positive controls (raw data starting with byte 0).
 - **Dependencies:** None. **Handoff:** detection contract and evidence field.
+
+**Completion record — Done (2026-10-09), PROD-03.0.**
+- **Ownership:** worker `prod-03-0` (a run and a fix round). Independent Tier-A review `claude/prod-03-0.review.md`: ACCEPT-WITH-FIXES, no HIGH.
+  - M1: the memory bound was false for a large-window zstd frame (+135 MB) and a near-cap lz4 segment (+263 MB).
+  - M2: no CI row on real segments.
+  - The LOWs.
+  
+  All fixed; the orchestrator read the fix round. An orchestrator security note (a background review flagged resource exhaustion on `cb5ae841`) made detection bounded and fail-safe. Merged as `8a853d0c` (PR #10, CI check and e2e green on Linux; release-notes item 46). The first CI run exposed PROD-01.3's exact receipt-version pin in `auth_modes`; the orchestrator replaced it with `harness::assert_format_at_least`.
+- **Delivered:**
+  - each backup flags topics whose keys or values carry Confluent framing (magic 0, a 4-byte schema ID, Protobuf message indexes), from the archived bytes alone; no Logweir component contacts a registry;
+  - receipt 1.5.0 `schema_dependency` (optional; absent reads "not assessed") in both verifiers, the catalog, the API and the console ("Registry not captured: applications may not read these records after restore");
+  - detection is streamed and bounded: 64 MiB stored, 256 MiB decompressed, an 8 MiB zstd window, a 64 KiB LZ4 window, and a 120 s hard budget;
+  - any cap, error or panic gives `notAssessed`, never a failed backup;
+  - measured worst case +16.6 MB; every bomb +2.4 MB.
+- **Evidence:** a non-ignored CI row backs up raw framed records through the real engine and store; a registry-profile row (`#[ignore]`); 40 + 6 mutants killed.
+- **For OD-2 #2:** 0 of the PoC's 2 source topics are schema-dependent. The worker recommends keeping Never #2 (no registry support) for now; the owner's call stays open in OD-2.
+- **Follow-up:** FX-30 (the complete lane's own decompression cap).
 
 ### PROD-03.1 — Capture a usable registry dependency set
 

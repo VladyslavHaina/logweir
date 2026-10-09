@@ -133,13 +133,18 @@ pub struct ObjectHead {
 /// | cap | bytes | read by | measured |
 /// |---|---|---|---|
 /// | [`SIDECAR`] | 64 KiB | everyone | one DSSE signature is about 312 bytes; equal to the evidence relay's sidecar cap |
-/// | [`SIGNED_DOCUMENT`] | 64 MiB | runner, CLI, check Jobs | a receipt is about 2.9 KB per topic (two-space pretty JSON, 14 semantic configuration entries each), so a 5,000-topic run (`MAX_RESOLVED_TOPICS`) is about 14 MiB, 18 MiB with five overrides per topic |
-/// | [`CONTROLLER_DOCUMENT`] | 1 MiB | `weirkeeper` | equal to the evidence relay's payload cap, so a document is verifiable by the controller exactly when it is verifiable through a relay; about 350 topics of receipt |
+/// | [`SIGNED_DOCUMENT`] | 64 MiB | runner, CLI, check Jobs | a 1.5.0 receipt is about 3.4 KB per topic (two-space pretty JSON, 14 semantic configuration entries and a schema-dependency block each), so a 5,000-topic run (`MAX_RESOLVED_TOPICS`) is about 16.4 MiB, 20 MiB with five overrides per topic |
+/// | [`CONTROLLER_DOCUMENT`] | 1 MiB | `weirkeeper` | equal to the evidence relay's payload cap, so a document is verifiable by the controller exactly when it is verifiable through a relay; about 300 topics of receipt |
 /// | [`MANIFEST`] | 256 MiB | runner, CLI, check Jobs | about 540 bytes per segment entry, so about 500,000 segments |
 /// | [`CONTROLLER_MANIFEST`] | 64 MiB | `weirkeeper`'s retention report | about 124,000 segments; parsed as a stream, so memory is the bytes and no more |
 /// | [`SEGMENT`] | 1 GiB | runner, CLI | eight times the engine's default `segment_max_bytes` (128 MiB); Logweir's default is 10 MiB. FX-30 owns the decode cap |
 /// | [`ENGINE_DOCUMENT`] | 64 MiB | runner, CLI | the engine's consumer-groups snapshot and validation report |
-/// | [`PROBE`] | 0 | check Jobs | a readiness probe of a key nobody wrote: the answer is the GET's status, and any body is refused unread |
+/// | [`PROBE`] | 0 | check Jobs, `backup run` | a readiness probe of a key nobody wrote, and the backup set check's "is the manifest there": the answer is the GET's status, and any body is refused unread |
+///
+/// PROD-03.0's schema-dependency detection reads archived segments through
+/// [`Store::get_bounded`] under its own 64 MiB stored cap (a `HEAD`, then a
+/// ranged GET of exactly the reported size), so it is bounded the same way
+/// and is not a row here.
 pub mod caps {
     use logweir_core::check_contract::{MAX_EVIDENCE_PAYLOAD_BYTES, MAX_EVIDENCE_SIDECAR_BYTES};
 
@@ -1358,6 +1363,62 @@ impl Store {
                 size: self.misreport.as_ref().map_or(meta.size, |m| m.reported),
                 version,
             })
+        })
+    }
+
+    /// **PROD-03.0 — read an object only when it is at most `max_bytes`
+    /// long, and only within `within`.** `Ok(None)` when the store reports it
+    /// larger: nothing is fetched. Otherwise the bytes of a ranged read of
+    /// exactly the size the store reported, so an object that grows between
+    /// the two requests is still read to that bound and no further (a
+    /// truncated read is the caller's to refuse). Both requests together end
+    /// within `within` when it is given — the store's own retries included —
+    /// or fail with [`StoreError::Io`] naming the timeout. For a reader that
+    /// must never hold an object the adopter's configuration could make
+    /// arbitrarily large, nor wait on a degraded store past its own budget —
+    /// schema dependency detection at backup time.
+    pub fn get_bounded(
+        &self,
+        key: &str,
+        max_bytes: u64,
+        within: Option<std::time::Duration>,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let rt = &self.rt;
+        rt.block_on(async {
+            let path = OPath::from(key);
+            let not_found_or_io = |e: object_store::Error| match e {
+                object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
+                other => StoreError::Io(format!("{key}: {other}")),
+            };
+            let read = async {
+                let size = self.inner.head(&path).await.map_err(not_found_or_io)?.size;
+                if size > max_bytes {
+                    return Ok(None);
+                }
+                if size == 0 {
+                    return Ok(Some(Vec::new()));
+                }
+                let b = self
+                    .inner
+                    .get_range(&path, 0..size)
+                    .await
+                    .map_err(not_found_or_io)?;
+                // Moved, not copied, where the buffer is the read's own: the
+                // caller holds the stored bytes once, not twice.
+                Ok(Some(Vec::<u8>::from(b)))
+            };
+            match within {
+                None => read.await,
+                // No budget left: no request is started.
+                Some(limit) if limit.is_zero() => Err(StoreError::Io(format!(
+                    "{key}: not read: no time is left of the reader's remaining budget"
+                ))),
+                Some(limit) => tokio::time::timeout(limit, read).await.unwrap_or_else(|_| {
+                    Err(StoreError::Io(format!(
+                        "{key}: not read within {limit:?}, the reader's remaining budget"
+                    )))
+                }),
+            }
         })
     }
 
