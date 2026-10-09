@@ -3696,6 +3696,68 @@ pub struct ScorecardObservation {
     /// nothing when malformed or past
     /// [`crate::crds::restore::UNSAMPLED_TOPICS_MAX`].
     pub unsampled_topics: Option<Vec<String>>,
+    /// **PROD-11.1b.** `source.selection` (format 1.7.0 / 2.0.0): present
+    /// EXACTLY when the document carries the block — a block this controller
+    /// cannot read is still a selection, copied empty, so a narrowed restore
+    /// is never shown as a full one ([`restore_selection`]).
+    pub selection: Option<crate::crds::restore::RestoreSelection>,
+}
+
+/// **PROD-11.1b.** A signed `source.selection` read as the status'
+/// [`crate::crds::restore::RestoreSelection`]: the window's ends, how many
+/// topics it narrows to a partition subset, and those topics' partitions —
+/// the rows all of them or none (none past
+/// [`crate::crds::restore::SELECTION_TOPICS_MAX`] topics or
+/// [`crate::crds::restore::SELECTION_PARTITIONS_MAX`] partitions in one, or
+/// when a row is malformed), the COUNT kept either way. FAIL SAFE: any value
+/// at all under the key is a selection (`Some`), because the one thing a
+/// reader of the status must never conclude from a narrowed restore is that
+/// it restored everything.
+#[must_use]
+pub fn restore_selection(block: &Value) -> crate::crds::restore::RestoreSelection {
+    use crate::crds::restore::{
+        RestoreSelection, SelectedPartitions, SELECTION_PARTITIONS_MAX, SELECTION_TOPICS_MAX,
+    };
+    let Some(o) = block.as_object() else {
+        return RestoreSelection::default();
+    };
+    let subsets = o.get("partitions").and_then(Value::as_array);
+    let rows = subsets.and_then(|list| {
+        if list.len() > SELECTION_TOPICS_MAX {
+            return None;
+        }
+        list.iter()
+            .map(|e| {
+                let topic = e.get("topic")?.as_str().filter(|t| t.len() <= 249)?;
+                let parts = e.get("partitions")?.as_array()?;
+                if parts.len() > SELECTION_PARTITIONS_MAX {
+                    return None;
+                }
+                let partitions = parts
+                    .iter()
+                    .map(|p| p.as_i64().and_then(|p| i32::try_from(p).ok()))
+                    .collect::<Option<Vec<i32>>>()?;
+                Some(SelectedPartitions {
+                    topic: topic.to_string(),
+                    partitions,
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+    });
+    RestoreSelection {
+        window_start_ms: o.get("window_start_ms").and_then(Value::as_i64),
+        window_end_ms: o.get("window_end_ms").and_then(Value::as_i64),
+        // A key holding anything but an empty list narrows: a malformed one
+        // is counted as one topic rather than read as none.
+        narrowed_topics: o.get("partitions").and_then(|v| match v.as_array() {
+            Some(list) if list.is_empty() => None,
+            Some(list) => i64::try_from(list.len()).ok(),
+            None if v.is_null() => None,
+            None => Some(1),
+        }),
+        partitions: rows.filter(|r| !r.is_empty()),
+        engine_runs: o.get("engine_runs").and_then(Value::as_i64),
+    }
 }
 
 /// **PROD-08.1a.** A signed `integrity.verification.complete` block read as
@@ -3940,6 +4002,12 @@ pub fn scorecard_observation(bytes: &[u8]) -> Option<ScorecardObservation> {
         unsampled_topics: doc
             .pointer("/sample/unsampled_topics")
             .and_then(unsampled_topics),
+        // PROD-11.1b: `null` is ABSENT, as the scorecard's own `Option` reads
+        // it; any other value is a selection.
+        selection: doc
+            .pointer("/source/selection")
+            .filter(|v| !v.is_null())
+            .map(restore_selection),
     })
 }
 
@@ -5916,6 +5984,15 @@ pub fn integrity_block(o: &ScorecardObservation) -> serde_json::Map<String, Valu
     }
     if let Some(v) = o.unsampled_topics.as_ref() {
         m.insert("unsampledTopics".to_string(), json!(v));
+    }
+    // PROD-11.1b: the restore's selection, beside the verdict it qualifies;
+    // absent for a restore of everything, as before.
+    if let Some(v) = o
+        .selection
+        .as_ref()
+        .and_then(|sel| serde_json::to_value(sel).ok())
+    {
+        m.insert("selection".to_string(), v);
     }
     m
 }

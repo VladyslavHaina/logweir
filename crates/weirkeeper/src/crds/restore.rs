@@ -261,10 +261,74 @@ pub struct Integrity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 256), inner(length(max = 249)))]
     pub unsampled_topics: Option<Vec<String>>,
+    /// **PROD-11.1b.** The signed `source.selection` (scorecard format 1.7.0
+    /// for a window start, 2.0.0 for a partition subset): this restore
+    /// restored a SELECTION — a window from a stated start, or only the listed
+    /// partitions of a narrowed topic — not every record of every partition
+    /// of every restored topic from the archive's floor. Every verdict above
+    /// (`result`, `coverage`, `complete`) is the selection's.
+    ///
+    /// ABSENT means the scorecard states no selection: every partition of
+    /// every restored topic, from the archive's floor, exactly as every
+    /// restore before PROD-11.1. A signed block this controller cannot read is
+    /// still copied as a selection (with nothing in it), never dropped: a
+    /// narrowed restore is never shown as a full one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<RestoreSelection>,
 }
 
 /// `status.integrity.unsampledTopics`' `maxItems`.
 pub const UNSAMPLED_TOPICS_MAX: usize = 256;
+
+/// `status.integrity.selection.partitions`' `maxItems` (narrowed topics).
+pub const SELECTION_TOPICS_MAX: usize = 256;
+
+/// The `maxItems` of one narrowed topic's `partitions` list.
+pub const SELECTION_PARTITIONS_MAX: usize = 1024;
+
+/// **PROD-11.1b.** A restore's replay selection, copied from the signed
+/// `source.selection` and never recomputed. A CLAIM until
+/// `evidence.verification` says `Valid`, like every scorecard fact here.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSelection {
+    /// The plan's stated INCLUSIVE window start, epoch milliseconds. Absent:
+    /// the window started at the archive set's floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_start_ms: Option<i64>,
+    /// The INCLUSIVE window end, epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_end_ms: Option<i64>,
+    /// How many topics the restore narrowed to a PARTITION SUBSET (format
+    /// 2.0.0). Present exactly when the signed block names one, so a list past
+    /// [`SELECTION_TOPICS_MAX`] or [`SELECTION_PARTITIONS_MAX`] still says the
+    /// restore was narrowed when its rows are not copied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrowed_topics: Option<i64>,
+    /// Each narrowed topic and the partitions it restored, sorted — all of it
+    /// or nothing: absent past the bounds above, and absent for a window start
+    /// alone. A restored topic not listed restored every partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub partitions: Option<Vec<SelectedPartitions>>,
+    /// How many engine runs restored the selection (one per distinct subset,
+    /// and one more for the topics without one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_runs: Option<i64>,
+}
+
+/// One narrowed topic of a [`RestoreSelection`].
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedPartitions {
+    /// The SOURCE topic.
+    #[schemars(length(max = 249))]
+    pub topic: String,
+    /// Its selected partitions, ascending; no other partition of it was
+    /// restored.
+    #[schemars(length(max = 1024))]
+    pub partitions: Vec<i32>,
+}
 
 /// `status.integrity.complete.partitions`' `maxItems`. A signed block listing
 /// more partitions is copied WITHOUT its partition rows (`partitionCount`
@@ -283,7 +347,11 @@ pub const COMPLETE_PARTITIONS_MAX: usize = 256;
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompleteCoverage {
-    /// `true` when every partition of every restored topic was compared.
+    /// `true` when every SELECTED partition of every restored topic was
+    /// compared: every partition of each topic unless
+    /// `integrity.selection.partitions` narrows it to a subset (PROD-11.1b),
+    /// in which case no other partition of that topic was restored or
+    /// compared.
     pub covered: bool,
     /// Why `covered` is `false`: the bound, an archive without lineage
     /// headers, a segment that could not be decoded.
