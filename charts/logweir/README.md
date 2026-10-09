@@ -594,6 +594,8 @@ not let you install, each refused at render time with the field named:
 | a `hostAliases` entry without an `ip` and a hostname, or with a wildcard | `/etc/hosts` has no wildcard; an entry that resolves nothing is a typo |
 | a `networkPolicy.oidcPeers` entry without `namespace`, `podLabels` and `port` | an empty selector would allow egress to every pod in the namespace |
 | `requireTrustedProxy` with a `trustedProxyCidrs` range wider than `/16` (IPv4) or `/48` (IPv6) | a range that wide contains the pods the gate exists to refuse |
+| `ingress.enabled` in shared mode with neither `trustedProxyService` nor `trustedProxyCidrs`, and `trustedProxy` not `none` | the console cannot tell its ingress from a pod that dials it: the per-peer connection cap is off and every sign-in shares one budget (FX-24c). Name the proxy, or opt out with `trustedProxy: none` |
+| `trustedProxy: none` beside `trustedProxyService` or `trustedProxyCidrs`, any other `trustedProxy` value, or `trustedProxy` in `localAdmin` mode | an opt-out that also names a proxy says two things; a loopback listener has no proxy to opt out of |
 
 **`requireTrustedProxy: true`** makes the console answer `421` to every request
 (the two probes excepted) whose socket peer is not a trusted proxy, or that the
@@ -678,12 +680,20 @@ once; its 33rd is closed as soon as it is accepted, and the console logs
 `closed a connection at once` (at most once every ten seconds). The ingress
 itself is never capped: every browser behind it arrives from its address.
 **With neither value set, nobody is capped**, because the console cannot then
-tell its ingress from any other peer — the chart's default. So set
-`trustedProxyService` in shared mode even without `requireTrustedProxy`; and if
-another proxy (an L7 load balancer, a second ingress) also carries many
-clients to the console, name it too, or its clients share 32 connections.
-[docs/api.md](../../docs/api.md#conventions) has the full set of connection
-limits.
+tell its ingress from any other peer; the start line says `per_peer_cap: 0`
+and the console warns. So **with `api.console.ingress.enabled` the chart
+requires one of the two**, or `api.console.trustedProxy: none` to run without
+a named proxy deliberately — an existing shared install that publishes the
+console through the chart's Ingress must set one before `helm upgrade`.
+Without the chart's Ingress nothing is refused, but set `trustedProxyService`
+there too. If another proxy (an L7 load balancer, a second ingress) carries
+many clients to the console, name it too, or its clients share 32
+connections. Behind a service-mesh sidecar that re-originates inbound
+connections (Istio from `127.0.0.6`, Linkerd from `127.0.0.1`) every client is
+one peer: name the sidecar's address, which turns the cap off behind it, or
+opt out. A `trustedProxyCidrs` range never caps anything inside it, so keep it
+to the ingress controller's own pods. [docs/api.md](../../docs/api.md#conventions)
+has the full set of connection limits.
 
 ### The identity provider inside the cluster: a private CA, a name, a path
 

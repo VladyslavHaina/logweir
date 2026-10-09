@@ -1513,7 +1513,28 @@ accept to its close.**
   stale (*The ingress controller by its Service*, below) it trusts nobody, so
   the ingress is capped like any peer — and `/readyz` is false then, which
   takes the pod out of its Service. localAdmin mode has no cap: every peer it
-  serves is the administrator's own machine.
+  serves is the administrator's own machine. The start line `logweir-api
+  started` carries `per_peer_cap` (32, or 0 when off), and a shared console
+  with no trusted proxy also warns at start that the cap is off. The chart
+  refuses to publish a shared console through its Ingress without
+  `trustedProxyService` or `trustedProxyCidrs`, unless `api.console.trustedProxy:
+  none` opts out by name ([chart README](../charts/logweir/README.md)).
+  Who shares one share, or escapes it:
+  - **A service-mesh sidecar** that re-originates inbound connections (Istio's
+    from `127.0.0.6`, Linkerd's from `127.0.0.1`) makes every client, the
+    ingress included, one peer at that address, and the console is then capped
+    at 32 connections in all — the refusal warning names that address. Either
+    name it in `trustedProxyCidrs` (a `/32`), which turns the cap off for every
+    client behind the sidecar and leaves the mesh's own policy as the bound, or
+    opt out with `trustedProxy: none`.
+  - **A wide `trustedProxyCidrs` range** trusts, and so never caps, every
+    address in it. Without `requireTrustedProxy` the ranges have no width floor,
+    so a pod range turns the cap off for every pod in it: keep the range to the
+    ingress controller's own pods, or name its Service instead.
+  - **Kubelet probes** come from the node's address, which hostNetwork pods
+    and node processes on that node share: one of them holding 32 connections
+    would fail the console's probes on that node. That needs node-level access
+    already.
 - **An event stream whose client stops reading** is the exception. Its
   heartbeats are too small to fill the kernel's buffers, so no write is ever
   pending and the stall clock never starts: the stream is held to its own

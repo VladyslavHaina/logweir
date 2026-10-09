@@ -116,9 +116,11 @@ provider that stalls and on the built console binary; it changes the console
 only, and the PoC upgrade that carries it signs in through Dex (a stall cannot
 be simulated on the live Dex).
 Item 48 is fix-now row FX-24c, proven by rows on the built console binary in
-both modes and live on the host; it changes the console only, and the PoC
-upgrade that carries it runs the per-peer probe against one shared-mode
-console pod and a burst through the ingress.
+both modes, by chart rows, and live on the host; it changes the console and
+the chart (a shared console behind the chart's Ingress must name its trusted
+proxy), and the PoC upgrade that carries it runs the per-peer probe against
+one shared-mode console pod and a burst through the ingress (the PoC profile
+already names Traefik's Service).
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1412,7 +1414,7 @@ cannot be simulated on the live Dex.
 **Rollback:** an older console reads a stalled provider's body with no
 deadline again; nothing is stored, so nothing needs converting.
 
-#### 48. One peer outside the trusted proxy holds at most 32 of the console's connections, and a request body must keep up 32 KiB a window (FX-24c)
+#### 48. One peer outside the trusted proxy holds at most 32 of the console's connections, and a request body must keep up 32 KiB a window (FX-24c) — required action
 
 **Changed.** Item 44 said that a client reading, or sending, one byte every
 thirty seconds keeps a console connection, so 256 of them could hold every
@@ -1450,14 +1452,32 @@ a byte at a time, until the sixty-second total. So:
   measured: the server sees a reader's progress only when the kernel lets it
   write again, in bursts the size of a send buffer, and that window cut a steady
   16 KiB/s reader at 32.5 s which the stall serves to the end.
-**Do:** in shared mode, set `api.console.trustedProxyService` to the ingress
-controller's Service even without `requireTrustedProxy`: without a trusted
-proxy the per-peer share is off. If another proxy (an L7 load balancer, a
-second ingress) carries many clients to the console's pods, name it too, or
-those clients share 32 connections; a refusal warning naming such a proxy's
-address says so. An enforcing NetworkPolicy
-(`api.console.networkPolicy.enabled`) remains the bound on clients from many
-addresses ([api.md](api.md#conventions); [chart
+- **The chart requires the trusted proxy of a console it publishes.** With
+  `api.console.mode: shared` and `api.console.ingress.enabled: true`, the chart
+  refuses to render unless `api.console.trustedProxyService` (the ingress
+  controller's Service) or `api.console.trustedProxyCidrs` names the proxy, or
+  the new `api.console.trustedProxy: none` opts out by name — "api.console.
+  ingress.enabled in shared mode needs the trusted proxy named". `none` beside
+  a named proxy, any other value, and the key in localAdmin mode are refused.
+- **The start line says whether the cap is on.** `logweir-api started`
+  carries `per_peer_cap` (32, or 0 when off), and a shared console with no
+  trusted proxy warns at start that the cap is off.
+**Do:** before `helm upgrade`, a shared console the chart publishes through
+its Ingress names its trusted proxy — `api.console.trustedProxyService:
+{namespace, name}` of the ingress controller's Service (it also makes
+`/readyz` depend on reading that Service's EndpointSlices: [api.md](api.md),
+*The ingress controller by its Service*) — or opts out with
+`api.console.trustedProxy: none`; otherwise the upgrade's render fails, naming
+the value (Required operator actions, below). A shared console without the
+chart's Ingress is not refused, but set `trustedProxyService` there too:
+without a trusted proxy the per-peer share is off. If another proxy (an L7
+load balancer, a second ingress) carries many clients to the console's pods,
+name it too, or those clients share 32 connections; behind a service-mesh
+sidecar that re-originates every connection (Istio from `127.0.0.6`, Linkerd
+from `127.0.0.1`) every client is one peer, so name the sidecar's address or
+opt out. A wide `trustedProxyCidrs` range never caps anything inside it. An
+enforcing NetworkPolicy (`api.console.networkPolicy.enabled`) remains the bound
+on clients from many addresses ([api.md](api.md#conventions); [chart
 README](../charts/logweir/README.md)).
 **Scope:** rows on the built binary (`crates/logweir-api/tests/local_admin.rs`).
 In shared mode: one peer outside the trusted set holds 32 connections and its
@@ -1480,7 +1500,17 @@ call site and in the clock), the window at 300 s, the cap off (served, and
 never reached), the trusted proxy capped, a cap with no trusted proxy, places
 that never come back, the cap off by one, IPv4-mapped peers counted apart, a
 window that outlives its operation, the 32 KiB floor on answers, a body floor
-of 1 MiB, and an output clock that restarts on every poll. Live, the built
+of 1 MiB, and an output clock that restarts on every poll. The review's fix
+round added: a row that holds 32 connections each with its own
+`X-Forwarded-For` (four claiming the trusted range) and requires the 33rd,
+claiming the trusted proxy, to be closed unanswered (killing a cap re-keyed on
+the forwarded client); 240 sequential refusals after the first, each closed at
+once, before the place-back (killing a refusal that keeps its permit, which
+leaves the 224th unaccepted); the start line's `per_peer_cap` and warning, read
+by the cap rows; and the chart's refusal, opt-out, contradiction, localAdmin
+and enum rows in `scripts/check-chart.sh`, the FX-10 values row, and a
+`chart_lint` row over every values file that publishes a shared console (the
+PoC profile names Traefik's Service), each with its mutant killed. Live, the built
 binary on the host, before and after: in shared mode one peer outside the
 trusted proxy kept 32 of 40 connections and its 41st request was reset at
 once, with one warning logged (before: all 40 kept and the 41st answered); as
@@ -1493,11 +1523,19 @@ runs the per-peer probe against one console pod (it passed against this build
 on the host and failed against the one before it).
 **Rollback:** an older console caps no peer and reads a body a byte at a time
 until its sixty-second total; nothing is stored, so nothing needs converting.
+Remove `api.console.trustedProxy` from the values before rolling the chart back:
+an older chart's schema refuses the key it does not know.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
 
+- **Before `helm upgrade`, name the trusted proxy of a shared console the
+  chart publishes** (item 48): with `api.console.mode: shared` and
+  `api.console.ingress.enabled: true`, set `api.console.trustedProxyService`
+  to the ingress controller's Service (or `api.console.trustedProxyCidrs` to
+  its pods' range), or `api.console.trustedProxy: none` to run without one
+  deliberately. Otherwise the upgrade's render fails, naming the value.
 - **Before the runner image rolls, read the plan preview of every `Enforce`
   `RetentionPolicy` with `requireApprovedPlan: false`**, or set it to `true`
   until you have read its first plan after the re-sync below: scheduled sets
@@ -1589,9 +1627,10 @@ authorization); item 44 changes the console only and needs nothing; item 45
 changes the controller only (and two CRD descriptions) and needs nothing; item 46
 changes the runner's receipts and catalog records, the catalog's view (runner
 and controller), the product API and the console, and needs nothing; item 47
-changes the console only and needs nothing; item 48 changes the console only
-and needs nothing, though a shared console needs a trusted proxy configured
-for its per-peer share to apply. To roll back to
+changes the console only and needs nothing; item 48 changes the console and
+the chart, and needs a shared console the chart publishes through its Ingress
+to name its trusted proxy (or set `api.console.trustedProxy: none`) before
+the upgrade renders. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
