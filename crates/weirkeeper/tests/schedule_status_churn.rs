@@ -37,12 +37,13 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use futures::StreamExt as _;
+use kube::runtime::controller::Action;
 use weirkeeper::conditions::{
     apply_merge_patch, keep_instant_unless_changed, replacing, status_unchanged,
 };
 use weirkeeper::controllers::backup_schedule::{
-    decide, reconcile_schedule, reconcile_trigger, schedule_triggers, status_patch_with_retention,
-    SlotDecision,
+    decide, error_action, reconcile_pass, reconcile_schedule, reconcile_trigger, schedule_action,
+    schedule_triggers, status_patch_with_retention, SlotDecision, REQUEUE_SECS,
 };
 use weirkeeper::crds::backup_schedule::BackupSchedule;
 use weirkeeper::retention::RetentionReport;
@@ -519,28 +520,481 @@ async fn the_watch_triggers_on_identity_and_spec_revision_only() {
     assert_eq!(reconcile_trigger(&a), reconcile_trigger(&b));
 }
 
-/// **The controller is built on that filter.** A source-shape row, because the
-/// `Controller` itself needs a cluster to run: `controller_in` constructs the
-/// controller from `schedule_triggers` and never through `Controller::new`,
-/// which triggers on every event. Reverting to `Controller::new` (the
-/// "requeue on own status" mutant) fails here.
+/// The text of a controller's source file under `src/controllers/`.
+fn controller_source(file: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/controllers")
+        .join(file);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The body of the `fn` whose signature contains `needle`, from its opening
+/// brace to the matching one, with every comment line dropped and all
+/// whitespace removed — so a row can assert the CODE's shape, and a comment
+/// that quotes a call cannot satisfy it.
+fn code_of_fn(source: &str, needle: &str) -> String {
+    let at = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("the source has no {needle:?}"));
+    let open = at + source[at..].find('{').expect("the fn has a body");
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, c) in source[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &source[open..=close.expect("the body is balanced")];
+    code_only(body)
+}
+
+/// `text` with comment lines dropped and all whitespace removed.
+fn code_only(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<String>()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect()
+}
+
+/// **The controller is built on that filter, and on nothing else.** A
+/// source-shape row, because the `Controller` itself needs a cluster to run.
+///
+/// The call shape is asserted, not the presence of two names (FX-29 review
+/// L-1): `controller_in` hands `Controller::for_stream` the result of
+/// `schedule_trigger_stream(…)` directly, and that function's body is the one
+/// expression `schedule_triggers(watcher(api, …)…)`. Mutants that fail here:
+/// reverting to `Controller::new` (the "requeue on own status" mutant), and
+/// keeping a dead `schedule_triggers(…)` call while handing the UNFILTERED
+/// stream to the controller (the reviewer's R3c).
 #[test]
 fn the_schedule_controller_is_built_on_the_filtered_trigger() {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/controllers/backup_schedule.rs");
-    let source = std::fs::read_to_string(&path).expect("the controller source is readable");
-    let at = source
-        .find("fn controller_in(")
-        .expect("the source defines controller_in");
-    let body = &source[at..];
-    let body = &body[..body.find("\n}\n").expect("controller_in ends")];
+    let source = controller_source("backup_schedule.rs");
+    let wiring = code_of_fn(&source, "fn controller_in(");
     assert!(
-        body.contains("schedule_triggers(") && body.contains("Controller::for_stream("),
-        "controller_in must build the controller from the filtered trigger: {body}"
+        wiring.contains("Controller::for_stream(schedule_trigger_stream(api,writer),reader)"),
+        "controller_in must hand for_stream the filtered trigger stream and nothing else: \
+         {wiring}"
     );
     assert!(
-        !body.contains("Controller::new("),
-        "Controller::new wakes the reconciler on its own status writes: {body}"
+        !wiring.contains("Controller::new(") && !wiring.contains("watcher("),
+        "no second watch, and no Controller::new, which wakes on every event: {wiring}"
+    );
+    assert_eq!(
+        code_of_fn(&source, "pub fn schedule_trigger_stream("),
+        "{schedule_triggers(watcher(api,watcher::Config::default()).default_backoff()\
+         .reflect(writer).applied_objects(),)}",
+        "the trigger stream is the reflected watch, filtered — one expression, so the \
+         unfiltered stream cannot be what is returned"
+    );
+}
+
+/// **Every reconcile path returns a timed requeue — the schedule's only clock**
+/// (FX-29 review M-1). Since the watch stopped delivering the schedule's own
+/// status writes, a pass that returned `await_change()` would leave a steady
+/// schedule asleep until somebody edited it. A source-shape row over the four
+/// controllers whose time-based work rides on the requeue: each `reconcile`
+/// returns its named action function, each `error_policy` its error action,
+/// and no code line in the file says `await_change`. The behaviour of each
+/// action is pinned by its own row.
+#[test]
+fn every_timed_controller_returns_its_requeue_on_every_path() {
+    for (file, reconcile_returns, error_returns) in [
+        (
+            "backup_schedule.rs",
+            vec![
+                "reconcile_pass(&schedule,&ctx.client,ctx.archive.as_ref(),Utc::now()).await\
+                 .map(|(_,action)|action)",
+            ],
+            "error_action()}",
+        ),
+        (
+            "backup_destination.rs",
+            vec!["Ok(destination_action())"],
+            "destination_error_action()}",
+        ),
+        (
+            "protection_policy.rs",
+            vec!["Ok(policy_action(&outcome))"],
+            "policy_error_action()}",
+        ),
+        (
+            "retention_policy.rs",
+            vec!["Ok(policy_action(&outcome))"],
+            "policy_error_action()}",
+        ),
+    ] {
+        let source = controller_source(file);
+        let reconcile = code_of_fn(&source, "async fn reconcile(");
+        for expected in reconcile_returns {
+            assert!(
+                reconcile.ends_with(&format!("{expected}}}")),
+                "{file}: reconcile must return {expected}: {reconcile}"
+            );
+        }
+        let error = code_of_fn(&source, "fn error_policy(");
+        assert!(
+            error.ends_with(error_returns),
+            "{file}: error_policy must return {error_returns}: {error}"
+        );
+        assert!(
+            !code_only(&source).contains("await_change"),
+            "{file}: a time-driven controller never parks a pass on await_change()"
+        );
+    }
+    let schedule = controller_source("backup_schedule.rs");
+    assert!(
+        code_of_fn(&schedule, "pub async fn reconcile_pass(")
+            .contains("letaction=schedule_action(&outcome.decision,now);"),
+        "reconcile_pass returns schedule_action of the decision"
+    );
+}
+
+/// **The requeue every decision returns is a timed one, at most the poll.**
+/// Every `SlotDecision` variant, by an exhaustive `match` (a new variant does
+/// not compile until it is added here), plus the error path.
+///
+/// Mutants that fail here: `schedule_action` returning `await_change()`
+/// (the reviewer's R5b, wherever it is put), and a poll longer than
+/// `REQUEUE_SECS` (R5c).
+#[test]
+fn every_reconcile_exit_requeues_within_the_poll() {
+    use weirkeeper::cadence::MissedReason;
+    let now = utc(2026, 10, 9, 14, 0, 0);
+    let poll = std::time::Duration::from_secs(REQUEUE_SECS);
+    let unparseable = {
+        let mut spec: BackupSchedule = serde_json::from_value(nightly(false, 4)).expect("typed");
+        spec.spec.schedule = "not a cron".to_string();
+        decide("nightly", &spec.spec, now)
+    };
+    assert!(matches!(unparseable, SlotDecision::Unparseable(_)));
+    let slot_error = || {
+        scheduled_backup_name(&"x".repeat(80), "20261009-020000")
+            .expect_err("a name that does not fit")
+    };
+    let next = Some(now + Duration::hours(12));
+    let s = || "20261009-020000".to_string();
+    let decisions = vec![
+        SlotDecision::Suspended,
+        unparseable,
+        SlotDecision::UnknownTimeZone {
+            got: "Mars/Olympus".to_string(),
+        },
+        SlotDecision::RetryNamesTooLong {
+            error: slot_error(),
+        },
+        SlotDecision::InvalidTopicSelection { errors: vec![] },
+        SlotDecision::InvalidRunPolicy { errors: vec![] },
+        SlotDecision::NoDueSlot {
+            next_fire_time: next,
+        },
+        SlotDecision::BeforeCreation {
+            due: now,
+            slot: s(),
+            created_at: now,
+            fired_at: None,
+            next_fire_time: next,
+        },
+        SlotDecision::AlreadyFired {
+            due: now,
+            slot: s(),
+            last_fire_time: now,
+            next_fire_time: next,
+        },
+        SlotDecision::Missed {
+            due: now,
+            slot: s(),
+            reason: MissedReason::PastStartingDeadline,
+            next_fire_time: next,
+        },
+        SlotDecision::CatchUpDue {
+            due: now,
+            slot: s(),
+            name: "n".to_string(),
+            next_fire_time: next,
+        },
+        SlotDecision::CaughtUp {
+            due: now,
+            slot: s(),
+            name: "n".to_string(),
+            next_fire_time: next,
+        },
+        SlotDecision::CatchUpBlocked {
+            slot: s(),
+            active_backups: vec![],
+            next_fire_time: next,
+        },
+        SlotDecision::InProgress {
+            slot: s(),
+            attempt: 0,
+            name: "n".to_string(),
+            next_fire_time: next,
+        },
+        SlotDecision::Retried {
+            due: now,
+            slot: s(),
+            name: "n".to_string(),
+            attempt: 1,
+            next_fire_time: next,
+        },
+        SlotDecision::RetryPending {
+            slot: s(),
+            attempt: 1,
+            due_at: now + Duration::hours(1),
+            next_fire_time: next,
+        },
+        SlotDecision::RetryBlocked {
+            slot: s(),
+            attempt: 1,
+            active_backups: vec![],
+            next_fire_time: next,
+        },
+        SlotDecision::RetryExhausted {
+            slot: s(),
+            attempt: 3,
+            max_retries: 3,
+            retry_configured: true,
+            next_fire_time: next,
+        },
+        SlotDecision::RunFailed {
+            slot: s(),
+            attempt: 0,
+            name: "n".to_string(),
+            next_fire_time: next,
+        },
+        SlotDecision::SlotNameUnavailable {
+            slot: s(),
+            name: "n".to_string(),
+            next_fire_time: next,
+        },
+        SlotDecision::ActiveRunLimit {
+            slot: s(),
+            active_backups: vec![],
+            next_fire_time: next,
+        },
+        SlotDecision::CrdOutdated {
+            detail: "d".to_string(),
+            next_fire_time: next,
+        },
+        SlotDecision::ConcurrencyBlocked {
+            slot: s(),
+            active_backups: vec![],
+            next_fire_time: next,
+        },
+        SlotDecision::NameTooLong {
+            slot: s(),
+            error: slot_error(),
+            next_fire_time: next,
+        },
+        SlotDecision::Due {
+            due: now,
+            slot: s(),
+            name: "n".to_string(),
+            next_fire_time: next,
+        },
+    ];
+    // EXHAUSTIVE: a variant added to `SlotDecision` stops this compiling.
+    let named = |d: &SlotDecision| match d {
+        SlotDecision::Suspended => "Suspended",
+        SlotDecision::Unparseable(_) => "Unparseable",
+        SlotDecision::UnknownTimeZone { .. } => "UnknownTimeZone",
+        SlotDecision::RetryNamesTooLong { .. } => "RetryNamesTooLong",
+        SlotDecision::InvalidTopicSelection { .. } => "InvalidTopicSelection",
+        SlotDecision::InvalidRunPolicy { .. } => "InvalidRunPolicy",
+        SlotDecision::NoDueSlot { .. } => "NoDueSlot",
+        SlotDecision::BeforeCreation { .. } => "BeforeCreation",
+        SlotDecision::AlreadyFired { .. } => "AlreadyFired",
+        SlotDecision::Missed { .. } => "Missed",
+        SlotDecision::CatchUpDue { .. } => "CatchUpDue",
+        SlotDecision::CaughtUp { .. } => "CaughtUp",
+        SlotDecision::CatchUpBlocked { .. } => "CatchUpBlocked",
+        SlotDecision::InProgress { .. } => "InProgress",
+        SlotDecision::Retried { .. } => "Retried",
+        SlotDecision::RetryPending { .. } => "RetryPending",
+        SlotDecision::RetryBlocked { .. } => "RetryBlocked",
+        SlotDecision::RetryExhausted { .. } => "RetryExhausted",
+        SlotDecision::RunFailed { .. } => "RunFailed",
+        SlotDecision::SlotNameUnavailable { .. } => "SlotNameUnavailable",
+        SlotDecision::ActiveRunLimit { .. } => "ActiveRunLimit",
+        SlotDecision::CrdOutdated { .. } => "CrdOutdated",
+        SlotDecision::ConcurrencyBlocked { .. } => "ConcurrencyBlocked",
+        SlotDecision::NameTooLong { .. } => "NameTooLong",
+        SlotDecision::Due { .. } => "Due",
+    };
+    let covered: std::collections::BTreeSet<&str> = decisions.iter().map(named).collect();
+    assert_eq!(covered.len(), 25, "every variant appears once: {covered:?}");
+    for decision in &decisions {
+        let wait = decision.requeue_after(now);
+        assert!(
+            wait > std::time::Duration::ZERO && wait <= poll,
+            "{}: the requeue is a real wait no longer than the {}-second poll, got {wait:?}",
+            named(decision),
+            REQUEUE_SECS
+        );
+        assert_eq!(
+            schedule_action(decision, now),
+            Action::requeue(wait),
+            "{}: the pass returns that timed requeue, never await_change()",
+            named(decision)
+        );
+    }
+    // A retry due sooner than the poll wakes the schedule at the retry.
+    let soon = SlotDecision::RetryPending {
+        slot: s(),
+        attempt: 1,
+        due_at: now + Duration::seconds(5),
+        next_fire_time: next,
+    };
+    assert_eq!(
+        schedule_action(&soon, now),
+        Action::requeue(std::time::Duration::from_secs(5))
+    );
+    // And a failed pass is requeued on the same poll.
+    assert_eq!(error_action(), Action::requeue(poll));
+    assert_eq!(REQUEUE_SECS, 30, "the poll this row and the docs state");
+}
+
+/// **The returned `Action`, on the real paths a pass takes:** decided (a slot
+/// fired), missed, suspended, and an error (a status write the API server
+/// refused). Each decided path returns `Action::requeue(30 s)` from
+/// `reconcile_pass`; the error path returns `Err`, which `error_policy` turns
+/// into `error_action()`.
+#[tokio::test]
+async fn the_reconcile_exit_paths_return_the_timed_requeue() {
+    let poll = Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS));
+    let run = |store: SharedStore, routes: Vec<Route>, now: DateTime<Utc>| async move {
+        let (client, _calls, _bodies) = mock_client_with_store(routes, store.clone());
+        reconcile_pass(&current(&store, SCHEDULE_KEY), &client, None, now).await
+    };
+
+    // DECIDED: the 10-08 slot fires.
+    let store = store_with(SCHEDULE_KEY, nightly(false, 4));
+    let fire = utc(2026, 10, 8, 0, 0, 0);
+    store
+        .lock()
+        .expect("writable")
+        .remove(&run_key("nightly", &slot_name(fire)));
+    let (outcome, action) = run(store.clone(), vec![list_route(vec![])], fire)
+        .await
+        .expect("decided");
+    assert!(matches!(outcome.decision, SlotDecision::Due { .. }));
+    assert_eq!(action, poll, "decided: {:?}", outcome.decision);
+
+    // MISSED: the controller is back at 02:00 the next day.
+    let today = run_key("nightly", &slot_name(utc(2026, 10, 9, 0, 0, 0)));
+    store.lock().expect("writable").remove(&today);
+    let (outcome, action) = run(
+        store.clone(),
+        vec![list_route(vec![])],
+        utc(2026, 10, 9, 2, 0, 0),
+    )
+    .await
+    .expect("missed");
+    assert!(matches!(outcome.decision, SlotDecision::Missed { .. }));
+    assert_eq!(action, poll, "missed");
+
+    // SUSPENDED.
+    let suspended = store_with(SCHEDULE_KEY, nightly(true, 4));
+    let (outcome, action) = run(
+        suspended,
+        vec![list_route(vec![])],
+        utc(2026, 10, 9, 2, 0, 0),
+    )
+    .await
+    .expect("suspended");
+    assert!(matches!(outcome.decision, SlotDecision::Suspended));
+    assert_eq!(action, poll, "suspended");
+
+    // ERROR: the status write is refused (no route answers it, so the double
+    // returns an error), the pass is an `Err`, and the error action is the poll.
+    let (client, _calls, _bodies) = weirkeeper::testing::mock_client_recording_bodies(vec![
+        list_route(vec![]),
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 500,
+            body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                "message": "etcdserver: request timed out", "reason": "InternalError",
+                "code": 500})
+            .to_string(),
+        },
+    ]);
+    let object: BackupSchedule = serde_json::from_value(nightly(true, 4)).expect("typed");
+    let failed = reconcile_pass(&object, &client, None, utc(2026, 10, 9, 2, 0, 0)).await;
+    assert!(
+        failed.is_err(),
+        "a refused status write is an error, not a decision"
+    );
+    assert_eq!(error_action(), poll, "error");
+}
+
+/// **A slot that comes due with NO watch event still fires, within the poll**
+/// (FX-29 review M-1). The controller is driven exactly as kube drives it with
+/// no event: reconcile, wait the requeue the pass returned, reconcile again.
+/// It starts at 23:58:47 the day after an admitted slot; the first pass
+/// records the missed 10-09 slot, and from then on the schedule is in the
+/// settled state the watch filter leaves completely quiet. The 10-10 00:00
+/// slot must fire on the first pass at or after it, and that pass may be at
+/// most one poll (plus one second of slack) late.
+///
+/// Mutants that fail here: `await_change()` (no requeue to wait), and an
+/// hourly poll (the slot fires an hour late — or, past the starting deadline,
+/// never).
+#[tokio::test]
+async fn a_due_slot_fires_from_the_requeue_alone() {
+    let store = store_with(SCHEDULE_KEY, nightly(false, 4));
+    let yesterday = admitted_yesterday(&store).await;
+    let finished = stored_value(&store, &format!("{BACKUPS}/{yesterday}"));
+    let missed = run_key("nightly", &slot_name(utc(2026, 10, 9, 0, 0, 0)));
+    store.lock().expect("writable").remove(&missed);
+    let due = utc(2026, 10, 10, 0, 0, 0);
+    store
+        .lock()
+        .expect("writable")
+        .remove(&run_key("nightly", &slot_name(due)));
+
+    let mut now = utc(2026, 10, 9, 23, 58, 47);
+    let created_before = creates(&store);
+    let mut fired_at = None;
+    for _ in 0..20 {
+        let (client, _calls, _bodies) =
+            mock_client_with_store(vec![list_route(vec![finished.clone()])], store.clone());
+        let (outcome, action) = reconcile_pass(&current(&store, SCHEDULE_KEY), &client, None, now)
+            .await
+            .expect("a pass is a decision");
+        if creates(&store) > created_before {
+            fired_at = Some(now);
+            break;
+        }
+        let wait = outcome.decision.requeue_after(now);
+        assert_eq!(
+            action,
+            Action::requeue(wait),
+            "the pass at {now} hands kube a timed requeue; with no watch event that requeue is \
+             the only thing that ever runs the next pass"
+        );
+        now += Duration::from_std(wait).expect("a requeue is a chrono duration");
+    }
+    let fired_at = fired_at.expect("the slot fired from the requeue alone, with no watch event");
+    let late = fired_at - due;
+    assert!(
+        late >= Duration::zero()
+            && late <= Duration::seconds(i64::try_from(REQUEUE_SECS).expect("small") + 1),
+        "the 10-10 00:00 slot fired {late} after it came due; the bound is one poll"
+    );
+    assert_eq!(
+        creates(&store) - created_before,
+        1,
+        "and it fired exactly once"
     );
 }
 

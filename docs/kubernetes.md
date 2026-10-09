@@ -4570,6 +4570,11 @@ already carries. The three "when" fields move only with what they time:
   reached; an evaluation that finds the same keeps it.
 - `status.policy.evaluatedAt` is when the status last moved.
 
+One write is not about a decision: `status.history.inventoriedAt` moves once
+an hour, when the controller re-inventories the schedule's retained runs, and
+`policy.evaluatedAt` moves with it. A schedule watched for a steady
+`resourceVersion` therefore still writes about once an hour.
+
 `status.lastSlot.backupRef` is present only when the decision names a `Backup`
 (`Admitted`, `CaughtUp`, `Retried`, `Failed`, and `Exhausted` when an attempt exists). A
 `Missed`, `Blocked`, `NameUnavailable` or `Released` slot carries none.

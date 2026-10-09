@@ -3449,12 +3449,14 @@ async fn a_policy_with_no_resource_version_sends_no_patch() {
 /// This reconciler's own status write wakes it (`Controller::new` watches the
 /// policy). Before FX-29 `lastEvaluation.at` was `now` on every evaluation, and
 /// every `candidates[]` element carried `objects: null, bytes: null` — members
-/// the API server prunes, so the no-op skip saw a change on every pass even
-/// with the clock frozen. Every pass wrote, and the write woke the next pass: a
+/// the typed read-back of the status does not carry (`null` and absent are the
+/// same `None`), so the no-op skip saw a change on every pass even with the
+/// clock frozen. Every pass wrote, and the write woke the next pass: a
 /// hot loop on every `Report` or `Enforce` policy whose catalog resolved.
 /// CONTROL: at `a8a30428` this row fails — the evaluation instant moves on the
-/// settling pass — and the pass after it sends a patch whose only change, once
-/// the API server has pruned its `null` members, is `lastEvaluation.at`.
+/// settling pass — and the pass after it sends a patch whose only change,
+/// beside the `null` members the typed read-back drops, is
+/// `lastEvaluation.at`.
 #[tokio::test]
 async fn a_steady_policy_writes_nothing_once_settled() {
     let first = fixture(happy_routes(&six_points()));
@@ -4464,6 +4466,100 @@ async fn a_second_pass_in_one_slot_creates_no_second_job() {
         f.seen().iter().all(|(m, _)| m != "POST"),
         "the deterministic name makes a duplicate a 409; the slot is what makes it one run per \
          CADENCE rather than one per minute"
+    );
+}
+
+/// **An enforcement slot starts its run from the timed requeue** (FX-29
+/// review M-1).
+///
+/// The `"17 4 * * *"` slot comes due with no event on any object, so the pass
+/// that starts the run is the one the requeue runs. Pass 1 at 04:16:30 is
+/// inside yesterday's slot, which already ran: nothing is created, and the pass
+/// returns `Action::requeue(IDLE_REQUEUE_SECONDS)`. The pass that requeue runs
+/// — 04:17:30, no watch event in between — starts today's run: one Job, at
+/// most one idle requeue after the slot. A started run is then requeued on
+/// `RUNNING_REQUEUE_SECONDS`, and a failed pass on `ERROR_REQUEUE_SECONDS`.
+///
+/// Mutants that fail here: `policy_action` returning `await_change()`, or an
+/// idle requeue longer than the documented 60 s.
+#[tokio::test]
+async fn an_enforcement_slot_starts_from_the_timed_requeue() {
+    use kube::runtime::controller::Action;
+    let digest = {
+        let learn = fixture(happy_routes(&six_points()));
+        run(&learn, &policy(enforcing(None), json!({}))).await;
+        learn.status()["lastEvaluation"]["planSha256"]
+            .as_str()
+            .expect("a digest")
+            .to_string()
+    };
+    let yesterday = now() - chrono::Duration::days(1);
+    let ran_yesterday = json!({
+        "lastEnforcement": {
+            "runId": plan::run_id(UID, &digest, yesterday.timestamp()),
+            "startedAt": "2026-09-16T04:17:00Z",
+            "finishedAt": "2026-09-16T04:17:30Z", "exitCode": 0
+        }
+    });
+    let routes = |at: DateTime<Utc>| {
+        let mut routes = happy_routes(&six_points());
+        routes.push(plan_config_map_route(&digest));
+        routes.push(route("POST", "/configmaps", "{}".to_string()));
+        routes.extend(absent_job_routes(&digest, at));
+        routes.push(route("POST", "/jobs", "{}".to_string()));
+        routes
+    };
+
+    let before = now() - chrono::Duration::seconds(30);
+    let f = fixture(routes(before));
+    let first = run_at(
+        &f,
+        &policy(enforcing(Some(&digest)), ran_yesterday.clone()),
+        before,
+    )
+    .await;
+    assert!(
+        f.posted("/jobs").is_empty(),
+        "04:16:30 is inside yesterday's slot, which already ran"
+    );
+    assert_eq!(
+        ctrl::IDLE_REQUEUE_SECONDS,
+        60,
+        "the idle cadence the docs state"
+    );
+    let idle = ctrl::policy_action(&first);
+    assert_eq!(
+        idle,
+        Action::requeue(std::time::Duration::from_secs(ctrl::IDLE_REQUEUE_SECONDS)),
+        "an idle pass hands kube a timed requeue: phase {:?}",
+        first.phase
+    );
+
+    let mut stored = ran_yesterday;
+    for patch in f.status_patches() {
+        weirkeeper::conditions::apply_merge_patch(&mut stored, &patch["status"]);
+    }
+    let next = before
+        + chrono::Duration::seconds(i64::try_from(ctrl::IDLE_REQUEUE_SECONDS).expect("small"));
+    let g = fixture(routes(next));
+    let second = run_at(&g, &policy(enforcing(Some(&digest)), stored), next).await;
+    assert_eq!(second.phase, ctrl::RetentionPhase::Started);
+    assert_eq!(
+        g.posted("/jobs").len(),
+        1,
+        "the pass the requeue runs, {}s after the slot, starts today's run",
+        (next - now()).num_seconds()
+    );
+    assert_eq!(
+        ctrl::policy_action(&second),
+        Action::requeue(std::time::Duration::from_secs(
+            ctrl::RUNNING_REQUEUE_SECONDS
+        )),
+        "a started run is followed on the running cadence"
+    );
+    assert_eq!(
+        ctrl::policy_error_action(),
+        Action::requeue(std::time::Duration::from_secs(ctrl::ERROR_REQUEUE_SECONDS))
     );
 }
 

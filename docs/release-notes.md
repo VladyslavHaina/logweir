@@ -1252,11 +1252,18 @@ watch filter triggers on a new object or a new spec revision and on none of four
 status writes. The class-sweep rows: a destination whose CA went away, twenty
 passes, one write (twenty before); a protection policy whose routes were
 removed settles after one write; a retention policy writes nothing once settled
-(every pass before). Each guard has a mutant that fails a row (the tracker's
-FX-29 row cites them). Not proven live in this branch: the PoC upgrade that
-carries it resumes the two schedules, expects each `resourceVersion` to stand
-for five minutes while no slot is due, and then watches the next slot fire and
-be decided once.
+(every pass before). The requeue that is now each schedule's only clock is
+pinned too: every decision returns a timed requeue of at most 30 s, never
+`await_change()`, and a schedule driven only by that requeue, with no watch
+event, fires its next slot within one poll; a destination re-reads a rotated
+CA, a protection policy turns `Stale` as its point ages, and a retention
+policy starts its enforcement slot, each on the pass its own timed requeue
+runs. Each guard has a mutant that fails a row. Not proven live in this
+branch: the PoC upgrade that carries it resumes the two schedules outside
+02:00–03:00Z, expects each `resourceVersion` to stand for five minutes while
+no slot is due (one hourly history-inventory write, moving only
+`history.inventoriedAt` and `policy.evaluatedAt`, is allowed), and then
+watches the next slot fire and be decided once.
 **Rollback:** an older controller restores the old behaviour the next time a
 schedule's slot is skipped after one that ran, or a destination loses its CA;
 suspending the schedule, or restoring the `ConfigMap`, stops it. Nothing stored

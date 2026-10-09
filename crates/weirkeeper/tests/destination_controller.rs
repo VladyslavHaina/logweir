@@ -647,6 +647,68 @@ async fn a_ca_bundle_that_goes_away_is_cleared_once_and_settles() {
     assert_eq!(after["status"]["reason"], "CaBundleNotFound");
 }
 
+/// **A rotated CA bundle is read by the timed requeue** (FX-29 review M-1).
+///
+/// This controller does not watch `ConfigMap`s, so nothing but its requeue
+/// ever runs the pass that reads a rotated bundle. The pass returns a timed
+/// requeue of `REQUEUE_SECONDS` (never `await_change()`), and the next pass —
+/// with no event on the destination at all — publishes the new digest. A
+/// failed pass is requeued on `ERROR_REQUEUE_SECONDS`.
+///
+/// Mutants that fail here: `destination_action()` returning `await_change()`
+/// or a poll longer than the documented 300 s.
+#[tokio::test]
+async fn a_rotated_ca_is_read_by_the_timed_requeue() {
+    use weirkeeper::controllers::backup_destination::{
+        destination_action, destination_error_action, ERROR_REQUEUE_SECONDS, REQUEUE_SECONDS,
+    };
+    use weirkeeper::testing::{mock_client_with_store, ObjectStore};
+    const KEY: &str = "/namespaces/team-a/backupdestinations/dest-a";
+    assert_eq!(
+        REQUEUE_SECONDS, 300,
+        "the cadence docs/kubernetes.md states"
+    );
+    assert_eq!(
+        destination_action(),
+        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(300)),
+        "every reconciled destination is looked at again in five minutes"
+    );
+    assert_eq!(
+        destination_error_action(),
+        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(
+            ERROR_REQUEUE_SECONDS
+        ))
+    );
+
+    let store = ObjectStore::shared();
+    store.lock().expect("store").put(KEY, dest_a_unreconciled());
+    let digest_after = |pem: &str| {
+        let store = store.clone();
+        let pem = pem.to_string();
+        async move {
+            let current = build(store.lock().expect("store").get(KEY).expect("stored"));
+            let (client, _rec, _bodies) = mock_client_with_store(
+                routes(Some(&configmap_body("ca.crt", &pem))),
+                store.clone(),
+            );
+            reconcile_destination(&current, &client)
+                .await
+                .expect("a verdict");
+            store.lock().expect("store").get(KEY).expect("stored")["status"]["caBundleSha256"]
+                .clone()
+        }
+    };
+    let first = digest_after(&ca_pem(0x11)).await;
+    // The ConfigMap is rotated. No event reaches the destination; the next
+    // pass is the one its requeue runs.
+    let rotated = digest_after(&ca_pem(0x22)).await;
+    assert!(first.is_string() && rotated.is_string());
+    assert_ne!(
+        first, rotated,
+        "the pass the requeue runs reads the rotated bundle and publishes its digest"
+    );
+}
+
 /// The condition reasons are a CLOSED set, and every one of them is a
 /// [`CheckCode`].
 #[test]

@@ -3907,18 +3907,65 @@ async fn reconcile(
     schedule: Arc<BackupSchedule>,
     ctx: Arc<Context>,
 ) -> Result<Action, ScheduleError> {
-    let now = Utc::now();
-    let outcome =
-        reconcile_schedule_with_archive(&schedule, &ctx.client, ctx.archive.as_ref(), now).await?;
-    // NOT `Action::await_change()`. A cron schedule's next event is a clock
-    // tick, and no Kubernetes watch delivers one; without a requeue a schedule
-    // created at 09:00 would never fire again until somebody edited it.
-    //
-    // D1 §4.5 step 8 asks for `min(30 s, next retry/slot due)`. The floor keeps
-    // a retry whose delay expires in two seconds from waiting twenty-eight more
-    // for a wake-up that was going to happen anyway; it never LENGTHENS the
-    // interval, so nothing drifts.
-    Ok(Action::requeue(outcome.decision.requeue_after(now)))
+    reconcile_pass(&schedule, &ctx.client, ctx.archive.as_ref(), Utc::now())
+        .await
+        .map(|(_, action)| action)
+}
+
+/// One pass of the `kube::runtime` reconciler at `now`: the outcome, and the
+/// [`Action`] the pass hands back to the scheduler — which is
+/// [`schedule_action`] of the decision, on every path that decided anything.
+///
+/// Public, and the whole of [`reconcile`] apart from its one clock read, so
+/// that a test can drive the controller the way kube does — reconcile, wait
+/// the requeue it was told, reconcile again — with no watch event in between
+/// (`tests/schedule_status_churn.rs`, FX-29 review M-1).
+///
+/// # Errors
+///
+/// [`ScheduleError`], which `error_policy` turns into [`error_action`].
+pub async fn reconcile_pass(
+    schedule: &BackupSchedule,
+    client: &kube::Client,
+    archive: Option<&Arc<Store>>,
+    now: DateTime<Utc>,
+) -> Result<(ScheduleOutcome, Action), ScheduleError> {
+    let outcome = reconcile_schedule_with_archive(schedule, client, archive, now).await?;
+    let action = schedule_action(&outcome.decision, now);
+    Ok((outcome, action))
+}
+
+/// The [`Action`] a pass that decided `decision` returns: ALWAYS a timed
+/// requeue, of [`SlotDecision::requeue_after`] — at most [`REQUEUE_SECS`].
+///
+/// # This requeue is the schedule's clock (FX-29 review M-1)
+///
+/// NOT `Action::await_change()`, and never a longer poll. A cron schedule's
+/// next event is a clock tick, and no Kubernetes watch delivers one. Since
+/// FX-29 the watch does not even deliver the schedule's own status writes
+/// ([`schedule_triggers`]) — a new object and a spec edit are the only events
+/// that wake this reconciler, so a pass that returned anything but this would
+/// leave every steady schedule asleep until somebody edited it, and a poll
+/// longer than the starting deadline would record every slot `Missed`.
+/// `every_reconcile_exit_requeues_within_the_poll` pins the value for every
+/// decision, and `a_due_slot_fires_from_the_requeue_alone` drives the
+/// reconciler by it with no watch event at all.
+///
+/// D1 §4.5 step 8 asks for `min(30 s, next retry/slot due)`. The floor keeps
+/// a retry whose delay expires in two seconds from waiting twenty-eight more
+/// for a wake-up that was going to happen anyway; it never LENGTHENS the
+/// interval, so nothing drifts.
+#[must_use]
+pub fn schedule_action(decision: &SlotDecision, now: DateTime<Utc>) -> Action {
+    Action::requeue(decision.requeue_after(now))
+}
+
+/// The [`Action`] a pass that FAILED returns: a timed requeue of
+/// [`REQUEUE_SECS`], for the same reason as [`schedule_action`] — an error is
+/// not a reason to stop the clock.
+#[must_use]
+pub fn error_action() -> Action {
+    Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
 }
 
 /// Requeue on an error, naming it. Never a panic and never a drop.
@@ -3928,7 +3975,7 @@ fn error_policy(schedule: Arc<BackupSchedule>, err: &ScheduleError, _ctx: Arc<Co
         error = %err,
         "backup schedule reconcile failed; requeueing"
     );
-    Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
+    error_action()
 }
 
 /// What, about a `BackupSchedule` watch event, may WAKE this reconciler: the
@@ -3976,6 +4023,30 @@ where
     S: futures::Stream<Item = Result<BackupSchedule, watcher::Error>> + Send,
 {
     applied.predicate_filter(reconcile_trigger)
+}
+
+/// The ONE trigger stream [`controller_in`] hands to `Controller::for_stream`:
+/// a `kube` watch over `api`, reflected into `writer`'s store BEFORE the
+/// filter (so the store always holds the newest object), then filtered by
+/// [`schedule_triggers`].
+///
+/// A FUNCTION, AND THE FUNCTION'S BODY IS ONE EXPRESSION, because the wiring
+/// is what a test has to be able to pin (FX-29 review L-1). A row that only
+/// grepped `controller_in` for both names passed a mutant that kept a dead
+/// `schedule_triggers(…)` call and handed the UNFILTERED stream to the
+/// controller. `the_schedule_controller_is_built_on_the_filtered_trigger` now
+/// asserts the call shape `Controller::for_stream(schedule_trigger_stream(`
+/// and that this body is exactly `schedule_triggers(watcher(api, …)…)`.
+pub fn schedule_trigger_stream(
+    api: Api<BackupSchedule>,
+    writer: reflector::store::Writer<BackupSchedule>,
+) -> impl futures::Stream<Item = Result<BackupSchedule, watcher::Error>> + Send {
+    schedule_triggers(
+        watcher(api, watcher::Config::default())
+            .default_backoff()
+            .reflect(writer)
+            .applied_objects(),
+    )
 }
 
 /// Run the `BackupSchedule` controller until the process ends.
@@ -4028,16 +4099,10 @@ fn controller_in(
     // The reflector still sees every event; only the TRIGGER is filtered, to
     // the schedule's identity and spec revision (`schedule_triggers`). The
     // clock that a cron schedule actually runs on is the requeue every pass
-    // returns, which no watch event was ever needed for.
+    // returns (`schedule_action`), which no watch event was ever needed for.
     let (reader, writer) = reflector::store();
-    let triggers = schedule_triggers(
-        watcher(api, watcher::Config::default())
-            .default_backoff()
-            .reflect(writer)
-            .applied_objects(),
-    );
     async move {
-        Controller::for_stream(triggers, reader)
+        Controller::for_stream(schedule_trigger_stream(api, writer), reader)
             .run(reconcile, error_policy, ctx)
             // Every item is already logged by `reconcile_schedule` or by
             // `error_policy`; the stream exists to be DRIVEN.

@@ -543,10 +543,7 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
                 // `kube::runtime::watcher(api, …)` and hands it to
                 // `Controller::for_stream`, so its kind's `list`/`watch`
                 // caller is that call and not `Controller::new`.
-                if ["Controller::new(", ".owns(", ".watches(", "watcher("]
-                    .iter()
-                    .any(|k| head.ends_with(k))
-                {
+                if is_watch_call(head) {
                     out.entry(ty.clone()).or_default().insert(WATCH.to_string());
                 }
                 // A HANDLE PASSED TO THE SHARED `/status` WRITER IS A
@@ -568,6 +565,44 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
         }
     }
     out
+}
+
+/// Whether the text before a typed handle is a call that LISTs and then
+/// WATCHes it: `Controller::new(`, `.owns(`, `.watches(`, or `watcher(` as a
+/// whole word (FX-29). Only a whole word (review L-6): `start_watcher(api`
+/// is some other function, and counting it would hide an orphaned grant.
+fn is_watch_call(head: &str) -> bool {
+    let watcher = head
+        .strip_suffix("watcher(")
+        .is_some_and(|before| !before.ends_with(|c: char| c.is_alphanumeric() || c == '_'));
+    watcher
+        || ["Controller::new(", ".owns(", ".watches("]
+            .iter()
+            .any(|k| head.ends_with(k))
+}
+
+/// The call shapes [`is_watch_call`] accepts, and the look-alikes it refuses.
+#[test]
+fn a_watch_call_is_matched_as_a_whole_call() {
+    for head in [
+        "Controller::new(",
+        "        .owns(",
+        "x.watches(",
+        "        watcher(",
+        "kube::runtime::watcher(",
+        "schedule_triggers(\n        watcher(",
+    ] {
+        assert!(is_watch_call(head), "{head:?} lists and watches its handle");
+    }
+    for head in [
+        "start_watcher(",
+        "my_watcher(",
+        "rewatcher(",
+        "watchers(",
+        "get(",
+    ] {
+        assert!(!is_watch_call(head), "{head:?} is some other call");
+    }
 }
 
 /// Every granted **(resource, verb)** pair has a caller on that resource's own

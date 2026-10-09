@@ -2843,12 +2843,14 @@ impl Pass<'_> {
                 });
                 // AND ABSENT MEANS NO KEY AT ALL, NOT `null` — FX-29's class
                 // sweep. An array is replaced wholesale by a merge patch, so a
-                // `null` member inside an element is not a deletion: the API
-                // server prunes it (the CRD does not mark the field nullable)
-                // and the object this controller reads back has no such key.
-                // The no-op skip compared the two and saw a change on every
-                // pass, so the status was written on every pass even when
-                // nothing else had moved.
+                // `null` member inside an element is not a deletion: it is
+                // STORED as `null` (the CRD marks `objects` and `bytes`
+                // `nullable: true`). But this controller reads its status back
+                // TYPED, where `null` and absent are the same `None` and
+                // re-serialise as no key — so the no-op skip compared a patch
+                // carrying `null`s with a stored status carrying none and saw
+                // a change on every pass, and the status was written on every
+                // pass even when nothing else had moved.
                 if let Some(fields) = candidate.as_object_mut() {
                     fields.retain(|_, value| !value.is_null());
                 }
@@ -4087,11 +4089,30 @@ async fn reconcile(
         },
     )
     .await?;
+    Ok(policy_action(&outcome))
+}
+
+/// The [`Action`] a pass returns: a timed requeue — [`RUNNING_REQUEUE_SECONDS`]
+/// while a run is started or running, [`IDLE_REQUEUE_SECONDS`] otherwise —
+/// never `await_change()`.
+///
+/// An enforcement slot comes due with no event on any object, so this
+/// requeue is what starts the run (FX-29 review M-1, pinned by
+/// `retention_policy_controller::an_enforcement_slot_starts_from_the_timed_requeue`).
+#[must_use]
+pub fn policy_action(outcome: &Outcome) -> Action {
     let seconds = match outcome.phase {
         RetentionPhase::Running | RetentionPhase::Started => RUNNING_REQUEUE_SECONDS,
         _ => IDLE_REQUEUE_SECONDS,
     };
-    Ok(Action::requeue(std::time::Duration::from_secs(seconds)))
+    Action::requeue(std::time::Duration::from_secs(seconds))
+}
+
+/// The [`Action`] a failed pass returns: a timed requeue of
+/// [`ERROR_REQUEUE_SECONDS`].
+#[must_use]
+pub fn policy_error_action() -> Action {
+    Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
 }
 
 fn error_policy(policy: Arc<RetentionPolicy>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
@@ -4101,7 +4122,7 @@ fn error_policy(policy: Arc<RetentionPolicy>, err: &ReconcileError, _ctx: Arc<Co
         error = %err,
         "the RetentionPolicy reconcile could not complete; nothing was deleted"
     );
-    Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
+    policy_error_action()
 }
 
 /// Run the `RetentionPolicy` controller until the process ends.

@@ -322,11 +322,27 @@ async fn reconcile(
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
     reconcile_destination(&dest, &ctx.client).await?;
-    // See the module header: the requeue is about the CA `ConfigMap`, which
-    // this controller does not watch, and not about the spec.
-    Ok(Action::requeue(std::time::Duration::from_secs(
-        REQUEUE_SECONDS,
-    )))
+    Ok(destination_action())
+}
+
+/// The [`Action`] every reconciled destination returns: a timed requeue of
+/// [`REQUEUE_SECONDS`], never `await_change()`.
+///
+/// See the module header: the requeue is about the CA `ConfigMap`, which this
+/// controller does not watch, and not about the spec. It is the only thing
+/// that notices a rotated bundle, so it is pinned by
+/// `destination_controller::a_rotated_ca_is_read_by_the_timed_requeue` (FX-29
+/// review M-1).
+#[must_use]
+pub fn destination_action() -> Action {
+    Action::requeue(std::time::Duration::from_secs(REQUEUE_SECONDS))
+}
+
+/// The [`Action`] a failed pass returns: a timed requeue of
+/// [`ERROR_REQUEUE_SECONDS`].
+#[must_use]
+pub fn destination_error_action() -> Action {
+    Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
 }
 
 /// Requeue on an error, naming it.
@@ -336,7 +352,7 @@ fn error_policy(dest: Arc<BackupDestination>, err: &ReconcileError, _ctx: Arc<Co
         error = %err,
         "backup destination reconcile failed; requeueing"
     );
-    Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
+    destination_error_action()
 }
 
 /// Run the `BackupDestination` controller until the process ends.

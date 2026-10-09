@@ -2174,6 +2174,84 @@ fn a_field_that_becomes_absent_is_cleared_and_the_policy_settles() {
     );
 }
 
+/// **A point that ages out is seen by the timed requeue** (FX-29 review M-1).
+///
+/// A recovery point ages with no event on any object, so the pass that turns
+/// a policy `Stale` is the one its requeue runs. Driven as kube drives it with
+/// no event: pass 1 sees the newest point 120 s inside the 26-hour objective
+/// (`Healthy`) and returns `Action::requeue(evaluationIntervalSeconds)`; the
+/// pass that requeue runs — no watch event in between — sees it 180 s past the
+/// objective and publishes `Stale`. A failed pass is requeued on
+/// `ERROR_REQUEUE_SECONDS`.
+///
+/// Mutants that fail here: `policy_action` returning `await_change()`, or a
+/// requeue longer than the evaluation interval.
+#[test]
+fn a_point_that_ages_out_is_seen_by_the_timed_requeue() {
+    use kube::runtime::controller::Action;
+    let spec = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"objectives": {"requireCatalogAvailability": false}}),
+        );
+        value
+            .as_object_mut()
+            .expect("a spec object")
+            .remove("notifications");
+        value
+    };
+    let objective = 93_600_i64;
+    let started = p::rfc3339(now() - Duration::seconds(objective - 120));
+    let point = backup(
+        "b-1",
+        26,
+        json!({
+            "metadata": {"creationTimestamp": started},
+            "status": {"capture": {"startedAt": started, "finishedAt": started}}
+        }),
+    );
+    let fired = json!({"lastFireTime": at(26)});
+    let routes = || {
+        let mut routes = read_routes(vec![point.clone()], fired.clone());
+        routes.push(patch(STATUS_PATH));
+        routes
+    };
+
+    let (first, _, bodies) = drive(&policy_with(spec.clone(), json!({})), routes());
+    assert_eq!(
+        first.health,
+        p::Health::Healthy,
+        "120 s inside the objective"
+    );
+    let interval = 300;
+    assert_eq!(
+        pp::policy_action(&first),
+        Action::requeue(std::time::Duration::from_secs(interval)),
+        "the pass hands kube a timed requeue of the evaluation interval"
+    );
+    assert!(first.requeue_seconds <= interval);
+    let written = last_status_patch(&bodies)["status"].clone();
+
+    let next =
+        now() + Duration::seconds(i64::try_from(first.requeue_seconds).expect("a small number"));
+    let (second, _, bodies) = drive_at(&policy_with(spec, written), routes(), next);
+    assert_eq!(
+        second.health,
+        p::Health::Stale,
+        "the pass the requeue runs sees the point past its objective"
+    );
+    assert_eq!(
+        last_status_patch(&bodies)["status"]["health"].as_str(),
+        Some("Stale"),
+        "and publishes it"
+    );
+    assert_eq!(
+        pp::policy_error_action(),
+        Action::requeue(std::time::Duration::from_secs(pp::ERROR_REQUEUE_SECONDS))
+    );
+}
+
 /// The other side of erratum **E11(d)**: past `evaluatedAt`'s half-interval
 /// window the object IS written, and the only things that move are the three
 /// clock-derived fields.
