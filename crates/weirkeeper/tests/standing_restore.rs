@@ -602,6 +602,23 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
     let per_run: weirkeeper::crds::approval::Approval =
         serde_json::from_value(per_run).expect("an Approval");
 
+    // ---- PROD-15.1: a plan under the ORIGINAL topic names ----------------
+    //
+    // Only a per-run approval signed for the approval subject `originalName`
+    // authorises one (OD-2); a standing document never carries that subject.
+    // The plan is otherwise the frozen one, so a mutant that dropped this arm
+    // is caught by the scope check with ANOTHER detail and fails the row.
+    let mut original_name: serde_json::Value =
+        serde_json::to_value(standing_restore()).expect("serialises");
+    original_name["spec"]["planBytes"] = serde_json::json!(plan_bytes()
+        .replace("  mode: scratch\n", "  mode: newTopic\n")
+        .replace(
+            "  default_replication_factor: 1\n",
+            "  default_replication_factor: 1\n  topic_naming:\n    prefix: \"\"\n    \
+             original_name: {owners: []}\n"
+        ));
+    let original_name: Restore = serde_json::from_value(original_name).expect("a Restore");
+
     let active = trust();
     // ---- a key withdrawn between one slot and the next -------------------
     let mut revoked_key = approver_key();
@@ -746,6 +763,14 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
             trust: active.clone(),
             expect_subject_mismatch: false,
             detail_contains: "is a different authorisation",
+        },
+        Row {
+            what: "a plan under the original topic names",
+            restore: original_name,
+            approval: approval(),
+            trust: active.clone(),
+            expect_subject_mismatch: false,
+            detail_contains: "a standing rehearsal authorization never does",
         },
         Row {
             what: "a Restore pinning no Approval UID",

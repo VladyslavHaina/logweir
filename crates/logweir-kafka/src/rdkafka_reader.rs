@@ -1698,6 +1698,36 @@ mod tests {
         );
     }
 
+    /// **PROD-15.1.** A source topic's own name is never handed to the
+    /// broker's delete, even inside the scratch namespace (a source named
+    /// `drill-orders` under the scratch prefix `drill-`): refused per name,
+    /// before any broker call — `127.0.0.1:1` is never dialled, so a name
+    /// that reached `AdminClient::delete_topics` would come back as a
+    /// transport error, not this refusal. KILLS: dropping the protected-name
+    /// arm, or checking it after the namespace arm.
+    #[test]
+    fn a_protected_source_name_is_refused_before_the_broker_even_inside_the_namespace() {
+        use crate::reader::TopicDeleter;
+        let reader = super::RdKafkaReader::connect(
+            &["127.0.0.1:1".to_string()],
+            crate::reader::AuthConfig::Plaintext,
+        )
+        .unwrap()
+        .with_scratch_prefix("drill-")
+        .unwrap()
+        .with_protected_names(["drill-orders".to_string()]);
+        let out = reader
+            .delete_topics(&["drill-orders".to_string()])
+            .expect("a per-name answer");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "drill-orders");
+        let why = out[0].1.as_ref().expect_err("refused");
+        assert!(
+            why.contains("a source topic's own name") && why.contains("original name"),
+            "{why}"
+        );
+    }
+
     #[test]
     fn with_scratch_prefix_accepts_a_realistic_operator_rendered_prefix() {
         let reader = super::RdKafkaReader::connect(

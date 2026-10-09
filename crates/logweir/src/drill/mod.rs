@@ -6164,3 +6164,92 @@ mod standing_approved_tests {
         );
     }
 }
+
+// =======================================================================
+// PROD-15.1 — the runner holds the signed approval subject to the plan
+// =======================================================================
+
+#[cfg(test)]
+mod original_name_subject_tests {
+    use super::*;
+    use logweir_core::original_name::ApprovalSubject;
+
+    fn plan(original_name: bool) -> DrillSpec {
+        let naming = if original_name {
+            "  topic_naming:\n    prefix: \"\"\n    original_name: {owners: []}\n"
+        } else {
+            "  topic_naming:\n    prefix: \"restore-\"\n"
+        };
+        serde_yaml::from_str(&format!(
+            "source:\n  storage:\n    backend: filesystem\n    path: /a\n  topics: [orders]\n\
+             target:\n  bootstrap_servers: [x:9092]\n  mode: newTopic\n  \
+             topic_mapping_prefix: \"drill-\"\n{naming}\
+             sample:\n  window_start: \"2026-01-01T00:00:00Z\"\n  window_end: \"2026-01-02T00:00:00Z\"\n\
+             objectives: {{}}\n\
+             evidence:\n  backend: filesystem\n  path: /b\n"
+        ))
+        .expect("a plan")
+    }
+
+    fn approved(subject: ApprovalSubject, mode: &'static str) -> phase1_approval::Approved {
+        phase1_approval::Approved {
+            approval: logweir_core::scorecard::ApprovalInfo {
+                approver: "ops".into(),
+                ticket: "T-1".into(),
+                plan_hash: "sha256:00".into(),
+                approved_at: chrono::Utc::now(),
+                key_id: "k".into(),
+                self_attested: false,
+            },
+            validated_at: chrono::Utc::now(),
+            approval_subject: subject,
+            approval_mode: mode,
+        }
+    }
+
+    fn refused(r: Result<(), DrillError>) -> String {
+        let e = r.expect_err("refused");
+        let text = e.to_string();
+        assert!(
+            text.contains(logweir_core::original_name::APPROVAL_SUBJECT_MISMATCH),
+            "{text}"
+        );
+        text
+    }
+
+    /// The pair is checked in BOTH directions, and a standing rehearsal
+    /// authorization never carries the subject whatever it claims.
+    ///
+    /// KILLS: a check that passes an ordinary approval for an original-name
+    /// plan; one that lets an `originalName` approval authorise an ordinary
+    /// plan; reading a standing document's subject as signed.
+    #[test]
+    fn the_runner_holds_the_signed_subject_to_the_plan_in_both_directions() {
+        let v1 = phase1_approval::APPROVAL_MODE_V1;
+        let standing = phase1_approval::APPROVAL_MODE_STANDING;
+        assert!(check_original_name_subject(
+            &plan(true),
+            Some(&approved(ApprovalSubject::OriginalName, v1))
+        )
+        .is_ok());
+        assert!(check_original_name_subject(
+            &plan(false),
+            Some(&approved(ApprovalSubject::Ordinary, v1))
+        )
+        .is_ok());
+        assert!(check_original_name_subject(&plan(false), None).is_ok());
+        refused(check_original_name_subject(
+            &plan(true),
+            Some(&approved(ApprovalSubject::Ordinary, v1)),
+        ));
+        refused(check_original_name_subject(
+            &plan(false),
+            Some(&approved(ApprovalSubject::OriginalName, v1)),
+        ));
+        refused(check_original_name_subject(&plan(true), None));
+        refused(check_original_name_subject(
+            &plan(true),
+            Some(&approved(ApprovalSubject::OriginalName, standing)),
+        ));
+    }
+}
