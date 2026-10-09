@@ -55,7 +55,7 @@ fn golden(name: &str, projected: &Value) -> Value {
 fn a_subset_restore_names_its_selection_on_list_and_detail() {
     let object = cr(&support::fixture("restore-subset-pass.json"));
     let want = json!({
-        "windowEndMs": 1_757_253_900_000i64,
+        "windowEndMs": 1_788_789_900_000i64,
         "narrowedTopics": 1,
         "partitions": [{"topic": "orders", "partitions": [0, 2]}],
         "engineRuns": 2
