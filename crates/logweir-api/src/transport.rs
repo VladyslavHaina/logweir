@@ -326,6 +326,14 @@ mod tests {
         Ok(())
     }
 
+    /// Every wait in these rows has its own deadline: a mutant that drops a
+    /// guard must fail the row, not hang the suite.
+    async fn bounded<F: std::future::Future>(within: Duration, what: &str, future: F) -> F::Output {
+        tokio::time::timeout(within, future)
+            .await
+            .unwrap_or_else(|_| panic!("{what} was still pending after {within:?}"))
+    }
+
     fn assert_at_the_limit(elapsed: Duration, what: &str) {
         assert!(
             elapsed >= LIMIT && elapsed < LIMIT + SLACK,
@@ -338,9 +346,13 @@ mod tests {
         let (mut server, client) = pair().await;
         let started = StdInstant::now();
         // Far more than the two kernel buffers hold; the client never reads.
-        let error = write_all(&mut server, 64 * 1024 * 1024)
-            .await
-            .expect_err("a write to a client that never reads must fail");
+        let error = bounded(
+            LIMIT + SLACK,
+            "a write to a client that never reads",
+            write_all(&mut server, 64 * 1024 * 1024),
+        )
+        .await
+        .expect_err("a write to a client that never reads must fail");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
         assert!(is_timeout(&error));
         assert_at_the_limit(started.elapsed(), "the stalled write");
@@ -383,21 +395,35 @@ mod tests {
         assert!(hyper::rt::Write::is_write_vectored(&io));
 
         let started = StdInstant::now();
-        let flushed = std::future::poll_fn(|cx| Pin::new(&mut io).poll_flush(cx)).await;
+        let flushed = bounded(
+            LIMIT + SLACK,
+            "a stuck flush",
+            std::future::poll_fn(|cx| Pin::new(&mut io).poll_flush(cx)),
+        )
+        .await;
         assert_eq!(flushed.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert_at_the_limit(started.elapsed(), "a stuck flush");
 
         let mut io = StallGuard::new(Stuck, LIMIT);
         let started = StdInstant::now();
-        let shut = std::future::poll_fn(|cx| Pin::new(&mut io).poll_shutdown(cx)).await;
+        let shut = bounded(
+            LIMIT + SLACK,
+            "a stuck shutdown",
+            std::future::poll_fn(|cx| Pin::new(&mut io).poll_shutdown(cx)),
+        )
+        .await;
         assert_eq!(shut.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert_at_the_limit(started.elapsed(), "a stuck shutdown");
 
         let mut io = StallGuard::new(Stuck, LIMIT);
         let started = StdInstant::now();
         let slices = [io::IoSlice::new(b"a"), io::IoSlice::new(b"b")];
-        let written =
-            std::future::poll_fn(|cx| Pin::new(&mut io).poll_write_vectored(cx, &slices)).await;
+        let written = bounded(
+            LIMIT + SLACK,
+            "a stuck vectored write",
+            std::future::poll_fn(|cx| Pin::new(&mut io).poll_write_vectored(cx, &slices)),
+        )
+        .await;
         assert_eq!(written.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert_at_the_limit(started.elapsed(), "a stuck vectored write");
     }
@@ -430,7 +456,12 @@ mod tests {
             }
         });
         let started = StdInstant::now();
-        let result = write_all(&mut server, TOTAL).await;
+        let result = bounded(
+            Duration::from_secs(60),
+            "a write to a steady reader",
+            write_all(&mut server, TOTAL),
+        )
+        .await;
         let elapsed = started.elapsed();
         assert!(
             result.is_ok(),
@@ -476,8 +507,12 @@ mod tests {
         );
         // And the connection still works.
         std::io::Write::write_all(&mut client, b"ping").unwrap();
-        let read =
-            std::future::poll_fn(|cx| Pin::new(&mut server).poll_read(cx, buf.unfilled())).await;
+        let read = bounded(
+            Duration::from_secs(5),
+            "a read after the client wrote",
+            std::future::poll_fn(|cx| Pin::new(&mut server).poll_read(cx, buf.unfilled())),
+        )
+        .await;
         assert!(read.is_ok(), "{read:?}");
         assert_eq!(buf.filled(), b"ping");
     }
@@ -537,10 +572,13 @@ mod tests {
     async fn a_body_that_stops_fails_at_the_limit() {
         use http_body_util::BodyExt as _;
         let started = StdInstant::now();
-        let error = StallBody::new(Pending, LIMIT)
-            .collect()
-            .await
-            .expect_err("a body that never arrives must fail");
+        let error = bounded(
+            LIMIT + SLACK,
+            "a body that never arrives",
+            StallBody::new(Pending, LIMIT).collect(),
+        )
+        .await
+        .expect_err("a body that never arrives must fail");
         assert!(is_timeout(error.as_ref()), "{error}");
         assert_at_the_limit(started.elapsed(), "the stalled body");
     }
@@ -551,11 +589,14 @@ mod tests {
         // A byte every half limit, six times: three limits in all, never one
         // limit without a byte.
         let started = StdInstant::now();
-        let body = StallBody::new(Trickle::new(LIMIT / 2, 6), LIMIT)
-            .collect()
-            .await
-            .expect("a body that keeps arriving is read whole")
-            .to_bytes();
+        let body = bounded(
+            LIMIT * 10,
+            "a body that keeps arriving",
+            StallBody::new(Trickle::new(LIMIT / 2, 6), LIMIT).collect(),
+        )
+        .await
+        .expect("a body that keeps arriving is read whole")
+        .to_bytes();
         assert_eq!(&body[..], b"xxxxxx");
         assert!(started.elapsed() >= LIMIT * 2);
     }
