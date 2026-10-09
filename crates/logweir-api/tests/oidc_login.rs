@@ -604,6 +604,122 @@ async fn a_consumed_login_cookie_is_cleared() {
     assert!(cleared.contains("Secure") && cleared.contains("HttpOnly"));
 }
 
+/// The `Set-Cookie` line that clears the login cookie, if the response has one.
+fn login_cookie_clear_of(response: &TestResponse) -> Option<String> {
+    response
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .find(|c| c.starts_with("__Host-logweir_login=;") && c.contains("Max-Age=0"))
+}
+
+/// **FX-32: every refused callback really clears the login cookie.**
+///
+/// The callback appends the clearing `Set-Cookie` to its refusal, and the
+/// request-context layer then re-renders the problem document. That layer
+/// used to keep `Allow` and nothing else, so the clear never reached the
+/// browser and the login module's "the callback clears it … on every refusal"
+/// was not true (found by FX-28). Each refusal below goes through the whole
+/// router, so it is the response the browser gets that is read.
+///
+/// The control is the same row on the old rendering (FX-32's mutant), where
+/// every case fails on the missing `Set-Cookie`; the positive half is that the
+/// rest of the problem document is unchanged.
+#[tokio::test]
+async fn every_refused_callback_clears_the_login_cookie() {
+    let key = TestKey::ec("k-ec-1");
+    let idp = MockIdp::new(ISSUER, &[&key]);
+    let app = app(&idp);
+
+    let send = |uri: String, cookie: Option<String>| {
+        let app = &app;
+        async move {
+            let mut request = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("host", SHARED_HOST);
+            if let Some(cookie) = cookie {
+                request = request.header("cookie", cookie);
+            }
+            app.app.send(request.body(Body::empty()).unwrap()).await
+        }
+    };
+
+    let mut cases: Vec<(&str, TestResponse)> = Vec::new();
+
+    let (_, s) = start_login(&app, "").await;
+    let s = s.expect("login redirects");
+    cases.push((
+        "a state that is not this login's",
+        send(
+            "/auth/callback?code=c&state=someone-elses".into(),
+            Some(s.cookie.clone()),
+        )
+        .await,
+    ));
+    cases.push((
+        "the provider refused",
+        send(
+            format!("/auth/callback?error=access_denied&state={}", s.state),
+            Some(s.cookie.clone()),
+        )
+        .await,
+    ));
+    cases.push((
+        "no code",
+        send(
+            format!("/auth/callback?state={}", s.state),
+            Some(s.cookie.clone()),
+        )
+        .await,
+    ));
+    cases.push((
+        "a malformed query",
+        send(
+            format!("/auth/callback?code=c&state={}&extra=1", s.state),
+            Some(s.cookie.clone()),
+        )
+        .await,
+    ));
+    cases.push((
+        "no login cookie",
+        send(format!("/auth/callback?code=c&state={}", s.state), None).await,
+    ));
+    // The exchange itself is refused: the provider has no such code.
+    cases.push((
+        "the exchange was refused",
+        finish_login(&app, &s, "no-such-code").await,
+    ));
+
+    let (_, stale) = start_login(&app, "").await;
+    let stale = stale.expect("login redirects");
+    app.app.clock.advance(601);
+    cases.push((
+        "the login is older than 600 s",
+        finish_login(&app, &stale, "c").await,
+    ));
+
+    for (label, response) in &cases {
+        response.assert_problem(401, "unauthenticated");
+        let clear = login_cookie_clear_of(response).unwrap_or_else(|| {
+            panic!(
+                "{label}: the refusal must clear the login cookie, and the browser got: {:?}",
+                response.headers.get_all("set-cookie")
+            )
+        });
+        for attribute in ["Path=/", "Secure", "HttpOnly", "SameSite=Lax"] {
+            assert!(clear.contains(attribute), "{label}: {attribute} in {clear}");
+        }
+        assert!(
+            session_cookie_of(response).is_none(),
+            "{label}: no session on a refusal"
+        );
+    }
+    assert_eq!(cases.len(), 7);
+    app.app.fake.assert_strict();
+}
+
 /// **A login attempt that has gone stale is refused.**
 #[tokio::test]
 async fn a_stale_login_attempt_is_refused() {
