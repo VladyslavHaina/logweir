@@ -8857,3 +8857,105 @@ fn fx20c_the_console_fixture_is_the_status_entry_entry_of_writes() {
         assert_eq!(entry[key], want[key], "{key}");
     }
 }
+
+/// **FX-20c review M-2: through the reconciler.** A `DestinationAccess`
+/// Preflight on the PoC batch 4 F6 thief — its only grant names
+/// `primary`'s archive-write Secret — goes through `reconcile_preflight`
+/// (the production entry point, `resolve()` included) and the bodies the
+/// controller really POSTs carry the binding: the plan `ConfigMap` lists the
+/// `archiveWrite` grant, and the Job projects that Secret's `logweir-binding`
+/// (optional) beside the THIEF's expected binding. Every other FX-20c
+/// controller row builds `Inputs` by hand, so without this one the single
+/// line that carries `grant_bindings` into a real reconcile was unguarded.
+///
+/// KILLS: `resolve()` not assigning `inputs.grant_bindings` (review mutant
+/// R1, which survived every weirkeeper test before this row).
+#[tokio::test]
+async fn fx20c_a_thief_access_preflight_carries_its_grant_binding_end_to_end() {
+    let job = job_name(CheckPlanKind::DestinationAccess);
+    let routes = vec![
+        route(
+            "GET",
+            "/trustrosters/default",
+            roster(RUNNER_KEY_ID, vec![]).to_string(),
+        ),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        route(
+            "GET",
+            "/backupdestinations/fx20-thief",
+            thief_destination().to_string(),
+        ),
+        not_found("GET", leak(job.clone())),
+        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
+        route("POST", "/configmaps", echo("ConfigMap", "plan")),
+        route("POST", "/jobs", echo("Job", &job)),
+    ];
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    let request = json!({
+        "operation": "DestinationAccess",
+        "destinationAccess": {
+            "destinationRef": {"name": "fx20-thief"},
+            "roles": ["ArchiveWrite"]
+        },
+        "timeoutSeconds": 120
+    });
+    pf::reconcile_preflight(&preflight(request), &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+    let bodies = bodies.lock().expect("bodies");
+    let body_of = |uri: &str| {
+        bodies
+            .iter()
+            .find(|b| b.method == "POST" && b.uri.contains(uri))
+            .unwrap_or_else(|| panic!("no POST {uri}"))
+            .body
+            .clone()
+    };
+    let plan_cm: Value = serde_json::from_str(&body_of("/configmaps")).expect("json");
+    let plan_json = plan_cm["data"]
+        .as_object()
+        .expect("data")
+        .values()
+        .find_map(|v| v.as_str().filter(|s| s.contains("\"destinationAccess\"")))
+        .expect("the check plan document");
+    let plan: Value = serde_json::from_str(plan_json).expect("plan json");
+    assert_eq!(
+        plan["request"]["destinationAccess"]["destination"]["grantBindings"],
+        json!([{"role": "ArchiveWrite", "secretName": VICTIM_ARCHIVE_WRITE}]),
+        "{plan}"
+    );
+    let job: Value = serde_json::from_str(&body_of("/jobs")).expect("job json");
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .expect("the container env")
+        .clone();
+    let (projected, expected) =
+        logweir_core::credential_binding::grant_binding_env(DestinationRole::ArchiveWrite);
+    let pair = env
+        .iter()
+        .find(|e| e["name"] == projected)
+        .unwrap_or_else(|| panic!("no {projected} in {env:?}"));
+    assert_eq!(
+        pair["valueFrom"]["secretKeyRef"],
+        json!({"name": VICTIM_ARCHIVE_WRITE, "key": "logweir-binding", "optional": true})
+    );
+    let object: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(thief_destination()).expect("fixture");
+    let thief_binding = weirkeeper::destination::resolve(
+        &object,
+        DestinationRole::ArchiveWrite,
+        &weirkeeper::check::policy::Policy::defaults(),
+    )
+    .expect("resolves")
+    .credential_binding();
+    assert_eq!(
+        env.iter()
+            .find(|e| e["name"] == expected)
+            .and_then(|e| e["value"].as_str()),
+        Some(thief_binding.as_str()),
+        "the expectation is the THIEF's binding, never the Secret's own"
+    );
+}
