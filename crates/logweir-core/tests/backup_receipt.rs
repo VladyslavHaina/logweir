@@ -1664,6 +1664,15 @@ fn a_1_5_0_receipt_with_every_identity_shape_satisfies_every_invariant() {
             identity(None, None, None, (Some("notRead"), Some("notRead"))),
         ),
         (
+            "a broker that answered Kafka's reserved ID",
+            identity(
+                None,
+                None,
+                None,
+                (Some("reservedTopicId"), Some("reservedTopicId")),
+            ),
+        ),
+        (
             "the engine route's source",
             identity(Some(ID_A), Some(ID_A), Some("engineManifest"), (None, None)),
         ),
@@ -1765,10 +1774,13 @@ fn arm_23_refuses_generations_that_do_not_cover_the_named_topic_set() {
 #[test]
 fn arm_24_refuses_an_id_that_is_not_canonical() {
     let tail = " is not a topic ID this format defines: 22 characters of URL-safe base64 \
-                without padding over the ID's 16 bytes, and never the all-zero ID";
+                without padding over the ID's 16 bytes, and never one of Kafka's reserved IDs \
+                (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)";
     for bad in [
         // Kafka's "no ID" is never an identity.
         "AAAAAAAAAAAAAAAAAAAAAA",
+        // Nor its reserved ONE_UUID / METADATA_TOPIC_ID (review M1).
+        "AAAAAAAAAAAAAAAAAAAAAQ",
         // C4: librdkafka's helper's STANDARD alphabet for a real ID.
         "Cf6zT/mcTNCoxuPmv1Ztxw",
         "gtOq2VXiTCK1QM2UtERijA==",
@@ -1802,7 +1814,8 @@ fn arm_24_refuses_an_id_that_is_not_canonical() {
 #[test]
 fn arm_25_refuses_a_reason_that_does_not_fit_its_id() {
     let tail = ": a reason is present exactly when the ID is null, and is \"noTopicId\", \
-                \"notAuthorized\", \"topicNotFound\", \"readFailed\" or \"notRead\"";
+                \"notAuthorized\", \"topicNotFound\", \"readFailed\", \"notRead\" or \
+                \"reservedTopicId\"";
     // A reason beside a recorded ID.
     let mut doc = pristine_1_5();
     generation(&mut doc, "orders").topic_id_reason = Some("readFailed".into());
@@ -1987,4 +2000,54 @@ fn the_generation_rule_reads_two_receipts_of_one_source_cluster() {
         between(Some(&pristine_1_5()), &pristine_1_5(), "payments"),
         Generation::NotEstablished(Unestablished::PreviousUnread(_))
     ));
+}
+
+/// **Review M1 and M2 over two receipts.** A recreated topic can never read
+/// as the same generation through Kafka's reserved ID: a receipt that records
+/// `AAAAAAAAAAAAAAAAAAAAAQ` is refused (arm 24), and even read unverified the
+/// rule does not take it as an identity. And a capture whose after-read
+/// recorded no ID is never `Same` with its predecessor. The control: two
+/// receipts with one real ID, read before and after, are `Same`.
+#[test]
+fn neither_a_sentinel_nor_a_missing_after_read_makes_two_points_the_same() {
+    use logweir_core::topic_identity::{between, Generation, Unestablished};
+    const SENTINEL: &str = "AAAAAAAAAAAAAAAAAAAAAQ";
+    let sentinel = |doc: &mut BackupReceipt| {
+        let e = generation(doc, "orders");
+        e.topic_id = Some(SENTINEL.into());
+        e.topic_id_after = Some(SENTINEL.into());
+    };
+    let mut before_recreation = pristine_1_5();
+    sentinel(&mut before_recreation);
+    let mut after_recreation = pristine_1_5();
+    sentinel(&mut after_recreation);
+    for doc in [&before_recreation, &after_recreation] {
+        assert!(
+            doc.validate_invariants()
+                .unwrap_err()
+                .starts_with("generations[\"orders\"].topic_id \"AAAAAAAAAAAAAAAAAAAAAQ\""),
+            "arm 24 refuses the sentinel"
+        );
+    }
+    assert!(matches!(
+        between(Some(&before_recreation), &after_recreation, "orders"),
+        Generation::NotEstablished(Unestablished::PreviousUnread(_))
+    ));
+    // M2: this capture's after-read failed.
+    let mut current = pristine_1_5();
+    let e = generation(&mut current, "orders");
+    e.topic_id_after = None;
+    e.topic_id_after_reason = Some("readFailed".into());
+    assert_eq!(current.validate_invariants(), Ok(()));
+    assert_eq!(
+        between(Some(&pristine_1_5()), &current, "orders"),
+        Generation::NotEstablished(Unestablished::CurrentAfterUnread("readFailed".into()))
+    );
+    // The control.
+    assert_eq!(
+        between(Some(&pristine_1_5()), &pristine_1_5(), "orders"),
+        Generation::Same {
+            topic_id: ID_A.into()
+        }
+    );
 }

@@ -166,6 +166,9 @@ pub fn describe_topics<C: ClientContext>(
     timeout: Duration,
 ) -> Result<Vec<DescribedTopic>, CallError> {
     let request = describe_request(names)?;
+    // The bound is checked here too, before `send` creates the collection, so
+    // a refused timeout creates no librdkafka object at all (review L3).
+    crate::raw::timeout_ms(timeout)?;
     send(client, &request, timeout)
 }
 
@@ -314,8 +317,9 @@ mod tests {
         assert_eq!(ok[1].as_bytes(), b"payments");
     }
 
-    /// A refused request costs no call: the timeout bound is checked before
-    /// anything is created, and an invalid name before that.
+    /// A refused request costs no call: an invalid name is refused first, and
+    /// then the timeout bound, both before `describe_topics` creates any
+    /// librdkafka object (`send` builds the collection only after both).
     #[test]
     fn a_refused_request_creates_nothing() {
         let p = offline_client();

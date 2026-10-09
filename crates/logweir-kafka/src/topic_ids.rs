@@ -9,6 +9,7 @@
 //! |---|---|
 //! | no error, a non-zero ID | `Id`, Kafka's text (`logweir_core::topic_identity::topic_id_text`) |
 //! | no error, the all-zero ID | `NoId`: the broker has none (inter-broker protocol below 2.8) |
+//! | no error, Kafka's reserved `(0, 1)` (`AAAAAAAAAAAAAAAAAAAAAQ`, `ONE_UUID` / `METADATA_TOPIC_ID`) | `Reserved`: a sentinel no topic is given, never an ID |
 //! | `UNKNOWN_TOPIC_OR_PARTITION` (3) | `NotFound` |
 //! | `TOPIC_AUTHORIZATION_FAILED` (29) | `NotAuthorized`: named, never read as "absent" |
 //! | any other code | `Failed`, naming the code |
@@ -20,7 +21,8 @@
 //! never `NotFound` or `NotAuthorized` ([`call_failure`]).
 use crate::reader::KafkaError;
 use logweir_core::topic_identity::{
-    topic_id_text, IdRead, NOT_AUTHORIZED, NOT_READ, NO_TOPIC_ID, READ_FAILED, TOPIC_NOT_FOUND,
+    topic_id_text, IdRead, NOT_AUTHORIZED, NOT_READ, NO_TOPIC_ID, READ_FAILED, RESERVED_TOPIC_ID,
+    TOPIC_NOT_FOUND,
 };
 
 /// Kafka's `UNKNOWN_TOPIC_OR_PARTITION`.
@@ -41,6 +43,9 @@ pub enum TopicIdRead {
     Id(String),
     /// The broker answered with the all-zero ID: it has no IDs to give.
     NoId,
+    /// The broker answered with Kafka's reserved `(0, 1)` ID, which no topic
+    /// is ever given (review M1): a sentinel, never an identity.
+    Reserved,
     /// The broker does not hold the topic.
     NotFound,
     /// The principal may not Describe the topic.
@@ -58,6 +63,7 @@ impl TopicIdRead {
         match self {
             TopicIdRead::Id(id) => IdRead::Id(id.clone()),
             TopicIdRead::NoId => IdRead::Unread(NO_TOPIC_ID),
+            TopicIdRead::Reserved => IdRead::Unread(RESERVED_TOPIC_ID),
             TopicIdRead::NotFound => IdRead::Unread(TOPIC_NOT_FOUND),
             TopicIdRead::NotAuthorized => IdRead::Unread(NOT_AUTHORIZED),
             TopicIdRead::Failed(_) => IdRead::Unread(READ_FAILED),
@@ -93,9 +99,11 @@ pub fn classify(answer: &TopicAnswer) -> TopicIdRead {
             None => TopicIdRead::Failed(
                 "DescribeTopics answered without an ID for the topic".to_string(),
             ),
-            Some((most, least)) => {
-                topic_id_text(most, least).map_or(TopicIdRead::NoId, TopicIdRead::Id)
-            }
+            Some((most, least)) => match topic_id_text(most, least) {
+                Some(text) => TopicIdRead::Id(text),
+                None if least == 0 => TopicIdRead::NoId,
+                None => TopicIdRead::Reserved,
+            },
         },
     }
 }
@@ -180,6 +188,16 @@ mod tests {
             classify(&answer("t", Some((0, 0)), None)),
             TopicIdRead::NoId
         );
+        // Kafka's reserved ONE_UUID / METADATA_TOPIC_ID (review M1).
+        assert_eq!(
+            classify(&answer("t", Some((0, 1)), None)),
+            TopicIdRead::Reserved
+        );
+        // Its neighbours are IDs.
+        assert!(matches!(
+            classify(&answer("t", Some((0, 2)), None)),
+            TopicIdRead::Id(_)
+        ));
         assert_eq!(
             classify(&answer("t", Some((0, 0)), Some(3))),
             TopicIdRead::NotFound
@@ -210,6 +228,10 @@ mod tests {
             IdRead::Id(TEXT.into())
         );
         assert_eq!(TopicIdRead::NoId.to_id_read(), IdRead::Unread("noTopicId"));
+        assert_eq!(
+            TopicIdRead::Reserved.to_id_read(),
+            IdRead::Unread("reservedTopicId")
+        );
         assert_eq!(
             TopicIdRead::NotFound.to_id_read(),
             IdRead::Unread("topicNotFound")
@@ -254,6 +276,31 @@ mod tests {
             &join(&["a".to_string()], &twice)[0].1,
             TopicIdRead::Failed(m) if m.contains("more than once")
         ));
+    }
+
+    /// Review L1: the codes are pinned as LITERALS here, from `rdkafka.h`
+    /// (`_TIMED_OUT` -185, `_TRANSPORT` -195, `_ALL_BROKERS_DOWN` -187,
+    /// `_TIMED_OUT_QUEUE` -166, `_RESOLVE` -193), so a wrong constant fails.
+    #[test]
+    fn the_transport_codes_are_librdkafkas() {
+        for code in [-185, -195, -187, -166, -193] {
+            assert!(
+                matches!(
+                    call_failure(Some(code), false, "x"),
+                    KafkaError::Unreachable(_)
+                ),
+                "{code}"
+            );
+        }
+        assert_eq!(TRANSPORT_CODES.len(), 5);
+        // A per-call refusal of the request itself, and a protocol code, are not
+        // the network.
+        for code in [-186, -184, 3, 29] {
+            assert!(
+                matches!(call_failure(Some(code), false, "x"), KafkaError::Client(_)),
+                "{code}"
+            );
+        }
     }
 
     #[test]

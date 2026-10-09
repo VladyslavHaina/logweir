@@ -2110,12 +2110,60 @@ fn the_signed_receipt_records_each_topics_configuration_capture_coverage() {
 // PROD-01.4a: the receipt's topic IDs, end to end through the backup seam.
 // ---------------------------------------------------------------------------
 
-/// A source reader that answers DescribeTopics from a SCRIPT, one answer per
-/// call, so a test can make the read after the engine see another topic than
-/// the read before it. `orders` is recreated while the engine runs (A, then
-/// B); `ledger` keeps its ID; `refunds` is refused, then not found.
+/// A source reader whose topics CHANGE WHEN THE ENGINE RUNS (review M3):
+/// it answers from the state of `engine_ran`, which only [`ChangesTheTopic`]
+/// sets, from inside the engine's `backup`. So a read taken before the engine
+/// sees the old topic, and only a read taken after it sees the new one,
+/// whatever order the reads are made in. `orders` is recreated by the engine
+/// (A, then B); `ledger` keeps its ID; `refunds` is refused, then not found.
 struct IdReader {
     calls: Mutex<usize>,
+    engine_ran: std::sync::atomic::AtomicBool,
+}
+
+/// An engine double that, when it runs, deletes and recreates `orders` on
+/// [`IdReader`]'s cluster (it flips `engine_ran`), and records how many
+/// DescribeTopics reads had happened by then.
+struct ChangesTheTopic<'a> {
+    engine: &'a dyn DataEngine,
+    reader: &'a IdReader,
+    reads_when_the_engine_ran: Mutex<Option<usize>>,
+}
+
+impl DataEngine for ChangesTheTopic<'_> {
+    fn id(&self) -> EngineId {
+        self.engine.id()
+    }
+    fn list_backup_sets(&self, loc: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
+        self.engine.list_backup_sets(loc)
+    }
+    fn describe(&self, set: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
+        self.engine.describe(set)
+    }
+    fn preflight(&self, plan: &RestorePlan) -> Result<PreflightReport, EngineError> {
+        self.engine.preflight(plan)
+    }
+    fn restore(
+        &self,
+        plan: &RestorePlan,
+        obs: &mut dyn PhaseObserver,
+    ) -> Result<RestoreFacts, EngineError> {
+        self.engine.restore(plan, obs)
+    }
+    fn fingerprints(&self, sel: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
+        self.engine.fingerprints(sel)
+    }
+    fn backup(
+        &self,
+        plan: &BackupPlan,
+        obs: &mut dyn PhaseObserver,
+    ) -> Result<BackupFacts, EngineError> {
+        *self.reads_when_the_engine_ran.lock().unwrap() = Some(*self.reader.calls.lock().unwrap());
+        self.reader
+            .engine_ran
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.engine.backup(plan, obs)
+    }
 }
 
 const ID_A: &str = "gtOq2VXiTCK1QM2UtERijA";
@@ -2152,9 +2200,8 @@ impl ClusterReader for IdReader {
         topics: &[String],
     ) -> Result<Vec<(String, logweir_kafka::topic_ids::TopicIdRead)>, KafkaError> {
         use logweir_kafka::topic_ids::TopicIdRead as R;
-        let mut calls = self.calls.lock().unwrap();
-        *calls += 1;
-        let after = *calls > 1;
+        *self.calls.lock().unwrap() += 1;
+        let after = self.engine_ran.load(std::sync::atomic::Ordering::SeqCst);
         Ok(topics
             .iter()
             .map(|t| {
@@ -2195,9 +2242,23 @@ fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
     let (store, _k, _b) = archive_for("mvp-demo");
     let reader = IdReader {
         calls: Mutex::new(0),
+        engine_ran: std::sync::atomic::AtomicBool::new(false),
+    };
+    let changing = ChangesTheTopic {
+        engine: &engine,
+        reader: &reader,
+        reads_when_the_engine_ran: Mutex::new(None),
     };
 
-    let outcome = exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
+    let outcome = exec(&f.args, "run-1", &reader, &changing, &store, &store).unwrap();
+    // Review M3: exactly ONE read happened before the engine ran, and the
+    // other after it — a read hoisted above the engine would make this 2, and
+    // would record A after the engine too.
+    assert_eq!(
+        *changing.reads_when_the_engine_ran.lock().unwrap(),
+        Some(1),
+        "the read before the engine, and only it, precedes the engine"
+    );
     assert_eq!(
         *reader.calls.lock().unwrap(),
         2,

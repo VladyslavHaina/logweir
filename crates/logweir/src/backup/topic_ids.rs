@@ -76,6 +76,12 @@ pub fn observe(
                 "the broker has no topic ID for this topic (a cluster below inter-broker \
                  protocol 2.8): recorded as null (noTopicId), its generation UNKNOWN"
             ),
+            TopicIdRead::Reserved => tracing::warn!(
+                topic = %topic,
+                read = when,
+                "the broker answered with Kafka's reserved topic ID (0, 1), which no topic is \
+                 ever given: recorded as null (reservedTopicId), never as an identity"
+            ),
             TopicIdRead::NotAuthorized => tracing::warn!(
                 topic = %topic,
                 read = when,

@@ -399,6 +399,51 @@ mod tests {
         assert_eq!(o.members[0].consumer_id, None);
     }
 
+    /// Review L1: what a whole DescribeTopics failure becomes. No result
+    /// within the bound and librdkafka's `_TIMED_OUT` are `Unreachable`; a
+    /// refused request is `Client`; none of them is ever "not found".
+    #[test]
+    fn a_describe_topics_call_failure_is_named_by_its_cause() {
+        assert!(matches!(
+            topics_call_failure(&CallError::NoResult {
+                waited: Duration::from_secs(20)
+            }),
+            KafkaError::Unreachable(m) if m.contains("DescribeTopics")
+        ));
+        assert!(matches!(
+            topics_call_failure(&CallError::Call {
+                code: -185,
+                message: CText::Utf8("Local: Timed out".into())
+            }),
+            KafkaError::Unreachable(_)
+        ));
+        assert!(matches!(
+            topics_call_failure(&CallError::Call {
+                code: -195,
+                message: CText::Utf8("Local: Broker transport failure".into())
+            }),
+            KafkaError::Unreachable(_)
+        ));
+        assert!(matches!(
+            topics_call_failure(&CallError::Call {
+                code: -186,
+                message: CText::Utf8("Local: Invalid argument".into())
+            }),
+            KafkaError::Client(_)
+        ));
+        assert!(matches!(
+            topics_call_failure(&CallError::InvalidInput("a NUL".into())),
+            KafkaError::Client(_)
+        ));
+        assert!(matches!(
+            topics_call_failure(&CallError::Options {
+                code: -1,
+                message: "NULL".into()
+            }),
+            KafkaError::Client(_)
+        ));
+    }
+
     #[test]
     fn a_whole_call_failure_keeps_its_integer_code() {
         assert_eq!(

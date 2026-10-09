@@ -217,15 +217,18 @@ pub struct BackupReceipt {
 /// OD-6 (a2)), through the engine's principal: once immediately before the
 /// engine starts, once immediately after it exits. The text is Kafka's, the
 /// one `kafka-topics.sh --describe` prints, derived from the ID's two halves
-/// (`crate::topic_identity::topic_id_text`); the all-zero ID — Kafka's "no
-/// ID", a cluster below inter-broker protocol 2.8 — is never written.
+/// (`crate::topic_identity::topic_id_text`). Kafka's two reserved IDs, which
+/// no topic is ever given, are never written: the all-zero ID — Kafka's "no
+/// ID", a cluster below inter-broker protocol 2.8 — becomes `null` with
+/// `noTopicId`, and `AAAAAAAAAAAAAAAAAAAAAQ` (`Uuid.ONE_UUID`,
+/// `METADATA_TOPIC_ID`) `null` with `reservedTopicId`.
 ///
 /// | field | present | meaning |
 /// |---|---|---|
 /// | `topic_id` | always, possibly `null` | the ID before the engine |
 /// | `topic_id_after` | always, possibly `null` | the ID after it; a different non-null value means the topic was recreated WHILE the engine ran |
 /// | `topic_id_source` | exactly when an ID is recorded (arm 26) | `describeTopics` (this build), or `engineManifest` (decision §6.3, not written by this build) |
-/// | `topic_id_reason` | exactly when `topic_id` is `null` (arm 25) | why: `noTopicId`, `notAuthorized`, `topicNotFound`, `readFailed` or `notRead` |
+/// | `topic_id_reason` | exactly when `topic_id` is `null` (arm 25) | why: `noTopicId`, `notAuthorized`, `topicNotFound`, `readFailed`, `notRead` or `reservedTopicId` |
 /// | `topic_id_after_reason` | exactly when `topic_id_after` is `null` (arm 25) | the same, for the read after the engine |
 ///
 /// `null` means UNKNOWN, never "the same" (decision §3.1): a reason says why,
@@ -234,11 +237,15 @@ pub struct BackupReceipt {
 /// `topic_id_after` as `null`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TopicIdentity {
-    /// The topic ID before the engine, or `null`.
+    /// The topic ID before the engine, or `null`. Kafka's text: 22 URL-safe
+    /// base64 characters, the last of which carries two bits (arm 24 also
+    /// refuses Kafka's reserved IDs, which the pattern cannot).
     #[serde(default)]
+    #[schemars(regex(pattern = r"^[A-Za-z0-9_-]{21}[AQgw]$"))]
     pub topic_id: Option<String>,
-    /// The topic ID after the engine, or `null`.
+    /// The topic ID after the engine, or `null`; the same form.
     #[serde(default)]
+    #[schemars(regex(pattern = r"^[A-Za-z0-9_-]{21}[AQgw]$"))]
     pub topic_id_after: Option<String>,
     /// Where the recorded IDs came from: `describeTopics` or
     /// `engineManifest` (`crate::topic_identity::TOPIC_ID_SOURCES`). Present
@@ -892,7 +899,8 @@ impl BackupReceipt {
     /// 22. `generations` is present only under a minor of at least 5.
     /// 23. it covers exactly `source.topics`.
     /// 24. every recorded ID is canonical (`crate::topic_identity::is_canonical`):
-    ///     22 URL-safe base64 characters over 16 bytes, never the all-zero ID.
+    ///     22 URL-safe base64 characters over 16 bytes, never one of Kafka's
+    ///     reserved IDs (zero, `AAAAAAAAAAAAAAAAAAAAAQ`).
     /// 25. a reason is present exactly when its ID is `null`, from the closed
     ///     set.
     /// 26. `topic_id_source` is present exactly when an ID is recorded, from
@@ -1362,7 +1370,8 @@ impl BackupReceipt {
                             return Err(format!(
                                 "generations[{topic:?}].{field} {id:?} is not a topic ID this \
                                  format defines: 22 characters of URL-safe base64 without \
-                                 padding over the ID's 16 bytes, and never the all-zero ID"
+                                 padding over the ID's 16 bytes, and never one of Kafka's \
+                                 reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)"
                             ));
                         }
                     }
@@ -1387,7 +1396,7 @@ impl BackupReceipt {
                             "generations[{topic:?}].{field}_reason {rendered} does not fit a \
                              {state} {field}: a reason is present exactly when the ID is null, \
                              and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \
-                             \"readFailed\" or \"notRead\""
+                             \"readFailed\", \"notRead\" or \"reservedTopicId\""
                         ));
                     }
                 }

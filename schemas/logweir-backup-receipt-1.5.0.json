@@ -338,19 +338,21 @@
       }
     },
     "TopicIdentity": {
-      "description": "**PROD-01.4a, receipt 1.5.0.** What one run observed about one topic's identity: the topic ID (KIP-516) before the engine and after it.\n\n# Where each part comes from\n\nLogweir's OWN DescribeTopics read of the source (`logweir-rdkafka-ffi`, OD-6 (a2)), through the engine's principal: once immediately before the engine starts, once immediately after it exits. The text is Kafka's, the one `kafka-topics.sh --describe` prints, derived from the ID's two halves (`crate::topic_identity::topic_id_text`); the all-zero ID — Kafka's \"no ID\", a cluster below inter-broker protocol 2.8 — is never written.\n\n| field | present | meaning | |---|---|---| | `topic_id` | always, possibly `null` | the ID before the engine | | `topic_id_after` | always, possibly `null` | the ID after it; a different non-null value means the topic was recreated WHILE the engine ran | | `topic_id_source` | exactly when an ID is recorded (arm 26) | `describeTopics` (this build), or `engineManifest` (decision §6.3, not written by this build) | | `topic_id_reason` | exactly when `topic_id` is `null` (arm 25) | why: `noTopicId`, `notAuthorized`, `topicNotFound`, `readFailed` or `notRead` | | `topic_id_after_reason` | exactly when `topic_id_after` is `null` (arm 25) | the same, for the read after the engine |\n\n`null` means UNKNOWN, never \"the same\" (decision §3.1): a reason says why, so a refused read (`notAuthorized`) is never mistaken for a broker that has no IDs (`noTopicId`). A reader reads an absent `topic_id` or `topic_id_after` as `null`.",
+      "description": "**PROD-01.4a, receipt 1.5.0.** What one run observed about one topic's identity: the topic ID (KIP-516) before the engine and after it.\n\n# Where each part comes from\n\nLogweir's OWN DescribeTopics read of the source (`logweir-rdkafka-ffi`, OD-6 (a2)), through the engine's principal: once immediately before the engine starts, once immediately after it exits. The text is Kafka's, the one `kafka-topics.sh --describe` prints, derived from the ID's two halves (`crate::topic_identity::topic_id_text`). Kafka's two reserved IDs, which no topic is ever given, are never written: the all-zero ID — Kafka's \"no ID\", a cluster below inter-broker protocol 2.8 — becomes `null` with `noTopicId`, and `AAAAAAAAAAAAAAAAAAAAAQ` (`Uuid.ONE_UUID`, `METADATA_TOPIC_ID`) `null` with `reservedTopicId`.\n\n| field | present | meaning | |---|---|---| | `topic_id` | always, possibly `null` | the ID before the engine | | `topic_id_after` | always, possibly `null` | the ID after it; a different non-null value means the topic was recreated WHILE the engine ran | | `topic_id_source` | exactly when an ID is recorded (arm 26) | `describeTopics` (this build), or `engineManifest` (decision §6.3, not written by this build) | | `topic_id_reason` | exactly when `topic_id` is `null` (arm 25) | why: `noTopicId`, `notAuthorized`, `topicNotFound`, `readFailed`, `notRead` or `reservedTopicId` | | `topic_id_after_reason` | exactly when `topic_id_after` is `null` (arm 25) | the same, for the read after the engine |\n\n`null` means UNKNOWN, never \"the same\" (decision §3.1): a reason says why, so a refused read (`notAuthorized`) is never mistaken for a broker that has no IDs (`noTopicId`). A reader reads an absent `topic_id` or `topic_id_after` as `null`.",
       "type": "object",
       "properties": {
         "topic_id": {
-          "description": "The topic ID before the engine, or `null`.",
+          "description": "The topic ID before the engine, or `null`. Kafka's text: 22 URL-safe base64 characters, the last of which carries two bits (arm 24 also refuses Kafka's reserved IDs, which the pattern cannot).",
           "default": null,
           "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$",
           "nullable": true
         },
         "topic_id_after": {
-          "description": "The topic ID after the engine, or `null`.",
+          "description": "The topic ID after the engine, or `null`; the same form.",
           "default": null,
           "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$",
           "nullable": true
         },
         "topic_id_after_reason": {

@@ -20,9 +20,16 @@
 //! halves ([`topic_id_text`]) and NEVER from librdkafka's
 //! `rd_kafka_Uuid_base64str`, which uses the standard alphabet: the same ID
 //! reads `Cf6zT/mcTNCoxuPmv1Ztxw` there and `Cf6zT_mcTNCoxuPmv1Ztxw` in Kafka
-//! (PROD-01.4 §1.3 C4, measured). The all-zero ID is Kafka's "no ID" (a broker
-//! below inter-broker protocol 2.8 answers with it) and is never written: it
-//! becomes `null` with the reason [`NO_TOPIC_ID`].
+//! (PROD-01.4 §1.3 C4, measured). Kafka RESERVES two IDs that no topic is
+//! ever given (`org.apache.kafka.common.Uuid.RESERVED`, which `randomUuid`
+//! never returns): the all-zero ID, Kafka's "no ID" (a broker below
+//! inter-broker protocol 2.8 answers with it), and `(0, 1)`,
+//! `AAAAAAAAAAAAAAAAAAAAAQ`, Kafka's `ONE_UUID` / `METADATA_TOPIC_ID`
+//! (librdkafka's `RD_KAFKA_UUID_METADATA_TOPIC_ID`). Neither is ever written
+//! or accepted as an identity: zero becomes `null` with the reason
+//! [`NO_TOPIC_ID`], the sentinel `null` with [`RESERVED_TOPIC_ID`], and a
+//! recorded one is refused (receipt arm 24) — so two captures can never read
+//! as the same generation through a sentinel.
 //!
 //! # The generation rule (decision §4.2 R1 and §4.4)
 //!
@@ -33,7 +40,7 @@
 //! |---|---|
 //! | both recorded before their captures, and different | [`Generation::New`]: the topic was recreated between them (`TopicIdChanged`), never a continuation |
 //! | the current point's own two reads differ | [`Generation::ChangedDuringCapture`]: recreated while the engine ran |
-//! | both recorded and equal, and the current capture saw no change | [`Generation::Same`] (basis `topicId`) |
+//! | both pre-capture IDs recorded and equal, and the current capture's own two reads recorded and equal | [`Generation::Same`] (basis `topicId`) |
 //! | anything else | [`Generation::NotEstablished`], with the reason |
 //!
 //! `NotEstablished` is TODAY'S FALLBACK, stated and never guessed: a point
@@ -92,21 +99,38 @@ pub const READ_FAILED: &str = "readFailed";
 /// The reader that took the backup does not read topic IDs at all.
 pub const NOT_READ: &str = "notRead";
 
+/// The broker answered with one of Kafka's reserved IDs that no topic is ever
+/// given — `(0, 1)`, `AAAAAAAAAAAAAAAAAAAAAQ` (`Uuid.ONE_UUID`,
+/// `METADATA_TOPIC_ID`). A sentinel is never an identity.
+pub const RESERVED_TOPIC_ID: &str = "reservedTopicId";
+
+/// The text of Kafka's reserved `(0, 1)` ID, which is never a topic's.
+pub const RESERVED_ID_TEXT: &str = "AAAAAAAAAAAAAAAAAAAAAQ";
+
 /// `topic_id_reason`'s and `topic_id_after_reason`'s closed set (receipt arm
 /// 25), in the order the refusal names them.
-pub const TOPIC_ID_REASONS: [&str; 5] = [
+pub const TOPIC_ID_REASONS: [&str; 6] = [
     NO_TOPIC_ID,
     NOT_AUTHORIZED,
     TOPIC_NOT_FOUND,
     READ_FAILED,
     NOT_READ,
+    RESERVED_TOPIC_ID,
 ];
 
-/// **The canonical text of a topic ID**, from its two halves; `None` for the
-/// all-zero ID, which is Kafka's "no ID" and never an identity.
+/// Whether the two halves are one of Kafka's reserved IDs, which no topic is
+/// ever given: zero ("no ID") and `(0, 1)` (`ONE_UUID`, `METADATA_TOPIC_ID`).
+#[must_use]
+pub const fn is_reserved(most_significant_bits: i64, least_significant_bits: i64) -> bool {
+    most_significant_bits == 0 && (least_significant_bits == 0 || least_significant_bits == 1)
+}
+
+/// **The canonical text of a topic ID**, from its two halves; `None` for
+/// Kafka's reserved IDs ([`is_reserved`]: zero and `(0, 1)`), which are never
+/// an identity.
 #[must_use]
 pub fn topic_id_text(most_significant_bits: i64, least_significant_bits: i64) -> Option<String> {
-    if most_significant_bits == 0 && least_significant_bits == 0 {
+    if is_reserved(most_significant_bits, least_significant_bits) {
         return None;
     }
     let mut bytes = [0u8; 16];
@@ -133,16 +157,61 @@ pub fn topic_id_halves(text: &str) -> Option<(i64, i64)> {
     least.copy_from_slice(&bytes[8..]);
     let halves = (i64::from_be_bytes(most), i64::from_be_bytes(least));
     // Canonical means it re-encodes to ITSELF (no stray trailing bits) and is
-    // not the all-zero "no ID".
+    // not one of Kafka's reserved IDs.
     (topic_id_text(halves.0, halves.1).as_deref() == Some(text)).then_some(halves)
 }
 
 /// Whether `text` is a topic ID in this format's text form (receipt arm 24):
 /// 22 URL-safe base64 characters over 16 bytes that re-encode to themselves,
-/// and not the all-zero ID.
+/// and not one of Kafka's reserved IDs (`AAAAAAAAAAAAAAAAAAAAAA`,
+/// `AAAAAAAAAAAAAAAAAAAAAQ`).
 #[must_use]
 pub fn is_canonical(text: &str) -> bool {
     topic_id_halves(text).is_some()
+}
+
+/// **The one check both verifiers make of a catalog point record** (review
+/// M1): every topic ID the record copies from its receipt
+/// (`topics[].identity.topic_id`, `.topic_id_after`) is a real topic ID in
+/// Kafka's text — never one of Kafka's reserved IDs, never another alphabet.
+/// A record's copied facts are otherwise checked against the verified receipt
+/// it names (D3 §5.2 rule 3), which no verifier fetches; this check needs
+/// nothing but the record, and keeps a sentinel from ever reading as an
+/// identity in a catalog. `docs/verify_scorecard.py::_catalog_point_problem`
+/// returns the same text.
+///
+/// # Errors
+///
+/// The refusal, naming the topic, the field and the value.
+pub fn refuse_copied_topic_ids(record: &serde_json::Value) -> Result<(), String> {
+    let Some(topics) = record.get("topics").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    for topic in topics {
+        let Some(identity) = topic.get("identity").filter(|i| !i.is_null()) else {
+            continue;
+        };
+        let name = topic
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(|| "?".to_string(), |n| format!("{n:?}"));
+        for field in ["topic_id", "topic_id_after"] {
+            match identity.get(field) {
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::String(id)) if is_canonical(id) => {}
+                Some(serde_json::Value::String(id)) => {
+                    return Err(format!(
+                        "topics[{name}].identity.{field} {id:?} is not a topic ID this format \
+                         defines: 22 characters of URL-safe base64 without padding over the ID's \
+                         16 bytes, and never one of Kafka's reserved IDs \
+                         (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)"
+                    ))
+                }
+                Some(_) => return Err(format!("topics[{name}].identity.{field} is not a string")),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One read of one topic's ID: the canonical text, or why there is none.
@@ -155,11 +224,15 @@ pub enum IdRead {
 }
 
 impl IdRead {
-    /// What the broker's two halves mean: the ID, or [`NO_TOPIC_ID`] for zero.
+    /// What the broker's two halves mean: the ID, [`NO_TOPIC_ID`] for zero,
+    /// or [`RESERVED_TOPIC_ID`] for Kafka's reserved `(0, 1)`.
     #[must_use]
     pub fn of_halves(most_significant_bits: i64, least_significant_bits: i64) -> IdRead {
-        topic_id_text(most_significant_bits, least_significant_bits)
-            .map_or(IdRead::Unread(NO_TOPIC_ID), IdRead::Id)
+        match topic_id_text(most_significant_bits, least_significant_bits) {
+            Some(text) => IdRead::Id(text),
+            None if least_significant_bits == 0 => IdRead::Unread(NO_TOPIC_ID),
+            None => IdRead::Unread(RESERVED_TOPIC_ID),
+        }
     }
 
     /// The ID, when there is one.
@@ -219,10 +292,21 @@ pub enum WithinCapture<'a> {
     NotEstablished,
 }
 
+/// An entry's ID as the rule reads it: only a canonical, non-reserved text
+/// counts as an ID. A verified receipt never carries another (arm 24); this
+/// keeps the rule from reading a sentinel as an identity even when it is
+/// handed a document nobody verified.
+fn real(id: Option<&str>) -> Option<&str> {
+    id.filter(|t| is_canonical(t))
+}
+
 /// [`WithinCapture`] of one receipt entry.
 #[must_use]
 pub fn within_capture(entry: &TopicIdentity) -> WithinCapture<'_> {
-    match (entry.topic_id.as_deref(), entry.topic_id_after.as_deref()) {
+    match (
+        real(entry.topic_id.as_deref()),
+        real(entry.topic_id_after.as_deref()),
+    ) {
         (Some(before), Some(after)) if before == after => {
             WithinCapture::Unchanged { topic_id: before }
         }
@@ -253,10 +337,13 @@ pub enum Generation {
         /// The ID after it.
         after: String,
     },
-    /// Both points recorded the same ID and this capture saw no change: the
-    /// same topic incarnation (basis `topicId`). Not, by itself, a claim that
-    /// the offsets between them are continuous (a same-ID truncation keeps
-    /// the ID; decision §2, FP1).
+    /// Both points recorded the same ID before their captures, AND this
+    /// capture's own two reads were recorded and are equal (it saw no change):
+    /// the same topic incarnation (basis `topicId`). A capture whose read after
+    /// the engine recorded no ID is never `Same` — the topic may have been
+    /// recreated while it ran (decision §4.7 FN3). Not, by itself, a claim that
+    /// the offsets between the two points are continuous (a same-ID truncation
+    /// keeps the ID; decision §2, FP1).
     Same {
         /// The ID.
         topic_id: String,
@@ -283,6 +370,10 @@ pub enum Unestablished {
     CurrentNotRecorded,
     /// This point's read before its capture recorded no ID, for this reason.
     CurrentUnread(String),
+    /// This point's read AFTER its capture recorded no ID, for this reason:
+    /// whether the topic was recreated while the engine ran is not known
+    /// (decision §4.7 FN3), so the link is never `Same`.
+    CurrentAfterUnread(String),
 }
 
 impl Unestablished {
@@ -296,6 +387,7 @@ impl Unestablished {
             Unestablished::PreviousUnread(_) => "previousUnread",
             Unestablished::CurrentNotRecorded => "currentNotRecorded",
             Unestablished::CurrentUnread(_) => "currentUnread",
+            Unestablished::CurrentAfterUnread(_) => "currentAfterUnread",
         }
     }
 }
@@ -319,6 +411,11 @@ impl std::fmt::Display for Unestablished {
             Unestablished::CurrentUnread(why) => {
                 write!(f, "this point recorded no topic ID ({why})")
             }
+            Unestablished::CurrentAfterUnread(why) => write!(
+                f,
+                "this point recorded no topic ID after its capture ({why}), so whether the \
+                 topic changed while it ran is unknown"
+            ),
         }
     }
 }
@@ -358,8 +455,9 @@ impl std::fmt::Display for Generation {
 /// change, then equality.
 #[must_use]
 pub fn by_topic_id(previous: Option<&TopicIdentity>, current: &TopicIdentity) -> Generation {
-    let prev_id = previous.and_then(|p| p.topic_id.as_deref());
-    if let (Some(a), Some(b)) = (prev_id, current.topic_id.as_deref()) {
+    let prev_id = previous.and_then(|p| real(p.topic_id.as_deref()));
+    let cur_id = real(current.topic_id.as_deref());
+    if let (Some(a), Some(b)) = (prev_id, cur_id) {
         if a != b {
             return Generation::New {
                 previous: a.to_string(),
@@ -367,29 +465,45 @@ pub fn by_topic_id(previous: Option<&TopicIdentity>, current: &TopicIdentity) ->
             };
         }
     }
-    match within_capture(current) {
-        WithinCapture::Changed { before, after } => {
-            return Generation::ChangedDuringCapture {
-                before: before.to_string(),
-                after: after.to_string(),
-            }
-        }
-        WithinCapture::Unchanged { .. } | WithinCapture::NotEstablished => {}
+    let within = within_capture(current);
+    if let WithinCapture::Changed { before, after } = within {
+        return Generation::ChangedDuringCapture {
+            before: before.to_string(),
+            after: after.to_string(),
+        };
     }
-    let reason_of = |r: &Option<String>| r.clone().unwrap_or_else(|| "absent".to_string());
+    // Why a side has no ID: its recorded reason, or — for a document nobody
+    // verified — that what it carries is not a topic ID.
+    let reason_of = |id: &Option<String>, reason: &Option<String>| match id {
+        Some(text) if !is_canonical(text) => format!("{text:?} is not a topic ID"),
+        _ => reason.clone().unwrap_or_else(|| "absent".to_string()),
+    };
     let Some(previous) = previous else {
         return Generation::NotEstablished(Unestablished::PreviousNotRecorded);
     };
-    match (previous.topic_id.as_deref(), current.topic_id.as_deref()) {
-        (Some(a), Some(_)) => Generation::Same {
-            topic_id: a.to_string(),
-        },
+    match (prev_id, cur_id) {
         (None, _) => Generation::NotEstablished(Unestablished::PreviousUnread(reason_of(
+            &previous.topic_id,
             &previous.topic_id_reason,
         ))),
         (Some(_), None) => Generation::NotEstablished(Unestablished::CurrentUnread(reason_of(
+            &current.topic_id,
             &current.topic_id_reason,
         ))),
+        // Equal pre-capture IDs are `Same` only when this capture's own two
+        // reads were recorded and agree: an after-read that recorded no ID
+        // leaves a recreation DURING the capture open (FN3).
+        (Some(a), Some(_)) => match within {
+            WithinCapture::Unchanged { .. } => Generation::Same {
+                topic_id: a.to_string(),
+            },
+            WithinCapture::Changed { .. } | WithinCapture::NotEstablished => {
+                Generation::NotEstablished(Unestablished::CurrentAfterUnread(reason_of(
+                    &current.topic_id_after,
+                    &current.topic_id_after_reason,
+                )))
+            }
+        },
     }
 }
 
@@ -466,13 +580,62 @@ mod tests {
     }
 
     #[test]
-    fn zero_is_no_id_and_never_text() {
+    fn kafkas_reserved_ids_are_never_text_and_never_an_identity() {
+        // Zero, Kafka's "no ID".
         assert_eq!(topic_id_text(0, 0), None);
         assert!(!is_canonical("AAAAAAAAAAAAAAAAAAAAAA"));
         assert_eq!(IdRead::of_halves(0, 0), IdRead::Unread(NO_TOPIC_ID));
-        // One half zero is an ID.
-        assert!(topic_id_text(0, 1).is_some());
+        // (0, 1), Kafka's ONE_UUID / METADATA_TOPIC_ID (review M1): never a
+        // topic's, so never text, never canonical, and its own reason.
+        assert!(is_reserved(0, 1));
+        assert_eq!(topic_id_text(0, 1), None);
+        assert!(!is_canonical(RESERVED_ID_TEXT));
+        assert_eq!(IdRead::of_halves(0, 1), IdRead::Unread(RESERVED_TOPIC_ID));
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode([0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            RESERVED_ID_TEXT
+        );
+        // Their neighbours are IDs.
+        assert!(!is_reserved(1, 0) && !is_reserved(0, 2) && !is_reserved(0, -1));
         assert!(topic_id_text(1, 0).is_some());
+        assert!(topic_id_text(0, 2).is_some());
+        assert!(is_canonical(&topic_id_text(0, 2).unwrap()));
+    }
+
+    /// Review M1's failure, closed: a recreated topic can never read as the
+    /// same generation through the sentinel. Two points whose reads carried
+    /// it record no ID (`reservedTopicId`) and are not established; even
+    /// handed unverified entries carrying the text, the rule does not read it
+    /// as an ID. The control: two real equal IDs are `Same`.
+    #[test]
+    fn a_sentinel_id_never_makes_two_points_the_same_generation() {
+        let sentinel_read = IdRead::of_halves(0, 1);
+        let point = observed(&sentinel_read, &sentinel_read);
+        assert_eq!(point.topic_id, None);
+        assert_eq!(point.topic_id_reason.as_deref(), Some(RESERVED_TOPIC_ID));
+        assert_eq!(point.topic_id_source, None);
+        assert!(matches!(
+            by_topic_id(Some(&point), &point),
+            Generation::NotEstablished(Unestablished::PreviousUnread(r)) if r == RESERVED_TOPIC_ID
+        ));
+        let forged = TopicIdentity {
+            topic_id: Some(RESERVED_ID_TEXT.into()),
+            topic_id_after: Some(RESERVED_ID_TEXT.into()),
+            topic_id_source: Some(DESCRIBE_TOPICS.into()),
+            topic_id_reason: None,
+            topic_id_after_reason: None,
+        };
+        assert_eq!(within_capture(&forged), WithinCapture::NotEstablished);
+        assert!(matches!(
+            by_topic_id(Some(&forged), &forged),
+            Generation::NotEstablished(Unestablished::PreviousUnread(r))
+                if r.contains("is not a topic ID")
+        ));
+        // The control.
+        assert_eq!(
+            by_topic_id(Some(&entry(Some(A), Some(A))), &entry(Some(A), Some(A))),
+            Generation::Same { topic_id: A.into() }
+        );
     }
 
     #[test]
@@ -562,8 +725,87 @@ mod tests {
         // The previous point's AFTER read does not decide R1; its BEFORE read
         // does (the oracle's `classify`).
         assert_eq!(
-            by_topic_id(Some(&entry(Some(A), None)), &entry(Some(A), None)),
+            by_topic_id(Some(&entry(Some(A), None)), &entry(Some(A), Some(A))),
             Generation::Same { topic_id: A.into() }
+        );
+    }
+
+    /// Review M2: equal pre-capture IDs are `Same` only when this capture's
+    /// read AFTER the engine recorded the same ID. Whatever the after-read's
+    /// reason, the link is not established (the topic may have been recreated
+    /// while the engine ran, decision §4.7 FN3) — never `Same`.
+    #[test]
+    fn an_after_read_that_recorded_no_id_is_never_the_same_generation() {
+        for reason in TOPIC_ID_REASONS {
+            let current = observed(&IdRead::Id(A.into()), &IdRead::Unread(reason));
+            assert_eq!(
+                by_topic_id(Some(&entry(Some(A), Some(A))), &current),
+                Generation::NotEstablished(Unestablished::CurrentAfterUnread(reason.into())),
+                "{reason}"
+            );
+        }
+        // The control: the same pre-capture ID, both reads recorded.
+        assert_eq!(
+            by_topic_id(Some(&entry(Some(A), Some(A))), &entry(Some(A), Some(A))),
+            Generation::Same { topic_id: A.into() }
+        );
+        assert_eq!(
+            Unestablished::CurrentAfterUnread("readFailed".into()).code(),
+            "currentAfterUnread"
+        );
+    }
+
+    /// Review M1, the catalog half: a record copying a reserved or
+    /// other-alphabet ID is refused; real IDs, nulls and records without the
+    /// block pass.
+    #[test]
+    fn a_catalog_record_copying_a_reserved_id_is_refused() {
+        let record = |id: serde_json::Value| {
+            serde_json::json!({"topics": [
+                {"name": "orders", "identity": {"topic_id": A, "topic_id_after": id}},
+            ]})
+        };
+        let tail = " is not a topic ID this format defines: 22 characters of URL-safe base64 \
+                    without padding over the ID's 16 bytes, and never one of Kafka's reserved \
+                    IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)";
+        for bad in [
+            RESERVED_ID_TEXT,
+            "AAAAAAAAAAAAAAAAAAAAAA",
+            "Cf6zT/mcTNCoxuPmv1Ztxw",
+        ] {
+            assert_eq!(
+                refuse_copied_topic_ids(&record(serde_json::json!(bad))),
+                Err(format!(
+                    "topics[\"orders\"].identity.topic_id_after \"{bad}\"{tail}"
+                ))
+            );
+        }
+        assert_eq!(
+            refuse_copied_topic_ids(&record(serde_json::json!(7))),
+            Err("topics[\"orders\"].identity.topic_id_after is not a string".to_string())
+        );
+        for ok in [serde_json::json!(B), serde_json::Value::Null] {
+            assert_eq!(refuse_copied_topic_ids(&record(ok)), Ok(()));
+        }
+        assert_eq!(
+            refuse_copied_topic_ids(&serde_json::json!({"topics": [{"name": "orders"}]})),
+            Ok(())
+        );
+        assert_eq!(refuse_copied_topic_ids(&serde_json::json!({})), Ok(()));
+    }
+
+    /// Review L2: a previous point that itself changed during its capture
+    /// (A before, B after) is followed by a point that reads B: R1 compares the
+    /// PRE-capture IDs, A and B, so the link is a new generation — never `Same`
+    /// through the previous point's after-read.
+    #[test]
+    fn a_previous_point_that_changed_during_its_capture_is_a_new_generation_after_it() {
+        assert_eq!(
+            by_topic_id(Some(&entry(Some(A), Some(B))), &entry(Some(B), Some(B))),
+            Generation::New {
+                previous: A.into(),
+                current: B.into()
+            }
         );
     }
 
