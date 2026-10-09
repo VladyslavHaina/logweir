@@ -274,3 +274,511 @@ fn opt_bytes(
     }
     Ok(Some(take(c, len as usize, what)?))
 }
+
+// ---------------------------------------------------------------------------
+// PROD-03.0: a STREAMING scan that keeps only each record's prefix bytes.
+// ---------------------------------------------------------------------------
+
+/// What [`scan_segment`] keeps of one record: its offset and at most the
+/// first `prefix` bytes of its key and of its value (`None` is null). Never a
+/// whole payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordPrefix {
+    pub offset: i64,
+    pub key: Option<Vec<u8>>,
+    pub value: Option<Vec<u8>>,
+}
+
+/// Why [`scan_segment`] stopped without reading the segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanError {
+    /// The body decompresses past the caller's cap, or a zstd frame declares
+    /// a window larger than [`ZSTD_WINDOW_LOG_MAX`] allows (a large segment,
+    /// or a decompression bomb). Nothing past the cap was held.
+    TooLarge(String),
+    /// The caller's deadline passed while the scan was reading.
+    TimedOut(String),
+    /// Not a KBAK v1 segment this scan can read: bad magic or version, a CRC
+    /// mismatch, an unknown codec, a corrupt body, or a record that does not
+    /// fit its frame.
+    Unreadable(String),
+}
+
+impl std::fmt::Display for ScanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge(m) => write!(f, "too large: {m}"),
+            Self::TimedOut(m) => write!(f, "timed out: {m}"),
+            Self::Unreadable(m) => write!(f, "unreadable: {m}"),
+        }
+    }
+}
+
+/// The bounds one [`scan_segment`] runs within.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanLimits {
+    /// The most bytes the body may decompress to; past it, `TooLarge`.
+    pub max_decompressed: u64,
+    /// When the scan must stop reading, checked on every read of the body;
+    /// past it, `TimedOut`. `None` is no deadline.
+    pub deadline: Option<std::time::Instant>,
+}
+
+/// **The zstd window cap: 2^23 bytes (8 MiB).** A zstd frame names the window
+/// its decoder must hold — up to 2^31 bytes — and the decoder allocates and
+/// touches it whatever the output cap says. Above this the scan refuses the
+/// frame as `TooLarge` (the frame's header is read first; the decoder is also
+/// told, for any later frame). The engine Logweir runs writes zstd at its
+/// default level 3 (window 2^21) and never pledges a size; levels 20-22 and
+/// single-segment frames over 8 MiB are not judged.
+pub const ZSTD_WINDOW_LOG_MAX: u32 = 23;
+
+/// How far back an LZ4 match may reach: the format's 16-bit offset.
+const LZ4_WINDOW: usize = 1 << 16;
+
+/// The window the FIRST zstd frame of `body` declares, when its header can be
+/// read: the window descriptor's size, or a single-segment frame's content
+/// size (RFC 8878 section 3.1.1.1). `None` defers to the decoder.
+fn zstd_first_window(body: &[u8]) -> Option<u64> {
+    if body.len() < 6 || body[0..4] != ZSTD_MAGIC {
+        return None;
+    }
+    let descriptor = body[4];
+    if descriptor & 0x20 == 0 {
+        let w = body[5];
+        let base = 1u64 << (10 + u64::from(w >> 3));
+        return Some(base + (base / 8) * u64::from(w & 7));
+    }
+    let dictionary = [0usize, 1, 2, 4][usize::from(descriptor & 3)];
+    let size = [1usize, 2, 4, 8][usize::from(descriptor >> 6)];
+    let field = body.get(5 + dictionary..5 + dictionary + size)?;
+    let mut v = 0u64;
+    for (i, b) in field.iter().enumerate() {
+        v |= u64::from(*b) << (8 * i);
+    }
+    Some(if size == 2 { v + 256 } else { v })
+}
+
+/// An LZ4 block (lz4_flex's size-prepended format: four bytes of declared
+/// size, then the block), decoded as a STREAM: it keeps only the last 64 KiB
+/// of output a match can reach (at most about 192 KiB at once), never the
+/// whole decompressed body. Every length and offset is bounds-checked; output
+/// past the declared size, a zero offset or one before the start, and a block
+/// that ends short of its declared size are `InvalidData`.
+struct Lz4Stream<'a> {
+    src: &'a [u8],
+    pos: usize,
+    hist: Vec<u8>,
+    handed: usize,
+    state: Lz4State,
+    produced: u64,
+    declared: u64,
+}
+
+#[derive(Clone, Copy)]
+enum Lz4State {
+    Token,
+    Literals {
+        left: usize,
+        match_base: usize,
+    },
+    Match {
+        offset: usize,
+        left: usize,
+        done: usize,
+    },
+    Done,
+}
+
+fn lz4_bad(m: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, format!("lz4: {m}"))
+}
+
+impl<'a> Lz4Stream<'a> {
+    /// `body` is the size-prepended block.
+    fn new(body: &'a [u8]) -> std::io::Result<Self> {
+        if body.len() < 4 {
+            return Err(lz4_bad("missing the 4-byte prepended size"));
+        }
+        Ok(Self {
+            src: &body[4..],
+            pos: 0,
+            hist: Vec::with_capacity(2 * LZ4_WINDOW),
+            handed: 0,
+            state: Lz4State::Token,
+            produced: 0,
+            declared: u64::from(u32::from_le_bytes(body[0..4].try_into().unwrap())),
+        })
+    }
+
+    fn byte(&mut self) -> std::io::Result<u8> {
+        let b = *self
+            .src
+            .get(self.pos)
+            .ok_or_else(|| lz4_bad("the block ends inside a sequence"))?;
+        self.pos += 1;
+        Ok(b)
+    }
+
+    /// A length's extension bytes: added while each is 255.
+    fn extension(&mut self) -> std::io::Result<usize> {
+        let mut total = 0usize;
+        loop {
+            let b = self.byte()?;
+            total = total.saturating_add(usize::from(b));
+            if b != 255 {
+                return Ok(total);
+            }
+        }
+    }
+
+    fn produce(&mut self, n: usize) -> std::io::Result<()> {
+        self.produced += n as u64;
+        if self.produced > self.declared {
+            return Err(lz4_bad("the block decodes past its declared size"));
+        }
+        Ok(())
+    }
+}
+
+impl std::io::Read for Lz4Stream<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        const CHUNK: usize = 1 << 16;
+        loop {
+            if self.handed < self.hist.len() {
+                let n = buf.len().min(self.hist.len() - self.handed);
+                buf[..n].copy_from_slice(&self.hist[self.handed..self.handed + n]);
+                self.handed += n;
+                return Ok(n);
+            }
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            // Everything produced has been handed over: keep only the window.
+            if self.hist.len() > 2 * LZ4_WINDOW {
+                let cut = self.hist.len() - LZ4_WINDOW;
+                self.hist.drain(..cut);
+                self.handed -= cut;
+            }
+            match self.state {
+                Lz4State::Done => return Ok(0),
+                Lz4State::Token => {
+                    if self.pos == self.src.len() {
+                        if self.produced != self.declared {
+                            return Err(lz4_bad("the block ends short of its declared size"));
+                        }
+                        self.state = Lz4State::Done;
+                        continue;
+                    }
+                    let token = self.byte()?;
+                    let mut left = usize::from(token >> 4);
+                    if left == 15 {
+                        left = left.saturating_add(self.extension()?);
+                    }
+                    self.state = Lz4State::Literals {
+                        left,
+                        match_base: usize::from(token & 15),
+                    };
+                }
+                Lz4State::Literals { left, match_base } if left > 0 => {
+                    let n = left.min(CHUNK);
+                    let lit = self
+                        .src
+                        .get(self.pos..self.pos + n)
+                        .ok_or_else(|| lz4_bad("literals run past the block"))?;
+                    self.produce(n)?;
+                    self.hist.extend_from_slice(lit);
+                    self.pos += n;
+                    self.state = Lz4State::Literals {
+                        left: left - n,
+                        match_base,
+                    };
+                }
+                Lz4State::Literals { match_base, .. } => {
+                    if self.pos == self.src.len() {
+                        // The last sequence is literals only.
+                        self.state = Lz4State::Token;
+                        continue;
+                    }
+                    let offset = usize::from(u16::from_le_bytes([self.byte()?, self.byte()?]));
+                    if offset == 0 || offset as u64 > self.produced {
+                        return Err(lz4_bad("a match offset outside the output"));
+                    }
+                    let mut left = match_base + 4;
+                    if match_base == 15 {
+                        left = left.saturating_add(self.extension()?);
+                    }
+                    self.state = Lz4State::Match {
+                        offset,
+                        left,
+                        done: 0,
+                    };
+                }
+                Lz4State::Match { offset, left, done } => {
+                    if left == 0 {
+                        self.state = Lz4State::Token;
+                        continue;
+                    }
+                    // Each copy reads only bytes already in the history. An
+                    // overlapping match repeats its `offset`-byte pattern, so
+                    // once this match has written some of it, a copy may reach
+                    // back any whole number of periods inside the run — which
+                    // lets a long match of a short pattern grow its copies
+                    // instead of moving `offset` bytes at a time.
+                    let run = (offset + done).min(CHUNK);
+                    let reach = (run / offset).max(1) * offset;
+                    let n = left.min(reach);
+                    self.produce(n)?;
+                    let start = self.hist.len() - reach;
+                    self.hist.extend_from_within(start..start + n);
+                    self.state = Lz4State::Match {
+                        offset,
+                        left: left - n,
+                        done: done + n,
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// A reader that yields at most `left` bytes and then reports — as an
+/// `io::Error` the scan maps to [`ScanError::TooLarge`] — any byte past them,
+/// and that stops — mapped to [`ScanError::TimedOut`] — once `deadline` has
+/// passed.
+struct Capped<R> {
+    inner: R,
+    left: u64,
+    exceeded: bool,
+    deadline: Option<std::time::Instant>,
+    timed_out: bool,
+}
+
+impl<R: std::io::Read> std::io::Read for Capped<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            self.timed_out = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the scan's deadline passed",
+            ));
+        }
+        if self.left == 0 {
+            let mut probe = [0u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => {
+                    self.exceeded = true;
+                    Err(std::io::Error::other("decompressed past the cap"))
+                }
+            };
+        }
+        let want = buf
+            .len()
+            .min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        let n = self.inner.read(&mut buf[..want])?;
+        self.left -= n as u64;
+        Ok(n)
+    }
+}
+
+/// **Streams** a KBAK v1 segment's records in order and hands each one's
+/// [`RecordPrefix`] to `visit`, keeping at most `prefix` bytes of every key
+/// and value; `visit` returns `false` to stop early. Returns how many records
+/// were handed over.
+///
+/// Bounded in memory whatever the segment says, for a reader that runs inside
+/// a backup that already succeeded (PROD-03.0's detector). Beyond the `bytes`
+/// the caller holds, it allocates a few hundred KiB of stream buffers and,
+/// for zstd, a window of at most 2^[`ZSTD_WINDOW_LOG_MAX`] bytes:
+/// - no record is materialised, and no allocation is sized on a length the
+///   segment declares;
+/// - zstd is decoded as a stream, and a frame declaring a window above the cap
+///   is `TooLarge` before it is decoded;
+/// - lz4 is decoded as a stream that keeps the 64 KiB a match can reach, never
+///   the whole body;
+/// - every codec's output stops at `limits.max_decompressed` (`TooLarge`), and
+///   every read stops once `limits.deadline` passes (`TimedOut`).
+///
+/// The envelope checks are [`decode_segment`]'s: magic, version, end magic and
+/// the CRC32 over the bytes held.
+pub fn scan_segment(
+    bytes: &[u8],
+    limits: &ScanLimits,
+    prefix: usize,
+    visit: &mut dyn FnMut(RecordPrefix) -> bool,
+) -> Result<u64, ScanError> {
+    use std::io::Read as _;
+    let unreadable = |m: String| ScanError::Unreadable(m);
+    if bytes.first() == Some(&b'[') || bytes.starts_with(b"{") {
+        return Err(unreadable("legacy JSON segment".into()));
+    }
+    if bytes.starts_with(&ZSTD_MAGIC) {
+        return Err(unreadable("whole-object zstd legacy JSON segment".into()));
+    }
+    if bytes.len() < HEADER_SIZE + FOOTER_SIZE {
+        return Err(unreadable("segment shorter than header+footer".into()));
+    }
+    if &bytes[0..4] != MAGIC {
+        return Err(unreadable("bad magic: not a KBAK segment".into()));
+    }
+    if bytes[4] != 1 {
+        return Err(unreadable(format!("KBAK version {} is not v1", bytes[4])));
+    }
+    let compression = bytes[5];
+    let record_count = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    let tail = bytes.len() - FOOTER_SIZE;
+    if &bytes[tail + 4..] != MAGIC_END {
+        return Err(unreadable("bad end magic: truncated segment".into()));
+    }
+    let want_crc = u32::from_le_bytes(bytes[tail..tail + 4].try_into().unwrap());
+    let got_crc = crc32fast::hash(&bytes[..tail]);
+    if want_crc != got_crc {
+        return Err(unreadable(format!(
+            "CRC32 mismatch: {got_crc:#x} != {want_crc:#x}"
+        )));
+    }
+    let body = &bytes[HEADER_SIZE..tail];
+    let max_decompressed = limits.max_decompressed;
+    let too_large = || {
+        ScanError::TooLarge(format!(
+            "the body decompresses past {max_decompressed} bytes"
+        ))
+    };
+    let stream: Box<dyn std::io::Read + '_> = match compression {
+        0 => Box::new(body),
+        1 => {
+            let window_cap = 1u64 << ZSTD_WINDOW_LOG_MAX;
+            if let Some(window) = zstd_first_window(body) {
+                if window > window_cap {
+                    return Err(ScanError::TooLarge(format!(
+                        "the zstd frame declares a {window}-byte window, above the \
+                         {window_cap}-byte cap"
+                    )));
+                }
+            }
+            let mut decoder = zstd::stream::read::Decoder::with_buffer(body)
+                .map_err(|e| unreadable(format!("zstd: {e}")))?;
+            decoder
+                .window_log_max(ZSTD_WINDOW_LOG_MAX)
+                .map_err(|e| unreadable(format!("zstd: {e}")))?;
+            Box::new(decoder)
+        }
+        2 => {
+            let stream = Lz4Stream::new(body).map_err(|e| unreadable(e.to_string()))?;
+            if stream.declared > max_decompressed {
+                return Err(too_large());
+            }
+            Box::new(stream)
+        }
+        c => return Err(unreadable(format!("unknown compression byte {c}"))),
+    };
+    let mut reader = std::io::BufReader::new(Capped {
+        inner: stream,
+        left: max_decompressed,
+        exceeded: false,
+        deadline: limits.deadline,
+        timed_out: false,
+    });
+    let mut visited: u64 = 0;
+    while visited < record_count {
+        let mut len = [0u8; 4];
+        let step = reader.read_exact(&mut len).and_then(|()| {
+            let total_len = u64::from(u32::from_le_bytes(len));
+            let mut frame = (&mut reader).take(total_len);
+            let r = read_prefix_record(&mut frame, prefix)?;
+            if frame.limit() != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "total_len mismatch: record declared {total_len} bytes and its fields \
+                         used {}",
+                        total_len - frame.limit()
+                    ),
+                ));
+            }
+            Ok(r)
+        });
+        let record = match step {
+            Ok(r) => r,
+            Err(_) if reader.get_ref().exceeded => return Err(too_large()),
+            Err(_) if reader.get_ref().timed_out => {
+                return Err(ScanError::TimedOut(format!(
+                    "the deadline passed after {visited} records"
+                )))
+            }
+            // A frame the decoder refuses for its window (a later frame than
+            // the one whose header was read above).
+            Err(e) if compression == 1 && e.to_string().contains("too much memory") => {
+                return Err(ScanError::TooLarge(format!("zstd: {e}")))
+            }
+            Err(e) => return Err(unreadable(format!("record {visited}: {e}"))),
+        };
+        visited += 1;
+        if !visit(record) {
+            break;
+        }
+    }
+    Ok(visited)
+}
+
+/// One record from its frame, keeping `prefix` bytes of the key and value and
+/// skipping everything else without holding it.
+fn read_prefix_record(
+    frame: &mut impl std::io::Read,
+    prefix: usize,
+) -> std::io::Result<RecordPrefix> {
+    use byteorder::{ReadBytesExt, LE};
+    let _timestamp = frame.read_i64::<LE>()?;
+    let offset = frame.read_i64::<LE>()?;
+    let key_len = frame.read_i32::<LE>()?;
+    let key = prefix_of(frame, key_len, prefix)?;
+    let value_len = frame.read_i32::<LE>()?;
+    let value = prefix_of(frame, value_len, prefix)?;
+    let header_count = frame.read_u16::<LE>()?;
+    for _ in 0..header_count {
+        let hk_len = frame.read_u16::<LE>()?;
+        skip(frame, u64::from(hk_len))?;
+        let hv_len = frame.read_i32::<LE>()?;
+        if hv_len >= 0 {
+            skip(frame, hv_len as u64)?;
+        }
+    }
+    Ok(RecordPrefix { offset, key, value })
+}
+
+/// A nullable field's first `prefix` bytes (`-1` is `None`), the rest skipped.
+fn prefix_of(
+    frame: &mut impl std::io::Read,
+    len: i32,
+    prefix: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    if len < 0 {
+        return Ok(None);
+    }
+    let len = len as u64;
+    let keep = len.min(prefix as u64) as usize;
+    let mut kept = vec![0u8; keep];
+    frame.read_exact(&mut kept)?;
+    skip(frame, len - keep as u64)?;
+    Ok(Some(kept))
+}
+
+/// Reads and discards exactly `n` bytes; a short read is an error.
+fn skip(frame: &mut impl std::io::Read, n: u64) -> std::io::Result<()> {
+    let mut bounded = <&mut _ as std::io::Read>::take(&mut *frame, n);
+    let copied = std::io::copy(&mut bounded, &mut std::io::sink())?;
+    if copied != n {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("a field declared {n} bytes and the frame held {copied}"),
+        ));
+    }
+    Ok(())
+}

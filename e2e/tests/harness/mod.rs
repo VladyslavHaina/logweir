@@ -1580,3 +1580,28 @@ pub fn engine_validate_restore(doc: &str) -> (Option<i32>, String, String) {
         .expect("engine validate-restore");
     (out.status.code(), out.stdout_utf8(), out.stderr_utf8())
 }
+
+/// A document's `format_version` is AT LEAST `min`, the version that defines
+/// the field a row checks. Pinning the exact version broke every row the next
+/// time an unrelated optional field bumped the minor (PROD-03.0's receipt
+/// 1.5.0 failed PROD-01.3's `auth_modes`); the field's meaning holds from the
+/// version that defines it on, within the same major.
+pub fn assert_format_at_least(actual: &str, min: &str, what: &str) {
+    let parse = |v: &str| -> (u64, u64, u64) {
+        let mut it = v.split('.').map(|p| {
+            p.parse::<u64>()
+                .unwrap_or_else(|_| panic!("{what}: `{v}` is not semver"))
+        });
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    };
+    let (a, m) = (parse(actual), parse(min));
+    assert_eq!(a.0, m.0, "{what}: format {actual} is not major {}", m.0);
+    assert!(
+        a >= m,
+        "{what}: format {actual} predates {min}, the version that defines this field"
+    );
+}

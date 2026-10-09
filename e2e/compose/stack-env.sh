@@ -54,7 +54,7 @@ autocreate  kafka-autocreate: a single-node cluster that AUTO-CREATES topics (Ka
 streams   streams-wordcount: Apache Kafka's WordCountDemo on kafka-broker-1 (group logweir-e2e-wordcount)
 streams-protocol  streams-protocol-wordcount: WordCountProcessorDemo on kafka-broker-1 with group.protocol=streams (a Streams group, logweir-e2e-streams-protocol); 4.x lines only
 objectstore  objectstore: SeaweedFS 4.48 S3 :9130 with kafka-backups, logweir-evidence, kafka-backups-locked (Object Lock), kafka-backups-2
-registry  registry: Karapace 6.2.3 (Schema-Registry-compatible) :9141, schemas in _schemas on kafka-broker-1
+registry  registry: Karapace 6.2.3 (Schema-Registry-compatible) :9141, schemas in _schemas on kafka-broker-1; registry-rest: its REST proxy :9142 (Avro, JSON Schema and Protobuf producers)
 acl       kafka-acl: StandardAuthorizer; PLAINTEXT :9150 as ANONYMOUS (super user), SASL_PLAINTEXT/SCRAM-SHA-512 :9151 as logweir (restricted by the row's ACLs)
 "
 

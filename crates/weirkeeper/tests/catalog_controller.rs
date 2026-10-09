@@ -4199,3 +4199,59 @@ fn a_points_topics_reach_the_view_and_an_unbounded_list_is_malformed() {
     assert!(row.topics.is_empty());
     assert_eq!(row.topics_omitted, Some(70));
 }
+
+/// PROD-03.0 (review L7): a topic's schema dependency is bounded like the rest
+/// of an entry. At most [`view::MAX_ENTRY_SCHEMA_IDS`] ids and two sides parse;
+/// an entry naming one id more, or a third side, is malformed and skipped and
+/// counted, never fatal and never published.
+#[test]
+fn a_schema_dependency_over_its_id_or_side_cap_is_a_malformed_entry() {
+    let with_dependency = |point: &str, sides: Value, ids: usize| {
+        let mut e = ok_entry(point, 1);
+        e["topics"] = json!([{"name": "orders", "schemaDependency": {
+            "verdict": "schemaDependent", "basis": "sampled", "sides": sides,
+            "schemaIds": (1..=ids as u32).collect::<Vec<_>>(),
+        }}]);
+        e
+    };
+    // CONTROL: exactly at both caps, the entry parses with its ids.
+    let at_caps = with_dependency(
+        "lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        json!(["key", "value"]),
+        view::MAX_ENTRY_SCHEMA_IDS,
+    );
+    let parsed = view::parse_body(&versioned(&page_block(1, 1, &[at_caps])), 5000)
+        .expect("an entry at the caps parses");
+    assert_eq!(parsed.skipped_entries, 0);
+    let listed = parsed.pages[0].entries[0].topics[0]
+        .schema_dependency
+        .clone()
+        .expect("the dependency is read");
+    assert_eq!(listed.schema_ids.len(), 16);
+    assert_eq!(listed.sides, ["key", "value"]);
+
+    for (what, over) in [
+        (
+            "17 schema ids",
+            with_dependency(
+                "lwp1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                json!(["value"]),
+                view::MAX_ENTRY_SCHEMA_IDS + 1,
+            ),
+        ),
+        (
+            "three sides",
+            with_dependency(
+                "lwp1-cccccccccccccccccccccccccccccccc",
+                json!(["key", "value", "value"]),
+                1,
+            ),
+        ),
+    ] {
+        let parsed = view::parse_body(&versioned(&page_block(1, 1, &[over])), 5000)
+            .expect("skipped, never fatal");
+        assert_eq!(parsed.pages[0].entries.len(), 0, "{what}");
+        assert_eq!(parsed.skipped_entries, 1, "{what}");
+        assert_eq!(parsed.pages[0].skipped, 1, "{what}");
+    }
+}

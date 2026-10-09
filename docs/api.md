@@ -174,7 +174,7 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/catalogs` | Recovery catalogs: ten verdict counts, the signer list, and whether the Kubernetes view is a window over a larger archive. |
 | `POST /api/v1/namespaces/{ns}/catalogs` | Connect an existing archive: create a `RecoveryCatalog` **under the name in the body**, because every protection, rehearsal and retention policy references it by that name. |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}` | One catalog. |
-| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns, and, for an `Available` point recorded from receipt format 1.3.0 or later, its topics' recorded partition count, replication factor, configuration coverage, owner kind and apply route (`topics[]`; absent is not published, never "no topics"), beside `ownerDetection`, where the backup run looked for declarative owners: an un-owned topic's `applyRoute` is `adminApi` only where it looked, and `unknown` where it did not (every controller-run `Backup` today). |
+| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns, and, for an `Available` point recorded from receipt format 1.3.0 or later, its topics' recorded partition count, replication factor, configuration coverage, owner kind and apply route (`topics[]`; absent is not published, never "no topics"), beside `ownerDetection`, where the backup run looked for declarative owners: an un-owned topic's `applyRoute` is `adminApi` only where it looked, and `unknown` where it did not (every controller-run `Backup` today). From receipt format 1.5.0 each topic also carries `schemaDependency` (PROD-03.0): `verdict` (`schemaDependent`, `notDetected`, `notAssessed`), `basis` or `reason`, the dependent `sides` and the `schemaIds` they name (at most 16, `schemaIdsOmitted` when more were seen); absent is not assessed, never "not schema-dependent". |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}/signers` | The untrusted-signer panel: key ids, point counts, whether the bound policy accepts each one, and the out-of-band fingerprint command. |
 | `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` | Retention: what the last evaluation would remove, what is **actually** enforcing it, which guarantees are in force and by whom, where the approved-plan gate stands, and whether enforcement has degraded. |
 | `GET /api/v1/trust-policies[/{name}]` | The installation's trust policies. **Cluster-scoped** and administrator-only; `unknown` is not `valid`. |
@@ -465,7 +465,8 @@ supported path.
 two-step gate in one value — `notApplicable`, `notRequired`, `noPlan`,
 `awaitingApproval`, `approved`, `expired` or `unknown` — and it is **`unknown`
 whenever an input is absent**, never `approved`. Nothing in `lastEvaluation`
-was deleted. The enforcement record is create-only and **unsigned**, verified by
+was deleted, and its `at` is when those findings were first reached, not when
+the controller last looked (FX-29). The enforcement record is create-only and **unsigned**, verified by
 the digest beside it; no surface calls it signed.
 
 **A catalog's view is a window, and the response says so.** The durable truth is
@@ -637,7 +638,8 @@ MCP-13). `status.lastSlot` is the controller's own record of the most recent
 slot it decided about — `slot`, `dueAt`, `attempt`, `disposition` (`Admitted`,
 `CaughtUp`, `Retried`, `Missed`, `Blocked`, `NameUnavailable`, `Released`,
 `Failed`, `Exhausted`, verbatim), the `Ready` `reason` beside it, `decidedAt`
-and, when there is one, `backupRef` — and `status.missedSlots` is the running
+(when that decision was reached: a later reconcile that reaches the same
+decision keeps it) and, when there is one, `backupRef` — and `status.missedSlots` is the running
 `count` of slots that came due and were not run, `countCapped` when an
 evaluation stopped at its enumeration cap (the count is then a floor),
 `lastEvaluatedSlot`, and the most `recent` skips, each with its `reason`

@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.24.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.25.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -950,7 +950,7 @@ def test_the_version_line_names_the_current_invariant_set():
             "source.selection only from 1.7.0, its start before its end, and a complete block "
             "over its window"
         ) in r.stdout, r.stdout
-        # 1.24.0's addition (PROD-15.1): `target.original_name`'s ten arms.
+        # 1.25.0's addition (PROD-15.1): `target.original_name`'s ten arms.
         assert (
             "target.original_name only from 1.8.0, only in a newTopic document with the empty "
             "prefix, its subject originalName, its approval mode and cluster condition from "
@@ -2262,12 +2262,16 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # (SEL-1 to SEL-3, format 1.7.0), its shape check, the `replay
     # selection:` line and the narrowed sampled-pass line. Map still five.
     #
-    # 1.24.0 (PROD-15.1) adds the scorecard's ten `target.original_name` arms
+    # 1.24.0 (PROD-03.0) adds the backup receipt's eight `schema_dependency`
+    # arms (22-29, format 1.5.0), its shape check and the `schema_dependency`
+    # lines. Map still five.
+    #
+    # 1.25.0 (PROD-15.1) adds the scorecard's ten `target.original_name` arms
     # (ON-1 to ON-10, format 1.8.0), its shape check and the two `original
     # name:` lines. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.24.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.25.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -3982,3 +3986,164 @@ def test_the_original_name_lines_are_the_rust_readers():
         "(SOURCE-CLUSTER)",
         "original name: declarative owners looked for in plan: none found",
     ]
+
+
+# ---------------------------------------------------------------------------
+# PROD-03.0: receipt format 1.5.0, `schema_dependency` (arms 22-29)
+# ---------------------------------------------------------------------------
+
+
+def _receipt_1_5():
+    return json.loads(
+        (ROOT / "e2e/fixtures/invariants/receipt_1_5_with_schema_dependency.json").read_text()
+    )
+
+
+def test_the_schema_dependency_constants_are_the_rust_readers():
+    # Arm 22's minor, arm 24's closed sets, arm 27's range and cap and arm 28's
+    # denominator are ONE value in each reader, read here from the Rust source
+    # so a change on one side fails before it splits the readers.
+    mod = _verifier_module()
+    root = pathlib.Path(__file__).resolve().parent.parent
+    receipt = (root / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    m = re.search(r"pub const SCHEMA_DEPENDENCY_SINCE_MINOR: u64 = (\d+);", receipt)
+    assert m, "backup_receipt.rs no longer declares SCHEMA_DEPENDENCY_SINCE_MINOR"
+    assert mod.RECEIPT_SCHEMA_DEPENDENCY_SINCE_MINOR == int(m.group(1))
+    detector = (root / "crates/logweir-core/src/schema_dependency.rs").read_text()
+    strings = dict(re.findall(r'pub const ([A-Z_]+): &str = "([^"]+)";', detector))
+
+    def names(const):
+        block = detector.split(f"pub const {const}", 1)[1].split("];", 1)[0]
+        return tuple(strings[n] for n in re.findall(r"\b([A-Z][A-Z_]+)\b", block.split("=", 1)[1]))
+
+    assert names("VERDICTS") == mod.SCHEMA_DEPENDENCY_VERDICTS
+    assert names("NOT_ASSESSED_REASONS") == mod.SCHEMA_DEPENDENCY_REASONS
+    assert names("BASES") == mod.SCHEMA_DEPENDENCY_BASES
+    m = re.search(r"pub const MAX_SCHEMA_ID: u32 = 0x([0-9A-F_]+);", detector)
+    assert int(m.group(1).replace("_", ""), 16) == mod.SCHEMA_ID_MAX
+    m = re.search(r"pub const SCHEMA_IDS_LISTED: usize = (\d+);", detector)
+    assert int(m.group(1)) == mod.SCHEMA_IDS_LISTED
+    m = re.search(r"pub const DEPENDENT_SHARE_DENOMINATOR: u64 = (\d+);", detector)
+    assert int(m.group(1)) == mod.DEPENDENT_SHARE_DENOMINATOR
+
+
+def test_a_1_5_0_receipt_is_accepted_and_a_receipt_without_the_block_too():
+    mod = _verifier_module()
+    doc = _receipt_1_5()
+    assert mod._receipt_shape(doc) == ""
+    assert mod.check_backup_receipt_invariants(doc) == ""
+    doc.pop("schema_dependency")
+    assert mod.check_backup_receipt_invariants(doc) == "", "absent is not assessed, never refused"
+
+
+def test_the_threshold_is_one_in_ten_and_at_least_one():
+    # The twin of `the_threshold_is_exactly_one_in_ten_and_at_least_one`: each
+    # line kills a mutant of `_dependent_by_share`.
+    mod = _verifier_module()
+    assert mod._dependent_by_share(1, 9)
+    assert not mod._dependent_by_share(1, 10)
+    assert mod._dependent_by_share(2, 18)
+    assert not mod._dependent_by_share(2, 19)
+    assert not mod._dependent_by_share(0, 0)
+    assert mod._dependent_by_share(1, 0)
+    assert mod._dependent_by_share(2 ** 64 - 1, 2 ** 64 - 1)
+
+
+def test_the_schema_dependency_arms_refuse_in_order_with_the_rust_text():
+    # One mutation per condition; the full text is the corpus's
+    # (backup-receipt-index.json), which the Rust reader is held to by
+    # two_reader_parity_receipt.rs and check-verifier-parity.sh.
+    mod = _verifier_module()
+    index = {
+        e["id"]: e
+        for e in json.loads(
+            (ROOT / "e2e/fixtures/invariants/backup-receipt-index.json").read_text()
+        )
+    }
+    ids = [i for i in index if i.startswith("schema_dependency_")]
+    assert len(ids) >= 12, ids
+    for cid in ids:
+        doc = json.loads((ROOT / "e2e/fixtures/invariants" / index[cid]["file"]).read_text())
+        assert mod._receipt_shape(doc) == "", cid
+        got = mod.check_backup_receipt_invariants(doc)
+        assert got == index[cid]["reason"], (cid, got)
+        assert got != "", cid
+
+
+def test_the_schema_dependency_shape_is_the_rust_deserialisers():
+    mod = _verifier_module()
+    base = _receipt_1_5()
+    cases = [
+        (["schema_dependency"], [], "schema_dependency is not an object"),
+        (["schema_dependency", "orders"], "x", 'schema_dependency["orders"] is not an object'),
+        (["schema_dependency", "orders", "verdict"], None,
+         'schema_dependency["orders"].verdict is not a string'),
+        (["schema_dependency", "orders", "basis"], 1,
+         'schema_dependency["orders"].basis is not a string'),
+        (["schema_dependency", "orders", "key"], [],
+         'schema_dependency["orders"].key is not an object'),
+        (["schema_dependency", "orders", "value", "dependent"], 1,
+         'schema_dependency["orders"].value.dependent is not a boolean'),
+        (["schema_dependency", "orders", "value", "framed"], -1,
+         'schema_dependency["orders"].value.framed is not a u64'),
+        (["schema_dependency", "orders", "value", "nulls"], 2 ** 64,
+         'schema_dependency["orders"].value.nulls is not a u64'),
+        (["schema_dependency", "orders", "value", "schema_id_count"], True,
+         'schema_dependency["orders"].value.schema_id_count is not a u64'),
+        (["schema_dependency", "orders", "value", "schema_ids"], [3, 2 ** 32],
+         'schema_dependency["orders"].value.schema_ids is not a list of u32'),
+        (["schema_dependency", "orders", "value", "schema_ids"], None,
+         'schema_dependency["orders"].value.schema_ids is not a list of u32'),
+    ]
+    for path, value, want in cases:
+        doc = json.loads(json.dumps(base))
+        at = doc
+        for step in path[:-1]:
+            at = at[step]
+        at[path[-1]] = value
+        assert mod._receipt_shape(doc) == want, (path, value)
+    # `null` is absent on both sides: the reason, the basis and the sides.
+    doc = json.loads(json.dumps(base))
+    doc["schema_dependency"]["orders"]["reason"] = None
+    assert mod._receipt_shape(doc) == ""
+
+
+def test_the_receipt_verdict_prints_schema_dependency_and_never_calls_absent_not_dependent():
+    mod = _verifier_module()
+    assert mod._schema_dependency_lines(None) == [
+        "schema_dependency: not assessed, so whether any topic's records need a schema "
+        "registry is not known from this receipt"
+    ]
+    doc = _receipt_1_5()
+    assert mod._schema_dependency_lines(doc["schema_dependency"]) == [
+        'schema_dependency["orders"]: schema-dependent, registry not captured; 4000 records '
+        "judged (sampled); key framed 0 of 4000 non-null; value framed 3990 of 3990 "
+        "non-null, dependent, schema ids 3, 4",
+        'schema_dependency["payments"]: no schema framing detected; 917 records judged '
+        "(complete); key framed 0 of 917 non-null; value framed 0 of 900 non-null",
+    ]
+    more = json.loads(
+        (ROOT / "e2e/fixtures/invariants/receipt_1_5_key_side_and_more_ids.json").read_text()
+    )
+    line = mod._schema_dependency_lines(more["schema_dependency"])[1]
+    want = "key framed 917 of 917 non-null, dependent, schema ids " + ", ".join(
+        str(i) for i in range(100, 116)
+    ) + " and 5 more; value framed 0 of 917 non-null"
+    assert line.endswith(want), line
+    na = json.loads((ROOT / "e2e/fixtures/invariants/receipt_1_5_not_assessed.json").read_text())
+    assert mod._schema_dependency_lines(na["schema_dependency"]) == [
+        'schema_dependency["orders"]: not assessed (segmentUnreadable)',
+        'schema_dependency["payments"]: not assessed (noRecords)',
+    ]
+
+
+def test_an_old_receipt_verifies_and_reads_not_assessed():
+    # The checked-in signed receipt is a 1.0.0 document: it verifies under this
+    # build, and its schema dependency reads NOT ASSESSED, never "not
+    # schema-dependent".
+    r = run_typed("backup-receipt", FIX / "backup-receipt.json",
+                  FIX / "backup-receipt.sig", FIX / "public.pem")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "schema_dependency: not assessed" in r.stdout, r.stdout
+    assert "no schema framing detected" not in r.stdout
+

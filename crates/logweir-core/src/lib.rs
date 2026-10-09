@@ -63,6 +63,7 @@ pub mod rehearsal_scope;
 /// partition subsets — and the one function preview and execution select by.
 pub mod replay_selection;
 pub mod schema;
+pub mod schema_dependency;
 pub mod scorecard;
 pub mod spec;
 /// FX-8: which clock a restore's time selection reads per source topic, and

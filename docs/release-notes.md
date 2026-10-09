@@ -33,8 +33,12 @@ it), 40 (FX-24, a silent connection meets the console's header deadline),
 41 (FX-21, a replication factor the archive does not record is never
 read as matching; the engine's first patch), 42 (PROD-11.1, a restore
 can select a window start) and 43 (PROD-08.1a, complete coverage requested
-and shown through the CRDs, the API and the console) and 44 (FX-24b, a
-client that stops reading or sending meets a stall deadline) so far. Items continue the next entry's
+and shown through the CRDs, the API and the console), 44 (FX-24b, a
+client that stops reading or sending meets a stall deadline), 45 (FX-29, a
+controller no longer rewrites a status whose content has not changed), 46
+(PROD-03.0, schema-dependent topics flagged from the archived bytes) and 47
+(PROD-15.1, a deleted topic restored under its own name, behind its own
+approval subject) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -96,6 +100,16 @@ new runner's engine identity.
 Item 44 is fix-now row FX-24b, proven the same way; it changes the console
 only, and the PoC upgrade that carries it repeats the slow-reader probe and
 the event-stream row against the shared-mode console.
+Item 45 is fix-now row FX-29, proven by controller rows over a fake API that
+applies each status patch as the API server does and counts the writes; it
+changes the controller only, and the PoC upgrade that carries it resumes the
+two suspended schedules and watches their `resourceVersion`.
+Item 46 is row PROD-03.0, proven by unit, reader, corpus and memory rows and
+on the compose stack (`registry`: Karapace and its REST proxy, stopped before
+the backup); it changes the runner's receipts and records, the catalog's view
+(runner and controller), the product API and the console, so the PoC upgrade
+that carries it runs a backup, reads its receipt's `schema_dependency` and the
+catalog's `topics[].schemaDependency`, and opens the restore review.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1200,6 +1214,215 @@ probe runs at the PoC upgrade that carries this item.
 **Rollback:** an older console leaves a connection whose client stopped
 reading or sending open again; nothing is stored, so nothing needs converting.
 
+#### 45. A controller no longer rewrites a status whose content has not changed (FX-29)
+
+**Changed.** A `BackupSchedule` whose latest slot was skipped (`Missed`) right
+after a slot that ran rewrote its status on every reconcile, and every write
+woke the next reconcile: on the PoC both schedules wrote about 120 times a
+second each from 2026-10-09 02:00Z, with 323 MB of controller log in 67 minutes
+and API-server `429`s on the shared cluster. The cause was a merge patch: the
+skipped slot's record names no `Backup`, an absent key in a merge patch leaves
+the stored one, so the previous slot's `status.lastSlot.backupRef` stayed, and
+the controller read that leftover as a new decision on every pass and stamped
+`lastSlot.decidedAt` and `policy.evaluatedAt` with the clock. Now:
+
+- every status block the schedule controller writes replaces the stored one,
+  so a field that became absent is removed, and a "when" field
+  (`lastSlot.decidedAt`, `retentionReport.evaluatedAt`) is kept unless the
+  block it times changed — compared as the API server will store it;
+- the schedule controller is woken by a new schedule or a spec change, and
+  otherwise by its own requeue (at most 30 s); its own status writes no longer
+  wake it.
+
+The sweep of every controller that writes status found the same loop in three
+more: a `BackupDestination` whose CA `ConfigMap` went away (`observedAt`
+restamped beside a stale `caBundleSha256`), a `ProtectionPolicy` whose
+notification routes were removed or whose newest point lost an optional field
+(`evaluatedAt` restamped beside the stale field), and every `RetentionPolicy`
+in `Report` or `Enforce` mode whose catalog resolved
+(`lastEvaluation.at` was the clock of every evaluation). Each now writes once
+and settles. `RetentionPolicy` `status.lastEvaluation.at` and `BackupSchedule`
+`status.retentionReport.evaluatedAt` mean "when these findings were first
+reached", and their CRD descriptions say so ([kubernetes.md](kubernetes.md)
+§9 and §7f).
+**Do:** nothing is required. If a schedule was suspended to stop the loop,
+resume it after the controller rolls. The first reconcile after the upgrade
+writes each affected object once — a schedule's stale `backupRef` is removed
+and its `decidedAt` and `policy.evaluatedAt` move to that instant; a
+destination's stale `caBundleSha256` is removed.
+**Scope:** controller rows over `testing::ObjectStore`, which applies each
+`/status` merge patch as RFC 7386 says, enforces the `resourceVersion`
+precondition and counts writes (`crates/weirkeeper/tests/schedule_status_churn.rs`):
+the PoC schedule object itself, reconciled forty times in 0.4 s, is written
+once (forty times before); a fresh `Admitted` then `Missed` sequence is written
+once over twenty passes (twenty before) and its record names no `Backup`; a new
+slot still fires, writes and decides; a `suspend` edit still writes once; the
+watch filter triggers on a new object or a new spec revision and on none of four
+status writes. The class-sweep rows: a destination whose CA went away, twenty
+passes, one write (twenty before); a protection policy whose routes were
+removed settles after one write; a retention policy writes nothing once settled
+(every pass before). The requeue that is now each schedule's only clock is
+pinned too: every decision returns a timed requeue of at most 30 s, never
+`await_change()`, and a schedule driven only by that requeue, with no watch
+event, fires its next slot within one poll; a destination re-reads a rotated
+CA, a protection policy turns `Stale` as its point ages, and a retention
+policy starts its enforcement slot, each on the pass its own timed requeue
+runs. Each guard has a mutant that fails a row. Not proven live in this
+branch: the PoC upgrade that carries it resumes the two schedules outside
+02:00–03:00Z, expects each `resourceVersion` to stand for five minutes while
+no slot is due (one hourly history-inventory write, moving only
+`history.inventoriedAt` and `policy.evaluatedAt`, is allowed), and then
+watches the next slot fire and be decided once.
+**Rollback:** an older controller restores the old behaviour the next time a
+schedule's slot is skipped after one that ran, or a destination loses its CA;
+suspending the schedule, or restoring the `ConfigMap`, stops it. Nothing stored
+needs converting: the objects this build rewrote read the same to an older one.
+
+#### 46. Topics whose records need a schema registry are flagged from the archived bytes: "registry not captured" (PROD-03.0)
+
+**Changed.** A record a Confluent serializer wrote is a zero byte, a 4-byte
+schema id and a payload only that schema decodes, and Logweir captures no
+schema registry, so a restore could succeed while no application could read
+what it restored, and nothing said so. Now every backup judges, per topic,
+whether its archived keys or values carry that framing — from the segments it
+just wrote, with Logweir's own decoder; **no registry is contacted** — and
+records it in the signed receipt (format **1.5.0**, `schema_dependency`: a
+verdict, the basis, each side's framed share and the schema ids seen, the 16
+smallest and a count). A side is dependent when at least one in ten of its
+non-null records is framed (magic byte 0, an id from 1 to 2^24 − 1, a payload
+after it); nulls and tombstones never count. The catalog point copies it
+(format 1.5.0), the catalog's view and the product API publish it per topic
+(`PointView.topics[].schemaDependency`), and the console says it where a
+restore is reviewed, on a catalog point's recovery-point step and on the
+catalog page: **"Registry not captured: applications may not read these
+records after restore."**, with each schema-dependent topic, its sides and its
+ids. Nothing is blocked: the bytes are restored unchanged, and what an
+application needs is the registry that issued those ids. A receipt before
+1.5.0, or a topic the backup could not judge, reads **not assessed**, never "no
+registry needed". Detection is bounded and never fails a backup: it streams at
+most two segments per partition for at most eight partitions per topic,
+keeps six bytes per key and value, and stops at 16 MiB stored, an 8 MiB zstd
+window or 256 MiB decompressed per segment and at 120 s per backup (a hard
+stop) — those topics read `notAssessed` (`segmentTooLargeForDetection`,
+`detectionTimeBudgetExceeded`, `segmentUnreadable`). It adds at most about
+**17 MB** to the runner's memory, measured: a 16 MiB incompressible segment
+held while scanned (+16.6 MB) is the worst case; a 1 GiB zstd bomb, a frame
+declaring a 128 MiB window and a 250 MiB lz4 body each add 2.4 MB. Both verifiers read the block: `verify_scorecard.py`
+**1.24.0** and `logweir drill verify` check its eight arms (22 to 29) and
+print one `schema_dependency` line per topic. Stated limit: a binary key that
+is a big-endian 64-bit integer from 2^24 to 2^56 (an epoch-millisecond
+timestamp, a large database id) looks framed and is flagged with the "ids" its
+bytes hold; schema ids in record headers, Apicurio's 8-byte ids and other
+registries' framing are not detected ([the contract](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
+**Do:** nothing is required. A `Backup` whose `spec.deadlineSeconds` is tight
+should allow up to 120 s more for detection after the engine. To see a point's
+flags, open the restore review or the catalog page, or verify its receipt with
+either reader. Points recorded before this item read not assessed until a
+backup by this runner records them.
+**Scope:** unit rows over the detector (Avro, JSON Schema and Protobuf framing
+in keys and values, unframed payloads, nulls and tombstones, short records and
+random ids after a zero byte, the one-in-ten boundary, a mixed topic, an empty
+topic, the 16-id cap); the sampler measured with a counting segment source;
+the caps, the time budget, a panicking source and the head's early stop; a
+child-process memory row (a ~190 MiB segment, a 1 GiB zstd bomb, a frame
+declaring a 128 MiB window and a 250 MiB lz4 body each add 2.4 MB; a 16 MiB
+incompressible segment +16.6 MB; decoding a segment whole adds 397 MB); a row
+CI runs on its default stack (raw Confluent framing, the real engine and
+store, the receipt's ids asserted); arms
+22–29 with their exact text in both readers, the corpus and the parity gate
+(which also derives each reader's lines from the document); the catalog's
+cross-check and reconcile; one fixture read by the runner's, the API's and the
+console's rows; and a live compose row: Avro, JSON Schema and Protobuf records
+produced through Karapace's REST proxy, the registry STOPPED, then a backup
+whose 1.5.0 receipt names exactly the four dependent topics with the
+registry's own ids, the plain and zero-byte controls `notDetected` and the
+empty topic `notAssessed`; both readers accept it and print the same lines;
+the catalog point copies it; the console's own render over the point says the
+sentence with the live ids. Mutants on the detector, the threshold, the
+readers and the bounds are killed. Older readers (`verify_scorecard.py` 1.23.0
+and earlier) accept a 1.5.0 receipt and print no schema line.
+**Rollback:** an older runner writes 1.3.0/1.4.0 receipts and records with no
+block (their topics read not assessed); the 1.5.0 documents already written
+stay valid for every reader. An older controller or console ignores the field.
+
+#### 47. A deleted topic can be restored under its own name, into a topic that does not exist, behind its own approval subject (PROD-15.1)
+
+**Added.** A restore under the ORIGINAL topic names: `orders` is recreated as
+`orders`, not beside it under a prefix — the recovery of a deleted topic, or
+of a lost cluster onto a replacement. The owner's decision OD-2 narrowed
+[stability.md](stability.md)'s Never #1 to a LIVE topic; this is the one path
+it no longer covers. The plan states it in `newTopic` mode:
+`target.topic_naming: {prefix: "", original_name: {owners: []}}`
+([drill-spec.md](formats/drill-spec.md#targettopic_namingoriginal_name-prod-151));
+the `Restore` declares `spec.target.topicNaming.originalName: true` (a CEL
+rule allows it only in `newTopic` mode with an empty prefix, and the
+controller refuses an object whose declaration and plan disagree,
+`ExecutionSpecInvalid`); the console offers it as an explicit choice in the
+restore wizard with the owner statement it needs
+([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
+**Its own approval subject.** Only an approval whose signed bytes carry the
+approval subject `originalName` authorises it, and such an approval authorises
+nothing else: `logweir drill approve --approval-subject original-name` (v1
+`approval_subject`), or the console's confirmation (v2 `approvalSubject`,
+signed only for a Restore that declares it). The controller refuses a
+mismatched pair terminally before any Job (`ApprovalSubjectMismatch`), the
+runner refuses it again (exit 3), and a standing rehearsal authorization never
+authorises one. The product API's restore reads and approvals list carry
+`approvalSubject`, and the console shows it on the review step and the
+approvals page.
+**What the runner proves first** (exit 3, nothing written): every restored name
+is absent; the target is another cluster than the archive's source (the bound
+point's receipt), or every broker reports `auto.create.topics.enable=false`
+(`OriginalNameAutoCreateEnabled`, `OriginalNameAutoCreateUnknown`); an owner
+was looked for — the plan's statement, the `KafkaTopic` resources given to
+`logweir restore run --kafka-topic-resources`, or the receipt's recorded
+owners — and none found unless the plan chose the owner path
+(`OriginalNameOwnerNotChecked`, `OriginalNameOwnerPresent`); and the
+`LogAppendTime` probe stays under the scratch prefix, never an original name.
+Creation is exclusive: a name that appears after phase 0 stops the run before
+the engine starts (`TargetTopicAppeared`, exit 1), and nothing is written into
+a topic the run did not create. Teardown never deletes a topic under its
+original name. The scorecard is format **1.8.0** with `target.original_name`
+(the approval subject and mode, the cluster condition, the owners); both
+readers check it (arms ON-1 to ON-10, `verify_scorecard.py` 1.25.0) and print
+two `original name:` lines, and `logweir drill show` names it in its footer.
+**Do:** nothing for any other restore. Apply the `Restore` CRD before the
+controller rolls, and roll the controller, the runner, the product API and the
+console together. Stop every producer of a restored name before such a
+restore, and repoint consumers after it (consumer positions are not copied).
+The controller does not list `KafkaTopic` resources (PROD-05.1a), so a
+`Restore` relies on the plan's owner statement or the receipt.
+**Scope:** runner rows over fakes for every condition and its refusal, the
+probe, the exclusive create (the pre-create re-check and `CreateTopics`'
+already-exists answer), the teardown rail and the subject check; controller
+rows for admission step 4b, the declaration and the standing refusal; API rows
+for the create, the identity mapping, the signed subject and the legacy
+route; both verifiers over twelve corpus cases and the parity script; the
+console's golden plan, parsed by the runner. Compose rows on slot 1
+(`COMPOSE_PROFILES=auth,cluster2,autocreate`; the new `autocreate` profile is
+a one-broker cluster that auto-creates topics), each against the brokers: a
+deleted topic recovered under its name on a second cluster (30 of 30
+records, still there after the run) and on the same cluster with
+auto-creation disabled under a complete verification, refused while the name
+existed; the same cluster with auto-creation enabled refused; a producer that
+auto-creates the name while the runner is suspended at phase 5 wins, the run
+stops `TargetTopicAppeared` and the topic holds that one record; an ordinary
+approval refused, and `drill approve` refusing to sign one; a `KafkaTopic`
+owner (simulated with a resources file: no Strimzi operator in the lab)
+refused, then restored on the owner path; scratch mode refused. Each
+condition, the exclusive create and the subject check has a mutant that fails
+a row. Older readers (`verify_scorecard.py` 1.23.0 and 1.24.0, and a
+`logweir` built before this item) accept the live 1.8.0 scorecards and print
+nothing about the original name. Not proven live: a
+real Strimzi operator, and the PoC upgrade.
+**Rollback:** an older runner ignores the `original_name` block, sees the
+empty prefix and refuses the plan (exit 3) before it writes anything; an older
+controller ignores `topicNaming.originalName` and its runner refuses the same
+way; an older reader of an authorization document v2 refuses one carrying
+`approvalSubject`. Rolling the CRD back prunes the field from stored objects,
+whose plans then fail at the runner as above. 1.8.0 scorecards stay valid
+under older readers, which ignore the block.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1265,7 +1488,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43 and 44, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46 and 47, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1291,7 +1514,13 @@ window start (an older runner refuses a plan with one); item 43 changes the
 notification and metrics, the standing authorization's scope (format
 1.1.0), the product API and the console, and needs nothing unless a
 rehearsal is to verify every record (a new schedule and a new
-authorization); item 44 changes the console only and needs nothing. To roll back to
+authorization); item 44 changes the console only and needs nothing; item 45
+changes the controller only (and two CRD descriptions) and needs nothing; item 46
+changes the runner's receipts and catalog records, the catalog's view (runner
+and controller), the product API and the console, and needs nothing; item 47
+changes the `Restore` CRD (apply it before the controller rolls), the
+controller, the runner, the product API and the console, and needs nothing
+for any other restore (an older runner refuses an original-name plan). To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -1301,8 +1530,9 @@ authorization); item 44 changes the console only and needs nothing. To roll back
    0.21.0 engine again, and that build's `doctor` refuses 0.23.3. The runner
    signs format 1.3.0 again, sampled (item 30); the 1.4.0 scorecards already
    written stay valid under both readers. It writes 1.1.0 or 1.2.0 receipts
-   again with no `topic_configuration` (item 32); the 1.3.0 receipts and
-   records already written stay valid.
+   again with no `topic_configuration` (item 32) and no `schema_dependency`
+   (item 46); the 1.3.0 and 1.5.0 receipts and records already written stay
+   valid.
 3. Roll the console back with the controller and the runner (item 33): an older
    console names an existing Secret again, which this API refuses. The bound
    Secrets keep working with the older controller and runner, which ignore the
@@ -1319,6 +1549,11 @@ authorization); item 44 changes the console only and needs nothing. To roll back
    the new status fields, and the bound Secrets keep working. Roll the console
    back with them (an older console offers `existing` on a create again,
    which only this API refuses).
+6. Item 47 needs no rollback step of its own: an older runner refuses an
+   original-name plan before it writes anything, an older controller ignores
+   `topicNaming.originalName`, and rolling the `Restore` CRD back prunes the
+   field. Finish or delete any original-name `Restore` first, so none is left
+   waiting on a runner that refuses it.
 
 ---
 

@@ -1040,6 +1040,53 @@ pub struct EntryTopic {
     /// The declarative owner's kind, when one manages the topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// **PROD-03.0.** The topic's schema dependency, when the point's record
+    /// carries one (record format 1.5.0). ABSENT is NOT ASSESSED, never "not
+    /// schema-dependent".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_dependency: Option<EntrySchemaDependency>,
+}
+
+/// **PROD-03.0.** The most schema ids one topic's entry may list — the
+/// receipt format's own cap (`logweir_core::schema_dependency::
+/// SCHEMA_IDS_LISTED`, held equal below and by the runner's
+/// `the_grammar_this_runner_writes_is_the_grammar_the_controller_parses`). An
+/// entry listing more is MALFORMED and skipped, for the reason
+/// [`MAX_ENTRY_TOPICS`] gives.
+pub const MAX_ENTRY_SCHEMA_IDS: usize = 16;
+const _: () = assert!(MAX_ENTRY_SCHEMA_IDS == logweir_core::schema_dependency::SCHEMA_IDS_LISTED);
+
+/// **PROD-03.0.** One topic's schema dependency as the runner lists it: the
+/// receipt's verdict and how it was reached, the DEPENDENT sides, and the
+/// schema ids they name — what a restore review needs to say "registry not
+/// captured" and which ids the applications will ask a registry for. The ids
+/// are bytes 1-4 of framed keys or values: a registry's schema id for real
+/// Confluent framing, but for the stated residual (big-endian 64-bit integer
+/// keys from 2^24 to 2^56) four bytes of the key itself. Nothing else of a
+/// payload is listed. Copied from a point record the runner cross-checked
+/// against its verified receipt (rule 3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntrySchemaDependency {
+    /// `schemaDependent`, `notDetected` or `notAssessed`.
+    pub verdict: String,
+    /// `sampled` or `complete`, for a judged topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    /// `noRecords`, `segmentUnreadable`, `segmentTooLargeForDetection` or
+    /// `detectionTimeBudgetExceeded`, for a `notAssessed` one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The dependent sides, `key` and/or `value`, in that order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sides: Vec<String>,
+    /// The ids the dependent sides name, merged, ascending, at most
+    /// [`MAX_ENTRY_SCHEMA_IDS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_ids: Vec<u32>,
+    /// Whether the record names more ids than `schemaIds` lists.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub schema_ids_omitted: bool,
 }
 
 /// One point, as the sync Job reports it.
@@ -1698,6 +1745,16 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
                         .owner_detection
                         .as_ref()
                         .is_some_and(|d| d.len() > MAX_OWNER_DETECTION) =>
+                {
+                    skipped = skipped.saturating_add(1);
+                }
+                // PROD-03.0: and for a topic's schema ids and sides.
+                Ok(entry)
+                    if entry.topics.iter().any(|t| {
+                        t.schema_dependency.as_ref().is_some_and(|d| {
+                            d.schema_ids.len() > MAX_ENTRY_SCHEMA_IDS || d.sides.len() > 2
+                        })
+                    }) =>
                 {
                     skipped = skipped.saturating_add(1);
                 }

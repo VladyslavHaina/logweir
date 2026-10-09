@@ -59,6 +59,7 @@
 pub mod config_coverage;
 pub mod phase_minus1_admit;
 pub mod phase_run;
+pub mod schema_dependency;
 
 use crate::exit::ExitCode;
 use logweir_core::engine::{AuthRender, BackupFacts, BackupPlan, DataEngine};
@@ -181,6 +182,13 @@ pub struct BackupOutcome {
     /// without an owner reads "not checked", never "applied through the admin
     /// API".
     pub owner_detection: Vec<String>,
+    /// **PROD-03.0.** Per named topic, whether its archived keys or values
+    /// carry Confluent wire-format framing — `schema_dependency::detect` over
+    /// a bounded sample of the segments this run wrote, read back through the
+    /// archive handle; no registry is contacted. One entry per named topic;
+    /// `phase_run::build_receipt` writes it as the receipt's 1.5.0
+    /// `schema_dependency` block.
+    pub schema_dependency: BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -757,6 +765,7 @@ fn execute_with_signer(
         config_coverage: coverage,
         topic_configuration,
         owner_detection: inputs.owner_detection.clone(),
+        schema_dependency: ran.schema_dependency,
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

@@ -1063,11 +1063,15 @@ pub const PHASE_FAILED: &str = "Failed";
 //    contract. `message` is deliberately NOT compared: it carries instants
 //    (the next firing, the slot) that move by design, and comparing it would
 //    put the bug straight back.
-// 2. A "when computed" field — `retentionReport.evaluatedAt` — is written only
-//    when the thing it timestamps changed, and kept otherwise. That
-//    comparison is the report's own
-//    (`crate::retention::RetentionReport::same_findings_as`), and it feeds
-//    this module's rule 3.
+// 2. A "when computed" field — `retentionReport.evaluatedAt`,
+//    `lastSlot.decidedAt` — is written only when the thing it timestamps
+//    changed, and kept otherwise. That comparison is
+//    [`keep_instant_unless_changed`], and it is made on the JSON the API server
+//    will STORE (the block merged onto the stored one), never on a typed
+//    struct: FX-29 was a typed comparison that saw a difference the merge patch
+//    could not carry, so it stamped a fresh instant on every pass, forever. It
+//    feeds this module's rule 3. A struct block is sent through [`replacing`]
+//    first, so a field that became `None` is cleared rather than left behind.
 // 3. **If the patch would not change the object, no patch is sent at all** —
 //    [`status_unchanged`]. This is the backstop that makes rules 1 and 2
 //    OBSERVABLE in a test (a route table with zero PATCHes) instead of merely
@@ -1264,6 +1268,89 @@ pub fn status_unchanged(current: Option<&serde_json::Value>, next: &serde_json::
     let mut merged = current.clone();
     apply_merge_patch(&mut merged, status);
     merged == current
+}
+
+/// `next`, a struct block serialised for a merge patch, made to REPLACE the
+/// block `stored` under the same key instead of merging into it.
+///
+/// # FX-29: the key a merge patch cannot clear
+///
+/// Every optional field of a status struct carries `skip_serializing_if =
+/// "Option::is_none"`, so a field that has BECOME `None` serialises as an
+/// absent key — and an absent key in an RFC 7386 merge patch means "leave it
+/// alone". `status.lastSlot.backupRef` was the case found live: a slot
+/// `Admitted` with a `Backup`, then the next slot `Missed` with none, left the
+/// older slot's `backupRef` on the newer slot's record, and the reconciler's
+/// typed "same decision?" comparison (stored `Some`, computed `None`) said
+/// "changed" on every pass while the write it sent could never make them equal.
+///
+/// So every key `stored` carries and `next` does not is sent as an explicit
+/// `null`, recursively through nested objects. Arrays are left alone: a merge
+/// patch already replaces an array wholesale. A `next` that is not an object,
+/// or a `stored` that is absent or not an object, is returned unchanged — there
+/// is nothing to clear.
+#[must_use]
+pub fn replacing(next: serde_json::Value, stored: Option<&serde_json::Value>) -> serde_json::Value {
+    let serde_json::Value::Object(mut fields) = next else {
+        return next;
+    };
+    let Some(serde_json::Value::Object(old)) = stored else {
+        return serde_json::Value::Object(fields);
+    };
+    for (key, old_value) in old {
+        match fields.get_mut(key) {
+            None => {
+                fields.insert(key.clone(), serde_json::Value::Null);
+            }
+            Some(new_value) => {
+                let taken = std::mem::take(new_value);
+                *new_value = replacing(taken, Some(old_value));
+            }
+        }
+    }
+    serde_json::Value::Object(fields)
+}
+
+/// Put `stored[instant]` back into `next` when merging `next` onto `stored`
+/// would change nothing ELSE — so that a "when computed" instant moves when
+/// the thing it timestamps moves, and never on its own. Returns whether it did.
+///
+/// `stored` and `next` are one status block (`status.lastSlot`,
+/// `status.retentionReport`), `next` as it will be sent. The comparison is
+/// [`status_unchanged`]'s, made on the merged JSON the API server will store,
+/// with `instant` left out of both sides. When the block did change, `next`
+/// keeps the instant it was built with, which is the caller's `now`.
+///
+/// A `stored` block with no `instant` keeps nothing: there is no earlier
+/// instant to keep, and the first one written is this one.
+pub fn keep_instant_unless_changed(
+    stored: Option<&serde_json::Value>,
+    next: &mut serde_json::Value,
+    instant: &str,
+) -> bool {
+    let Some(stored) = stored.filter(|s| s.is_object()) else {
+        return false;
+    };
+    let Some(kept) = stored.get(instant).filter(|v| !v.is_null()).cloned() else {
+        return false;
+    };
+    let without = |value: &serde_json::Value| {
+        let mut value = value.clone();
+        if let Some(fields) = value.as_object_mut() {
+            fields.remove(instant);
+        }
+        value
+    };
+    let mut merged = stored.clone();
+    apply_merge_patch(&mut merged, next);
+    if without(&merged) != without(stored) {
+        return false;
+    }
+    if let Some(fields) = next.as_object_mut() {
+        fields.insert(instant.to_string(), kept);
+        return true;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

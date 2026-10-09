@@ -138,8 +138,8 @@ golden:
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
 scorecard_schema_version := "1.8.0"
-receipt_schema_version := "1.4.0"
-catalog_schema_version := "1.4.0"
+receipt_schema_version := "1.5.0"
+catalog_schema_version := "1.5.0"
 
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json
