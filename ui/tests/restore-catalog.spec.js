@@ -986,3 +986,36 @@ test("prod041_a_points_consumer_positions_say_how_fresh_and_what_relates", () =>
   assert.doesNotMatch(pointRow(row(), NS, "archive", "primary", page([]))[2],
     /data-consumer-positions/);
 });
+
+test("prod041_a_captured_group_whose_reads_failed_says_so_never_only_none_relate", () => {
+  // Review L5: "0 of 3 relate" alone read like three positions that do not
+  // relate; the failed, beyond-the-end and not-observed counts are said too.
+  const cp = {
+    observedBeforeRecoveryPointMs: 0, listing: "complete",
+    groups: [{ groupId: "g", outcome: "captured", active: false,
+      positions: { related: 0, notRelated: 0, neverCommitted: 0, beyondEnd: 1, failed: 3,
+        notObserved: 2 } }],
+  };
+  const note = consumerPositionsNote(row({ consumerPositions: cp }));
+  assert.match(note,
+    /g: captured, 0 of 6 position\(s\) relate to archived data, 1 beyond the end, 3 failed, 2 not observed/);
+  assert.doesNotMatch(note, /never committed/, "a zero count is not said");
+});
+
+test("prod041_h1_a_point_selecting_the_most_groups_is_offered_and_counts_what_it_does_not_list", () => {
+  // Review H1's chain, at the console: the catalog now reads a point whose
+  // backup selected 100 groups (the most) as Available -- its receipt carries
+  // counts, never partitions -- and the view lists none of the groups past
+  // its cap of 32, only how many. Such a row is offered for restore like any
+  // other, and its note says the groups were left out of the list.
+  const big = row({ consumerPositions: { observedFromMs: 1, observedToMs: 2,
+    observedBeforeRecoveryPointMs: 2000, listing: "complete", groupsOmitted: 100 } });
+  assert.deepEqual(catalogPointOffer(big, page([])), { offer: true, reason: null });
+  assert.match(consumerPositionsNote(big),
+    /100 group\(s\) not listed here; the signed receipt names each/);
+  // NEGATIVE CONTROL: the same point read Unreadable -- what an over-cap
+  // receipt was before the fix -- is not offered.
+  const unreadable = row({ availability: "Unreadable", selectable: false,
+    consumerPositions: undefined });
+  assert.equal(catalogPointOffer(unreadable, page([])).offer, false);
+});

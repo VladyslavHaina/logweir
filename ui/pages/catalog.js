@@ -479,10 +479,12 @@ export function pointRow(entry, ns, catalog, destination, page) {
 /** PROD-04.1: a point's consumer position evidence, as the catalog's view
  *  publishes it (`consumerPositions`): how long before the recovery point the
  *  positions were read -- the snapshot's freshness -- and per selected group
- *  its outcome and how many of its positions relate to archived data. The
+ *  its outcome and how many of its positions relate to archived data, with
+ *  every count that is not zero: never committed, beyond the end, failed and
+ *  not observed (review L5: "0 of 3 relate" alone hid three failed reads). The
  *  empty string when the point publishes none (the backup selected no group,
  *  or the record predates format 1.5.0): never "no positions". The positions
- *  themselves are in the point's signed receipt. */
+ *  themselves are in the positions document the point's signed receipt binds. */
 export function consumerPositionsNote(entry) {
   const cp = (entry || {}).consumerPositions;
   if (!cp || typeof cp !== "object") {
@@ -497,9 +499,14 @@ export function consumerPositionsNote(entry) {
     if (g.outcome === "captured" && p && typeof p === "object") {
       const total = count(p.related) + count(p.notRelated) + count(p.neverCommitted) +
         count(p.beyondEnd) + count(p.failed) + count(p.notObserved);
+      const also = [
+        [p.neverCommitted, "never committed"],
+        [p.beyondEnd, "beyond the end"],
+        [p.failed, "failed"],
+        [p.notObserved, "not observed"],
+      ].filter(([n]) => count(n) > 0).map(([n, what]) => ", " + count(n) + " " + what).join("");
       return id + ": captured" + (g.active === true ? " (active)" : "") + ", " +
-        count(p.related) + " of " + total + " position(s) relate to archived data" +
-        (count(p.neverCommitted) > 0 ? ", " + count(p.neverCommitted) + " never committed" : "");
+        count(p.related) + " of " + total + " position(s) relate to archived data" + also;
     }
     return id + ": " + String(g.outcome || "") + " (" + String(g.reason || "") + ")";
   });
