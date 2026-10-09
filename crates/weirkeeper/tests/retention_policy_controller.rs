@@ -7405,7 +7405,9 @@ async fn fx20_a_binding_refusal_is_named_on_the_enforced_condition() {
     assert_eq!(enforced["reason"], "CredentialBindingMismatch");
     let message = enforced["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("Nothing was deleted") && message.contains("status.credentialBinding"),
+        message.contains("Nothing was deleted")
+            && message.contains("scripts/bind-credential.py")
+            && !message.contains("Set it to status.credentialBinding"),
         "{message}"
     );
 
@@ -7487,7 +7489,32 @@ async fn fx20c_a_binding_refusal_stands_on_enforced_until_a_later_run() {
         "logweir-retention: CredentialBindingMismatch: x\nretention-refusal=CredentialBindingMismatch\n",
     )
     .await;
+    // REVIEW M-1: the two fields the console reads say what is happening —
+    // nothing is deleted until a human rebinds — on the harvest AND on the
+    // held pass, not "enforced by Logweir".
+    let console_fields = |status: &Value| {
+        (
+            status["enforcement"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            status["guarantees"]["ageExpiry"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        )
+    };
+    assert_eq!(
+        console_fields(&refused),
+        ("RecommendationOnly".to_string(), "NotEnforced".to_string()),
+        "the harvest of a binding-refused run: {refused}"
+    );
     let next = next_pass(refused.clone()).await;
+    assert_eq!(
+        console_fields(&next),
+        ("RecommendationOnly".to_string(), "NotEnforced".to_string()),
+        "the held pass: {next}"
+    );
     let enforced = condition_of(&next, "Enforced").expect("Enforced");
     assert_eq!(enforced["status"], "False", "{enforced}");
     assert_eq!(enforced["reason"], "CredentialBindingMismatch");
@@ -7501,10 +7528,16 @@ async fn fx20c_a_binding_refusal_stands_on_enforced_until_a_later_run() {
 
     // CONTROL: the same exit without the binding line is not held.
     let generic = refused_after("retention-refusal=SomethingThisBuildDoesNotKnow\n").await;
+    assert_eq!(generic["enforcement"], "LogweirWorker", "{generic}");
     let next = next_pass(generic).await;
     assert_eq!(
         condition_of(&next, "Enforced").expect("Enforced")["status"],
         "True"
+    );
+    assert_eq!(
+        console_fields(&next),
+        ("LogweirWorker".to_string(), "LogweirEnforced".to_string()),
+        "a generic refusal is not held: {next}"
     );
 
     // CONTROL: a newest run that exited 0 releases the hold.
@@ -7514,5 +7547,10 @@ async fn fx20c_a_binding_refusal_stands_on_enforced_until_a_later_run() {
     assert_eq!(
         condition_of(&next, "Enforced").expect("Enforced")["status"],
         "True"
+    );
+    assert_eq!(
+        console_fields(&next),
+        ("LogweirWorker".to_string(), "LogweirEnforced".to_string()),
+        "a later successful run releases the fields too: {next}"
     );
 }
