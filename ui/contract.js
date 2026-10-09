@@ -2623,6 +2623,28 @@ const D3_POINT_TOPIC = shapeOf(
   { partitions: int, replicationFactor: int, configCoverage: str, owner: str },
 );
 
+/** PROD-04.1: a point's consumer position evidence, as the catalog's view
+ *  lists it -- the snapshot's freshness, and per selected group its outcome and
+ *  its positions counted by what they say about archived data. Never a
+ *  position. */
+const D3_POINT_POSITION_COUNTS = shapeOf("PointPositionCountsView", {
+  related: int, notRelated: int, neverCommitted: int, beyondEnd: int, failed: int,
+  notObserved: int,
+});
+const D3_POINT_GROUP = shapeOf(
+  "PointGroupView",
+  { groupId: str, outcome: str },
+  { reason: str, groupType: str, active: bool, positions: objectOf(D3_POINT_POSITION_COUNTS) },
+);
+const D3_POINT_CONSUMER_POSITIONS = shapeOf(
+  "PointConsumerPositionsView",
+  { listing: str },
+  {
+    observedFrom: str, observedTo: str, observedBeforeRecoveryPointMs: int,
+    groups: listOf(objectOf(D3_POINT_GROUP)), groupsOmitted: int,
+  },
+);
+
 const D3_POINT = shapeOf(
   "PointView",
   {
@@ -2648,6 +2670,9 @@ const D3_POINT = shapeOf(
     // EMPTY says it looked nowhere, so an un-owned topic's `applyRoute` is
     // `unknown` -- never read as `adminApi`.
     ownerDetection: listOf(str),
+    // PROD-04.1: the consumer position evidence of the groups the backup
+    // selected. ABSENT is not published, never "no positions".
+    consumerPositions: objectOf(D3_POINT_CONSUMER_POSITIONS),
   },
 );
 

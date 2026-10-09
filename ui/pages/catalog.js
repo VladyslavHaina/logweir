@@ -459,7 +459,7 @@ export function pointRow(entry, ns, catalog, destination, page) {
         : "<span class=\"note\" data-restore-refused=\"wizard\">not offered: " +
           messageText(offer.reason) + "</span>"),
     "<code>" + cell(e.pointId) + "</code>",
-    when(e.recoveryPointAt),
+    when(e.recoveryPointAt) + consumerPositionsNote(e),
     badge(e.availability === "Available" ? "green" : "unverified", String(e.availability || "")),
     badge(
       e.verification === "Verified" || e.verification === "VerifiedHistorical"
@@ -474,6 +474,44 @@ export function pointRow(entry, ns, catalog, destination, page) {
     "<code>" + cell(e.signerKeyId) + "</code>",
     cell(e.remedy),
   ];
+}
+
+/** PROD-04.1: a point's consumer position evidence, as the catalog's view
+ *  publishes it (`consumerPositions`): how long before the recovery point the
+ *  positions were read -- the snapshot's freshness -- and per selected group
+ *  its outcome and how many of its positions relate to archived data. The
+ *  empty string when the point publishes none (the backup selected no group,
+ *  or the record predates format 1.5.0): never "no positions". The positions
+ *  themselves are in the point's signed receipt. */
+export function consumerPositionsNote(entry) {
+  const cp = (entry || {}).consumerPositions;
+  if (!cp || typeof cp !== "object") {
+    return "";
+  }
+  const groups = Array.isArray(cp.groups) ? cp.groups : [];
+  const count = (n) => (typeof n === "number" ? n : 0);
+  const parts = groups.map((group) => {
+    const g = group || {};
+    const id = String(g.groupId || "");
+    const p = g.positions;
+    if (g.outcome === "captured" && p && typeof p === "object") {
+      const total = count(p.related) + count(p.notRelated) + count(p.neverCommitted) +
+        count(p.beyondEnd) + count(p.failed) + count(p.notObserved);
+      return id + ": captured" + (g.active === true ? " (active)" : "") + ", " +
+        count(p.related) + " of " + total + " position(s) relate to archived data" +
+        (count(p.neverCommitted) > 0 ? ", " + count(p.neverCommitted) + " never committed" : "");
+    }
+    return id + ": " + String(g.outcome || "") + " (" + String(g.reason || "") + ")";
+  });
+  if (typeof cp.groupsOmitted === "number") {
+    parts.push(cp.groupsOmitted + " group(s) not listed here; the signed receipt names each");
+  }
+  const fresh = typeof cp.observedBeforeRecoveryPointMs === "number"
+    ? "read " + (cp.observedBeforeRecoveryPointMs / 1000).toFixed(1) + " s before this point"
+    : "read at a time this view does not say";
+  return "<br><span class=\"note\" data-consumer-positions=\"" + groups.length + "\">" +
+    esc("Consumer positions " + fresh + " (listing " + String(cp.listing || "") + "), not " +
+      "atomic with the records: " + parts.join("; ")) + "</span>";
 }
 
 /** Said above the point table when the product API could not read every

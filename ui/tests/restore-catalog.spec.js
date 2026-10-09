@@ -56,6 +56,7 @@ import {
 import {
   BACKUP_VERDICTS_INCOMPLETE_SENTENCE,
   pointRow,
+  consumerPositionsNote,
   renderPoints,
 } from "../pages/catalog.js";
 import { latestRestorablePoint, readSchedulePoints, restoreCell } from "../pages/schedules.js";
@@ -954,4 +955,34 @@ test("the_operation_words_map_to_the_verdicts_the_rule_reads", () => {
   assert.equal(ownVerdictOf({ status: { evidence: { verification: { result: "Untrusted" } } } }),
     "Untrusted", "a legacy-mode custom resource is read as it is written");
   assert.equal(ownVerdictOf({ status: {} }), null);
+});
+
+test("prod041_a_points_consumer_positions_say_how_fresh_and_what_relates", () => {
+  const cp = {
+    observedFromMs: 1, observedToMs: 2, observedBeforeRecoveryPointMs: 1500, listing: "complete",
+    groups: [
+      { groupId: "billing", outcome: "captured", groupType: "consumer", active: true,
+        positions: { related: 5, notRelated: 1, neverCommitted: 2, beyondEnd: 0, failed: 0,
+          notObserved: 0 } },
+      { groupId: "word-count", outcome: "excluded", reason: "GroupTypeNotCaptured",
+        groupType: "other" },
+    ],
+  };
+  const note = consumerPositionsNote(row({ consumerPositions: cp }));
+  assert.match(note, /data-consumer-positions="2"/);
+  assert.match(note, /read 1\.5 s before this point/);
+  assert.match(note, /billing: captured \(active\), 5 of 8 position\(s\) relate to archived data, 2 never committed/);
+  assert.match(note, /word-count: excluded \(GroupTypeNotCaptured\)/);
+  assert.match(note, /not atomic with the records/);
+  // It rides in the RECOVERY POINT cell, so the table keeps its columns.
+  const cells = pointRow(row({ consumerPositions: cp }), NS, "archive", "primary", page([]));
+  assert.equal(cells.length, pointRow(row(), NS, "archive", "primary", page([])).length);
+  assert.match(cells[2], /data-consumer-positions/);
+  // Groups the view left out are counted, never read as the whole selection.
+  assert.match(consumerPositionsNote(row({ consumerPositions: { listing: "complete",
+    observedBeforeRecoveryPointMs: 0, groupsOmitted: 40 } })), /40 group\(s\) not listed here/);
+  // CONTROL: a point that publishes none says nothing -- never "no positions".
+  assert.equal(consumerPositionsNote(row()), "");
+  assert.doesNotMatch(pointRow(row(), NS, "archive", "primary", page([]))[2],
+    /data-consumer-positions/);
 });
