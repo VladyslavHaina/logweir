@@ -631,7 +631,12 @@ RECEIPT_SCHEMA_DEPENDENCY_SINCE_MINOR = 5
 # `BASES`, `MAX_SCHEMA_ID`, `SCHEMA_IDS_LISTED` and
 # `DEPENDENT_SHARE_DENOMINATOR`, which they must equal.
 SCHEMA_DEPENDENCY_VERDICTS = ("schemaDependent", "notDetected", "notAssessed")
-SCHEMA_DEPENDENCY_REASONS = ("noRecords", "segmentUnreadable")
+SCHEMA_DEPENDENCY_REASONS = (
+    "noRecords",
+    "segmentUnreadable",
+    "segmentTooLargeForDetection",
+    "detectionTimeBudgetExceeded",
+)
 SCHEMA_DEPENDENCY_BASES = ("sampled", "complete")
 SCHEMA_ID_MAX = 0x00FFFFFF
 SCHEMA_IDS_LISTED = 16
@@ -2784,9 +2789,10 @@ def check_backup_receipt_invariants(doc) -> str:
                     f"{_rust_debug_str(verdict)} with reason {_shown_or_absent(reason)} and basis "
                     f"{_shown_or_absent(basis)} is not a verdict this format defines: the verdict is "
                     "\"schemaDependent\", \"notDetected\" or \"notAssessed\"; a "
-                    "\"notAssessed\" topic has a reason, \"noRecords\" or "
-                    "\"segmentUnreadable\", and no basis, and any other topic has a basis, "
-                    "\"sampled\" or \"complete\", and no reason"
+                    "\"notAssessed\" topic has a reason, \"noRecords\", "
+                    "\"segmentUnreadable\", \"segmentTooLargeForDetection\" or "
+                    "\"detectionTimeBudgetExceeded\", and no basis, and any other topic has "
+                    "a basis, \"sampled\" or \"complete\", and no reason"
                 )
 
             # ARM 25. Both sides exactly when the topic was judged, over the

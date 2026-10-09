@@ -408,6 +408,14 @@
     "arm": ""
   },
   {
+    "id": "receipt_1_5_not_assessed_by_the_caps",
+    "file": "receipt_1_5_not_assessed_by_the_caps.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
     "id": "receipt_1_5_key_side_and_more_ids",
     "file": "receipt_1_5_key_side_and_more_ids.json",
     "rust_exit": 0,
@@ -436,16 +444,16 @@
     "file": "schema_dependency_verdict_outside_the_set.json",
     "rust_exit": 4,
     "python_exit": 1,
-    "reason": "schema_dependency[\"orders\"] verdict \"registryNeeded\" with reason absent and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\" or \"segmentUnreadable\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason",
-    "arm": "schema_dependency[\"orders\"] verdict \"registryNeeded\" with reason absent and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\" or \"segmentUnreadable\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason"
+    "reason": "schema_dependency[\"orders\"] verdict \"registryNeeded\" with reason absent and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\", \"segmentUnreadable\", \"segmentTooLargeForDetection\" or \"detectionTimeBudgetExceeded\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason",
+    "arm": "schema_dependency[\"orders\"] verdict \"registryNeeded\" with reason absent and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\", \"segmentUnreadable\", \"segmentTooLargeForDetection\" or \"detectionTimeBudgetExceeded\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason"
   },
   {
     "id": "schema_dependency_not_assessed_with_a_basis",
     "file": "schema_dependency_not_assessed_with_a_basis.json",
     "rust_exit": 4,
     "python_exit": 1,
-    "reason": "schema_dependency[\"payments\"] verdict \"notAssessed\" with reason \"noRecords\" and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\" or \"segmentUnreadable\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason",
-    "arm": "schema_dependency[\"payments\"] verdict \"notAssessed\" with reason \"noRecords\" and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\" or \"segmentUnreadable\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason"
+    "reason": "schema_dependency[\"payments\"] verdict \"notAssessed\" with reason \"noRecords\" and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\", \"segmentUnreadable\", \"segmentTooLargeForDetection\" or \"detectionTimeBudgetExceeded\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason",
+    "arm": "schema_dependency[\"payments\"] verdict \"notAssessed\" with reason \"noRecords\" and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\", \"segmentUnreadable\", \"segmentTooLargeForDetection\" or \"detectionTimeBudgetExceeded\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason"
   },
   {
     "id": "schema_dependency_judged_without_a_value_side",

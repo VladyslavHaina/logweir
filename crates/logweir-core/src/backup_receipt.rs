@@ -222,7 +222,9 @@ pub struct BackupReceipt {
 /// | `schemaDependent` | — | `sampled`/`complete` | both | at least one side is dependent ([`SideFraming::dependent`]): its records carry Confluent framing, so a reader needs the registry, which was not captured |
 /// | `notDetected` | — | `sampled`/`complete` | both | neither side is dependent over the records judged |
 /// | `notAssessed` | `noRecords` | — | neither | the archive holds no record of the topic, so there is nothing to judge |
-/// | `notAssessed` | `segmentUnreadable` | — | neither | a segment the sample needed could not be read or decoded, or decoded to a count its manifest does not record |
+/// | `notAssessed` | `segmentUnreadable` | — | neither | a segment the sample needed could not be read or decoded, or decoded to a count its manifest does not record, or the detector failed |
+/// | `notAssessed` | `segmentTooLargeForDetection` | — | neither | a segment the sample needed is stored, or decompresses, larger than the detector reads at backup time |
+/// | `notAssessed` | `detectionTimeBudgetExceeded` | — | neither | the backup's detection time budget ran out before the topic was judged |
 ///
 /// `basis` is `complete` exactly when every record the receipt counts for
 /// the topic was judged, and `sampled` otherwise (arm 26).
@@ -234,7 +236,8 @@ pub struct TopicSchemaDependency {
     /// `schemaDependent`, `notDetected` or `notAssessed` —
     /// [`crate::schema_dependency::VERDICTS`].
     pub verdict: String,
-    /// `noRecords` or `segmentUnreadable` —
+    /// `noRecords`, `segmentUnreadable`, `segmentTooLargeForDetection` or
+    /// `detectionTimeBudgetExceeded` —
     /// [`crate::schema_dependency::NOT_ASSESSED_REASONS`] — present exactly
     /// when `verdict` is `notAssessed` (arm 24).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1439,9 +1442,10 @@ impl BackupReceipt {
                         "schema_dependency[{topic:?}] verdict {:?} with reason {} and basis {} \
                          is not a verdict this format defines: the verdict is \
                          \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \
-                         \"notAssessed\" topic has a reason, \"noRecords\" or \
-                         \"segmentUnreadable\", and no basis, and any other topic has a basis, \
-                         \"sampled\" or \"complete\", and no reason",
+                         \"notAssessed\" topic has a reason, \"noRecords\", \
+                         \"segmentUnreadable\", \"segmentTooLargeForDetection\" or \
+                         \"detectionTimeBudgetExceeded\", and no basis, and any other topic has \
+                         a basis, \"sampled\" or \"complete\", and no reason",
                         entry.verdict,
                         shown(entry.reason.as_ref()),
                         shown(entry.basis.as_ref())

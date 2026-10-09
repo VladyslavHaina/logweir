@@ -14,12 +14,16 @@
 
 mod fixtures;
 
-use logweir::backup::schema_dependency::{detect, SegmentSource};
+use logweir::backup::schema_dependency::{
+    detect, detect_within, DetectionLimits, SegmentSource, MAX_DECOMPRESSED_BYTES,
+    MAX_SEGMENT_BYTES, TIME_BUDGET,
+};
 use logweir_core::backup_receipt::BackupReceipt;
 use logweir_core::engine::*;
 use logweir_core::schema_dependency::{
     BASIS_COMPLETE, BASIS_SAMPLED, NOT_ASSESSED, NOT_DETECTED, REASON_NO_RECORDS,
-    REASON_SEGMENT_UNREADABLE, SAMPLE_PARTITIONS, SAMPLE_RECORDS_PER_END, SCHEMA_DEPENDENT,
+    REASON_SEGMENT_TOO_LARGE, REASON_SEGMENT_UNREADABLE, REASON_TIME_BUDGET, SAMPLE_PARTITIONS,
+    SAMPLE_RECORDS_PER_END, SCHEMA_DEPENDENT,
 };
 use logweir_kafka::reader::ConsumedRecord;
 use std::cell::RefCell;
@@ -62,12 +66,18 @@ struct Segments {
 }
 
 impl SegmentSource for Segments {
-    fn segment(&self, key: &str) -> Result<Vec<u8>, String> {
-        self.reads.borrow_mut().push(key.to_string());
-        self.objects
+    fn segment_bounded(&self, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, String> {
+        let bytes = self
+            .objects
             .get(key)
-            .cloned()
-            .ok_or_else(|| format!("{key}: not found"))
+            .ok_or_else(|| format!("{key}: not found"))?;
+        // The store's size check comes BEFORE the read: an object over the
+        // cap is never fetched, so it is never counted as read.
+        if bytes.len() as u64 > max_bytes {
+            return Ok(None);
+        }
+        self.reads.borrow_mut().push(key.to_string());
+        Ok(Some(bytes.clone()))
     }
 }
 
@@ -498,4 +508,264 @@ fn a_backup_run_signs_a_1_5_0_receipt_naming_the_framed_topic() {
         .find(|t| t["name"] == "orders")
         .unwrap();
     assert_eq!(orders["schema_dependency"]["verdict"], "schemaDependent");
+}
+
+// ===========================================================================
+// THE BOUNDS (the security review of the first version): caps, the time
+// budget, the head's early stop, the tail's ring, and "never fatal".
+// ===========================================================================
+
+/// A KBAK v1 segment of `(key, value)` records, zstd-compressed when `zstd`,
+/// with the frame of record `pad` (when given) declaring one byte more than
+/// its fields use — a record no decoder may accept.
+fn kbak(records: &[(Option<Vec<u8>>, Option<Vec<u8>>)], zstd: bool, pad: Option<usize>) -> Vec<u8> {
+    let opt = |out: &mut Vec<u8>, v: &Option<Vec<u8>>| match v {
+        None => out.extend_from_slice(&(-1i32).to_le_bytes()),
+        Some(b) => {
+            out.extend_from_slice(&(b.len() as i32).to_le_bytes());
+            out.extend_from_slice(b);
+        }
+    };
+    let mut body = Vec::new();
+    for (i, (k, v)) in records.iter().enumerate() {
+        let mut rec = Vec::new();
+        rec.extend_from_slice(&(1_760_000_000_000i64 + i as i64).to_le_bytes());
+        rec.extend_from_slice(&(i as i64).to_le_bytes());
+        opt(&mut rec, k);
+        opt(&mut rec, v);
+        rec.extend_from_slice(&0u16.to_le_bytes());
+        if pad == Some(i) {
+            rec.push(0xEE);
+        }
+        body.extend_from_slice(&(rec.len() as u32).to_le_bytes());
+        body.extend_from_slice(&rec);
+    }
+    envelope(
+        records.len() as u64,
+        if zstd { 1 } else { 0 },
+        &if zstd {
+            zstd::encode_all(&body[..], 3).unwrap()
+        } else {
+            body
+        },
+    )
+}
+
+/// The 32-byte header, `body`, the CRC-32 and the end magic.
+fn envelope(record_count: u64, codec: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"KBAK");
+    out.push(1);
+    out.push(codec);
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&record_count.to_le_bytes());
+    out.extend_from_slice(&0i64.to_le_bytes());
+    out.extend_from_slice(&(record_count as i64 - 1).max(0).to_le_bytes());
+    out.extend_from_slice(body);
+    let crc = fixtures::crc32_ieee(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(b"BKAE");
+    out
+}
+
+/// A one-record zstd segment whose value is `inflated` zero bytes: a few
+/// kilobytes stored, `inflated` decompressed — a decompression bomb when that
+/// is past the cap. Streamed through the encoder, so the test never holds it.
+fn bomb(inflated: u64) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut enc = zstd::stream::Encoder::new(Vec::new(), 19).unwrap();
+    let frame_len = 8 + 8 + 4 + 4 + inflated + 2;
+    enc.write_all(&(frame_len as u32).to_le_bytes()).unwrap();
+    enc.write_all(&1_760_000_000_000i64.to_le_bytes()).unwrap();
+    enc.write_all(&0i64.to_le_bytes()).unwrap();
+    enc.write_all(&(-1i32).to_le_bytes()).unwrap();
+    enc.write_all(&(inflated as i32).to_le_bytes()).unwrap();
+    std::io::copy(
+        &mut std::io::Read::take(std::io::repeat(0), inflated),
+        &mut enc,
+    )
+    .unwrap();
+    enc.write_all(&0u16.to_le_bytes()).unwrap();
+    envelope(1, 1, &enc.finish().unwrap())
+}
+
+fn facts_of(key: &str, count: i64) -> SegmentFacts {
+    SegmentFacts {
+        key: key.into(),
+        start_offset: 0,
+        end_offset: count - 1,
+        start_timestamp: 0,
+        end_timestamp: 0,
+        record_count: count,
+        sha256: String::new(),
+        uploaded_at: 0,
+    }
+}
+
+fn one_segment_topic(s: &mut Segments, name: &str, bytes: Vec<u8>, count: i64) -> TopicFacts {
+    let key = format!("t/{name}/0/0");
+    s.objects.insert(key.clone(), bytes);
+    topic(name, vec![partition(0, vec![facts_of(&key, count)])])
+}
+
+#[test]
+fn the_production_limits_are_the_documented_ones() {
+    assert_eq!(MAX_SEGMENT_BYTES, 64 << 20);
+    assert_eq!(MAX_DECOMPRESSED_BYTES, 256 << 20);
+    assert_eq!(TIME_BUDGET, std::time::Duration::from_secs(120));
+    assert_eq!(
+        DetectionLimits::default(),
+        DetectionLimits {
+            max_segment_bytes: MAX_SEGMENT_BYTES,
+            max_decompressed_bytes: MAX_DECOMPRESSED_BYTES,
+            time_budget: TIME_BUDGET,
+        }
+    );
+}
+
+/// A segment STORED larger than the fetch cap is never fetched (the size
+/// check comes first) and its topic is `segmentTooLargeForDetection`. The
+/// control: the same segment under the default cap is judged.
+#[test]
+fn a_segment_stored_over_the_cap_is_never_fetched() {
+    let mut s = Segments::default();
+    let records: Vec<_> = (0..20).map(|_| (None, Some(framed(5)))).collect();
+    let t = one_segment_topic(&mut s, "big", kbak(&records, false, None), 20);
+    let archive = set(vec![t]);
+    let tight = DetectionLimits {
+        max_segment_bytes: 64,
+        ..DetectionLimits::default()
+    };
+    let got = &detect_within(&archive, &names(&["big"]), &s, &tight)["big"];
+    assert_eq!(got.verdict, NOT_ASSESSED);
+    assert_eq!(got.reason.as_deref(), Some(REASON_SEGMENT_TOO_LARGE));
+    assert!(
+        s.reads().is_empty(),
+        "nothing over the cap is fetched: {:?}",
+        s.reads()
+    );
+    assert_eq!(
+        detect(&archive, &names(&["big"]), &s)["big"].verdict,
+        SCHEMA_DEPENDENT,
+        "NEGATIVE CONTROL: under the default cap it is judged"
+    );
+}
+
+/// A DECOMPRESSION BOMB — a few kilobytes stored, 8 MiB decompressed — stops
+/// at the decompression cap and reads `segmentTooLargeForDetection`; the same
+/// bytes under a cap above 8 MiB are judged (`notDetected`: a zero-filled
+/// value names id 0, which no registry issues). The memory bound is measured
+/// in `schema_dependency_memory.rs`.
+#[test]
+fn a_decompression_bomb_stops_at_the_cap() {
+    let mut s = Segments::default();
+    let bytes = bomb(8 << 20);
+    assert!(bytes.len() < 64 << 10, "stored small: {}", bytes.len());
+    let t = one_segment_topic(&mut s, "bomb", bytes, 1);
+    let archive = set(vec![t]);
+    let tight = DetectionLimits {
+        max_decompressed_bytes: 1 << 20,
+        ..DetectionLimits::default()
+    };
+    let got = &detect_within(&archive, &names(&["bomb"]), &s, &tight)["bomb"];
+    assert_eq!(got.verdict, NOT_ASSESSED);
+    assert_eq!(got.reason.as_deref(), Some(REASON_SEGMENT_TOO_LARGE));
+    assert_eq!(
+        detect(&archive, &names(&["bomb"]), &s)["bomb"].verdict,
+        NOT_DETECTED,
+        "NEGATIVE CONTROL: under a cap it fits, the same segment is judged"
+    );
+}
+
+/// Past the time budget, every topic still to judge reads
+/// `detectionTimeBudgetExceeded` and nothing more is fetched; a topic with no
+/// record needs no read and still says `noRecords`.
+#[test]
+fn past_the_time_budget_the_rest_is_not_assessed() {
+    let mut s = Segments::default();
+    let t = one_segment_topic(
+        &mut s,
+        "a",
+        kbak(&[(None, Some(framed(5)))], false, None),
+        1,
+    );
+    let archive = set(vec![t, topic("empty", vec![partition(0, vec![])])]);
+    let spent = DetectionLimits {
+        time_budget: std::time::Duration::ZERO,
+        ..DetectionLimits::default()
+    };
+    let got = detect_within(&archive, &names(&["a", "empty"]), &s, &spent);
+    assert_eq!(got["a"].reason.as_deref(), Some(REASON_TIME_BUDGET));
+    assert_eq!(got["empty"].reason.as_deref(), Some(REASON_NO_RECORDS));
+    assert!(s.reads().is_empty());
+    assert_eq!(
+        detect(&archive, &names(&["a"]), &s)["a"].verdict,
+        SCHEMA_DEPENDENT,
+        "NEGATIVE CONTROL: within the budget it is judged"
+    );
+}
+
+/// A source that panics: the topic is `segmentUnreadable`, the next topic is
+/// still judged, and `detect` returns — detection can never fail the backup.
+#[test]
+fn a_panic_inside_detection_is_a_value_not_a_failed_backup() {
+    struct Panics<'a>(&'a Segments);
+    impl SegmentSource for Panics<'_> {
+        fn segment_bounded(&self, key: &str, max: u64) -> Result<Option<Vec<u8>>, String> {
+            if key.contains("/boom/") {
+                panic!("a store client that panics");
+            }
+            self.0.segment_bounded(key, max)
+        }
+    }
+    let mut s = Segments::default();
+    let boom = one_segment_topic(&mut s, "boom", kbak(&[(None, None)], false, None), 1);
+    let fine = one_segment_topic(
+        &mut s,
+        "fine",
+        kbak(&[(None, Some(framed(6)))], false, None),
+        1,
+    );
+    let got = detect(
+        &set(vec![boom, fine]),
+        &names(&["boom", "fine"]),
+        &Panics(&s),
+    );
+    assert_eq!(
+        got["boom"].reason.as_deref(),
+        Some(REASON_SEGMENT_UNREADABLE)
+    );
+    assert_eq!(got["fine"].verdict, SCHEMA_DEPENDENT);
+}
+
+/// THE HEAD STOPS: a first segment whose record after the head is broken is
+/// still judged, because the head scan never reaches it. The control: the
+/// same segment as a partition's ONLY segment is scanned whole, reaches the
+/// broken record, and is `segmentUnreadable`.
+#[test]
+fn the_head_scan_stops_after_its_records() {
+    let n = SAMPLE_RECORDS_PER_END;
+    let records: Vec<_> = (0..n + 5).map(|_| (None, Some(framed(8)))).collect();
+    let broken = kbak(&records, true, Some(n + 2));
+    let tail = kbak(&[(None, Some(framed(8)))], false, None);
+    let mut s = Segments::default();
+    s.objects.insert("t/two/0/a".into(), broken.clone());
+    s.objects.insert("t/two/0/b".into(), tail);
+    let mut first = facts_of("t/two/0/a", (n + 5) as i64);
+    first.end_offset = (n + 4) as i64;
+    let mut second = facts_of("t/two/0/b", 1);
+    second.start_offset = (n + 5) as i64;
+    second.end_offset = second.start_offset;
+    let archive = set(vec![topic("two", vec![partition(0, vec![first, second])])]);
+    let got = &detect(&archive, &names(&["two"]), &s)["two"];
+    assert_eq!(got.verdict, SCHEMA_DEPENDENT, "{got:?}");
+    assert_eq!(got.value.as_ref().unwrap().framed, (n + 1) as u64);
+    let mut s = Segments::default();
+    let only = one_segment_topic(&mut s, "one", broken, (n + 5) as i64);
+    let got = &detect(&set(vec![only]), &names(&["one"]), &s)["one"];
+    assert_eq!(
+        got.reason.as_deref(),
+        Some(REASON_SEGMENT_UNREADABLE),
+        "NEGATIVE CONTROL: a whole scan reaches the broken record"
+    );
 }

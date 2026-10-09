@@ -1652,9 +1652,15 @@ fn a_1_5_0_receipt_satisfies_every_invariant() {
         .validate_invariants()
         .expect("the pristine 1.5.0 receipt satisfies every arm");
     // Every not-assessed shape is accepted too.
-    let mut doc = pristine_1_5();
-    *dep(&mut doc, "payments") = logweir_core::schema_dependency::not_assessed("segmentUnreadable");
-    doc.validate_invariants().expect("segmentUnreadable");
+    for reason in [
+        "segmentUnreadable",
+        "segmentTooLargeForDetection",
+        "detectionTimeBudgetExceeded",
+    ] {
+        let mut doc = pristine_1_5();
+        *dep(&mut doc, "payments") = logweir_core::schema_dependency::not_assessed(reason);
+        doc.validate_invariants().expect(reason);
+    }
     let mut doc = pristine_1_5();
     doc.records.insert("payments".into(), 0);
     *dep(&mut doc, "payments") = logweir_core::schema_dependency::not_assessed("noRecords");
@@ -1708,8 +1714,9 @@ fn arm_23_refuses_schema_dependency_that_does_not_cover_the_named_topic_set() {
 
 const ARM_24_TAIL: &str = " is not a verdict this format defines: the verdict is \
      \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a \
-     reason, \"noRecords\" or \"segmentUnreadable\", and no basis, and any other topic has a \
-     basis, \"sampled\" or \"complete\", and no reason";
+     reason, \"noRecords\", \"segmentUnreadable\", \"segmentTooLargeForDetection\" or \
+     \"detectionTimeBudgetExceeded\", and no basis, and any other topic has a basis, \
+     \"sampled\" or \"complete\", and no reason";
 
 #[test]
 fn arm_24_refuses_a_verdict_reason_or_basis_outside_the_closed_sets() {

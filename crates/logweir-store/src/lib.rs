@@ -679,6 +679,38 @@ impl Store {
         })
     }
 
+    /// **PROD-03.0 — read an object only when it is at most `max_bytes`
+    /// long.** `Ok(None)` when the store reports it larger: nothing is
+    /// fetched. Otherwise the bytes of a ranged read of exactly the size the
+    /// store reported, so an object that grows between the two requests is
+    /// still read to that bound and no further (a truncated read is the
+    /// caller's to refuse). For a reader that must never hold an object the
+    /// adopter's configuration could make arbitrarily large — schema
+    /// dependency detection at backup time.
+    pub fn get_bounded(&self, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, StoreError> {
+        let rt = &self.rt;
+        rt.block_on(async {
+            let path = OPath::from(key);
+            let not_found_or_io = |e: object_store::Error| match e {
+                object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
+                other => StoreError::Io(format!("{key}: {other}")),
+            };
+            let size = self.inner.head(&path).await.map_err(not_found_or_io)?.size;
+            if size > max_bytes {
+                return Ok(None);
+            }
+            if size == 0 {
+                return Ok(Some(Vec::new()));
+            }
+            let b = self
+                .inner
+                .get_range(&path, 0..size)
+                .await
+                .map_err(not_found_or_io)?;
+            Ok(Some(b.to_vec()))
+        })
+    }
+
     /// **FX-7 — read ONE VERSION of an object**, by the version id a signed
     /// document pinned. Returns the bytes and the version id the store
     /// answered with.

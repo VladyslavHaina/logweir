@@ -76,6 +76,19 @@
 //! records of its first segment and the last [`SAMPLE_RECORDS_PER_END`] of its
 //! last segment (every record when the partition holds no more than twice
 //! that in at most two segments).
+//!
+//! # Bounded, and never a failed backup
+//!
+//! The runner reads only what the sample needs and holds only what the
+//! detector looks at: segments are streamed (`logweir_engine_oso::kbak::
+//! scan_segment`), each key and value kept to its first [`MIN_FRAMED_LEN`]
+//! bytes, the head scan stops after its records and the tail is a ring of
+//! [`SAMPLE_RECORDS_PER_END`]. A segment stored larger than the runner's
+//! fetch cap, or one that decompresses past its decompression cap, is not
+//! judged ([`REASON_SEGMENT_TOO_LARGE`]); a backup whose detection outlives
+//! its time budget leaves the rest [`REASON_TIME_BUDGET`]; any other failure,
+//! a panic included, is [`REASON_SEGMENT_UNREADABLE`]. All three are
+//! `notAssessed`, never "not schema-dependent", and none fails the backup.
 
 use crate::backup_receipt::{SideFraming, TopicSchemaDependency};
 use std::collections::BTreeSet;
@@ -118,10 +131,23 @@ pub const VERDICTS: [&str; 3] = [SCHEMA_DEPENDENT, NOT_DETECTED, NOT_ASSESSED];
 /// `reason`: the archive holds no record of the topic.
 pub const REASON_NO_RECORDS: &str = "noRecords";
 /// `reason`: a segment the sample needed could not be read or decoded, or
-/// decoded to a record count its manifest does not record.
+/// decoded to a record count its manifest does not record — or the detector
+/// failed in any other way. Never a failed backup.
 pub const REASON_SEGMENT_UNREADABLE: &str = "segmentUnreadable";
+/// `reason`: a segment the sample needed is larger than the detector reads
+/// at backup time — stored, or decompressed — so it was not judged (a large
+/// segment, or a decompression bomb). Never "not schema-dependent".
+pub const REASON_SEGMENT_TOO_LARGE: &str = "segmentTooLargeForDetection";
+/// `reason`: the backup's time budget for detection ran out before this
+/// topic was judged.
+pub const REASON_TIME_BUDGET: &str = "detectionTimeBudgetExceeded";
 /// `TopicSchemaDependency::reason`'s closed set (arm 24).
-pub const NOT_ASSESSED_REASONS: [&str; 2] = [REASON_NO_RECORDS, REASON_SEGMENT_UNREADABLE];
+pub const NOT_ASSESSED_REASONS: [&str; 4] = [
+    REASON_NO_RECORDS,
+    REASON_SEGMENT_UNREADABLE,
+    REASON_SEGMENT_TOO_LARGE,
+    REASON_TIME_BUDGET,
+];
 
 /// `basis`: some of the topic's records were judged.
 pub const BASIS_SAMPLED: &str = "sampled";
