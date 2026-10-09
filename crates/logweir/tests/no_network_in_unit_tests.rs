@@ -326,7 +326,9 @@ const ALLOWED: [(&str, &str); 33] = [
     (
         "crates/weirkeeper/tests/read_caps.rs",
         "FX-31: read-only handles over a filesystem evidence tree of SPARSE files in a scratch \
-         directory, for the child-process peak-RSS row — no endpoint, no network",
+         directory, for the child-process peak-RSS row — no endpoint, no network; and one \
+         `#[ignore]`d LIVE row that builds an S3 handle only when `FX31_LIVE_S3_ENDPOINT` names \
+         the compose MinIO, which the default suite never runs",
     ),
     (
         "crates/logweir-store/tests/capped.rs",

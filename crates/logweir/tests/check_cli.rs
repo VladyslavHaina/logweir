@@ -5552,6 +5552,100 @@ mod live {
             "the MinIO credential reached a frame"
         );
     }
+
+    /// **FX-31, live on the compose MinIO.** An evidence fetch of an object
+    /// over the plan's `maxBytes` reports it present and `truncated`, relays
+    /// NO bytes for it and never reads it; a normal object in the same fetch
+    /// is relayed whole.
+    ///
+    /// The oversized object is seeded here at 4 MiB. For a memory reading,
+    /// where the object must not live in this process, seed it out of process
+    /// and name it in `FX31_LIVE_OVERSIZED_KEY` (`claude/fx-31.result.md` §5
+    /// seeds 768 MiB with `curl --aws-sigv4` and reads this process's peak RSS
+    /// with `/usr/bin/time`).
+    #[test]
+    fn an_evidence_fetch_of_an_oversized_receipt_relays_nothing() {
+        std::env::set_var("AWS_ACCESS_KEY_ID", MINIO_USER);
+        std::env::set_var(MINIO_PASSWORD_VAR, "minioadmin");
+        let run_id = format!(
+            "fx31-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let url = logweir_core::engine::StorageUrl::S3 {
+            bucket: "kafka-backups".to_string(),
+            prefix: "logweir/".to_string(),
+            region: Some("us-east-1".to_string()),
+            endpoint: Some(s3_endpoint()),
+            path_style: true,
+            allow_http: true,
+        };
+        let opts = logweir_engine_oso::storage::StoreOptions::static_from_env()
+            .with_request_timeout(std::time::Duration::from_secs(20));
+        let writer = logweir_engine_oso::storage::Store::from_url_with(&url, &opts)
+            .expect("a writable evidence handle over the compose MinIO");
+        let normal_key = format!("logweir/backups/{run_id}/normal.receipt.json");
+        let normal = br#"{"fx31":"a receipt well under the cap"}"#;
+        writer
+            .put_create_only(&normal_key, normal)
+            .expect("the normal object is seeded");
+        let oversized_key = match std::env::var("FX31_LIVE_OVERSIZED_KEY") {
+            Ok(key) => key,
+            Err(_) => {
+                let key = format!("logweir/backups/{run_id}/oversized.receipt.json");
+                writer
+                    .put_create_only(&key, &vec![b' '; 4 << 20])
+                    .expect("the oversized object is seeded");
+                key
+            }
+        };
+
+        let plan = plan_of(CheckRequest::EvidenceFetch(EvidenceFetchRequest {
+            destination: minio_destination("fx31"),
+            objects: vec![
+                EvidenceObjectRequest {
+                    role: DestinationRole::EvidenceRead,
+                    key: oversized_key.clone(),
+                    max_bytes: 1024 * 1024,
+                    stream: Stream::EvidencePayload,
+                },
+                EvidenceObjectRequest {
+                    role: DestinationRole::EvidenceRead,
+                    key: normal_key.clone(),
+                    max_bytes: 64 * 1024,
+                    stream: Stream::EvidenceSidecar,
+                },
+            ],
+        }));
+        let m = mount(&plan);
+        let run = drive_live(&m);
+        assert_eq!(run.code, ExitCode::Ok, "stdout:\n{}", run.stdout);
+        let evidence = &run.result().evidence;
+        eprintln!("[fx31-live] evidence-fetch result: {evidence:?}");
+        let big = evidence
+            .iter()
+            .find(|e| e.key == oversized_key)
+            .expect("an answer for the oversized object");
+        assert!(big.present && big.truncated, "{big:?}");
+        assert_eq!((big.bytes, big.sha256.as_deref()), (None, None), "{big:?}");
+        let relay = run.relay.as_ref().expect("the relay decodes");
+        assert!(
+            relay.stream(Stream::EvidencePayload).is_none(),
+            "no byte of the oversized object was relayed"
+        );
+        let small = evidence
+            .iter()
+            .find(|e| e.key == normal_key)
+            .expect("an answer for the normal object");
+        assert!(small.present && !small.truncated, "{small:?}");
+        assert_eq!(
+            relay.stream(Stream::EvidenceSidecar),
+            Some(&normal[..]),
+            "the normal object is relayed whole"
+        );
+    }
 }
 
 // ===========================================================================

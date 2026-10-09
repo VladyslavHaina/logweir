@@ -390,7 +390,31 @@ fn plant_tiny_values(root: &Path) -> u64 {
     std::fs::metadata(&path).unwrap().len()
 }
 
+/// Set to the compose MinIO's S3 endpoint (for example
+/// `http://localhost:39000` on slot 3) to run the LIVE row: every child then
+/// reads the bucket [`LIVE_BUCKET`] through a read-only S3 handle instead of a
+/// filesystem tree, with the credential from the three named `AWS_*`
+/// variables. The objects are seeded OUT of this process (`claude/fx-31.result.md`
+/// §5 uses `curl --aws-sigv4` over a sparse file), at the keys [`plant`] uses.
+const LIVE_ENDPOINT_ENV: &str = "FX31_LIVE_S3_ENDPOINT";
+const LIVE_BUCKET: &str = "kafka-backups";
+
 fn handle(root: &Path) -> Store {
+    if let Ok(endpoint) = std::env::var(LIVE_ENDPOINT_ENV) {
+        return Store::read_only_with(
+            &StorageUrl::S3 {
+                bucket: LIVE_BUCKET.to_string(),
+                prefix: "logweir/".to_string(),
+                region: Some("us-east-1".to_string()),
+                endpoint: Some(endpoint),
+                path_style: true,
+                allow_http: true,
+            },
+            &logweir_store::StoreOptions::static_from_env()
+                .with_request_timeout(std::time::Duration::from_secs(60)),
+        )
+        .expect("a read-only S3 handle over the compose MinIO builds");
+    }
     Store::read_only_from_url(&StorageUrl::Filesystem {
         path: root.to_path_buf(),
     })
@@ -442,6 +466,12 @@ fn run_child(mode: &str, root: &Path) {
                 .expect("a cap far too large reads the whole object");
             assert_eq!(bytes.len() as u64, PLANTED);
         }
+        "uncapped-live" => {
+            let (bytes, _) = store
+                .get_capped(PAYLOAD_KEY, u64::MAX)
+                .expect("a cap far too large reads the whole object");
+            assert!(bytes.len() as u64 > caps::CONTROLLER_DOCUMENT);
+        }
         // A manifest of tiny values WITHIN the controller's cap: the
         // streaming fold holds the bytes and nothing per value.
         "stream" => {
@@ -464,12 +494,22 @@ fn run_child(mode: &str, root: &Path) {
 /// Runs this test again in a child, in `mode`, over `root`, and returns the
 /// child's own peak resident set.
 fn child_peak(mode: &str, root: &Path) -> u64 {
-    let out = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+    child_peak_over(mode, root, None)
+}
+
+/// [`child_peak`], over the compose MinIO at `live` when it is `Some`, and
+/// over the filesystem tree at `root` (never an endpoint the parent happens to
+/// carry) when it is `None`.
+fn child_peak_over(mode: &str, root: &Path, live: Option<&str>) -> u64 {
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, mode)
-        .env(ROOT_ENV, root)
-        .output()
-        .expect("the child test process starts");
+        .env(ROOT_ENV, root);
+    match live {
+        Some(endpoint) => cmd.env(LIVE_ENDPOINT_ENV, endpoint),
+        None => cmd.env_remove(LIVE_ENDPOINT_ENV),
+    };
+    let out = cmd.output().expect("the child test process starts");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -569,5 +609,62 @@ fn the_controller_read_paths_hold_bounded_memory_over_a_512_mib_object() {
         whole > PLANTED / 2,
         "the control added only {whole} bytes; the meter cannot tell a capped read from a whole \
          one at this size"
+    );
+}
+
+/// **LIVE (FX-31), against the compose MinIO: the controller's five read paths
+/// over 768 MiB objects in a real S3 bucket.** `#[ignore]`d: it needs the
+/// stack and objects seeded out of process. Run it as
+/// `claude/fx-31.result.md` §5 does:
+///
+/// ```text
+/// FX31_LIVE_S3_ENDPOINT=http://localhost:39000 AWS_ACCESS_KEY_ID=… \
+///   AWS_SECRET_ACCESS_KEY=… cargo test -p weirkeeper --test read_caps -- \
+///   --ignored --nocapture against_minio
+/// ```
+///
+/// The store reports each object's size in the GET's own `Content-Length`,
+/// so every capped path is refused on it with no body read, and the control
+/// child reading the receipt under a cap far too large holds the object.
+#[test]
+#[ignore = "live: needs the compose MinIO and seeded objects (FX31_LIVE_S3_ENDPOINT)"]
+fn the_controller_read_paths_hold_bounded_memory_against_minio() {
+    let size: u64 = std::env::var("FX31_LIVE_OBJECT_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(768 << 20);
+    assert!(
+        std::env::var(LIVE_ENDPOINT_ENV).is_ok(),
+        "set {LIVE_ENDPOINT_ENV} to the compose MinIO and seed the objects first"
+    );
+    // The filesystem root is unused by an S3 child; the baseline still reads
+    // small objects, from a scratch tree.
+    let scratch = std::env::temp_dir().join(format!(
+        "logweir-fx31-live-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let small = scratch.join("small");
+    plant(&small, 1024);
+    let endpoint = std::env::var(LIVE_ENDPOINT_ENV).expect("checked above");
+    // The baseline reads the SMALL tree, with no endpoint.
+    let baseline = child_peak("baseline", &small);
+    let capped = child_peak_over("capped", &small, Some(&endpoint));
+    let uncapped = child_peak_over("uncapped-live", &small, Some(&endpoint));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let added = capped.saturating_sub(baseline);
+    let whole = uncapped.saturating_sub(baseline);
+    eprintln!(
+        "[fx31-live] S3 objects of {size} B: baseline child {baseline} B; five capped paths \
+         {capped} B (adds {added} B, bound {BOUND} B); control under a cap far too large \
+         {uncapped} B (adds {whole} B)"
+    );
+    assert!(
+        added < BOUND,
+        "the capped paths added {added} bytes over S3 (bound {BOUND})"
+    );
+    assert!(
+        whole > size / 2,
+        "the control added only {whole} bytes over S3"
     );
 }

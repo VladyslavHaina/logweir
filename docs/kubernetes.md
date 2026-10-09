@@ -901,6 +901,71 @@ same reason.
   bucket is now told so*. A `RetentionPolicy` (§7f) is the per-destination
   answer.
 
+### 7b.4 Every object-store read has a size cap (FX-31)
+
+The controller is one process for every namespace. Until FX-31 it read a
+receipt, a scorecard, a sidecar and a manifest **whole**. A tenant could put a
+multi-gigabyte object at its own receipt or sidecar key, and that object would
+then take the controller's memory every time a reconcile read it. The pod's
+memory limit (`controller.resources.limits.memory`, 512Mi in the chart) would
+OOM-kill the controller for every namespace, and every restart read the
+object again.
+
+Every read now names a cap. Nothing in the tree can read an object whole:
+
+- **The size the store reports is checked first.** That is the GET's
+  `Content-Length` or `Content-Range`, or a filesystem's metadata. An object
+  over the cap is refused there, and no body byte is read.
+- **Then a running cap holds over the stream.** A store that reports a small
+  size and then streams more is cut off at the cap.
+- **An existence test reads no body.** The sidecar's presence is a `HEAD`, and
+  the readiness probe's GET has a 0-byte cap.
+
+| Document | Read by | Cap |
+|---|---|---|
+| Receipt, scorecard (the signed document) | the controller | **1 MiB**, the evidence relay's own cap |
+| DSSE sidecar | everyone | **64 KiB**, the relay's sidecar cap |
+| Engine manifest | the controller's retention report | **64 MiB**, parsed as a stream |
+| Receipt, scorecard, catalog record | runner, CLI, check Jobs | 64 MiB (the catalog walk keeps its own 256 KiB) |
+| Engine manifest | runner, CLI, check Jobs | 256 MiB |
+| Archived segment | runner, CLI | 1 GiB |
+| Consumer-groups snapshot, engine report | runner, CLI | 64 MiB |
+
+The controller's caps are the evidence relay's. A document is therefore
+verifiable through the controller's own handle (`ControllerIdentity`, or the
+inline-archive handle) exactly when an evidence-fetch Job can relay it.
+
+The 1 MiB cap is also what bounds the controller's parse. The controller reads
+a receipt's window and a scorecard's outcome before any digest check, and a
+document of tiny values parses into about 37 times its size. That figure was
+measured by `crates/weirkeeper/tests/read_caps.rs`: 16 MiB of JSON held 621 MB.
+
+A manifest is never parsed into a tree. The window is folded as the bytes
+stream past, so the retention report holds at most the 64 MiB it read.
+
+**What an operator sees.** An object over its cap is never a crash and never
+a pass:
+
+| Where | What it says |
+|---|---|
+| `Backup` and `Restore` `status.evidence.verification` | `NotAttempted`, with the detail `<key> is larger than the <cap>-byte cap weirkeeper reads (the store reports <n> bytes); nothing was verified`. The verdict is **final**: the object will not shrink, so it is not read again on the retry schedule. A new controller process reads it once more, and that read is refused on the size alone. |
+| The relay path (`evidenceFetch`) | The Job reports the object `present` and `truncated` and relays **no** bytes. The controller records `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`, as before. |
+| Retention report (`status.retentionReport.skipped` / `RetentionPolicy`) | The set is listed under `skipped`, and the reason names the cap. It is neither kept nor listed as removable. |
+| `Preflight` restore check (`archive.backupSet`) | Not ready. The message ends `…could not be read: <code>: it is larger than the 268435456-byte read cap for a manifest`. |
+| Drill, `backup run`, `catalog sync` | An operational failure (exit 1) or an `Unreadable` point. The message names the cap. |
+
+**The limit this sets, measured.** A receipt is two-space pretty JSON. With
+FX-4's configuration coverage and PROD-05.1's 14 semantic entries per topic,
+it is about 2.9 KB per topic, so 1 MiB holds about **350 topics**. A run that
+selects more topics writes a receipt that neither path can verify. It reads
+`NotAttempted` naming the cap, and it is not a recovery point. This was
+already true of every evidence-fetch relay before FX-31. It is new for the
+controller's own handle, where such a receipt used to verify. Under OD-7's
+third case this moves a verdict to the safer side only. Lifting it means
+raising the relay and the controller caps together, with a parse that is
+bounded without the cap. It is proposed as a follow-up row and is not done in
+FX-31.
+
 ### 7c. A `TopicDiscovery` is one observation, and `unknown` is its honest default
 
 **In this build, end to end.** The reconciler resolves the connection, renders

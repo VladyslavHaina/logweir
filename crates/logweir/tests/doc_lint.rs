@@ -2068,6 +2068,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a controller no longer rewrites an unchanged status",
             "status.lastSlot.backupRef",
         ),
+        // FX-31 (2026-10-09, item 46): every object-store read has a size cap;
+        // the controller reads evidence under the relay's cap, which sets the
+        // receipt's topic limit an operator must know.
+        (
+            "every object-store read has a size cap",
+            "about **350 topics**",
+        ),
     ];
     assert_eq!(
         items.len(),
