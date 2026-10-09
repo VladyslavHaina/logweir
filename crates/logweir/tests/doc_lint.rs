@@ -2062,6 +2062,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a stopped client meets the console's stall deadline",
             "IO_STALL_TIMEOUT",
         ),
+        // FX-28 (2026-10-09, item 45): a sign-in whose identity provider
+        // stalls its body is answered at the provider deadline, under the
+        // audit code an operator alerts on.
+        (
+            "a stalled identity provider meets the provider deadline",
+            "provider_timeout",
+        ),
     ];
     assert_eq!(
         items.len(),
