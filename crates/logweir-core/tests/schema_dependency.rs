@@ -173,6 +173,10 @@ fn unframed_payloads_are_not_detected() {
         (s("order-2"), Some(vec![0x08, 0x2A])), // raw Protobuf: field tags are never 0
         (s("order-3"), Some(vec![0x06, b'a', b'b', b'c'])), // raw Avro, no framing
         (s("order-4"), Some(Vec::new())),       // empty, not null
+        // Another registry's header: AWS Glue's magic byte 3, then bytes that
+        // would read as a plausible Confluent id. Not Confluent framing.
+        (s("order-5"), Some(vec![3, 0, 0, 0, 9, 0x42, 0x42])),
+        (s("order-6"), Some(vec![1, 0, 0, 0, 7, 2])),
     ]);
     assert_eq!(entry.verdict, NOT_DETECTED);
     assert_eq!(entry.basis.as_deref(), Some(BASIS_COMPLETE));
@@ -182,7 +186,7 @@ fn unframed_payloads_are_not_detected() {
         assert!(side.schema_ids.is_empty());
         assert_eq!(side.schema_id_count, 0);
     }
-    assert_eq!(entry.value.as_ref().unwrap().unframed, 4);
+    assert_eq!(entry.value.as_ref().unwrap().unframed, 6);
 }
 
 #[test]
