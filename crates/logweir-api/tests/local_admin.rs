@@ -2957,9 +2957,7 @@ fn a_peer_outside_the_trusted_set_is_capped_at_its_share() {
         server.log()
     );
     assert!(
-        server
-            .log()
-            .contains(&format!("\"per_peer_cap\":{PEER_CAP}"))
+        start_line(&server.log()).contains(&format!("\"per_peer_cap\":{PEER_CAP}"))
             && !server.log().contains(CAP_OFF_WARNING),
         "the start line must say the cap is on, at {PEER_CAP} (review L1):\n{}",
         server.log()
@@ -2970,6 +2968,16 @@ fn a_peer_outside_the_trusted_set_is_capped_at_its_share() {
 /// The warning shared mode logs at start when no trusted proxy is configured,
 /// so the per-peer cap is off (review L1).
 const CAP_OFF_WARNING: &str = "the per-peer connection cap is off";
+
+/// The server's own `logweir-api started` line, and only it: the warning
+/// carries a `per_peer_cap` field too, so a search over the whole log could
+/// read the wrong line.
+fn start_line(log: &str) -> String {
+    log.lines()
+        .find(|line| line.contains(STARTED))
+        .unwrap_or_else(|| panic!("no start line in:\n{log}"))
+        .to_owned()
+}
 
 /// Connect to `address`, send `request` if any, and require the server to
 /// close the connection unanswered within two seconds: a connection over its
@@ -3147,9 +3155,7 @@ fn the_trusted_proxy_is_never_capped_as_one_peer() {
     let (server, port) = start_shared_server(&fixture, "trustedProxyCidrs: [\"127.0.0.1/32\"]\n");
     held_past_the_cap(&server, port, "the trusted proxy");
     assert!(
-        server
-            .log()
-            .contains(&format!("\"per_peer_cap\":{PEER_CAP}"))
+        start_line(&server.log()).contains(&format!("\"per_peer_cap\":{PEER_CAP}"))
             && !server.log().contains(CAP_OFF_WARNING),
         "a configured trusted proxy turns the cap on, and the start line says so:\n{}",
         server.log()
@@ -3168,7 +3174,8 @@ fn without_a_trusted_proxy_set_no_peer_is_capped() {
     // And it says so at start, as a warning (review L1): an uncapped install
     // and a capped one that refuses nobody look the same otherwise.
     assert!(
-        server.log().contains("\"per_peer_cap\":0") && server.log().contains(CAP_OFF_WARNING),
+        start_line(&server.log()).contains("\"per_peer_cap\":0")
+            && server.log().contains(CAP_OFF_WARNING),
         "a shared console with no trusted proxy must say at start that the cap is off:\n{}",
         server.log()
     );
