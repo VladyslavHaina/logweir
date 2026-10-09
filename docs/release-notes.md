@@ -36,9 +36,10 @@ can select a window start) and 43 (PROD-08.1a, complete coverage requested
 and shown through the CRDs, the API and the console), 44 (FX-24b, a
 client that stops reading or sending meets a stall deadline), 45 (FX-29, a
 controller no longer rewrites a status whose content has not changed), 46
-(PROD-03.0, schema-dependent topics flagged from the archived bytes) and 47
-(PROD-11.1b, a restore can select a partition subset, signed as scorecard
-format 2.0.0 and named on every surface) so far. Items continue the next entry's
+(PROD-03.0, schema-dependent topics flagged from the archived bytes), 47
+(FX-28, a sign-in whose identity provider stalls is answered at the provider
+deadline) and 48 (PROD-11.1b, a restore can select a partition subset, signed
+as scorecard format 2.0.0 and named on every surface) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -110,13 +111,19 @@ the backup); it changes the runner's receipts and records, the catalog's view
 (runner and controller), the product API and the console, so the PoC upgrade
 that carries it runs a backup, reads its receipt's `schema_dependency` and the
 catalog's `topics[].schemaDependency`, and opens the restore review.
-Item 47 is row PROD-11.1b (the owner's decision OD-9 (a)), proven by unit,
+Item 47 is fix-now row FX-28, proven by rows over a loopback identity
+provider that stalls and on the built console binary; it changes the console
+only, and the PoC upgrade that carries it signs in through Dex (a stall cannot
+be simulated on the live Dex).
+Item 48 is row PROD-11.1b (the owner's decision OD-9 (a)), proven by unit,
 phase, preview and reader rows, the parity script and the invariant corpus,
 and on the compose stack (subset restores, a faulty engine, older runners and
 older readers); it changes the runner (the plan grammar, phase 7's evidence
 and the signed scorecard, whose first MAJOR it introduces), the restore
-preview and both verifiers, and the PoC upgrade that carries it runs a
-subset `Restore` and reads its scorecard with both readers.
+preview, both verifiers, the controller's `Restore` status, the product API,
+the console and the runner's notification, and the PoC upgrade that carries
+it runs a subset `Restore`, reads its scorecard with both readers, and reads
+the selection on its status, the API, the console and the notification.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1352,7 +1359,65 @@ and earlier) accept a 1.5.0 receipt and print no schema line.
 block (their topics read not assessed); the 1.5.0 documents already written
 stay valid for every reader. An older controller or console ignores the field.
 
-#### 47. A restore can select a partition subset, and its scorecard is format 2.0.0 (PROD-11.1b)
+#### 47. A sign-in whose identity provider stalls is answered at the provider deadline (FX-28)
+
+**Changed.** The shared-mode console's OIDC client put its ten-second provider
+deadline (`PROVIDER_DEADLINE`) around the request up to the response head only,
+and read the body after it with no timer. A provider, or a path to it, that
+answered a head and then stopped sending held the sign-in open for as long as
+the socket stayed open: `/auth/login`, which is unauthenticated, whenever its
+hour-long discovery cache is stale, and `/auth/callback` at the token endpoint
+or the key set. Each such request held one of the console's 256 connection
+slots. Now one deadline covers the connection, the request, the head and the
+whole body of every provider request (discovery, the key set and the token
+exchange), and a document over 512 KiB is still refused, now by name. A
+stalled request fails at ten seconds and the console drops its connection to
+the provider: `/auth/login` answers `503 kubernetes_unavailable` ("The identity
+provider could not be reached. Try again shortly."), the callback
+`401 unauthenticated` ("The sign-in could not be completed."). The audit
+failure is a new code, `provider_timeout`, and the console's warning says "did
+not complete a request within the 10-second provider deadline"; the login
+warning now carries that detail too, as the callback's and readiness's already
+did. The deadline is per request: `/auth/login` makes at most one, and a
+callback at most four, so a provider that answers each just inside the bound
+can take a callback to forty seconds, while one that stalls ends it at once.
+A dial (TCP connect and TLS handshake) also has a twelve-second bound of its
+own, for a dial that outlives its sign-in. Provider connections now carry TCP
+keepalive (30 s idle, then three probes ten seconds apart), so a pooled
+connection to a provider that has gone silently is dropped after about a
+minute of idleness; a sign-in inside that minute can still meet the deadline
+once. What the deadline leaves: a failed discovery is not cached and
+concurrent sign-ins do not share a fetch, so while a provider stalls, about 77
+client addresses at the sign-in limit can keep every console connection busy
+([api.md](api.md#sign-in)).
+**Do:** nothing is required. Alert on `provider_timeout` beside
+`provider_unreachable` and `code_exchange_failed`.
+**Scope:** rows over a loopback HTTP provider that this repository's tests
+bind, reached through the console's production client
+(`crates/logweir-api/tests/oidc_provider_deadline.rs`): a discovery document,
+a key set and a token response that each send a head and stall, a provider
+that never sends a head, and a TLS handshake that is never answered are each
+answered after 10.0 s with `provider_timeout` (or the client's deadline
+error), and the provider sees the console hang up at 10.0 s; under the pre-fix
+code each body-stall row is still pending at fifteen seconds. A provider that
+trickles its head over seven seconds and then stalls the body is answered at
+10.0 s, not seventeen, so the request and the body share one deadline. A
+provider that takes six seconds per document still signs in (login 6.1 s,
+callback 12.1 s). An oversized document is refused by name. On the built
+binary in shared mode, a raw-socket `GET /auth/login` against a stalled
+provider gets its `503` status line at 10.1 s and the server closes the
+connection. Unit rows read keepalive back off a socket the client's own
+connector dialled, and end a stalled dial at the connector's bound. Mutants,
+all killed: the pre-fix timer, a timer around the body alone, one timer per
+phase, the body uncapped, keepalive off in the connector or in the client's
+wiring, the deadline doubled, halved or moved, the dial unbounded, and the
+timeout reported under another name.
+Live: the PoC upgrade that carries this item signs in through Dex; a stall
+cannot be simulated on the live Dex.
+**Rollback:** an older console reads a stalled provider's body with no
+deadline again; nothing is stored, so nothing needs converting.
+
+#### 48. A restore can select a partition subset, and its scorecard is format 2.0.0 (PROD-11.1b)
 
 **Added.** A drill or restore plan may name per-topic partition subsets,
 `restore.partitions: {orders: [0, 2], payments: [1]}`, written beside the
@@ -1377,7 +1442,7 @@ complete block's `partitions[]` and the sampled lane's fields name the
 selected partitions
 ([stability.md](stability.md#scorecard-format-200-a-partition-subset-restore-prod-111b-the-first-major)).
 Every other scorecard is the 1.x document it was. `verify_scorecard.py`
-1.24.0 and `logweir drill verify` read it (arms PS-1 to PS-5) and print the
+1.25.0 and `logweir drill verify` read it (arms PS-1 to PS-5) and print the
 subset; every older verifier refuses it instead of reading it as a full
 restore. Schema: `schemas/logweir-drill-scorecard-2.0.0.json`; 1.7.0 is
 frozen beside it.
@@ -1387,25 +1452,45 @@ subset beside a plain instant, which does not parse.
 (older ones refuse it), and roll the runner forward before submitting a
 subset plan: an older runner refuses one (`drill spec does not parse`, or
 `PartitionSubsetsAwaitOwnerDecision`) before it touches anything. Nothing
-for a plan without a subset. The `Restore` CRD, the product API (which passes
-`planBytes` through) and the console are unchanged; the console's selection
-is PROD-11.1a.
-**Scope:** unit, phase, preview, reader, parity and corpus rows; compose rows
+for a plan without a subset.
+**Every surface says partial.** The controller copies the signed
+`source.selection` to the `Restore` status' `integrity.selection` —
+`scope: partial`, the window's ends, how many topics were narrowed and, up to
+256 topics and 1024 partitions in one, each topic's selected partitions, and
+the engine runs — shown by a new `SELECTION` printer column appended after
+`AGE` ([kubernetes.md](kubernetes.md)); the CRD's schema change is additive.
+The product API serves it as `selection` on both restore reads and the
+operation view's `verificationScope` ([api.md](api.md)); the console's History
+list, detail and operation view say `partial: partitions 0, 2 of topic
+orders`, and a covered complete check reads "every record of every SELECTED
+partition"; the runner's notification body carries `selection` (`scope:
+"partial"`) and `format_version`, and its PagerDuty title appends `(partial:
+…)`. A restore without a selection shows none of it, exactly as before.
+`logweir drill approve` refuses to mint an approval over a `Restore` plan that
+states `restore.partitions` and does not parse (`SubsetPlanUnparseable`, exit
+1, nothing signed). Choosing a subset in the console is PROD-11.1a.
+**Scope:** unit, phase, preview, reader, parity and corpus rows (a document
+with one topic narrowed and one restored whole among them); controller, API,
+console and notification rows, each beside an unnarrowed control, and an
+approval row; compose rows
 (the default stack with `COMPOSE_PROFILES=auth`, Kafka 3.7.1, engine
 `0.23.3+logweir.2`) with an oracle of their own: two topics with different
 subsets (two engine runs) from the floor under both coverages and from a
-start, every unselected partition empty and signed 2.0.0, read alike by both
-readers; an engine that ignores the filter, failed under both coverages; a
+start, beside a third topic restored whole (three engine runs), every
+unselected partition empty and signed 2.0.0, read alike by both readers; an engine that ignores the filter, failed under both coverages; a
 selected partition with nothing in the window, `preflight-failed`; the
 refusals; a runner from before PROD-11.1 and main's runner from before this
 release refusing subset plans, with the unnarrowed and start-only documents
 of the two builds the same shape; and every `verify_scorecard.py` from 1.16.0
-to 1.23.0 and both older `logweir` readers refusing the signed 2.0.0
+to 1.24.0 and both older `logweir` readers refusing the signed 2.0.0
 documents.
 **Rollback:** an older runner refuses subset plans and an older reader
 refuses 2.0.0 scorecards, so roll the verifiers back last; 2.0.0 scorecards
 already written stay verifiable with this release's readers. Start-only and
-unnarrowed documents are unchanged in both directions.
+unnarrowed documents are unchanged in both directions. An older CRD, API and
+console do not carry `integrity.selection`, so after a rollback they show a
+subset restore without its selection again: read the subset restores' signed
+scorecards (2.0.0) with this release's verifiers.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -1472,7 +1557,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46 and 47, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 and 48, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1502,6 +1587,7 @@ authorization); item 44 changes the console only and needs nothing; item 45
 changes the controller only (and two CRD descriptions) and needs nothing; item 46
 changes the runner's receipts and catalog records, the catalog's view (runner
 and controller), the product API and the console, and needs nothing; item 47
+changes the console only and needs nothing; item 48
 changes the runner, the restore preview, both verifiers, the controller's
 `Restore` status (and the CRD's schema, additively), the product API, the
 console and the runner's notification, and needs nothing for a plan without a

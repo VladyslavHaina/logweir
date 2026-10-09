@@ -2076,7 +2076,14 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "schema-dependent topics are flagged",
             "Registry not captured: applications may not read these",
         ),
-        // PROD-11.1b (2026-10-09, item 47, OD-9 (a)): a partition subset,
+        // FX-28 (2026-10-09, item 47): a sign-in whose identity provider
+        // stalls its body is answered at the provider deadline, under the
+        // audit code an operator alerts on.
+        (
+            "a stalled identity provider meets the provider deadline",
+            "provider_timeout",
+        ),
+        // PROD-11.1b (2026-10-09, item 48, OD-9 (a)): a partition subset,
         // and the scorecard's first MAJOR it signs.
         (
             "a partition subset signs scorecard format 2.0.0",
