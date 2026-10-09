@@ -1857,10 +1857,26 @@ stale, the token, the key set, and one refetch for an unknown `kid`), and one
 that stalls ends the callback, so only a provider that answers every request
 just inside the bound can take a callback to about forty seconds. A key-set
 request that stalls while cached keys are less than a day old is an outage
-like any other: the cached keys are used. Provider connections carry TCP
-keepalive (30 s idle, then three probes ten seconds apart), so a pooled
-connection to a provider that has gone is dropped between sign-ins rather than
-found dead by the next one.
+like any other: the cached keys are used. A dial (the TCP connect and the TLS
+handshake) has a twelve-second bound of its own, for the dial that outlives
+its sign-in when the client's pool hands the request a connection that freed
+up meanwhile; inside a request the request's ten seconds always end first.
+
+Provider connections carry TCP keepalive (30 s idle, then three probes ten
+seconds apart), so a pooled connection to a provider that has gone silently is
+dropped after about a minute of idleness. A sign-in inside that minute can
+still pick the dead connection up and meet the deadline once.
+
+**What the deadline does not stop.** A failed discovery is not cached, and
+concurrent sign-ins do not share one fetch. While a provider stalls, every
+`/auth/login` whose discovery cache is stale dials the provider and holds its
+browser connection for the full ten seconds. At the sign-in limit (20 requests
+a minute per client, *Rate limits* below) one client holds about three of the
+console's 256 connections on average (20 × 10 s a minute), so about 77 client
+addresses can keep them all busy for as long as the provider stalls. Signed-in sessions are
+not affected by the provider, but they need a connection too. The bound is
+real (ten seconds per sign-in) and it needs a stalled provider first; a
+short negative cache or a single shared fetch is the follow-up.
 
 ### The session and the CSRF token
 

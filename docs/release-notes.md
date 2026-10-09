@@ -1228,25 +1228,37 @@ warning now carries that detail too, as the callback's and readiness's already
 did. The deadline is per request: `/auth/login` makes at most one, and a
 callback at most four, so a provider that answers each just inside the bound
 can take a callback to forty seconds, while one that stalls ends it at once.
-Provider connections now carry TCP keepalive (30 s idle, then three probes ten
-seconds apart), so a pooled connection to a provider that has gone is dropped
-between sign-ins ([api.md](api.md#sign-in)).
+A dial (TCP connect and TLS handshake) also has a twelve-second bound of its
+own, for a dial that outlives its sign-in. Provider connections now carry TCP
+keepalive (30 s idle, then three probes ten seconds apart), so a pooled
+connection to a provider that has gone silently is dropped after about a
+minute of idleness; a sign-in inside that minute can still meet the deadline
+once. What the deadline leaves: a failed discovery is not cached and
+concurrent sign-ins do not share a fetch, so while a provider stalls, about 77
+client addresses at the sign-in limit can keep every console connection busy
+([api.md](api.md#sign-in)).
 **Do:** nothing is required. Alert on `provider_timeout` beside
 `provider_unreachable` and `code_exchange_failed`.
 **Scope:** rows over a loopback HTTP provider that this repository's tests
 bind, reached through the console's production client
 (`crates/logweir-api/tests/oidc_provider_deadline.rs`): a discovery document,
-a key set and a token response that each send a head and stall are answered
-after 10.0 s (10.006–10.029 s measured) with `provider_timeout`, and the
-provider sees the console hang up at 10.0 s; under the pre-fix code each row is
-still pending at fifteen seconds. A provider that takes six seconds per
-document still signs in (login 6.0 s, callback 12.1 s). An oversized document
-is refused by name. On the built binary in shared mode, a raw-socket
-`GET /auth/login` against a stalled provider gets its `503` status line at
-10.0 s and the server closes the connection. A unit row reads keepalive back
-off a socket the provider's connector dialled. Eleven mutants, all killed: the pre-fix timer, the body uncapped, keepalive
-off or partial, the deadline doubled, halved or moved, and the timeout
-reported under another name.
+a key set and a token response that each send a head and stall, a provider
+that never sends a head, and a TLS handshake that is never answered are each
+answered after 10.0 s with `provider_timeout` (or the client's deadline
+error), and the provider sees the console hang up at 10.0 s; under the pre-fix
+code each body-stall row is still pending at fifteen seconds. A provider that
+trickles its head over seven seconds and then stalls the body is answered at
+10.0 s, not seventeen, so the request and the body share one deadline. A
+provider that takes six seconds per document still signs in (login 6.1 s,
+callback 12.1 s). An oversized document is refused by name. On the built
+binary in shared mode, a raw-socket `GET /auth/login` against a stalled
+provider gets its `503` status line at 10.1 s and the server closes the
+connection. Unit rows read keepalive back off a socket the client's own
+connector dialled, and end a stalled dial at the connector's bound. Mutants,
+all killed: the pre-fix timer, a timer around the body alone, one timer per
+phase, the body uncapped, keepalive off in the connector or in the client's
+wiring, the deadline doubled, halved or moved, the dial unbounded, and the
+timeout reported under another name.
 Live: the PoC upgrade that carries this item signs in through Dex; a stall
 cannot be simulated on the live Dex.
 **Rollback:** an older console reads a stalled provider's body with no
