@@ -21,6 +21,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
+use logweir_api::transport::{StallBody, StallGuard};
 use tokio::sync::Semaphore;
 
 const HELP: &str = "logweir-api — the bounded Logweir product API. Serves the static UI at /ui/ \
@@ -177,6 +178,28 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
 /// socket (FX-24). See [`serve`] on why the deadline starts at the accept.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a connection may wait on its client with no progress: a pending
+/// write of an answer the client has stopped reading, or a pending read of a
+/// request body the client has stopped sending (FX-24b). Past it the operation
+/// fails `TimedOut`, the connection ends and its permit comes back. See
+/// `logweir_api::transport` for the two guards and why the connection's other
+/// reads are not timed.
+///
+/// A STALL, NOT A TOTAL, AND NOT THE HEADER DEADLINE. The clock starts only
+/// while a write or a body read is pending and resets on every byte that moves,
+/// so a slow but steady reader keeps its connection for as long as the answer
+/// takes, and an event stream between heartbeats (a write every 15 s, nothing
+/// pending in between) never starts it. The header deadline is ten seconds
+/// because a client that has sent nothing has no excuse; this one is longer
+/// because a client in the middle of a transfer can be held up by the network:
+/// a lossy link's retransmission backoff alone can stall a live TCP connection
+/// for well over ten seconds. Thirty seconds is past that, still under the
+/// ingress controllers' common 60-second response timeouts, and it is how long
+/// 256 clients that stopped reading can hold every connection slot, which is
+/// the outage this bounds. Each test row that measures it reads it back out of
+/// this file.
+const IO_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The largest request head hyper will buffer, 32 KiB.
 ///
 /// The BODY is already bounded, in the place that knows what a body means:
@@ -200,7 +223,7 @@ const MAX_CONNECTIONS: usize = 256;
 /// are dropped and the process still exits 0 — it stopped when it was told to.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
-/// Run the router on `listener` until a shutdown signal, under the four limits
+/// Run the router on `listener` until a shutdown signal, under the five limits
 /// above.
 ///
 /// WHY THIS IS NOT `axum::serve`. That helper builds its hyper connection as
@@ -282,17 +305,30 @@ async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> ExitC
                 request
                     .extensions_mut()
                     .insert(logweir_api::http::PeerAddr(peer_ip));
+                // THE BODY'S STALL DEADLINE (FX-24b), for every route and
+                // whoever reads the body: a handler waiting on a body the
+                // client stopped sending gets `TimedOut` instead of waiting
+                // for ever. `http::read_json` adds a total on top.
+                let request = request.map(|body| StallBody::new(body, IO_STALL_TIMEOUT));
                 let router = router_for_connection.clone();
                 async move {
                     use tower::ServiceExt as _;
-                    router.into_service::<Incoming>().oneshot(request).await
+                    router
+                        .into_service::<StallBody<Incoming>>()
+                        .oneshot(request)
+                        .await
                 }
             },
         ));
         // No `with_upgrades`: no route here switches protocols (the event
         // stream is server-sent events, an ordinary HTTP/1.1 response), so a
         // request asking to upgrade is answered like any other.
-        let connection = builder.serve_connection(TokioIo::new(stream), service);
+        //
+        // THE OUTPUT'S STALL DEADLINE (FX-24b): an answer the client has
+        // stopped reading fails its pending write at `IO_STALL_TIMEOUT`, and
+        // the connection ends with it — the permit below comes back then.
+        let io = StallGuard::new(TokioIo::new(stream), IO_STALL_TIMEOUT);
+        let connection = builder.serve_connection(io, service);
         let connection = graceful.watch(connection);
         tokio::spawn(async move {
             // Held for the connection's life; dropped with it, which is what
@@ -300,7 +336,8 @@ async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> ExitC
             let _permit = permit;
             if let Err(error) = connection.await {
                 // Every HTTP-level answer is the router's; this is a transport
-                // failure — a reset, or the header deadline above.
+                // failure — a reset, the header deadline or the stall deadline
+                // above.
                 tracing::debug!(error = %error, "connection ended");
             }
         });
