@@ -36,9 +36,10 @@ can select a window start) and 43 (PROD-08.1a, complete coverage requested
 and shown through the CRDs, the API and the console), 44 (FX-24b, a
 client that stops reading or sending meets a stall deadline), 45 (FX-29, a
 controller no longer rewrites a status whose content has not changed), 46
-(PROD-03.0, schema-dependent topics flagged from the archived bytes) and 47
+(PROD-03.0, schema-dependent topics flagged from the archived bytes), 47
 (FX-28, a sign-in whose identity provider stalls is answered at the provider
-deadline) so far. Items continue the next entry's
+deadline) and 48 (FX-19, a probe Job Kubernetes is collecting no longer clears
+`reachable`) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -114,6 +115,10 @@ Item 47 is fix-now row FX-28, proven by rows over a loopback identity
 provider that stalls and on the built console binary; it changes the console
 only, and the PoC upgrade that carries it signs in through Dex (a stall cannot
 be simulated on the live Dex).
+Item 48 is fix-now row FX-19, proven by controller rows over a fake API with
+the controller's own log captured; it changes the controller only, and the PoC
+upgrade that carries it watches every connection's `reachable` and the
+controller's WARN lines across fifteen minutes of probe cycles.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1407,6 +1412,75 @@ cannot be simulated on the live Dex.
 **Rollback:** an older console reads a stalled provider's body with no
 deadline again; nothing is stored, so nothing needs converting.
 
+#### 48. A probe Job Kubernetes is collecting no longer clears `reachable`, and the probe's WARN lines stop (FX-19)
+
+**Changed.** The `KafkaCluster` probe re-reads its probe Job on every
+reconcile, and the TTL controller deletes a finished probe Job five minutes
+after it finished with foreground propagation: the Job gains a
+`metadata.deletionTimestamp`, its pod goes first, and the Job stays readable,
+finished and pod-less, until the pod is gone. The controller read that Job as
+a crashed probe, wrote `Reachable=Unknown` / `NoExitCode` and cleared
+`status.reachable` until the next probe answered. PoC batch 2 measured about
+17 s on one healthy connection, a window in which a `Restore` against it is
+refused `ClusterNotReachable` (item 26). The races around it — the pod gone by
+the log read, the Job gone by its TTL patch, and a status write preconditioned
+on an older copy of the object than the API server held — logged about twelve
+`KafkaCluster probe reconcile failed; requeueing` WARN lines per cadence for
+twelve connections, about 3,000 a day. Now:
+
+- a probe Job with a `deletionTimestamp` is not read at all and nothing is
+  written; the next probe is created once it is gone;
+- a finished probe Job that carries its TTL — patched on only after the status
+  write that recorded its verdict — is not re-judged when its pod is gone;
+- `NotFound` on the pod log or the TTL patch and `Conflict` on a status write
+  are debug lines and ordinary outcomes, not reconcile errors, and a verdict
+  write that lost its precondition is never followed by its TTL;
+- a crash, an unreadable probe log and a refused probe pod are logged at WARN
+  once per Job, on the pass whose write first recorded them.
+
+The last recorded verdict therefore stands until the next probe answers. The
+sweep of every other Job-owning controller (`Backup`, `Restore`, the catalog
+sync, retention, a `ProtectionPolicy` delivery, `Preflight` and
+`TopicDiscovery`; a `RehearsalSchedule` owns `Restore`s, not Jobs) found none
+that reads a collected Job: each records a Job's verdict before it gives the
+Job a TTL (the catalog sync's TTL, from creation, is at least an hour) and
+stops at that record before it reads a pod ([kubernetes.md](kubernetes.md),
+*The crashed Job*).
+**Do:** nothing is required. A `KafkaCluster probe reconcile failed` WARN line
+now means a transport, authorization or server failure; an alert that ignored
+the line for its noise can use it again.
+**Scope:** controller rows over the fake API with the controller's log
+captured (`crates/weirkeeper/tests/kafka_cluster_controller.rs`, `fx19_*`): a
+probe Job being deleted, in four shapes (TTL set with its pod gone or still
+terminating, deleted before any TTL, still running), costs one Job read,
+writes nothing and logs no WARN; a recorded verdict whose pod was collected
+writes nothing; the pod gone by the log read and the Job gone by its TTL
+patch are outcomes with no WARN, and a `500` on the log read is still an
+error; a `409` on a status write is an outcome on every write path, and a
+verdict's TTL is not patched after it (and is after a `200`); one whole probe
+cycle — the read Job re-read, its deletion with the pod terminating and then
+gone, a stale read of it, the next probe's creation, a `409` from a stale copy,
+the new probe running and then read — keeps `reachable: true` after every pass
+and logs no WARN; `error_policy` logs a stray `404` or `409` at debug and a
+`500` or `403` at WARN. Negative controls: a real crash clears `reachable` and
+logs exactly one WARN over three passes; a refused probe pod logs one WARN
+over three passes. The class-sweep rows (`backup_controller.rs`,
+`restore_controller.rs`, `recovery_catalog_controller.rs`,
+`retention_policy_controller.rs`, `protection_controller.rs`, `fx19_*`) hand
+each other controller a Job in its being-collected shape and assert no write
+and no WARN, each with a control showing that the read its gate prevents is
+reachable. Twenty-eight mutants of the controller change, all killed:
+among them deletion read as a crash, a WARN on `NotFound` or `Conflict`, a
+`404` or a `409` propagated as an error, clearing on an already-recorded
+verdict, a TTL after a superseded write on each of six paths, and a WARN on
+every pass (one survived a first run and got its row). Not proven live in this branch: the PoC upgrade that carries it
+watches every connection's `reachable` across fifteen minutes of probe cycles
+(it must never leave `true` on a healthy connection) and counts the
+controller's `KafkaCluster` WARN lines (about zero, against about twelve a
+cadence before).
+**Rollback:** an older controller brings the flap and the WARN lines back;
+nothing is stored differently, so nothing needs converting.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1472,7 +1546,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46 and 47, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 and 48, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1502,7 +1576,8 @@ authorization); item 44 changes the console only and needs nothing; item 45
 changes the controller only (and two CRD descriptions) and needs nothing; item 46
 changes the runner's receipts and catalog records, the catalog's view (runner
 and controller), the product API and the console, and needs nothing; item 47
-changes the console only and needs nothing. To roll back to
+changes the console only and needs nothing; item 48 changes the controller
+only and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

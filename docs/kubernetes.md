@@ -4985,7 +4985,9 @@ the deadline as the cause. A named allowlist has no such floor.
    and its connection settings, and deliberately **not**
    `KafkaCluster.status.clusterId` — that field is the probe's record of its
    last successful look, rewritten by every reachable pass (the companion
-   `reachable` is cleared by every pass that cannot vouch for it), so pinning
+   `reachable` is cleared by every probe verdict that cannot vouch for it,
+   and never by the collection of a probe Job whose verdict is already on the
+   status — the crashed-Job section below), so pinning
    it would turn ordinary probe churn during the discovery window into a
    refused run.
 2. Creates `lwd-<backup uid>` — a `topicInventory` check Job, running
@@ -5722,7 +5724,9 @@ finishes.
 crashed-Job branch below — `exitCode` absent, phase `Failed`, reason
 `NoExitCode`, and for a probe `reachable` cleared and the Job replaced on the
 re-probe cadence — which is also what happens when the pod was genuinely
-garbage-collected. A Job with no
+garbage-collected BEFORE the run's verdict was recorded (one collected after
+it is not re-judged: *A Job Kubernetes is collecting is not a crash*, below).
+A Job with no
 `metadata.uid` is not even listed for. Every candidate that was not read is
 logged once, with code `ForeignPodIgnored` and the namespace, the Job and the
 pod name; in the contested case **all** claimants are named, including the one
@@ -5734,7 +5738,8 @@ status.
 ### The crashed Job: when there is no exit code at all
 
 A Job can finish having produced no terminated state for `runner` — the node
-went away, the pod never scheduled, the pod was garbage-collected. There is no
+went away, the pod never scheduled, the pod was garbage-collected before the
+run's verdict was read. There is no
 code to read and there never will be, so the controller writes a **terminal**
 status rather than watching forever, and **never invents a code**: a fabricated
 `1` is indistinguishable from a real operational failure, and a fabricated `0`
@@ -5771,6 +5776,48 @@ diagnostics' fail-fast (*The runner's requests and limits*, §12), and on a
 probe runs. With no such
 event the rows above stand. An absent `EXIT` column with
 `PHASE=Failed` is therefore a real, distinct state and not a rendering gap.
+
+**A Job Kubernetes is collecting is not a crash either** (FX-19). The TTL
+controller deletes a finished Job with *foreground* propagation: the Job gains
+a `metadata.deletionTimestamp`, its pod is deleted first, and the Job stays
+readable — finished and pod-less — until the pod is gone. A controller
+patches a Job's `ttlSecondsAfterFinished` on only AFTER the status write that
+recorded the Job's verdict (the catalog sync Job alone carries its TTL from
+creation, and that TTL is at least an hour — three sync intervals — so the
+sync is harvested long before it), so that collection follows a recorded
+verdict, and no controller reads it as a crash:
+
+* `Backup` and `Restore` stop at their terminal status before any pod read;
+  the catalog sync stops at the record of that Job's completion, retention at
+  `lastEnforcement.finishedAt`, a `ProtectionPolicy` delivery once its ledger
+  entry is no longer `Pending`, and `Preflight` and `TopicDiscovery` never
+  read a terminal object's Job at all.
+* The `KafkaCluster` probe re-reads its Job on every pass, so it states the
+  rule itself. A probe Job with a `deletionTimestamp` is judged not at all —
+  no pod read, no status write, no TTL patch — and the next probe is created
+  once it is gone. A finished probe Job that carries its TTL has had its
+  verdict recorded (the TTL is patched on only after that write), so a
+  missing terminated `runner` on it is not re-judged. **The last recorded
+  verdict stands until the next probe answers:** `reachable`, `clusterId`,
+  `observedAt` and the `Reachable` condition do not move while Kubernetes
+  collects a Job.
+* `NotFound` and `Conflict` while a Job is collected are expected: the probe
+  pod gone between the pod list and the `pods/log` read, the Job gone before
+  its TTL patch, and a status write that lost its `resourceVersion`
+  precondition to a newer copy of the object (the watch cache delivers the new
+  probe Job's events before the status the creating pass wrote) are debug
+  lines and ordinary outcomes, never a WARN and never a reconcile error. A
+  verdict write that lost the precondition is never followed by its TTL; the
+  newer copy's own watch event reconciles again.
+* A real crash, an unreadable probe log and a refused probe pod are logged at
+  WARN **once per Job**, on the pass whose status write first recorded them.
+
+Before this build PoC batch 2 measured `reachable` cleared for about 17 s on a
+healthy connection whenever its probe Job was collected — long enough for a
+`Restore` against it to be refused `ClusterNotReachable` — and about twelve
+WARN lines per five-minute cadence for twelve connections. Nothing about the
+objects' schema changes, so there is no migration step, and a rollback brings
+back only the flap and the WARN lines.
 
 The pod is found by `batch.kubernetes.io/job-name=<job>`, falling back to the
 legacy unprefixed `job-name=<job>` when that returns nothing — both are set on

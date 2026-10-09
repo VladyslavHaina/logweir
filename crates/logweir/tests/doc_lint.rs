@@ -2082,6 +2082,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a stalled identity provider meets the provider deadline",
             "provider_timeout",
         ),
+        // FX-19 (2026-10-09, item 48): a probe Job Kubernetes is collecting
+        // is not a crash; the field that says it is being collected.
+        (
+            "a probe Job being collected does not clear reachable",
+            "metadata.deletionTimestamp",
+        ),
     ];
     assert_eq!(
         items.len(),
