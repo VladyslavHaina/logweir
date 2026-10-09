@@ -209,6 +209,8 @@ fn create_source_topic(topic: &str, rf: u32) {
         ],
         &format!("create topic {topic}"),
     );
+    // FX-18: read it only once `cluster3` serves it.
+    harness::await_created_on(&s.source_bootstrap, topic, PARTITIONS as i32);
 }
 
 /// `topic`'s replication factor as the broker reports it — the ORACLE.
