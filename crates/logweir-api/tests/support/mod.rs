@@ -1828,6 +1828,32 @@ impl SharedApp {
         options: SharedOptions,
         clock: Arc<TestClock>,
     ) -> Self {
+        let http = Box::new(idp.clone());
+        Self::assemble(fake, idp, ISSUER, http, options, clock)
+    }
+
+    /// A shared-mode app whose provider speaks `http` to `issuer` — the
+    /// production `HyperHttpClient` over a real socket, for the rows that
+    /// need the wire (FX-28). `idp` is the document source behind that wire,
+    /// kept for its counters and grants.
+    pub fn over_http(
+        fake: FakeKube,
+        idp: idp::MockIdp,
+        issuer: &str,
+        http: Box<dyn logweir_api::auth::oidc::HttpClient>,
+        options: SharedOptions,
+    ) -> Self {
+        Self::assemble(fake, idp, issuer, http, options, TestClock::new())
+    }
+
+    fn assemble(
+        fake: FakeKube,
+        idp: idp::MockIdp,
+        issuer: &str,
+        http: Box<dyn logweir_api::auth::oidc::HttpClient>,
+        options: SharedOptions,
+        clock: Arc<TestClock>,
+    ) -> Self {
         let keys = Arc::new(CookieKeys::new(&VersionedKey::from_parts(
             options.key_version,
             options.key_bytes.clone(),
@@ -1835,7 +1861,7 @@ impl SharedApp {
         let authorizer = Arc::new(SharedAuthorizer::new(options.bindings.clone()));
         let provider = Provider::new(
             OidcSettings {
-                issuer: ISSUER.to_string(),
+                issuer: issuer.to_string(),
                 client_id: CLIENT_ID.to_string(),
                 client_secret: Secret::new("a-client-secret".into()),
                 redirect_uri: REDIRECT_URI.to_string(),
@@ -1845,7 +1871,7 @@ impl SharedApp {
                 display_name_claim: "name".into(),
                 token_auth_method: TokenAuthMethod::ClientSecretBasic,
             },
-            Box::new(idp.clone()),
+            http,
         );
         let shared = Arc::new(SharedMode {
             provider,
