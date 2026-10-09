@@ -6369,6 +6369,7 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
         config_coverage: None,
         topic_configuration: None,
         owner_detection: None,
+        consumer_positions: None,
     }
 }
 

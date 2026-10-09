@@ -205,6 +205,7 @@ fn backup_binary_rejects_every_invalid_key_before_production_side_effects() {
                 auth: AuthSpec::Plaintext,
                 topics: vec!["orders".into()],
                 topic_owners: None,
+                consumer_groups: None,
             },
             storage: StorageUrl::Filesystem {
                 path: archive.clone(),

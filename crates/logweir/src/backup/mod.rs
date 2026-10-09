@@ -57,6 +57,7 @@
 //! A binary CANNOT be handed an in-process double, which is why the one
 //! binary-level argv assertion lives under `e2e/` (`e2e/tests/backup_argv.rs`).
 pub mod config_coverage;
+pub mod consumer_positions;
 pub mod phase_minus1_admit;
 pub mod phase_run;
 
@@ -112,6 +113,25 @@ pub struct BackupRunArgs {
     /// **PROD-05.1.** Only `KafkaTopic` resources labelled
     /// `strimzi.io/cluster=<this>` count.
     pub strimzi_cluster: Option<String>,
+    /// **PROD-04.1.** `--consumer-group`: groups selected on the command line,
+    /// after the plan's own `source.consumer_groups` ([`selected_groups`]).
+    pub consumer_groups: Vec<String>,
+}
+
+/// **PROD-04.1.** The consumer groups this run records positions for: the
+/// plan's `source.consumer_groups`, then `--consumer-group`, in that order.
+/// Phase −1 refuses the combined list when it is not a selection
+/// (`logweir_core::consumer_positions::refuse_selection`); EMPTY selects
+/// nothing, and the receipt then carries no `consumer_positions`.
+#[must_use]
+pub fn selected_groups(args: &BackupRunArgs, spec: &BackupSpec) -> Vec<String> {
+    spec.source
+        .consumer_groups
+        .iter()
+        .flatten()
+        .chain(args.consumer_groups.iter())
+        .cloned()
+        .collect()
 }
 
 /// What one `logweir backup run` established. Task 5b turns this into the
@@ -181,6 +201,10 @@ pub struct BackupOutcome {
     /// without an owner reads "not checked", never "applied through the admin
     /// API".
     pub owner_detection: Vec<String>,
+    /// **PROD-04.1.** The consumer position evidence of the selected groups
+    /// (`consumer_positions::build`), or `None` when the run selected none:
+    /// the receipt's 1.5.0 `consumer_positions` block.
+    pub consumer_positions: Option<logweir_core::consumer_positions::ConsumerPositions>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -732,8 +756,39 @@ fn execute_with_signer(
             BTreeMap::new()
         });
 
+    // **PROD-04.1: the selected consumer groups, read BEFORE the engine** —
+    // their listings, descriptions, positions and the marks of every named
+    // partition, through the same reader. Never fatal: every outcome,
+    // `failed` included, is a value the receipt records. Before the engine,
+    // so a position is at or below the end the engine then reads from; the
+    // positions of an active group are still not atomic with the records
+    // (`logweir_core::consumer_positions`'s module doc).
+    let selected = selected_groups(args, &inputs.spec);
+    let group_capture = (!selected.is_empty()).then(|| {
+        let observed_from = chrono::Utc::now();
+        let observation = reader.observe_consumer_groups(&selected, &plan.topics);
+        let observed_to = chrono::Utc::now().max(observed_from);
+        (observed_from, observed_to, observation)
+    });
+
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
+    // PROD-04.1: the marks again, after the engine, and the archive's offsets:
+    // what each position is judged against.
+    let consumer_positions = group_capture.map(|(observed_from, observed_to, observation)| {
+        let after = reader.partition_marks(&plan.topics);
+        let block = consumer_positions::build(&consumer_positions::Capture {
+            selected: &selected,
+            topics: &plan.topics,
+            observed_from,
+            observed_to,
+            observation: &observation,
+            after: &after,
+            archived: &ran.manifest_ranges,
+        });
+        consumer_positions::log(&block, &observation);
+        block
+    });
     let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
     let topic_configuration =
         config_coverage::model(&observed, &ran.manifest_layouts, &factors, &inputs.owners);
@@ -762,6 +817,7 @@ fn execute_with_signer(
         config_coverage: coverage,
         topic_configuration,
         owner_detection: inputs.owner_detection.clone(),
+        consumer_positions,
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

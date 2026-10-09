@@ -258,6 +258,18 @@ impl RdKafkaReader {
         &self.admin
     }
 
+    /// The connection the reader dialled with, for `crate::rdkafka_capture`'s
+    /// READ_UNCOMMITTED marks handle (PROD-04.1). Holds the password; never
+    /// printed.
+    pub(crate) fn base_config(&self) -> &ClientConfig {
+        &self.base
+    }
+
+    /// The reader's consumer, for `crate::rdkafka_capture`'s metadata reads.
+    pub(crate) fn metadata_consumer(&self) -> &BaseConsumer {
+        &self.consumer
+    }
+
     /// The bound of one admin call (PROD-04.0b).
     pub(crate) fn admin_bound(&self) -> Duration {
         self.admin_bound
@@ -536,6 +548,20 @@ fn settling_on<T>(code: rdkafka::error::RDKafkaErrorCode, error: KafkaError) -> 
 }
 
 impl ClusterReader for RdKafkaReader {
+    /// PROD-04.1: `crate::rdkafka_capture`.
+    fn observe_consumer_groups(
+        &self,
+        selected: &[String],
+        topics: &[String],
+    ) -> crate::capture::GroupsObservation {
+        self.capture_consumer_groups(selected, topics)
+    }
+
+    /// PROD-04.1: `crate::rdkafka_capture`.
+    fn partition_marks(&self, topics: &[String]) -> BTreeMap<String, crate::capture::TopicMarks> {
+        self.read_partition_marks(topics)
+    }
+
     fn cluster_id(&self) -> Result<String, KafkaError> {
         self.consumer.client().fetch_cluster_id(T).ok_or_else(|| {
             // librdkafka's own doc for `rd_kafka_clusterid`: "returns a newly

@@ -828,6 +828,7 @@ fn backup_fixture(auth_block: &str) -> BackupFixture {
             backup_id_override: None,
             kafka_topic_resources: None,
             strimzi_cluster: None,
+            consumer_groups: Vec::new(),
         },
     }
 }

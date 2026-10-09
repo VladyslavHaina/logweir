@@ -89,6 +89,7 @@ impl Fixture {
                 backup_id_override: None,
                 kafka_topic_resources: None,
                 strimzi_cluster: None,
+                consumer_groups: Vec::new(),
             },
             key,
             _dir: dir,
@@ -140,6 +141,7 @@ impl Fixture {
             backup_id_override: Some(backup_id.to_string()),
             kafka_topic_resources: None,
             strimzi_cluster: None,
+            consumer_groups: Vec::new(),
         };
         execute_with(
             &args,

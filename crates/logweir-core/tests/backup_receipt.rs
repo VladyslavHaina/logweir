@@ -89,6 +89,7 @@ fn pristine() -> BackupReceipt {
         config_coverage: None,
         topic_configuration: None,
         owner_detection: None,
+        consumer_positions: None,
     }
 }
 
@@ -336,16 +337,16 @@ fn the_written_version_follows_the_auth_mode() {
             username: None,
         };
         assert_eq!(
-            format_version_for(&doc.archive, false, &auth),
+            format_version_for(&doc.archive, false, &auth, false),
             RECEIPT_FORMAT_VERSION
         );
         assert_eq!(
-            format_version_for(&pinned, false, &auth),
+            format_version_for(&pinned, false, &auth, false),
             FORMAT_VERSION_WITH_MANIFEST_VERSION
         );
         for archive in [&doc.archive, &pinned] {
             assert_eq!(
-                format_version_for(archive, true, &auth),
+                format_version_for(archive, true, &auth, false),
                 FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
             );
         }
@@ -358,7 +359,7 @@ fn the_written_version_follows_the_auth_mode() {
         for archive in [&doc.archive, &pinned] {
             for topic_configuration in [false, true] {
                 assert_eq!(
-                    format_version_for(archive, topic_configuration, &auth),
+                    format_version_for(archive, topic_configuration, &auth, false),
                     FORMAT_VERSION_WITH_AUTH_MODES,
                     "{mode}, topic_configuration={topic_configuration}"
                 );
@@ -1566,9 +1567,9 @@ fn the_written_version_defines_topic_configuration() {
     assert_eq!(minor, TOPIC_CONFIGURATION_SINCE_MINOR);
     let mut archive = pristine().archive;
     let auth = pristine().source.auth;
-    assert_eq!(format_version_for(&archive, true, &auth), "1.3.0");
-    assert_eq!(format_version_for(&archive, false, &auth), "1.1.0");
+    assert_eq!(format_version_for(&archive, true, &auth, false), "1.3.0");
+    assert_eq!(format_version_for(&archive, false, &auth, false), "1.1.0");
     archive.manifest_version_id = Some("v1".into());
-    assert_eq!(format_version_for(&archive, true, &auth), "1.3.0");
-    assert_eq!(format_version_for(&archive, false, &auth), "1.2.0");
+    assert_eq!(format_version_for(&archive, true, &auth, false), "1.3.0");
+    assert_eq!(format_version_for(&archive, false, &auth, false), "1.2.0");
 }

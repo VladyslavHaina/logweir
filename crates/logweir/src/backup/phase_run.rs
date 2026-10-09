@@ -370,6 +370,11 @@ pub struct Ran {
     /// `source_replication_factor` for each NAMED topic it mentions — the
     /// counts `topic_configuration` records, from the same read-back.
     pub manifest_layouts: BTreeMap<String, crate::backup::config_coverage::Layout>,
+    /// **PROD-04.1.** Per NAMED topic, per partition with at least one
+    /// segment, the lowest and highest offsets the manifest records
+    /// (inclusive): what a consumer position is judged against. A partition
+    /// with no segment is ABSENT: nothing archived, never `[0, 0]`.
+    pub manifest_ranges: crate::backup::consumer_positions::ArchivedRanges,
 }
 
 pub fn run(
@@ -467,10 +472,15 @@ pub fn run(
         BTreeMap::new();
     let mut oldest: Option<i64> = None;
     let mut newest: Option<i64> = None;
+    let mut manifest_ranges = crate::backup::consumer_positions::ArchivedRanges::new();
     for topic in &archive.topics {
         let Some(entry) = records_per_topic.get_mut(&topic.name) else {
             continue;
         };
+        manifest_ranges.insert(
+            topic.name.clone(),
+            crate::backup::consumer_positions::archived_ranges(&topic.partitions),
+        );
         manifest_configurations.insert(topic.name.clone(), topic.configurations.clone());
         manifest_layouts.insert(
             topic.name.clone(),
@@ -540,6 +550,7 @@ pub fn run(
         covered_to_ms,
         manifest_configurations,
         manifest_layouts,
+        manifest_ranges,
     })
 }
 
@@ -619,8 +630,14 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         // PROD-01.3: the version follows the auth mode too — 1.4.0 for
         // `scramSha256`, `plain` and `mtls` (it defines PROD-05.1's block as
         // well), PROD-05.1's 1.3.0 document otherwise.
-        format_version: logweir_core::backup_receipt::format_version_for(&archive, true, &auth)
-            .to_string(),
+        // PROD-04.1: 1.5.0 when the run selected consumer groups.
+        format_version: logweir_core::backup_receipt::format_version_for(
+            &archive,
+            true,
+            &auth,
+            outcome.consumer_positions.is_some(),
+        )
+        .to_string(),
         run_id: outcome.run_id.clone(),
         backup_id: outcome.backup_id.clone(),
         requested_at: outcome.requested_at,
@@ -659,6 +676,8 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         // model, so a topic without an owner reads "not checked" when it is
         // empty and never "applied through the admin API".
         owner_detection: Some(outcome.owner_detection.clone()),
+        // PROD-04.1: present exactly when the run selected consumer groups.
+        consumer_positions: outcome.consumer_positions.clone(),
     }
 }
 

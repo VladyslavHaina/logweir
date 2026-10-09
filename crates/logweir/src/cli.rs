@@ -891,6 +891,15 @@ pub enum BackupCmd {
         /// backup's source. Without it, any cluster label counts.
         #[arg(long, requires = "kafka_topic_resources")]
         strimzi_cluster: Option<String>,
+        /// A consumer group whose committed positions this backup records as
+        /// evidence (PROD-04.1), by its exact id; repeat it for several. Added
+        /// to the plan's own `source.consumer_groups`. Each selected group gets
+        /// one outcome in the receipt's `consumer_positions` (captured,
+        /// excluded with a reason, or failed): absence is never offset 0. A
+        /// blank, repeated or control-character id, or more than 100 groups in
+        /// all, is refused before anything runs (exit 3).
+        #[arg(long = "consumer-group", value_name = "GROUP_ID")]
+        consumer_groups: Vec<String>,
     },
 }
 

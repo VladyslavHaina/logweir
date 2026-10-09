@@ -160,6 +160,7 @@ fn a_backup_plan_takes_the_projected_ca_or_refuses_it() {
             auth,
             topics: vec!["orders".into()],
             topic_owners: None,
+            consumer_groups: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "kafka-backups".into(),
@@ -258,6 +259,7 @@ fn one_projected_path_reaches_both_tls_clients() {
             auth: source.clone(),
             topics: vec!["orders".into()],
             topic_owners: None,
+            consumer_groups: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "kafka-backups".into(),

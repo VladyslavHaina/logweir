@@ -1366,6 +1366,7 @@ impl FrozenInputs {
                 auth: inputs.source.auth.clone(),
                 topics: inputs.topics.clone(),
                 topic_owners: None,
+                consumer_groups: None,
             },
             storage: inputs.archive.storage.clone(),
             backup_id: inputs.execution.id.clone(),

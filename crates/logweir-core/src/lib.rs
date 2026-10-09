@@ -41,6 +41,9 @@ pub mod approval_policy;
 pub mod backup_receipt;
 pub mod check_contract;
 pub mod connection;
+/// PROD-04.1: the receipt's consumer position evidence (format 1.5.0), its
+/// closed vocabularies and the rules its arms re-derive.
+pub mod consumer_positions;
 /// FX-20: the credential binding for every credential reference — object
 /// stores, retention and notification sinks — beside PROD-01.3's Kafka one.
 pub mod credential_binding;
