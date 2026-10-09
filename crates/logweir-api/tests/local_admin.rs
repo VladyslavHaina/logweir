@@ -1635,7 +1635,9 @@ const BODY_DEADLINE: Duration = Duration::from_secs(60);
 ///
 /// THE CALL SITES TOO (the FX-24 review's L1 lesson): a constant that still
 /// reads thirty seconds proves nothing if a guard is built with something
-/// else, so each guard must be handed `IO_STALL_TIMEOUT` itself, once.
+/// else, so each guard must be handed `IO_STALL_TIMEOUT` itself, once — and,
+/// since FX-24c, the body's guard `BODY_MIN_PROGRESS` itself as its floor
+/// ([`the_rate_floor_and_peer_cap_these_rows_measure_are_mains`]).
 #[test]
 fn the_stall_and_body_deadlines_these_rows_measure_are_mains() {
     let main =
@@ -1659,14 +1661,15 @@ fn the_stall_and_body_deadlines_these_rows_measure_are_mains() {
             "the connection's IO",
         ),
         (
-            "StallBody::new(body, IO_STALL_TIMEOUT)",
+            "StallBody::new(body, IO_STALL_TIMEOUT, BODY_MIN_PROGRESS)",
             "each request body",
         ),
     ] {
         assert_eq!(
             code.matches(call).count(),
             1,
-            "{what} must be guarded with IO_STALL_TIMEOUT itself, exactly once: `{call}`"
+            "{what} must be guarded with IO_STALL_TIMEOUT (and a body with \
+             BODY_MIN_PROGRESS) itself, exactly once: `{call}`"
         );
     }
     assert_eq!(
@@ -2321,11 +2324,14 @@ fn a_signed_in_body_that_stops_is_closed_at_the_stall_deadline() {
 /// **A signed-in client that trickles its body is answered and closed at the
 /// total deadline (FX-24b).**
 ///
-/// One byte (a space, which JSON allows) every four seconds: the body never
-/// stalls for the thirty-second stall deadline, so only `read_json`'s total
-/// can end it — at sixty seconds, with `400 malformed_request`, "not received
-/// within 60 seconds", and the connection closed after the answer. A server
-/// with no total fails here; so does one whose total is the stall's.
+/// 8 KiB of spaces (which JSON allows) every four seconds: 60 KiB a window,
+/// past the 32 KiB floor (FX-24c), so the body's progress window never ends it
+/// and only `read_json`'s total can — at sixty seconds, with `400
+/// malformed_request`, "not received within 60 seconds", and the connection
+/// closed after the answer. A server with no total fails here; so does one
+/// whose total is the window's. (Before FX-24c the drip was one byte, which
+/// the floor now ends at the window instead:
+/// [`a_signed_in_body_below_the_rate_floor_is_closed_at_the_window`].)
 ///
 /// THE DRIPS STOP EIGHT SECONDS SHORT OF THE TOTAL (FX-24b review L1). The
 /// first version dripped on its five-second read timeout, which divides sixty,
@@ -2341,6 +2347,7 @@ fn a_signed_in_body_that_stops_is_closed_at_the_stall_deadline() {
 fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
     const DRIP_EVERY: Duration = Duration::from_secs(4);
     const LAST_DRIP_BEFORE_THE_TOTAL: Duration = Duration::from_secs(8);
+    const DRIP: usize = 8 * 1024;
     let fixture = Fixture::new("bodytrickle");
     let (_server, port) = start_server(&fixture);
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -2352,9 +2359,11 @@ fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
     trickle
         .set_read_timeout(Some(Duration::from_millis(250)))
         .unwrap();
+    // Announced past everything the drips send, and under the 1 MiB cap.
     trickle
-        .write_all(backup_post_head(port, 4096, "fx24b-trickle-0001").as_bytes())
+        .write_all(backup_post_head(port, 256 * 1024, "fx24b-trickle-0001").as_bytes())
         .unwrap();
+    let drip = vec![b' '; DRIP];
     let sent = Instant::now();
     let limit = BODY_DEADLINE + DEADLINE_SLACK;
     let last_drip = BODY_DEADLINE.saturating_sub(LAST_DRIP_BEFORE_THE_TOTAL);
@@ -2365,14 +2374,14 @@ fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
     let closed_at = loop {
         assert!(
             sent.elapsed() < limit,
-            "a trickling body was not answered and closed within {limit:?} ({dripped} bytes \
+            "a trickling body was not answered and closed within {limit:?} ({dripped} drips \
              sent, {} received: {:?})",
             received.len(),
             String::from_utf8_lossy(&received)
         );
         if received.is_empty() && next_drip <= last_drip && sent.elapsed() >= next_drip {
             trickle
-                .write_all(b" ")
+                .write_all(&drip)
                 .unwrap_or_else(|e| panic!("drip at {:?}: {e}", sent.elapsed()));
             dripped += 1;
             next_drip += DRIP_EVERY;
@@ -2401,12 +2410,714 @@ fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
     assert!(
         closed_at >= BODY_DEADLINE.saturating_sub(Duration::from_secs(1)),
         "a trickling body was ended after {closed_at:?}, before the {BODY_DEADLINE:?} total \
-         deadline ({dripped} bytes sent)"
+         deadline ({dripped} drips sent)"
     );
     // Every drip from 4 s to 52 s was sent: thirteen.
     let expected = (last_drip.as_secs() / DRIP_EVERY.as_secs()) as usize;
     assert_eq!(
         dripped, expected,
-        "{dripped} bytes were trickled, not {expected}: the body was not kept moving"
+        "{dripped} drips were sent, not {expected}: the body was not kept moving"
     );
+}
+
+// ---------------------------------------------------------------------------
+// FX-24c: what the stall does to a client that reads a byte at a time, the
+// rate floor on a request body, and the cap on the connections one peer
+// outside the trusted-proxy set may hold.
+// ---------------------------------------------------------------------------
+
+/// `main::BODY_MIN_PROGRESS`, which a test cannot import from a binary.
+/// [`the_rate_floor_and_peer_cap_these_rows_measure_are_mains`] reads it back
+/// out of `src/main.rs`.
+const RATE_FLOOR: usize = 32 * 1024;
+
+/// `main::MAX_CONNECTIONS_PER_PEER`, read back the same way.
+const PEER_CAP: usize = 32;
+
+/// The slow-rate client's pace: ONE byte every twenty seconds, the shape of
+/// the FX-24b review's measurement M1.
+const SLOW_READ_EVERY: Duration = Duration::from_secs(20);
+
+/// The floor and the cap the FX-24c rows measure are the ones `src/main.rs`
+/// configures, handed over at their one call site each.
+///
+/// The body guard's call site, with `BODY_MIN_PROGRESS` as its floor, is
+/// pinned by [`the_stall_and_body_deadlines_these_rows_measure_are_mains`];
+/// this row pins the two constants and the cap's call site.
+#[test]
+fn the_rate_floor_and_peer_cap_these_rows_measure_are_mains() {
+    let main =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs")).unwrap();
+    for (constant, expected) in [
+        (
+            "BODY_MIN_PROGRESS",
+            format!(
+                "const BODY_MIN_PROGRESS: usize = {} * 1024;",
+                RATE_FLOOR / 1024
+            ),
+        ),
+        (
+            "MAX_CONNECTIONS_PER_PEER",
+            format!("const MAX_CONNECTIONS_PER_PEER: usize = {PEER_CAP};"),
+        ),
+    ] {
+        assert!(
+            main.contains(&expected),
+            "src/main.rs no longer reads `{expected}`; update this file's copy of {constant} \
+             with it"
+        );
+    }
+    let code: String = main
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        code.matches("PeerLimit::outside(&shared.trusted_proxies, MAX_CONNECTIONS_PER_PEER)")
+            .count(),
+        1,
+        "the cap must be built once, from the shared mode's own trusted-proxy set and \
+         MAX_CONNECTIONS_PER_PEER itself"
+    );
+    assert_eq!(
+        code.matches("PeerLimit::outside(").count(),
+        1,
+        "src/main.rs builds a peer cap somewhere else too"
+    );
+    assert_eq!(
+        code.matches(".admit(peer_ip)").count(),
+        1,
+        "every accepted connection is admitted once, by its socket peer"
+    );
+    assert!(
+        PEER_CAP < 256,
+        "a cap at or above the 256-connection ceiling caps nothing"
+    );
+}
+
+/// **A client that reads one byte every twenty seconds is ended at the stall
+/// deadline (FX-24c, correcting the FX-24b review's M1).**
+///
+/// M1's shape, as a row: one connection pipelines sixteen requests for the
+/// 156 KiB asset through a 4 KiB receive buffer, then reads ONE byte every
+/// twenty seconds. The review's probe reported it "still open at 100 s", but
+/// that probe read a byte at a time out of the half a megabyte the kernel had
+/// buffered, and could never reach the end-of-stream behind it: the server's
+/// own log shows the connection ended at 35.1 s (`claude/fx-24c.result.md`).
+/// The kernel stops waking a writer whose client takes almost nothing, so the
+/// stall ends it like a client that stopped. This row drains the connection
+/// after the bound instead: EOF or reset within two seconds, short of the
+/// sixteen answers. A stall clock that restarted on a mere poll, or a
+/// deadline far past thirty seconds, leaves it open and hands over every
+/// answer once drained. A request on another connection is answered
+/// meanwhile, so the wait is this connection's, not the server's.
+#[test]
+fn a_client_reading_one_byte_every_twenty_seconds_is_ended_at_the_stall_deadline() {
+    const PIPELINED: usize = 16;
+    let fixture = Fixture::new("slowrate");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let runtime = socket_runtime();
+    let mut slow = connect_with_receive_buffer(&runtime, address, 4096).unwrap();
+    slow.set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let request = format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    slow.write_all(request.repeat(PIPELINED).as_bytes())
+        .unwrap();
+    let sent = Instant::now();
+
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+
+    // One byte every twenty seconds, up to the bound.
+    let bound = STALL_DEADLINE + STALL_SLACK;
+    let mut read = 0usize;
+    let mut next = SLOW_READ_EVERY;
+    while next < bound {
+        std::thread::sleep(next.saturating_sub(sent.elapsed()));
+        slow.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut one = [0u8; 1];
+        match slow.read(&mut one) {
+            Ok(1) => read += 1,
+            // Ended already: what is checked below is that it is ended.
+            Ok(_) => break,
+            Err(e) if e.kind() == ErrorKind::ConnectionReset => break,
+            Err(e) => panic!(
+                "the slow reader's one-byte read at {:?} failed: {e}",
+                sent.elapsed()
+            ),
+        }
+        next += SLOW_READ_EVERY;
+    }
+    assert!(
+        read >= 1,
+        "the slow reader never read its byte: the row measured a non-reader"
+    );
+
+    std::thread::sleep(bound.saturating_sub(sent.elapsed()));
+    let whole = PIPELINED * render_js_size();
+    match answered_then_closed(&mut slow, Duration::from_secs(2)) {
+        Ok((_, received)) if received.len() + read < whole => {}
+        Ok((_, received)) => panic!(
+            "the connection that read one byte every {SLOW_READ_EVERY:?} was sent all {} bytes \
+             of its answers once drained: the server never ended it",
+            received.len() + read
+        ),
+        Err(why) => panic!(
+            "the connection that read one byte every {SLOW_READ_EVERY:?} was not ended by the \
+             server within {bound:?} of its requests: {why}"
+        ),
+    }
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+}
+
+/// **Clients that read one byte every twenty seconds cannot hold the ceiling
+/// past the stall deadline, and the request queued behind them is answered
+/// (FX-24c).**
+///
+/// THE CI-SCALE ROW: 256 sockets. Under the flood rule (WORKER-RULES,
+/// 2026-10-08) it does not run on a host serving a compose stack or the PoC;
+/// CI's Linux `cargo test --workspace` runs it, and the FX-24c worker ran it
+/// at a ceiling of eight (a temporary `MAX_CONNECTIONS` edit).
+///
+/// [`clients_that_stop_reading_cannot_hold_the_ceiling_past_the_stall_deadline`]
+/// with one change: every client READS one byte every twenty seconds — the
+/// ledger's slow-rate client. The bounds are that row's: held for a measured
+/// window first; then answered no sooner than the deadline (less a second)
+/// after the first client connected, and within the deadline plus
+/// [`STALL_SLACK`] of the last; and by then every slow connection ended by the
+/// server, short of its sixteen answers.
+#[test]
+fn slow_rate_clients_cannot_hold_the_ceiling_past_the_stall_deadline() {
+    const CEILING: usize = 256;
+    const PIPELINED: usize = 16;
+    let fixture = Fixture::new("slowrateceiling");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let runtime = socket_runtime();
+    let request = format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let requests = request.repeat(PIPELINED);
+    let open = |i: usize| {
+        let mut stream = connect_with_receive_buffer(&runtime, address, 4096)
+            .unwrap_or_else(|e| panic!("slow connection {i}: {e}"));
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(requests.as_bytes())
+            .unwrap_or_else(|e| panic!("slow connection {i}: write: {e}"));
+        stream
+    };
+
+    let mut held = Vec::with_capacity(CEILING);
+    let mut slowest = Duration::ZERO;
+    let first = Instant::now();
+    while held.len() < CEILING - 1 {
+        for _ in 0..(CEILING - 1 - held.len()).min(UNACCEPTED_AT_ONCE) {
+            held.push(open(held.len()));
+        }
+        slowest = slowest.max(answered_after(port, held.len()));
+    }
+    held.push(open(CEILING - 1));
+    let last = Instant::now();
+
+    let mut queued = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    queued
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        queued,
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+
+    // Held first.
+    let window = (slowest * 4).max(Duration::from_secs(2));
+    let budget = STALL_DEADLINE
+        .saturating_sub(first.elapsed())
+        .saturating_sub(Duration::from_secs(1));
+    assert!(
+        window <= budget,
+        "inconclusive, not a product failure: filling the ceiling took {:?} and the slowest \
+         probe {slowest:?}, which leaves {budget:?} before the first connection's stall \
+         deadline for a {window:?} held window",
+        first.elapsed()
+    );
+    queued.set_read_timeout(Some(window)).unwrap();
+    let mut buffer = [0u8; 64];
+    match queued.read(&mut buffer) {
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+        other => panic!(
+            "the queued request was not held behind {CEILING} slow connections for {window:?}: \
+             {other:?} {:?}",
+            String::from_utf8_lossy(&buffer)
+        ),
+    }
+
+    // Then released by the stall deadline, while every slow client keeps
+    // reading its byte every twenty seconds.
+    let limit = STALL_DEADLINE + STALL_SLACK;
+    let mut next_round = SLOW_READ_EVERY;
+    let mut response = Vec::new();
+    let answered_at = loop {
+        assert!(
+            last.elapsed() < limit,
+            "the request queued behind {CEILING} connections that read a byte every \
+             {SLOW_READ_EVERY:?} was not answered within {limit:?} of the last one ({} bytes \
+             received)",
+            response.len()
+        );
+        if first.elapsed() >= next_round {
+            for stream in &mut held {
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(20)))
+                    .unwrap();
+                let mut one = [0u8; 1];
+                let _ = stream.read(&mut one);
+            }
+            next_round += SLOW_READ_EVERY;
+        }
+        queued
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+        match queued.read(&mut buffer) {
+            Ok(0) => break first.elapsed(),
+            Ok(n) => response.extend_from_slice(&buffer[..n]),
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(e) => panic!("the queued request failed: {e}"),
+        }
+    };
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "the queued request was answered with: {text:?}"
+    );
+    assert!(
+        answered_at >= STALL_DEADLINE.saturating_sub(Duration::from_secs(1)),
+        "the queued request was answered {answered_at:?} after the first slow client \
+         connected, before the {STALL_DEADLINE:?} stall deadline: a permit came back some \
+         other way"
+    );
+
+    std::thread::sleep(limit.saturating_sub(last.elapsed()));
+    let whole = PIPELINED * render_js_size();
+    for (i, stream) in held.iter_mut().enumerate() {
+        match answered_then_closed(stream, Duration::from_secs(2)) {
+            Ok((_, received)) if received.len() < whole => {}
+            Ok((_, received)) => panic!(
+                "slow connection {i} of {CEILING} was sent all {} bytes of its answers once \
+                 drained: the server never ended it",
+                received.len()
+            ),
+            Err(why) => panic!(
+                "slow connection {i} of {CEILING} was not ended by the server within {limit:?} \
+                 of the last connect: {why}"
+            ),
+        }
+    }
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+}
+
+/// **A signed-in body that arrives below the rate floor is answered and
+/// closed at the window (FX-24c).**
+///
+/// The localAdmin actor announces 4096 bytes and sends ONE every twenty
+/// seconds. Before FX-24c each byte restarted the body's stall clock, so only
+/// the sixty-second total ended it. Now its window wants [`RATE_FLOOR`] bytes:
+/// it is answered `400 malformed_request`, "arrived too slowly", and closed at
+/// thirty seconds, not sixty. A body floor of one byte fails here.
+#[test]
+fn a_signed_in_body_below_the_rate_floor_is_closed_at_the_window() {
+    let fixture = Fixture::new("bodyslow");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let mut slow = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    slow.set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    slow.set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    slow.write_all(backup_post_head(port, 4096, "fx24c-slowbody-0001").as_bytes())
+        .unwrap();
+    let sent = Instant::now();
+    let limit = STALL_DEADLINE + DEADLINE_SLACK;
+    let mut next_drip = SLOW_READ_EVERY;
+    let mut received = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut dripped = 0;
+    let closed_at = loop {
+        assert!(
+            sent.elapsed() < limit,
+            "a body arriving at one byte every {SLOW_READ_EVERY:?} was not answered and closed \
+             within {limit:?} ({dripped} bytes sent, {} received: {:?})",
+            received.len(),
+            String::from_utf8_lossy(&received)
+        );
+        if received.is_empty() && sent.elapsed() >= next_drip {
+            slow.write_all(b" ")
+                .unwrap_or_else(|e| panic!("drip at {:?}: {e}", sent.elapsed()));
+            dripped += 1;
+            next_drip += SLOW_READ_EVERY;
+        }
+        match slow.read(&mut buffer) {
+            Ok(0) => break sent.elapsed(),
+            Ok(n) => received.extend_from_slice(&buffer[..n]),
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(e) if e.kind() == ErrorKind::ConnectionReset => break sent.elapsed(),
+            Err(e) => panic!(
+                "the slow body's connection failed after {:?}: {e}",
+                sent.elapsed()
+            ),
+        }
+    };
+    let response = String::from_utf8_lossy(&received);
+    assert!(
+        response.starts_with("HTTP/1.1 400")
+            && response.contains("\"code\":\"malformed_request\"")
+            && response.contains("arrived too slowly"),
+        "a body below the floor was answered with: {response}"
+    );
+    assert!(
+        closed_at >= STALL_DEADLINE.saturating_sub(Duration::from_secs(1)),
+        "a body below the floor was ended after {closed_at:?}, before its {STALL_DEADLINE:?} \
+         window"
+    );
+    assert_eq!(
+        dripped, 1,
+        "the body's byte at {SLOW_READ_EVERY:?} was not sent: the row measured a stopped body"
+    );
+}
+
+// ------------------------------------------------- the per-peer cap (shared)
+
+/// Start the binary in SHARED mode, with `extra` appended to its
+/// configuration, and return it with the port it said it is listening on.
+/// Shared mode reaches nothing at start: the identity provider is read on
+/// the first sign-in or readiness probe, and the cluster at
+/// `https://127.0.0.1:1` never.
+fn start_shared_server(fixture: &Fixture, extra: &str) -> (Watched, u16) {
+    write_shared_material(fixture, 1);
+    let mut lost = Vec::new();
+    for _ in 0..START_ATTEMPTS {
+        let port = free_port();
+        let config = fixture.config(&format!(
+            "{}{extra}",
+            shared_config_text(
+                fixture,
+                &format!("127.0.0.1:{port}"),
+                "https://console.example"
+            )
+        ));
+        let mut server = Watched::spawn(&config);
+        match wait_until_listening(&mut server, port) {
+            Start::Listening => return (server, port),
+            Start::PortTaken => {
+                drop(server);
+                lost.push(port);
+            }
+        }
+    }
+    panic!("the shared-mode server lost the port it was given {START_ATTEMPTS} times ({lost:?})");
+}
+
+/// The warning the server logs when it closes a connection over its peer's
+/// cap (`transport::PeerLimit`).
+const CAP_REFUSAL: &str = "closed a connection at once";
+
+/// `GET /healthz` on fresh connections until one is answered, or `deadline`.
+fn answered_before(port: u16, deadline: Instant) -> Result<String, String> {
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let mut last = String::from("never tried");
+    while Instant::now() < deadline {
+        match one_http_get(&address, "/healthz", &format!("127.0.0.1:{port}")) {
+            Ok(answer) => return Ok(answer),
+            Err(error) => last = error,
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(last)
+}
+
+/// **A peer outside the trusted-proxy set holds at most its share, and gets
+/// a place back when one of its connections ends (FX-24c).**
+///
+/// Shared mode, with TEST-NET-1 as the trusted proxy, so loopback — where
+/// this test connects from — is outside the set and capped at [`PEER_CAP`].
+/// - **Every place held.** [`PEER_CAP`] − 1 connections that send nothing,
+///   then a keep-alive request answered and held open: its answer proves every
+///   connection opened before it was accepted (the kernel hands them over in
+///   order), so all [`PEER_CAP`] places are taken.
+/// - **One more is refused.** A further connection from the same peer is
+///   closed by the server within two seconds, unanswered — long before the
+///   held connections' own ten-second header deadline — and the server says
+///   why in its log. A server with no cap answers it.
+/// - **A place given back is a place.** One held connection is dropped, and
+///   a request from the peer is answered before any held connection's own
+///   deadline could have freed one. A cap whose places never come back fails
+///   there.
+#[test]
+fn a_peer_outside_the_trusted_set_is_capped_at_its_share() {
+    let fixture = Fixture::new("peercap");
+    let (mut server, port) =
+        start_shared_server(&fixture, "trustedProxyCidrs: [\"192.0.2.0/24\"]\n");
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let connect = |i: usize| {
+        TcpStream::connect_timeout(&address, Duration::from_secs(5))
+            .unwrap_or_else(|e| panic!("connection {i}: {e}"))
+    };
+
+    let first = Instant::now();
+    let mut silent: Vec<TcpStream> = (0..PEER_CAP - 1).map(connect).collect();
+    let answered = hold_an_answered_keep_alive(&mut server, port);
+
+    let mut over = connect(PEER_CAP);
+    over.set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    // The write may meet a connection the server has already closed.
+    let _ = write!(
+        over,
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    let refused = closed_by_the_server(&mut over, Duration::from_secs(2));
+    assert!(
+        refused.is_ok(),
+        "connection {} from one peer outside the trusted set, past its cap of {PEER_CAP}, was \
+         not closed at once: {refused:?}\n{}",
+        PEER_CAP + 1,
+        server.log()
+    );
+    let budget = HEADER_DEADLINE
+        .saturating_sub(first.elapsed())
+        .saturating_sub(RELEASE_MARGIN);
+    assert!(
+        !budget.is_zero(),
+        "inconclusive, not a product failure: holding the cap took {:?}, past the held \
+         connections' header deadline",
+        first.elapsed()
+    );
+    for (i, held) in silent.iter_mut().enumerate() {
+        held.set_nonblocking(true).unwrap();
+        let mut byte = [0u8; 1];
+        match held.read(&mut byte) {
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+            other => panic!(
+                "held connection {i} was ended before its header deadline ({other:?}): the cap \
+                 refused a connection inside it"
+            ),
+        }
+        held.set_nonblocking(false).unwrap();
+    }
+
+    drop(silent.remove(0));
+    let deadline = first + HEADER_DEADLINE.saturating_sub(RELEASE_MARGIN);
+    let answer = answered_before(port, deadline).unwrap_or_else(|last| {
+        panic!(
+            "the peer got no place back from a connection it dropped, before its other \
+             connections' own header deadline ({last})\n{}",
+            server.log()
+        )
+    });
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(
+        server.log().contains(CAP_REFUSAL),
+        "the server closed a connection over the cap without saying why:\n{}",
+        server.log()
+    );
+    drop(answered);
+}
+
+/// [`PEER_CAP`] + 8 connections from loopback that send nothing, opened in
+/// two batches each proven accepted by a probe answered before the first
+/// one's header deadline; then every one of them must still be open, and the
+/// server must not have refused any. Used where loopback must NOT be capped.
+fn held_past_the_cap(server: &Watched, port: u16, who: &str) {
+    const PAST: usize = PEER_CAP + 8;
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let first = Instant::now();
+    let deadline = first + HEADER_DEADLINE.saturating_sub(RELEASE_MARGIN);
+    let mut held = Vec::with_capacity(PAST);
+    for batch in [PAST / 2, PAST - PAST / 2] {
+        for _ in 0..batch {
+            let i = held.len();
+            held.push(
+                TcpStream::connect_timeout(&address, Duration::from_secs(5))
+                    .unwrap_or_else(|e| panic!("connection {i}: {e}")),
+            );
+        }
+        let answer = answered_before(port, deadline).unwrap_or_else(|last| {
+            panic!(
+                "{who} holding {} connections got no answer to one more before the header \
+                 deadline ({last}): it was capped as one peer\n{}",
+                held.len(),
+                server.log()
+            )
+        });
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    }
+    assert!(
+        Instant::now() < deadline,
+        "inconclusive, not a product failure: opening {PAST} connections took {:?}",
+        first.elapsed()
+    );
+    for (i, stream) in held.iter_mut().enumerate() {
+        stream.set_nonblocking(true).unwrap();
+        let mut byte = [0u8; 1];
+        match stream.read(&mut byte) {
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+            other => panic!(
+                "connection {i} of {PAST} from {who} was ended at once ({other:?}): it was capped \
+                 as one peer at {PEER_CAP}\n{}",
+                server.log()
+            ),
+        }
+    }
+    assert!(
+        !server.log().contains(CAP_REFUSAL),
+        "the server refused a connection from {who}:\n{}",
+        server.log()
+    );
+}
+
+/// **The trusted proxy is never capped as one peer (FX-24c).** Every browser
+/// behind the ingress arrives from the ingress's address, so capping it would
+/// cap the console's whole audience at [`PEER_CAP`] connections. Loopback is
+/// the trusted proxy here, and holds [`PEER_CAP`] + 8 connections.
+#[test]
+fn the_trusted_proxy_is_never_capped_as_one_peer() {
+    let fixture = Fixture::new("peercaptrusted");
+    let (server, port) = start_shared_server(&fixture, "trustedProxyCidrs: [\"127.0.0.1/32\"]\n");
+    held_past_the_cap(&server, port, "the trusted proxy");
+}
+
+/// **With no trusted-proxy set, no peer is capped (FX-24c).** The console
+/// cannot then tell its ingress from any other peer, and the chart's default
+/// names none: a cap here would cap an unconfigured install's ingress as one
+/// peer.
+#[test]
+fn without_a_trusted_proxy_set_no_peer_is_capped() {
+    let fixture = Fixture::new("peercapnone");
+    let (server, port) = start_shared_server(&fixture, "");
+    held_past_the_cap(&server, port, "a peer of a console with no trusted proxy");
+}
+
+/// **One address outside the trusted set cannot hold the ceiling, however it
+/// reads (FX-24c).**
+///
+/// THE CI-SCALE CAP ROW: 256 sockets, so the flood rule applies as above.
+///
+/// 256 clients from loopback, outside the trusted set, each pipelining
+/// sixteen requests for the 156 KiB asset and reading nothing — the clients a
+/// stall ends only after thirty seconds, and that no window can end at all if
+/// they read just fast enough to keep the kernel moving. The cap holds them to
+/// [`PEER_CAP`]: the server closes every one past it within two seconds of
+/// its connect, unanswered, and keeps [`PEER_CAP`] open. Where the host can
+/// dial from a second loopback address (Linux routes all of `127.0.0.0/8`;
+/// macOS configures only `127.0.0.1`), a request from `127.0.0.2` is then
+/// answered at once — not after the stall deadline — because the other 224
+/// permits are free; elsewhere the row says it skipped that half.
+#[test]
+fn one_address_outside_the_trusted_set_cannot_hold_the_ceiling() {
+    const CLIENTS: usize = 256;
+    const PIPELINED: usize = 16;
+    let fixture = Fixture::new("peercapceiling");
+    let (server, port) = start_shared_server(&fixture, "trustedProxyCidrs: [\"192.0.2.0/24\"]\n");
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let runtime = socket_runtime();
+    let requests =
+        format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").repeat(PIPELINED);
+
+    // Opened in batches, so the listen queue never holds more than one.
+    let first = Instant::now();
+    let mut clients = Vec::with_capacity(CLIENTS);
+    while clients.len() < CLIENTS {
+        for _ in 0..(CLIENTS - clients.len()).min(UNACCEPTED_AT_ONCE) {
+            let i = clients.len();
+            let mut stream = connect_with_receive_buffer(&runtime, address, 4096)
+                .unwrap_or_else(|e| panic!("client {i}: {e}"));
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            // A client the server has already closed may refuse the write.
+            let _ = stream.write_all(requests.as_bytes());
+            clients.push(stream);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Every client past the cap is closed, unanswered; the cap's share is not.
+    let mut open = 0;
+    let mut refused = 0;
+    for (i, stream) in clients.iter_mut().enumerate() {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        match stream.read(&mut byte) {
+            Ok(1) => open += 1,
+            Ok(_) => refused += 1,
+            Err(e) if e.kind() == ErrorKind::ConnectionReset => refused += 1,
+            Err(e) => panic!("client {i}: neither answered nor closed within 2 s: {e}"),
+        }
+    }
+    assert!(
+        first.elapsed() < STALL_DEADLINE,
+        "inconclusive, not a product failure: counting took {:?}, past the stall deadline \
+         that ends the held clients on its own",
+        first.elapsed()
+    );
+    assert_eq!(
+        (open, refused),
+        (PEER_CAP, CLIENTS - PEER_CAP),
+        "one address outside the trusted set held {open} connections and had {refused} \
+         closed; its cap is {PEER_CAP}\n{}",
+        server.log()
+    );
+
+    // Another address is served at once, from the permits the cap left free.
+    let other = runtime.block_on(async {
+        let socket = tokio::net::TcpSocket::new_v4().ok()?;
+        socket.bind("127.0.0.2:0".parse().unwrap()).ok()?;
+        let stream = tokio::time::timeout(Duration::from_secs(5), socket.connect(address))
+            .await
+            .ok()?
+            .ok()?;
+        let stream = stream.into_std().ok()?;
+        stream.set_nonblocking(false).ok()?;
+        Some(stream)
+    });
+    match other {
+        Some(mut stream) => {
+            let asked = Instant::now();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            write!(
+                stream,
+                "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut answer = Vec::new();
+            let read = stream.read_to_end(&mut answer);
+            let text = String::from_utf8_lossy(&answer);
+            assert!(
+                read.is_ok() && text.starts_with("HTTP/1.1 200"),
+                "a request from 127.0.0.2, beside {CLIENTS} clients of 127.0.0.1, was not \
+                 answered within 5 s: {read:?} {text:?}"
+            );
+            assert!(
+                asked.elapsed() < Duration::from_secs(5),
+                "answered after {:?}",
+                asked.elapsed()
+            );
+        }
+        None => eprintln!(
+            "one_address_outside_the_trusted_set_cannot_hold_the_ceiling: this host cannot dial \
+             from 127.0.0.2, so the second-address half was skipped (it runs on Linux)"
+        ),
+    }
 }
