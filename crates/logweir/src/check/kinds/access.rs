@@ -402,10 +402,16 @@ pub const GRANT_BOUND: &str = "bound";
 ///
 /// # Per grant, by name
 ///
-/// The message names each refused grant by its `spec.access` field, its Secret
-/// and its destination, and says whether the binding was absent or foreign;
-/// the facts carry one `<grant>=bound|CredentialBindingMismatch` per listed
-/// grant. Neither the projected nor the expected value is ever written.
+/// The message LEADS with one compact entry per refused grant — its
+/// `spec.access` field, its Secret, and whether the binding was absent or
+/// foreign — so the per-grant answer survives the 512-character cap and the
+/// facts the controller folds in after it (review LOW-1). The destination is
+/// named once, by the row's scope; only a row spanning two destinations (a
+/// restore's source and evidence) names it per grant. The scope is the first
+/// REFUSED grant's destination (review LOW-3). The facts carry one
+/// `<grant>=bound|CredentialBindingMismatch` per listed grant. Neither the
+/// projected nor the expected value is ever written, and the remedy never
+/// suggests binding a refused Secret to this destination (review LOW-2).
 ///
 /// `None` when no plan lists a grant (no Secret-backed grant, or a controller
 /// that predates FX-20c): `CheckRequest::compares_grant_bindings` is false and
@@ -418,7 +424,13 @@ pub fn credential_bound_row(
     use logweir_core::credential_binding::{check_grant_binding, grant_field};
     let now = wiring.now();
     let get = |name: &str| wiring.env(name);
+    let spans = plans
+        .iter()
+        .filter(|p| !p.grant_bindings.is_empty())
+        .count()
+        > 1;
     let mut refused: Vec<String> = Vec::new();
+    let mut refused_scope: Option<&DestinationPlan> = None;
     let mut facts: Vec<(&'static str, &'static str)> = Vec::new();
     let mut checked = 0usize;
     for plan in plans {
@@ -429,14 +441,19 @@ pub fn credential_bound_row(
                 Ok(()) => facts.push((field, GRANT_BOUND)),
                 Err(refusal) => {
                     facts.push((field, CheckCode::CredentialBindingMismatch.as_str()));
+                    refused_scope.get_or_insert(plan);
+                    let of = if spans {
+                        format!(" of `{}`", plan.name)
+                    } else {
+                        String::new()
+                    };
                     refused.push(format!(
-                        "`{field}` of destination `{}` (Secret `{}`: {})",
-                        plan.name,
+                        "{field}{of} (Secret `{}`: {})",
                         grant.secret_name,
                         if refusal.absent {
                             "no binding"
                         } else {
-                            "bound to another object or endpoint"
+                            "foreign binding"
                         }
                     ));
                 }
@@ -446,9 +463,8 @@ pub fn credential_bound_row(
     if checked == 0 {
         return None;
     }
-    let first = plans.first()?;
     let row = if refused.is_empty() {
-        ready(
+        let row = ready(
             CheckId::DestinationCredentialBound,
             CheckCode::CredentialBound,
             now,
@@ -456,7 +472,17 @@ pub fn credential_bound_row(
         .with_message(&format!(
             "every Secret-backed grant this check covers carries the binding its destination \
              expects ({checked} compared in the check pod; nothing was dialled to learn it)"
-        ))
+        ));
+        // ONE DESTINATION, ONE SCOPE; a row about two names neither and takes
+        // the check Job's, as every row without a better referent does.
+        match plans
+            .iter()
+            .filter(|p| !p.grant_bindings.is_empty())
+            .collect::<Vec<_>>()[..]
+        {
+            [only] => row.with_scope(scope(only)),
+            _ => row,
+        }
     } else {
         catalogue::outcome(
             CheckId::DestinationCredentialBound,
@@ -465,24 +491,14 @@ pub fn credential_bound_row(
             now,
         )
         .with_message(&format!(
-            "{} {}: every run that presents {} is refused CredentialBindingMismatch before it \
-             builds a store, and this check compared the binding in the pod and dialled nothing \
-             with it",
-            refused.join(" and "),
-            if refused.len() == 1 {
-                "is not bound to its destination"
-            } else {
-                "are not bound to their destination"
-            },
-            if refused.len() == 1 {
-                "that grant"
-            } else {
-                "one of these grants"
-            },
+            "{}: a run that presents {} is refused before it builds a store; nothing was dialled",
+            refused.join("; "),
+            if refused.len() == 1 { "it" } else { "one" },
         ))
         .with_remedy(remedy_for(CheckCode::CredentialBindingMismatch))
+        .with_scope(scope(refused_scope?))
     };
-    let mut row = row.with_scope(scope(first));
+    let mut row = row;
     for (field, verdict) in facts {
         row = row.with_fact(field, verdict);
     }

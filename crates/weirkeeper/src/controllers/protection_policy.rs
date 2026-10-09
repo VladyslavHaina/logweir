@@ -2046,8 +2046,8 @@ fn delivery_condition(alerts: &[AlertEntry]) -> (&'static str, &'static str, Str
             format!(
                 "{refused} alert transition(s) were not delivered to a sink whose credential \
                  Secret is not bound to this policy (no `logweir-binding`, or one written for \
-                 another policy, sink or endpoint); nothing was posted to that sink. Set each \
-                 Secret's `logweir-binding` to its entry in status.credentialBindings"
+                 another policy, sink or endpoint); nothing was posted to that sink. {}",
+                logweir_core::credential_binding::BINDING_REMEDY
             ),
         );
     }

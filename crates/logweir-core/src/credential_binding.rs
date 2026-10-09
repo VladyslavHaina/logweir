@@ -70,7 +70,7 @@ use crate::destination::DestinationRole;
 use crate::engine::StorageUrl;
 
 pub use crate::connection::{
-    check_credential_binding, CredentialBindingRefusal, CREDENTIAL_BINDING_KEY,
+    check_credential_binding, CredentialBindingRefusal, BINDING_REMEDY, CREDENTIAL_BINDING_KEY,
     CREDENTIAL_BINDING_MISMATCH,
 };
 
@@ -737,6 +737,18 @@ mod tests {
         let refusal = check_grant_binding(DestinationRole::ArchiveWrite, &map(vec![(p, "v1:a")]))
             .unwrap_err();
         assert_eq!(refusal.binding_env, p);
+        // A BLANK expectation is the same lost half (review LOW-4), even
+        // beside a Secret that carries a blank binding too.
+        for blank in ["", "  "] {
+            assert!(
+                check_grant_binding(
+                    DestinationRole::ArchiveWrite,
+                    &map(vec![(e, blank), (p, "v1:a")])
+                )
+                .is_err(),
+                "a blank expectation {blank:?} was accepted"
+            );
+        }
         assert!(check_pair(p, e, &map(vec![(p, "v1:a")])).is_ok());
         // Absent and foreign: refused, and told apart.
         assert!(
@@ -778,5 +790,54 @@ mod tests {
         for (credential, _, _) in GUARDED_CREDENTIALS {
             assert!(!names.contains(&credential));
         }
+    }
+
+    /// FX-20c review LOW-2: EVERY binding refusal text tells the operator to
+    /// give the refused object its OWN Secret, and none tells them to write
+    /// the refused object's binding into the Secret it named — which, when
+    /// that Secret is another object's, hands this one the credential.
+    ///
+    /// KILLS: the first landing's "add the key with the value in … status.
+    /// credentialBinding" and "Set the key to the route's entry …" texts.
+    #[test]
+    fn no_binding_refusal_tells_anyone_to_bind_the_refused_secret_here() {
+        let vars = [
+            ARCHIVE_CREDENTIAL_BINDING_ENV,
+            EVIDENCE_CREDENTIAL_BINDING_ENV,
+            EVIDENCE_READ_CREDENTIAL_BINDING_ENV,
+            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV,
+            NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV,
+            NOTIFY_SLACK_CREDENTIAL_BINDING_ENV,
+            crate::connection::SOURCE_CREDENTIAL_BINDING_ENV,
+            crate::connection::TARGET_CREDENTIAL_BINDING_ENV,
+            grant_binding_env(DestinationRole::ArchiveWrite).0,
+        ];
+        for var in vars {
+            for absent in [true, false] {
+                let text = CredentialBindingRefusal {
+                    binding_env: var,
+                    absent,
+                }
+                .to_string();
+                assert!(text.starts_with(CREDENTIAL_BINDING_MISMATCH), "{text}");
+                for forbidden in ["add the key", "Set the key", "set the Secret's"] {
+                    assert!(!text.contains(forbidden), "{var}: `{forbidden}` in {text}");
+                }
+                // The Kafka connection's FOREIGN text is PROD-01.3's, which
+                // already sends the operator to enter the credential again.
+                let kafka_foreign = !absent
+                    && !var.starts_with("LOGWEIR_ARCHIVE_")
+                    && !var.starts_with("LOGWEIR_EVIDENCE_")
+                    && !var.starts_with("NOTIFY_");
+                if !kafka_foreign {
+                    assert!(
+                        text.contains(BINDING_REMEDY),
+                        "{var} absent={absent}: {text}"
+                    );
+                }
+            }
+        }
+        assert!(BINDING_REMEDY.contains("scripts/bind-credential.py"));
+        assert!(BINDING_REMEDY.contains("never bind it to this one"));
     }
 }

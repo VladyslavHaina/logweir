@@ -271,11 +271,10 @@ fn fx20c_a_thief_with_only_a_foreign_archive_write_secret_is_not_ready() {
     assert_eq!(bound.gating, Gating::Blocking);
     assert_eq!(bound.code, CheckCode::CredentialBindingMismatch);
     assert!(
-        bound.message.starts_with(
-            "`archiveWrite` of destination `fx20-thief` (Secret \
-             `lwd-primary-archive-write`: bound to another object or endpoint)"
-        ),
-        "the refusal names the grant, its destination and its Secret first: {}",
+        bound
+            .message
+            .starts_with("archiveWrite (Secret `lwd-primary-archive-write`: foreign binding)"),
+        "the refusal names the grant and its Secret first: {}",
         bound.message
     );
     assert_eq!(
@@ -359,21 +358,21 @@ fn fx20c_one_foreign_grant_among_bound_ones_is_the_one_named() {
     let bound = bound_row(&result);
     assert_eq!(bound.state, CheckState::NotReady, "{bound:?}");
     assert!(
-        bound.message.contains("`archiveWrite`"),
+        bound.message.starts_with("archiveWrite (Secret"),
         "{}",
         bound.message
     );
     assert!(
-        !bound.message.contains("`archiveRead`"),
+        !bound.message.contains("archiveRead ("),
         "{}",
         bound.message
     );
     assert!(
-        !bound.message.contains("`evidenceRead`"),
+        !bound.message.contains("evidenceRead ("),
         "{}",
         bound.message
     );
-    assert!(bound.message.contains(" is not bound to its destination"));
+    assert!(bound.message.contains("a run that presents it is refused"));
     let facts: BTreeMap<&str, &str> = bound
         .facts
         .iter()
@@ -424,16 +423,10 @@ fn fx20c_absent_foreign_and_unexpected_are_all_refused_and_all_named() {
     );
     let bound = bound_row(&result);
     assert!(
-        bound
-            .message
-            .contains("`archiveWrite` of destination `primary` (Secret `aw`: no binding)")
-            && bound.message.contains(
-                "`evidenceWrite` of destination `primary` (Secret `ew`: bound to another \
-                 object or endpoint)"
-            )
-            && bound
-                .message
-                .contains(" are not bound to their destination"),
+        bound.message.starts_with(
+            "archiveWrite (Secret `aw`: no binding); evidenceWrite (Secret `ew`: foreign \
+             binding): a run that presents one is refused"
+        ),
         "{}",
         bound.message
     );
@@ -519,7 +512,7 @@ fn fx20c_a_backup_readiness_check_names_a_foreign_evidence_write_secret() {
     assert_eq!(bound.state, CheckState::NotReady, "{bound:?}");
     assert!(bound
         .message
-        .starts_with("`evidenceWrite` of destination `primary`"));
+        .starts_with("evidenceWrite (Secret `lwd-other-evidence-write`: foreign binding)"));
     // The marker row is execution-only here: before FX-20c nothing else
     // would have said so.
     assert_eq!(
@@ -592,8 +585,7 @@ fn fx20c_a_restore_preflight_names_each_destinations_grant() {
     assert_eq!(bound.state, CheckState::NotReady, "{bound:?}");
     assert!(
         bound.message.starts_with(
-            "`evidenceWrite` of destination `evidence` (Secret \
-                 `lwd-evidence-evidence-write`"
+            "evidenceWrite of `evidence` (Secret `lwd-evidence-evidence-write`: foreign binding)"
         ),
         "{}",
         bound.message
@@ -601,6 +593,12 @@ fn fx20c_a_restore_preflight_names_each_destinations_grant() {
     assert_eq!(
         bound.facts.get("archiveRead").map(String::as_str),
         Some("bound")
+    );
+    // THE SCOPE IS THE REFUSED GRANT'S DESTINATION (review LOW-3), not the
+    // source the row happens to list first.
+    assert_eq!(
+        bound.scope.as_ref().map(|s| s.name.as_str()),
+        Some("evidence")
     );
     // The plan bytes did not parse (no plan is mounted here); the binding row
     // was reported anyway.
@@ -616,7 +614,11 @@ fn fx20c_a_restore_preflight_names_each_destinations_grant() {
         ],
         THIEF_BINDING,
     );
-    assert_eq!(bound_row(&run(restore(), &wiring)).state, CheckState::Ready);
+    let ready_row = bound_row(&run(restore(), &wiring));
+    assert_eq!(ready_row.state, CheckState::Ready);
+    // A READY row about TWO destinations names neither (review LOW-3): the
+    // controller gives it the check Job's scope.
+    assert!(ready_row.scope.is_none(), "{:?}", ready_row.scope);
 }
 
 /// The row is in the runner's catalogue as BLOCKING with the default expiry,
@@ -679,4 +681,164 @@ fn fx20c_the_console_fixture_is_the_runners_row() {
     assert_eq!(entry["state"], "notReady");
     assert_eq!(entry["gating"], "blocking");
     assert_eq!(entry["scope"]["name"], "fx20-thief");
+}
+
+/// The controller's fold (`weirkeeper::controllers::preflight::entry_of`):
+/// `<message> [<k>=<v>; …]`, redacted and capped at 512 characters again.
+fn folded(row: &CheckOutcome) -> String {
+    logweir_core::check_contract::redact(&format!(
+        "{} [{}]",
+        row.message,
+        row.facts
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))
+}
+
+/// **Review LOW-1: the per-grant answer survives the 512-character cap.**
+/// F6b's `fx20-thief-read` (all three of `primary`'s Secrets): the first
+/// landing's message was 598 characters before the facts and lost every
+/// `<grant>=…` fact and the end of its sentence. The compact form keeps every
+/// refused grant AND every fact. A four-grant destination with long Secret
+/// names (a 40-character name is redacted by the long-run rule) still names
+/// each refused grant at the head of the message.
+///
+/// KILLS: a message that repeats the destination per grant and carries the
+/// long explanatory tail (the first landing's; the three-grant fold exceeds
+/// 512 and the facts are cut).
+#[test]
+fn fx20c_the_per_grant_answer_survives_the_message_cap() {
+    let thief_read = destination(
+        "fx20-thief-read",
+        &[
+            (DestinationRole::ArchiveWrite, "lwd-primary-archive-write"),
+            (DestinationRole::ArchiveRead, "lwd-primary-archive-read"),
+            (DestinationRole::EvidenceRead, "lwd-primary-evidence-read"),
+        ],
+    );
+    let wiring = Fake::with(
+        &[
+            (DestinationRole::ArchiveWrite, Some(VICTIM_BINDING)),
+            (DestinationRole::ArchiveRead, Some(VICTIM_BINDING)),
+            (DestinationRole::EvidenceRead, Some(VICTIM_BINDING)),
+        ],
+        THIEF_BINDING,
+    );
+    let result = run(
+        access(thief_read, vec![DestinationRole::ArchiveWrite]),
+        &wiring,
+    );
+    let text = folded(&bound_row(&result));
+    assert!(text.chars().count() <= 512, "{text}");
+    for (field, secret) in [
+        ("archiveWrite", "lwd-primary-archive-write"),
+        ("archiveRead", "lwd-primary-archive-read"),
+        ("evidenceRead", "lwd-primary-evidence-read"),
+    ] {
+        assert!(
+            text.contains(&format!("{field} (Secret `{secret}`: foreign binding)")),
+            "{field} is not named whole: {text}"
+        );
+        assert!(
+            text.contains(&format!("{field}=CredentialBindingMismatch")),
+            "the {field} fact was cut: {text}"
+        );
+    }
+
+    // Four grants, console-length names: each refused grant is still named,
+    // at the head, inside the cap.
+    let long = destination(
+        "payments-prod-archive",
+        &[
+            (
+                DestinationRole::ArchiveWrite,
+                "lwd-payments-prod-archive-archive-write",
+            ),
+            (
+                DestinationRole::ArchiveRead,
+                "lwd-payments-prod-archive-archive-read",
+            ),
+            (
+                DestinationRole::EvidenceWrite,
+                "lwd-payments-prod-archive-evidence-write",
+            ),
+            (
+                DestinationRole::EvidenceRead,
+                "lwd-payments-prod-archive-evidence-read",
+            ),
+        ],
+    );
+    let wiring = Fake::with(
+        &[
+            (DestinationRole::ArchiveWrite, None),
+            (DestinationRole::ArchiveRead, Some(VICTIM_BINDING)),
+            (DestinationRole::EvidenceWrite, None),
+            (DestinationRole::EvidenceRead, Some(VICTIM_BINDING)),
+        ],
+        THIEF_BINDING,
+    );
+    let row = bound_row(&run(
+        access(long, vec![DestinationRole::ArchiveWrite]),
+        &wiring,
+    ));
+    let text = folded(&row);
+    assert!(text.chars().count() <= 512, "{text}");
+    for (field, verdict) in [
+        ("archiveWrite", "no binding"),
+        ("archiveRead", "foreign binding"),
+        ("evidenceWrite", "no binding"),
+        ("evidenceRead", "foreign binding"),
+    ] {
+        let at = text
+            .find(&format!("{field} (Secret "))
+            .unwrap_or_else(|| panic!("{field} is not named: {text}"));
+        assert!(
+            text[at..]
+                .split(')')
+                .next()
+                .is_some_and(|e| e.contains(verdict)),
+            "{field}'s verdict is not beside it: {text}"
+        );
+    }
+}
+
+/// **Review LOW-2: the remedy never tells an operator to bind a refused
+/// Secret to this destination.** On the thief's row the Secret is the
+/// VICTIM's; "set the Secret's `logweir-binding` to this destination's
+/// status.credentialBinding" hands the thief that credential. The remedy says:
+/// this destination's own Secret (the console, or `scripts/bind-credential.py`,
+/// which refuses a Secret another object names), and a Secret two objects
+/// name is an incident. Every refusal text the runner and the controller
+/// write shares it (`BINDING_REMEDY`; core and controller rows).
+///
+/// KILLS: the first landing's remedy (the `status.credentialBinding`
+/// instruction).
+#[test]
+fn fx20c_the_remedy_never_binds_a_refused_secret_to_this_destination() {
+    let thief = destination(
+        "fx20-thief",
+        &[(DestinationRole::ArchiveWrite, VICTIM_SECRET)],
+    );
+    let wiring = Fake::with(
+        &[(DestinationRole::ArchiveWrite, Some(VICTIM_BINDING))],
+        THIEF_BINDING,
+    );
+    let row = bound_row(&run(
+        access(thief, vec![DestinationRole::ArchiveWrite]),
+        &wiring,
+    ));
+    for remedy in [
+        row.remedy.as_str(),
+        kinds::remedy_for(CheckCode::CredentialBindingMismatch),
+    ] {
+        assert!(remedy.contains("its own Secret"), "{remedy}");
+        assert!(remedy.contains("scripts/bind-credential.py"), "{remedy}");
+        assert!(remedy.contains("never bind it to this one"), "{remedy}");
+        assert!(remedy.contains("incident to investigate"), "{remedy}");
+        for forbidden in ["status.credentialBinding", "set the Secret", "add the key"] {
+            assert!(!remedy.contains(forbidden), "`{forbidden}` in: {remedy}");
+        }
+    }
 }

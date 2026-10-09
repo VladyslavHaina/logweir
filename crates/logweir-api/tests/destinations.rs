@@ -1635,9 +1635,7 @@ async fn fx20c_a_destination_test_refused_on_a_binding_is_answered_by_grant() {
     assert_eq!(bound["code"], "CredentialBindingMismatch");
     let message = bound["message"].as_str().expect("message");
     assert!(
-        message.starts_with(
-            "`archiveWrite` of destination `fx20-thief` (Secret `lwd-primary-archive-write`"
-        ),
+        message.starts_with("archiveWrite (Secret `lwd-primary-archive-write`: foreign binding)"),
         "{message}"
     );
 

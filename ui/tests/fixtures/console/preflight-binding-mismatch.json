@@ -56,9 +56,9 @@
         "expiresAt": "2026-10-09T13:16:30Z",
         "gating": "blocking",
         "id": "destination.credentialBound",
-        "message": "`archiveWrite` of destination `fx20-thief` (Secret `lwd-primary-archive-write`: bound to another object or endpoint) is not bound to its destination: every run that presents that grant is refused CredentialBindingMismatch before it builds a store, and this check compared the binding in the pod and dialled nothing with it [archiveWrite=CredentialBindingMismatch]",
+        "message": "archiveWrite (Secret `lwd-primary-archive-write`: foreign binding): a run that presents it is refused before it builds a store; nothing was dialled [archiveWrite=CredentialBindingMismatch]",
         "observedAt": "2026-10-09T13:01:30Z",
-        "remedy": "The destination's credential Secret carries no `logweir-binding`, or one written for another object or endpoint, so the check refused to present it anywhere. Enter the credential again through the console, or set the Secret's `logweir-binding` key to the destination's status.credentialBinding (docs/kubernetes.md §20.10).",
+        "remedy": "A Secret this destination names carries no `logweir-binding`, or one written for another object or endpoint, so the check presented it nowhere. Give this destination its own Secret: enter the credential through the console, or bind a Secret only it names with scripts/bind-credential.py (which refuses a Secret another object names). A Secret two objects name is an incident to investigate; never bind it to this one (docs/kubernetes.md §20.10).",
         "scope": {
           "kind": "BackupDestination",
           "name": "fx20-thief",
