@@ -157,6 +157,29 @@ pub struct VerifyReport {
     pub unsampled_topics: Option<Vec<String>>,
     /// The document's own `format_version`, for [`sampled_pass_lines`].
     pub format_version: String,
+    /// `source.selection` (scorecard 1.7.0, PROD-11.1), carried as read:
+    /// `None` is a restore of every partition from the archive's floor.
+    pub selection: Option<logweir_core::scorecard::SelectionLabel>,
+    /// What the document proves about records before a stated start (review
+    /// N1), from its `integrity.result` and `integrity.verification`.
+    pub before_the_start: logweir_core::scorecard::BeforeTheStart,
+}
+
+/// The replay-selection line both readers print for a restore from a stated
+/// start (PROD-11.1): the writer's sentence (`SelectionLabel::sentence`),
+/// ending in what THIS document proves about the records before the start
+/// (`BeforeTheStart::of`, review N1) — "restored or expected" only over a
+/// complete verification that passed. Nothing for a document without
+/// `source.selection`: it restored every partition from the archive's floor.
+/// `docs/verify_scorecard.py::_selection_lines` prints the same line, and
+/// `scripts/check-verifier-parity.sh` compares every line starting
+/// `replay selection:` between the two readers.
+#[must_use]
+pub fn selection_lines(
+    selection: Option<&logweir_core::scorecard::SelectionLabel>,
+    before: logweir_core::scorecard::BeforeTheStart,
+) -> Vec<String> {
+    selection.map(|s| s.sentence(before)).into_iter().collect()
 }
 
 /// The line both readers print for a SAMPLED `pass` (FX-23 review M2): what
@@ -172,10 +195,41 @@ pub fn sampled_pass_lines(
     verification: Option<&logweir_core::scorecard::Verification>,
     format_version: &str,
 ) -> Vec<String> {
+    sampled_pass_lines_over(outcome, verification, format_version, None)
+}
+
+/// [`sampled_pass_lines`] for a document that may carry `source.selection`
+/// (PROD-11.1 review H1): over a narrowed window the guarantee is QUALIFIED
+/// by that window — the count bound, the per-partition presence and the
+/// engine-report check were judged over `[start, end]`, and no record before
+/// the start was expected — so the line a 1.7.0 reader prints never reads as
+/// a pass over the whole archive. It says the sampled check does NOT show
+/// that no record before the start was restored (review N1): the sample is
+/// drawn from the window, and a segment straddling the start counts all of
+/// its records into the bound.
+/// `docs/verify_scorecard.py::_sampled_pass_lines` prints the same line.
+#[must_use]
+pub fn sampled_pass_lines_over(
+    outcome: Outcome,
+    verification: Option<&logweir_core::scorecard::Verification>,
+    format_version: &str,
+    selection: Option<&logweir_core::scorecard::SelectionLabel>,
+) -> Vec<String> {
     let sampled =
         verification.is_none_or(|v| v.coverage == logweir_core::scorecard::COVERAGE_SAMPLED);
     if outcome != Outcome::Pass || !sampled {
         return Vec::new();
+    }
+    if let Some(window) = selection {
+        return vec![format!(
+            "sample coverage: a sampled pass over a replay selection from epoch-ms {} to \
+             epoch-ms {}: every mapped partition was held to its own count bound over that \
+             window, max_partitions reached every topic before a second partition of any, and a \
+             readable engine report lacking a partition with records in that window was \
+             refused; no record before the start was expected, and a sampled check does not \
+             prove that none was restored",
+            window.window_start_ms, window.window_end_ms
+        )];
     }
     if logweir_core::scorecard::proves_fx23_sampled_checks(format_version) {
         vec![
@@ -278,7 +332,9 @@ pub fn verification_lines(v: Option<&logweir_core::scorecard::Verification>) -> 
 }
 
 /// The configuration-parity line both readers print for a scorecard (FX-4),
-/// or `None` when every topic was assessed. `docs/verify_scorecard.py` prints
+/// or `None` when every topic was assessed. It names every `not_assessed`
+/// entry as written, FX-21's `replication_factor (notRecorded)` and
+/// `partition_count (notRecorded)` included. `docs/verify_scorecard.py` prints
 /// the same sentence from the same three cases, and
 /// `scripts/check-verifier-parity.sh` compares the two.
 #[must_use]
@@ -793,6 +849,11 @@ pub fn verify_scorecard(
         time_basis: sc.source.time_basis.clone(),
         verification: sc.integrity.verification.clone().map(Box::new),
         unsampled_topics: sc.sample.unsampled_topics.clone(),
+        selection: sc.source.selection.clone(),
+        before_the_start: logweir_core::scorecard::BeforeTheStart::of(
+            &sc.integrity.result,
+            sc.integrity.verification.as_ref(),
+        ),
         format_version: sc.format_version.clone(),
     }))
 }
@@ -846,10 +907,20 @@ fn print_report(r: &VerifyReport) {
     }
     // FX-23: what a sampled pass proves at this document's version (review
     // M2), and the topics the cap left out.
-    for line in sampled_pass_lines(r.outcome, r.verification.as_deref(), &r.format_version)
-        .into_iter()
-        .chain(unsampled_lines(r.unsampled_topics.as_deref()))
+    for line in sampled_pass_lines_over(
+        r.outcome,
+        r.verification.as_deref(),
+        &r.format_version,
+        r.selection.as_ref(),
+    )
+    .into_iter()
+    .chain(unsampled_lines(r.unsampled_topics.as_deref()))
     {
+        println!("coverage:  {line}");
+    }
+    // PROD-11.1: nor a restore of the whole archive when it restored a
+    // selection.
+    for line in selection_lines(r.selection.as_ref(), r.before_the_start) {
         println!("coverage:  {line}");
     }
 }

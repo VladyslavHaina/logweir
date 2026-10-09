@@ -3,7 +3,8 @@
 //! PROD-00.3f moved OSO's release from `kafka-backup` 0.21.0 to 0.23.3
 //! (`docs/to-do/decisions/PROD-00-engine-route.md` section 12). PROD-00.2
 //! (OD-3) made what ships LOGWEIR'S BUILD of that release's vendored source,
-//! `0.23.3+logweir.1`, and kept OSO's own binary as the one-release rollback.
+//! `0.23.3+logweir.1` (FX-21's patch 0002 made it `0.23.3+logweir.2`), and kept
+//! OSO's own binary as the one-release rollback.
 //! So there are two values, and each place names the one it should:
 //!
 //! | place | names | what goes wrong when it lags |
@@ -287,10 +288,17 @@ fn check_documented_identity(src: &str, pin: &str, digest: &str) -> Result<(), S
 /// line that is not the build env's; this list is what refuses the one change
 /// the script cannot see, a recorded line edited in place to describe new
 /// inputs under an old version. A new build appends a line here AND there.
-const SHIPPED_BUILDS: &[(&str, &str)] = &[(
-    "0.23.3+logweir.1",
-    "sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3",
-)];
+const SHIPPED_BUILDS: &[(&str, &str)] = &[
+    (
+        "0.23.3+logweir.1",
+        "sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3",
+    ),
+    // FX-21: patch 0002, the manifest records every topic's replication factor.
+    (
+        "0.23.3+logweir.2",
+        "sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8",
+    ),
+];
 
 fn check_ledger_keeps_shipped(ledger: &str, shipped: &[(&str, &str)]) -> Result<(), String> {
     let lines: Vec<&str> = ledger
@@ -340,7 +348,7 @@ fn third_party_names() -> Vec<String> {
 fn the_pin_is_logweirs_build_of_the_release_prod_00_3f_evaluated() {
     // Moving either value is a decision with a record (sections 12 and 13 of
     // the engine route); these lines make the next move touch this file too.
-    assert_eq!(ENGINE_PIN, "0.23.3+logweir.1");
+    assert_eq!(ENGINE_PIN, "0.23.3+logweir.2");
     assert_eq!(ENGINE_UPSTREAM_RELEASE, "0.23.3");
     assert_eq!(
         digest_file(),
@@ -466,7 +474,8 @@ fn every_check_refuses_a_copy_that_lags() {
         (
             env.replace(
                 &format!("ENGINE_VERSION={ENGINE_PIN}"),
-                "ENGINE_VERSION=0.23.3+logweir.2",
+                // The build before the pin (FX-21 moved it to `+logweir.2`).
+                "ENGINE_VERSION=0.23.3+logweir.1",
             ),
             "another build",
         ),

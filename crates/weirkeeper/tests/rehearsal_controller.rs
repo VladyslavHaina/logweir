@@ -105,10 +105,36 @@ async fn with_time_basis<T, F: std::future::Future<Output = T>>(
     out
 }
 
+thread_local! {
+    /// PROD-08.1a: the `bounds.coverage` (and `completeMaxRecords`) that
+    /// [`spec_value`] states. `None` for every row but the PROD-08.1a ones, so
+    /// the other rows' digests are what they were.
+    static COVERAGE: std::cell::Cell<Option<(&'static str, Option<i64>)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` with [`spec_value`] stating `bounds.coverage`, and restores the
+/// default after.
+async fn with_coverage<T, F: std::future::Future<Output = T>>(
+    coverage: Option<(&'static str, Option<i64>)>,
+    f: impl FnOnce() -> F,
+) -> T {
+    let before = COVERAGE.with(|c| c.replace(coverage));
+    let out = f().await;
+    COVERAGE.with(|c| c.set(before));
+    out
+}
+
 fn spec_value() -> Value {
     let mut spec = spec_value_base();
     if TIME_BASIS.with(std::cell::Cell::get) {
         spec["point"]["timeBasis"] = json!("producerTime");
+    }
+    if let Some((coverage, bound)) = COVERAGE.with(std::cell::Cell::get) {
+        spec["bounds"]["coverage"] = json!(coverage);
+        if let Some(n) = bound {
+            spec["bounds"]["completeMaxRecords"] = json!(n);
+        }
     }
     spec
 }
@@ -5033,4 +5059,329 @@ fn a_redacted_catalog_binding_never_qualifies_a_rehearsal_point() {
     // CONTROL: the same catalog-only row whole is selectable (and is then
     // refused by `select_point` only for its missing topic list, as before).
     assert!(merged(None, matching_catalog_row(1_758_240_000_000)).selectable);
+}
+
+// ===========================================================================
+// PROD-08.1a: a rehearsal can ask for complete coverage, and the standing
+// authorization must have signed it
+// ===========================================================================
+
+/// The standing envelope at format 1.1.0 over [`scope_value`] plus `extra`
+/// scope fields — what `logweir drill approve --standing` mints for a scope
+/// that states `coverage`.
+fn envelope_1_1(extra: Value) -> String {
+    let mut scope = scope_value();
+    for (k, v) in extra.as_object().expect("an object").clone() {
+        scope[k] = v;
+    }
+    let mut doc: Value =
+        serde_json::from_str(&envelope_with(SCHEDULE_UID, scope, "2026-11-01T00:00:00Z"))
+            .expect("the envelope is JSON");
+    doc["formatVersion"] = json!("1.1.0");
+    serde_json::to_string_pretty(&doc).expect("serialises")
+}
+
+/// One reconcile of the fixture schedule over `approval`; the verdict and the
+/// posted child, if any.
+async fn fire_with(approval: Value) -> (rs::Verdict, Option<Value>, BodyRecorder) {
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes(
+        approval,
+        trust_policy_value("Active", None),
+        cluster_value(true, Some(TARGET_CLUSTER_ID)),
+        backup_list(vec![backup_value(
+            "logweir-backup-nightly-20260919-020000",
+            "2026-09-19T02:00:00Z",
+            json!(["orders", "payments"]),
+            true,
+        )]),
+        restore_list(vec![]),
+    ));
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    let child = bodies
+        .lock()
+        .expect("the body recorder is not poisoned")
+        .iter()
+        .find(|seen| is_post_to(&seen.method, &seen.uri, RESTORES_PATH))
+        .map(|seen| serde_json::from_str(&seen.body).expect("the child parses"));
+    (outcome.verdict, child, bodies)
+}
+
+/// **The orchestrator's row 3: the coverage is inside `templateDigest`.**
+/// `rehearsal::template_bytes` covers `bounds.coverage` and
+/// `bounds.completeMaxRecords`: a schedule stating either has a different
+/// digest; a schedule stating neither serialises neither, so every existing
+/// digest is unchanged; and flipping sampled -> complete after an
+/// authorization was signed for the sampled schedule is refused before any
+/// `Restore` exists (`AuthorizationInvalid`, naming the digest the complete
+/// spec hashes to).
+///
+/// KILLS: `template_bytes` dropping either field (the digests agree and the
+/// complete slot fires under the sampled authorization).
+#[tokio::test]
+async fn the_coverage_is_inside_the_standing_authorizations_template_digest() {
+    let base_bytes = rehearsal::template_bytes(&schedule().spec).expect("the bytes");
+    let text = String::from_utf8_lossy(&base_bytes).to_string();
+    assert!(
+        !text.contains("coverage") && !text.contains("completeMaxRecords"),
+        "a schedule that states no coverage serialises none, so its digest is unchanged: {text}"
+    );
+    let base = template_digest();
+    let complete = with_coverage(Some(("complete", None)), || async { template_digest() }).await;
+    let bounded = with_coverage(Some(("complete", Some(1000))), || async {
+        template_digest()
+    })
+    .await;
+    let explicit_sampled =
+        with_coverage(Some(("sampled", None)), || async { template_digest() }).await;
+    assert_ne!(base, complete, "coverage is inside the digest");
+    assert_ne!(complete, bounded, "the record bound is inside the digest");
+    assert_ne!(
+        base, explicit_sampled,
+        "a stated field is a different template"
+    );
+
+    // The authorization was signed for the SAMPLED schedule; the schedule now
+    // states complete.
+    let approval = approval_value(&envelope());
+    let (verdict, child, bodies) =
+        with_coverage(Some(("complete", None)), || fire_with(approval)).await;
+    let rs::Verdict::Skipped(skip) = &verdict else {
+        panic!("an authorization over the sampled template fired: {verdict:?}")
+    };
+    assert_eq!(skip.reason, rehearsal::SkipReason::AuthorizationInvalid);
+    assert!(
+        skip.detail.contains("sealed spec hashes to") && skip.detail.contains(&complete),
+        "{skip}"
+    );
+    assert!(child.is_none(), "no Restore");
+    assert_eq!(last_skip(&bodies).as_deref(), Some("AuthorizationInvalid"));
+}
+
+/// **A complete schedule fires only under a scope that SIGNED complete
+/// coverage** — the controller's half of the orchestrator's rows 1 and 2,
+/// with the template digest right both times so only the scope decides.
+///
+/// Under the 1.0.0 scope (no `coverage`) the slot is refused
+/// `AuthorizationInvalid`, naming the coverage, and creates nothing. Under the
+/// 1.1.0 scope stating `coverage: complete` it fires, and the frozen plan
+/// asks for complete coverage with no `max_partitions` (the runner refuses the
+/// pair), carries the schedule's record bound, and the child `Restore`
+/// declares the same coverage and bound — which the `Restore` controller's own
+/// agreement check accepts.
+///
+/// KILLS: `render_plan` ignoring `bounds.coverage` (the plan is sampled, and
+/// the scope refuses it); `render_plan` keeping `max_partitions` beside
+/// complete (refused by the scope); `child_restore` not declaring it (the
+/// `Restore` controller refuses the child); `expected_scope`/`plan_within_scope`
+/// admitting complete under a 1.0.0 scope (the first half fires).
+#[tokio::test]
+async fn a_complete_schedule_fires_only_under_a_scope_that_signed_complete_coverage() {
+    let coverage = Some(("complete", Some(5000_i64)));
+    // 1. The template digest matches, the scope names no coverage.
+    let (verdict, child, _) = with_coverage(coverage, || async {
+        fire_with(approval_value(&envelope())).await
+    })
+    .await;
+    let rs::Verdict::Skipped(skip) = &verdict else {
+        panic!("a complete slot fired under a scope that did not sign it: {verdict:?}")
+    };
+    assert_eq!(skip.reason, rehearsal::SkipReason::AuthorizationInvalid);
+    assert!(
+        skip.detail.contains("`sample.coverage: complete`")
+            && skip.detail.contains("authorises `sampled` coverage"),
+        "{skip}"
+    );
+    assert!(child.is_none());
+
+    // 2. The same schedule under a scope that signed complete coverage.
+    let (verdict, child, _) = with_coverage(coverage, || async {
+        let envelope = envelope_1_1(
+            json!({"coverage": "complete", "maxPartitions": 0, "completeMaxRecords": 5000}),
+        );
+        fire_with(approval_value(&envelope)).await
+    })
+    .await;
+    assert!(matches!(verdict, rs::Verdict::Fire(_)), "{verdict:?}");
+    let child = child.expect("the child Restore was posted");
+    let plan_bytes = child
+        .pointer("/spec/planBytes")
+        .and_then(Value::as_str)
+        .expect("planBytes");
+    let plan: logweir_core::spec::DrillSpec =
+        serde_yaml::from_str(plan_bytes).expect("the runner's grammar");
+    assert_eq!(plan.sample.coverage, logweir_core::spec::Coverage::Complete);
+    assert_eq!(plan.sample.max_partitions, None, "{plan_bytes}");
+    assert_eq!(plan.sample.complete_max_records, Some(5000));
+    assert_eq!(child["spec"]["coverage"], "complete", "{child}");
+    assert_eq!(child["spec"]["completeMaxRecords"], 5000, "{child}");
+    let typed: weirkeeper::crds::restore::Restore =
+        serde_json::from_value(child).expect("the child is a Restore");
+    weirkeeper::controllers::restore::coverage_agrees(&typed)
+        .expect("the Restore controller admits the declaration it was given");
+}
+
+/// **PROD-08.1a review M1: a scope that authorises complete coverage signs
+/// `maxPartitions: 0`.** The complete schedule above, under a 1.1.0 scope
+/// that signed complete coverage but a positive partition bound, fires no
+/// slot: the controller's own admission refuses the document, because a
+/// reader older than format 1.1.0 would read it as a sampled scope it could
+/// run sampled plans under. The control is the row above, where the same
+/// scope with `maxPartitions: 0` fires.
+///
+/// KILLS: the zero-bound rule removed from `admit_standing_authorization`.
+#[tokio::test]
+async fn a_complete_scope_with_a_positive_partition_bound_authorises_no_slot() {
+    let (verdict, child, _) = with_coverage(Some(("complete", Some(5000_i64))), || async {
+        let envelope = envelope_1_1(
+            json!({"coverage": "complete", "maxPartitions": 200, "completeMaxRecords": 5000}),
+        );
+        fire_with(approval_value(&envelope)).await
+    })
+    .await;
+    let rs::Verdict::Skipped(skip) = &verdict else {
+        panic!("a complete scope with a partition bound authorised a slot: {verdict:?}")
+    };
+    assert_eq!(skip.reason, rehearsal::SkipReason::AuthorizationInvalid);
+    assert!(
+        skip.detail.contains("states `maxPartitions: 200`")
+            && skip.detail.contains("signs `maxPartitions: 0`"),
+        "{skip}"
+    );
+    assert!(child.is_none());
+}
+
+/// **A scope that signed complete refuses a sampled schedule's plan** — a
+/// weaker check than the signer chose — and a 1.0.0 document carrying
+/// `coverage` is refused as malformed. Both before any `Restore`.
+///
+/// The complete scope signs `maxPartitions: 0` (review M1), so the sampled
+/// plan, whose bound a schedule's CRD keeps at 1 or more, is also past the
+/// signed bound; the coverage equality alone is pinned by `logweir-core`'s
+/// `a_sampled_plan_under_a_complete_scope_is_refused` (its zero-bound plan).
+///
+/// KILLS: the minor check removed from `admit_standing_authorization`.
+#[tokio::test]
+async fn a_scope_that_signed_complete_does_not_cover_a_sampled_rehearsal() {
+    let (verdict, child, _) = fire_with(approval_value(&envelope_1_1(
+        json!({"coverage": "complete", "maxPartitions": 0}),
+    )))
+    .await;
+    let rs::Verdict::Skipped(skip) = &verdict else {
+        panic!("a sampled slot fired under a complete scope: {verdict:?}")
+    };
+    assert_eq!(skip.reason, rehearsal::SkipReason::AuthorizationInvalid);
+    assert!(skip.detail.contains("`sample.coverage: sampled`"), "{skip}");
+    assert!(child.is_none());
+
+    // The coverage field in a document that declares 1.0.0.
+    let mut scope = scope_value();
+    scope["coverage"] = json!("complete");
+    scope["maxPartitions"] = json!(0);
+    let old = envelope_with(SCHEDULE_UID, scope, "2026-11-01T00:00:00Z");
+    let (verdict, child, _) = with_coverage(Some(("complete", None)), || async {
+        fire_with(approval_value(&old)).await
+    })
+    .await;
+    let rs::Verdict::Skipped(skip) = &verdict else {
+        panic!("a 1.0.0 document carrying coverage authorised a slot: {verdict:?}")
+    };
+    assert_eq!(skip.reason, rehearsal::SkipReason::AuthorizationInvalid);
+    assert!(
+        skip.detail.contains("defined from formatVersion 1.1.0"),
+        "{skip}"
+    );
+    assert!(child.is_none());
+}
+
+/// **An absent field renders the plan every existing schedule rendered.**
+/// The sampled slot's plan carries no `coverage` and no
+/// `complete_max_records` key, and still carries `max_partitions` — so its
+/// bytes, and so its `plan_hash`, are what they were; its child `Restore`
+/// declares nothing.
+///
+/// KILLS: `render_plan` serialising `coverage: sampled`; dropping
+/// `max_partitions` for a sampled plan; `child_restore` declaring
+/// `coverage: sampled`.
+#[tokio::test]
+async fn a_schedule_that_states_no_coverage_renders_the_plan_it_always_did() {
+    let (verdict, child, _) = fire_with(approval_value(&envelope())).await;
+    assert!(matches!(verdict, rs::Verdict::Fire(_)), "{verdict:?}");
+    let child = child.expect("posted");
+    let plan_bytes = child
+        .pointer("/spec/planBytes")
+        .and_then(Value::as_str)
+        .expect("planBytes");
+    assert!(
+        !plan_bytes.contains("coverage") && !plan_bytes.contains("complete_max_records"),
+        "{plan_bytes}"
+    );
+    assert!(plan_bytes.contains("max_partitions: 200"), "{plan_bytes}");
+    assert!(child["spec"].get("coverage").is_none(), "{child}");
+    assert!(child["spec"].get("completeMaxRecords").is_none(), "{child}");
+}
+
+/// **A slot whose complete verification did not cover is a FAILED rehearsal,
+/// never a pass** — even over a status a broken runner could produce, whose
+/// `outcome` reads `pass` at exit 0 with a `Valid` verdict: the badge rule's
+/// `CompleteNotCovered` decides, `lastSucceeded` is not written and
+/// `RehearsalHealthy` is not `True`. The same status with `covered: true`
+/// passes (the control).
+///
+/// KILLS: the badge's `covered` arm removed (`observe` then passes the run).
+#[test]
+fn a_slot_whose_complete_verification_did_not_cover_is_never_recorded_as_a_pass() {
+    let restore = |covered: bool| -> weirkeeper::crds::restore::Restore {
+        serde_json::from_value(json!({
+            "apiVersion": "logweir.dev/v1alpha1",
+            "kind": "Restore",
+            "metadata": {"name": "logweir-rehearsal-weekly-orders-20260913-030000",
+                         "namespace": NS, "uid": "r1", "resourceVersion": "3"},
+            "spec": {
+                "planBytes": "{}",
+                "sourceArchive": {"url": "s3://x"},
+                "backupSetRef": "b",
+                "pointInTime": "2026-09-13T02:00:00Z",
+                "target": {"clusterRef": {"name": TARGET}, "mode": "scratch",
+                           "topicNaming": {"prefix": "rehearsal-"}},
+                "deadlineSeconds": 3600,
+                "coverage": "complete"
+            },
+            "status": {
+                "phase": "Succeeded",
+                "exitCode": 0,
+                "outcome": "pass",
+                "integrity": {"level": "byte-fingerprint", "result": "pass",
+                              "coverage": "complete",
+                              "complete": {"covered": covered,
+                                           "archive": {"segments": 1, "segmentsVerified": 1,
+                                                       "segmentsFailedCount": 0,
+                                                       "segmentsUnverifiedCount": 0,
+                                                       "recordsDecoded": 1, "offsetHoles": 0},
+                                           "replay": {"expected": 1, "restored": 1,
+                                                      "matching": 1, "missing": 0,
+                                                      "unexpected": 0, "duplicates": 0,
+                                                      "outOfOrder": 0, "mismatched": 0},
+                                           "partitionCount": 1}},
+                "evidence": {"scorecardKey": "k", "sidecarKey": "s",
+                             "verification": {"result": "Valid",
+                                              "verifiedAt": FINISHED_AT,
+                                              "matchedKeyId": KEY_ID}},
+                "conditions": [{"type": "Complete", "status": "True", "reason": "Ok",
+                                "lastTransitionTime": FINISHED_AT}]
+            }
+        }))
+        .expect("the fixture is a Restore")
+    };
+    let failed = rs::observe(Some(&restore(false)), now());
+    assert!(failed.decided, "{failed:?}");
+    assert!(!failed.passed, "covered: false is never a pass: {failed:?}");
+    assert_eq!(
+        failed.reason.as_deref(),
+        Some(weirkeeper::conditions::REASON_COMPLETE_NOT_COVERED),
+        "{failed:?}"
+    );
+    let passed = rs::observe(Some(&restore(true)), now());
+    assert!(passed.passed, "the control: {passed:?}");
 }

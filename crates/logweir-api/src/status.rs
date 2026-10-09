@@ -668,7 +668,13 @@ pub struct OperationTrust {
     pub signing_time_read: Option<String>,
 }
 
-/// How thorough the record check was. `complete` does not exist in v1.
+/// HOW records were compared, from the scorecard's `integrity.level`: byte
+/// for byte (named `sampled` because that was the only coverage when this
+/// enum was frozen), consume-only, or not at all. HOW MUCH was compared is
+/// [`VerificationScopeView::coverage`] (PROD-08.1a), so a complete
+/// verification compared byte for byte reads `level: sampled` beside
+/// `coverage: complete` — the level's three values are unchanged and a client
+/// that knows only them never refuses a body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum VerificationScopeLevel {
@@ -697,6 +703,163 @@ pub struct VerificationScopeView {
     /// The canary size the plan asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub records_expected: Option<i64>,
+    /// **PROD-08.1a.** HOW MUCH the signed scorecard says it verified:
+    /// `sampled` or `complete` (its `integrity.verification.coverage`, format
+    /// 1.4.0). A CLAIM until the evidence verifies. ABSENT MEANS NOT RECORDED
+    /// — a scorecard before 1.4.0, a refused run, or one not read yet — and is
+    /// read as a sampled check, never as a complete one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::contract::RestoreCoverage>,
+    /// **PROD-08.1a.** A complete verification's exact counts, present exactly
+    /// when `coverage` is `complete` and the signed block was read whole.
+    /// `covered: false` names its reason and is never a pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complete: Option<CompleteVerificationView>,
+    /// **FX-23.** The restored topics a SAMPLED check's partition cap left
+    /// without a sampled partition — counted against their bound, not compared
+    /// record by record. Empty when none is recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub unsampled_topics: Vec<String>,
+}
+
+/// **PROD-08.1a.** A complete verification's result, copied from
+/// `Restore.status.integrity.complete` (itself copied from the signed
+/// scorecard) and never recomputed.
+#[derive(Clone, Debug, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteVerificationView {
+    /// `true` when every partition of every restored topic was compared.
+    /// `false` is NEVER a pass, on any surface.
+    pub covered: bool,
+    /// Why `covered` is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
+    /// The record bound the plan set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_records: Option<i64>,
+    /// Segments the manifest lists for the restored partitions.
+    pub segments: i64,
+    /// Segments verified: sha256, decode and manifest count all agreed.
+    pub segments_verified: i64,
+    /// Segments examined and found wrong.
+    pub segments_failed: i64,
+    /// Segments that could not be examined.
+    pub segments_unverified: i64,
+    /// Archived records decoded.
+    pub records_decoded: i64,
+    /// Compaction holes inside the decoded span — disclosed, never a fault.
+    pub offset_holes: i64,
+    /// The totals over every compared partition.
+    pub replay: ReplayCountsView,
+    /// How many partitions the signed block lists.
+    pub partition_count: i64,
+    /// One row per partition — absent when the signed block lists more than
+    /// the status holds (256); the rows stay in the scorecard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<Vec<PartitionVerificationView>>,
+}
+
+/// The exact counts of a replay comparison.
+#[derive(Clone, Debug, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayCountsView {
+    /// The expected output: archived records the window selects.
+    pub expected: i64,
+    /// Records the target holds.
+    pub restored: i64,
+    /// Expected records restored byte for byte, headers in order.
+    pub matching: i64,
+    /// Expected records with no restored copy.
+    pub missing: i64,
+    /// Restored records that are no expected record.
+    pub unexpected: i64,
+    /// Restored records repeating a source offset.
+    pub duplicates: i64,
+    /// Restored records below a source offset seen before them.
+    pub out_of_order: i64,
+    /// Expected records whose restored copy differs.
+    pub mismatched: i64,
+}
+
+/// One partition of a complete verification.
+#[derive(Clone, Debug, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionVerificationView {
+    /// The source topic.
+    pub topic: String,
+    /// The partition.
+    pub partition: i32,
+    /// The restored topic it was compared with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_topic: Option<String>,
+    /// `false` when this partition was not compared.
+    pub compared: bool,
+    /// Its exact counts.
+    pub replay: ReplayCountsView,
+}
+
+fn replay_view(r: &weirkeeper::crds::restore::ReplayCounts) -> ReplayCountsView {
+    ReplayCountsView {
+        expected: r.expected,
+        restored: r.restored,
+        matching: r.matching,
+        missing: r.missing,
+        unexpected: r.unexpected,
+        duplicates: r.duplicates,
+        out_of_order: r.out_of_order,
+        mismatched: r.mismatched,
+    }
+}
+
+/// `status.integrity.coverage`, read: `sampled`, `complete`, or not recorded
+/// (any other word, too, is not recorded — never complete).
+#[must_use]
+pub fn recorded_coverage(
+    integrity: Option<&weirkeeper::crds::restore::Integrity>,
+) -> Option<crate::contract::RestoreCoverage> {
+    match integrity.and_then(|i| i.coverage.as_deref()) {
+        Some("sampled") => Some(crate::contract::RestoreCoverage::Sampled),
+        Some("complete") => Some(crate::contract::RestoreCoverage::Complete),
+        _ => None,
+    }
+}
+
+/// **PROD-08.1a.** The complete block as the API serves it, only beside a
+/// recorded `coverage: complete`.
+#[must_use]
+pub fn complete_view(
+    integrity: Option<&weirkeeper::crds::restore::Integrity>,
+) -> Option<CompleteVerificationView> {
+    if recorded_coverage(integrity) != Some(crate::contract::RestoreCoverage::Complete) {
+        return None;
+    }
+    let c = integrity?.complete.as_ref()?;
+    Some(CompleteVerificationView {
+        covered: c.covered,
+        incomplete_reason: c.incomplete_reason.as_deref().map(|r| bounded(r, 1024)),
+        max_records: c.max_records,
+        segments: c.archive.segments,
+        segments_verified: c.archive.segments_verified,
+        segments_failed: c.archive.segments_failed_count,
+        segments_unverified: c.archive.segments_unverified_count,
+        records_decoded: c.archive.records_decoded,
+        offset_holes: c.archive.offset_holes,
+        replay: replay_view(&c.replay),
+        partition_count: c.partition_count,
+        partitions: c.partitions.as_ref().map(|rows| {
+            rows.iter()
+                .take(weirkeeper::crds::restore::COMPLETE_PARTITIONS_MAX)
+                .map(|p| PartitionVerificationView {
+                    topic: bounded(&p.topic, 249),
+                    partition: p.partition,
+                    target_topic: p.target_topic.as_deref().map(|t| bounded(t, 249)),
+                    compared: p.compared,
+                    replay: replay_view(&p.replay),
+                })
+                .collect()
+        }),
+    })
 }
 
 /// One topic the run created.
@@ -1183,6 +1346,9 @@ pub fn backup_view(backup: &Backup, now: DateTime<Utc>) -> OperationView {
             records_sampled: None,
             records_sampled_matching: None,
             records_expected: None,
+            coverage: None,
+            complete: None,
+            unsampled_topics: Vec::new(),
         },
         awaiting_approval: false,
         stale,
@@ -1261,6 +1427,17 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
             records_sampled: completion.and_then(|c| c.records_sampled),
             records_sampled_matching: completion.and_then(|c| c.records_sampled_matching),
             records_expected: completion.and_then(|c| c.records_expected),
+            // PROD-08.1a / FX-23: from `status.integrity`, the controller's copy
+            // of the signed scorecard — a claim until the evidence verifies,
+            // like every other fact here.
+            coverage: recorded_coverage(status.and_then(|s| s.integrity.as_ref())),
+            complete: complete_view(status.and_then(|s| s.integrity.as_ref())),
+            unsampled_topics: status
+                .and_then(|s| s.integrity.as_ref())
+                .and_then(|i| i.unsampled_topics.as_ref())
+                .filter(|t| t.len() <= weirkeeper::crds::restore::UNSAMPLED_TOPICS_MAX)
+                .map(|t| t.iter().map(|n| bounded(n, 249)).collect())
+                .unwrap_or_default(),
         },
         awaiting_approval,
         stale,

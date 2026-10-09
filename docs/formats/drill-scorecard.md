@@ -181,6 +181,7 @@ their refusal text, so the agreement is checked rather than asserted.
 | `source.manifest_version_id` | string \| null | The store's version id for the manifest object, when the backend returned one. |
 | `source.captured_by_logweir` | bool | `true` **exactly when** phase −1 ran. `validate_invariants` enforces the pairing in **both** directions with `last_phase_completed` and the two `rpo_source_relative_*` fields, so it cannot be forged into a signed document. **Always `false` in v0.1.0.** |
 | `source.time_basis` | object, **optional** (1.3.0) | Which source topics the restore's time selection read by **producer time**, and which it selected by time with no recorded timestamp type. See [below](#sourcetime_basis-format-130). ABSENT means not recorded. |
+| `source.selection` | object, **optional** (1.7.0) | The plan's **replay selection**: its stated inclusive window start and the window's end, for a restore narrowed by a start. See [below](#sourceselection-format-170). ABSENT means the restore selected every partition of every restored topic from the archive's floor. |
 | `target.cluster_id` | string | The target cluster's own id, read from it. |
 | `target.mode` | string, optional | Which of the two target modes the run was in: `scratch` or `newTopic`. **Absent means `scratch`**, which is what every document written before this field existed carries, so the three checked-in signed fixtures keep their bytes. |
 | `target.marker_topic` | string, optional | The **scratch** segregation proof: the cluster is in `allowedClusterIds` **and** this topic exists, both verified at phase 0, whose failure refuses the drill with exit 3 before anything runs. **Absent in `newTopic` mode**, because that mode skips both checks — a reader that saw the field there would be reading a verification that never ran. Both readers REFUSE a document that is `scratch` and omits it. |
@@ -250,6 +251,100 @@ name, `docs/verify_scorecard.py`'s `FORMAT_VERSION` and
 `SCORECARD_TIME_BASIS_VERSION`, and the literal pins in
 `crates/logweir-core/src/lib.rs`, `docs/test_verify_scorecard.py` and the
 corpus cases `time_basis_*.json` (their `format_version` and TB-1's reason).
+
+### `source.selection` (format 1.7.0)
+
+```json
+"selection": {
+  "window_start_ms": 1788000000000,
+  "window_end_ms": 1788055200000
+}
+```
+
+A plan may state an inclusive window START, written
+`restore.point_in_time: "<start>/<end>"`
+([the plan field](drill-spec.md#a-window-start-restorepoint_in_time-startend-prod-111)).
+A restore from a stated start is format 1.7.0 and carries this block; the
+contract is [`PROD-11.1-replay-selection.md`](../to-do/decisions/PROD-11.1-replay-selection.md).
+A partition subset (`restore.partitions`) is refused before anything runs
+until the owner decides OD-9, so no document narrowed by a subset exists.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `window_start_ms` | integer | The plan's stated inclusive start, epoch milliseconds, never earlier than the archive set's floor (guard G-WIN; a start before it is refused, never moved). |
+| `window_end_ms` | integer | The inclusive end: the end of `restore.point_in_time`. |
+
+Every partition of every restored topic was restored from the start, so the
+block names no partition.
+
+**Every verdict of such a document is judged over the window only:** samples
+are drawn from the stated start; the count bound and the per-partition
+presence check are over `[window_start_ms, window_end_ms]`; a complete
+verification expects every archived record whose own timestamp is in that
+window.
+
+**Existing fields carry the start too.** `sample.coverage_note` opens with
+`replay selection: every partition of every restored topic, from epoch-ms S
+(the plan's stated window start, inclusive) to epoch-ms E (inclusive); no
+record before the start was expected`, and under the sampled lane goes on
+`; a sampled check does not prove that none was restored` and names the one
+limit a start adds (an in-window record held in a segment whose last record
+is before the start is not found by a sampled check; `sample.coverage:
+complete` finds it). The note is written before phase 7 judges anything, so
+it never says that no record before the start was RESTORED. A complete
+block's `window.start_ms` is the stated start, and `sample.window_start` is
+never earlier than it (for a sampled document that is the sample window,
+which an unnarrowed document can share; the coverage note is the field that
+names the start). No older verifier prints either free-text field; what they
+do print is true of the restore (`verify-a-scorecard.md`).
+
+**What the documents prove about records before the start (review N1).** A
+COMPLETE verification whose `integrity.result` is `pass` proves that none was
+restored: a restored record below the start is `unexpected` there, and IV-6
+holds a complete pass to none. A SAMPLED check does not: its sample is drawn
+from the window, and its per-partition count bound counts every record of a
+segment that straddles the start, so an engine that restored such a
+segment's earlier records stays inside every bound. Both readers end the
+`replay selection:` line accordingly: `no record before the start was
+restored or expected` for a complete pass; `no record before the start was
+expected; a sampled check does not prove that none was restored` for a
+sampled document; `no record before the start was expected` otherwise (a
+complete verification that did not pass, or none).
+
+Three arms, enforced by both readers in the same position (after
+`sample.unsampled_topics`, before `redactions`) and words, fire only on a
+document carrying the block:
+
+| Arm | Refuses |
+|---|---|
+| SEL-1 | the block under a `format_version` before 1.7.0 |
+| SEL-2 | a start at or after the end |
+| SEL-3 | a complete block whose `window` is not the block's start and end |
+
+A block that is not an object with both fields as integers is refused when
+the document is read; an unknown key in it is ignored, as everywhere in the
+document (which is why a partition subset cannot be added to this block as a
+MINOR: a 1.23.0 reader would ignore it and read the restore as every
+partition — OD-9). Each arm reads only the new block, or
+judges an existing field against it, and can only refuse: MINOR under OD-7
+(a). Both readers print one `replay selection:` coverage line for a document
+carrying the block (above), and for a sampled `pass` the `sample coverage:`
+line is QUALIFIED by the window (`a sampled pass over a replay selection from
+epoch-ms S to epoch-ms E: …; no record before the start was expected, and a
+sampled check does not prove that none was restored`); `logweir drill show`
+shows `sample.coverage_note`, which opens with the writer's sentence.
+
+**The version only rises.** A restore that states a start AND is sampled
+(FX-23's 1.6.0) is 1.7.0; each step that raises the version keeps the newer
+of the two minors (`scorecard::newer_format_version`), so no step can lower a
+version an earlier step chose.
+
+**The number.** 1.7.0; 1.6.0 is FX-23's. A renumber moves
+`scorecard::FORMAT_VERSION_WITH_SELECTION` and `scorecard::SELECTION_SINCE_MINOR`
+together, the justfile's `scorecard_schema_version` and this schema file's
+name, `docs/verify_scorecard.py`'s `SCORECARD_SELECTION_SINCE_MINOR`, the parity
+script's `SCORECARD_SELECTION_VERSION`, and the corpus cases `selection_*.json`
+(their `format_version` and SEL-1's reason).
 
 ## `approval`
 
@@ -530,8 +625,8 @@ fields.
 | `integrity.restoredPrincipalCouldConsume` | bool \| null | **SP3.** Null, never `false`, until then. The wire name is camelCase deliberately and permanently: renaming it later would be a major bump. |
 | `integrity.verification` | object, **optional** (1.4.0) | What the verdict COVERED: `sampled` or `complete` coverage, what it compared against, whether header order was verified, the verified partitions' capture gaps and pruned ranges, and a complete verification's archive integrity and replay comparison. See [below](#integrityverification-format-140). ABSENT means not recorded, read as sampled and never as complete. |
 | `topic_parity.intentionally_deviated` | string[] | A SCRATCH drill's deviations on the four settings the restore's own topic creation decides (`cleanup.policy`, `retention.ms`, `partition_count`, `replication_factor`), as `"<target topic>: <key>"`. Since 1.2.0 always `[]` in a `newTopic` restore; in a `newTopic` document before 1.2.0 its entries were NOT reconstructed, whatever the label ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
-| `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have, as `"<target topic>: <key>"`. Since 1.1.0 also one fail-safe entry `"<target topic>: configuration not assessed (<why>)"` per topic `not_assessed` names ([below](#topic_parity-and-what-its-silence-means)). Since 1.2.0, in a `newTopic` restore, also every entry of `not_reconstructed` ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
-| `topic_parity.not_assessed` | string[], **optional** (1.1.0) | The mapped target topics whose CONFIGURATION parity was not assessed, as `"<target topic>: configuration (<why>)"`. See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
+| `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have, as `"<target topic>: <key>"`. Since 1.1.0 also one fail-safe entry `"<target topic>: <what> not assessed (<why>)"` per entry `not_assessed` names ([below](#topic_parity-and-what-its-silence-means)). Since 1.2.0, in a `newTopic` restore, also every entry of `not_reconstructed` ([below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)). |
+| `topic_parity.not_assessed` | string[], **optional** (1.1.0) | What was not assessed per mapped target topic, as `"<target topic>: <what> (<why>)"`: its CONFIGURATION (`configuration`, FX-4), or a replication factor or partition count the source's record lacks (`replication_factor` or `partition_count`, `notRecorded`, FX-21). See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
 | `topic_parity.not_reconstructed` | string[], **optional** (1.2.0) | The source settings a `newTopic` restore did NOT reconstruct, as `"<target topic>: <key>"`; each is also in `unexpected_divergence` and never in `intentionally_deviated`. `[]` in a scratch drill. In a `newTopic` document carrying it, `intentionally_deviated` is `[]` and every divergence on the four settings is listed here (arms NR-4, NR-5). See [below](#topic_parity-in-a-newtopic-restore-not-reconstructed-120). ABSENT means not recorded. |
 
 ### `topic_parity`, and what its silence means
@@ -555,11 +650,27 @@ Every other mapped topic is named in `not_assessed` with `<why>`:
 For a listed topic the two arrays above still name every difference the archive's
 own record shows — those are facts — but their SILENCE proves nothing. Partition
 count and replication factor come from metadata, not DescribeConfigs, and are
-classified either way.
+classified whatever the coverage — where the source's value is recorded (next).
+
+**A replication factor or partition count the source's record lacks (FX-21).**
+Phase 7 compares the source's replication factor from the archive's manifest
+(`source_replication_factor`), else from the bound receipt's
+`topic_configuration` (format 1.3.0), and its partition count from the
+manifest (`original_partition_count`). Where none records the value — engine
+0.23.3 records the factor for the first topic a backup saves only, and an
+archive before engine 0.17 records neither — the value is not compared: it is
+named in `not_assessed` as `"<target topic>: replication_factor
+(notRecorded)"` (or `partition_count`), with the fail-safe twin below. A
+writer before FX-21 compared the target's own value with itself there, so its
+silence about such a topic's factor is not parity
+([stability](../stability.md#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
+Logweir's engine build `0.23.3+logweir.2` records every topic's factor.
 
 **The fail-safe entry.** For every topic it names in `not_assessed`, phase 7
 also writes `"<target topic>: configuration not assessed (<why>)"` into
-`unexpected_divergence`. `not_assessed` is new in 1.1.0, so a reader that
+`unexpected_divergence` (and, for an FX-21 entry, `"<target topic>:
+replication_factor not assessed (notRecorded)"` or its `partition_count`
+twin). `not_assessed` is new in 1.1.0, so a reader that
 predates it — `verify_scorecard.py` before 1.15.0, a `logweir drill show` built
 before FX-4, a person with a 1.0.0 guide — reads only the two arrays it always
 had, and must not see a clean list for a topic nobody assessed. For
@@ -754,7 +865,7 @@ transformations do to it — is
 | `complete.replay.duplicates` | integer | Restored records that repeat an `x-original-offset` already read. |
 | `complete.replay.out_of_order` | integer | Restored records whose `x-original-offset` is below one read before them. |
 | `complete.replay.mismatched` | integer | Expected records whose first restored copy differs from the archive. |
-| `complete.partitions[]` | object[] | One entry per partition of every restored topic, sorted: `topic` (archive side), `partition`, `target_topic`, `compared` (false when this partition was not compared), `segments`, `segments_verified`, `records_decoded`, `offset_holes`, `replay` (the eight counts above, for this partition), and `findings`: the first 20 findings in words (which offsets are missing, duplicated, out of order or different, and why a partition was not compared), and one more saying how many were left out. The counts are complete; the words illustrate. |
+| `complete.partitions[]` | object[] | One entry per partition of every restored topic, sorted (unchanged in 1.7.0: a restore from a stated start restores every partition, so its `replay` counts are each partition's over `[window.start_ms, window.end_ms]`): `topic` (archive side), `partition`, `target_topic`, `compared` (false when this partition was not compared), `segments`, `segments_verified`, `records_decoded`, `offset_holes`, `replay` (the eight counts above, for this partition), and `findings`: the first 20 findings in words (which offsets are missing, duplicated, out of order or different, and why a partition was not compared), and one more saying how many were left out. The counts are complete; the words illustrate. |
 
 **Absent means not recorded.** Every document before 1.4.0 — and one whose
 phase 7 never ran — is read as a SAMPLED verdict, never a complete one. Every

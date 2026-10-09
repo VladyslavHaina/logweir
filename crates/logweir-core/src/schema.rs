@@ -18,9 +18,10 @@ use crate::scorecard::Scorecard;
 /// same way. **1.6.0 since FX-23** (`sample.unsampled_topics`), which this
 /// build writes for every SAMPLED scorecard; the 1.5.0 file is frozen beside
 /// it. A complete verification's scorecard is still written as 1.4.0 (or 1.5.0
-/// for a PROD-01.3 mode), which those frozen files describe. The `$id` is built from
-/// [`crate::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`], the newest
-/// minor.
+/// for a PROD-01.3 mode), which those frozen files describe. **1.7.0 since
+/// PROD-11.1** (`source.selection`), written only for a narrowed restore; the
+/// 1.6.0 file is frozen beside it. The `$id` is built from
+/// [`crate::scorecard::FORMAT_VERSION_WITH_SELECTION`], the newest minor.
 pub fn scorecard_schema() -> String {
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
         s.option_nullable = true;
@@ -31,7 +32,7 @@ pub fn scorecard_schema() -> String {
         .into_root_schema_for::<Scorecard>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-        crate::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
+        crate::scorecard::FORMAT_VERSION_WITH_SELECTION
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

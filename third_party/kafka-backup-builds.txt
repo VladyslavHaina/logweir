@@ -6,3 +6,4 @@
 # not rise, and a last line that is not the build env's; crates/logweir/tests/
 # engine_pin.rs refuses a rewritten line of any build that has shipped.
 0.23.3+logweir.1 sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3
+0.23.3+logweir.2 sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8

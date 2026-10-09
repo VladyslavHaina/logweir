@@ -1638,6 +1638,65 @@ fn the_time_basis_opt_in_the_console_writes_is_the_one_the_runner_reads() {
     );
 }
 
+// ---- 18a2. the complete-coverage plan the console writes is the one the runner reads (PROD-08.1a)
+
+#[test]
+fn the_complete_coverage_the_console_writes_is_the_one_the_runner_reads() {
+    // ARM 1 of the complete-coverage golden (arm 2 is
+    // `ui/tests/complete-coverage.spec.js`, which byte-compares the emitter's
+    // output with the same file, and `scripts/check-ui-behaviour.sh` re-runs
+    // the emitter and `diff -u`s it).
+    //
+    // `RestoreSpec` HAS NO `deny_unknown_fields`, so a golden that spelt the
+    // key `completeMaxRecords:` or the value `Complete` would parse -- into a
+    // SAMPLED plan an approver signed believing it verified everything. So this
+    // arm asserts both values ARRIVE, and that the plain goldens carry neither.
+    let golden_path = ui_root()
+        .join("tests")
+        .join("fixtures")
+        .join("plan-complete.golden.yaml");
+    let golden = read(&golden_path);
+    let spec: logweir_core::spec::RestoreSpec = serde_yaml::from_str(&golden).unwrap_or_else(|e| {
+        panic!(
+            "{} does not deserialise into logweir_core::spec::RestoreSpec: {e}. Regenerate with \
+             `node ui/tests/emit-plan.js plan-complete-fields.json > \
+             ui/tests/fixtures/plan-complete.golden.yaml` AFTER fixing the emitter.",
+            shown(&golden_path)
+        )
+    });
+    assert_eq!(
+        spec.sample.coverage,
+        logweir_core::spec::Coverage::Complete,
+        "{} parsed as sampled: the console wrote the coverage under a key or value the runner \
+         does not read",
+        shown(&golden_path)
+    );
+    assert_eq!(spec.sample.complete_max_records, Some(1_000_000));
+    assert_eq!(
+        spec.sample.max_partitions, None,
+        "a complete plan states no partition bound: phase 0 refuses the pair"
+    );
+    for plain in [
+        "plan.golden.yaml",
+        "plan-point.golden.yaml",
+        "plan-time-basis.golden.yaml",
+    ] {
+        let spec: logweir_core::spec::RestoreSpec =
+            serde_yaml::from_str(&read(&ui_root().join("tests").join("fixtures").join(plain)))
+                .expect("the golden parses");
+        assert_eq!(
+            (spec.sample.coverage, spec.sample.complete_max_records),
+            (logweir_core::spec::Coverage::Sampled, None),
+            "{plain} must stay sampled"
+        );
+    }
+    let gate = read(&repo_root().join("scripts").join("check-ui-behaviour.sh"));
+    assert!(
+        gate.contains("plan-complete.golden.yaml") && gate.contains("plan-complete-fields.json"),
+        "scripts/check-ui-behaviour.sh must re-emit and diff the complete-coverage golden as well"
+    );
+}
+
 // ---- 18b. the catalog-bound plan carries the recovery point binding (PLAT-15.2)
 
 #[test]

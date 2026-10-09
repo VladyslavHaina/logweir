@@ -264,6 +264,7 @@ fn window_plan() -> RestorePlan {
             chrono::DateTime::from_timestamp_millis(PIT_MS).unwrap(),
         ),
         window_floor_source: WindowFloorSource::ArchiveManifest,
+        source_partitions: Default::default(),
         default_replication_factor: 1,
         checkpoint_state: "/tmp/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,

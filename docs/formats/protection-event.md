@@ -23,8 +23,11 @@ field is the point of the next section.
 
 This is the load-bearing field. Its value travels into a PagerDuty incident and a Slack channel,
 where it is read by someone deciding, during an incident, whether an archive can be trusted.
-**Logweir verifies a sample.** It compares a selected window of records byte-for-byte; it does not
-read an archive end to end and it never has.
+**It describes the policy's newest available point, and that is a sample.** The controller
+publishes `sampled` for a point whose evidence verified, by the sampled check every point gets; it
+does not read an archive end to end to raise a protection event. A RESTORE can ask for complete
+coverage (PROD-08.1a), and reports what it covered on the `Restore`, in the product API's
+`verificationScope.coverage` and in the runner's own notification body — never in this field.
 
 - `sampled` — a sampled per-record comparison ran.
 - `degraded` — `integrityLevel: consume-only`: records were read back but not compared
