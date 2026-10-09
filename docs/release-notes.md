@@ -33,8 +33,9 @@ it), 40 (FX-24, a silent connection meets the console's header deadline),
 41 (FX-21, a replication factor the archive does not record is never
 read as matching; the engine's first patch), 42 (PROD-11.1, a restore
 can select a window start) and 43 (PROD-08.1a, complete coverage requested
-and shown through the CRDs, the API and the console) and 44 (FX-24b, a
-client that stops reading or sending meets a stall deadline) so far. Items continue the next entry's
+and shown through the CRDs, the API and the console), 44 (FX-24b, a
+client that stops reading or sending meets a stall deadline) and 45
+(PROD-03.0, schema-dependent topics flagged from the archived bytes) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -96,6 +97,12 @@ new runner's engine identity.
 Item 44 is fix-now row FX-24b, proven the same way; it changes the console
 only, and the PoC upgrade that carries it repeats the slow-reader probe and
 the event-stream row against the shared-mode console.
+Item 45 is row PROD-03.0, proven by unit, reader, corpus and memory rows and
+on the compose stack (`registry`: Karapace and its REST proxy, stopped before
+the backup); it changes the runner's receipts and records, the catalog's view
+(runner and controller), the product API and the console, so the PoC upgrade
+that carries it runs a backup, reads its receipt's `schema_dependency` and the
+catalog's `topics[].schemaDependency`, and opens the restore review.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1200,6 +1207,64 @@ probe runs at the PoC upgrade that carries this item.
 **Rollback:** an older console leaves a connection whose client stopped
 reading or sending open again; nothing is stored, so nothing needs converting.
 
+#### 45. Topics whose records need a schema registry are flagged from the archived bytes: "registry not captured" (PROD-03.0)
+
+**Changed.** A record a Confluent serializer wrote is a zero byte, a 4-byte
+schema id and a payload only that schema decodes, and Logweir captures no
+schema registry, so a restore could succeed while no application could read
+what it restored, and nothing said so. Now every backup judges, per topic,
+whether its archived keys or values carry that framing — from the segments it
+just wrote, with Logweir's own decoder; **no registry is contacted** — and
+records it in the signed receipt (format **1.5.0**, `schema_dependency`: a
+verdict, the basis, each side's framed share and the schema ids seen, the 16
+smallest and a count). A side is dependent when at least one in ten of its
+non-null records is framed (magic byte 0, an id from 1 to 2^24 − 1, a payload
+after it); nulls and tombstones never count. The catalog point copies it
+(format 1.5.0), the catalog's view and the product API publish it per topic
+(`PointView.topics[].schemaDependency`), and the console says it where a
+restore is reviewed, on a catalog point's recovery-point step and on the
+catalog page: **"Registry not captured: applications may not read these
+records after restore."**, with each schema-dependent topic, its sides and its
+ids. Nothing is blocked: the bytes are restored unchanged, and what an
+application needs is the registry that issued those ids. A receipt before
+1.5.0, or a topic the backup could not judge, reads **not assessed**, never "no
+registry needed". Detection is bounded and never fails a backup: it streams at
+most two segments per partition for at most eight partitions per topic,
+keeps six bytes per key and value, and stops at 64 MiB stored or 256 MiB
+decompressed per segment and 120 s per backup — those topics read
+`notAssessed` (`segmentTooLargeForDetection`, `detectionTimeBudgetExceeded`,
+`segmentUnreadable`). Both verifiers read the block: `verify_scorecard.py`
+**1.24.0** and `logweir drill verify` check its eight arms (22 to 29) and
+print one `schema_dependency` line per topic. Stated limit: a binary key that
+is a big-endian 64-bit integer from 2^24 to 2^56 (an epoch-millisecond
+timestamp, a large database id) looks framed and is flagged with the "ids" its
+bytes hold ([the contract](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
+**Do:** nothing is required. To see a point's flags, open the restore review or
+the catalog page, or verify its receipt with either reader. Points recorded
+before this item read not assessed until a backup by this runner records them.
+**Scope:** unit rows over the detector (Avro, JSON Schema and Protobuf framing
+in keys and values, unframed payloads, nulls and tombstones, short records and
+random ids after a zero byte, the one-in-ten boundary, a mixed topic, an empty
+topic, the 16-id cap); the sampler measured with a counting segment source;
+the caps, the time budget, a panicking source and the head's early stop; a
+child-process memory row (a ~190 MiB segment and a 1 GiB decompression bomb
+each add about 2.5 MB; decoding the same segment whole adds 397 MB); arms
+22–29 with their exact text in both readers, the corpus and the parity gate
+(which also derives each reader's lines from the document); the catalog's
+cross-check and reconcile; one fixture read by the runner's, the API's and the
+console's rows; and a live compose row: Avro, JSON Schema and Protobuf records
+produced through Karapace's REST proxy, the registry STOPPED, then a backup
+whose 1.5.0 receipt names exactly the four dependent topics with the
+registry's own ids, the plain and zero-byte controls `notDetected` and the
+empty topic `notAssessed`; both readers accept it and print the same lines;
+the catalog point copies it; the console's own render over the point says the
+sentence with the live ids. Mutants on the detector, the threshold, the
+readers and the bounds are killed. Older readers (`verify_scorecard.py` 1.23.0
+and earlier) accept a 1.5.0 receipt and print no schema line.
+**Rollback:** an older runner writes 1.3.0/1.4.0 receipts and records with no
+block (their topics read not assessed); the 1.5.0 documents already written
+stay valid for every reader. An older controller or console ignores the field.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1265,7 +1330,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43 and 44, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44 and 45, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1291,7 +1356,9 @@ window start (an older runner refuses a plan with one); item 43 changes the
 notification and metrics, the standing authorization's scope (format
 1.1.0), the product API and the console, and needs nothing unless a
 rehearsal is to verify every record (a new schedule and a new
-authorization); item 44 changes the console only and needs nothing. To roll back to
+authorization); item 44 changes the console only and needs nothing; item 45
+changes the runner's receipts and catalog records, the catalog's view (runner
+and controller), the product API and the console, and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -1301,8 +1368,9 @@ authorization); item 44 changes the console only and needs nothing. To roll back
    0.21.0 engine again, and that build's `doctor` refuses 0.23.3. The runner
    signs format 1.3.0 again, sampled (item 30); the 1.4.0 scorecards already
    written stay valid under both readers. It writes 1.1.0 or 1.2.0 receipts
-   again with no `topic_configuration` (item 32); the 1.3.0 receipts and
-   records already written stay valid.
+   again with no `topic_configuration` (item 32) and no `schema_dependency`
+   (item 45); the 1.3.0 and 1.5.0 receipts and records already written stay
+   valid.
 3. Roll the console back with the controller and the runner (item 33): an older
    console names an existing Secret again, which this API refuses. The bound
    Secrets keep working with the older controller and runner, which ignore the
