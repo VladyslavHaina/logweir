@@ -183,7 +183,6 @@ if [ -f "$work/logweir.yaml" ] && [ -f "$work/logweir-checkout.yaml" ]; then
     "- $DEX_HOST" \
     "trustedProxyService:" \
     "name: logweir-api-trusted-proxy" \
-    "name: logweir-api-signin" \
     "namespace: $INGRESS_NAMESPACE" \
     "kubernetes.io/metadata.name: $DEX_NAMESPACE" \
     "port: 5554" \

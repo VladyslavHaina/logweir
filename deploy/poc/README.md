@@ -300,12 +300,6 @@ commit.
   Ingress;
 - `kubectl --context "$CTX" -n traefik get role,rolebinding logweir-api-trusted-proxy`
   exists — the console's one read outside its namespaces, `list endpointslices`;
-- `kubectl --context "$CTX" -n logweir-system get role,rolebinding logweir-api-signin`
-  exists — `create events` there and nothing else, the sign-in claim that makes
-  a login state redeem once on either replica (FX-13a); after a sign-in,
-  `kubectl --context "$CTX" -n logweir-system get events --field-selector reason=SignInStateRedeemed`
-  lists one `logweir-signin-…` Event per sign-in, naming the console Pod that
-  redeemed it;
 - the console's log names the trusted proxy set:
   `kubectl --context "$CTX" -n logweir-system logs deploy/logweir-api | grep 'trusted proxy set changed'`
   shows the Traefik pod's address;

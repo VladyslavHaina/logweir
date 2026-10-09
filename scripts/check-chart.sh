@@ -1045,7 +1045,6 @@ else
     'trustedProxyService:' \
     'name: logweir-api-trusted-proxy' \
     'resources: ["endpointslices"]' \
-    'name: logweir-api-signin' \
     'port: 8443'; do
     if ! grep -F -q -- "$needle" "$tmp/console-gaps.yaml"; then
       echo "FAIL: the PoC gap render does not carry \`$needle\`" >&2

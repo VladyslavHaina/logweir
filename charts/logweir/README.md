@@ -74,7 +74,6 @@ install document; this README is the chart's own.
 | `Ingress` `<release>-api` | `api.console.ingress.enabled` | the shared console's public entry point. **Shared mode only, TLS required, host must be `publicBaseUrl`'s authority**; refused in front of the in-cluster administrator mode |
 | `NetworkPolicy` `<release>-api` | `api.console.networkPolicy.enabled` | in shared mode, ingress from the configured ingress-controller pods only; in the in-cluster administrator mode, `ingress: []` — deny. Egress in both: DNS, the Kubernetes API and the configured IdP CIDRs, and **never** a broker or object-store port |
 | `Role` + `RoleBinding` `<release>-api-trusted-proxy`, in the ingress controller's namespace | `api.console.trustedProxyService` (shared mode) | `list` on `discovery.k8s.io/endpointslices` there and nothing else: the console trusts the serving endpoints of the ingress controller's Service (see *`shared` mode* below) |
-| `Role` + `RoleBinding` `<release>-api-signin`, in the release namespace | `api.console.mode: shared` | `create` on core `events` there and nothing else: before a callback exchanges its code, it claims the sign-in `state` with one Event, so a state redeems once on every replica (FX-13a; see *`shared` mode* below). Readiness dry-runs the same create, so a console without it is never ready |
 
 Nothing optional is on by default. The release gate renders the snapshots with
 the pinned bootstrap digest exactly as shipped; the rest of the default render
@@ -396,10 +395,7 @@ Approval); `patch` on `backupschedules`, `backupdestinations`,
 cluster-scoped `trustpolicies`; `get` on the one cluster-scoped `trustrosters/default`
 (`resourceNames: ["default"]`, so a readiness verdict's roster referent can be
 compared rather than reported `unverifiable`); `get` on `configmaps`; `create` on
-`secrets`. A shared console (`api.console.mode: shared`) also holds `create` on
-`events` in the release namespace, `<release>-api-signin`, for its sign-in
-claims (FX-13a): no read, update or delete, because the API server expires
-Events itself.
+`secrets`.
 
 What it does not, each for a reason: **no `watch`** (the service's adapter has
 no watch method, and the operation event stream is server-sent events over its
@@ -673,28 +669,6 @@ The whole rule, why there is no global sign-in budget, and what to do about
 the residual it leaves at the identity provider (generous per-client limits
 there, alerts, and the in-cluster administrator mode as the break-glass path)
 are in [docs/api.md](../../docs/api.md), *Rate limits*.
-
-**A sign-in `state` redeems once, on every replica (FX-13a).** Before a
-callback exchanges its code it creates one Event, `logweir-signin-<32 hex>`
-(an HMAC of the state, the same on every replica), in the release namespace;
-the API server's create is atomic, so a second callback with the same login
-cookie — replayed later, sent to the other replica, or racing the first — is
-refused `login_state_replayed` with no token request. That is the
-`<release>-api-signin` grant: `create` on `events` there, and nothing else.
-The API server expires the Events itself (`--event-ttl`, one hour by
-default; it must be at least ten minutes, the life of a login state), and
-`kubectl get events -n <release namespace> --field-selector
-reason=SignInStateRedeemed` lists them with the Pod that redeemed each.
-Readiness dry-runs the create, so a console that lacks the grant — say, one
-run out of band under its own RBAC — stays NotReady with the warning `this
-console cannot record a redeemed sign-in state` rather than refusing every
-sign-in. Each console process writes at most 120 claims a minute; past
-that, in a many-address flood, sign-ins are still served and their states
-recorded in that process only (audit note `signInClaim: processOnly`), so the
-cluster never takes more than that from unauthenticated traffic. During a
-rolling upgrade from a release before FX-13a the old replicas do not claim,
-so the guarantee holds once the last of them is gone.
-Details: [docs/api.md](../../docs/api.md), *Sign-in*.
 
 ### The identity provider inside the cluster: a private CA, a name, a path
 
