@@ -1201,7 +1201,7 @@ fn backup_run_writes_a_signed_receipt() {
     let model = receipt
         .topic_configuration
         .as_ref()
-        .expect("a 1.3.0 receipt this build signs carries topic_configuration");
+        .expect("a receipt this build signs carries topic_configuration");
     assert_eq!(
         model.keys().cloned().collect::<Vec<_>>(),
         vec!["orders".to_string()]

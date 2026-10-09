@@ -34,9 +34,10 @@ pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 /// **PROD-05.1.** The format of a record whose topics carry the receipt's
 /// `topic_configuration` (`topics[].configuration`, and `topics[].partitions`
 /// from it) — the MINOR after FX-7's 1.2.0. Written exactly when the receipt
-/// is a 1.3.0 one that carries the block, which every receipt this build
-/// signs is; a record backfilled from an older receipt keeps the format it
-/// would have had (reading rule 2: an older reader ignores the fields).
+/// carries the block and nothing newer decides (every receipt PROD-05.1's
+/// builds signed, before PROD-01.4a's 1.5.0); a record backfilled from an
+/// older receipt keeps the format it would have had (reading rule 2: an older
+/// reader ignores the fields).
 pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
 
 /// **PROD-01.3.** The format of a record whose `source.auth_mode` is one of the

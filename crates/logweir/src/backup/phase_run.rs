@@ -598,7 +598,9 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// PROD-05.1) of THIS document type (independent of the scorecard's), because
 /// this build writes `topic_configuration` on every receipt, pinned or not —
 /// or `FORMAT_VERSION_WITH_AUTH_MODES` (`1.4.0`, PROD-01.3) when the source's
-/// auth mode is one PROD-01.3 added — by
+/// auth mode is one PROD-01.3 added — and since PROD-01.4a
+/// `FORMAT_VERSION_WITH_GENERATIONS` (`1.5.0`) for every receipt, because every
+/// one carries `generations` too; by
 /// `logweir_core::backup_receipt::format_version_for`, the one place that
 /// decides it. `source.auth` is `BackupOutcome::source_auth` rendered as the
 /// two strings `ReceiptAuth` holds — **never a password, and no field that
@@ -655,9 +657,9 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         },
         config_coverage: Some(outcome.config_coverage.clone()),
         // PROD-05.1: ALWAYS written beside `config_coverage`, so every receipt
-        // this build signs is 1.3.0 and carries its topics' configuration
-        // model — a receipt never leaves it to be read as NOT RECORDED by
-        // omission when it was observed.
+        // this build signs carries its topics' configuration model (and is at
+        // least 1.3.0) — a receipt never leaves it to be read as NOT RECORDED
+        // by omission when it was observed.
         topic_configuration: Some(outcome.topic_configuration.clone()),
         // PROD-05.1: where the run looked for owners — written beside the
         // model, so a topic without an owner reads "not checked" when it is

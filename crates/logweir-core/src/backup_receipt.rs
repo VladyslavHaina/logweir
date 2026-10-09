@@ -297,9 +297,11 @@ pub const CONFIG_SOURCES: [&str; 6] = [
 
 /// **PROD-05.1.** The `format_version` of a receipt that carries
 /// `topic_configuration` — the MINOR after FX-7's 1.2.0. Every receipt this
-/// build signs carries the block, pinned or not, so every one is 1.3.0
-/// ([`format_version_for`]); a 1.0.0, 1.1.0 or 1.2.0 reader ignores the field
-/// inside major 1 and reads the document under it.
+/// build signs carries the block, pinned or not; until PROD-01.4a that made
+/// every one 1.3.0, and since then every one is
+/// [`FORMAT_VERSION_WITH_GENERATIONS`] ([`format_version_for`]). A 1.0.0,
+/// 1.1.0 or 1.2.0 reader ignores the field inside major 1 and reads the
+/// document under it.
 pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
 
 /// The first minor of format 1 that defines `topic_configuration` (arm 12). A
@@ -722,8 +724,7 @@ pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
 /// defines both: [`FORMAT_VERSION_WITH_AUTH_MODES`] when the auth mode is one
 /// PROD-01.3 added (it also defines PROD-05.1's `topic_configuration` and
 /// FX-7's pin), else [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] when it
-/// carries `topic_configuration` (PROD-05.1 — every receipt this build signs),
-/// else
+/// carries `topic_configuration` (PROD-05.1), else
 /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] when it pins the manifest's
 /// version, else [`RECEIPT_FORMAT_VERSION`] — FX-4's 1.1.0. The ONE place a
 /// writer decides it.

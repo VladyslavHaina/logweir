@@ -346,8 +346,9 @@ none of them.
   `cross_check` accepts it; one whose copy differs from the receipt's is a
   mismatch. **1.3.0 (PROD-05.1)** is the third: `topics[].configuration`, and
   the existing `topics[].partitions` filled, from a receipt that carries
-  `topic_configuration` — every receipt this build signs, so every record it
-  writes is 1.3.0, pinned or not. A record backfilled from an older receipt
+  `topic_configuration` — every receipt a build from PROD-05.1 signs, so every
+  record such a build writes is 1.3.0, pinned or not (1.5.0 since PROD-01.4a,
+  below). A record backfilled from an older receipt
   keeps the format it would have had. The catalog's view lists a point's topics
   with their recorded layout from these fields (`PointView.topics[]` in the
   product API) for an `Available` point only.
