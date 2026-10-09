@@ -1172,9 +1172,9 @@ fn backup_run_writes_a_signed_receipt() {
     // The document says what the run measured — spot-checked on the fields an
     // auditor reads first, so a receipt full of defaults cannot pass this row.
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
-    // PROD-05.1: every receipt this build signs carries `topic_configuration`,
-    // so every one is 1.3.0.
-    assert_eq!(receipt.format_version, "1.3.0");
+    // PROD-03.0: every receipt this build signs carries `schema_dependency`
+    // (beside PROD-05.1's `topic_configuration`), so every one is 1.5.0.
+    assert_eq!(receipt.format_version, "1.5.0");
     // …one model entry per named topic, and — the read having failed — NO
     // entries: NOT RECORDED, never an empty "no configuration".
     let model = receipt

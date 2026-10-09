@@ -387,8 +387,9 @@ for case_id, change_doc, change_receipt, rebind in DOCUMENT_CASES:
 
 # ------------------------------------------------------------------- indexes
 index_path = CORPUS / "backup-receipt-index.json"
+MINE = {case_id for case_id, _ in RECEIPT_CASES}
 index = [e for e in json.loads(index_path.read_text())
-         if not (e["id"].startswith("consumer_positions_") or e["id"].startswith("receipt_1_5_"))]
+         if not (e["id"].startswith("consumer_positions_") or e["id"] in MINE)]
 index += receipt_index
 index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n")
 (CORPUS / "consumer-positions-index.json").write_text(

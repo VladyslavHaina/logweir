@@ -531,10 +531,19 @@ fn the_signed_receipt_fixture_verifies() {
     // below keeps the weaker sentence honest for the two document types that
     // still get it.
     assert!(
-        stdout.contains("the signature AND all twenty-seven backup-receipt invariants"),
-        "an exit 0 that checked the invariants must say so on stdout (twenty-one since \
-         PROD-05.1's eight topic_configuration arms and two owner_detection arms), got: \
-         {stdout}"
+        stdout.contains("the signature AND all thirty-five backup-receipt invariants"),
+        "an exit 0 that checked the invariants must say so on stdout (thirty-five since \
+         PROD-04.1's six consumer_positions arms), got: {stdout}"
+    );
+    // PROD-03.0: the checked-in receipt is a 1.0.0 document, so whether its
+    // topics need a schema registry is NOT ASSESSED — said, never left to read
+    // as "not schema-dependent".
+    assert!(
+        stdout.contains(
+            "schema_dependency: not assessed, so whether any topic's records need a schema \
+             registry is not known from this receipt"
+        ),
+        "{stdout}"
     );
     // PROD-05.1: the checked-in receipt is a 1.0.0 document, so its topics'
     // configuration model is NOT RECORDED — said, never left to read as "none".

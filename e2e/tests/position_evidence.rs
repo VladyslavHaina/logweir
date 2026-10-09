@@ -908,20 +908,12 @@ fn every_selected_group_gets_one_outcome_in_the_signed_receipt() {
         plan_groups,
         cli_groups: vec![last, absent.clone()],
     });
-    // AT LEAST the minor that defines the block (a renumber at integration
+    // AT LEAST the version that defines the block (a renumber at integration
     // makes it later, never earlier).
-    let minor: u64 = b
-        .receipt
-        .format_version
-        .split('.')
-        .nth(1)
-        .and_then(|m| m.parse().ok())
-        .expect("a 1.x.y receipt");
-    assert!(
-        b.receipt.format_version.starts_with("1.")
-            && minor >= logweir_core::backup_receipt::CONSUMER_POSITIONS_SINCE_MINOR,
-        "{}",
-        b.receipt.format_version
+    harness::assert_format_at_least(
+        &b.receipt.format_version,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS,
+        "the receipt of a backup that selects consumer groups",
     );
     let block = b.block();
     assert_eq!(

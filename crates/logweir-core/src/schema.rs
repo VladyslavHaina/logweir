@@ -50,8 +50,10 @@ pub fn scorecard_schema() -> String {
 ///
 /// **The current file is the newest MINOR** (FX-7 fix round, review M-2):
 /// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_CONSUMER_POSITIONS>.json`
-/// (`1.5.0`, PROD-04.1's `consumer_positions`; PROD-01.3's 1.4.0 file with its
-/// three new `source.auth.mode` values is frozen beside it, as are PROD-05.1's
+/// (`1.5.0`, PROD-03.0's `schema_dependency` and PROD-04.1's
+/// `consumer_positions`, one minor until the integration renumbers them;
+/// PROD-01.3's 1.4.0 file, with its
+/// three new `source.auth.mode` values, PROD-05.1's
 /// 1.3.0 `topic_configuration` file and FX-7's 1.2.0
 /// `archive.manifest_version_id` file are frozen beside it), its `$id` built
 /// from that ONE constant, so a renumber is the constant and a file name

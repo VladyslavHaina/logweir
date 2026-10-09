@@ -96,9 +96,13 @@ import { FINGERPRINT_COMMAND } from "./keys.js";
 import { apiClient, granted } from "../client.js";
 import {
   REDACTION_MARKER,
+  SCHEMA_DEPENDENCY_NOTE,
+  SCHEMA_REGISTRY_NOT_CAPTURED,
   catalogPointOffer,
   isRedacted,
   restoreCatalogPointRoute,
+  schemaDependencyOf,
+  schemaDependentTopicText,
 } from "./restore-wizard.js";
 
 // The product API's reads, for the destinations the connect form offers.
@@ -521,6 +525,45 @@ export function consumerPositionsNote(entry) {
       "atomic with the records: " + parts.join("; ")) + "</span>";
 }
 
+/** PROD-03.0: a point's schema-dependent topics, from its listed topics'
+ *  `schemaDependency` -- the topics whose archived keys or values carry
+ *  Confluent wire-format framing, with the sides and the schema ids. */
+export function schemaDependentTopicsOf(entry) {
+  return (Array.isArray((entry || {}).topics) ? entry.topics : [])
+    .filter((t) => t !== null && typeof t === "object" && typeof t.name === "string")
+    .map((t) => ({ topic: t.name, d: schemaDependencyOf(t.schemaDependency) }))
+    .filter((x) => x.d !== null && x.d.verdict === "schemaDependent")
+    .map((x) => ({ topic: x.topic, sides: x.d.sides, schemaIds: x.d.schemaIds,
+      schemaIdsOmitted: x.d.schemaIdsOmitted, basis: x.d.basis }));
+}
+
+/** PROD-03.0: the points of this page with schema-dependent topics, each
+ *  named with its topics and their schema ids, under the sentence the review
+ *  also says -- or `""` when no listed topic is schema-dependent. A point
+ *  whose topics are not listed says nothing here: its schema dependency is
+ *  NOT ASSESSED on this page, never "none". */
+export function renderSchemaDependentPoints(page) {
+  const rows = itemsOf(page)
+    .map((e) => ({ pointId: String((e || {}).pointId || ""), topics: schemaDependentTopicsOf(e) }))
+    .filter((r) => r.topics.length > 0);
+  if (rows.length === 0) {
+    return "";
+  }
+  return (
+    "<section class=\"schema-dependency\" id=\"catalog-schema-dependency\">" +
+    "<h3>Schema-dependent topics</h3>" +
+    "<p class=\"caveat\"><strong>" + esc(SCHEMA_REGISTRY_NOT_CAPTURED) + "</strong></p>" +
+    "<ul>" + rows.map((r) =>
+      "<li data-schema-dependent-point=\"" + esc(r.pointId) + "\"><code>" + esc(r.pointId) +
+      "</code>: " + r.topics.map((t) =>
+        "<span class=\"schema-dependent-topic\" data-topic=\"" + esc(t.topic) + "\">" +
+        esc(schemaDependentTopicText(t)) + "</span>").join(", ") + "</li>").join("") +
+    "</ul>" +
+    "<p class=\"note\">" + esc(SCHEMA_DEPENDENCY_NOTE) + "</p>" +
+    "</section>"
+  );
+}
+
 /** Said above the point table when the product API could not read every
  *  `Backup` verdict for this page (`backupVerdictsIncomplete`). */
 export const BACKUP_VERDICTS_INCOMPLETE_SENTENCE =
@@ -558,6 +601,8 @@ export function renderPoints(page, ns, catalog, destination) {
       ? ""
       : "<p class=\"note\" data-more-points=\"true\">" + messageText(MORE_POINTS_SENTENCE) + "</p>") +
     "<p class=\"note\">" + messageText(POINT_BINDING_SENTENCE) + "</p>" +
+    // PROD-03.0: which points' topics need a schema registry nobody captured.
+    renderSchemaDependentPoints(page) +
     (entries.some((entry) => isRedacted((entry || {}).receiptKey) ||
       isRedacted((entry || {}).backupId))
       ? "<p class=\"complaint\" data-redacted-binding=\"true\">" +

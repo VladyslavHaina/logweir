@@ -89,6 +89,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
         config_coverage: None,
         topic_configuration: None,
         owner_detection: None,
+        schema_dependency: None,
         consumer_positions: None,
     }
 }
@@ -1564,10 +1565,10 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // document. `just schema` is the only sanctioned way to change the file.
     // The CURRENT file is the newest MINOR's, named by the writer's constant
     // (FX-7 fix round, review M-2; 1.3.0 since PROD-05.1, 1.4.0 since
-    // PROD-01.3's auth modes), so a renumber moves the constant and the
-    // justfile, not this test; the 1.0.0, 1.1.0, 1.2.0 and 1.3.0 files are
-    // frozen beside it.
-    let version = logweir::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS;
+    // PROD-01.3's auth modes, 1.5.0 since PROD-03.0's schema dependency), so a
+    // renumber moves the constant and the justfile, not this test; the 1.0.0
+    // to 1.4.0 files are frozen beside it.
+    let version = logweir::catalog::record::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY;
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../schemas/logweir-catalog-point-{version}.json"
     ));
@@ -2427,13 +2428,194 @@ fn the_point_id_fixture_is_the_catalogs() {
     );
 }
 
+// ===========================================================================
+// PROD-03.0: record format 1.5.0, `topics[].schema_dependency`
+// ===========================================================================
+
+/// A 1.5.0 receipt whose one topic, `orders`, has `verdict` (judged over all
+/// its 1 234 records, values framed with ids 3 and 4 when dependent).
+fn receipt_1_5(verdict: &str) -> BackupReceipt {
+    let mut r = receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A");
+    r.format_version = "1.5.0".into();
+    let dependent = verdict == "schemaDependent";
+    let side = |dependent: bool| SideFraming {
+        dependent,
+        framed: if dependent { 1234 } else { 0 },
+        unframed: if dependent { 0 } else { 1234 },
+        nulls: 0,
+        schema_ids: if dependent { vec![3, 4] } else { vec![] },
+        schema_id_count: if dependent { 2 } else { 0 },
+    };
+    r.schema_dependency = Some(BTreeMap::from([(
+        "orders".to_string(),
+        TopicSchemaDependency {
+            verdict: verdict.into(),
+            reason: None,
+            basis: Some("complete".into()),
+            key: Some(side(false)),
+            value: Some(side(dependent)),
+        },
+    )]));
+    r.validate_invariants()
+        .expect("the fixture receipt is valid");
+    r
+}
+
+/// The writer COPIES the receipt's entry into the topic and says 1.5.0; an
+/// older receipt's record carries none (NOT ASSESSED) and keeps its format.
+#[test]
+fn a_1_5_0_record_copies_the_receipts_schema_dependency_and_absent_stays_absent() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_5("schemaDependent");
+    let p = point_for(&r, "s3://kafka-backups/prod", &key);
+    assert_eq!(
+        p.format_version,
+        logweir::catalog::record::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
+    );
+    assert_eq!(p.format_version, "1.5.0");
+    assert_eq!(
+        p.topics[0].schema_dependency,
+        r.schema_dependency.as_ref().unwrap().get("orders").cloned()
+    );
+    let old = point_for(
+        &receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A"),
+        "s3://kafka-backups/prod",
+        &key,
+    );
+    assert_eq!(old.topics[0].schema_dependency, None);
+    assert_eq!(
+        old.format_version, "1.1.0",
+        "an older receipt's record keeps its format"
+    );
+    let text = String::from_utf8(old.canonical_bytes().unwrap()).unwrap();
+    assert!(
+        !text.contains("schema_dependency"),
+        "absent is NOT ASSESSED: {text}"
+    );
+    // The index entry's shape did not change, so neither did its version.
+    assert_eq!(CatalogLogEntry::of(&p).format_version, "1.0.0");
+}
+
+/// **Rule 3 for the new field.** A record that says `notDetected` beside a
+/// receipt that says `schemaDependent` — the catalog hiding that a restore's
+/// records need a registry — or that carries the field beside a receipt that
+/// has none, is a `RecordMismatch`. Knowing less agrees.
+#[test]
+fn a_record_whose_schema_dependency_its_receipt_does_not_back_is_a_record_mismatch() {
+    let key = SigningKey::generate_ed25519();
+    let dependent = receipt_1_5("schemaDependent");
+    let bytes = receipt_bytes(&dependent);
+    let honest = point_for(&dependent, "s3://kafka-backups/prod", &key);
+    assert_eq!(
+        reader::cross_check(&honest, &dependent, &bytes),
+        CrossCheck::Agrees
+    );
+    let mut hidden = honest.clone();
+    hidden.topics[0].schema_dependency = receipt_1_5("notDetected")
+        .schema_dependency
+        .unwrap()
+        .get("orders")
+        .cloned();
+    match reader::cross_check(&hidden, &dependent, &bytes) {
+        CrossCheck::RecordMismatch(d) => assert!(
+            d.iter().any(|m| m
+                == "topics[\"orders\"].schema_dependency: \"notDetected\" ids [] vs \
+                    \"schemaDependent\" ids [3, 4]"),
+            "{d:?}"
+        ),
+        other => panic!("a record hiding the dependency must not agree: {other:?}"),
+    }
+    let old = receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A");
+    let old_bytes = receipt_bytes(&old);
+    let mut invented = point_for(&old, "s3://kafka-backups/prod", &key);
+    invented.topics[0].schema_dependency = honest.topics[0].schema_dependency.clone();
+    match reader::cross_check(&invented, &old, &old_bytes) {
+        CrossCheck::RecordMismatch(d) => assert!(
+            d.iter()
+                .any(|m| m.starts_with("topics[\"orders\"].schema_dependency")
+                    && m.ends_with("none in the receipt")),
+            "{d:?}"
+        ),
+        other => panic!("a dependency the older receipt cannot hold must not agree: {other:?}"),
+    }
+    let mut quieter = honest.clone();
+    quieter.topics[0].schema_dependency = None;
+    assert_eq!(
+        reader::cross_check(&quieter, &dependent, &bytes),
+        CrossCheck::Agrees
+    );
+}
+
+/// **Rule 4 for the new field.** Two records of one point conflict only where
+/// BOTH carry a schema dependency for a topic and it differs.
+#[test]
+fn two_records_conflict_on_schema_dependency_only_where_both_carry_it() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_5("schemaDependent");
+    let a = point_for(&r, "s3://kafka-backups/prod", &key);
+    let mut b = point_for(&r, "s3://dr-copy/prod", &key);
+    b.topics[0].schema_dependency = None;
+    assert!(matches!(
+        reader::reconcile(&a, &b),
+        Duplicate::SameIdentity { .. }
+    ));
+    let mut c = a.clone();
+    c.archive.location_id = "s3://dr-copy/prod".into();
+    c.topics[0].schema_dependency = receipt_1_5("notDetected")
+        .schema_dependency
+        .unwrap()
+        .get("orders")
+        .cloned();
+    match reader::reconcile(&a, &c) {
+        Duplicate::Conflict(d) => assert!(
+            d.iter()
+                .any(|m| m.starts_with("topics[\"orders\"].schema_dependency")),
+            "{d:?}"
+        ),
+        other => panic!("two copies disagreeing on schema dependency conflict: {other:?}"),
+    }
+}
+
+/// A 1.4.0 record reads under this build (reading rule 2), and its topics'
+/// schema dependency is absent: NOT ASSESSED.
+#[test]
+fn a_1_4_0_record_reads_with_its_schema_dependency_not_assessed() {
+    let mut v = serde_json::to_value(sample_point()).unwrap();
+    v["format_version"] = serde_json::json!("1.4.0");
+    match reader::read_record(&serde_json::to_vec(&v).unwrap()) {
+        RecordVerdict::Point(p) => {
+            assert!(p.topics.iter().all(|t| t.schema_dependency.is_none()));
+        }
+        other => panic!("a 1.4.0 record must read: {other:?}"),
+    }
+}
+
+/// The catalog point 1.4.0 schema is FROZEN beside the 1.5.0 one: it has no
+/// `schema_dependency`, the current file does.
+#[test]
+fn the_frozen_1_4_0_catalog_point_schema_is_still_prod_01_3s() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+    let frozen: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("logweir-catalog-point-1.4.0.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-catalog-point-1.4.0.json"
+    );
+    assert!(frozen["definitions"]["RecordTopic"]["properties"]["schema_dependency"].is_null());
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir::catalog::schema::catalog_point_schema()).unwrap();
+    assert!(current["definitions"]["RecordTopic"]["properties"]["schema_dependency"].is_object());
+}
+
 // ===================================================================== PROD-04.1
 
 /// A 1.5.0 receipt: `receipt_1_3` plus a consumer position block over its one
 /// topic — `billing` captured (one related position, at `position`, and one
 /// partition never committed), `share-1` excluded GroupTypeNotCaptured,
 /// `hidden` failed — bound to the positions document that holds them.
-fn receipt_1_5_at(position: i64) -> BackupReceipt {
+fn receipt_cp_at(position: i64) -> BackupReceipt {
     let mut r = receipt_1_3();
     r.format_version = logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.into();
     let doc: logweir_core::consumer_positions::PositionsDocument =
@@ -2486,8 +2668,8 @@ fn receipt_1_5_at(position: i64) -> BackupReceipt {
     r
 }
 
-fn receipt_1_5() -> BackupReceipt {
-    receipt_1_5_at(17)
+fn receipt_cp() -> BackupReceipt {
+    receipt_cp_at(17)
 }
 
 /// The record summarises the receipt's block, bound by its digest, and is
@@ -2495,7 +2677,7 @@ fn receipt_1_5() -> BackupReceipt {
 #[test]
 fn a_1_5_0_record_summarises_and_binds_the_receipts_consumer_positions() {
     let key = SigningKey::generate_ed25519();
-    let r = receipt_1_5();
+    let r = receipt_cp();
     let p = point_for(&r, "s3://kafka-backups/prod", &key);
     assert_eq!(
         p.format_version,
@@ -2542,7 +2724,7 @@ fn a_1_5_0_record_summarises_and_binds_the_receipts_consumer_positions() {
 #[test]
 fn a_consumer_positions_summary_the_receipt_does_not_back_is_a_record_mismatch() {
     let key = SigningKey::generate_ed25519();
-    let r = receipt_1_5();
+    let r = receipt_cp();
     let bytes = receipt_bytes(&r);
     let honest = point_for(&r, "s3://kafka-backups/prod", &key);
     let mismatch = |p: &CatalogPoint, receipt: &BackupReceipt, want: &str| match reader::cross_check(
@@ -2592,7 +2774,7 @@ fn a_consumer_positions_summary_the_receipt_does_not_back_is_a_record_mismatch()
 #[test]
 fn one_position_moved_is_another_digest_and_a_record_carrying_it_is_refused() {
     let key = SigningKey::generate_ed25519();
-    let (a, b) = (receipt_1_5_at(17), receipt_1_5_at(18));
+    let (a, b) = (receipt_cp_at(17), receipt_cp_at(18));
     let (ca, cb) = (
         a.consumer_positions.as_ref().unwrap(),
         b.consumer_positions.as_ref().unwrap(),
@@ -2622,7 +2804,7 @@ fn one_position_moved_is_another_digest_and_a_record_carrying_it_is_refused() {
 #[test]
 fn two_records_conflict_on_consumer_positions_only_where_both_carry_them() {
     let key = SigningKey::generate_ed25519();
-    let r = receipt_1_5();
+    let r = receipt_cp();
     let a = point_for(&r, "s3://kafka-backups/prod", &key);
     let mut b = point_for(&r, "s3://dr-copy/prod", &key);
     b.consumer_positions = None;

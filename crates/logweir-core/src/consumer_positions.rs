@@ -111,13 +111,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// `GroupSnapshot::outcome`'s closed set (arm 25).
+/// `GroupSnapshot::outcome`'s closed set (arm 33).
 pub const GROUP_OUTCOMES: [&str; 3] = ["captured", "excluded", "failed"];
 
-/// `GroupSnapshot::reason`'s closed set for an `excluded` group (arm 25).
+/// `GroupSnapshot::reason`'s closed set for an `excluded` group (arm 33).
 pub const EXCLUDED_REASONS: [&str; 2] = ["GroupTypeNotCaptured", "GroupNotFound"];
 
-/// `GroupSnapshot::reason`'s closed set for a `failed` group (arm 25).
+/// `GroupSnapshot::reason`'s closed set for a `failed` group (arm 33).
 ///
 /// - `NotVisibleToPrincipal`: no listing shows it and a targeted call was
 ///   refused GROUP_AUTHORIZATION_FAILED; it may exist (PROD-04.0 §5, T14).
@@ -136,7 +136,7 @@ pub const EXCLUDED_REASONS: [&str; 2] = ["GroupTypeNotCaptured", "GroupNotFound"
 /// - `CaptureUnavailable`: the run's reader could not read consumer groups.
 /// - `GroupVanishedDuringCapture`: its description answered `Dead` with no
 ///   member — the stand-in for "no such group" (PROD-04.0 T2) — so it was
-///   deleted, or its offsets expired, while it was being read (arm 26).
+///   deleted, or its offsets expired, while it was being read (arm 34).
 /// - `PartitionsNotRead`: a named topic's partitions were never read, so its
 ///   positions there are unknown (arm CP-10).
 pub const FAILED_REASONS: [&str; 14] = [
@@ -169,13 +169,13 @@ pub const PARTITIONS_NOT_READ: &str = "PartitionsNotRead";
 /// The reason an excluded group of a type Logweir does not capture carries.
 pub const GROUP_TYPE_NOT_CAPTURED: &str = "GroupTypeNotCaptured";
 
-/// The group types a `captured` group carries (arm 26).
+/// The group types a `captured` group carries (arm 34).
 pub const CAPTURED_TYPES: [&str; 2] = ["classic", "consumer"];
 
-/// The type an `excluded: GroupTypeNotCaptured` group carries (arm 26).
+/// The type an `excluded: GroupTypeNotCaptured` group carries (arm 34).
 pub const OTHER_TYPE: &str = "other";
 
-/// `GroupSnapshot::state` and `listed_state`'s closed set (arm 26): the states
+/// `GroupSnapshot::state` and `listed_state`'s closed set (arm 34): the states
 /// librdkafka names, and `stateUnknownToClient` for any other (KIP-848's
 /// `Assigning` and `Reconciling` among them), which counts as active.
 pub const GROUP_STATES: [&str; 6] = [
@@ -192,7 +192,7 @@ pub const GROUP_STATES: [&str; 6] = [
 pub const INACTIVE_STATES: [&str; 2] = ["Empty", "Dead"];
 
 /// The state a group being removed is described in. A captured group is never
-/// `Dead` with no member (arm 26).
+/// `Dead` with no member (arm 34).
 pub const DEAD_STATE: &str = "Dead";
 
 /// `PositionEntry::status`'s closed set (arm CP-12). A partition with no
@@ -235,7 +235,7 @@ pub const COVERAGE_RELATIONS: [&str; 6] = [
 /// The coverage words that RELATE a position to archived data.
 pub const RELATED: [&str; 2] = ["withinArchive", "atArchiveEnd"];
 
-/// `ConsumerPositions::listing`'s closed set (arm 23).
+/// `ConsumerPositions::listing`'s closed set (arm 31).
 pub const LISTING_VALUES: [&str; 2] = ["complete", "notComplete"];
 
 /// **The most groups one backup may select.** A larger selection is refused
@@ -291,15 +291,15 @@ pub struct ConsumerPositions {
     /// descriptions and the positions.
     pub observed_from: DateTime<Utc>,
     /// When it ended, after the group-capture marks and BEFORE the engine
-    /// started. At or after `observed_from` (arm 23).
+    /// started. At or after `observed_from` (arm 31).
     pub observed_to: DateTime<Utc>,
     /// `complete` when the group listings were complete (Describe on the
     /// cluster, no listing error), else `notComplete`: an unlisted id was then
     /// classified by a targeted describe (PROD-04.0 §5).
     pub listing: String,
-    /// The positions document this receipt binds (arm 24).
+    /// The positions document this receipt binds (arm 32).
     pub document: DocumentRef,
-    /// One entry per selected group id, keyed by it. Never empty (arm 23): a
+    /// One entry per selected group id, keyed by it. Never empty (arm 31): a
     /// backup that selects no group carries no block.
     pub groups: BTreeMap<String, GroupSnapshot>,
 }
@@ -341,11 +341,11 @@ pub struct GroupSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub members: Option<u32>,
     /// Whether either state says the group had members, so its positions may
-    /// have moved after they were read ([`active`], arm 27; captured only).
+    /// have moved after they were read ([`active`], arm 35; captured only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<bool>,
     /// Its positions, counted by what they say about archived data, over
-    /// every partition of every named topic (captured only; arm 26). The
+    /// every partition of every named topic (captured only; arm 34). The
     /// positions themselves are the document's, and arm CP-14 holds these
     /// counts to them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -509,7 +509,7 @@ pub fn active(state: &str, listed_state: &str) -> bool {
 }
 
 /// Whether a description answers "no such group": `Dead` with no member
-/// (PROD-04.0 T2). A group described so is never captured (arm 26).
+/// (PROD-04.0 T2). A group described so is never captured (arm 34).
 #[must_use]
 pub fn vanished(state: &str, members: u32) -> bool {
     state == DEAD_STATE && members == 0

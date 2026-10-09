@@ -57,6 +57,15 @@ pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 /// which an older reader ignores, and 1.5.0 includes every earlier minor.
 /// Written only for a backup that selected consumer groups.
 pub const FORMAT_VERSION_WITH_CONSUMER_POSITIONS: &str = "1.5.0";
+/// **PROD-03.0.** The format of a record whose topics carry the receipt's
+/// `schema_dependency` (`topics[].schema_dependency`) — copied from a receipt
+/// that is itself 1.5.0 (`logweir_core::backup_receipt::
+/// FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`), which every receipt this build
+/// signs is. A MINOR bump over [`FORMAT_VERSION_WITH_AUTH_MODES`]: one
+/// optional field, and 1.5.0 defines every earlier minor's fields and values
+/// (reading rule 2: an older reader ignores the field). A record backfilled
+/// from an older receipt keeps the format it would have had.
+pub const FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY: &str = "1.5.0";
 
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
@@ -413,6 +422,18 @@ pub struct RecordTopic {
     /// that predates 1.3.0. Never read as "no configuration".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration: Option<logweir_core::backup_receipt::TopicConfiguration>,
+    /// **Format 1.5.0 (PROD-03.0).** The receipt's `schema_dependency` entry
+    /// for this topic, copied and never recomputed: whether the archived keys
+    /// or values carry Confluent wire-format framing, with the schema ids
+    /// seen and the basis of the judgement. A `schemaDependent` topic reads
+    /// "schema-dependent, registry not captured".
+    ///
+    /// Receipt-derived under rule 3 — `reader::cross_check` refuses a record
+    /// whose copy the receipt does not back. ABSENT means NOT ASSESSED (rule
+    /// 2): every record before 1.5.0, and every record derived from a receipt
+    /// that predates 1.5.0. Never read as "not schema-dependent".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_dependency: Option<logweir_core::backup_receipt::TopicSchemaDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

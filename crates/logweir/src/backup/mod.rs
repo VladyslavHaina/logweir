@@ -60,6 +60,7 @@ pub mod config_coverage;
 pub mod consumer_positions;
 pub mod phase_minus1_admit;
 pub mod phase_run;
+pub mod schema_dependency;
 
 use crate::exit::ExitCode;
 use logweir_core::engine::{AuthRender, BackupFacts, BackupPlan, DataEngine};
@@ -201,6 +202,13 @@ pub struct BackupOutcome {
     /// without an owner reads "not checked", never "applied through the admin
     /// API".
     pub owner_detection: Vec<String>,
+    /// **PROD-03.0.** Per named topic, whether its archived keys or values
+    /// carry Confluent wire-format framing — `schema_dependency::detect` over
+    /// a bounded sample of the segments this run wrote, read back through the
+    /// archive handle; no registry is contacted. One entry per named topic;
+    /// `phase_run::build_receipt` writes it as the receipt's 1.5.0
+    /// `schema_dependency` block.
+    pub schema_dependency: BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>,
     /// **PROD-04.1.** The consumer position evidence of the selected groups
     /// (`consumer_positions::build`), or `None` when the run selected none:
     /// the receipt's 1.5.0 `consumer_positions` block.
@@ -836,6 +844,7 @@ fn execute_with_signer(
         config_coverage: coverage,
         topic_configuration,
         owner_detection: inputs.owner_detection.clone(),
+        schema_dependency: ran.schema_dependency,
         consumer_positions,
         consumer_positions_document,
         facts: ran.facts,

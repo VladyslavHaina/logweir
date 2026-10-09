@@ -1,18 +1,19 @@
-//! `BackupReceipt::validate_invariants` has exactly TWENTY-ONE arms — the four
+//! `BackupReceipt::validate_invariants` has exactly TWENTY-NINE arms — the four
 //! SELF-CONTRADICTION invariants and, since Task 5b fix round 1, the one
 //! CLOSED VALUE SET (`source.auth.mode`), plus since FX-4 the six arms (6-11)
 //! that read ONLY the 1.1.0 `config_coverage` block, plus since PROD-05.1 the
 //! eight (12-19) that run only on the 1.3.0 `topic_configuration` block and
-//! the two (20-21) over its `owner_detection`, plus since PROD-04.1 the
-//! six (22-27) that run only on the 1.5.0 `consumer_positions` block — and
-//! each one refuses with an exact message. The positions document that block
-//! binds has its own fourteen (CP-1 to CP-14,
+//! the two (20-21) over its `owner_detection`, plus since PROD-03.0 the eight
+//! (22-29) that run only on the 1.5.0 `schema_dependency` block, plus since
+//! PROD-04.1 the six (30-35) that run only on the 1.5.0 `consumer_positions`
+//! block — and each one refuses with an exact message. The positions document
+//! that block binds has its own fourteen (CP-1 to CP-14,
 //! `validate_consumer_positions_document`), asserted here the same way.
 //!
 //! The four and the five are asserted SEPARATELY and on purpose:
 //! `arm_cases()` carries the four self-contradiction arms and
 //! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` closes over them, while
-//! `validate_invariants_has_exactly_twenty_nine_return_err_statements` closes over
+//! `validate_invariants_has_exactly_thirty_seven_return_err_statements` closes over
 //! the function's TOTAL by reading its source text. So an arm added to the
 //! function without a case here fails the second test, and a case deleted
 //! from `arm_cases()` fails the first — neither number can go stale under
@@ -95,6 +96,7 @@ fn pristine() -> BackupReceipt {
         config_coverage: None,
         topic_configuration: None,
         owner_detection: None,
+        schema_dependency: None,
         consumer_positions: None,
     }
 }
@@ -108,7 +110,7 @@ fn pristine() -> BackupReceipt {
 /// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
 /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` keeps saying exactly
 /// what its name says while
-/// `validate_invariants_has_exactly_twenty_nine_return_err_statements` pins the
+/// `validate_invariants_has_exactly_thirty_seven_return_err_statements` pins the
 /// total.
 fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     // Arm 1: a major this reader has never seen.
@@ -343,16 +345,16 @@ fn the_written_version_follows_the_auth_mode() {
             username: None,
         };
         assert_eq!(
-            format_version_for(&doc.archive, false, &auth, false),
+            format_version_for(&doc.archive, false, false, &auth, false),
             RECEIPT_FORMAT_VERSION
         );
         assert_eq!(
-            format_version_for(&pinned, false, &auth, false),
+            format_version_for(&pinned, false, false, &auth, false),
             FORMAT_VERSION_WITH_MANIFEST_VERSION
         );
         for archive in [&doc.archive, &pinned] {
             assert_eq!(
-                format_version_for(archive, true, &auth, false),
+                format_version_for(archive, true, false, &auth, false),
                 FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
             );
         }
@@ -365,7 +367,7 @@ fn the_written_version_follows_the_auth_mode() {
         for archive in [&doc.archive, &pinned] {
             for topic_configuration in [false, true] {
                 assert_eq!(
-                    format_version_for(archive, topic_configuration, &auth, false),
+                    format_version_for(archive, topic_configuration, false, &auth, false),
                     FORMAT_VERSION_WITH_AUTH_MODES,
                     "{mode}, topic_configuration={topic_configuration}"
                 );
@@ -380,7 +382,8 @@ fn the_written_version_follows_the_auth_mode() {
     );
 }
 
-/// **THE TOTAL.** `validate_invariants` has exactly twenty-three refusing statements.
+/// **THE TOTAL.** `validate_invariants` has exactly thirty-one refusing statements
+/// (arm 5 is three statements, so twenty-nine arms are thirty-one).
 ///
 /// Read out of the SOURCE TEXT, which is the only way to make the count a
 /// claim about the function rather than about this file's case list: an arm
@@ -393,7 +396,7 @@ fn the_written_version_follows_the_auth_mode() {
 /// `crates/logweir/tests/two_reader_parity.rs::
 /// every_invariant_arm_has_a_corpus_case` applies to the scorecard's arms).
 #[test]
-fn validate_invariants_has_exactly_twenty_nine_return_err_statements() {
+fn validate_invariants_has_exactly_thirty_seven_return_err_statements() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/backup_receipt.rs"
@@ -414,9 +417,9 @@ fn validate_invariants_has_exactly_twenty_nine_return_err_statements() {
 
     let total = body.matches("return Err(format!(").count();
     assert_eq!(
-        total, 29,
+        total, 37,
         "BackupReceipt::validate_invariants has {total} `return Err(format!(` \
-         statement(s), not 29. Every one of them needs a per-arm test in this file with \
+         statement(s), not 37. Every one of them needs a per-arm test in this file with \
          its exact message AND a case in \
          e2e/fixtures/invariants/backup-receipt-index.json — \
          scripts/check-invariant-corpus.sh derives the list from this same slice and \
@@ -442,7 +445,7 @@ fn validate_invariants_has_exactly_twenty_nine_return_err_statements() {
 /// exact message, and a pristine receipt accepted. Arm 5 — the closed value
 /// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
 /// function's total is
-/// `validate_invariants_has_exactly_twenty_nine_return_err_statements`.
+/// `validate_invariants_has_exactly_thirty_seven_return_err_statements`.
 ///
 /// **RENAMED, Task 12 closeout carry (c).** It was
 /// `backup_receipt_invariants_have_exactly_four_arms`, which Task 5b's fix
@@ -1573,14 +1576,570 @@ fn the_written_version_defines_topic_configuration() {
     assert_eq!(minor, TOPIC_CONFIGURATION_SINCE_MINOR);
     let mut archive = pristine().archive;
     let auth = pristine().source.auth;
-    assert_eq!(format_version_for(&archive, true, &auth, false), "1.3.0");
-    assert_eq!(format_version_for(&archive, false, &auth, false), "1.1.0");
+    assert_eq!(
+        format_version_for(&archive, true, false, &auth, false),
+        "1.3.0"
+    );
+    assert_eq!(
+        format_version_for(&archive, false, false, &auth, false),
+        "1.1.0"
+    );
     archive.manifest_version_id = Some("v1".into());
-    assert_eq!(format_version_for(&archive, true, &auth, false), "1.3.0");
-    assert_eq!(format_version_for(&archive, false, &auth, false), "1.2.0");
+    assert_eq!(
+        format_version_for(&archive, true, false, &auth, false),
+        "1.3.0"
+    );
+    assert_eq!(
+        format_version_for(&archive, false, false, &auth, false),
+        "1.2.0"
+    );
 }
 
-// ===================================================================== 1.5.0
+// ===========================================================================
+// PROD-03.0: format 1.5.0, `schema_dependency` (arms 22-29)
+// ===========================================================================
+
+use logweir_core::backup_receipt::{SchemaDependency, SideFraming, TopicSchemaDependency};
+
+fn side(dependent: bool, framed: u64, unframed: u64, nulls: u64, ids: &[u32]) -> SideFraming {
+    SideFraming {
+        dependent,
+        framed,
+        unframed,
+        nulls,
+        schema_ids: ids.to_vec(),
+        schema_id_count: ids.len() as u64,
+    }
+}
+
+fn judged(
+    verdict: &str,
+    basis: &str,
+    key: SideFraming,
+    value: SideFraming,
+) -> TopicSchemaDependency {
+    TopicSchemaDependency {
+        verdict: verdict.to_string(),
+        reason: None,
+        basis: Some(basis.to_string()),
+        key: Some(key),
+        value: Some(value),
+    }
+}
+
+/// A 1.5.0 receipt that satisfies all twenty-nine arms: `orders` (12 records)
+/// judged completely, its values framed with ids 1 and 7 beside two
+/// tombstones and its keys unframed; `payments` (7 records) sampled, five
+/// records with null keys and unframed values.
+fn pristine_1_5() -> BackupReceipt {
+    let mut doc = pristine_1_3();
+    doc.format_version = "1.5.0".to_string();
+    let mut block = BTreeMap::new();
+    block.insert(
+        "orders".to_string(),
+        judged(
+            "schemaDependent",
+            "complete",
+            side(false, 0, 12, 0, &[]),
+            side(true, 10, 0, 2, &[1, 7]),
+        ),
+    );
+    block.insert(
+        "payments".to_string(),
+        judged(
+            "notDetected",
+            "sampled",
+            side(false, 0, 0, 5, &[]),
+            side(false, 0, 5, 0, &[]),
+        ),
+    );
+    doc.schema_dependency = Some(block);
+    doc
+}
+
+fn dep<'a>(doc: &'a mut BackupReceipt, name: &str) -> &'a mut TopicSchemaDependency {
+    doc.schema_dependency
+        .as_mut()
+        .unwrap()
+        .get_mut(name)
+        .unwrap()
+}
+
+#[test]
+fn a_1_5_0_receipt_satisfies_every_invariant() {
+    pristine_1_5()
+        .validate_invariants()
+        .expect("the pristine 1.5.0 receipt satisfies every arm");
+    // Every not-assessed shape is accepted too.
+    for reason in [
+        "segmentUnreadable",
+        "segmentTooLargeForDetection",
+        "detectionTimeBudgetExceeded",
+    ] {
+        let mut doc = pristine_1_5();
+        *dep(&mut doc, "payments") = logweir_core::schema_dependency::not_assessed(reason);
+        doc.validate_invariants().expect(reason);
+    }
+    let mut doc = pristine_1_5();
+    doc.records.insert("payments".into(), 0);
+    *dep(&mut doc, "payments") = logweir_core::schema_dependency::not_assessed("noRecords");
+    doc.validate_invariants()
+        .expect("noRecords beside a count of 0");
+}
+
+#[test]
+fn a_receipt_without_schema_dependency_is_decided_as_before() {
+    let mut doc = pristine_1_5();
+    doc.schema_dependency = None;
+    doc.validate_invariants()
+        .expect("absent is not assessed, never refused");
+    pristine_1_3().validate_invariants().expect("1.3.0");
+}
+
+#[test]
+fn arm_22_refuses_schema_dependency_under_a_minor_before_5() {
+    let mut doc = pristine_1_5();
+    doc.format_version = "1.4.0".to_string();
+    refused_with(
+        &doc,
+        "schema_dependency is present but format_version \"1.4.0\" predates it: the field is \
+         defined from 1.5.0",
+        "arm 22",
+    );
+}
+
+#[test]
+fn arm_23_refuses_schema_dependency_that_does_not_cover_the_named_topic_set() {
+    let mut doc = pristine_1_5();
+    doc.schema_dependency.as_mut().unwrap().remove("payments");
+    refused_with(
+        &doc,
+        "schema_dependency covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
+        "arm 23, a topic missing",
+    );
+    let mut doc = pristine_1_5();
+    let extra = dep(&mut doc, "payments").clone();
+    doc.schema_dependency
+        .as_mut()
+        .unwrap()
+        .insert("invoices".into(), extra);
+    refused_with(
+        &doc,
+        "schema_dependency covers {\"invoices\", \"orders\", \"payments\"} but the named topic set \
+         is {\"orders\", \"payments\"}",
+        "arm 23, a topic not named",
+    );
+}
+
+const ARM_24_TAIL: &str = " is not a verdict this format defines: the verdict is \
+     \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a \
+     reason, \"noRecords\", \"segmentUnreadable\", \"segmentTooLargeForDetection\" or \
+     \"detectionTimeBudgetExceeded\", and no basis, and any other topic has a basis, \
+     \"sampled\" or \"complete\", and no reason";
+
+#[test]
+fn arm_24_refuses_a_verdict_reason_or_basis_outside_the_closed_sets() {
+    type Mutation = Box<dyn Fn(&mut TopicSchemaDependency)>;
+    let cases: Vec<(&str, Mutation, &str)> = vec![
+        (
+            "a verdict outside the three",
+            Box::new(|e| e.verdict = "registryNeeded".into()),
+            "schema_dependency[\"orders\"] verdict \"registryNeeded\" with reason absent and basis \"complete\"",
+        ),
+        (
+            "a judged topic with a reason",
+            Box::new(|e| e.reason = Some("noRecords".into())),
+            "schema_dependency[\"orders\"] verdict \"schemaDependent\" with reason \"noRecords\" and basis \"complete\"",
+        ),
+        (
+            "a judged topic with no basis",
+            Box::new(|e| e.basis = None),
+            "schema_dependency[\"orders\"] verdict \"schemaDependent\" with reason absent and basis absent",
+        ),
+        (
+            "a basis outside the two",
+            Box::new(|e| e.basis = Some("partial".into())),
+            "schema_dependency[\"orders\"] verdict \"schemaDependent\" with reason absent and basis \"partial\"",
+        ),
+        (
+            "a not-assessed topic with a basis",
+            Box::new(|e| {
+                *e = logweir_core::schema_dependency::not_assessed("noRecords");
+                e.basis = Some("sampled".into());
+            }),
+            "schema_dependency[\"orders\"] verdict \"notAssessed\" with reason \"noRecords\" and basis \"sampled\"",
+        ),
+        (
+            "a not-assessed topic with no reason",
+            Box::new(|e| {
+                *e = logweir_core::schema_dependency::not_assessed("noRecords");
+                e.reason = None;
+            }),
+            "schema_dependency[\"orders\"] verdict \"notAssessed\" with reason absent and basis absent",
+        ),
+        (
+            "a reason outside the two",
+            Box::new(|e| {
+                *e = logweir_core::schema_dependency::not_assessed("registryDown");
+            }),
+            "schema_dependency[\"orders\"] verdict \"notAssessed\" with reason \"registryDown\" and basis absent",
+        ),
+    ];
+    for (what, mutate, head) in cases {
+        let mut doc = pristine_1_5();
+        mutate(dep(&mut doc, "orders"));
+        refused_with(&doc, &format!("{head}{ARM_24_TAIL}"), what);
+    }
+}
+
+#[test]
+fn arm_25_refuses_sides_that_do_not_fit_the_verdict() {
+    let tail = ": a judged topic records a key side and a value side over the same records, at \
+                least one, and a \"notAssessed\" topic records neither";
+    let mut doc = pristine_1_5();
+    dep(&mut doc, "orders").value = None;
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"orders\"] verdict \"schemaDependent\" records key 12 records and value absent{tail}"),
+        "a judged topic missing a side",
+    );
+    let mut doc = pristine_1_5();
+    dep(&mut doc, "orders").key.as_mut().unwrap().unframed = 11;
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"orders\"] verdict \"schemaDependent\" records key 11 records and value 12 records{tail}"),
+        "sides over different records",
+    );
+    let mut doc = pristine_1_5();
+    let e = dep(&mut doc, "payments");
+    e.key = Some(side(false, 0, 0, 0, &[]));
+    e.value = Some(side(false, 0, 0, 0, &[]));
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"payments\"] verdict \"notDetected\" records key 0 records and value 0 records{tail}"),
+        "a judged topic that judged nothing",
+    );
+    let mut doc = pristine_1_5();
+    let e = dep(&mut doc, "payments");
+    let key = e.key.clone();
+    *e = logweir_core::schema_dependency::not_assessed("segmentUnreadable");
+    e.key = key;
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"payments\"] verdict \"notAssessed\" records key 5 records and value absent{tail}"),
+        "a not-assessed topic with a side",
+    );
+}
+
+#[test]
+fn arm_26_refuses_a_judged_count_the_receipt_does_not_back() {
+    let tail = ": a \"complete\" basis judges every record the receipt counts, a \"sampled\" one \
+                at most that many, and \"noRecords\" is said only of a topic that counts none";
+    let mut doc = pristine_1_5();
+    doc.records.insert("orders".into(), 13);
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"orders\"] judges 12 records under \"complete\" and records counts 13{tail}"),
+        "complete, but a record was not judged",
+    );
+    let mut doc = pristine_1_5();
+    doc.records.insert("payments".into(), 4);
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"payments\"] judges 5 records under \"sampled\" and records counts 4{tail}"),
+        "sampled more than the receipt counts",
+    );
+    let mut doc = pristine_1_5();
+    *dep(&mut doc, "payments") = logweir_core::schema_dependency::not_assessed("noRecords");
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"payments\"] judges 0 records under \"noRecords\" and records counts 7{tail}"),
+        "noRecords beside a topic with records",
+    );
+    // The boundary holds: sampled may judge exactly what is counted.
+    let mut doc = pristine_1_5();
+    doc.records.insert("payments".into(), 5);
+    doc.validate_invariants().expect("sampled == counted");
+}
+
+#[test]
+fn arm_27_refuses_ids_that_do_not_fit_the_count_or_the_framing() {
+    let tail = ": the ids are distinct, ascending and from 1 to 16777215, all of them when the \
+                count is 16 or fewer and 16 otherwise, and the count is at least 1 exactly when \
+                a record is framed and never above the framed count";
+    let cases: Vec<(&str, Vec<u32>, u64, u64, &str)> = vec![
+        (
+            "descending",
+            vec![7, 1],
+            2,
+            10,
+            "[7, 1] with schema_id_count 2 and framed 10",
+        ),
+        (
+            "a repeat",
+            vec![7, 7],
+            2,
+            10,
+            "[7, 7] with schema_id_count 2 and framed 10",
+        ),
+        (
+            "id 0",
+            vec![0, 7],
+            2,
+            10,
+            "[0, 7] with schema_id_count 2 and framed 10",
+        ),
+        (
+            "id 2^24",
+            vec![1, 16_777_216],
+            2,
+            10,
+            "[1, 16777216] with schema_id_count 2 and framed 10",
+        ),
+        (
+            "fewer listed than counted",
+            vec![1],
+            2,
+            10,
+            "[1] with schema_id_count 2 and framed 10",
+        ),
+        (
+            "a count above the framed records",
+            vec![1, 7],
+            2,
+            1,
+            "[1, 7] with schema_id_count 2 and framed 1",
+        ),
+    ];
+    for (what, ids, count, framed, said) in cases {
+        let mut doc = pristine_1_5();
+        let v = dep(&mut doc, "orders").value.as_mut().unwrap();
+        v.schema_ids = ids;
+        v.schema_id_count = count;
+        v.framed = framed;
+        v.unframed = 10 - framed;
+        refused_with(
+            &doc,
+            &format!("schema_dependency[\"orders\"].value lists schema_ids {said}{tail}"),
+            what,
+        );
+    }
+    // Framed records with no id, on the key side.
+    let mut doc = pristine_1_5();
+    let k = dep(&mut doc, "orders").key.as_mut().unwrap();
+    k.framed = 1;
+    k.unframed = 11;
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"orders\"].key lists schema_ids [] with schema_id_count 0 and framed 1{tail}"),
+        "framed, and no id",
+    );
+    // More than 16: 16 listed, the count above them. `orders` grows to 30
+    // records so 20 ids fit inside its framed count.
+    let thirty = |listed: u32| {
+        let mut doc = pristine_1_5();
+        doc.records.insert("orders".into(), 30);
+        let e = dep(&mut doc, "orders");
+        e.key = Some(side(false, 0, 30, 0, &[]));
+        let v = e.value.as_mut().unwrap();
+        v.framed = 28;
+        v.nulls = 2;
+        v.schema_ids = (1..=listed).collect();
+        v.schema_id_count = 20;
+        doc
+    };
+    thirty(16)
+        .validate_invariants()
+        .expect("16 listed of 20 is the cap");
+    refused_with(
+        &thirty(17),
+        &format!(
+            "schema_dependency[\"orders\"].value lists schema_ids {:?} with schema_id_count 20 \
+             and framed 28{tail}",
+            (1..=17).collect::<Vec<u32>>()
+        ),
+        "17 listed",
+    );
+    refused_with(
+        &thirty(15),
+        &format!(
+            "schema_dependency[\"orders\"].value lists schema_ids {:?} with schema_id_count 20 \
+             and framed 28{tail}",
+            (1..=15).collect::<Vec<u32>>()
+        ),
+        "15 listed of 20",
+    );
+}
+
+#[test]
+fn arm_28_refuses_a_dependent_flag_the_counts_do_not_give() {
+    let tail = ": a side is dependent exactly when at least one record and at least one in ten \
+                of its non-null records are framed";
+    // One in ten exactly is dependent; one in eleven is not.
+    let mut doc = pristine_1_5();
+    let v = dep(&mut doc, "orders").value.as_mut().unwrap();
+    v.framed = 1;
+    v.unframed = 9;
+    v.nulls = 2;
+    v.schema_ids = vec![1];
+    v.schema_id_count = 1;
+    doc.validate_invariants().expect("1 of 10 is dependent");
+    let v = dep(&mut doc, "orders").value.as_mut().unwrap();
+    v.unframed = 10;
+    v.nulls = 1;
+    refused_with(
+        &doc,
+        &format!(
+            "schema_dependency[\"orders\"].value is dependent with framed 1 and unframed 10{tail}"
+        ),
+        "1 of 11 claimed dependent",
+    );
+    // Nulls never count toward the share.
+    let mut doc = pristine_1_5();
+    let v = dep(&mut doc, "orders").value.as_mut().unwrap();
+    v.framed = 1;
+    v.unframed = 0;
+    v.nulls = 11;
+    v.schema_ids = vec![1];
+    v.schema_id_count = 1;
+    doc.validate_invariants()
+        .expect("1 framed beside 11 tombstones is dependent");
+    // A side that is not claimed dependent when its counts say it is.
+    let mut doc = pristine_1_5();
+    let k = dep(&mut doc, "payments").key.as_mut().unwrap();
+    k.framed = 5;
+    k.nulls = 0;
+    k.schema_ids = vec![3];
+    k.schema_id_count = 1;
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"payments\"].key is not dependent with framed 5 and unframed 0{tail}"),
+        "all framed, claimed not dependent",
+    );
+}
+
+#[test]
+fn arm_29_refuses_a_verdict_its_sides_do_not_give() {
+    let tail =
+        " does not fit its sides: a judged topic is \"schemaDependent\" exactly when its key \
+                side or its value side is dependent";
+    let mut doc = pristine_1_5();
+    dep(&mut doc, "orders").verdict = "notDetected".into();
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"orders\"] verdict \"notDetected\"{tail}"),
+        "a dependent value side under notDetected",
+    );
+    let mut doc = pristine_1_5();
+    dep(&mut doc, "payments").verdict = "schemaDependent".into();
+    refused_with(
+        &doc,
+        &format!("schema_dependency[\"payments\"] verdict \"schemaDependent\"{tail}"),
+        "schemaDependent with no dependent side",
+    );
+    // A dependent KEY side alone makes the topic dependent.
+    let mut doc = pristine_1_5();
+    let e = dep(&mut doc, "payments");
+    e.verdict = "schemaDependent".into();
+    e.key = Some(side(true, 5, 0, 0, &[4]));
+    doc.validate_invariants().expect("a dependent key side");
+}
+
+#[test]
+fn the_owner_arms_are_evaluated_before_the_schema_dependency_arms() {
+    let mut doc = pristine_1_5();
+    doc.owner_detection = Some(vec!["declared".into()]);
+    dep(&mut doc, "orders").verdict = "nope".into();
+    let got = doc.validate_invariants().unwrap_err();
+    assert!(
+        got.starts_with("topic_configuration[\"orders\"].owner by"),
+        "{got}"
+    );
+}
+
+/// The written version and the first minor that defines the block move
+/// together, or every receipt this build signs refuses itself at arm 22; and
+/// a receipt carrying the block is 1.5.0 whatever else it carries.
+#[test]
+fn the_written_version_defines_schema_dependency() {
+    use logweir_core::backup_receipt::{
+        format_version_for, FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY, SCHEMA_DEPENDENCY_SINCE_MINOR,
+    };
+    let minor: u64 = FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
+        .split('.')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(minor, SCHEMA_DEPENDENCY_SINCE_MINOR);
+    assert_eq!(FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY, "1.5.0");
+    let mut pinned = pristine().archive;
+    pinned.manifest_version_id = Some("v1".into());
+    for mode in ["plaintext", "scramSha512", "scramSha256", "plain", "mtls"] {
+        let auth = ReceiptAuth {
+            mode: mode.into(),
+            username: None,
+        };
+        for archive in [&pristine().archive, &pinned] {
+            for topic_configuration in [false, true] {
+                assert_eq!(
+                    format_version_for(archive, topic_configuration, true, &auth, false),
+                    "1.5.0",
+                    "{mode}"
+                );
+            }
+        }
+    }
+    // 1.5.0 defines the PROD-01.3 modes: a 1.5.0 receipt naming one is
+    // accepted by arm 5.
+    let mut doc = pristine_1_5();
+    doc.source.auth.mode = "mtls".into();
+    doc.validate_invariants().expect("1.5.0 defines mtls");
+}
+
+#[test]
+fn schema_dependency_of_reads_absent_as_not_assessed_never_not_detected() {
+    let doc = pristine_1_5();
+    assert_eq!(
+        SchemaDependency::of(&doc, "orders"),
+        SchemaDependency::SchemaDependent
+    );
+    assert_eq!(
+        SchemaDependency::of(&doc, "payments"),
+        SchemaDependency::NotDetected
+    );
+    assert_eq!(
+        SchemaDependency::of(&doc, "invoices"),
+        SchemaDependency::NotAssessed
+    );
+    assert_eq!(
+        SchemaDependency::of(&pristine_1_3(), "payments"),
+        SchemaDependency::NotAssessed
+    );
+    assert_eq!(
+        SchemaDependency::from_wire("notdetected"),
+        SchemaDependency::NotAssessed
+    );
+}
+
+#[test]
+fn a_1_4_0_receipt_round_trips_byte_for_byte_through_the_1_5_0_type() {
+    let mut doc = pristine_1_3();
+    doc.format_version = "1.4.0".into();
+    let bytes = logweir_core::det_json::to_deterministic_json(&doc).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("schema_dependency"));
+    let back: BackupReceipt = serde_json::from_slice(&bytes).unwrap();
+    assert!(back.schema_dependency.is_none());
+    assert_eq!(
+        logweir_core::det_json::to_deterministic_json(&back).unwrap(),
+        bytes
+    );
+}
+
+// ===========================================================================
+// PROD-04.1: format 1.5.0, `consumer_positions` (arms 30-35) and the
+// positions document it binds (CP-1 to CP-14)
+// ===========================================================================
 
 /// A partition's facts, as JSON.
 fn facts(
@@ -1605,7 +2164,7 @@ fn facts(
     v
 }
 
-/// The positions document of [`pristine_1_5`]. `orders` has three partitions,
+/// The positions document of [`pristine_cp`]. `orders` has three partitions,
 /// the third added during the capture; `payments` one. Group `billing` is
 /// captured (a committed position on each topic, `orders` 1 never committed,
 /// `orders` 2 not observed), `audit` captured with a position beyond the end,
@@ -1656,7 +2215,7 @@ fn pristine_document() -> PositionsDocument {
 /// [`pristine_document`]: `billing` and `audit` captured with the counts the
 /// document's positions give, `share-1` excluded GroupTypeNotCaptured, `gone`
 /// excluded GroupNotFound, `hidden` failed NotVisibleToPrincipal.
-fn pristine_1_5() -> BackupReceipt {
+fn pristine_cp() -> BackupReceipt {
     let mut doc = pristine_1_3();
     doc.format_version =
         logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.to_string();
@@ -1726,18 +2285,18 @@ fn pentry<'a>(d: &'a mut PositionsDocument, group: &str, i: usize) -> &'a mut Po
 
 #[test]
 fn a_1_5_0_receipt_and_its_document_satisfy_every_invariant() {
-    assert_eq!(pristine_1_5().validate_invariants(), Ok(()));
-    assert_eq!(check(pristine_1_5(), &pristine_document()), Ok(()));
+    assert_eq!(pristine_cp().validate_invariants(), Ok(()));
+    assert_eq!(check(pristine_cp(), &pristine_document()), Ok(()));
     // Without the block the document is decided exactly as 1.3.0 was.
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     doc.consumer_positions = None;
     assert_eq!(doc.validate_invariants(), Ok(()));
 }
 
 #[test]
-fn arm_22_refuses_consumer_positions_under_the_minor_before_it() {
+fn arm_30_refuses_consumer_positions_under_the_minor_before_it() {
     use logweir_core::backup_receipt::CONSUMER_POSITIONS_SINCE_MINOR as SINCE;
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     let before = format!("1.{}.0", SINCE - 1);
     doc.format_version = before.clone();
     assert_eq!(
@@ -1751,10 +2310,10 @@ fn arm_22_refuses_consumer_positions_under_the_minor_before_it() {
 
 /// Arm 23, including the review's L1: a capture that ends before it starts.
 #[test]
-fn arm_23_refuses_a_backwards_window_a_listing_outside_the_set_or_no_group() {
+fn arm_31_refuses_a_backwards_window_a_listing_outside_the_set_or_no_group() {
     let tail = "the capture ends at or after it starts, the listing is \"complete\" or \
                 \"notComplete\", and at least one group is recorded";
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     cp(&mut doc).listing = "partial".into();
     assert_eq!(
         doc.validate_invariants().unwrap_err(),
@@ -1763,7 +2322,7 @@ fn arm_23_refuses_a_backwards_window_a_listing_outside_the_set_or_no_group() {
              at or after it starts: {tail}"
         )
     );
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     cp(&mut doc).groups.clear();
     assert_eq!(
         doc.validate_invariants().unwrap_err(),
@@ -1772,7 +2331,7 @@ fn arm_23_refuses_a_backwards_window_a_listing_outside_the_set_or_no_group() {
              at or after it starts: {tail}"
         )
     );
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     cp(&mut doc).observed_to = "2000-01-01T00:00:00Z".parse().unwrap();
     assert_eq!(
         doc.validate_invariants().unwrap_err(),
@@ -1782,13 +2341,13 @@ fn arm_23_refuses_a_backwards_window_a_listing_outside_the_set_or_no_group() {
         )
     );
     // The boundary: a capture that ends as it starts.
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     cp(&mut doc).observed_to = cp(&mut doc).observed_from;
     assert_eq!(doc.validate_invariants(), Ok(()));
 }
 
 #[test]
-fn arm_24_refuses_a_document_reference_that_is_not_this_runs() {
+fn arm_32_refuses_a_document_reference_that_is_not_this_runs() {
     let want = |key: &str, sha: &str, bytes: u64| {
         format!(
             "consumer_positions.document is {key:?} with sha256 {sha:?} over {bytes} bytes: the \
@@ -1797,7 +2356,7 @@ fn arm_24_refuses_a_document_reference_that_is_not_this_runs() {
              lowercase hex digits, over at least one byte"
         )
     };
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     let good = cp(&mut doc).document.clone();
     let other = "logweir/backups/logweir-backup-01J8Z9QK7V/another-run.consumer-positions.json";
     cp(&mut doc).document.key = other.into();
@@ -1805,14 +2364,14 @@ fn arm_24_refuses_a_document_reference_that_is_not_this_runs() {
         doc.validate_invariants().unwrap_err(),
         want(other, &good.sha256, good.bytes)
     );
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     let upper = good.sha256.to_uppercase().replace("SHA256:", "sha256:");
     cp(&mut doc).document.sha256 = upper.clone();
     assert_eq!(
         doc.validate_invariants().unwrap_err(),
         want(&good.key, &upper, good.bytes)
     );
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     cp(&mut doc).document.bytes = 0;
     assert_eq!(
         doc.validate_invariants().unwrap_err(),
@@ -1821,7 +2380,7 @@ fn arm_24_refuses_a_document_reference_that_is_not_this_runs() {
 }
 
 #[test]
-fn arm_25_refuses_an_outcome_or_reason_that_does_not_fit() {
+fn arm_33_refuses_an_outcome_or_reason_that_does_not_fit() {
     let want = |id: &str, outcome: &str, reason: &str| {
         format!(
             "consumer_positions.groups[{id:?}] has outcome {outcome} and reason {reason}: the \
@@ -1856,7 +2415,7 @@ fn arm_25_refuses_an_outcome_or_reason_that_does_not_fit() {
             "an outcome outside the set",
         ),
     ] {
-        let mut doc = pristine_1_5();
+        let mut doc = pristine_cp();
         let g = group(&mut doc, id);
         g.outcome = outcome.trim_matches('"').into();
         g.reason = reason.map(str::to_string);
@@ -1877,7 +2436,7 @@ fn arm_25_refuses_an_outcome_or_reason_that_does_not_fit() {
 /// counts), the review's M2 (a captured group described `Dead` with no
 /// member), and the two other branches.
 #[test]
-fn arm_26_refuses_fields_that_do_not_fit_the_outcome() {
+fn arm_34_refuses_fields_that_do_not_fit_the_outcome() {
     let tail = "a captured group records a type of \"classic\" or \"consumer\", both states \
                 from the closed set, its members, active and counts over at least one \
                 partition, and is never \"Dead\" with no member; a GroupTypeNotCaptured group \
@@ -1986,18 +2545,18 @@ fn arm_26_refuses_fields_that_do_not_fit_the_outcome() {
         ),
     ];
     for (mutate, want) in rows {
-        let mut doc = pristine_1_5();
+        let mut doc = pristine_cp();
         mutate(group(&mut doc, "billing"));
         assert_eq!(doc.validate_invariants().unwrap_err(), want);
     }
     // The control of the vanished clause: `Dead` WITH a member is described
     // as the broker answered, and the receipt holds.
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     let g = group(&mut doc, "billing");
     g.state = Some("Dead".into());
     assert_eq!(doc.validate_invariants(), Ok(()));
     // A failed group carrying counts; an excluded one without `other`.
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     group(&mut doc, "hidden").counts = Some(PositionCounts::default());
     assert_eq!(
         doc.validate_invariants().unwrap_err(),
@@ -2007,7 +2566,7 @@ fn arm_26_refuses_fields_that_do_not_fit_the_outcome() {
              partition(s): {tail}"
         )
     );
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     group(&mut doc, "share-1").group_type = None;
     assert!(doc.validate_invariants().unwrap_err().starts_with(
         "consumer_positions.groups[\"share-1\"] is \"excluded\" with group_type absent"
@@ -2015,8 +2574,8 @@ fn arm_26_refuses_fields_that_do_not_fit_the_outcome() {
 }
 
 #[test]
-fn arm_27_refuses_an_active_flag_the_states_do_not_derive() {
-    let mut doc = pristine_1_5();
+fn arm_35_refuses_an_active_flag_the_states_do_not_derive() {
+    let mut doc = pristine_cp();
     let g = group(&mut doc, "audit");
     g.listed_state = Some("PreparingRebalance".into());
     assert_eq!(
@@ -2029,7 +2588,7 @@ fn arm_27_refuses_an_active_flag_the_states_do_not_derive() {
 
 #[test]
 fn the_consumer_positions_arms_run_after_every_earlier_arm() {
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     cp(&mut doc).listing = "partial".into();
     topic(&mut doc, "orders").partitions = Some(0);
     let got = doc.validate_invariants().unwrap_err();
@@ -2040,7 +2599,7 @@ fn the_consumer_positions_arms_run_after_every_earlier_arm() {
 }
 
 /// The written version and the first minor that defines the block move
-/// together, or every receipt that selects groups refuses itself at arm 22.
+/// together, or every receipt that selects groups refuses itself at arm 30.
 #[test]
 fn the_written_version_defines_consumer_positions() {
     use logweir_core::backup_receipt::{
@@ -2056,16 +2615,19 @@ fn the_written_version_defines_consumer_positions() {
     let mut archive = pristine().archive;
     let mut auth = pristine().source.auth;
     assert_eq!(
-        format_version_for(&archive, true, &auth, true),
+        format_version_for(&archive, true, false, &auth, true),
         FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     );
     archive.manifest_version_id = Some("v1".into());
     auth.mode = "mtls".into();
     assert_eq!(
-        format_version_for(&archive, true, &auth, true),
+        format_version_for(&archive, true, false, &auth, true),
         FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     );
-    assert_eq!(format_version_for(&archive, true, &auth, false), "1.4.0");
+    assert_eq!(
+        format_version_for(&archive, true, false, &auth, false),
+        "1.4.0"
+    );
 }
 
 // --------------------------------------------- the positions document, CP-1..14
@@ -2120,7 +2682,7 @@ fn cp_1_refuses_a_document_for_a_receipt_that_selected_no_group() {
 /// receipt signed.
 #[test]
 fn cp_2_refuses_a_document_the_receipt_did_not_sign_even_with_equal_counts() {
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     let bytes = bind(&mut doc, &pristine_document());
     let signed = cp(&mut doc).document.clone();
     let mut other = pristine_document();
@@ -2166,7 +2728,7 @@ fn cp_3_refuses_a_document_for_another_run_or_format() {
     let mut other = pristine_document();
     other.run_id = "another-run".into();
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         "the positions document is format \"1.0.0\" for backup \"logweir-backup-01J8Z9QK7V\" run \
          \"another-run\" but the receipt is backup \"logweir-backup-01J8Z9QK7V\" run \
          \"01J8Z9QK7V6M3F2R5T8W1XB0CD\": a format-1 positions document names its receipt's own \
@@ -2174,7 +2736,7 @@ fn cp_3_refuses_a_document_for_another_run_or_format() {
     );
     let mut other = pristine_document();
     other.format_version = "2.0.0".into();
-    assert!(check(pristine_1_5(), &other)
+    assert!(check(pristine_cp(), &other)
         .unwrap_err()
         .starts_with("the positions document is format \"2.0.0\""));
 }
@@ -2184,7 +2746,7 @@ fn cp_4_refuses_topics_that_are_not_the_named_set() {
     let mut other = pristine_document();
     other.topics.remove("payments");
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         "the positions document's topics cover {\"orders\"} but the named topic set is \
          {\"orders\", \"payments\"}"
     );
@@ -2195,7 +2757,7 @@ fn cp_5_refuses_partitions_out_of_order() {
     let mut other = pristine_document();
     other.topics.get_mut("orders").unwrap().partitions[1].partition = 2;
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         "the positions document's topics[\"orders\"].partitions[1] is partition 2: each topic \
          lists its partitions from 0, one entry each, in order"
     );
@@ -2219,7 +2781,7 @@ fn cp_6_refuses_marks_that_are_not_well_formed() {
     for mutate in rows {
         let mut other = pristine_document();
         mutate(&mut other.topics.get_mut("orders").unwrap().partitions[0]);
-        assert_eq!(check(pristine_1_5(), &other).unwrap_err(), want);
+        assert_eq!(check(pristine_cp(), &other).unwrap_err(), want);
     }
 }
 
@@ -2232,14 +2794,14 @@ fn cp_7_refuses_a_changed_flag_the_marks_do_not_derive() {
         .unwrap()
         .changed_during_capture = true;
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         "the positions document's topics[\"payments\"].changed_during_capture is true but its \
          marks say false: a topic changed during the capture exactly when a mark read after the \
          engine is below the one read at group capture"
     );
     let mut other = pristine_document();
     other.topics.get_mut("orders").unwrap().partitions[0].high_watermark_after = Some(19);
-    assert!(check(pristine_1_5(), &other).unwrap_err().starts_with(
+    assert!(check(pristine_cp(), &other).unwrap_err().starts_with(
         "the positions document's topics[\"orders\"].changed_during_capture is false"
     ));
 }
@@ -2250,14 +2812,14 @@ fn cp_8_refuses_positions_for_a_group_that_was_not_captured_or_none_for_one_that
     let billing = other.groups["billing"].clone();
     other.groups.insert("hidden".into(), billing);
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         "the positions document records positions for the groups {\"audit\", \"billing\", \
          \"hidden\"} but the receipt's captured groups are {\"audit\", \"billing\"}: it records \
          exactly the captured groups"
     );
     let mut other = pristine_document();
     other.groups.remove("audit");
-    assert!(check(pristine_1_5(), &other)
+    assert!(check(pristine_cp(), &other)
         .unwrap_err()
         .starts_with("the positions document records positions for the groups {\"billing\"}"));
 }
@@ -2280,7 +2842,7 @@ fn cp_9_refuses_a_position_on_a_changed_topic_and_a_blame_without_a_change() {
     t.partitions[0].log_start_after = Some(0);
     t.changed_during_capture = true;
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want("billing", "captured", "absent", "{\"payments\"}")
     );
     // The review's A3: a kept EXCLUDED position on a changed topic counts too.
@@ -2288,7 +2850,7 @@ fn cp_9_refuses_a_position_on_a_changed_topic_and_a_blame_without_a_change() {
     let t = other.topics.get_mut("orders").unwrap();
     t.partitions[1].high_watermark_after = Some(8);
     t.changed_during_capture = true;
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     let mut only_excluded = other.clone();
     only_excluded.groups.remove("billing");
     group(&mut doc, "billing").outcome = "failed".into();
@@ -2311,7 +2873,7 @@ fn cp_9_refuses_a_position_on_a_changed_topic_and_a_blame_without_a_change() {
         want("audit", "captured", "absent", "{\"orders\"}")
     );
     // Blamed with no topic changed.
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     group(&mut doc, "hidden").reason = Some("GenerationChangedDuringCapture".into());
     assert_eq!(
         check(doc, &pristine_document()).unwrap_err(),
@@ -2338,10 +2900,10 @@ fn cp_10_refuses_a_capture_over_an_unread_topic_and_a_blame_with_every_topic_rea
     let mut other = pristine_document();
     other.topics.get_mut("payments").unwrap().partitions.clear();
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want("audit", "captured", "absent", "{\"payments\"}")
     );
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     group(&mut doc, "hidden").reason = Some("PartitionsNotRead".into());
     assert_eq!(
         check(doc, &pristine_document()).unwrap_err(),
@@ -2370,7 +2932,7 @@ fn cp_11_refuses_entries_out_of_place_a_dropped_unobserved_partition_or_a_wrong_
         .unwrap()
         .no_committed_position = 0;
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(3, "none", 0, 0)
     );
     // Out of order.
@@ -2382,14 +2944,14 @@ fn cp_11_refuses_entries_out_of_place_a_dropped_unobserved_partition_or_a_wrong_
         .positions
         .swap(0, 1);
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(3, "1, \"orders\":0", 0, 1)
     );
     // A partition no topic has.
     let mut other = pristine_document();
     pentry(&mut other, "billing", 2).partition = 1;
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(3, "2, \"payments\":1", 0, 1)
     );
     // The unobserved partition left out (and counted instead).
@@ -2398,7 +2960,7 @@ fn cp_11_refuses_entries_out_of_place_a_dropped_unobserved_partition_or_a_wrong_
     b.positions.remove(1);
     b.no_committed_position = 2;
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(2, "none", 1, 2)
     );
 }
@@ -2420,19 +2982,19 @@ fn cp_12_refuses_a_status_position_or_reason_that_does_not_fit() {
     let e = pentry(&mut other, "billing", 0);
     (e.status, e.position, e.coverage) = ("noCommittedPosition".into(), Some(0), None);
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(0, "noCommittedPosition", "0", "absent")
     );
     let mut other = pristine_document();
     pentry(&mut other, "billing", 0).position = Some(-1);
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(0, "captured", "-1", "absent")
     );
     let mut other = pristine_document();
     pentry(&mut other, "billing", 0).reason = Some("Unstable".into());
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(0, "captured", "12", "\"Unstable\"")
     );
     // `notObserved` on a partition the capture read.
@@ -2445,7 +3007,7 @@ fn cp_12_refuses_a_status_position_or_reason_that_does_not_fit() {
         Some("TopicNotObserved".into()),
     );
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(2, "notObserved", "absent", "\"TopicNotObserved\"")
     );
 }
@@ -2465,7 +3027,7 @@ fn cp_13_refuses_a_coverage_the_facts_do_not_derive() {
     let e = pentry(&mut other, "audit", 0);
     (e.status, e.reason, e.coverage) = ("captured".into(), None, Some("beyondArchive".into()));
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(
             "audit",
             0,
@@ -2479,7 +3041,7 @@ fn cp_13_refuses_a_coverage_the_facts_do_not_derive() {
     let mut other = pristine_document();
     pentry(&mut other, "billing", 0).coverage = Some("atArchiveEnd".into());
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(
             "billing",
             0,
@@ -2493,7 +3055,7 @@ fn cp_13_refuses_a_coverage_the_facts_do_not_derive() {
     let mut other = pristine_document();
     pentry(&mut other, "audit", 0).coverage = Some("beyondArchive".into());
     assert_eq!(
-        check(pristine_1_5(), &other).unwrap_err(),
+        check(pristine_cp(), &other).unwrap_err(),
         want(
             "audit",
             0,
@@ -2507,7 +3069,7 @@ fn cp_13_refuses_a_coverage_the_facts_do_not_derive() {
 
 #[test]
 fn cp_14_refuses_counts_the_positions_do_not_give() {
-    let mut doc = pristine_1_5();
+    let mut doc = pristine_cp();
     let c = group(&mut doc, "billing").counts.as_mut().unwrap();
     c.related = 1;
     c.not_related = 1;

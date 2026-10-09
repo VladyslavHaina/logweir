@@ -1064,6 +1064,7 @@ mod tests {
             topic_configuration: None,
             owner_detection: None,
             consumer_positions: None,
+            schema_dependency: None,
         }
     }
 

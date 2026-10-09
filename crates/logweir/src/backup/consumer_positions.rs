@@ -6,7 +6,7 @@
 //! Pure: [`build`] is a function of its [`Capture`], so every rule below is a
 //! unit row with no broker. The vocabulary and the coverage rule are
 //! `logweir_core::consumer_positions`'s, the same ones the receipt's arms
-//! 22-27 and the document's arms CP-1 to CP-14 re-derive, so what this module
+//! 30-35 and the document's arms CP-1 to CP-14 re-derive, so what this module
 //! writes is what both readers accept.
 //!
 //! # The rules

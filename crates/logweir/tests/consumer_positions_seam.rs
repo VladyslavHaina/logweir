@@ -5,7 +5,7 @@
 //!
 //! | row | proves | negative control |
 //! |---|---|---|
-//! | `a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point` | one outcome per selected id (plan then CLI), a captured group's position — in the positions document put beside the receipt, which the receipt binds by digest — judged against the archive (`withinArchive`), a share group `GroupTypeNotCaptured`, the receipt 1.5.0 and VALID, the document VALID against it, the catalog point's summary bound by the block's digest | the same run selecting nothing writes a 1.3.0 receipt that never names the block, and no document |
+//! | `a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point` | one outcome per selected id (plan then CLI), a captured group's position — in the positions document put beside the receipt, which the receipt binds by digest — judged against the archive (`withinArchive`), a share group `GroupTypeNotCaptured`, the receipt 1.5.0 and VALID, the document VALID against it, the catalog point's summary bound by the block's digest | the same run selecting nothing writes a receipt that never names the block, and no document |
 //! | `a_reader_that_cannot_read_groups_fails_every_selected_group` | the default `ClusterReader` (every double written before PROD-04.1) records each selected group `failed: CaptureUnavailable` | absence read as offset 0, or the group dropped, would fail arm 26, CP-11 or the count |
 //! | `a_selection_that_is_not_one_is_refused_before_anything_runs` | a group selected twice (plan and CLI), a blank id and a control character are refused at phase −1, exit 3, before the engine | a valid selection runs |
 //! | `a_topic_recreated_during_the_capture_fails_the_groups_holding_positions_on_it` | marks after the engine below the group-capture marks (TI-04.1-3): the group is `GenerationChangedDuringCapture` | stable marks capture it |
@@ -283,8 +283,8 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
         point.format_version
     );
 
-    // CONTROL: the same backup selecting nothing writes the receipt it wrote
-    // before PROD-04.1.
+    // CONTROL: the same backup selecting nothing writes the receipt it would
+    // without PROD-04.1.
     let f = Fixture::new();
     let store = evidence();
     let outcome = f
@@ -295,8 +295,11 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
     let (bytes, _) = store.get(&outcome.receipt_key).unwrap();
     let text = String::from_utf8(bytes).unwrap();
     assert!(!text.contains("consumer_positions"), "{text}");
+    // No block and no document; the version is whatever this build writes
+    // without a selection (its other blocks decide it), never pinned here.
     let plain: logweir_core::backup_receipt::BackupReceipt = serde_json::from_str(&text).unwrap();
-    assert_eq!(plain.format_version, "1.3.0");
+    assert!(plain.consumer_positions.is_none());
+    assert_eq!(plain.validate_invariants(), Ok(()));
     let keys = store.list_page("logweir/backups/", None, 10).unwrap().0;
     assert!(
         keys.iter()

@@ -36,7 +36,7 @@
       "nullable": true
     },
     "consumer_positions": {
-      "description": "**Format 1.5.0 (PROD-04.1).** The consumer position evidence of the groups the backup SELECTED: one outcome per group with its position counts, the observation window, and the positions DOCUMENT beside this receipt that holds the positions, bound by its SHA-256 and length ([`crate::consumer_positions`]). Its size depends on the selection only, never on partitions. Arms 22-27 read it, and only when it is present; a reader given the document checks it with [`BackupReceipt::validate_consumer_positions_document`].\n\nABSENT means the backup selected no group — every receipt before 1.5.0, and every later one whose plan names none — and never \"the groups had no positions\". Appended LAST and skipped when absent, so a backup that selects no group writes the document it wrote before, byte for byte.",
+      "description": "**Format 1.5.0 (PROD-04.1).** The consumer position evidence of the groups the backup SELECTED: one outcome per group with its position counts, the observation window, and the positions DOCUMENT beside this receipt that holds the positions, bound by its SHA-256 and length ([`crate::consumer_positions`]). Its size depends on the selection only, never on partitions. Arms 30-35 read it, and only when it is present; a reader given the document checks it with [`BackupReceipt::validate_consumer_positions_document`].\n\nABSENT means the backup selected no group — every receipt before 1.5.0, and every later one whose plan names none — and never \"the groups had no positions\". Appended LAST and skipped when absent, so a backup that selects no group writes the document it wrote before, byte for byte.",
       "allOf": [
         {
           "$ref": "#/definitions/ConsumerPositions"
@@ -90,6 +90,14 @@
     "run_id": {
       "description": "ULID of the run that produced this receipt. Also the object key stem in the evidence bucket, exactly as `Scorecard::run_id` is.",
       "type": "string"
+    },
+    "schema_dependency": {
+      "description": "**Format 1.5.0 (PROD-03.0).** Per named topic, whether the archived records carry Confluent wire-format framing — magic byte 0 and a schema id — so that an application needs the schema registry that issued those ids to read them after a restore. Judged by Logweir from the archived segment bytes this run wrote, never from a registry (Logweir contacts none), with keys and values judged separately (`crate::schema_dependency` is the detection contract). One entry per `source.topics` entry and no others (arm 23).\n\nNo registry is ever captured (`docs/stability.md` Never #2), so a `schemaDependent` topic reads \"schema-dependent, registry not captured\" on every surface.\n\nABSENT means NOT ASSESSED for every topic — every receipt before 1.5.0 — and never \"not schema-dependent\". [`SchemaDependency::of`] states that rule in one place (it answers [`SchemaDependency::NotAssessed`] for an absent block or entry); each surface — the two verifiers, the catalog rule-3 check, the API and the console — applies the same rule itself and holds it with its own row. Appended LAST and skipped when absent, so an older document round-trips byte for byte.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/TopicSchemaDependency"
+      },
+      "nullable": true
     },
     "source": {
       "$ref": "#/definitions/ReceiptSource"
@@ -148,7 +156,7 @@
       ],
       "properties": {
         "document": {
-          "description": "The positions document this receipt binds (arm 24).",
+          "description": "The positions document this receipt binds (arm 32).",
           "allOf": [
             {
               "$ref": "#/definitions/DocumentRef"
@@ -156,7 +164,7 @@
           ]
         },
         "groups": {
-          "description": "One entry per selected group id, keyed by it. Never empty (arm 23): a backup that selects no group carries no block.",
+          "description": "One entry per selected group id, keyed by it. Never empty (arm 31): a backup that selects no group carries no block.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/definitions/GroupSnapshot"
@@ -172,7 +180,7 @@
           "format": "date-time"
         },
         "observed_to": {
-          "description": "When it ended, after the group-capture marks and BEFORE the engine started. At or after `observed_from` (arm 23).",
+          "description": "When it ended, after the group-capture marks and BEFORE the engine started. At or after `observed_from` (arm 31).",
           "type": "string",
           "format": "date-time"
         }
@@ -229,12 +237,12 @@
       ],
       "properties": {
         "active": {
-          "description": "Whether either state says the group had members, so its positions may have moved after they were read ([`active`], arm 27; captured only).",
+          "description": "Whether either state says the group had members, so its positions may have moved after they were read ([`active`], arm 35; captured only).",
           "type": "boolean",
           "nullable": true
         },
         "counts": {
-          "description": "Its positions, counted by what they say about archived data, over every partition of every named topic (captured only; arm 26). The positions themselves are the document's, and arm CP-14 holds these counts to them.",
+          "description": "Its positions, counted by what they say about archived data, over every partition of every named topic (captured only; arm 34). The positions themselves are the document's, and arm CP-14 holds these counts to them.",
           "allOf": [
             {
               "$ref": "#/definitions/PositionCounts"
@@ -445,6 +453,57 @@
         }
       }
     },
+    "SideFraming": {
+      "description": "One side (the keys, or the values) of one topic's judged records.\n\nEvery judged record counts once on each side: as `framed`, `unframed` or `nulls` (a null key, or a null value — a tombstone). `nulls` never count toward the share: a side is `dependent` exactly when at least one record is framed and at least one in [`crate::schema_dependency::DEPENDENT_SHARE_DENOMINATOR`] of its NON-NULL records is (arm 28).",
+      "type": "object",
+      "required": [
+        "dependent",
+        "framed",
+        "nulls",
+        "schema_id_count",
+        "schema_ids",
+        "unframed"
+      ],
+      "properties": {
+        "dependent": {
+          "description": "Whether this side depends on the registry, by the threshold above.",
+          "type": "boolean"
+        },
+        "framed": {
+          "description": "Records whose bytes on this side are framed ([`crate::schema_dependency::framed_schema_id`]).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "nulls": {
+          "description": "Records with no bytes on this side: a null key, or a null value.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "schema_id_count": {
+          "description": "How many distinct schema ids the framed records name, listed or not.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "schema_ids": {
+          "description": "The distinct schema ids the framed records name, ascending, at most [`crate::schema_dependency::SCHEMA_IDS_LISTED`] — the smallest ones when more were seen (arm 27).",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        },
+        "unframed": {
+          "description": "Non-null records whose bytes on this side are not framed.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
     "TopicConfigCoverage": {
       "description": "What Logweir established about ONE topic's configuration at capture (receipt 1.1.0, FX-4).\n\n# Where the answer comes from\n\nLogweir's OWN DescribeConfigs read of the topic, taken by `logweir backup run` immediately before the engine starts, through the same principal the engine uses — NOT the engine's capture, which is non-fatal, all-or-nothing across the run's topics and invisible in the manifest. That read is then compared with the manifest the engine wrote:\n\n| `coverage` | `reason` | meaning | |---|---|---| | `captured` | — | the read succeeded AND the manifest's `configurations` for this topic equal the explicit overrides the engine captures (its own filter: topic-override source, not read-only, not sensitive, on its allowlist). The manifest is a complete record of them, so a configuration parity check may compare against it. | | `captureDenied` | — | the broker's authorizer refused the read (`TOPIC_AUTHORIZATION_FAILED`). The engine runs as the same principal, so an empty manifest record says nothing. | | `notCaptured` | `describeFailed` | the read failed for any other reason (a timeout, an unknown topic, a broker error). | | `notCaptured` | `manifestDiffers` | the read succeeded but the manifest does not record the same overrides — the engine's own capture failed (one denied topic empties them all), or the configuration changed between the two reads. |\n\nOverrides outside the engine's allowlist are never part of the claim: `captured` says the ARCHIVE's configuration record is complete, not that every setting of the topic was archived (that is PROD-05.1's portability table).\n\nStrings on the wire, not enums, for the reason `ReceiptAuth::mode` gives: a reader must be able to REPORT a value it refuses. The closed sets are enforced by arms 8, 9 and 11 in both readers.",
       "type": "object",
@@ -528,6 +587,47 @@
         },
         "reference": {
           "description": "Where the desired state lives: `<namespace>/<name>` of the `KafkaTopic`, or the plan's own words. 1 to 256 characters.",
+          "type": "string"
+        }
+      }
+    },
+    "TopicSchemaDependency": {
+      "description": "**PROD-03.0, receipt 1.5.0.** What the archived bytes of ONE topic say about its dependence on a schema registry.\n\n| `verdict` | `reason` | `basis` | `key`/`value` | meaning | |---|---|---|---|---| | `schemaDependent` | — | `sampled`/`complete` | both | at least one side is dependent ([`SideFraming::dependent`]): its records carry Confluent framing, so a reader needs the registry, which was not captured | | `notDetected` | — | `sampled`/`complete` | both | neither side is dependent over the records judged | | `notAssessed` | `noRecords` | — | neither | the archive holds no record of the topic, so there is nothing to judge | | `notAssessed` | `segmentUnreadable` | — | neither | a segment the sample needed could not be read or decoded, or decoded to a count its manifest does not record, or the detector failed | | `notAssessed` | `segmentTooLargeForDetection` | — | neither | a segment the sample needed is stored, or decompresses, larger than the detector reads at backup time | | `notAssessed` | `detectionTimeBudgetExceeded` | — | neither | the backup's detection time budget ran out before the topic was judged |\n\n`basis` is `complete` exactly when every record the receipt counts for the topic was judged, and `sampled` otherwise (arm 26).\n\nStrings on the wire, not enums, for the reason `ReceiptAuth::mode` gives; the closed sets are enforced by arm 24 in both readers.",
+      "type": "object",
+      "required": [
+        "verdict"
+      ],
+      "properties": {
+        "basis": {
+          "description": "`sampled` or `complete` — [`crate::schema_dependency::BASES`] — present exactly when `verdict` is not `notAssessed` (arm 24).",
+          "type": "string",
+          "nullable": true
+        },
+        "key": {
+          "description": "The record KEYS judged, present exactly when `verdict` is not `notAssessed` (arm 25).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SideFraming"
+            }
+          ],
+          "nullable": true
+        },
+        "reason": {
+          "description": "`noRecords`, `segmentUnreadable`, `segmentTooLargeForDetection` or `detectionTimeBudgetExceeded` — [`crate::schema_dependency::NOT_ASSESSED_REASONS`] — present exactly when `verdict` is `notAssessed` (arm 24).",
+          "type": "string",
+          "nullable": true
+        },
+        "value": {
+          "description": "The record VALUES judged, beside `key` and over the same records.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SideFraming"
+            }
+          ],
+          "nullable": true
+        },
+        "verdict": {
+          "description": "`schemaDependent`, `notDetected` or `notAssessed` — [`crate::schema_dependency::VERDICTS`].",
           "type": "string"
         }
       }

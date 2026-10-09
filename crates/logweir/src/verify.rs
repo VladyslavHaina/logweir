@@ -604,6 +604,67 @@ pub fn consumer_positions_lines(
     lines
 }
 
+/// One line per topic of a backup receipt's `schema_dependency` (PROD-03.0),
+/// or the one line that says it is absent — NOT ASSESSED, never "not
+/// schema-dependent". `docs/verify_scorecard.py` prints the same lines, and
+/// `scripts/check-verifier-parity.sh` compares every line starting
+/// `schema_dependency` between the two readers.
+///
+/// A `schemaDependent` topic says "registry not captured" in as many words:
+/// no Logweir build captures a schema registry, so a reader of the restored
+/// records needs one the archive does not carry.
+#[must_use]
+pub fn schema_dependency_lines(
+    block: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>>,
+) -> Vec<String> {
+    let Some(block) = block else {
+        return vec![
+            "schema_dependency: not assessed, so whether any topic's records need a schema \
+             registry is not known from this receipt"
+                .to_string(),
+        ];
+    };
+    let side = |name: &str, s: &logweir_core::backup_receipt::SideFraming| {
+        let non_null = u128::from(s.framed) + u128::from(s.unframed);
+        let mut out = format!("{name} framed {} of {non_null} non-null", s.framed);
+        if s.dependent {
+            out.push_str(", dependent");
+        }
+        if !s.schema_ids.is_empty() {
+            let ids: Vec<String> = s.schema_ids.iter().map(u32::to_string).collect();
+            out.push_str(&format!(", schema ids {}", ids.join(", ")));
+            let more = s.schema_id_count.saturating_sub(s.schema_ids.len() as u64);
+            if more > 0 {
+                out.push_str(&format!(" and {more} more"));
+            }
+        }
+        out
+    };
+    block
+        .iter()
+        .map(|(topic, e)| {
+            let verdict = match e.verdict.as_str() {
+                "schemaDependent" => "schema-dependent, registry not captured".to_string(),
+                "notDetected" => "no schema framing detected".to_string(),
+                _ => format!(
+                    "not assessed ({})",
+                    e.reason.as_deref().unwrap_or("no reason recorded")
+                ),
+            };
+            match (&e.key, &e.value) {
+                (Some(k), Some(v)) => format!(
+                    "schema_dependency[{topic:?}]: {verdict}; {} records judged ({}); {}; {}",
+                    logweir_core::schema_dependency::judged_records(k),
+                    e.basis.as_deref().unwrap_or("no basis recorded"),
+                    side("key", k),
+                    side("value", v)
+                ),
+                _ => format!("schema_dependency[{topic:?}]: {verdict}"),
+            }
+        })
+        .collect()
+}
+
 /// The time-basis lines both readers print for a scorecard (FX-8): one per
 /// non-empty list of `source.time_basis`, the one line that says it was not
 /// recorded, or nothing when the restore selected no topic by producer time
@@ -711,6 +772,9 @@ pub enum Verdict {
         /// The 1.3.0 `owner_detection` (PROD-05.1), as read: where the run
         /// looked for owners. `None` reads as empty (arm 21).
         owner_detection: Option<Vec<String>>,
+        /// The 1.5.0 block (PROD-03.0), as read; `None` is NOT ASSESSED.
+        schema_dependency:
+            Option<BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>>,
         /// The 1.5.0 block (PROD-04.1), as read; `None` is "no group
         /// selected".
         consumer_positions: Option<logweir_core::consumer_positions::ConsumerPositions>,
@@ -941,6 +1005,7 @@ pub fn verify_scorecard_with(
             config_coverage: receipt.config_coverage,
             topic_configuration: receipt.topic_configuration,
             owner_detection: receipt.owner_detection,
+            schema_dependency: receipt.schema_dependency,
             consumer_positions: receipt.consumer_positions,
             positions,
         });
@@ -1109,6 +1174,9 @@ struct ReceiptBlocks<'a> {
         Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicConfiguration>>,
     /// PROD-05.1's `owner_detection`; `None` reads as empty.
     owner_detection: Option<&'a [String]>,
+    /// PROD-03.0's 1.5.0 block; `None` is NOT ASSESSED.
+    schema_dependency:
+        Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>>,
     /// PROD-04.1's 1.5.0 block; `None` when no group was selected.
     consumer_positions: Option<&'a logweir_core::consumer_positions::ConsumerPositions>,
     /// The positions document the block binds, verified; `None` when it was
@@ -1169,12 +1237,17 @@ fn print_backup_receipt(
     for line in topic_configuration_lines(topic_configuration, blocks.owner_detection) {
         println!("model:     {line}");
     }
+    // PROD-03.0: the schema dependency, one line per topic — or the line that
+    // says it was not assessed, which is never "not schema-dependent".
+    for line in schema_dependency_lines(blocks.schema_dependency) {
+        println!("schema:    {line}");
+    }
     // PROD-04.1: the consumer position evidence, one line per selected group.
     for line in consumer_positions_lines(blocks.consumer_positions, blocks.positions) {
         println!("groups:    {line}");
     }
     println!(
-        "checked:   the signature AND all twenty-seven backup-receipt invariants \
+        "checked:   the signature AND all thirty-five backup-receipt invariants \
          (format_version, exit_code/manifest_key, records/topics, covered window, \
          source.auth.mode, config_coverage's six: its version, its topic set, \
          coverage, reason, timestamp-after-a-read, timestamp value and source, \
@@ -1182,7 +1255,10 @@ fn print_backup_receipt(
          set, entries exactly where the read succeeded, closed source and class, \
          secret and inherited, the owner, counts of at least one, \
          owner_detection's two: its closed set beside the model, an owner only from \
-         a source it lists, and consumer_positions' six: its version, a forward \
+         a source it lists, schema_dependency's eight: its version, its topic set, \
+         closed verdict, reason and basis, both sides exactly when judged, the judged \
+         count against records, the schema ids, the one-in-ten threshold, and the \
+         verdict from its sides, and consumer_positions' six: its version, a forward \
          capture window with a closed listing and at least one group, this run's \
          positions document by a well-formed digest, outcome and reason, fields and \
          counts that fit the outcome with no captured group Dead and memberless, and a \
@@ -1252,6 +1328,7 @@ pub fn run_with(
             config_coverage,
             topic_configuration,
             owner_detection,
+            schema_dependency,
             consumer_positions,
             positions,
         }) => {
@@ -1266,6 +1343,7 @@ pub fn run_with(
                     config_coverage: config_coverage.as_ref(),
                     topic_configuration: topic_configuration.as_ref(),
                     owner_detection: owner_detection.as_deref(),
+                    schema_dependency: schema_dependency.as_ref(),
                     consumer_positions: consumer_positions.as_ref(),
                     positions: positions.as_ref(),
                 },

@@ -77,6 +77,15 @@ pub fn from_receipt(
                 .as_ref()
                 .and_then(|block| block.get(name))
                 .cloned();
+            // PROD-03.0: the receipt's own schema dependency entry, copied —
+            // absent (NOT ASSESSED) for a receipt that predates format 1.5.0.
+            // Arm 23 has established the block names exactly the topics
+            // `records` does.
+            let schema_dependency = receipt
+                .schema_dependency
+                .as_ref()
+                .and_then(|block| block.get(name))
+                .cloned();
             RecordTopic {
                 name: name.clone(),
                 // The archive's own count, from the receipt's 1.3.0 model, and
@@ -93,10 +102,14 @@ pub fn from_receipt(
                     .and_then(|block| block.get(name))
                     .cloned(),
                 configuration,
+                schema_dependency,
             }
         })
         .collect();
-    // The record's minor says what it carries: PROD-01.3's
+    // The record's minor says what it carries: PROD-03.0's
+    // `FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY` (1.5.0) when the receipt's
+    // schema dependency travels into the topics — every receipt this build
+    // signs — else PROD-01.3's
     // `FORMAT_VERSION_WITH_AUTH_MODES` (1.4.0) when it copies a receipt whose
     // `source.auth.mode` is one of the modes PROD-01.3 added — its
     // `source.auth_mode` carries a value the older schemas do not list, and
@@ -107,7 +120,7 @@ pub fn from_receipt(
     // the pin does, else FX-4's `FORMAT_VERSION` (1.1.0).
     let manifest_version_id = receipt.archive.manifest_version_id.clone();
     // PROD-04.1: the receipt's consumer position evidence, summarised and
-    // bound by its digest; 1.5.0 when it travels.
+    // bound by its digest; the version that defines it when it travels.
     let consumer_positions = receipt
         .consumer_positions
         .as_ref()
@@ -115,6 +128,11 @@ pub fn from_receipt(
         .transpose()?;
     let format_version = if consumer_positions.is_some() {
         crate::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+    } else if receipt.schema_dependency.is_some() {
+        // PROD-03.0: the record's topics carry the receipt's schema
+        // dependency, which 1.5.0 defines (with every earlier minor's fields
+        // and values).
+        crate::catalog::record::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
     } else if logweir_core::connection::is_prod_01_3_auth_mode(&receipt.source.auth.mode) {
         crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES
     } else if receipt.topic_configuration.is_some() {
