@@ -279,8 +279,8 @@ const WORST_CASE_DOCUMENT_KEY_BYTES: usize = 1024;
 /// the block larger than the bound it claimed.
 #[must_use]
 pub fn worst_case_block_bytes(selected: &[String]) -> usize {
-    let at = DateTime::<Utc>::from_timestamp(i64::from(i32::MAX), 999_999_999)
-        .unwrap_or_else(Utc::now);
+    let at =
+        DateTime::<Utc>::from_timestamp(i64::from(i32::MAX), 999_999_999).unwrap_or_else(Utc::now);
     let counts = PositionCounts {
         related: u32::MAX,
         not_related: u32::MAX,
@@ -965,9 +965,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let real_bytes = crate::det_json::to_deterministic_json(&real)
-            .unwrap()
-            .len();
+        let real_bytes = crate::det_json::to_deterministic_json(&real).unwrap().len();
         let real_ids: Vec<String> = real.groups.keys().cloned().collect();
         assert!(real_bytes <= worst_case_block_bytes(&real_ids));
         const { assert!(MAX_BLOCK_BYTES * 3 <= 256 * 1024) };

@@ -85,7 +85,7 @@ impl RdKafkaReader {
                     return (
                         p,
                         Err(format!(
-                            "{topic}:{p}: marks not read: the {}-second budget for one pass                              over the marks was spent",
+                            "{topic}:{p}: marks not read: the {}-second budget for one pass over the marks was spent",
                             MARKS_BUDGET.as_secs()
                         )),
                     );

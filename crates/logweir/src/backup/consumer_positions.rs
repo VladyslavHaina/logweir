@@ -1157,6 +1157,38 @@ mod tests {
         );
     }
 
+    /// **Review N1, through the builder.** The largest selection of
+    /// escape-heavy ids the cap admits (84 ids of 255 `"`), every group
+    /// captured, builds a block whose ENCODED bytes are within
+    /// `MAX_BLOCK_BYTES` and within the worst case `refuse_selection` measured;
+    /// one id more is refused before anything runs.
+    #[test]
+    fn the_largest_escape_heavy_selection_the_cap_admits_builds_within_it() {
+        let ids: Vec<String> = (0..84)
+            .map(|i| format!("{i:03}{}", "\"".repeat(model::MAX_GROUP_ID_BYTES - 3)))
+            .collect();
+        assert_eq!(model::refuse_selection(&ids), None);
+        let groups: Vec<ObservedGroup> = ids
+            .iter()
+            .map(|id| captured_group(id, vec![committed(1)]))
+            .collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let f = Fixture::new(observation(groups, vec![(0, marks(0, 5))]), &refs);
+        let b = f.build();
+        valid(&b);
+        assert!(b.block.captured().count() == 84);
+        let encoded = logweir_core::det_json::to_deterministic_json(&b.block)
+            .unwrap()
+            .len();
+        assert!(encoded <= model::MAX_BLOCK_BYTES, "{encoded}");
+        assert!(encoded <= model::worst_case_block_bytes(&ids), "{encoded}");
+        let mut more = ids.clone();
+        more.push(format!("084{}", "\"".repeat(model::MAX_GROUP_ID_BYTES - 3)));
+        assert!(model::refuse_selection(&more)
+            .expect("refused")
+            .starts_with("ConsumerGroupSelectionTooLarge: "));
+    }
+
     /// The receipt binds the document's exact bytes, and the document names
     /// its receipt's run.
     #[test]
