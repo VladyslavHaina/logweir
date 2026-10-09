@@ -966,9 +966,11 @@ sockets and stub IO. The connection's own reads are deliberately not timed:
 the server keeps one pending for the whole of every answer to notice a client
 leaving, and a timer there would cut every event stream at thirty seconds (a
 mutant shows it). Live, the built binary on the host in localAdmin mode: a
-request behind 256 non-reading clients answered at 32.5 s (unanswered at 45 s
-before), a stopped body answered at 30.0 s (open at 75 s before), a trickling
-one at 60.0 s. The controller's in-pod health listener already bounds the
+request behind 256 non-reading clients answered 35.1 s after the first of them
+connected, every one of them ended by the server (before: unanswered at 48 s,
+none ended), a stopped body answered and closed at 30.0 s (still open at 75 s
+before), a trickling one at 60.0 s (nothing at 90 s before), while a steady
+reader took 42 s and an event stream heartbeated past 48 s on both. The controller's in-pod health listener already bounds the
 whole exchange, its write included, at two seconds. The shared-mode console's
 probe runs at the PoC upgrade that carries this item.
 **Rollback:** an older console leaves a connection whose client stopped
