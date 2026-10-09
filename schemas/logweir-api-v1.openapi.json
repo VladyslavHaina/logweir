@@ -10653,7 +10653,7 @@
         "description": "The stable problem codes. Clients branch on `code`, never on `detail`.\n\nThe decision's baseline set is here verbatim (`unauthenticated`, `session_expired`, `forbidden`, `namespace_forbidden`, `not_found`, `idempotency_conflict`, `state_conflict`, `approval_required`, `policy_mismatch`, `precondition_failed`, `validation_failed`, `rate_limited`, `kubernetes_unavailable`, `upstream_timeout`, plus the cursor pair). The remainder name transport-level refusals the baseline did not enumerate; each is documented in the OpenAPI document.",
         "oneOf": [
           {
-            "description": "400 — the body is not JSON, a query string is malformed or carries an unknown or repeated parameter.",
+            "description": "400 — the body is not JSON or did not arrive in time (nothing arrived for 30 s, or it was not whole after 60 s), a query string is malformed or carries an unknown or repeated parameter.",
             "type": "string",
             "enum": [
               "malformed_request"
