@@ -1712,7 +1712,7 @@ What changes for an operator:
   Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
   bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
   merges the two views for you yet (PROD-09.2 owns that merge).
-- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), and an unpinned one still has no `manifest_version_id` key.
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), from PROD-03.0 `1.5.0` (it carries `schema_dependency` too), and an unpinned one still has no `manifest_version_id` key.
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and

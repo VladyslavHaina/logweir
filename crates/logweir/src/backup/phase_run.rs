@@ -666,9 +666,9 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         },
         config_coverage: Some(outcome.config_coverage.clone()),
         // PROD-05.1: ALWAYS written beside `config_coverage`, so every receipt
-        // this build signs is 1.3.0 and carries its topics' configuration
-        // model — a receipt never leaves it to be read as NOT RECORDED by
-        // omission when it was observed.
+        // this build signs carries its topics' configuration model (and is
+        // 1.5.0, for PROD-03.0's block below) — a receipt never leaves it to
+        // be read as NOT RECORDED by omission when it was observed.
         topic_configuration: Some(outcome.topic_configuration.clone()),
         // PROD-05.1: where the run looked for owners — written beside the
         // model, so a topic without an owner reads "not checked" when it is

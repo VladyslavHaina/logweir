@@ -1083,8 +1083,9 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
   `plain` or `mtls`** (PROD-01.3), whatever else it carries — 1.4.0 includes
   PROD-05.1's 1.3.0 `topic_configuration` and FX-7's optional
   `archive.manifest_version_id`. Every receipt of a `plaintext` or
-  `scramSha512` backup is the 1.3.0 document this build writes for it (or the
-  1.1.0/1.2.0 document an earlier build wrote), byte for byte.
+  `scramSha512` backup that a build from PROD-05.1 to before PROD-03.0 wrote is
+  the 1.3.0 document (or the 1.1.0/1.2.0 document an earlier build wrote), byte
+  for byte; from PROD-03.0 every receipt is 1.5.0 (below).
   `schemas/logweir-backup-receipt-1.4.0.json` differs from the frozen 1.3.0
   file in the `source.auth.mode` and `username` descriptions only: no
   property, type or required field moved. The payload type keeps
