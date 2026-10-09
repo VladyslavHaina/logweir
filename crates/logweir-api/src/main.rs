@@ -21,7 +21,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
-use logweir_api::transport::{StallBody, StallGuard};
+use logweir_api::transport::{Admission, PeerLimit, StallBody, StallGuard};
 use tokio::sync::Semaphore;
 
 const HELP: &str = "logweir-api — the bounded Logweir product API. Serves the static UI at /ui/ \
@@ -162,7 +162,13 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             .map_or(String::new(), |i| format!("{}/{}", i.namespace, i.config_map)),
         "logweir-api started"
     );
-    serve(listener, logweir_api::app::router(state)).await
+    // FX-24c: the per-peer cap exists only where a trusted-proxy set does, so
+    // the ingress is never capped as one peer (see `PeerLimit`). localAdmin
+    // mode has no such set, and every peer it serves is this machine anyway.
+    let peer_limit = state
+        .shared()
+        .and_then(|shared| PeerLimit::outside(&shared.trusted_proxies, MAX_CONNECTIONS_PER_PEER));
+    serve(listener, logweir_api::app::router(state), peer_limit).await
 }
 
 /// How long a connection may take to send its request headers, counted from
@@ -178,27 +184,60 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
 /// socket (FX-24). See [`serve`] on why the deadline starts at the accept.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a connection may wait on its client with no progress: a pending
-/// write of an answer the client has stopped reading, or a pending read of a
-/// request body the client has stopped sending (FX-24b). Past it the operation
-/// fails `TimedOut`, the connection ends and its permit comes back. See
-/// `logweir_api::transport` for the two guards and why the connection's other
-/// reads are not timed.
+/// The progress window on a connection waiting on its client: a pending
+/// write of an answer the client is not reading fast enough, or a pending read
+/// of a request body it is not sending fast enough (FX-24b; the floor,
+/// [`IO_MIN_PROGRESS`], is FX-24c's). A window that passes without its floor
+/// of progress fails the operation `TimedOut`, the connection ends and its
+/// permit comes back. See `logweir_api::transport` for the two guards and why
+/// the connection's other reads are not timed.
 ///
-/// A STALL, NOT A TOTAL, AND NOT THE HEADER DEADLINE. The clock starts only
-/// while a write or a body read is pending and resets on every byte that moves,
-/// so a slow but steady reader keeps its connection for as long as the answer
-/// takes, and an event stream between heartbeats (a write every 15 s, nothing
-/// pending in between) never starts it. The header deadline is ten seconds
-/// because a client that has sent nothing has no excuse; this one is longer
-/// because a client in the middle of a transfer can be held up by the network:
-/// a lossy link's retransmission backoff alone can stall a live TCP connection
-/// for well over ten seconds. Thirty seconds is past that, still under the
-/// ingress controllers' common 60-second response timeouts, and it is how long
-/// 256 clients that stopped reading can hold every connection slot, which is
-/// the outage this bounds. Each test row that measures it reads it back out of
-/// this file.
+/// A WINDOW, NOT A TOTAL, AND NOT THE HEADER DEADLINE. A window opens only
+/// while a write or a body read is pending, and closes once the floor has
+/// moved or the output has caught up, so a slow but steady reader keeps its
+/// connection for as long as the answer takes, and an event stream between
+/// heartbeats (a write every 15 s, nothing pending in between) never opens
+/// one. The header deadline is ten seconds because a client that has sent
+/// nothing has no excuse; this one is longer because a client in the middle of
+/// a transfer can be held up by the network: a lossy link's retransmission
+/// backoff alone can stall a live TCP connection for well over ten seconds.
+/// Thirty seconds is past that, still under the ingress controllers' common
+/// 60-second response timeouts, and it is how long 256 clients that stopped
+/// reading, or that read below the floor, can hold every connection slot,
+/// which is the outage this bounds. Each test row that measures it reads it
+/// back out of this file.
 const IO_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The least a connection that is behind must move in each
+/// [`IO_STALL_TIMEOUT`] window: 32 KiB, about 1.1 KiB/s or 9 kbit/s (FX-24c).
+///
+/// WHY A FLOOR. With FX-24b's window closed by any progress at all, a client
+/// that read one byte every twenty seconds kept its connection past 100 s
+/// (FX-24b review, measured on the built binary), so 256 such clients held
+/// every connection for the price of a dozen bytes a minute each.
+///
+/// WHY THIS FLOOR. It is below a 9.6 kbit/s GSM data call, the slowest link a
+/// browser has used in twenty years, so a real client that is reading never
+/// meets it: a slow mobile client is behind the ingress, which reads the
+/// answer as fast as its own buffers let it, and the console sees the
+/// client's rate only once those are full. It is far above what a
+/// deliberately slow client wants to spend: to hold every connection with
+/// reads at the floor takes 256 × 1.1 KiB/s, about 2.2 Mbit/s of reading,
+/// sustained, and at least [`MAX_CONNECTIONS`] / [`MAX_CONNECTIONS_PER_PEER`]
+/// addresses wherever the per-peer cap applies. A body counts the same way:
+/// one still arriving after a window must have brought the floor in it.
+const IO_MIN_PROGRESS: usize = 32 * 1024;
+
+/// The most connections one peer outside the trusted-proxy set may hold at
+/// once (FX-24c; `logweir_api::transport::PeerLimit`). A connection over it is
+/// closed as soon as it is accepted.
+///
+/// A peer that is not the ingress is one machine — a kubelet probe, a
+/// `kubectl port-forward`, a pod — and a browser opens at most six HTTP/1.1
+/// connections to a host, so 32 is five browsers' worth. It is one eighth of
+/// [`MAX_CONNECTIONS`]: no single address outside the set can hold more than
+/// that share, at any rate. The ingress, inside the set, is never capped.
+const MAX_CONNECTIONS_PER_PEER: usize = 32;
 
 /// The largest request head hyper will buffer, 32 KiB.
 ///
@@ -223,8 +262,8 @@ const MAX_CONNECTIONS: usize = 256;
 /// are dropped and the process still exits 0 — it stopped when it was told to.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
-/// Run the router on `listener` until a shutdown signal, under the five limits
-/// above.
+/// Run the router on `listener` until a shutdown signal, under the limits
+/// above, and `peer_limit`'s cap when there is one.
 ///
 /// WHY THIS IS NOT `axum::serve`. That helper builds its hyper connection as
 /// `Builder::new(TokioExecutor::new())` and gives no access to it, so a
@@ -254,7 +293,11 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// which the chart never says; kubelet probes are HTTP/1.1. A client that
 /// tries HTTP/2 with prior knowledge is closed at its first request line,
 /// because `PRI * HTTP/2.0` is not an HTTP/1 request.
-async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> ExitCode {
+async fn serve(
+    listener: tokio::net::TcpListener,
+    router: axum::Router,
+    peer_limit: Option<Arc<PeerLimit>>,
+) -> ExitCode {
     let mut builder = http1::Builder::new();
     builder
         // The timer is not optional: without one hyper ignores the default
@@ -299,17 +342,32 @@ async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> ExitC
         // is inside a configured trusted-proxy range and is read by no decision
         // anywhere.
         let peer_ip = peer.ip();
+
+        // THE PER-PEER CAP (FX-24c), before anything is read: a peer outside
+        // the trusted-proxy set that already holds its share has this
+        // connection closed now, and the permit above comes back with it.
+        let peer_slot = match peer_limit.as_ref().map(|limit| limit.admit(peer_ip)) {
+            Some(Admission::Refused) => {
+                drop(stream);
+                continue;
+            }
+            Some(Admission::Counted(slot)) => Some(slot),
+            Some(Admission::Trusted) | None => None,
+        };
+
         let router_for_connection = router.clone();
         let service = TowerToHyperService::new(tower::service_fn(
             move |mut request: hyper::Request<Incoming>| {
                 request
                     .extensions_mut()
                     .insert(logweir_api::http::PeerAddr(peer_ip));
-                // THE BODY'S STALL DEADLINE (FX-24b), for every route and
-                // whoever reads the body: a handler waiting on a body the
-                // client stopped sending gets `TimedOut` instead of waiting
-                // for ever. `http::read_json` adds a total on top.
-                let request = request.map(|body| StallBody::new(body, IO_STALL_TIMEOUT));
+                // THE BODY'S PROGRESS WINDOW (FX-24b, FX-24c), for every
+                // route and whoever reads the body: a handler waiting on a
+                // body the client stopped sending, or trickles, gets
+                // `TimedOut` instead of waiting for ever. `http::read_json`
+                // adds a total on top.
+                let request =
+                    request.map(|body| StallBody::new(body, IO_STALL_TIMEOUT, IO_MIN_PROGRESS));
                 let router = router_for_connection.clone();
                 async move {
                     use tower::ServiceExt as _;
@@ -324,16 +382,18 @@ async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> ExitC
         // stream is server-sent events, an ordinary HTTP/1.1 response), so a
         // request asking to upgrade is answered like any other.
         //
-        // THE OUTPUT'S STALL DEADLINE (FX-24b): an answer the client has
-        // stopped reading fails its pending write at `IO_STALL_TIMEOUT`, and
-        // the connection ends with it — the permit below comes back then.
-        let io = StallGuard::new(TokioIo::new(stream), IO_STALL_TIMEOUT);
+        // THE OUTPUT'S PROGRESS WINDOW (FX-24b, FX-24c): an answer the client
+        // has stopped reading, or reads below the floor, fails its pending
+        // write at the window's end, and the connection ends with it — the
+        // permit below comes back then.
+        let io = StallGuard::new(TokioIo::new(stream), IO_STALL_TIMEOUT, IO_MIN_PROGRESS);
         let connection = builder.serve_connection(io, service);
         let connection = graceful.watch(connection);
         tokio::spawn(async move {
             // Held for the connection's life; dropped with it, which is what
-            // returns the permit.
+            // returns the permit, and the peer's place under its cap.
             let _permit = permit;
+            let _peer_slot = peer_slot;
             if let Err(error) = connection.await {
                 // Every HTTP-level answer is the router's; this is a transport
                 // failure — a reset, the header deadline or the stall deadline

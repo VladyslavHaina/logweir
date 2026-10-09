@@ -53,14 +53,16 @@ pub const MAX_JSON_BODY: usize = 1024 * 1024;
 /// How long [`read_json`] waits for a whole body, from its first read to the
 /// last byte (FX-24b).
 ///
-/// THE TRANSPORT'S STALL DEADLINE IS NOT ENOUGH ON ITS OWN. `main.rs` fails a
-/// body read that receives nothing for thirty seconds, but a client that sends
-/// one byte every twenty-nine seconds never stalls, and a 1 MiB body at that
-/// pace would hold its connection permit for most of a year. This is the total, and it
-/// is twice the stall so each bound keeps its own job: a body that stops is
-/// ended by the stall at thirty seconds, one that trickles by this at sixty.
-/// Sixty seconds for at most 1 MiB asks for 17 KiB/s, which any client
-/// that means to send the body clears; the console's own bodies are a few KiB.
+/// THE TRANSPORT'S PROGRESS WINDOW IS NOT ENOUGH ON ITS OWN. `main.rs` fails a
+/// body read that receives less than its floor (32 KiB, FX-24c) in thirty
+/// seconds, but a client that sends just over the floor in every window
+/// never meets it, and a 1 MiB body at that pace would hold its connection
+/// permit for a quarter of an hour. This is the total, and it is twice the
+/// window so each bound keeps its own job: a body that stops, or trickles
+/// below the floor, is ended by the window at thirty seconds, one that keeps
+/// above the floor by this at sixty. Sixty seconds for at most 1 MiB asks for
+/// 17 KiB/s, which any client that means to send the body clears; the
+/// console's own bodies are a few KiB.
 pub const JSON_BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The Content-Security-Policy on every response, verbatim from the contract
@@ -711,9 +713,12 @@ pub async fn read_json<T: DeserializeOwned>(body: Body, limit: usize) -> Result<
                 ));
             }
             if crate::transport::is_timeout(error.as_ref()) {
+                // The body's progress window (FX-24b; its floor, FX-24c): no
+                // window's worth of bytes arrived in time.
                 return Err(ApiError::new(
                     ProblemCode::MalformedRequest,
-                    "The request body stopped arriving before it was complete.",
+                    "The request body stopped arriving, or arrived too slowly, before it was \
+                     complete.",
                 ));
             }
             return Err(ApiError::new(
