@@ -857,6 +857,11 @@ pub fn render_plan(inputs: &PlanInputs<'_>) -> DrillSpec {
                     logweir_core::spec::TimeBasis::ProducerTime
                 }
             }),
+            // PROD-11.1: a rehearsal restores every partition from the
+            // archive's floor; both absent keep the slot's plan bytes, and its
+            // `templateDigest`, exactly as before.
+            window_start: None,
+            partitions: std::collections::BTreeMap::new(),
         },
         objectives: ObjectivesSpec {
             rto_seconds: spec

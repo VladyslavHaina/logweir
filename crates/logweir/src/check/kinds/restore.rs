@@ -37,6 +37,7 @@ use logweir_core::check_contract::{
     RestorePreflightRequest, Stream,
 };
 use logweir_core::destination::DestinationRole;
+use logweir_core::replay_selection::{ReplaySelection, SelectionRefusal};
 use logweir_core::spec::{target_topic_prefix, DrillSpec, TargetMode};
 use logweir_kafka::inventory::{InventoryProbe, TopicPresence};
 use logweir_kafka::reader::{NewTopicSpec, TARGET_TOPIC_CONFIGS};
@@ -92,7 +93,16 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
     checks.push(runner_contract(now));
 
     // 1 — THE PLAN BYTES, BEFORE ANY SOCKET.
-    let spec = match plan_spec(req, wiring) {
+    let spec = match plan_spec(req, wiring).and_then(|spec| {
+        // PROD-11.1: a replay selection the plan states WRONGLY is a fact
+        // about these bytes, like a parse failure: refused here, and nothing
+        // later runs. The same shape refusals as execution's phase 0
+        // (`ReplaySelection::from_spec`, the shared function).
+        match ReplaySelection::from_spec(&spec) {
+            Ok(_) => Ok(spec),
+            Err(refusal) => Err((CheckCode::SelectionInvalid, refusal.to_string())),
+        }
+    }) {
         Ok(spec) => {
             if want(CheckId::PlanParse) {
                 checks.push(
@@ -460,11 +470,65 @@ fn coverage_row(
         ))
         .with_remedy(remedy_for(CheckCode::PointInTimeAfterCoverage));
     }
-    ready(CheckId::ArchiveCoverage, CheckCode::PointInTimeCovered, now).with_message(&format!(
+    let covered = format!(
         "backup set `{}` covers epoch-ms {} to {}, which includes the requested recovery point \
          epoch-ms {pit}",
         req.backup_id, w.oldest_ms, w.newest_ms
-    ))
+    );
+    // PROD-11.1: the plan's replay selection, resolved through the SAME
+    // function execution binds and restores it with
+    // (`ReplaySelection::resolve`), over the same manifest. A plan that states
+    // none is answered exactly as before.
+    let selection = match ReplaySelection::from_spec(spec) {
+        Ok(s) if !s.is_full() => s,
+        _ => {
+            return ready(CheckId::ArchiveCoverage, CheckCode::PointInTimeCovered, now)
+                .with_message(&covered)
+        }
+    };
+    match selection.resolve(&archive::topic_facts(manifest)) {
+        Ok(r) => {
+            let topics: BTreeSet<&str> = r.partitions.iter().map(|p| p.topic.as_str()).collect();
+            let with_data = r
+                .partitions
+                .iter()
+                .filter(|p| !p.segment_keys.is_empty())
+                .count();
+            ready(CheckId::ArchiveCoverage, CheckCode::PointInTimeCovered, now).with_message(
+                &format!(
+                    "{covered}; the plan selects {} partition(s) of {} topic(s) ({with_data} \
+                     with archived segments in the window) from epoch-ms {} ({}) to epoch-ms \
+                     {}, restored by {} engine run(s)",
+                    r.partitions.len(),
+                    topics.len(),
+                    r.start_ms,
+                    if selection.window_start_ms.is_some() {
+                        "the plan's stated start"
+                    } else {
+                        "the archive's floor"
+                    },
+                    r.end_ms,
+                    r.runs.len()
+                ),
+            )
+        }
+        Err(refusal) => {
+            let code = match &refusal {
+                SelectionRefusal::StartBeforeCoverage { .. } => {
+                    CheckCode::WindowStartBeforeCoverage
+                }
+                SelectionRefusal::PartitionNotInArchive { .. } => {
+                    CheckCode::PartitionNotInBackupSet
+                }
+                SelectionRefusal::EmptySelection { .. } => CheckCode::SelectionEmpty,
+                SelectionRefusal::NoCoverage { .. } => CheckCode::PointInTimeAfterCoverage,
+                _ => CheckCode::SelectionInvalid,
+            };
+            catalogue::outcome(CheckId::ArchiveCoverage, CheckState::NotReady, code, now)
+                .with_message(&format!("backup set `{}`: {refusal}", req.backup_id))
+                .with_remedy(remedy_for(code))
+        }
+    }
 }
 
 /// `archive.segments` — every segment the manifest names for the restore
@@ -479,17 +543,26 @@ fn segments_row(
     now: DateTime<Utc>,
     details: &mut Vec<String>,
 ) -> CheckOutcome {
-    let Ok(w) = window else {
+    if window.is_err() {
         return ready(CheckId::ArchiveSegments, CheckCode::SegmentsPresent, now)
             .with_message("the backup set names no segment, so none can be missing");
-    };
-    // The window the restore will actually ask for: the archive's own floor to
-    // the recovery point (guard G-WIN — the start is the archive's, never the
-    // spec's).
-    let want = (w.oldest_ms, recovery_point(spec).timestamp_millis());
-    let expected = archive::segment_keys_for_topics(manifest, &spec.source.topics, want, &|k| {
-        access.qualify(k)
-    });
+    }
+    // The segments the restore will actually read: the plan's selection —
+    // every partition of every selected topic from the archive's own floor
+    // (guard G-WIN) unless the plan states a start or a partition subset
+    // (PROD-11.1) — resolved by the ONE function execution restores it with
+    // (`ReplaySelection::resolve`), then qualified into this handle's key
+    // space. A selection the coverage row refuses names no segment here.
+    let mut expected: Vec<String> = ReplaySelection::from_spec(spec)
+        .ok()
+        .and_then(|selection| selection.resolve(&archive::topic_facts(manifest)).ok())
+        .map(|r| r.segment_keys())
+        .unwrap_or_default()
+        .iter()
+        .map(|k| access.qualify(k))
+        .collect();
+    expected.sort();
+    expected.dedup();
     // `<storage.prefix>/<backupId>` — the QUALIFIED manifest key's own
     // directory, so the listing and the manifest cannot disagree about which
     // set is being checked, and neither can the listing and `expected`:

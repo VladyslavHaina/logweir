@@ -2355,3 +2355,118 @@ fn a_complete_coverage_plan_finds_a_changed_record_past_the_canary() {
     );
     assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
 }
+
+/// **PROD-11.1: a partition subset can never sign** (the review's H1,
+/// OD-9). A plan stating `restore.partitions` — one the archive satisfies, so
+/// the refusal is not the archive's — is refused exit 3 at phase 0, its
+/// message opening with `PartitionSubsetsAwaitOwnerDecision`: no target topic
+/// created, no sample fingerprinted, nothing signed. The control is the same
+/// archive with no selection (`Drill::Passes`), which runs and signs.
+///
+/// KILLS: the refusal deleted from `ReplaySelection::from_spec` (the subset
+/// would be restored and signed under a format a verifier that predates it
+/// reads as a full restore).
+#[test]
+fn a_partition_subset_is_refused_by_name_and_never_signed() {
+    let f = fixtures::orchestrator_fixture(Drill::StatesAPartitionSelection);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=GuardRefused");
+    assert!(
+        message.contains("PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition subset of orders"),
+        "{message}"
+    );
+    assert!(fixtures::created_topics(&f).is_empty(), "nothing created");
+    assert!(fixtures::fingerprint_calls(&f).is_empty(), "before phase 4");
+    assert!(
+        f.ctx
+            .store
+            .get(&format!("logweir/drills/{}.json", f.run_id))
+            .is_err(),
+        "a refused run signs nothing"
+    );
+    let control = fixtures::orchestrator_fixture(Drill::Passes);
+    execute_with(&control.args, &control.run_id, &control.ctx).expect("the control runs");
+    assert_eq!(fixtures::created_topics(&control).len(), 1);
+}
+
+/// **PROD-11.1: a stated window start is restored, judged over its window and
+/// SIGNED.** The approved plan states `restore.point_in_time:
+/// "<start>/<end>"` with the start at the archive's floor (so the restore is
+/// the archive's). The run passes, its scorecard is format 1.7.0 with
+/// `source.selection` naming the start and end, and the EXISTING
+/// `sample.coverage_note` opens with the window and names the sampled lane's
+/// one limit — what a reader that predates the block reads. The control is the
+/// same archive with no selection: no block, its version as before.
+///
+/// KILLS: dropping the block, writing it for a plan with no start, a version
+/// step writing an older minor over 1.7.0, the coverage note not naming the
+/// window.
+#[test]
+fn a_stated_window_start_is_restored_and_signed_with_its_window() {
+    let f = fixtures::orchestrator_fixture(Drill::StatesAWindowStart);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the window runs");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
+    assert_eq!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+    );
+    let start = chrono::DateTime::parse_from_rfc3339(fixtures::FIXTURE_WINDOW_START)
+        .unwrap()
+        .timestamp_millis();
+    let end = chrono::DateTime::parse_from_rfc3339(fixtures::FIXTURE_WINDOW_END)
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(
+        sc.source.selection,
+        Some(logweir_core::scorecard::SelectionLabel {
+            window_start_ms: start,
+            window_end_ms: end,
+        })
+    );
+    assert!(
+        sc.sample.coverage_note.starts_with(&format!(
+            "replay selection: every partition of every restored topic, from epoch-ms {start} \
+             (the plan's stated window start, inclusive)"
+        )),
+        "{}",
+        sc.sample.coverage_note
+    );
+    assert!(
+        sc.sample
+            .coverage_note
+            .contains("a sampled check does not find an in-window record held in a segment"),
+        "{}",
+        sc.sample.coverage_note
+    );
+    // Review N1: the sampled lane's signed note never says no record before
+    // the start was restored — it cannot show that.
+    assert!(
+        sc.sample.coverage_note.contains(
+            "no record before the start was expected; a sampled check does not prove that none \
+             was restored"
+        ),
+        "{}",
+        sc.sample.coverage_note
+    );
+    assert!(
+        !sc.sample.coverage_note.contains("was restored or expected"),
+        "{}",
+        sc.sample.coverage_note
+    );
+    assert!(sc.validate_invariants().is_ok());
+
+    let control = fixtures::orchestrator_fixture(Drill::Passes);
+    execute_with(&control.args, &control.run_id, &control.ctx).expect("the control runs");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&control)).unwrap();
+    assert!(sc.source.selection.is_none(), "no selection, no block");
+    assert_ne!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+    );
+    assert!(!sc.sample.coverage_note.contains("replay selection"));
+}

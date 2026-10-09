@@ -1,6 +1,7 @@
 use crate::drill::DrillError;
 use chrono::{DateTime, Utc};
 use logweir_core::engine::{BackupSetFacts, BackupSetRef, SampleSelection};
+use logweir_core::replay_selection::ReplaySelection;
 use logweir_core::spec::{Coverage, SampleSpec};
 
 #[derive(Debug, Clone)]
@@ -74,6 +75,24 @@ pub fn run(
     spec: &SampleSpec,
     topics: &[String],
 ) -> Result<Selection, DrillError> {
+    run_selected(facts, spec, topics, None)
+}
+
+/// [`run`], over a plan's replay selection (PROD-11.1). `None` — a plan that
+/// states none — is [`run`] exactly.
+///
+/// With a selection, a sample may come only from a SELECTED partition (a
+/// partition the plan did not select holds no restored record to reconcile),
+/// and the sample window starts no earlier than the plan's stated start (an
+/// archived record below it was never restored). The window this returns is
+/// the one the scorecard signs as `sample.window_start`/`window_end`, so that
+/// existing field names the narrowed start, never the archive's floor.
+pub fn run_selected(
+    facts: &BackupSetFacts,
+    spec: &SampleSpec,
+    topics: &[String],
+    selection: Option<&ReplaySelection>,
+) -> Result<Selection, DrillError> {
     // Task 19 fix round 1 (review finding F2): `records_per_partition: 0` is
     // an ordinary YAML value nothing else rejects, and it reaches every
     // `SampleSelection.count` this function builds. A zero-count selection
@@ -88,7 +107,17 @@ pub fn run(
                 .into(),
         ));
     }
-    let (w0, w1) = (spec.window_start, spec.window_end);
+    let w0 = match selection.and_then(|sel| sel.window_start_ms) {
+        Some(start_ms) if start_ms > spec.window_start.timestamp_millis() => {
+            DateTime::<Utc>::from_timestamp_millis(start_ms).ok_or_else(|| {
+                DrillError::Operational(format!(
+                    "the window start epoch-ms {start_ms} is outside the representable range"
+                ))
+            })?
+        }
+        _ => spec.window_start,
+    };
+    let w1 = spec.window_end;
     let (ms0, ms1) = (w0.timestamp_millis(), w1.timestamp_millis());
     let mut candidates: Vec<Candidate> = Vec::new();
 
@@ -102,6 +131,10 @@ pub fn run(
     let complete = spec.coverage == Coverage::Complete;
     for t in facts.topics.iter().filter(|t| topics.contains(&t.name)) {
         for p in &t.partitions {
+            // PROD-11.1: a partition the plan did not select restored nothing.
+            if selection.is_some_and(|sel| !sel.selects_partition(&t.name, p.partition_id)) {
+                continue;
+            }
             let in_window: Vec<_> = p
                 .segments
                 .iter()

@@ -124,6 +124,125 @@ pub struct SourceInfo {
     /// `e2e/fixtures/signed/` round-trip byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_basis: Option<TimeBasisLabel>,
+    /// **Format 1.7.0 (PROD-11.1).** The plan's stated INCLUSIVE window
+    /// start, when it states one: see [`SelectionLabel`].
+    ///
+    /// ABSENT means the restore selected every record of every partition of
+    /// every restored topic from the archive's floor, which is what every
+    /// restore before 1.7.0 did. Partition subsets are refused until the
+    /// owner decides OD-9, so no format-1 document narrows partitions. Nested
+    /// optional (Global Constraint 12 as amended); `skip_serializing_if`, so
+    /// every document without a start keeps its bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionLabel>,
+}
+
+/// **PROD-11.1, scorecard format 1.7.0.** A narrowed restore's window: the
+/// plan's stated inclusive start and its end. The contract is
+/// `docs/to-do/decisions/PROD-11.1-replay-selection.md`.
+///
+/// **A START ONLY.** Every partition of every restored topic is restored and
+/// judged; only the window's start moved. A partition-subset restore is
+/// refused by name (`PartitionSubsetsAwaitOwnerDecision`) until the owner
+/// decides OD-9, because a reader that predates its scorecard would read it
+/// as a full restore.
+///
+/// Every verdict of such a document is judged over `[window_start_ms,
+/// window_end_ms]`: samples start no earlier than the start, the count bound
+/// and the per-partition presence check are over that window, and a complete
+/// verification expects every archived record whose own timestamp is in it.
+/// The EXISTING fields name the start too: `sample.window_start` is never
+/// earlier than it, `sample.coverage_note` opens with it, and a complete
+/// block's `window.start_ms` (1.4.0) is it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SelectionLabel {
+    /// The plan's stated INCLUSIVE window start, epoch milliseconds.
+    pub window_start_ms: i64,
+    /// The window's INCLUSIVE end, epoch milliseconds: the end of the plan's
+    /// `restore.point_in_time` interval.
+    pub window_end_ms: i64,
+}
+
+impl SelectionLabel {
+    /// The `replay selection:` sentence, ending in what the document proves
+    /// about records BEFORE the start (review N1): the same words in the
+    /// writer's `sample.coverage_note` ([`Self::coverage_note`]) and in the
+    /// line both readers print (`logweir::verify::selection_lines`,
+    /// `docs/verify_scorecard.py::_selection_lines`).
+    #[must_use]
+    pub fn sentence(&self, before: BeforeTheStart) -> String {
+        format!(
+            "replay selection: every partition of every restored topic, from epoch-ms {} (the \
+             plan's stated window start, inclusive) to epoch-ms {} (inclusive); {}",
+            self.window_start_ms,
+            self.window_end_ms,
+            before.words()
+        )
+    }
+
+    /// The sentence that opens the writer's `sample.coverage_note`, naming
+    /// the window in an EXISTING field (PROD-11.1 §5.2). Written before phase
+    /// 7 judges anything, so it claims only what the plan's lane can say then:
+    /// a sampled lane says it cannot show that no record before the start was
+    /// restored; a complete lane says only that none was expected (whether
+    /// none was restored is the complete block's verdict, which a reader
+    /// states — [`BeforeTheStart::of`]).
+    #[must_use]
+    pub fn coverage_note(&self, coverage: crate::spec::Coverage) -> String {
+        self.sentence(match coverage {
+            crate::spec::Coverage::Sampled => BeforeTheStart::SampledUnproved,
+            crate::spec::Coverage::Complete => BeforeTheStart::Expected,
+        })
+    }
+}
+
+/// What a document from a stated start proves about the records BEFORE that
+/// start (PROD-11.1 review N1). Only a COMPLETE verification whose
+/// `integrity.result` is `pass` shows that none was restored: there a
+/// restored record below the start is `unexpected`, and IV-6 holds a
+/// complete pass to no unexpected record in any partition. A SAMPLED check
+/// cannot: its sample is drawn from the window, and its per-partition count
+/// bound counts every record of a segment that straddles the start, so an
+/// engine that restored a straddling segment's earlier records stays inside
+/// every bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeforeTheStart {
+    /// A complete verification that passed: none was restored or expected.
+    ProvedNoneRestored,
+    /// A sampled verification: none was expected; the check does not show
+    /// that none was restored.
+    SampledUnproved,
+    /// Anything else — a complete verification that did not pass, or no
+    /// verification (phase 7 never ran): none was expected, nothing more.
+    Expected,
+}
+
+impl BeforeTheStart {
+    /// What THIS document proves, from its `integrity.result` and its
+    /// `integrity.verification`. The one predicate both readers use.
+    #[must_use]
+    pub fn of(integrity: &IntegrityResult, verification: Option<&Verification>) -> Self {
+        match verification {
+            Some(v) if v.coverage == COVERAGE_COMPLETE && *integrity == IntegrityResult::Pass => {
+                Self::ProvedNoneRestored
+            }
+            Some(v) if v.coverage == COVERAGE_SAMPLED => Self::SampledUnproved,
+            _ => Self::Expected,
+        }
+    }
+
+    /// The clause that ends the `replay selection:` sentence.
+    #[must_use]
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::ProvedNoneRestored => "no record before the start was restored or expected",
+            Self::SampledUnproved => {
+                "no record before the start was expected; a sampled check does not prove that \
+                 none was restored"
+            }
+            Self::Expected => "no record before the start was expected",
+        }
+    }
 }
 
 /// **FX-8, scorecard format 1.3.0.** What the restore's time selection read,
@@ -222,6 +341,52 @@ pub const UNSAMPLED_TOPICS_SINCE_MINOR: u64 = 6;
 /// file is this version's.
 pub const FORMAT_VERSION_WITH_UNSAMPLED_TOPICS: &str = "1.6.0";
 
+/// **PROD-11.1.** The first minor of scorecard format 1 that defines
+/// `source.selection`, which arm SEL-1 enforces. **A renumber changes this and
+/// [`FORMAT_VERSION_WITH_SELECTION`] together**, and
+/// `docs/verify_scorecard.py`'s `SCORECARD_SELECTION_SINCE_MINOR` follows it.
+pub const SELECTION_SINCE_MINOR: u64 = 7;
+
+/// **PROD-11.1.** The `format_version` of a scorecard that carries
+/// `source.selection` (a stated window start) — a MINOR bump for a new
+/// optional block, under OD-7: arms SEL-1 to SEL-3 read only that block, or
+/// judge an existing field against it and can only refuse. Written only for a
+/// restore that states a start ([`format_version_with_selection`]), so every
+/// other document is the one it was. The newest minor: the current schema
+/// file is this version's.
+pub const FORMAT_VERSION_WITH_SELECTION: &str = "1.7.0";
+
+/// The NEWER of two scorecard versions of major 1, by minor (PROD-11.1 review:
+/// every version step takes the max, so a later minor is never downgraded by
+/// an earlier step). A version this build cannot parse is kept as it is, so a
+/// malformed value is never silently replaced.
+#[must_use]
+pub fn newer_format_version<'a>(a: &'a str, b: &'a str) -> &'a str {
+    match (
+        major_version(a).zip(minor_version(a)),
+        major_version(b).zip(minor_version(b)),
+    ) {
+        (Some(x), Some(y)) if y > x => b,
+        _ => a,
+    }
+}
+
+/// The `format_version` a scorecard is written with once its plan's replay
+/// selection is known (PROD-11.1): at least [`FORMAT_VERSION_WITH_SELECTION`]
+/// when it carries `source.selection`, else `current` unchanged. 1.7.0
+/// defines everything 1.6.0 does. Monotonic: never lowers `current`.
+#[must_use]
+pub fn format_version_with_selection<'a>(
+    current: &'a str,
+    selection: Option<&SelectionLabel>,
+) -> &'a str {
+    if selection.is_some() {
+        newer_format_version(current, FORMAT_VERSION_WITH_SELECTION)
+    } else {
+        current
+    }
+}
+
 /// **FX-23 review M2.** Whether a scorecard's `format_version` shows that a
 /// build with FX-23's sampled-lane checks signed it: major 1, minor 1.6 or
 /// later. Only such a build writes 1.6.0. A 1.4.0 or 1.5.0 document is
@@ -243,15 +408,18 @@ pub fn proves_fx23_sampled_checks(format_version: &str) -> bool {
 /// for any block naming an unsampled topic; else `current`, the version
 /// [`format_version_for_target`] chose, unchanged (a complete verification).
 /// 1.6.0 defines everything 1.5.0 does, so a sampled document of a PROD-01.3
-/// auth mode is 1.6.0 too.
+/// auth mode is 1.6.0 too. Monotonic: it never lowers `current`.
 #[must_use]
 pub fn format_version_with_sample<'a>(
     current: &'a str,
     sample: &SampleInfo,
     coverage: crate::spec::Coverage,
 ) -> &'a str {
+    // MONOTONIC (the PROD-11.1 review): at least 1.6.0, never lower than the
+    // version handed in, so a later minor a step before this one chose (1.7.0
+    // for a stated window start) is never written over.
     if coverage == crate::spec::Coverage::Sampled || sample.unsampled_topics.is_some() {
-        FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
+        newer_format_version(current, FORMAT_VERSION_WITH_UNSAMPLED_TOPICS)
     } else {
         current
     }
@@ -1950,6 +2118,59 @@ impl Scorecard {
                 ));
             }
         }
+        // `source.selection` (format 1.7.0, PROD-11.1): arms SEL-1 to SEL-3.
+        // They fire ONLY on a document that CARRIES the block, so every
+        // document without it is decided exactly as before: MINOR under the
+        // owner's OD-7 (a). SEL-3 judges an existing field (the 1.4.0 complete
+        // block's window) against it, as IV-6 does, and can only refuse.
+        //
+        // NOT INTERPOLATED, except SEL-1's version, so the messages join
+        // `index.json`'s `arm` fields by literal substring.
+        //
+        // Mirrored arm for arm, in this order and this position (after
+        // `sample.unsampled_topics`, before `redactions`, which stays last), in
+        // `docs/verify_scorecard.py::check_invariants`.
+        if let Some(selection) = &self.source.selection {
+            // SEL-1. A document declaring a version before 1.7.0 cannot carry
+            // a 1.7.0 block.
+            let defined = major_version(&self.format_version) == Some(1)
+                && minor_version(&self.format_version)
+                    .is_some_and(|minor| minor >= SELECTION_SINCE_MINOR);
+            if !defined {
+                return Err(InvariantError(format!(
+                    "source.selection is present but format_version {:?} predates it: the \
+                     block is defined from 1.{SELECTION_SINCE_MINOR}.0",
+                    self.format_version
+                )));
+            }
+            // SEL-2. A stated start is before the end (the plan refuses
+            // anything else before it runs).
+            if selection.window_start_ms >= selection.window_end_ms {
+                return Err(InvariantError(
+                    "source.selection.window_start_ms is not before window_end_ms; a selection's \
+                     window holds at least one instant after its start"
+                        .into(),
+                ));
+            }
+            // SEL-3. A complete verification's expected output is selected by
+            // the plan's own window.
+            if let Some(c) = self
+                .integrity
+                .verification
+                .as_ref()
+                .and_then(|v| v.complete.as_ref())
+            {
+                if c.window.start_ms != Some(selection.window_start_ms)
+                    || c.window.end_ms != selection.window_end_ms
+                {
+                    return Err(InvariantError(
+                        "integrity.verification.complete.window is not source.selection's window; \
+                         the expected output is selected by the plan's own start and end"
+                            .into(),
+                    ));
+                }
+            }
+        }
         // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
         // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
         // now nothing enforced it and no surface displayed it — a third party
@@ -2031,6 +2252,7 @@ mod tests {
                 // `source.time_basis` arms have their own unit tests below,
                 // over this same base document.
                 time_basis: None,
+                selection: None,
             },
             target: TargetInfo {
                 cluster_id: "cluster-1".into(),
@@ -4130,5 +4352,214 @@ mod tests {
             .unwrap_err()
             .0
             .starts_with("sample.unsampled_topics is present"));
+    }
+
+    // ---- PROD-11.1: `source.selection`, arms SEL-1 to SEL-3 ----
+
+    /// A sampled 1.7.0 scorecard narrowed to a window starting at `start`.
+    fn with_selection(start: i64) -> Scorecard {
+        let mut sc = with_verification(sampled_verification());
+        sc.format_version = FORMAT_VERSION_WITH_SELECTION.into();
+        sc.source.selection = Some(SelectionLabel {
+            window_start_ms: start,
+            window_end_ms: 1_760_000_005_000,
+        });
+        sc
+    }
+
+    fn sel_err(sc: &Scorecard) -> String {
+        sc.validate_invariants().unwrap_err().0
+    }
+
+    /// The writer's shapes are accepted, and the version rule: at least 1.7.0
+    /// exactly when the block is present. KILLS: writing 1.7.0 for every
+    /// document, or the old version beside the block (SEL-1 would refuse it).
+    #[test]
+    fn a_selection_is_written_as_1_7_0_and_accepted() {
+        let sc = with_selection(1_760_000_001_000);
+        assert!(sc.validate_invariants().is_ok());
+        assert_eq!(
+            format_version_with_selection("1.6.0", sc.source.selection.as_ref()),
+            "1.7.0"
+        );
+        assert_eq!(format_version_with_selection("1.6.0", None), "1.6.0");
+        assert_eq!(format_version_with_selection("1.4.0", None), "1.4.0");
+        assert!(proves_fx23_sampled_checks(FORMAT_VERSION_WITH_SELECTION));
+    }
+
+    /// **The version steps are MONOTONIC** (the PROD-11.1 review): each takes
+    /// the newer of what it was handed and its own minor, so FX-23's sampled
+    /// step can never write 1.6.0 over a 1.7.0 a step before it chose, and the
+    /// selection step never lowers a later minor. KILLS: either step returning
+    /// its own constant unconditionally.
+    #[test]
+    fn every_version_step_takes_the_newer_minor() {
+        use crate::spec::Coverage::{Complete, Sampled};
+        let sc = with_selection(1_760_000_001_000);
+        assert_eq!(
+            format_version_with_sample("1.7.0", &sc.sample, Sampled),
+            "1.7.0"
+        );
+        assert_eq!(
+            format_version_with_sample("1.4.0", &sc.sample, Sampled),
+            "1.6.0"
+        );
+        assert_eq!(
+            format_version_with_sample("1.7.0", &sc.sample, Complete),
+            "1.7.0"
+        );
+        assert_eq!(
+            format_version_with_selection("1.8.0", sc.source.selection.as_ref()),
+            "1.8.0"
+        );
+        assert_eq!(newer_format_version("1.6.0", "1.7.0"), "1.7.0");
+        assert_eq!(newer_format_version("1.7.0", "1.6.0"), "1.7.0");
+        assert_eq!(newer_format_version("1.x.0", "1.6.0"), "1.x.0");
+    }
+
+    /// SEL-1. KILLS: deleting the arm; comparing against the wrong minor.
+    #[test]
+    fn sel1_refuses_a_selection_under_a_version_that_predates_it() {
+        for version in ["1.4.0", "1.5.0", "1.6.0", "1.x.0"] {
+            let mut sc = with_selection(1_760_000_001_000);
+            // No 1.4.0 block, so IV-1 does not answer first.
+            sc.integrity.verification = None;
+            sc.format_version = version.into();
+            assert_eq!(
+                sel_err(&sc),
+                format!(
+                    "source.selection is present but format_version {version:?} predates it: \
+                     the block is defined from 1.{SELECTION_SINCE_MINOR}.0"
+                )
+            );
+        }
+    }
+
+    /// SEL-2. KILLS: deleting the arm; `>` for `>=`.
+    #[test]
+    fn sel2_refuses_a_start_at_or_after_the_end() {
+        for start in [1_760_000_005_000, 1_760_000_006_000] {
+            assert_eq!(
+                sel_err(&with_selection(start)),
+                "source.selection.window_start_ms is not before window_end_ms; a selection's window holds at least one instant after its start"
+            );
+        }
+        assert!(with_selection(1_760_000_004_999)
+            .validate_invariants()
+            .is_ok());
+    }
+
+    /// SEL-3, over the 1.4.0 complete block. KILLS: deleting it; comparing
+    /// only the start, or only the end.
+    #[test]
+    fn sel3_holds_the_complete_block_to_the_selections_window() {
+        let complete = |start: Option<i64>, end: i64| {
+            let mut v = complete_verification();
+            v.complete.as_mut().unwrap().window = CompleteWindow {
+                start_ms: start,
+                end_ms: end,
+            };
+            v
+        };
+        let mut ok = with_selection(1_760_000_001_000);
+        ok.integrity.verification = Some(complete(Some(1_760_000_001_000), 1_760_000_005_000));
+        assert!(
+            ok.validate_invariants().is_ok(),
+            "{:?}",
+            ok.validate_invariants()
+        );
+        for (start, end) in [
+            (None, 1_760_000_005_000),
+            (Some(1_760_000_000_000), 1_760_000_005_000),
+            (Some(1_760_000_001_000), 1_760_000_004_000),
+        ] {
+            let mut sc = ok.clone();
+            sc.integrity.verification = Some(complete(start, end));
+            assert_eq!(
+                sel_err(&sc),
+                "integrity.verification.complete.window is not source.selection's window; the expected output is selected by the plan's own start and end",
+                "{start:?} {end}"
+            );
+        }
+    }
+
+    /// SEL-1 to SEL-3 sit after US-1 to US-3 and before `redactions`. KILLS:
+    /// moving the block.
+    #[test]
+    fn the_selection_arms_sit_between_the_unsampled_arms_and_redactions() {
+        let mut sc = with_selection(1_760_000_001_000);
+        sc.sample.unsampled_topics = Some(vec![]);
+        assert!(sel_err(&sc).starts_with("sample.unsampled_topics is empty"));
+        let mut sc = with_selection(1_760_000_001_000);
+        sc.format_version = "1.6.0".into();
+        sc.redactions = vec![Redaction {
+            path: "/x".into(),
+            reason: "y".into(),
+            present: true,
+        }];
+        assert!(sel_err(&sc).starts_with("source.selection is present"));
+    }
+
+    /// The `sample.coverage_note` sentence names the window, and claims about
+    /// the records before the start only what the lane can show (review N1):
+    /// the writer's note never says none was restored — a sampled lane says it
+    /// cannot show it, a complete lane says only that none was expected, its
+    /// verdict being the complete block's. KILLS: the sampled note claiming
+    /// "restored"; the complete note claiming it before phase 7 has judged.
+    #[test]
+    fn the_coverage_note_names_the_window_and_claims_per_lane() {
+        use crate::spec::Coverage;
+        let label = with_selection(1_760_000_001_000).source.selection.unwrap();
+        let head = "replay selection: every partition of every restored topic, from epoch-ms 1760000001000 (the plan's stated window start, inclusive) to epoch-ms 1760000005000 (inclusive); ";
+        assert_eq!(
+            label.coverage_note(Coverage::Sampled),
+            format!("{head}no record before the start was expected; a sampled check does not prove that none was restored")
+        );
+        assert_eq!(
+            label.coverage_note(Coverage::Complete),
+            format!("{head}no record before the start was expected")
+        );
+        for lane in [Coverage::Sampled, Coverage::Complete] {
+            assert!(!label
+                .coverage_note(lane)
+                .contains("was restored or expected"));
+        }
+    }
+
+    /// **Review N1, the reader's predicate, a row per lane.** Only a complete
+    /// verification whose integrity passed proves no record before the start
+    /// was restored (IV-6: no unexpected record anywhere); a sampled one
+    /// never does, pass or not; a complete one that did not pass, and a
+    /// document with no verification (phase 7 never ran), say only that none
+    /// was expected. KILLS: a sampled pass printing "restored"; a failed
+    /// complete verification printing it; a missing verification printing it.
+    #[test]
+    fn what_a_document_proves_before_the_start_follows_its_lane_and_verdict() {
+        use crate::outcome::IntegrityResult::{Fail, Pass};
+        let (sampled, complete) = (sampled_verification(), complete_verification());
+        assert_eq!(
+            BeforeTheStart::of(&Pass, Some(&complete)),
+            BeforeTheStart::ProvedNoneRestored
+        );
+        assert_eq!(
+            BeforeTheStart::of(&Fail, Some(&complete)),
+            BeforeTheStart::Expected
+        );
+        assert_eq!(
+            BeforeTheStart::of(&Pass, Some(&sampled)),
+            BeforeTheStart::SampledUnproved
+        );
+        assert_eq!(
+            BeforeTheStart::of(&Fail, Some(&sampled)),
+            BeforeTheStart::SampledUnproved
+        );
+        assert_eq!(BeforeTheStart::of(&Pass, None), BeforeTheStart::Expected);
+        assert_eq!(
+            BeforeTheStart::ProvedNoneRestored.words(),
+            "no record before the start was restored or expected"
+        );
+        for unproved in [BeforeTheStart::SampledUnproved, BeforeTheStart::Expected] {
+            assert!(!unproved.words().contains("restored or"), "{unproved:?}");
+        }
     }
 }

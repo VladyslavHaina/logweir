@@ -755,5 +755,43 @@
   "python_exit": 1,
   "reason": "sample.unsampled_topics is present but integrity.verification.coverage is \"complete\"; a complete verification compares every restored partition and leaves no topic unsampled",
   "arm": "sample.unsampled_topics is present but integrity.verification.coverage is "
+ },
+ {
+  "id": "selection_1_7_sampled",
+  "file": "selection_1_7_sampled.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "selection_1_7_complete_pass",
+  "file": "selection_1_7_complete_pass.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "selection_under_format_1_6_0",
+  "file": "selection_under_format_1_6_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection is present but format_version \"1.6.0\" predates it: the block is defined from 1.7.0",
+  "arm": "source.selection is present but format_version "
+ },
+ {
+  "id": "selection_start_at_its_end",
+  "file": "selection_start_at_its_end.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.window_start_ms is not before window_end_ms; a selection's window holds at least one instant after its start",
+  "arm": "source.selection.window_start_ms is not before window_end_ms; a selection's "
+ },
+ {
+  "id": "selection_complete_window_is_not_its_own",
+  "file": "selection_complete_window_is_not_its_own.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete.window is not source.selection's window; the expected output is selected by the plan's own start and end",
+  "arm": "integrity.verification.complete.window is not source.selection's window; "
  }
 ]

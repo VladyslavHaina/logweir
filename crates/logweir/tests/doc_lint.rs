@@ -2045,6 +2045,9 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a replication factor the archive does not record",
             "replication_factor (notRecorded)",
         ),
+        // PROD-11.1 (2026-10-08): a plan may select a window start (partition
+        // subsets are refused until OD-9), and the scorecard signs it.
+        ("a restore can select a window start", "source.selection"),
     ];
     assert_eq!(
         items.len(),

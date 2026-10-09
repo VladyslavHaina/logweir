@@ -29,9 +29,10 @@ early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
 one crate that may hold `unsafe` code, and the consumer-group and ACL reads
 behind it), 38 (FX-20, the binding for every other credential reference),
 39 (FX-18, a topic phase 0 creates is used only once the cluster serves
-it), 40 (FX-24, a silent connection meets the console's header deadline)
-and 41 (FX-21, a replication factor the archive does not record is never
-read as matching; the engine's first patch) so far. Items continue the next entry's
+it), 40 (FX-24, a silent connection meets the console's header deadline),
+41 (FX-21, a replication factor the archive does not record is never
+read as matching; the engine's first patch) and 42 (PROD-11.1, a restore
+can select a window start) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -850,7 +851,6 @@ against a sentinel) is the next PoC upgrade's.
 the new status fields; bound Secrets keep working with them. An older console
 offers `existing` again, which this API refuses — roll the console with the
 controller.
-
 #### 39. A topic phase 0 creates is read, or handed to the engine, only once the cluster serves it (FX-18)
 
 **Changed.** Phase 0 creates the target topics (and, on a `LogAppendTime`
@@ -993,6 +993,55 @@ is bound. Archives are unaffected in either direction: the patch changes what
 the manifest records, never the segment format, and a manifest with every
 factor is read by every engine that reads one with the first.
 
+#### 42. A restore can select a window start, and the scorecard signs it (PROD-11.1)
+
+**Added.** A drill or restore plan may state an inclusive window START, as the
+interval form of its point in time:
+`restore.point_in_time: "<start>/<end>"`
+([drill-spec.md](formats/drill-spec.md#a-window-start-restorepoint_in_time-startend-prod-111)).
+A single instant is what it was. Every partition of every topic the plan names
+is restored from the start; a start before the archive's coverage (never moved
+to it), a start at or after the end and a window no archived segment overlaps
+are refused (exit 3) before any target topic is created. Phases 4 and 7 judge
+the window only. The restore preflight previews it through the same function
+execution uses (`WindowStartBeforeCoverage`, `SelectionEmpty`,
+`SelectionInvalid`). The scorecard is format **1.7.0** and carries
+`source.selection {window_start_ms, window_end_ms}`; its existing fields
+(`sample.window_start`, `sample.coverage_note`, a complete block's window) name
+the start too
+([stability.md](stability.md#scorecard-format-170-sourceselection-a-restore-from-a-stated-window-start-prod-111)).
+`verify_scorecard.py` 1.23.0 and `logweir drill verify` check it (arms SEL-1
+to SEL-3), print a `replay selection:` line, and qualify a sampled `pass` by
+its window. Each says no record before the start was restored only over a
+complete verification that passed; for a sampled document it says the
+sampled check does not prove it.
+**Refused:** `restore.partitions` (a partition subset), by name,
+`PartitionSubsetsAwaitOwnerDecision`, until the owner decides how a
+subset-narrowed scorecard is versioned (OD-9); and a plan stating a start
+under a standing rehearsal authorization, which restores every partition from
+the floor.
+**Do:** nothing for a plan without a start. A runner older than this release
+refuses a plan with a start (`drill spec does not parse`, exit 1) before it
+touches anything, so roll the runner forward before submitting one. The
+`Restore` CRD and the console are unchanged (the console's selection is
+PROD-11.1a); a `Restore` carries the plan bytes as they are.
+**Scope:** compose rows (slot 2 with `COMPOSE_PROFILES=auth`, Kafka 3.7.1,
+engine `0.23.3+logweir.1`) with an oracle of their own: inclusive vs exclusive
+at the start with equal and non-monotonic timestamps; a segment whose last
+record is before the start hides an in-window record, which complete coverage
+fails (the engine's limit, PROD-01.1b); a topic subset from a start under both
+coverages, read by both verifiers; the refusals (a partition subset among
+them) with a control; a compaction hole inside a sub-window; a newer backup
+set arriving after approval; a partition whose records all precede the start,
+signed `preflight-failed` naming it (phase 5's existing rule for a partition
+with nothing in the window), never `pass`; and main's runner from before this release
+refusing a plan with a start, with the same plan without it restoring.
+**Rollback:** an older runner refuses plans with a start (above) and ignores a
+`restore.partitions` key (which no Logweir writer emits). 1.7.0 scorecards
+already written stay valid under the older readers, which ignore the block;
+the document's `sample.window_start` and `sample.coverage_note` still name the
+start.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1055,7 +1104,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40 and 41, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41 and 42, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1074,7 +1123,9 @@ retention, notification and inline-archive credential Secret bound; item 39
 changes the runner's phase 0 only and needs nothing; item 40 changes the
 console only and needs nothing unless an ingress dials the console with
 HTTP/2; item 41 changes the runner (phase 7 and the engine's build)
-only. To roll back to
+only; item 42 changes the runner, the restore preview and the
+controller's standing-scope check, and needs nothing for a plan without a
+window start (an older runner refuses a plan with one). To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

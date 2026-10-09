@@ -50,6 +50,7 @@ fn restore_plan(auth: AuthRender) -> RestorePlan {
             "2026-08-30T02:00:00Z".parse().unwrap(),
         ),
         window_floor_source: WindowFloorSource::ArchiveManifest,
+        source_partitions: Default::default(),
         default_replication_factor: 1,
         checkpoint_state: "/var/lib/logweir/x/checkpoint.json".into(),
         checkpoint_interval_secs: 30,
