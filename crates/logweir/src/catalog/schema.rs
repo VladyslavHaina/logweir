@@ -15,9 +15,10 @@ use crate::catalog::record::CatalogPoint;
 ///
 /// **The newest MINOR** (FX-7 fix round, review M-2): the `$id` and the file
 /// name come from ONE constant,
-/// [`FORMAT_VERSION_WITH_AUTH_MODES`](crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES)
-/// (`1.4.0`, PROD-01.3's three new `source.auth_mode` values). The older files
-/// are FROZEN beside it: `schemas/logweir-catalog-point-1.0.0.json` for the
+/// [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`](crate::catalog::record::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY)
+/// (`1.5.0`, PROD-03.0's `topics[].schema_dependency`). The older files
+/// are FROZEN beside it: PROD-01.3's `-1.4.0.json` (three new
+/// `source.auth_mode` values), `schemas/logweir-catalog-point-1.0.0.json` for the
 /// records written before FX-4, FX-4's `-1.1.0.json` (`topics[].config_coverage`)
 /// for the records written without a pin before PROD-05.1, FX-7's `-1.2.0.json`
 /// (`archive.manifest_version_id`) for the pinned ones, and PROD-05.1's
@@ -40,7 +41,7 @@ pub fn catalog_point_schema() -> String {
         .into_root_schema_for::<CatalogPoint>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-catalog-point-{}.json",
-        crate::catalog::record::FORMAT_VERSION_WITH_AUTH_MODES
+        crate::catalog::record::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

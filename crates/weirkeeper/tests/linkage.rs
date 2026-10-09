@@ -236,10 +236,16 @@ fn kube_is_declared_without_default_features() {
          [client, rustls-tls, ring], and taking the defaults leaves the feature set free to \
          drift with the upstream crate. Got: {kube}"
     );
+    // `unstable-runtime` SINCE FX-29: three empty cfg features, no package
+    // (`no_new_package_enters_the_graph_for_the_mock` still measures that), for
+    // `Controller::for_stream` — the `BackupSchedule` watch filtered to spec
+    // revisions so its own status writes stop waking it.
     assert!(
-        kube.contains(r#"features = ["client", "runtime", "derive", "rustls-tls"]"#),
+        kube.contains(
+            r#"features = ["client", "runtime", "derive", "rustls-tls", "unstable-runtime"]"#
+        ),
         "kube's feature list must be exactly [\"client\", \"runtime\", \"derive\", \
-         \"rustls-tls\"] — no openssl-tls, no oauth, no gzip. Got: {kube}"
+         \"rustls-tls\", \"unstable-runtime\"] — no openssl-tls, no oauth, no gzip. Got: {kube}"
     );
     let openapi =
         manifest_entry(&text, "dependencies", "k8s-openapi").expect("k8s-openapi is declared");

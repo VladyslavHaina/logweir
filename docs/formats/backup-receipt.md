@@ -3,10 +3,14 @@
 `application/vnd.logweir.backup-receipt+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-backup-receipt-1.3.0.json`](../../schemas/logweir-backup-receipt-1.3.0.json)
+[`schemas/logweir-backup-receipt-1.5.0.json`](../../schemas/logweir-backup-receipt-1.5.0.json)
 and CI regenerates it from the Rust type and `diff -u`s it against the checked-in
 file on every build, so this document and the schema cannot drift apart
 silently. A MINOR bump is a new schema file beside the old one: the
+[`1.4.0` schema](../../schemas/logweir-backup-receipt-1.4.0.json) (PROD-01.3's
+auth modes) and the [`1.3.0` schema](../../schemas/logweir-backup-receipt-1.3.0.json)
+(PROD-05.1's `topic_configuration`), which describe every receipt written
+before PROD-03.0, the
 [`1.2.0` schema](../../schemas/logweir-backup-receipt-1.2.0.json), which
 describes every pinned receipt written before PROD-05.1 (FX-7's format), the
 [`1.1.0` schema](../../schemas/logweir-backup-receipt-1.1.0.json), which
@@ -320,7 +324,125 @@ topic.
 
 ---
 
-## The twenty-one arms
+## `schema_dependency` — does a restore need a schema registry? (format 1.5.0)
+
+**Why it exists (PROD-03.0).** A record a Confluent serializer wrote is a zero
+byte, a 4-byte schema id and a payload only that schema decodes. Logweir never
+captures a schema registry (`docs/stability.md` Never #2), so a restore can
+succeed — every byte back, every count matching — while no application can
+read what it restored. This block records, per named topic, whether the
+archived keys or values carry that framing and which schema ids they name, so
+the receipt, the catalog, the API and the console can say **"schema-dependent,
+registry not captured"** before anyone restores the topic. **No registry is
+contacted to say it**: the judgement reads archived bytes only.
+
+An object keyed by topic name, **one entry per `source.topics` entry and no
+others** (arm 23):
+
+```json
+"schema_dependency": {
+  "orders": {
+    "verdict": "schemaDependent",
+    "basis": "sampled",
+    "key":   { "dependent": false, "framed": 0,   "unframed": 1000, "nulls": 0, "schema_ids": [],     "schema_id_count": 0 },
+    "value": { "dependent": true,  "framed": 998, "unframed": 0,    "nulls": 2, "schema_ids": [3, 4], "schema_id_count": 2 }
+  },
+  "audit":   { "verdict": "notDetected", "basis": "complete", "key": { … }, "value": { … } },
+  "archive": { "verdict": "notAssessed", "reason": "noRecords" }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `verdict` | string | `schemaDependent` (a key or value side is dependent: registry not captured), `notDetected` (neither side over the records judged) or `notAssessed` (nothing judged; `reason` says why) — arm 24. |
+| `reason` | string, `notAssessed` only | `noRecords` (the archive holds no record of the topic), `segmentUnreadable` (a sampled segment could not be read or decoded, decoded to a count its manifest entry does not state, or the detector failed), `segmentTooLargeForDetection` (a sampled segment is stored, or decompresses, larger than detection reads at backup time) or `detectionTimeBudgetExceeded` (the backup's detection time ran out first). |
+| `basis` | string, judged topics only | `complete` exactly when every record `records` counts for the topic was judged (arm 26), else `sampled`. |
+| `key`, `value` | objects, judged topics only | One per side, over the same records (arm 25): `framed`, `unframed` and `nulls` (a null key, or a null value — a tombstone) count every judged record once; `schema_ids` lists the distinct ids the framed records name, ascending, the 16 smallest when more were seen, and `schema_id_count` counts them all (arm 27); `dependent` is the threshold below, never a claim beside the counts (arm 28). |
+
+**ABSENT means NOT ASSESSED** — every receipt before 1.5.0 — and is never
+read as "not schema-dependent": both readers print `schema_dependency: not
+assessed, so whether any topic's records need a schema registry is not known
+from this receipt`, the catalog copies nothing, and the console says "not
+assessed".
+
+### The detection contract
+
+`logweir_core::schema_dependency` is the contract; the numbers below are its
+constants.
+
+1. **Framed.** A payload is framed when its first byte is the magic byte `0x00`,
+   bytes 1–4 read as a big-endian integer are a PLAUSIBLE schema id —
+   `1..=16777215` (2^24 − 1): registries issue ids sequentially from 1
+   (Confluent Cloud from 100 001), and id 0 is never issued — and at least one
+   byte follows the id (six bytes or more). Avro, JSON Schema and Protobuf share
+   the prefix (Protobuf's message-index bytes follow the id), so one test finds
+   all three; the payload after the id is not interpreted.
+2. **Keys and values separately.** Every judged record counts once on each
+   side. A null key and a null value (a tombstone) count as `nulls` and never
+   toward the share; an empty, non-null payload is unframed.
+3. **The threshold.** A side is dependent when at least one record is framed
+   AND at least one in ten of its NON-NULL judged records are. A topic is
+   `schemaDependent` when its key side or its value side is.
+4. **How false positives are bounded.** For bytes unrelated to the framing one
+   payload passes rule 1 with probability 2^-16 × (1 − 2^-24) ≈ 1.5 × 10^-5,
+   and a side needs at least `max(1, ⌈n/10⌉)` of its `n` non-null records to
+   pass: ≈ 1.5 × 10^-5 for one record, below 10^-30 for a hundred. A zero byte
+   followed by random id bytes is refused per record (255 in 256 such ids are
+   at or above 2^24); a short binary key that starts with zero (a big-endian
+   32-bit integer, a 5-byte value) is refused by the length rule; framing-shaped
+   records under one in ten of a side do not flag it. **Residual, stated:**
+   structured binary payloads of six bytes or more whose first two bytes are
+   zero pass rule by rule — most notably big-endian 64-bit integers from 2^24
+   to 2^56 (a `LongSerializer` key holding a database id or an
+   epoch-millisecond timestamp). Such a side reads as dependent with the
+   "ids" its bytes happen to hold; the flag only adds a warning and never
+   blocks or changes a restore; the "ids" listed for it are four bytes of the
+   key itself.
+5. **What it does not detect (false negatives, stated).** Only Confluent's
+   payload prefix is read, so these read `notDetected`: schema ids carried in
+   record headers (Confluent's header-based serializers, Apicurio's header
+   mode); Apicurio's default 8-byte global id (its 4-byte "id" is 0, refused);
+   other registries' framing (AWS Glue's magic byte 3, any other magic);
+   Confluent ids of 2^24 and above; a 5-byte framed value with an empty body;
+   and framing under one in ten of a side's sampled records, or only outside
+   the sample (`basis: sampled` says the sample was not every record).
+   `notDetected` is therefore "no Confluent wire-format framing detected", never
+   "no registry needed".
+6. **Which records are read.** `logweir backup run` judges the segments it
+   just wrote, read back through the read-only archive handle: per topic the
+   first 8 partitions holding records (lowest id first), and per partition the
+   first 500 records of its first segment and the last 500 of its last (a
+   partition of one segment is scanned once, and read whole when it holds
+   1 000 records or fewer). A topic read whole says `complete`; the complete
+   verification lane (PROD-08.1) does not re-judge at restore time.
+7. **Bounded, and never a failed backup.** Segments are STREAMED through
+   Logweir's own decoder (`kbak::scan_segment`), keeping each key and value to
+   its first six bytes; the head scan stops after its records and the tail is a
+   ring of 500. The bounds:
+   - a segment STORED larger than **16 MiB** is never fetched (its size is
+     read first); the fetched bytes are what detection holds while it scans;
+   - a zstd frame declaring a window above **8 MiB** (2^23) is refused before
+     it is decoded (the engine Logweir runs writes level 3, a 2 MiB window);
+   - lz4 is decoded as a stream that keeps only the 64 KiB a match can reach;
+   - a body that decompresses past **256 MiB** stops its scan;
+   - detection takes at most **120 s** per backup, as a hard stop: every
+     store read is given only what is left, every scan stops reading when it
+     runs out.
+
+   Past a bound the topic is `notAssessed` with its reason; a segment that
+   cannot be read, or a detector that fails in any way (a panic included), is
+   `segmentUnreadable`. **Measured** (child-process peak RSS, macOS, the row
+   `crates/logweir/tests/schema_dependency_memory.rs`): a 1 GiB zstd bomb, the
+   same bomb in a frame declaring a 2^27 window, and a 250 MiB lz4 body each
+   add 2.4 MB to the process; the worst case is a 16 MiB incompressible
+   segment held while scanned, **+16.6 MB**. None of them fails the backup, and
+   none reads as "not schema-dependent". A backup whose arms would refuse the
+   block it judged (a manifest this build did not foresee) is signed with every
+   topic `notAssessed (segmentUnreadable)` instead.
+
+---
+
+## The twenty-nine arms
 
 `logweir_core::backup_receipt::BackupReceipt::validate_invariants` implements
 these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
@@ -329,16 +451,16 @@ BOTH readers — compared byte-for-byte by
 `crates/logweir-core/tests/backup_receipt.rs` (`backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message`
 over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` and
 `arm_5_is_versioned_by_the_prod_01_3_modes` over arm 5, one `arm_N_…` test per
-arm 6–21, and
-`validate_invariants_has_exactly_twenty_three_return_err_statements` over the
-total — twenty-one arms, twenty-three statements, because arm 5 is three since
+arm 6–29, and
+`validate_invariants_has_exactly_thirty_one_return_err_statements` over the
+total — twenty-nine arms, thirty-one statements, because arm 5 is three since
 1.4.0), by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
 over the documents in `e2e/fixtures/invariants/backup-receipt-index.json`
 (a refusing case for each half of arms 15–19, not only for each arm),
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
 from both readers' source and refuses to balance if they are not the same
-twenty-one arms in the same order.
+twenty-nine arms in the same order.
 
 Arms 6–11 read `config_coverage` and NOTHING ELSE, and run only when it is
 present — so every receipt without it, which is every receipt written before
@@ -484,6 +606,48 @@ key order, then 18 and 19. Arms 20 and 21 run last, over `owner_detection`.
 
     > `topic_configuration["orders"].owner by "kafkaTopicResource" names no source owner_detection ["declared"] lists: a "declared" owner needs "declared", a "kafkaTopicResource" owner "kafkaTopicResources"`
 
+Arms 22–29 (format 1.5.0, PROD-03.0) read `schema_dependency` — with
+`source.topics` and `records` as its context — and run only when it is present,
+so every receipt without it is decided exactly as before (OD-7 (a): MINOR).
+Topics in name order; per topic 24, 25 and 26, then 27 and 28 for the key side
+and then the value side, then 29.
+
+22. **`schema_dependency` is present only from 1.5.0.**
+
+    > `schema_dependency is present but format_version "1.4.0" predates it: the field is defined from 1.5.0`
+
+23. **It covers exactly the named topic set.**
+
+    > `schema_dependency covers {"orders"} but the named topic set is {"orders", "payments"}`
+
+24. **The verdict, and a reason or a basis as it requires, from closed sets.**
+
+    > `schema_dependency["orders"] verdict "registryNeeded" with reason absent and basis "sampled" is not a verdict this format defines: the verdict is "schemaDependent", "notDetected" or "notAssessed"; a "notAssessed" topic has a reason, "noRecords", "segmentUnreadable", "segmentTooLargeForDetection" or "detectionTimeBudgetExceeded", and no basis, and any other topic has a basis, "sampled" or "complete", and no reason`
+
+25. **Both sides exactly when judged, over the same records, at least one.**
+
+    > `schema_dependency["orders"] verdict "schemaDependent" records key 4000 records and value absent: a judged topic records a key side and a value side over the same records, at least one, and a "notAssessed" topic records neither`
+
+26. **What was judged fits what `records` counts.** `complete` judged all of
+    them, `sampled` at most that many, and `noRecords` only of a topic that
+    counts none.
+
+    > `schema_dependency["payments"] judges 917 records under "complete" and records counts 918: a "complete" basis judges every record the receipt counts, a "sampled" one at most that many, and "noRecords" is said only of a topic that counts none`
+
+27. **The ids are distinct, ascending, plausible and as many as the count
+    allows; the count is at least one exactly when a record is framed, and at
+    most the framed count.**
+
+    > `schema_dependency["orders"].value lists schema_ids [4, 3] with schema_id_count 2 and framed 3990: the ids are distinct, ascending and from 1 to 16777215, all of them when the count is 16 or fewer and 16 otherwise, and the count is at least 1 exactly when a record is framed and never above the framed count`
+
+28. **`dependent` is the threshold over the counts.**
+
+    > `schema_dependency["orders"].value is dependent with framed 1 and unframed 3989: a side is dependent exactly when at least one record and at least one in ten of its non-null records are framed`
+
+29. **The verdict is what the sides say.**
+
+    > `schema_dependency["orders"] verdict "notDetected" does not fit its sides: a judged topic is "schemaDependent" exactly when its key side or its value side is dependent`
+
 A block that serde itself cannot read — a `timestamp_type` without its `source`,
 a `coverage` that is not a string — is refused before any arm by both readers
 (`drill verify` exits 1 with serde's message; `verify_scorecard.py` exits 1 with
@@ -522,11 +686,11 @@ would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
 > **What each reader checks today, stated plainly rather than implied.** Both
-> readers run **all twenty-one arms above** over a `--payload-type
+> readers run **all twenty-nine arms above** over a `--payload-type
 > backup-receipt` document; arms 1–5 arrived together in Task 5b, arms 6–11
-> together in FX-4 and arms 12–21 together in PROD-05.1, so the two readers
-> never disagreed in between.
-> `logweir drill verify` prints `checked:   the signature AND all twenty-one
+> together in FX-4, arms 12–21 together in PROD-05.1 and arms 22–29 together
+> in PROD-03.0, so the two readers never disagreed in between.
+> `logweir drill verify` prints `checked:   the signature AND all twenty-nine
 > backup-receipt invariants …`; `docs/verify_scorecard.py` prints `verifier:
 > verify_scorecard.py <SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both also print
 > the configuration capture coverage in the same words, one
@@ -542,7 +706,15 @@ would break every existing invocation, every document and
 > found (<sources>), so applied through the admin API` or `owner not checked,
 > so how it is applied is not known` — or
 > `topic_configuration: not recorded, …` for a receipt without the block, and
-> the parity script compares those lines too. Both print a pinned
+> the parity script compares those lines too. Both print the schema dependency
+> in the same words, one `schema_dependency["<topic>"]: schema-dependent,
+> registry not captured; <n> records judged (<basis>); key framed <f> of <n>
+> non-null[, dependent, schema ids <ids>[ and <k> more]]; value …` line per
+> topic (`no schema framing detected; …`, or `not assessed (<reason>)`) — or
+> `schema_dependency: not assessed, so whether any topic's records need a
+> schema registry is not known from this receipt` for a receipt without the
+> block — and the parity script compares those lines AND derives them from
+> each document. Both print a pinned
 > `archive.manifest_version_id` when the receipt carries one (`manifest version:`
 > and `manifest_version_id=`), and both refuse one that is not a string — Rust
 > at deserialisation, the script in its shape layer (FX-7; verdict parity in
@@ -938,8 +1110,9 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
   `plain` or `mtls`** (PROD-01.3), whatever else it carries — 1.4.0 includes
   PROD-05.1's 1.3.0 `topic_configuration` and FX-7's optional
   `archive.manifest_version_id`. Every receipt of a `plaintext` or
-  `scramSha512` backup is the 1.3.0 document this build writes for it (or the
-  1.1.0/1.2.0 document an earlier build wrote), byte for byte.
+  `scramSha512` backup that a build from PROD-05.1 to before PROD-03.0 wrote is
+  the 1.3.0 document (or the 1.1.0/1.2.0 document an earlier build wrote), byte
+  for byte; from PROD-03.0 every receipt is 1.5.0 (below).
   `schemas/logweir-backup-receipt-1.4.0.json` differs from the frozen 1.3.0
   file in the `source.auth.mode` and `username` descriptions only: no
   property, type or required field moved. The payload type keeps
@@ -954,6 +1127,28 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
   `scramSha256`, `plain` or `mtls` at all (its `AuthSpec` has no such arm, so
   the spec does not parse), and writes no 1.4.0 receipt. The 1.4.0 receipts
   already written stay valid for every reader from PROD-01.3 on.
+
+## Upgrade, rollback and old receipts (format 1.5.0)
+
+- **Every receipt this build signs is 1.5.0**: it carries `schema_dependency`
+  for every named topic, whatever its auth mode or pin (1.5.0 defines PROD-01.3's
+  modes, PROD-05.1's model and FX-7's pin). `schemas/logweir-backup-receipt-1.5.0.json`
+  adds the optional property and its two definitions to the frozen 1.4.0 file;
+  nothing else moved. The payload type keeps `version=1.0.0`.
+- **Older readers accept a 1.5.0 receipt** and ignore the block inside major 1
+  (OD-7 (a): the new arms read only the new block, so the bump is MINOR). They
+  verify everything they verified before; they just do not say whether a topic
+  needs a registry. An auditor who wants that line uses `verify_scorecard.py`
+  1.24.0 or a `logweir` built from PROD-03.0 on.
+- **Old receipts read NOT ASSESSED**, never "not schema-dependent": both
+  readers say so per receipt, and a catalog point synced from one carries no
+  `schema_dependency` (record format 1.1.0–1.4.0 as before).
+- **Backup cost.** Detection reads back at most two segments per partition for
+  at most eight partitions per topic, streams them and stops at its caps
+  (16 MiB stored per segment, a zstd window of 8 MiB, 256 MiB decompressed,
+  120 s per backup, about 17 MB of memory at worst); see the contract above.
+- **Rollback.** A runner from before PROD-03.0 writes 1.3.0/1.4.0 receipts with
+  no block; the 1.5.0 receipts already written stay valid for every reader.
 
 ---
 

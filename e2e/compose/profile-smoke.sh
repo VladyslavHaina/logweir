@@ -241,6 +241,26 @@ smoke_registry() {
   # The state lives in Kafka: the registration is a record in `_schemas`.
   out=$(innet "$T/kafka-console-consumer.sh --bootstrap-server kafka-broker-1:9094 --topic _schemas --from-beginning --timeout-ms 15000 --property print.key=true 2>/dev/null")
   if printf '%s' "$out" | grep -q "$n-value"; then pass registry.state-in-kafka "_schemas holds the $n-value registration"; else fail registry.state-in-kafka "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  # PROD-03.0: the REST proxy (`registry-rest`) produces Confluent wire format:
+  # an Avro record through it is 0x00, the registry's id (4 bytes, big-endian)
+  # and the Avro body on the broker. Negative control: a plain JSON record
+  # through the same proxy is NOT framed (its first byte is `{`).
+  local rest t
+  rest="http://localhost:$(lw_e2e_port LOGWEIR_E2E_REGISTRY_REST_PORT)"
+  t="$n-rest"
+  innet "$T/kafka-topics.sh --bootstrap-server kafka-broker-1:9094 --create --topic $t --partitions 1 --replication-factor 1" > /dev/null
+  out=$(bounded 30 curl -s -X POST -H 'Content-Type: application/vnd.kafka.avro.v2+json' -H 'Accept: application/vnd.kafka.v2+json' \
+    --data '{"value_schema":"{\"type\":\"record\",\"name\":\"Probe\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}","records":[{"value":{"id":1}}]}' \
+    "$rest/topics/$t" 2>&1)
+  id=$(printf '%s' "$out" | sed -n 's/.*"value_schema_id": *\([0-9]*\).*/\1/p')
+  if [ -n "$id" ]; then pass registry-rest.produce-avro "$t <- schema id $id via $rest"; else fail registry-rest.produce-avro "$out"; fi
+  out=$(bounded 30 curl -s -X POST -H 'Content-Type: application/vnd.kafka.json.v2+json' -H 'Accept: application/vnd.kafka.v2+json' \
+    --data '{"records":[{"value":{"id":2}}]}' "$rest/topics/$t" 2>&1)
+  out=$(innet "$T/kafka-console-consumer.sh --bootstrap-server kafka-broker-1:9094 --topic $t --from-beginning --max-messages 2 --timeout-ms 15000 2>/dev/null | od -A n -t x1 | tr -s ' \n' ' '")
+  id=${id:-0}
+  want=$(printf ' 00 %02x %02x %02x %02x' $((id >> 24 & 255)) $((id >> 16 & 255)) $((id >> 8 & 255)) $((id & 255)))
+  if printf '%s' "$out" | grep -q "^$want"; then pass registry-rest.wire-format "the Avro record starts$want"; else fail registry-rest.wire-format "$out"; fi
+  if printf '%s' "$out" | grep -q ' 0a 7b 22 69 64 22 3a 32 7d'; then pass registry-rest.json-unframed "the plain JSON record starts with { (no framing)"; else fail registry-rest.json-unframed "$out"; fi
 }
 smoke_acl() {
   local p s out cfg rc

@@ -473,9 +473,10 @@ fn backup_restore_verify(row: Row) {
         row.sasl().then_some(USER),
         "{label}: the SASL principal, or none for mtls"
     );
-    assert_eq!(
-        doc["format_version"], "1.4.0",
-        "{label}: a receipt naming a PROD-01.3 mode declares the version that defines it"
+    harness::assert_format_at_least(
+        doc["format_version"].as_str().expect("format_version"),
+        "1.4.0",
+        &format!("{label}: a receipt naming a PROD-01.3 mode declares at least the version that defines it"),
     );
     assert_eq!(doc["source"]["cluster_id"], cluster_id, "{label}");
     assert_eq!(

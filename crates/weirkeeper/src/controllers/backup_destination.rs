@@ -61,7 +61,7 @@ use tracing::{debug, info, warn};
 
 use super::approval::ReconcileError;
 use super::Context;
-use crate::conditions::{current_condition, merge_condition, status_unchanged};
+use crate::conditions::{current_condition, merge_condition, replacing, status_unchanged};
 use crate::crds::backup_destination::{BackupDestination, BackupDestinationStatus};
 use crate::crds::Condition;
 use crate::destination::{
@@ -184,19 +184,30 @@ pub async fn reconcile_destination(
     let status = status_for(dest, &verdict, now);
 
     let api: Api<BackupDestination> = Api::namespaced(client.clone(), &namespace);
-    let patch = json!({ "status": status });
+    // `replacing` — FX-29's class sweep. Every field of the status is
+    // optional and omitted when `None`, and a merge patch keeps an omitted
+    // key: a destination whose CA `ConfigMap` went away kept the old
+    // `caBundleSha256` beside `CaBundleNotFound`, and `observed_at_for` then
+    // compared that stale digest with the verdict's `None` on every pass, so
+    // `observedAt` was `now` on every pass and each write woke this reconciler
+    // again. This controller is the only writer of the status, so a key the
+    // stored status has and this verdict does not is sent as `null`.
+    let stored = dest
+        .status
+        .as_ref()
+        .and_then(|s| serde_json::to_value(s).ok());
+    let patch = json!({
+        "status": replacing(
+            serde_json::to_value(&status).unwrap_or(serde_json::Value::Null),
+            stored.as_ref(),
+        )
+    });
     // NO WRITE WHEN NOTHING CHANGED — erratum E11(d). This reconciler's own
     // status patch is what wakes it, and a patch that changed nothing but the
     // clock spins the loop at whatever rate the API server will serve.
     // `observed_at_for` is what keeps the timestamp stable across an unchanged
     // verdict, so this comparison has something to compare.
-    if status_unchanged(
-        dest.status
-            .as_ref()
-            .and_then(|s| serde_json::to_value(s).ok())
-            .as_ref(),
-        &patch,
-    ) {
+    if status_unchanged(stored.as_ref(), &patch) {
         debug!(
             destination = %name,
             namespace = %namespace,
@@ -311,11 +322,27 @@ async fn reconcile(
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
     reconcile_destination(&dest, &ctx.client).await?;
-    // See the module header: the requeue is about the CA `ConfigMap`, which
-    // this controller does not watch, and not about the spec.
-    Ok(Action::requeue(std::time::Duration::from_secs(
-        REQUEUE_SECONDS,
-    )))
+    Ok(destination_action())
+}
+
+/// The [`Action`] every reconciled destination returns: a timed requeue of
+/// [`REQUEUE_SECONDS`], never `await_change()`.
+///
+/// See the module header: the requeue is about the CA `ConfigMap`, which this
+/// controller does not watch, and not about the spec. It is the only thing
+/// that notices a rotated bundle, so it is pinned by
+/// `destination_controller::a_rotated_ca_is_read_by_the_timed_requeue` (FX-29
+/// review M-1).
+#[must_use]
+pub fn destination_action() -> Action {
+    Action::requeue(std::time::Duration::from_secs(REQUEUE_SECONDS))
+}
+
+/// The [`Action`] a failed pass returns: a timed requeue of
+/// [`ERROR_REQUEUE_SECONDS`].
+#[must_use]
+pub fn destination_error_action() -> Action {
+    Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
 }
 
 /// Requeue on an error, naming it.
@@ -325,7 +352,7 @@ fn error_policy(dest: Arc<BackupDestination>, err: &ReconcileError, _ctx: Arc<Co
         error = %err,
         "backup destination reconcile failed; requeueing"
     );
-    Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
+    destination_error_action()
 }
 
 /// Run the `BackupDestination` controller until the process ends.

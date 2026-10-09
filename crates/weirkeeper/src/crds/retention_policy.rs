@@ -345,7 +345,9 @@ pub struct SkippedEntry {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionEvaluation {
-    /// When.
+    /// When an evaluation first reached the findings below. Later evaluations
+    /// that find the same keep this instant, so it is when the findings last
+    /// changed, not when the controller last looked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<Time>,
     /// How many points were considered.

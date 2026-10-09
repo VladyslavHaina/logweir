@@ -30,10 +30,9 @@ fn justfile_schema_version(name: &str) -> String {
 /// compare the file their justfile variable names; the writer's constant names
 /// the `$id` and the `format_version` it writes. They must be one number, or a
 /// renumber would regenerate one file and sign documents naming another. The
-/// CURRENT file is each document's newest MINOR's — since PROD-01.3 the one a
-/// document naming a new auth mode carries (scorecard 1.5.0, receipt 1.4.0, on
-/// top of PROD-05.1's receipt 1.3.0, which every other receipt this build
-/// signs carries); the older files are frozen beside it.
+/// CURRENT file is each document's newest MINOR's — for the receipt since
+/// PROD-03.0 the 1.5.0 every receipt this build signs carries
+/// (`schema_dependency`); the older files are frozen beside it.
 #[test]
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
@@ -42,7 +41,7 @@ fn the_justfile_schema_versions_are_the_writers_constants() {
     );
     assert_eq!(
         justfile_schema_version("receipt"),
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
     );
 }
 
@@ -410,7 +409,7 @@ fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
     let checked_in = current_schema(
         "backup-receipt",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY,
     );
     assert_eq!(
         generated.trim_end(),
@@ -419,7 +418,7 @@ fn backup_receipt_schema_has_no_drift() {
          review the diff — a field added is a MINOR bump, a field removed or \
          retyped is a MAJOR bump (Global Constraint 12), and the receipt's \
          format_version is its own and not the scorecard's.",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
     );
 }
 
@@ -441,7 +440,7 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         v["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-            logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
         )
     );
     assert!(
@@ -453,6 +452,15 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         "topic_configuration is OPTIONAL: every receipt before 1.3.0 lacks it and must still validate"
     );
     assert!(v["definitions"]["TopicConfiguration"]["properties"]["entries"].is_object());
+    assert!(
+        !v["required"]
+            .as_array()
+            .expect("the receipt schema has a required array")
+            .iter()
+            .any(|r| r == "schema_dependency"),
+        "schema_dependency is OPTIONAL: every receipt before 1.5.0 lacks it and must still validate"
+    );
+    assert!(v["definitions"]["SideFraming"]["properties"]["schema_ids"].is_object());
     let archive = &v["definitions"]["ReceiptArchive"];
     assert!(archive["properties"]["manifest_version_id"].is_object());
     assert!(
@@ -762,5 +770,31 @@ fn the_frozen_1_3_0_receipt_schema_is_still_prod_05_1s() {
     assert_eq!(
         logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES,
         "1.4.0"
+    );
+}
+
+/// **PROD-03.0: PROD-01.3's 1.4.0 receipt schema is FROZEN** beside the 1.5.0
+/// one, and still describes every 1.4.0 receipt an earlier build signed: it
+/// names itself 1.4.0, names the five auth modes, and has no
+/// `schema_dependency`. The current file adds the field, optional.
+#[test]
+fn the_frozen_1_4_0_receipt_schema_is_still_prod_01_3s() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.4.0.json"
+    ))
+    .expect("the frozen 1.4.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.4.0.json"
+    );
+    assert!(frozen["properties"]["schema_dependency"].is_null());
+    assert!(frozen["properties"]["topic_configuration"].is_object());
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
+    assert!(current["properties"]["schema_dependency"].is_object());
+    assert_eq!(
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY,
+        "1.5.0"
     );
 }

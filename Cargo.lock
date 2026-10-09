@@ -1820,6 +1820,7 @@ dependencies = [
  "logweir-engine-oso",
  "logweir-evidence",
  "logweir-kafka",
+ "nix",
  "p256",
  "rustls",
  "schemars",
@@ -1832,6 +1833,7 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "ureq",
+ "zstd",
 ]
 
 [[package]]
