@@ -1580,3 +1580,24 @@ pub fn engine_validate_restore(doc: &str) -> (Option<i32>, String, String) {
         .expect("engine validate-restore");
     (out.status.code(), out.stdout_utf8(), out.stderr_utf8())
 }
+
+/// Assert that a document's `format_version` is **at least** `min` — the
+/// version at which the field under test was defined — rather than pinning it
+/// to an exact value. Receipt and catalog-point versions are renumbered when
+/// several format-bumping rows integrate together (PROD-01.3/01.4a/03.0/04.1),
+/// so a row that pins an exact version breaks a sibling's CI; this asserts the
+/// property the row actually depends on. Both arguments are dotted `x.y.z`.
+pub fn assert_format_at_least(actual: &str, min: &str, what: &str) {
+    fn triple(v: &str) -> (u64, u64, u64) {
+        let mut it = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    }
+    assert!(
+        triple(actual) >= triple(min),
+        "{what}: format_version {actual:?} is below the minimum {min:?} that defines this field"
+    );
+}

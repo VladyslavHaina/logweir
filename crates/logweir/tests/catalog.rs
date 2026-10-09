@@ -2458,9 +2458,31 @@ fn the_frozen_1_4_0_catalog_point_schema_is_still_prod_01_3s() {
     assert!(current["definitions"]["RecordTopic"]["properties"]["identity"].is_object());
     assert!(current["definitions"]["TopicIdentity"]["properties"]["topic_id_after"].is_object());
     assert_ne!(current["$id"], frozen["$id"]);
-    assert_eq!(
+    // At least 1.5.0, not an exact pin: receipt and catalog-point versions are
+    // renumbered when several format-bumping rows integrate together, and a
+    // renumber only raises this constant.
+    assert_format_at_least(
         logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS,
-        "1.5.0"
+        "1.5.0",
+        "generations is defined",
+    );
+}
+
+/// A document's `format_version` is at least `min` (the minor that defines the
+/// field under test), surviving the integration renumber of receipt and
+/// catalog-point versions where an exact pin would break a sibling's CI.
+fn assert_format_at_least(actual: &str, min: &str, what: &str) {
+    let triple = |v: &str| -> (u64, u64, u64) {
+        let mut it = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    };
+    assert!(
+        triple(actual) >= triple(min),
+        "{what}: format_version {actual:?} is below the minimum {min:?} that defines this field"
     );
 }
 
@@ -2471,7 +2493,7 @@ const ID_B: &str = "tpWwuKExQo2lN9NziDMpYg";
 /// ID B after it — recreated during the capture.
 fn receipt_1_5() -> BackupReceipt {
     let mut r = receipt_1_3();
-    r.format_version = "1.5.0".into();
+    r.format_version = logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS.into();
     r.generations = Some(BTreeMap::from([(
         "orders".to_string(),
         TopicIdentity {
@@ -2493,7 +2515,10 @@ fn a_1_5_0_record_copies_the_receipts_topic_ids() {
     let key = SigningKey::generate_ed25519();
     let r = receipt_1_5();
     let p = point_for(&r, "s3://kafka-backups/prod", &key);
-    assert_eq!(p.format_version, "1.5.0");
+    assert_eq!(
+        p.format_version,
+        logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS
+    );
     assert_eq!(
         p.topics[0].identity,
         r.generations.as_ref().unwrap().get("orders").cloned()

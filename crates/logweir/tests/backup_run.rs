@@ -490,6 +490,26 @@ fn guard_message(err: BackupError) -> String {
     }
 }
 
+/// A document's `format_version` is **at least** `min` — the minor that defines
+/// the field under test — rather than an exact pin. Receipt and catalog-point
+/// versions are renumbered when several format-bumping rows integrate together
+/// (PROD-01.3/01.4a/03.0/04.1), and a future renumber only raises the stamped
+/// version, so `>= min` survives it where `== min` would break a sibling's CI.
+fn assert_format_at_least(actual: &str, min: &str, what: &str) {
+    let triple = |v: &str| -> (u64, u64, u64) {
+        let mut it = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    };
+    assert!(
+        triple(actual) >= triple(min),
+        "{what}: format_version {actual:?} is below the minimum {min:?} that defines this field"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Phase −1: the refusals (exit 3)
 // ---------------------------------------------------------------------------
@@ -1172,8 +1192,12 @@ fn backup_run_writes_a_signed_receipt() {
     // auditor reads first, so a receipt full of defaults cannot pass this row.
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
     // PROD-05.1 and PROD-01.4a: every receipt this build signs carries
-    // `topic_configuration` and `generations`, so every one is 1.5.0.
-    assert_eq!(receipt.format_version, "1.5.0");
+    // `topic_configuration` and `generations`, so it is at least 1.5.0.
+    assert_format_at_least(
+        &receipt.format_version,
+        "1.5.0",
+        "the receipt carries topic_configuration and generations",
+    );
     // PROD-01.4a: one `generations` entry per named topic. This seam's reader
     // reads no topic IDs, so each ID is null and SAYS so (`notRead`) — never
     // a guessed ID, never omitted.
@@ -2266,7 +2290,11 @@ fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
     );
     let (doc, _v) = store.get(&outcome.receipt_key).unwrap();
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
-    assert_eq!(receipt.format_version, "1.5.0");
+    assert_format_at_least(
+        &receipt.format_version,
+        "1.5.0",
+        "the receipt carries generations",
+    );
     let g = receipt
         .generations
         .clone()
@@ -2314,7 +2342,11 @@ fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
         .expect("the run wrote its catalog point");
     let (record, _) = store.get(&record_key).unwrap();
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
-    assert_eq!(record["format_version"], "1.5.0");
+    assert_format_at_least(
+        record["format_version"].as_str().expect("a version"),
+        "1.5.0",
+        "the catalog point copies identity",
+    );
     for t in record["topics"].as_array().expect("topics") {
         let name = t["name"].as_str().unwrap();
         assert_eq!(

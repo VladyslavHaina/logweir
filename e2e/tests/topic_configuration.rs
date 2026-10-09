@@ -900,9 +900,15 @@ fn a_backup_records_each_topics_model_and_its_owner() {
     );
 
     // The document.
-    // 1.5.0 since PROD-01.4a: every receipt this build signs also carries
-    // `generations`, and 1.5.0 defines every earlier minor.
-    assert_eq!(r.format_version, "1.5.0");
+    // At least 1.5.0 since PROD-01.4a: every receipt this build signs also
+    // carries `generations`, and 1.5.0 defines every earlier minor. "At
+    // least", not exact: the version is renumbered when format-bumping rows
+    // integrate together.
+    harness::assert_format_at_least(
+        &r.format_version,
+        "1.5.0",
+        "the receipt carries generations",
+    );
     assert_eq!(r.validate_invariants(), Ok(()));
     for t in all {
         assert_eq!(
@@ -1057,7 +1063,11 @@ fn a_backup_records_each_topics_model_and_its_owner() {
     }
 
     // THE CATALOG POINT copies the model and the partition count.
-    assert_eq!(record["format_version"], "1.5.0");
+    harness::assert_format_at_least(
+        record["format_version"].as_str().expect("a version"),
+        "1.5.0",
+        "the catalog point copies the model",
+    );
     for topic in record["topics"].as_array().expect("topics") {
         let name = topic["name"].as_str().unwrap();
         let m = model_of(&b, name);

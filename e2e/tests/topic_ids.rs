@@ -590,7 +590,11 @@ fn a_recreated_topic_is_a_new_generation_and_the_same_topic_continues() {
         );
     }
     for point in [&a, &b] {
-        assert_eq!(point.receipt.format_version, "1.5.0");
+        harness::assert_format_at_least(
+            &point.receipt.format_version,
+            "1.5.0",
+            "the receipt carries generations",
+        );
         assert_eq!(point.receipt.validate_invariants(), Ok(()));
     }
 
@@ -629,9 +633,13 @@ fn a_recreated_topic_is_a_new_generation_and_the_same_topic_continues() {
         );
     }
 
-    // Each catalog point copies its receipt's IDs (format 1.5.0).
+    // Each catalog point copies its receipt's IDs (format 1.5.0 or later).
     for point in [&a, &b] {
-        assert_eq!(point.catalog["format_version"], "1.5.0");
+        harness::assert_format_at_least(
+            point.catalog["format_version"].as_str().expect("a version"),
+            "1.5.0",
+            "the catalog point copies identity",
+        );
         for t in point.catalog["topics"].as_array().expect("topics") {
             let name = t["name"].as_str().expect("a name");
             assert_eq!(
