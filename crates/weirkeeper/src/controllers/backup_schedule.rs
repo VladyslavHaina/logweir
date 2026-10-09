@@ -92,7 +92,7 @@ use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt as _;
 use kube::api::{ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
-use kube::runtime::{watcher, Controller};
+use kube::runtime::{reflector, watcher, Controller, WatchStreamExt as _};
 use kube::{Api, ResourceExt};
 use serde_json::json;
 use tracing::{debug, info, warn};
@@ -104,7 +104,9 @@ use crate::cadence::{
     Cadence, CadenceError, CatchUpPolicy as CadenceCatchUp, MissedReason, RetryAdmission,
     RetryPolicy, SlotAdmission,
 };
-use crate::conditions::{current_condition, merge_condition, status_unchanged};
+use crate::conditions::{
+    current_condition, keep_instant_unless_changed, merge_condition, replacing, status_unchanged,
+};
 use crate::crds::backup::{Backup, BackupSpec, ScheduleRef, Trigger, TriggerKind};
 use crate::crds::backup_schedule::{
     ActiveRun, BackupSchedule, BackupScheduleSpec, ConcurrencyPolicy, LastSlot, MissedSlot,
@@ -2014,8 +2016,10 @@ fn status_patch_with_preconditions(
 /// fresh transition timestamps a day on a schedule that never changed state
 /// (fix round 1, review finding MED-1), which is both a lie about the
 /// condition and 2,880 `resourceVersion` bumps every watcher in the cluster
-/// has to receive. `retentionReport.evaluatedAt` obeys the same rule through
-/// [`crate::crds::backup_schedule::RetentionReport::same_findings_as`].
+/// has to receive. `retentionReport.evaluatedAt` and `lastSlot.decidedAt` obey
+/// the same rule through [`crate::conditions::keep_instant_unless_changed`],
+/// and every struct block is sent through [`crate::conditions::replacing`] so
+/// that a field which became `None` is cleared rather than left behind (FX-29).
 #[must_use]
 pub fn status_patch(
     schedule: &BackupSchedule,
@@ -2166,6 +2170,25 @@ fn status_patch_with_refs(
     now: DateTime<Utc>,
 ) -> serde_json::Value {
     let mut status = serde_json::Map::new();
+    // THE STORED STATUS AS THE API SERVER HOLDS IT, for the two FX-29 rules
+    // below. Every struct block this builder writes goes through
+    // `replacing(…, stored)`, so a field that became `None` is sent as `null`
+    // and cleared — an absent key in a merge patch would leave the old value in
+    // place. And every "when computed" instant is kept by
+    // `keep_instant_unless_changed`, which compares the block AS IT WILL BE
+    // STORED with the instant left out — not a typed struct, which is what saw
+    // a stale `lastSlot.backupRef` as a new decision on every pass and spun the
+    // PoC's two schedules at ~120 writes a second each.
+    let stored = schedule
+        .status
+        .as_ref()
+        .and_then(|s| serde_json::to_value(s).ok());
+    let stored_block = |key: &str| {
+        stored
+            .as_ref()
+            .and_then(|s| s.get(key))
+            .filter(|v| !v.is_null())
+    };
     // D1 §4.5 STEP 0 AND §5.3. Written on every final patch, so an operator can
     // always read which revision the controller acted on and what the run
     // policy of that revision digests to — a `suspend` flip moves `generation`
@@ -2174,25 +2197,22 @@ fn status_patch_with_refs(
         "observedGeneration".to_string(),
         json!(schedule.metadata.generation.unwrap_or_default()),
     );
-    status.insert("policy".to_string(), json!(policy_status(schedule, now)));
+    status.insert(
+        "policy".to_string(),
+        replacing(json!(policy_status(schedule, now)), stored_block("policy")),
+    );
     status.insert("nextRuns".to_string(), json!(next_runs(schedule, decision)));
     if let Some(report) = retention {
         // `evaluatedAt` IS KEPT WHEN THE FINDINGS ARE THE SAME — plan erratum
         // E11(d), review finding M-1. `evaluatedAt` is a "when computed" field,
         // so writing `now` into it on every pass made the whole status differ
         // on every pass, bumped `resourceVersion`, woke this reconciler's own
-        // watch and spun it.
-        let mut next = report.to_status();
-        if let Some(previous) = schedule
-            .status
-            .as_ref()
-            .and_then(|s| s.retention_report.as_ref())
-        {
-            if next.same_findings_as(previous) {
-                next.evaluated_at = previous.evaluated_at;
-            }
-        }
-        status.insert("retentionReport".to_string(), json!(next));
+        // watch and spun it. A rule that is now cleared (`keepLast` removed
+        // from the spec, a `note` that no longer applies) is sent as `null`,
+        // or the stale value would make the findings differ on every pass.
+        let mut next = replacing(json!(report.to_status()), stored_block("retentionReport"));
+        keep_instant_unless_changed(stored_block("retentionReport"), &mut next, "evaluatedAt");
+        status.insert("retentionReport".to_string(), next);
     }
     status.insert(
         "nextFireTime".to_string(),
@@ -2225,20 +2245,24 @@ fn status_patch_with_refs(
         // timestamp rewritten each time would make the whole status differ each
         // time and put 2,880 `resourceVersion` bumps a day on an object that
         // never changed. The instant moves when the DECISION moves.
-        let mut next = last.clone();
-        if let Some(previous) = schedule.status.as_ref().and_then(|s| s.last_slot.as_ref()) {
-            let same = LastSlot {
-                decided_at: next.decided_at,
-                ..previous.clone()
-            };
-            if same == next {
-                next.decided_at = previous.decided_at;
-            }
-        }
-        status.insert("lastSlot".to_string(), json!(next));
+        //
+        // FX-29, THE FOURTH TIME. A decision that names no `Backup` (`Missed`,
+        // `Blocked`, `NameUnavailable`, `Released`) after one that did has
+        // `backupRef: None`, which serialises as an absent key and so could
+        // never clear the stored one. The typed comparison this replaced read
+        // the stale reference as a different decision on every pass and wrote
+        // `decidedAt: now` each time; each write woke the watch. Now the
+        // reference is cleared (`replacing`) and the comparison is made on what
+        // the API server will store (`keep_instant_unless_changed`).
+        let mut next = replacing(json!(last), stored_block("lastSlot"));
+        keep_instant_unless_changed(stored_block("lastSlot"), &mut next, "decidedAt");
+        status.insert("lastSlot".to_string(), next);
     }
     if let Some(missed) = work.missed.as_ref() {
-        status.insert("missedSlots".to_string(), json!(missed));
+        status.insert(
+            "missedSlots".to_string(),
+            replacing(json!(missed), stored_block("missedSlots")),
+        );
     }
     // `lastFireTime` IS THE DUE INSTANT, NEVER THE RECONCILE CLOCK. The
     // fallback keeps [`status_patch`]'s pure-function contract: a caller that
@@ -2326,7 +2350,15 @@ fn status_patch_with_refs(
                 schedule.metadata.generation,
                 now,
             ));
-            status.insert("history".to_string(), json!(history));
+            // `replacing` FOR THE SAME REASON AS `lastSlot`: a migration that
+            // is no longer blocked has `migrationBlocked: None`, and an absent
+            // key would leave the old sample on the object — where the
+            // condition above, computed from the stored block on every pass
+            // that takes no inventory, would keep reading it.
+            status.insert(
+                "history".to_string(),
+                replacing(json!(history), stored_block("history")),
+            );
         }
         None => {
             if let Some(retained) = stored_retained {
@@ -3876,18 +3908,65 @@ async fn reconcile(
     schedule: Arc<BackupSchedule>,
     ctx: Arc<Context>,
 ) -> Result<Action, ScheduleError> {
-    let now = Utc::now();
-    let outcome =
-        reconcile_schedule_with_archive(&schedule, &ctx.client, ctx.archive.as_ref(), now).await?;
-    // NOT `Action::await_change()`. A cron schedule's next event is a clock
-    // tick, and no Kubernetes watch delivers one; without a requeue a schedule
-    // created at 09:00 would never fire again until somebody edited it.
-    //
-    // D1 §4.5 step 8 asks for `min(30 s, next retry/slot due)`. The floor keeps
-    // a retry whose delay expires in two seconds from waiting twenty-eight more
-    // for a wake-up that was going to happen anyway; it never LENGTHENS the
-    // interval, so nothing drifts.
-    Ok(Action::requeue(outcome.decision.requeue_after(now)))
+    reconcile_pass(&schedule, &ctx.client, ctx.archive.as_ref(), Utc::now())
+        .await
+        .map(|(_, action)| action)
+}
+
+/// One pass of the `kube::runtime` reconciler at `now`: the outcome, and the
+/// [`Action`] the pass hands back to the scheduler — which is
+/// [`schedule_action`] of the decision, on every path that decided anything.
+///
+/// Public, and the whole of [`reconcile`] apart from its one clock read, so
+/// that a test can drive the controller the way kube does — reconcile, wait
+/// the requeue it was told, reconcile again — with no watch event in between
+/// (`tests/schedule_status_churn.rs`, FX-29 review M-1).
+///
+/// # Errors
+///
+/// [`ScheduleError`], which `error_policy` turns into [`error_action`].
+pub async fn reconcile_pass(
+    schedule: &BackupSchedule,
+    client: &kube::Client,
+    archive: Option<&Arc<Store>>,
+    now: DateTime<Utc>,
+) -> Result<(ScheduleOutcome, Action), ScheduleError> {
+    let outcome = reconcile_schedule_with_archive(schedule, client, archive, now).await?;
+    let action = schedule_action(&outcome.decision, now);
+    Ok((outcome, action))
+}
+
+/// The [`Action`] a pass that decided `decision` returns: ALWAYS a timed
+/// requeue, of [`SlotDecision::requeue_after`] — at most [`REQUEUE_SECS`].
+///
+/// # This requeue is the schedule's clock (FX-29 review M-1)
+///
+/// NOT `Action::await_change()`, and never a longer poll. A cron schedule's
+/// next event is a clock tick, and no Kubernetes watch delivers one. Since
+/// FX-29 the watch does not even deliver the schedule's own status writes
+/// ([`schedule_triggers`]) — a new object and a spec edit are the only events
+/// that wake this reconciler, so a pass that returned anything but this would
+/// leave every steady schedule asleep until somebody edited it, and a poll
+/// longer than the starting deadline would record every slot `Missed`.
+/// `every_reconcile_exit_requeues_within_the_poll` pins the value for every
+/// decision, and `a_due_slot_fires_from_the_requeue_alone` drives the
+/// reconciler by it with no watch event at all.
+///
+/// D1 §4.5 step 8 asks for `min(30 s, next retry/slot due)`. The floor keeps
+/// a retry whose delay expires in two seconds from waiting twenty-eight more
+/// for a wake-up that was going to happen anyway; it never LENGTHENS the
+/// interval, so nothing drifts.
+#[must_use]
+pub fn schedule_action(decision: &SlotDecision, now: DateTime<Utc>) -> Action {
+    Action::requeue(decision.requeue_after(now))
+}
+
+/// The [`Action`] a pass that FAILED returns: a timed requeue of
+/// [`REQUEUE_SECS`], for the same reason as [`schedule_action`] — an error is
+/// not a reason to stop the clock.
+#[must_use]
+pub fn error_action() -> Action {
+    Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
 }
 
 /// Requeue on an error, naming it. Never a panic and never a drop.
@@ -3897,7 +3976,78 @@ fn error_policy(schedule: Arc<BackupSchedule>, err: &ScheduleError, _ctx: Arc<Co
         error = %err,
         "backup schedule reconcile failed; requeueing"
     );
-    Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
+    error_action()
+}
+
+/// What, about a `BackupSchedule` watch event, may WAKE this reconciler: the
+/// object's identity and its spec revision — `metadata.uid` and
+/// `metadata.generation` — and nothing else (FX-29).
+///
+/// # Why not the status
+///
+/// This reconciler is the only writer of `BackupSchedule` status, so a status
+/// change on the watch is, in practice, its own last write coming back. Waking
+/// on it re-runs a pass that has just run; if that pass found anything to
+/// change, the write wakes it again. On the PoC a `Missed` slot changed
+/// `lastSlot.decidedAt` on every pass and the two schedules wrote ~120 times a
+/// second each. Kubernetes moves `generation` on every spec change and never on
+/// a `/status` write, so the spec edits that must take effect at once still
+/// do; everything else waits for the requeue every pass returns
+/// ([`SlotDecision::requeue_after`], at most [`REQUEUE_SECS`]).
+///
+/// # Why the UID as well
+///
+/// kube's predicate cache is keyed by namespace and name. A schedule deleted
+/// and re-created under the same name starts again at `generation: 1`, so a
+/// generation-only hash would equal the deleted object's whenever that one had
+/// never been edited, and the new schedule would never be reconciled until
+/// somebody edited it. The UID makes it a new object.
+#[must_use]
+pub fn reconcile_trigger(schedule: &BackupSchedule) -> Option<u64> {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    schedule.metadata.uid.hash(&mut hasher);
+    schedule.metadata.generation.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// The watch events that trigger a reconcile: `applied`, with every event
+/// whose [`reconcile_trigger`] equals the previous one for the same object
+/// dropped. [`controller_in`] feeds it the reflector's applied objects, so the
+/// store still holds the newest object while the trigger ignores status-only
+/// events. Public so the filter is a property a test can drive with a plain
+/// stream, without a cluster.
+pub fn schedule_triggers<S>(
+    applied: S,
+) -> impl futures::Stream<Item = Result<BackupSchedule, watcher::Error>> + Send
+where
+    S: futures::Stream<Item = Result<BackupSchedule, watcher::Error>> + Send,
+{
+    applied.predicate_filter(reconcile_trigger)
+}
+
+/// The ONE trigger stream [`controller_in`] hands to `Controller::for_stream`:
+/// a `kube` watch over `api`, reflected into `writer`'s store BEFORE the
+/// filter (so the store always holds the newest object), then filtered by
+/// [`schedule_triggers`].
+///
+/// A FUNCTION, AND THE FUNCTION'S BODY IS ONE EXPRESSION, because the wiring
+/// is what a test has to be able to pin (FX-29 review L-1). A row that only
+/// grepped `controller_in` for both names passed a mutant that kept a dead
+/// `schedule_triggers(…)` call and handed the UNFILTERED stream to the
+/// controller. `the_schedule_controller_is_built_on_the_filtered_trigger` now
+/// asserts the call shape `Controller::for_stream(schedule_trigger_stream(`
+/// and that this body is exactly `schedule_triggers(watcher(api, …)…)`.
+pub fn schedule_trigger_stream(
+    api: Api<BackupSchedule>,
+    writer: reflector::store::Writer<BackupSchedule>,
+) -> impl futures::Stream<Item = Result<BackupSchedule, watcher::Error>> + Send {
+    schedule_triggers(
+        watcher(api, watcher::Config::default())
+            .default_backoff()
+            .reflect(writer)
+            .applied_objects(),
+    )
 }
 
 /// Run the `BackupSchedule` controller until the process ends.
@@ -3942,8 +4092,18 @@ fn controller_in(
         // `super::Context::runner_image`.
         runner_image: crate::job::RunnerImage::default(),
     });
+    // `for_stream` AND NOT `Controller::new`, FOR ONE REASON: FX-29.
+    // `Controller::new` wakes this reconciler on EVERY event of the object,
+    // including the one its own `/status` PATCH produces — so a pass whose
+    // status write changed anything ran again at once, and a pass that always
+    // changed something (a fresh `lastSlot.decidedAt`) ran ~120 times a second.
+    // The reflector still sees every event; only the TRIGGER is filtered, to
+    // the schedule's identity and spec revision (`schedule_triggers`). The
+    // clock that a cron schedule actually runs on is the requeue every pass
+    // returns (`schedule_action`), which no watch event was ever needed for.
+    let (reader, writer) = reflector::store();
     async move {
-        Controller::new(api, watcher::Config::default())
+        Controller::for_stream(schedule_trigger_stream(api, writer), reader)
             .run(reconcile, error_policy, ctx)
             // Every item is already logged by `reconcile_schedule` or by
             // `error_policy`; the stream exists to be DRIVEN.

@@ -465,7 +465,8 @@ supported path.
 two-step gate in one value — `notApplicable`, `notRequired`, `noPlan`,
 `awaitingApproval`, `approved`, `expired` or `unknown` — and it is **`unknown`
 whenever an input is absent**, never `approved`. Nothing in `lastEvaluation`
-was deleted. The enforcement record is create-only and **unsigned**, verified by
+was deleted, and its `at` is when those findings were first reached, not when
+the controller last looked (FX-29). The enforcement record is create-only and **unsigned**, verified by
 the digest beside it; no surface calls it signed.
 
 **A catalog's view is a window, and the response says so.** The durable truth is
@@ -637,7 +638,8 @@ MCP-13). `status.lastSlot` is the controller's own record of the most recent
 slot it decided about — `slot`, `dueAt`, `attempt`, `disposition` (`Admitted`,
 `CaughtUp`, `Retried`, `Missed`, `Blocked`, `NameUnavailable`, `Released`,
 `Failed`, `Exhausted`, verbatim), the `Ready` `reason` beside it, `decidedAt`
-and, when there is one, `backupRef` — and `status.missedSlots` is the running
+(when that decision was reached: a later reconcile that reaches the same
+decision keeps it) and, when there is one, `backupRef` — and `status.missedSlots` is the running
 `count` of slots that came due and were not run, `countCapped` when an
 evaluation stopped at its enumeration cap (the count is then a floor),
 `lastEvaluatedSlot`, and the most `recent` skips, each with its `reason`

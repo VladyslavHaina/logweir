@@ -585,6 +585,130 @@ async fn an_unchanged_verdict_sends_no_patch() {
     );
 }
 
+/// **FX-29's class sweep: a CA bundle that goes away is written ONCE.**
+///
+/// `dest-a` was `Valid` with a private CA, so its status carries
+/// `caBundleSha256`. The `ConfigMap` is deleted: the verdict is
+/// `CaBundleNotFound` with no digest. Before FX-29 the patch OMITTED the key
+/// (`skip_serializing_if`), a merge patch keeps an omitted key, and
+/// `observed_at_for` compared the stale stored digest with the verdict's
+/// `None` on every pass — so `observedAt` was `now` on every pass, every write
+/// woke this reconciler's own watch, and the destination spun. CONTROL: at
+/// `a8a30428` twenty passes write twenty times and the digest stays.
+///
+/// The fake API is `testing::ObjectStore`, which applies each merge patch as
+/// the API server does and hands the next pass the stored object.
+#[tokio::test]
+async fn a_ca_bundle_that_goes_away_is_cleared_once_and_settles() {
+    use weirkeeper::testing::{mock_client_with_store, ObjectStore};
+    const KEY: &str = "/namespaces/team-a/backupdestinations/dest-a";
+
+    // The Valid status a reconcile with the CA present writes.
+    let pem = ca_pem(0x5A);
+    let dest = build(dest_a_unreconciled());
+    let verdict = destination::evaluate(&dest, &CaObservation::Present(pem.into_bytes()));
+    let mut stored = dest_a_unreconciled();
+    stored["status"] = serde_json::to_value(status_for(&dest, &verdict, chrono::Utc::now()))
+        .expect("a status serialises");
+    assert!(
+        stored["status"]["caBundleSha256"].is_string(),
+        "the premise"
+    );
+
+    let store = ObjectStore::shared();
+    store.lock().expect("store").put(KEY, stored);
+    let passes = 20;
+    for _ in 0..passes {
+        let current = build(store.lock().expect("store").get(KEY).expect("stored"));
+        let (client, _rec, _bodies) = mock_client_with_store(routes(None), store.clone());
+        let verdict = reconcile_destination(&current, &client)
+            .await
+            .expect("a 404 on the ConfigMap is a verdict");
+        assert_eq!(verdict.reason, CheckCode::CaBundleNotFound.as_str());
+    }
+    let writes = store
+        .lock()
+        .expect("store")
+        .writes()
+        .iter()
+        .filter(|w| w.method == "PATCH" && w.status == 200)
+        .count();
+    assert_eq!(
+        writes, 1,
+        "the CaBundleNotFound verdict is written once; {passes} passes later it has not been \
+         written again"
+    );
+    let after = store.lock().expect("store").get(KEY).expect("stored");
+    assert!(
+        after["status"].get("caBundleSha256").is_none(),
+        "no bytes were read, so the object no longer claims a digest: {}",
+        after["status"]
+    );
+    assert_eq!(after["status"]["reason"], "CaBundleNotFound");
+}
+
+/// **A rotated CA bundle is read by the timed requeue** (FX-29 review M-1).
+///
+/// This controller does not watch `ConfigMap`s, so nothing but its requeue
+/// ever runs the pass that reads a rotated bundle. The pass returns a timed
+/// requeue of `REQUEUE_SECONDS` (never `await_change()`), and the next pass —
+/// with no event on the destination at all — publishes the new digest. A
+/// failed pass is requeued on `ERROR_REQUEUE_SECONDS`.
+///
+/// Mutants that fail here: `destination_action()` returning `await_change()`
+/// or a poll longer than the documented 300 s.
+#[tokio::test]
+async fn a_rotated_ca_is_read_by_the_timed_requeue() {
+    use weirkeeper::controllers::backup_destination::{
+        destination_action, destination_error_action, ERROR_REQUEUE_SECONDS, REQUEUE_SECONDS,
+    };
+    use weirkeeper::testing::{mock_client_with_store, ObjectStore};
+    const KEY: &str = "/namespaces/team-a/backupdestinations/dest-a";
+    assert_eq!(
+        REQUEUE_SECONDS, 300,
+        "the cadence docs/kubernetes.md states"
+    );
+    assert_eq!(
+        destination_action(),
+        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(300)),
+        "every reconciled destination is looked at again in five minutes"
+    );
+    assert_eq!(
+        destination_error_action(),
+        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(
+            ERROR_REQUEUE_SECONDS
+        ))
+    );
+
+    let store = ObjectStore::shared();
+    store.lock().expect("store").put(KEY, dest_a_unreconciled());
+    let digest_after = |pem: &str| {
+        let store = store.clone();
+        let pem = pem.to_string();
+        async move {
+            let current = build(store.lock().expect("store").get(KEY).expect("stored"));
+            let (client, _rec, _bodies) = mock_client_with_store(
+                routes(Some(&configmap_body("ca.crt", &pem))),
+                store.clone(),
+            );
+            reconcile_destination(&current, &client)
+                .await
+                .expect("a verdict");
+            store.lock().expect("store").get(KEY).expect("stored")["status"]["caBundleSha256"]
+                .clone()
+        }
+    };
+    let first = digest_after(&ca_pem(0x11)).await;
+    // The ConfigMap is rotated. No event reaches the destination; the next
+    // pass is the one its requeue runs.
+    let rotated = digest_after(&ca_pem(0x22)).await;
+    assert!(first.is_string() && rotated.is_string());
+    assert_ne!(
+        first, rotated,
+        "the pass the requeue runs reads the rotated bundle and publishes its digest"
+    );
+}
+
 /// The condition reasons are a CLOSED set, and every one of them is a
 /// [`CheckCode`].
 #[test]

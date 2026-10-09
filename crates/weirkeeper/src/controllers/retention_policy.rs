@@ -90,7 +90,7 @@ use logweir_core::destination::DestinationRole;
 
 use crate::catalog_view::{self as view, ViewEntry};
 use crate::check;
-use crate::conditions::{merge_condition, status_unchanged};
+use crate::conditions::{keep_instant_unless_changed, merge_condition, status_unchanged};
 use crate::crds::backup::Backup;
 use crate::crds::recovery_catalog::RecoveryCatalog;
 use crate::crds::restore::Restore;
@@ -2826,7 +2826,7 @@ impl Pass<'_> {
             .candidates
             .iter()
             .map(|c| {
-                json!({
+                let mut candidate = json!({
                     "pointId": c.point_id,
                     "reason": c.reason.as_str(),
                     "recoveryPointAt": Time::from(
@@ -2840,7 +2840,21 @@ impl Pass<'_> {
                     // view carries no segment keys.
                     "objects": c.objects(),
                     "bytes": c.bytes,
-                })
+                });
+                // AND ABSENT MEANS NO KEY AT ALL, NOT `null` — FX-29's class
+                // sweep. An array is replaced wholesale by a merge patch, so a
+                // `null` member inside an element is not a deletion: it is
+                // STORED as `null` (the CRD marks `objects` and `bytes`
+                // `nullable: true`). But this controller reads its status back
+                // TYPED, where `null` and absent are the same `None` and
+                // re-serialise as no key — so the no-op skip compared a patch
+                // carrying `null`s with a stored status carrying none and saw
+                // a change on every pass, and the status was written on every
+                // pass even when nothing else had moved.
+                if let Some(fields) = candidate.as_object_mut() {
+                    fields.retain(|_, value| !value.is_null());
+                }
+                candidate
             })
             .collect();
         let protected: Vec<Value> = evaluation
@@ -2990,34 +3004,51 @@ impl Pass<'_> {
                 },
             ),
         ]);
+        // `lastEvaluation.at` IS THE EVALUATION THAT REACHED THESE FINDINGS —
+        // FX-29's class sweep. It was `now` on every evaluation, and this
+        // reconciler's own status write wakes it (`Controller::new` watches the
+        // policy), so every `Report`/`Enforce` policy whose catalog resolved
+        // wrote its status on every pass, for ever. It is kept while the rest
+        // of the block — the counts, the candidates, the plan and its expiry —
+        // comes out the same, and moves with the first evaluation that finds
+        // something different (`keep_instant_unless_changed`, compared on what
+        // the API server will store).
+        let mut last_evaluation = json!({
+            "at": self.ctx.now,
+            "pointsEvaluated": evaluation.points_evaluated,
+            "candidateCount": i64::try_from(evaluation.candidates.len()).unwrap_or(i64::MAX),
+            "kept": evaluation.kept,
+            "candidates": candidates,
+            "protected": protected,
+            "skipped": skipped,
+            "planSha256": plan_sha256,
+            // THE PLAN THIS EVALUATION RENDERED, NAMED WHERE ITS DIGEST IS
+            // PUBLISHED — defect RET-STALE-PLANREF. `planRef` used to be
+            // written by `start_run` and by nothing else, so an evaluation
+            // that rendered a NEW plan without starting a run left the ref
+            // naming the previous run's `ConfigMap` while `planSha256`
+            // beside it named the new plan's bytes: two fields of one block
+            // describing two different plans, and the one an administrator
+            // reads to preview what would be deleted was the stale one.
+            //
+            // The name is a pure function of the policy UID and the digest
+            // (`plan::plan_config_map_name`), so it is exactly as true as
+            // the digest it sits next to — including before any run
+            // materializes the object, which is the case this fixes.
+            "planRef": { "name": plan::plan_config_map_name(&self.uid, plan_sha256) },
+            "planExpiresAt": window.expires_at,
+        });
+        keep_instant_unless_changed(
+            self.observed()
+                .as_ref()
+                .and_then(|status| status.get("lastEvaluation")),
+            &mut last_evaluation,
+            "at",
+        );
         let mut status = json!({
             "enforcement": decision.enforcement,
             "guarantees": guarantees,
-            "lastEvaluation": {
-                "at": self.ctx.now,
-                "pointsEvaluated": evaluation.points_evaluated,
-                "candidateCount": i64::try_from(evaluation.candidates.len()).unwrap_or(i64::MAX),
-                "kept": evaluation.kept,
-                "candidates": candidates,
-                "protected": protected,
-                "skipped": skipped,
-                "planSha256": plan_sha256,
-                // THE PLAN THIS EVALUATION RENDERED, NAMED WHERE ITS DIGEST IS
-                // PUBLISHED — defect RET-STALE-PLANREF. `planRef` used to be
-                // written by `start_run` and by nothing else, so an evaluation
-                // that rendered a NEW plan without starting a run left the ref
-                // naming the previous run's `ConfigMap` while `planSha256`
-                // beside it named the new plan's bytes: two fields of one block
-                // describing two different plans, and the one an administrator
-                // reads to preview what would be deleted was the stale one.
-                //
-                // The name is a pure function of the policy UID and the digest
-                // (`plan::plan_config_map_name`), so it is exactly as true as
-                // the digest it sits next to — including before any run
-                // materializes the object, which is the case this fixes.
-                "planRef": { "name": plan::plan_config_map_name(&self.uid, plan_sha256) },
-                "planExpiresAt": window.expires_at,
-            },
+            "lastEvaluation": last_evaluation,
             // FX-20: what `spec.enforcement.credentialSecretRef` must carry
             // under `logweir-binding`; `null` clears it when enforcement is
             // removed.
@@ -4058,11 +4089,30 @@ async fn reconcile(
         },
     )
     .await?;
+    Ok(policy_action(&outcome))
+}
+
+/// The [`Action`] a pass returns: a timed requeue — [`RUNNING_REQUEUE_SECONDS`]
+/// while a run is started or running, [`IDLE_REQUEUE_SECONDS`] otherwise —
+/// never `await_change()`.
+///
+/// An enforcement slot comes due with no event on any object, so this
+/// requeue is what starts the run (FX-29 review M-1, pinned by
+/// `retention_policy_controller::an_enforcement_slot_starts_from_the_timed_requeue`).
+#[must_use]
+pub fn policy_action(outcome: &Outcome) -> Action {
     let seconds = match outcome.phase {
         RetentionPhase::Running | RetentionPhase::Started => RUNNING_REQUEUE_SECONDS,
         _ => IDLE_REQUEUE_SECONDS,
     };
-    Ok(Action::requeue(std::time::Duration::from_secs(seconds)))
+    Action::requeue(std::time::Duration::from_secs(seconds))
+}
+
+/// The [`Action`] a failed pass returns: a timed requeue of
+/// [`ERROR_REQUEUE_SECONDS`].
+#[must_use]
+pub fn policy_error_action() -> Action {
+    Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
 }
 
 fn error_policy(policy: Arc<RetentionPolicy>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
@@ -4072,7 +4122,7 @@ fn error_policy(policy: Arc<RetentionPolicy>, err: &ReconcileError, _ctx: Arc<Co
         error = %err,
         "the RetentionPolicy reconcile could not complete; nothing was deleted"
     );
-    Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
+    policy_error_action()
 }
 
 /// Run the `RetentionPolicy` controller until the process ends.

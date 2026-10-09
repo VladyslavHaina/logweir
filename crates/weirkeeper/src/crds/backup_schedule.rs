@@ -282,7 +282,9 @@ impl RetrySpec {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionReport {
-    /// When the controller last evaluated retention.
+    /// When an evaluation first reached the findings below. Later evaluations
+    /// that find the same keep this instant, so it is when the findings last
+    /// changed, not when the controller last looked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluated_at: Option<Time>,
     /// `spec.retention.keepLast`, **as it was applied**. Absent when no rule
@@ -329,33 +331,6 @@ pub struct RetentionReport {
     /// nothing to remove" — set when no retention rule is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-}
-
-impl RetentionReport {
-    /// Whether this report FOUND what `other` found — every field compared
-    /// except [`RetentionReport::evaluated_at`].
-    ///
-    /// # Why `evaluatedAt` is the one field left out
-    ///
-    /// It is a "when computed" field, not a finding: it timestamps the
-    /// evaluation, so comparing it would make every evaluation differ from
-    /// every other by construction. Plan erratum **E11(d)**, review finding
-    /// M-1 — `retentionReport.evaluatedAt = now` on every pass is what made a
-    /// `BackupSchedule` with an archive configured bump its own
-    /// `resourceVersion` on every reconcile and spin, exactly as the two
-    /// unconditional `lastTransitionTime` writes did. The rule is the same one
-    /// the `metav1.Condition` contract states for a transition time: the
-    /// timestamp moves when the thing it timestamps moves. The caller
-    /// (`controllers::backup_schedule::status_patch_with_retention`) keeps the
-    /// stored instant when this returns `true`.
-    #[must_use]
-    pub fn same_findings_as(&self, other: &Self) -> bool {
-        let ignoring_when = |r: &Self| Self {
-            evaluated_at: None,
-            ..r.clone()
-        };
-        ignoring_when(self) == ignoring_when(other)
-    }
 }
 
 /// One manifest key the evaluation could not read. **Task 19 review, F-5.**

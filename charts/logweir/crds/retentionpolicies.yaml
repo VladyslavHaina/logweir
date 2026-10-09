@@ -393,7 +393,7 @@ spec:
                 nullable: true
                 properties:
                   at:
-                    description: When.
+                    description: When an evaluation first reached the findings below. Later evaluations that find the same keep this instant, so it is when the findings last changed, not when the controller last looked.
                     format: date-time
                     nullable: true
                     type: string
