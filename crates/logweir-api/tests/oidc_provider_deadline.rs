@@ -447,8 +447,8 @@ async fn timed(app: &SharedApp, request: Request<Body>) -> (TestResponse, Durati
     match tokio::time::timeout(bound, app.app.send(request)).await {
         Ok(response) => (response, started.elapsed()),
         Err(_) => panic!(
-            "the request was still pending after {bound:?}: the provider's body read has no \
-             deadline (the pre-FX-28 behaviour)"
+            "the request was still pending after {bound:?}: no single deadline covers the \
+             provider's request and its body (the pre-FX-28 code timed the head alone)"
         ),
     }
 }
@@ -997,8 +997,8 @@ fn the_built_binary_answers_a_stalled_sign_in_and_closes_the_connection() {
     let text = String::from_utf8_lossy(&received);
     let first_byte = first_byte.unwrap_or_else(|| {
         panic!(
-            "no answer within {bound:?}: the provider's body read has no deadline (the \
-             pre-FX-28 behaviour)\n{}",
+            "no answer within {bound:?}: no single deadline covers the provider's request \
+             and its body (the pre-FX-28 code timed the head alone)\n{}",
             server.log()
         )
     });
