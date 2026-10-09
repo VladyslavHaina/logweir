@@ -156,6 +156,7 @@ pub fn plan_documents(
                 // `ConfigMap`, never re-read by the pod from the live one.
                 ca_file: destination.ca_pem.as_ref().map(|_| ca_path.clone()),
                 credentials,
+                grant_bindings: Vec::new(),
             },
             // EXACTLY TWO OBJECTS, AT THE CONTRACT'S CAPS, WITH THE ONE ROLE
             // THE CONTRACT ALLOWS. `CheckPlan::validate` refuses any other

@@ -671,6 +671,7 @@ impl Pass<'_> {
                     )
                 }),
                 credentials: credential_mode(&resolved.grant),
+                grant_bindings: Vec::new(),
             },
             mode: self.catalog.spec.sync.mode.into(),
             deep_check: self.catalog.spec.sync.deep_check.into(),
