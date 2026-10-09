@@ -152,8 +152,10 @@ pub mod caps {
     /// A signed evidence document read by the SHARED controller: the evidence
     /// relay's payload cap, so the controller's own handle and a relay agree
     /// on which documents can be verified at all. The controller parses two
-    /// such documents before any digest check (the receipt's window, the
-    /// scorecard's outcome), so this cap is also what bounds that parse.
+    /// such documents into a `serde_json::Value` before any digest check (the
+    /// receipt's window, the scorecard's outcome), and a document of tiny
+    /// values parses into about 37 times its size, so this cap is also what
+    /// bounds that parse: about 40 MB at worst.
     pub const CONTROLLER_DOCUMENT: u64 = MAX_EVIDENCE_PAYLOAD_BYTES;
     /// An engine manifest read in a runner, CLI or check-Job process.
     pub const MANIFEST: u64 = 256 << 20;
@@ -1156,16 +1158,22 @@ impl Store {
     /// range it covers, and then streams the object's real bytes — a
     /// misbehaving proxy or endpoint, which is what [`Store::get_capped`]'s
     /// running cap exists for. Writes and lists are the in-memory backend's.
-    /// No production path builds it.
+    ///
+    /// The [`StreamMeter`] counts every body byte a reader actually took from
+    /// a GET's stream, so a row can show that a refusal on the reported size,
+    /// or a [`Store::head`], took none. No production path builds it.
     #[doc(hidden)]
-    pub fn in_memory_misreporting_size(prefix: &str, reported: u64) -> Self {
-        Self {
+    pub fn in_memory_misreporting_size(prefix: &str, reported: u64) -> (Self, StreamMeter) {
+        let meter = StreamMeter::default();
+        let store = Self {
             inner: Arc::new(misreport::MisreportingSize {
                 inner: object_store::memory::InMemory::new(),
                 reported,
+                streamed: Arc::clone(&meter.0),
             }),
             ..Self::in_memory(prefix)
-        }
+        };
+        (store, meter)
     }
 
     /// A TEST DOUBLE of a VERSIONED bucket (FX-7), and the handle a test uses
@@ -1592,7 +1600,9 @@ impl Store {
     /// parsed ([`manifest_window`]) and no `serde_json::Value` of the manifest
     /// is ever built, so the memory this takes is the capped bytes and no
     /// more: a document of tiny values (`[0,0,0,…]`) costs a `Value` tree
-    /// many times its own size, in the one process every namespace shares. The answers are the ones the earlier `Value` walk
+    /// about 37 times its own size (16 MiB of JSON held 621 MB, measured by
+    /// `crates/weirkeeper/tests/read_caps.rs`), in the one process every
+    /// namespace shares. The answers are the ones the earlier `Value` walk
     /// gave, byte for byte, including which duplicate key wins (the last).
     pub fn manifest_facts(&self, key: &str, max_bytes: u64) -> Result<ManifestFacts, StoreError> {
         let (bytes, _) = self.get_capped(key, max_bytes)?;
@@ -2008,6 +2018,20 @@ impl VersionedBucket {
     }
 }
 
+/// TEST DOUBLE ONLY (FX-31): how many body bytes readers took from a
+/// [`Store::in_memory_misreporting_size`] store's GET streams, in total.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct StreamMeter(Arc<std::sync::atomic::AtomicU64>);
+
+impl StreamMeter {
+    /// The body bytes taken so far.
+    #[must_use]
+    pub fn streamed(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// The test double behind [`Store::in_memory_misreporting_size`].
 ///
 /// `object_store::ObjectStore` is an `async_trait` trait; its methods are
@@ -2027,6 +2051,8 @@ mod misreport {
     pub(super) struct MisreportingSize {
         pub(super) inner: object_store::memory::InMemory,
         pub(super) reported: u64,
+        /// [`super::StreamMeter`]'s counter.
+        pub(super) streamed: std::sync::Arc<std::sync::atomic::AtomicU64>,
     }
 
     impl std::fmt::Display for MisreportingSize {
@@ -2074,10 +2100,34 @@ mod misreport {
             Self: 'c,
         {
             Box::pin(async move {
+                use futures::StreamExt as _;
                 let mut r = self.inner.get_opts(location, options).await?;
                 // THE LIE: the headers say `reported`, the body is whole.
                 r.meta.size = self.reported;
                 r.range = 0..self.reported;
+                // THE METER: every chunk a reader polls out of the body.
+                let streamed = std::sync::Arc::clone(&self.streamed);
+                let body = match r.payload {
+                    object_store::GetResultPayload::Stream(s) => s,
+                    #[allow(unreachable_patterns)]
+                    other => {
+                        return Err(object_store::Error::NotImplemented {
+                            operation: format!("misreporting double over {other:?}"),
+                            implementer: "MisreportingSize".to_string(),
+                        })
+                    }
+                };
+                r.payload = object_store::GetResultPayload::Stream(
+                    body.inspect(move |chunk| {
+                        if let Ok(bytes) = chunk {
+                            streamed.fetch_add(
+                                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                                std::sync::atomic::Ordering::SeqCst,
+                            );
+                        }
+                    })
+                    .boxed(),
+                );
                 Ok(r)
             })
         }

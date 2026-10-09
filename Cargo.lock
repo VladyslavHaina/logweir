@@ -3846,6 +3846,7 @@ dependencies = [
  "logweir-core",
  "logweir-store",
  "logweir-verify",
+ "nix",
  "rustls",
  "schemars",
  "serde",
