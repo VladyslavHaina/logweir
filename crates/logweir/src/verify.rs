@@ -165,7 +165,9 @@ pub struct VerifyReport {
     pub before_the_start: logweir_core::scorecard::BeforeTheStart,
     /// `target.original_name` (scorecard 1.8.0, PROD-15.1), carried as read:
     /// `None` is a restore that did not write under the original names.
-    pub original_name: Option<logweir_core::scorecard::OriginalNameInfo>,
+    /// Boxed: the block is the largest optional one, and `Verdict`'s variants
+    /// stay comparable in size.
+    pub original_name: Option<Box<logweir_core::scorecard::OriginalNameInfo>>,
 }
 
 /// The two `original name:` lines both readers print for a restore under the
@@ -876,7 +878,7 @@ pub fn verify_scorecard(
             sc.integrity.verification.as_ref(),
         ),
         format_version: sc.format_version.clone(),
-        original_name: sc.target.original_name.clone(),
+        original_name: sc.target.original_name.clone().map(Box::new),
     }))
 }
 
@@ -947,7 +949,7 @@ fn print_report(r: &VerifyReport) {
     }
     // PROD-15.1: nor an ordinary restore when it wrote under the original
     // topic names — and what admitted that.
-    for line in original_name_lines(r.original_name.as_ref()) {
+    for line in original_name_lines(r.original_name.as_deref()) {
         println!("target:    {line}");
     }
 }

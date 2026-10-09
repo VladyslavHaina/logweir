@@ -105,7 +105,7 @@ fn last_approval_posted(fake: &FakeKube) -> Value {
         .into_iter()
         .filter(|r| r.method == "POST" && r.path.ends_with("/approvals"))
         .map(|r| serde_json::from_str::<Value>(&r.body).expect("json"))
-        .last()
+        .next_back()
         .expect("the console stored its confirmation")
 }
 

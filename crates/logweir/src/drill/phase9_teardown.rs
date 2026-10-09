@@ -106,7 +106,8 @@ pub fn run(
         // mapping in scratch mode, and this rail keeps teardown from ever
         // reaching one if that refusal is bypassed. Such a name is attested
         // as not deleted, and never handed to the deleter.
-        let (original, names): (Vec<(&String, &String)>, Vec<(&String, &String)>) = mapping
+        type Pairs<'m> = Vec<(&'m String, &'m String)>;
+        let (original, names): (Pairs<'_>, Pairs<'_>) = mapping
             .iter()
             .partition(|(source, target)| source == target);
         for (_, target) in original {
