@@ -3403,3 +3403,83 @@ async fn fx19_one_probe_cycle_never_flaps_reachable_and_logs_no_warn() {
         log.messages_at("WARN")
     );
 }
+
+/// **FX-19: A SUPERSEDED WRITE ENDS EVERY JUDGING PASS, AND NO TTL FOLLOWS
+/// IT.** The verdict pass and the creating pass are pinned above
+/// (`a_conflicting_cluster_status_write_is_an_outcome_and_never_precedes_a_ttl`);
+/// these are the other four writes a pass makes about a Job: the crash, the
+/// refusal of a finished pod-less Job, the fail-fast refusal of a running one,
+/// and `ProbeRunning`. Each answers `409` as [`Deferred::StatusSuperseded`],
+/// patches no TTL, and logs no WARN — the crash or refusal is logged when a
+/// later pass's write records it.
+///
+/// KILLS: a superseded crash or refusal write followed by its TTL (the Job and
+/// its record collected for a status that never landed); a `409` on any of
+/// these paths read as a landed write.
+#[tokio::test]
+async fn fx19_a_superseded_write_ends_every_judging_pass_before_any_ttl() {
+    let superseded = |routes| {
+        answering(
+            routes,
+            "PATCH",
+            "/kafkaclusters/orders-prod/status",
+            409,
+            CONFLICT_BODY.to_string(),
+        )
+    };
+    for (what, routes) in [
+        (
+            "the crash of a finished pod-less Job",
+            superseded(every_route(
+                reaping_job(true, false, false),
+                NO_PODS.to_string(),
+            )),
+        ),
+        (
+            "the refusal of a finished pod-less Job",
+            superseded(podless_probe_routes(
+                podless_probe_job("2026-09-10T11:59:15Z", true),
+                probe_events(Some(QUOTA_REFUSAL)),
+            )),
+        ),
+        (
+            "the fail-fast refusal of a running Job",
+            superseded(podless_probe_routes(
+                podless_probe_job("2026-09-10T11:59:15Z", false),
+                probe_events(Some(QUOTA_REFUSAL)),
+            )),
+        ),
+        (
+            "ProbeRunning",
+            superseded(every_route(running_job_body(), NO_PODS.to_string())),
+        ),
+    ] {
+        let log = CapturedLog::start();
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_cluster(&cluster(), &client, now())
+            .await
+            .expect("a lost precondition is an outcome");
+        let seen = bodies.lock().expect("readable").clone();
+        assert_eq!(
+            outcome.deferred,
+            Some(Deferred::StatusSuperseded),
+            "{what}: {outcome:?}"
+        );
+        assert_eq!(
+            count(&seen, "PATCH", "/status"),
+            1,
+            "{what}: the write was sent"
+        );
+        assert!(
+            job_patches(&seen)
+                .iter()
+                .all(|p| p["spec"].get("ttlSecondsAfterFinished").is_none()),
+            "{what}: no TTL after a write that did not land: {seen:?}"
+        );
+        assert!(
+            log.at("WARN").is_empty(),
+            "{what}: no WARN: {:?}",
+            log.messages_at("WARN")
+        );
+    }
+}
