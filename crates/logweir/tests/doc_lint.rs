@@ -2068,6 +2068,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a controller no longer rewrites an unchanged status",
             "status.lastSlot.backupRef",
         ),
+        // FX-20c (2026-10-09, item 46): a destination's Test access compares every
+        // grant's binding on a blocking row, and is never READY for a
+        // destination a backup would refuse.
+        (
+            "Test access compares every grant's binding",
+            "destination.credentialBound",
+        ),
     ];
     assert_eq!(
         items.len(),
