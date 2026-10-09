@@ -376,9 +376,7 @@ four, `get`/`list` on the four D3 kinds (`protectionpolicies`,
 cluster-scoped `trustpolicies`, `get` on the one cluster-scoped
 `trustrosters/default` (so a readiness verdict's roster referent is compared,
 not reported stale), `create` on `recoverycatalogs` for "connect existing
-archive", `get` on `configmaps`, and `create` on `secrets`; in shared mode
-also `create` on `events` in its own namespace, a sign-in's claim on its
-`state` (FX-13a; nothing the page calls).
+archive", `get` on `configmaps`, and `create` on `secrets`.
 
 And four absences that the page depends on:
 

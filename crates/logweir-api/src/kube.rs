@@ -25,16 +25,6 @@
 //! NOT imported: a type that can hold a Secret's data is a type that can leak
 //! one.
 //!
-//! AND ONE CORE WRITE THAT IS NOT A PRODUCT OBJECT: [`SignInClaim`], an
-//! `events` POST and nothing else, in this service's OWN namespace (FX-13a).
-//! It records a sign-in `state` as redeemed so that a second callback
-//! presenting it — on this replica or another, later or at the same moment —
-//! is refused before any token request: the API server's create of a taken
-//! name is `AlreadyExists` whoever asks. The record is an Event because the
-//! API server expires Events itself and this service has no `delete`; it
-//! carries a keyed hash for a name and the replica that redeemed it, nothing
-//! else. See [`KubeAdapter::claim_sign_in_state`].
-//!
 //! ONE MORE CORE-ADJACENT READ, FOR THE ENTRY POINT AND NOTHING ELSE.
 //! [`ProxyEndpointSlice`] is a `discovery.k8s.io/v1` `endpointslices` LIST in
 //! ONE configured namespace, filtered by the `kubernetes.io/service-name`
@@ -69,8 +59,6 @@
 
 use std::path::Path;
 use std::time::Duration;
-
-use chrono::{DateTime, Utc};
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use k8s_openapi::NamespaceResourceScope;
@@ -334,176 +322,6 @@ impl kube::Resource for WriteOnlyCredential {
     }
     fn plural(_: &()) -> std::borrow::Cow<'_, str> {
         "secrets".into()
-    }
-    fn meta(&self) -> &ObjectMeta {
-        &self.metadata
-    }
-    fn meta_mut(&mut self) -> &mut ObjectMeta {
-        &mut self.metadata
-    }
-}
-
-/// The `reason` every sign-in claim carries (FX-13a).
-pub const SIGN_IN_CLAIM_REASON: &str = "SignInStateRedeemed";
-
-/// The component name a sign-in claim reports.
-pub const SIGN_IN_CLAIM_COMPONENT: &str = "logweir-api";
-
-/// The name of the claim readiness dry-runs. Never created for real: a dry
-/// run discards the write.
-pub const SIGN_IN_CLAIM_PROBE_NAME: &str = "logweir-signin-readiness-probe";
-
-/// A redeemed sign-in `state`, recorded as a core `Event` (FX-13a). POSTED,
-/// AND NOTHING ELSE: this service holds `create` on `events` in its own
-/// namespace and no other verb on them.
-///
-/// WHY AN EVENT, AND NOT A LEASE OR A CONFIGMAP. The record must be
-///
-/// 1. DECIDED BY THE API SERVER, so two replicas cannot both be first. A
-///    create of a taken name is `AlreadyExists` whoever asks, and the name is
-///    the same on every replica for the same `state`;
-/// 2. GONE WITHOUT ANYBODY DELETING IT. This service holds no `delete`
-///    anywhere, and a `delete` on Leases in its namespace would reach other
-///    components' leader locks. The API server expires Events itself
-///    (`--event-ttl`, one hour unless the cluster's administrator changed it),
-///    which is well past the 600 seconds a login state lives;
-/// 3. HARMLESS TO READ. It names a keyed hash
-///    ([`crate::auth::keys::CookieKeys::sign_in_claim_name`]) and the replica
-///    that redeemed the state — nothing about the state, the browser, the
-///    person or the provider.
-///
-/// A single document holding a set of used states would need `get` and
-/// `update`, rewrite the whole set on every sign-in and need a size bound
-/// that fails open or locks everyone out when full; one object per state
-/// needs none of that.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SignInClaim {
-    /// The claim's name and namespace, and the labels that say what it is.
-    #[serde(default)]
-    pub metadata: ObjectMeta,
-    /// The replica that redeemed the state: its Pod, by name.
-    #[serde(default)]
-    pub involved_object: SignInClaimReplica,
-    /// [`SIGN_IN_CLAIM_REASON`].
-    #[serde(default)]
-    pub reason: String,
-    /// A fixed sentence naming the replica.
-    #[serde(default)]
-    pub message: String,
-    /// `Normal`.
-    #[serde(rename = "type", default)]
-    pub type_: String,
-    /// [`SIGN_IN_CLAIM_COMPONENT`].
-    #[serde(default)]
-    pub source: SignInClaimSource,
-    /// When the state was redeemed, RFC 3339.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_timestamp: Option<String>,
-    /// The same instant: a claim is never updated.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_timestamp: Option<String>,
-    /// Always 1.
-    #[serde(default)]
-    pub count: i32,
-    /// [`SIGN_IN_CLAIM_COMPONENT`].
-    #[serde(default)]
-    pub reporting_component: String,
-    /// The replica's name.
-    #[serde(default)]
-    pub reporting_instance: String,
-}
-
-/// A claim's `involvedObject`: the replica's Pod.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SignInClaimReplica {
-    /// `v1`.
-    #[serde(default)]
-    pub api_version: String,
-    /// `Pod`.
-    #[serde(default)]
-    pub kind: String,
-    /// The claim's own namespace: the API server refuses an Event whose
-    /// `involvedObject.namespace` is another.
-    #[serde(default)]
-    pub namespace: String,
-    /// The replica's name.
-    #[serde(default)]
-    pub name: String,
-}
-
-/// A claim's `source`.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SignInClaimSource {
-    /// [`SIGN_IN_CLAIM_COMPONENT`].
-    #[serde(default)]
-    pub component: String,
-}
-
-impl SignInClaim {
-    /// The claim for one redeemed `state`, named `name` (a
-    /// [`crate::auth::keys::CookieKeys::sign_in_claim_name`]) in `namespace`,
-    /// by `replica`, at `now`.
-    #[must_use]
-    pub fn new(namespace: &str, name: &str, replica: &str, now: DateTime<Utc>) -> Self {
-        let at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        Self {
-            metadata: ObjectMeta {
-                name: Some(name.to_string()),
-                namespace: Some(namespace.to_string()),
-                labels: Some(
-                    [
-                        ("app.kubernetes.io/name", "logweir"),
-                        ("app.kubernetes.io/component", "api"),
-                        ("logweir.dev/record", "sign-in-claim"),
-                    ]
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-                ),
-                ..ObjectMeta::default()
-            },
-            involved_object: SignInClaimReplica {
-                api_version: "v1".to_string(),
-                kind: "Pod".to_string(),
-                namespace: namespace.to_string(),
-                name: replica.to_string(),
-            },
-            reason: SIGN_IN_CLAIM_REASON.to_string(),
-            message: format!(
-                "A sign-in state was redeemed by {replica}; any other callback presenting it is \
-                 refused before a token request (login_state_replayed)."
-            ),
-            type_: "Normal".to_string(),
-            source: SignInClaimSource {
-                component: SIGN_IN_CLAIM_COMPONENT.to_string(),
-            },
-            first_timestamp: Some(at.clone()),
-            last_timestamp: Some(at),
-            count: 1,
-            reporting_component: SIGN_IN_CLAIM_COMPONENT.to_string(),
-            reporting_instance: replica.to_string(),
-        }
-    }
-}
-
-impl kube::Resource for SignInClaim {
-    type DynamicType = ();
-    type Scope = NamespaceResourceScope;
-
-    fn kind(_: &()) -> std::borrow::Cow<'_, str> {
-        "Event".into()
-    }
-    fn group(_: &()) -> std::borrow::Cow<'_, str> {
-        "".into()
-    }
-    fn version(_: &()) -> std::borrow::Cow<'_, str> {
-        "v1".into()
-    }
-    fn plural(_: &()) -> std::borrow::Cow<'_, str> {
-        "events".into()
     }
     fn meta(&self) -> &ObjectMeta {
         &self.metadata
@@ -1480,44 +1298,6 @@ impl KubeAdapter {
             name: created.metadata.name.unwrap_or_default(),
             uid: created.metadata.uid.unwrap_or_default(),
         })
-    }
-
-    /// FX-13a: record a sign-in `state` as redeemed — ONCE, whichever replica
-    /// asks first.
-    ///
-    /// One `events` CREATE in the claim's namespace (this service's own).
-    /// `Ok` means this caller redeemed the state; `AlreadyExists` means a
-    /// callback already did, on this replica or another, earlier or at the
-    /// same moment. The API server decides, so nothing in this process has to
-    /// be shared or remembered.
-    ///
-    /// NOT ATTRIBUTED, ON PURPOSE. [`KubeAdapter::create`] stamps a durable
-    /// object with its actor; a claim is made before there is one (the
-    /// callback has not exchanged the code yet), it is not a product object,
-    /// and it expires on its own. It records the replica instead.
-    ///
-    /// With `dry_run`, the API server authorizes, validates and admits the
-    /// claim and discards it: readiness asks that until it succeeds once, so a
-    /// console that cannot record a claim (no grant, a refused shape) never
-    /// becomes ready instead of refusing every sign-in.
-    ///
-    /// # Errors
-    ///
-    /// [`KubeFailure`], `AlreadyExists` for a state already redeemed.
-    pub async fn claim_sign_in_state(
-        &self,
-        claim: &SignInClaim,
-        dry_run: bool,
-    ) -> Result<(), KubeFailure> {
-        let namespace = claim.metadata.namespace.as_deref().unwrap_or_default();
-        let api: Api<SignInClaim> = Api::namespaced(self.client.clone(), namespace);
-        let params = PostParams {
-            dry_run,
-            field_manager: Some(FIELD_MANAGER.to_string()),
-        };
-        self.bounded("create", "events", api.create(&params, claim))
-            .await
-            .map(|_| ())
     }
 
     /// The serving addresses of one Service's endpoints, for the trusted-proxy

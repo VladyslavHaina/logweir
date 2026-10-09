@@ -38,7 +38,7 @@ client that stops reading or sending meets a stall deadline), 45 (FX-29, a
 controller no longer rewrites a status whose content has not changed), 46
 (PROD-03.0, schema-dependent topics flagged from the archived bytes), 47
 (FX-28, a sign-in whose identity provider stalls is answered at the provider
-deadline) and 48 (FX-13a and FX-32, a sign-in state redeems once on every
+deadline) and 48 (FX-13a and FX-32, a sign-in state is single-use on each
 replica, and a refused callback really clears the login cookie) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
@@ -115,10 +115,10 @@ Item 47 is fix-now row FX-28, proven by rows over a loopback identity
 provider that stalls and on the built console binary; it changes the console
 only, and the PoC upgrade that carries it signs in through Dex (a stall cannot
 be simulated on the live Dex).
-Item 48 is fix-now rows FX-13a and FX-32, proven by router rows and by two
-console processes over one fake API server; it changes the console and the
-shared console's chart RBAC, and the PoC upgrade that carries it signs in
-through Dex, replays the callback URL and lists the claim.
+Item 48 is fix-now rows FX-13a and FX-32, proven by router rows over one and
+two console processes; it changes the console only, and the PoC upgrade that
+carries it signs in through Dex and replays the callback URL against both
+replicas.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1412,74 +1412,59 @@ cannot be simulated on the live Dex.
 **Rollback:** an older console reads a stalled provider's body with no
 deadline again; nothing is stored, so nothing needs converting.
 
-#### 48. A sign-in state redeems once, on every replica; a refused callback really clears the login cookie (FX-13a, FX-32)
+#### 48. A sign-in state is single-use on each replica; a refused callback really clears the login cookie (FX-13a, FX-32)
 
 **Changed.** The login cookie is sealed and stateless and opens for 600
 seconds, and nothing recorded that its `state` had been used: anyone who kept
-a copy of it could drive `/auth/callback` again and again, on either replica,
-and each callback was a token request to the provider authenticated as this
-console's client. Now, once the cookie has opened and its `state` matched and
-**before the code is exchanged**, the callback claims the state: it creates
-one core Event, `logweir-signin-<32 hex>` (an HMAC of the state under a
-subkey of the session key, the same on every replica), in the console's own
-namespace. The API server's create is atomic per name, so exactly one
-callback per state signs in; any other — later, on the other replica, or at
-the same moment — is refused `401 unauthenticated` ("This sign-in was already
-used. Start again at /auth/login.") with audit failure `login_state_replayed`,
-a warning naming the claim, and **no token request**. A claim that cannot be
-recorded refuses the sign-in `503 kubernetes_unavailable` with
-`login_state_claim_failed`, again before any token request. Readiness
-dry-runs the claim until one succeeds, so a console that cannot record one is
-never ready. A claim is a cluster write nobody authenticated, so it is
-bounded: each process remembers the states it redeemed (a replay on the same
-replica never reaches Kubernetes) and sends at most 120 claims a minute to the
-cluster; past that, in a many-address flood, sign-ins are still served and
-their states recorded in that process only (audit note `signInClaim:
-processOnly`, one warning a minute), so another replica could accept one
-replay of each until the window ends. The claim names the Pod that redeemed the state and nothing
-about the state, the person or the provider; the API server expires it
-(`--event-ttl`, one hour by default). Separately (FX-32), the problem
+a copy could drive `/auth/callback` again and again, and each callback was a
+token request to the provider authenticated as this console's client. Now,
+once the cookie has opened and its `state` matched and **before the code is
+exchanged**, the callback redeems the state in the console process's own
+record, in memory. A replay on the same replica — later, with another code,
+or racing the first — is refused `401 unauthenticated` ("This sign-in was
+already used. Start again at /auth/login.") with audit failure
+`login_state_replayed`, a warning, the login cookie cleared and **no token
+request**. Nothing is written to Kubernetes and the console's RBAC is
+unchanged. Across replicas the provider is the backstop: an authorization
+code is single-use (RFC 6749 §4.1.2), so a replay on another replica costs
+one token request that the provider refuses (`code_exchange_failed`), signs
+nobody in, and is then refused by that replica's record too. The record holds
+65,536 states per process, each forgotten when its login could no longer
+open; when it is full the oldest is forgotten, never a sign-in refused
+(audit note `usedSignInStates: full`, one warning a minute), and a replay of
+a forgotten state meets the same backstop. Separately (FX-32), the problem
 rendering kept only `Allow` from a handler's headers, so the callback's
 `Set-Cookie` clearing `__Host-logweir_login` on a refusal never reached the
 browser; every header now survives except those describing the replaced body
 and its caching ([api.md](api.md#sign-in)).
-**Do:** nothing with the chart: a shared console gains `<release>-api-signin`,
-`create` on `events` in the release namespace and nothing else. A shared
-console run outside the chart needs that grant in its own namespace, or it
-stays NotReady with the warning `this console cannot record a redeemed
-sign-in state`. A cluster whose `kube-apiserver --event-ttl` is below ten
-minutes lets a replay through once a claim has expired. Alert on
-`login_state_replayed` (someone driving callbacks with a copied cookie),
-`login_state_claim_failed`, and the audit note `signInClaim: processOnly`
-or `unrecorded` (a flood has spent a console's claim budget).
-**Scope:** rows through the whole router over the fake API server, which
-answers an `events` create of a taken name `AlreadyExists` atomically and
-checks the namespace agreement the real one validates
-(`crates/logweir-api/tests/sign_in_state.rs`): a replayed callback — the same
-code, another code, and 599 s later — is refused by name with no token
-request while the first signs in; two callbacks with one state at once, the
-provider taking 150 ms per token request, give exactly one sign-in and one
-token request; two console processes over one cluster redeem a state once,
-in sequence (the login started on one, finished on the other) and at once; a
-claim refused 403 or 500 refuses the sign-in before any token request; a
-successful sign-in is unchanged and its claim carries no state, nonce, code,
-cookie or identity; readiness dry-runs until one succeeds and then holds; a
-replay on the same replica makes no Kubernetes call; past a shrunk budget
-the next sign-ins are served with no claim written, announced once, a replay
-on that replica is refused and the other replica accepts it once (the stated
-limit), and the next window claims again.
-`tests/oidc_login.rs` drives seven callback refusals and reads the clearing
-`Set-Cookie` on the response the browser gets; unit rows hold what the
-rendering keeps and drops. The chart's grant is pinned both ways by
-`scripts/render-install.sh --check` and `chart_lint`. Mutants, all killed:
-the claim's result ignored, the claim after the exchange, a check-then-claim
-race window, a per-process record in place of the cluster's, no readiness
-half, and the rendering dropping `Set-Cookie` again.
-[UNVERIFIED — no real API server has answered the claim's create or its dry run yet; the PoC upgrade that carries this item signs in through Dex and replays the callback URL.]
-**Rollback:** an older console claims nothing (a copied cookie replays again
-within its 600 s) and drops a refusal's `Set-Cookie` again; the Helm rollback
-removes `<release>-api-signin`, and the claims already written expire on
-their own.
+**Do:** nothing is required. Alert on `login_state_replayed` (someone
+driving callbacks with a copied cookie) beside `code_exchange_failed`.
+**Scope:** rows through the whole router (`crates/logweir-api/tests/sign_in_state.rs`):
+a replay on one replica — the same code, another code, and 599 s later — is
+refused by name with no token request while the first callback signs in,
+against a provider double that would have accepted the code twice; two
+callbacks with one state at once on one replica, the provider taking 150 ms
+per token request, give one sign-in and one token request; with the provider
+double's codes single-use, a replay on a second console process reaches the
+token request once, is refused by the provider with no session, and is then
+refused by that process's record, and two callbacks at once on two processes
+give exactly one sign-in; a record shrunk to two forgets its oldest entries
+and still signs in every new login, announces it once, and a replay of a
+forgotten state meets the provider's refusal. Each row also asserts the
+callback made no Kubernetes write. `tests/oidc_login.rs` drives seven
+callback refusals and reads the clearing `Set-Cookie` on the response the
+browser gets; unit rows hold what the rendering keeps and drops, and the
+record's expiry, eviction and bound. Mutants, all killed: listed in the
+worker report (the record not consulted, the record written after the
+exchange, a check-then-write race, a full record that refuses, no eviction,
+eviction of the newest, no expiry, the eviction announced every time, a
+record keyed on the code, a refusal without the clear, and the rendering
+dropping `Set-Cookie` again).
+[UNVERIFIED — no PoC sign-in has replayed a callback URL against the deployed console yet; the PoC upgrade that carries this item does.]
+**Rollback:** an older console keeps no record (a copied cookie replays
+within its 600 s again, each replay a token request the provider refuses) and
+drops a refusal's `Set-Cookie` again; nothing is stored, so nothing needs
+converting.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -1531,9 +1516,6 @@ In addition to the next entry's six, in its order:
   controller, the runner and the console together; never in a loop. The tool's
   refusal of a Secret another object also names is an incident to investigate
   ([install.md](install.md); [kubernetes.md](kubernetes.md) §20.10).
-- **Grant a shared console run outside the chart `create` on `events` in its
-  own namespace** (item 48), or it stays NotReady; the chart renders the
-  grant itself.
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -1579,9 +1561,8 @@ authorization); item 44 changes the console only and needs nothing; item 45
 changes the controller only (and two CRD descriptions) and needs nothing; item 46
 changes the runner's receipts and catalog records, the catalog's view (runner
 and controller), the product API and the console, and needs nothing; item 47
-changes the console only and needs nothing; item 48 changes the console and
-the shared console's RBAC (one Role in the release namespace) and needs
-nothing with the chart. To roll back to
+changes the console only and needs nothing; item 48 changes the console only
+and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

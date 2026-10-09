@@ -237,14 +237,7 @@ pub fn state_from_parts(
                         settings.trusted_proxy_service.clone(),
                     )),
                     require_trusted_proxy: settings.require_trusted_proxy,
-                    // FX-13a: claims go to this service's own namespace — the
-                    // in-cluster service account's, which is the release
-                    // namespace the chart grants `create events` in — and
-                    // name the Pod (`HOSTNAME`) that redeemed the state.
-                    sign_in_claims: auth::login::SignInClaims::new(
-                        client.default_namespace(),
-                        std::env::var("HOSTNAME").ok().as_deref(),
-                    ),
+                    used_states: auth::login::UsedStates::new(),
                 })),
             )
         }

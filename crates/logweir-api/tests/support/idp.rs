@@ -201,6 +201,9 @@ struct IdpState {
     /// the network round trip a real provider costs, which is the window two
     /// concurrent callbacks race in (FX-13a).
     token_delay: Option<std::time::Duration>,
+    /// Whether a code is single-use, as RFC 6749 §4.1.2 requires of a real
+    /// provider: an exchanged grant is gone, and its second use answers 400.
+    consume_codes: bool,
 }
 
 struct Inner {
@@ -291,6 +294,12 @@ impl MockIdp {
     /// at once).
     pub fn set_token_delay(&self, delay: Option<std::time::Duration>) {
         self.with(|s| s.token_delay = delay);
+    }
+
+    /// Make codes single-use, as a real provider's are (FX-13a): a code that
+    /// has been exchanged once is refused with HTTP 400 after that.
+    pub fn set_single_use_codes(&self, on: bool) {
+        self.with(|s| s.consume_codes = on);
     }
 
     /// How many token exchanges were attempted.
@@ -405,7 +414,12 @@ impl MockIdp {
             s.token_calls += 1;
             s.last_token_form = body.to_string();
             let code = form.get("code").cloned().unwrap_or_default();
-            let Some(grant) = s.grants.get(&code).cloned() else {
+            let granted = if s.consume_codes {
+                s.grants.remove(&code)
+            } else {
+                s.grants.get(&code).cloned()
+            };
+            let Some(grant) = granted else {
                 return Err(HttpError::Failed(
                     "the provider answered HTTP 400".to_string(),
                 ));

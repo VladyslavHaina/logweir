@@ -76,14 +76,11 @@ pub const CLUSTER_KEY: &str = "\u{0}cluster";
 const PREFIX: &str = "/apis/logweir.dev/v1alpha1/namespaces/";
 /// The group root, for the cluster-scoped kind.
 const GROUP_PREFIX: &str = "/apis/logweir.dev/v1alpha1/";
-/// The core group's namespaced path. THREE OBJECTS ONLY, each with ONE verb:
-/// `configmaps` GET (a check's own stored result), `secrets` POST (a
-/// write-only credential) and `events` POST (a redeemed sign-in state,
-/// FX-13a). Anything else under it is `unexpected`.
+/// The core group's namespaced path. TWO OBJECTS ONLY, each with ONE verb:
+/// `configmaps` GET (a check's own stored result) and `secrets` POST (a
+/// write-only credential). Anything else under it is `unexpected`.
 const CORE_PREFIX: &str = "/api/v1/namespaces/";
-pub const CORE_PLURALS: [&str; 3] = ["configmaps", "secrets", "events"];
-/// The namespace a shared-mode test app records sign-in claims in.
-pub const CLAIM_NAMESPACE: &str = "logweir-system";
+pub const CORE_PLURALS: [&str; 2] = ["configmaps", "secrets"];
 /// The discovery group: `endpointslices` LIST and nothing else — the
 /// trusted-proxy set's one read (chart gap G6). A GET by name, any write and
 /// any other plural are `unexpected`.
@@ -175,7 +172,6 @@ fn kind_of(plural: &str) -> &'static str {
         "configmaps" => "ConfigMap",
         "secrets" => "Secret",
         "endpointslices" => "EndpointSlice",
-        "events" => "Event",
         _ => "Unknown",
     }
 }
@@ -331,18 +327,6 @@ impl FakeKube {
             .keys()
             .filter(|(p, n, _)| p == plural && n == namespace)
             .count()
-    }
-
-    /// Every stored object of one plural in one namespace, in name order.
-    pub fn objects(&self, plural: &str, namespace: &str) -> Vec<Value> {
-        self.state
-            .lock()
-            .unwrap()
-            .objects
-            .iter()
-            .filter(|((p, n, _), _)| p == plural && n == namespace)
-            .map(|(_, v)| v.clone())
-            .collect()
     }
 
     pub fn requests(&self) -> Vec<Recorded> {
@@ -526,7 +510,6 @@ fn core_answer(s: &mut State, recorded: &Recorded, rest: &str) -> (Option<Durati
                 ),
             }
         }
-        ("POST", "events", None) => event_create(s, recorded, &namespace),
         ("POST", "secrets", None) => {
             let Ok(mut object) = serde_json::from_str::<Value>(&recorded.body) else {
                 return (
@@ -600,83 +583,6 @@ fn core_answer(s: &mut State, recorded: &Recorded, rest: &str) -> (Option<Durati
             )
         }
     }
-}
-
-/// `events` POST: a sign-in claim (FX-13a). A create of a taken name is
-/// `AlreadyExists`, atomically — the fake's lock is the API server's
-/// per-key create — and `dryRun=All` validates and discards. The shape is
-/// validated as the API server's legacy Event validation does: a name, and an
-/// `involvedObject.namespace` equal to the Event's own (a mismatch is the
-/// 422 a real cluster would answer, and would refuse every sign-in).
-fn event_create(
-    s: &mut State,
-    recorded: &Recorded,
-    namespace: &str,
-) -> (Option<Duration>, u16, String) {
-    let Ok(mut object) = serde_json::from_str::<Value>(&recorded.body) else {
-        return (
-            None,
-            400,
-            status_body(400, "BadRequest", "body is not JSON"),
-        );
-    };
-    let Some(name) = object
-        .pointer("/metadata/name")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-    else {
-        return (
-            None,
-            422,
-            status_body(422, "Invalid", "metadata.name: Required value"),
-        );
-    };
-    if object
-        .pointer("/involvedObject/namespace")
-        .and_then(Value::as_str)
-        != Some(namespace)
-    {
-        return (
-            None,
-            422,
-            status_body(
-                422,
-                "Invalid",
-                "involvedObject.namespace: Invalid value: does not match event.namespace",
-            ),
-        );
-    }
-    let key = ("events".to_string(), namespace.to_string(), name.clone());
-    if s.objects.contains_key(&key) {
-        return (
-            None,
-            409,
-            status_body(
-                409,
-                "AlreadyExists",
-                &format!("events \"{name}\" already exists"),
-            ),
-        );
-    }
-    let dry_run = serde_urlencoded::from_str::<BTreeMap<String, String>>(&recorded.query)
-        .unwrap_or_default()
-        .get("dryRun")
-        .is_some_and(|v| v == "All");
-    s.next_rv += 1;
-    s.next_uid += 1;
-    let meta = object["metadata"].as_object_mut().unwrap();
-    meta.insert("namespace".into(), json!(namespace));
-    meta.insert(
-        "uid".into(),
-        json!(format!("00000000-0000-4000-9000-{:012}", s.next_uid)),
-    );
-    meta.insert("resourceVersion".into(), json!(s.next_rv.to_string()));
-    object["apiVersion"] = json!("v1");
-    object["kind"] = json!("Event");
-    if !dry_run {
-        s.objects.insert(key, object.clone());
-    }
-    (None, 201, object.to_string())
 }
 
 /// The cluster-scoped kinds: `GET` list and `GET` by name, and nothing else —
@@ -1845,11 +1751,9 @@ pub struct SharedOptions {
     pub require_trusted_proxy: bool,
     /// PLAT-19.2: the approval policies and the console key.
     pub approval: Arc<logweir_api::approval::ApprovalSettings>,
-    /// FX-13a: the replica name sign-in claims carry (`HOSTNAME`).
-    pub replica: Option<String>,
-    /// FX-13a: the cluster-claim budget per window and the process record's
-    /// capacity, when a test needs to reach them.
-    pub claim_bounds: Option<(u32, usize)>,
+    /// FX-13a: the bound on the redeemed-state record, when a test needs to
+    /// reach it.
+    pub used_state_capacity: Option<usize>,
 }
 
 impl Default for SharedOptions {
@@ -1865,8 +1769,7 @@ impl Default for SharedOptions {
             login_limiter: None,
             require_trusted_proxy: false,
             approval: Arc::default(),
-            replica: None,
-            claim_bounds: None,
+            used_state_capacity: None,
         }
     }
 }
@@ -1986,18 +1889,10 @@ impl SharedApp {
                 ))
             }),
             require_trusted_proxy: options.require_trusted_proxy,
-            sign_in_claims: match options.claim_bounds {
-                Some((budget, capacity)) => logweir_api::auth::login::SignInClaims::with_bounds(
-                    CLAIM_NAMESPACE,
-                    options.replica.as_deref(),
-                    budget,
-                    capacity,
-                ),
-                None => logweir_api::auth::login::SignInClaims::new(
-                    CLAIM_NAMESPACE,
-                    options.replica.as_deref(),
-                ),
-            },
+            used_states: options.used_state_capacity.map_or_else(
+                logweir_api::auth::login::UsedStates::new,
+                logweir_api::auth::login::UsedStates::with_capacity,
+            ),
         });
         let app = TestApp::with_clock(
             fake,

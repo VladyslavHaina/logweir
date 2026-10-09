@@ -935,7 +935,6 @@ add a kind, and it spends exactly four Kubernetes verbs:
 | `get` on `trustrosters` with `resourceNames: ["default"]` (cluster-scoped, `<release>-api-trustroster`) | comparing a readiness check's `TrustRoster/default` referent; without it every readiness verdict on a cluster with a roster is `unverifiable` and served stale. No `list` and no other roster |
 | `get` on `configmaps` | a check's stored result and a catalog view's pages, each verified by owner UID, immutability and digest before a byte is served |
 | `create` on `secrets` | the write-only credential entry |
-| `create` on `events` in the release namespace only (`<release>-api-signin`, shared mode only) | a sign-in's claim on its `state`, made before the code is exchanged, so a state redeems once on every replica (FX-13a; [api.md](api.md#sign-in)). No read, update or delete: the API server expires Events itself. Readiness dry-runs it, so a console without it is not ready |
 
 And what it does **not** hold, each for a reason:
 

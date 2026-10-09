@@ -72,10 +72,10 @@ pub struct SharedMode {
     /// through one of those proxies over HTTPS
     /// (`crate::http::boundary_guard`, `requireTrustedProxy`).
     pub require_trusted_proxy: bool,
-    /// FX-13a: where a redeemed sign-in `state` is recorded (this service's
-    /// own namespace), as which replica, and whether this replica has shown
-    /// it can (`crate::auth::login::SignInClaims`).
-    pub sign_in_claims: crate::auth::login::SignInClaims,
+    /// FX-13a: the sign-in states THIS process has redeemed, in memory and
+    /// bounded (`crate::auth::login::UsedStates`). Per replica on purpose: the
+    /// provider's single-use code is the backstop across replicas.
+    pub used_states: crate::auth::login::UsedStates,
 }
 
 /// Everything a request handler needs.
@@ -221,8 +221,7 @@ impl AppState {
 
     /// Readiness, cached for [`READINESS_CACHE`]: Kubernetes answers for this
     /// service's identity and, in shared mode, the OIDC provider's discovery
-    /// document and keys are available, the trusted-proxy set is read, and a
-    /// sign-in claim can be recorded (FX-13a).
+    /// document and keys are available.
     pub async fn ready(&self) -> bool {
         let mut cached = self.inner.readiness.lock().await;
         if let Some((at, verdict)) = *cached {
@@ -250,14 +249,7 @@ impl AppState {
         let proxies = self
             .shared()
             .is_none_or(|shared| shared.trusted_proxies.ready());
-        // A console that cannot record a redeemed sign-in state would refuse
-        // every sign-in `login_state_claim_failed` (FX-13a): that is not ready
-        // either. A dry run, latched once it succeeds.
-        let claims = match self.shared() {
-            None => true,
-            Some(shared) => shared.sign_in_claims.ready(self.kube(), self.now()).await,
-        };
-        let verdict = kubernetes && provider && proxies && claims;
+        let verdict = kubernetes && provider && proxies;
         *cached = Some((Instant::now(), verdict));
         verdict
     }

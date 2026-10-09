@@ -1812,16 +1812,6 @@ readiness check reads discovery and the key set under the provider deadline
 (*Sign-in*, below), so a provider that stalls adds at most twenty seconds to
 it.
 
-It also requires that the console can record a sign-in claim (FX-13a,
-*Sign-in* below): readiness **dry-runs** the claim's create (`dryRun=All`, so
-the API server authorizes, validates and admits it and stores nothing) until
-one succeeds, and then holds that half like the provider half. A console
-without `create` on `events` in its own namespace, or whose claim a policy
-refuses, is therefore never ready, so a rollout keeps the old replicas
-serving instead of refusing every sign-in `login_state_claim_failed`. The
-warning `this console cannot record a redeemed sign-in state` names the
-namespace.
-
 ### Sign-in
 
 `GET /auth/login` starts an Authorization Code flow with PKCE S256, `state` and
@@ -1830,79 +1820,59 @@ per-login secrets travel in a sealed, `HttpOnly`, ten-minute
 `__Host-logweir_login` cookie rather than in process memory, so a login begun on
 one replica finishes on another.
 
-`GET /auth/callback` compares `state` in constant time, claims it (below),
-exchanges the code with the verifier, and validates the ID token: allowed
-`alg`, JWKS key by exact `kid`, signature, exact `iss`, exact audience (`azp`
-required when there is more than one), `exp`, `iat` (bounded skew, bounded
-age) and this login's `nonce`. **The browser never receives a provider
-token**: the token response is deserialised into a struct with one field,
-`id_token`, so no access or refresh token exists in the process to leak. Every
-refusal clears the login cookie, and the clear reaches the browser (FX-32: the
-problem rendering keeps the handler's `Set-Cookie`; before it, only `Allow`
-survived).
+`GET /auth/callback` compares `state` in constant time, redeems it on this
+replica (below), exchanges the code with the verifier, and validates the ID
+token: allowed `alg`, JWKS key by exact `kid`, signature, exact `iss`, exact
+audience (`azp` required when there is more than one), `exp`, `iat` (bounded
+skew, bounded age) and this login's `nonce`. **The browser never receives a
+provider token**: the token response is deserialised into a struct with one
+field, `id_token`, so no access or refresh token exists in the process to
+leak. Every refusal clears the login cookie, and the clear reaches the
+browser (FX-32: the problem rendering keeps the handler's `Set-Cookie`;
+before it, only `Allow` survived).
 
-**The sign-in state is single-use, on every replica (FX-13a).** A sealed
-cookie cannot remember being used, so before FX-13a anyone who kept a copy of
-a login cookie could drive the callback with it for its whole 600 seconds, and
+**A sign-in state is single-use on each replica, and the provider's
+single-use code is the backstop across replicas (FX-13a).** A sealed cookie
+cannot remember being used, so before FX-13a anyone who kept a copy of a
+login cookie could drive the callback with it for its whole 600 seconds, and
 every callback was a token request to the provider authenticated as this
 console's client. Now, once the cookie has opened and its `state` matched,
-**and before the code is exchanged**, the callback *claims* the state: it
-creates one core `Event` in the console's own namespace, named
-`logweir-signin-<32 hex>` — 128 bits of an HMAC of the `state` under a subkey
-of the session key, the same on every replica. The API server's create is
-atomic per name, so exactly one callback per `state` is ever first, whichever
-replica it reaches and however many arrive at once.
+**and before the code is exchanged**, the callback redeems the state in the
+console process's own record (in memory, keyed by a digest of the state, one
+lock). Nothing is written anywhere else — no Kubernetes object and no shared
+store — so the console's RBAC is unchanged.
 
 | the callback | the answer | audit `failureCode` | token request |
 |---|---|---|---|
-| the first to present the state | the sign-in proceeds as before | — | one |
-| any later one, on any replica, at any time in the 600 s, or the loser of two at once | `401 unauthenticated`, "This sign-in was already used. Start again at /auth/login.", login cookie cleared | `login_state_replayed` | none |
-| the claim cannot be recorded (Kubernetes refused or did not answer) | `503 kubernetes_unavailable`, "The sign-in could not be recorded. Start again at /auth/login.", login cookie cleared | `login_state_claim_failed` | none |
+| the first on this replica to present the state | the sign-in proceeds as before | — | one |
+| any later one on the same replica, at any time in the 600 s, or the loser of two at once | `401 unauthenticated`, "This sign-in was already used. Start again at /auth/login.", login cookie cleared | `login_state_replayed` | none |
+| the first replay on **another** replica, or on this one after its entry was forgotten (below) | `401 unauthenticated`, "The sign-in could not be completed.", login cookie cleared: the provider refuses the code it already exchanged (RFC 6749 §4.1.2: an authorization code is single-use) | `code_exchange_failed` | one, refused |
 
-A replay also logs the warning `a sign-in state was presented again after it
-was redeemed`, naming the claim, never the state. A callback that reached the
-exchange has used its state even when the exchange then fails (a stalled or
-refusing provider, a session too large): starting again at `/auth/login` is
-the retry. The claim records the Pod that redeemed the state
-(`involvedObject`, `reportingInstance`) and reason `SignInStateRedeemed`, and
-nothing about the state, the browser, the person or the provider; `kubectl get
-events -n <release namespace> --field-selector reason=SignInStateRedeemed` lists
-them. The console holds `create` on `events` in its own namespace and no other
-verb on them (`<release>-api-signin`, shared mode only). It never reads,
-updates or deletes a claim: **the API server expires Events itself**
-(`kube-apiserver --event-ttl`, one hour by default), well after the 600
-seconds a state can live.
+So a replay costs at most **one token request per replica**, which the
+provider refuses, and **cannot sign anyone in**: on the replica that redeemed
+the state it is refused before the provider, and anywhere else the provider's
+single-use code refuses it (that callback then records the state there too).
+Two callbacks at once on two replicas both reach the provider, and the
+provider lets one of them sign in. A replay logs the warning `a sign-in state
+was presented again after this replica redeemed it`, never the state.
 
-What this relies on, and what it does not cover:
+A callback that reached the exchange has used its state even when the
+exchange then fails (a stalled or refusing provider, a session too large):
+starting again at `/auth/login` is the retry.
 
-* **`--event-ttl` of at least ten minutes.** Managed clusters keep the
-  one-hour default. A cluster set below 600 s lets a replay through once the
-  claim has expired and before the cookie does: once per expiry, never a
-  lockout.
-* **Kubernetes answering.** A claim that cannot be recorded refuses the
-  sign-in rather than exchange an unclaimed state. A console that cannot reach
-  Kubernetes serves nothing else either; an `EventRateLimit` admission
-  configured on the cluster can refuse claims under load, which refuses
-  sign-ins by name until it relents.
-* **A rolling upgrade from a release before FX-13a.** Old replicas do not
-  claim, so until the last of them is gone a state can still be replayed
-  through one of them.
-* **Each claim is a Kubernetes write that nobody authenticated, so it is
-  bounded.** A login cookie costs one unauthenticated `/auth/login`, and the
-  sign-in limit bounds each client but deliberately no total (*Rate
-  limits*). So each console process also remembers the states it redeemed —
-  a replay that reaches the same replica is refused without a Kubernetes
-  call — and sends at most **120 claims a minute** to the cluster (about
-  7,200 Events alive per replica at the default one-hour TTL). Past that
-  budget, a flood from many addresses, a sign-in is **served, not
-  refused** (a refusal would lock every operator out, which FX-13 rules
-  out), with its state recorded in that process only: a replay on the same
-  replica is still refused, while each other replica could accept one
-  replay of it until the window ends. The audit line says which happened,
-  `signInClaim: cluster`, `processOnly`, or `unrecorded` once the process's
-  own record (65,536 live states) is full too, and the console logs `this
-  console's sign-in claim budget for the minute is spent` (or `… its own
-  record is full of live states`) once a minute while it lasts.
+**The record is bounded and never refuses a sign-in.** It holds at most
+65,536 states per process (a 128-bit digest and an expiry each, about 3 MiB),
+and each is forgotten once its login state could no longer open (`iat` plus
+600 s). When it is full of live entries, the **oldest is forgotten** to make
+room — never is a new sign-in refused, because a full record that refused
+would let anyone who can mint login cookies (one unauthenticated
+`/auth/login` each) lock every operator out. A replay of a forgotten state is
+the cross-replica case above: one token request, refused by the provider. The
+audit line of a sign-in that forgot a live entry carries the note
+`usedSignInStates: full`, and the console logs `this console's record of
+redeemed sign-in states is full of live ones` once a minute while it lasts.
+The record is per process: a restart forgets it, and the provider's code is
+again the backstop.
 
 JWKS are cached. An unknown `kid` provokes at most one refetch per minute —
 that is what makes a provider's key rotation work without a restart, and what
@@ -2146,12 +2116,12 @@ sign-in request costs the identity provider at most one request, so nothing
 is amplified. But those requests reach the provider **authenticated as this
 console's client and from its address**, not as the unauthenticated requests
 from many addresses an attacker could send the provider directly. The login
-state is single-use (FX-13a, *Sign-in* above), so each token request costs
-the attacker a fresh `/auth/login` from the same budget: about ten a minute
-per client, where one cookie used to arm a token request on every callback
-in its 600 s. Still, an attacker with many addresses can spend whatever
-per-client or per-source quota the provider gives this console, and the
-provider then refuses everyone's sign-ins for as long as the attack lasts.
+state is single-use on each replica (FX-13a, *Sign-in* above), so one
+`/auth/login` arms at most one token request per replica, where one cookie
+used to arm a token request on every callback in its 600 s. Still, an
+attacker with many addresses can spend whatever per-client or per-source
+quota the provider gives this console, and the provider then refuses
+everyone's sign-ins for as long as the attack lasts.
 
 A distributed attacker can cause a sign-in outage either way. There is **no
 budget over all clients**, deliberately: a global cap here would guarantee
@@ -2168,11 +2138,9 @@ operator does about the residual:
   e.g. `the provider answered HTTP 429`. A provider that stalls is
   `provider_timeout` instead (*Sign-in* above). Watch the provider's own
   throttling metrics for this client too. A burst of `login_state_replayed`
-  is someone driving callbacks with copied login cookies; it costs the
-  provider nothing, and `login_state_claim_failed` says sign-ins are being
-  refused because Kubernetes would not record their claims. The audit note
-  `signInClaim: processOnly` or `unrecorded` (and its once-a-minute warning)
-  says a flood has spent a console's cluster-claim budget.
+  is someone driving callbacks with copied login cookies (it costs the
+  provider nothing), and the note `usedSignInStates: full` says a flood of
+  logins has filled a console's record of redeemed states.
 * **Keep a break-glass path** that does not sign in through the provider: the
   in-cluster administrator mode (`api.console.mode: localAdmin`, reached only
   by `kubectl port-forward deploy/<release>-api`; *What ships today, and what
@@ -2255,7 +2223,6 @@ naming the field.
 | `Deployment` `<release>-api` | `api.console.enabled` |
 | ClusterIP `Service` `<release>-api` | `api.console.mode: shared` — **only**. The in-cluster administrator mode binds loopback, so a Service there would advertise a ready endpoint and refuse every connection. It speaks plain HTTP/1.1, every ingress controller's default for an HTTP backend; a controller configured to dial it with HTTP/2 (an `h2c` or gRPC backend) is refused (FX-24) |
 | `PodDisruptionBudget` | `api.console.replicas` > 1 |
-| `Role` and `RoleBinding` `<release>-api-signin`: `create` on core `events` in the release namespace, nothing else | `api.console.mode: shared` — a sign-in's claim on its `state` (FX-13a, *Sign-in*). The in-cluster administrator mode has no sign-in and no such grant |
 | `Ingress` | `api.console.ingress.enabled` — shared mode only, TLS required, host must be `publicBaseUrl`'s authority |
 | `NetworkPolicy` | `api.console.networkPolicy.enabled` — an allow rule for the configured ingress controller in shared mode, `ingress: []` (deny) in the administrator mode |
 
