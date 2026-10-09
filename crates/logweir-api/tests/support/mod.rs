@@ -1847,6 +1847,9 @@ pub struct SharedOptions {
     pub approval: Arc<logweir_api::approval::ApprovalSettings>,
     /// FX-13a: the replica name sign-in claims carry (`HOSTNAME`).
     pub replica: Option<String>,
+    /// FX-13a: the cluster-claim budget per window and the process record's
+    /// capacity, when a test needs to reach them.
+    pub claim_bounds: Option<(u32, usize)>,
 }
 
 impl Default for SharedOptions {
@@ -1863,6 +1866,7 @@ impl Default for SharedOptions {
             require_trusted_proxy: false,
             approval: Arc::default(),
             replica: None,
+            claim_bounds: None,
         }
     }
 }
@@ -1982,10 +1986,18 @@ impl SharedApp {
                 ))
             }),
             require_trusted_proxy: options.require_trusted_proxy,
-            sign_in_claims: logweir_api::auth::login::SignInClaims::new(
-                CLAIM_NAMESPACE,
-                options.replica.as_deref(),
-            ),
+            sign_in_claims: match options.claim_bounds {
+                Some((budget, capacity)) => logweir_api::auth::login::SignInClaims::with_bounds(
+                    CLAIM_NAMESPACE,
+                    options.replica.as_deref(),
+                    budget,
+                    capacity,
+                ),
+                None => logweir_api::auth::login::SignInClaims::new(
+                    CLAIM_NAMESPACE,
+                    options.replica.as_deref(),
+                ),
+            },
         });
         let app = TestApp::with_clock(
             fake,

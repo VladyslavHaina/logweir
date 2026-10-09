@@ -19,6 +19,10 @@
 //!   replicas, and the claim is in the cluster, not in either process;
 //! * a claim that cannot be recorded refuses the sign-in before any token
 //!   request, and a console that cannot record one is not ready;
+//! * a replay that reaches the same replica is refused without a Kubernetes
+//!   call, and a flood past the per-process cluster-claim budget writes no
+//!   more claims and locks nobody out (the degradation is bounded and stated
+//!   as rows);
 //! * a successful sign-in is unchanged, and its claim says nothing about the
 //!   state.
 //!
@@ -91,6 +95,31 @@ impl Buffer {
         assert_eq!(found.len(), 1, "one audit record for {request_id}");
         found[0].clone()
     }
+
+    /// One note of the audit line for a request id (`signInClaim`, …).
+    fn note(&self, request_id: &str, name: &str) -> Option<String> {
+        self.text()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|line| line["target"] == "logweir_api::audit")
+            .find(|line| {
+                line["fields"]["audit"]
+                    .as_str()
+                    .and_then(|audit| serde_json::from_str::<Value>(audit).ok())
+                    .is_some_and(|record| record["auditId"] == request_id)
+            })
+            .and_then(|line| {
+                line["fields"]["notes"]
+                    .as_str()
+                    .and_then(|notes| serde_json::from_str::<Value>(notes).ok())
+            })
+            .and_then(|notes| notes[name].as_str().map(str::to_string))
+    }
+
+    /// How many log lines carry `needle`.
+    fn count(&self, needle: &str) -> usize {
+        self.text().lines().filter(|l| l.contains(needle)).count()
+    }
 }
 
 fn capture() -> (Buffer, tracing::subscriber::DefaultGuard) {
@@ -129,15 +158,34 @@ fn claims(nonce: &str) -> Value {
 /// One replica: its own process state (limiter, readiness, caches), over a
 /// cluster and a provider that `fake` and `idp` may share with another.
 fn replica(fake: &FakeKube, idp: &MockIdp, name: &str) -> SharedApp {
+    replica_with(fake, idp, name, None)
+}
+
+/// A replica with its cluster-claim budget and record capacity shrunk.
+fn replica_with(
+    fake: &FakeKube,
+    idp: &MockIdp,
+    name: &str,
+    bounds: Option<(u32, usize)>,
+) -> SharedApp {
     SharedApp::new(
         fake.clone(),
         idp.clone(),
         SharedOptions {
             bindings: support::default_bindings(),
             replica: Some(name.to_string()),
+            claim_bounds: bounds,
             ..SharedOptions::default()
         },
     )
+}
+
+/// The `POST …/events` requests the fake has received.
+fn event_posts(fake: &FakeKube) -> usize {
+    fake.requests()
+        .iter()
+        .filter(|r| r.method == "POST" && r.path.ends_with("/events"))
+        .count()
 }
 
 struct Started {
@@ -240,6 +288,13 @@ fn assert_signed_in(response: &TestResponse, label: &str) {
 
 /// A replay: refused by name, cookie cleared, no session.
 fn assert_replay_refused(response: &TestResponse, label: &str) {
+    assert_eq!(
+        response.status.as_u16(),
+        401,
+        "{label}: a replay must be refused, and it got {} with {:?}",
+        response.status,
+        response.header("location")
+    );
     response.assert_problem(401, "unauthenticated");
     assert!(
         response.text().contains("already used"),
@@ -322,7 +377,8 @@ async fn a_replayed_callback_is_refused_by_name_with_no_token_request() {
 /// THE RACE IS REAL. The provider takes 150 ms to answer a token request, so
 /// a design that exchanged first and recorded after — or checked a mark and
 /// set it later — would let both callbacks into the exchange while the first
-/// is still waiting. The API server's create is what makes "first" atomic.
+/// is still waiting. On one replica the process's own record decides, under
+/// one lock; across replicas (the next row) the API server's create does.
 #[tokio::test]
 async fn two_concurrent_callbacks_with_one_state_exactly_one_wins() {
     let key = TestKey::ec("k-ec-1");
@@ -512,6 +568,147 @@ async fn a_successful_sign_in_records_one_claim_and_nothing_about_the_state() {
         !event_requests[0].query.contains("dryRun"),
         "the sign-in's claim is a real create"
     );
+    fake.assert_strict();
+}
+
+/// **A replay that reaches the replica that redeemed the state is refused
+/// without a Kubernetes call.** The process remembers what it redeemed, so the
+/// commonest replay (the same ingress, the same replica) costs the cluster
+/// nothing; the control is the first callback's one create.
+#[tokio::test]
+async fn a_same_replica_replay_is_refused_without_a_kubernetes_call() {
+    let key = TestKey::ec("k-ec-1");
+    let idp = MockIdp::new(ISSUER, &[&key]);
+    let fake = FakeKube::new();
+    let app = replica(&fake, &idp, "console-a");
+    let started = start_login(&app).await;
+    grant(&idp, &key, "code-1", &started);
+    assert_signed_in(&callback(&app, &started, "code-1").await, "the control");
+    assert_eq!(
+        event_posts(&fake),
+        1,
+        "the first callback claims in the cluster"
+    );
+    for code in ["code-1", "junk", "code-1"] {
+        assert_replay_refused(&callback(&app, &started, code).await, code);
+    }
+    assert_eq!(event_posts(&fake), 1, "no replay reached Kubernetes");
+    assert_eq!(idp.token_calls(), 1);
+    fake.assert_strict();
+}
+
+/// **A flood past the per-process cluster-claim budget writes no more claims
+/// and locks nobody out; the degradation is bounded and announced.**
+///
+/// Replica A's budget is shrunk to three claims a minute (production: 120).
+/// Its first three sign-ins claim in the cluster; the fourth and fifth are
+/// SERVED (a refusal here would be the lockout FX-13 rules out), recorded in
+/// A only, with the audit note `signInClaim: processOnly` and ONE warning for
+/// the window. What that costs, stated as rows rather than prose: a replay of
+/// the fourth on A is still refused, while replica B, which has its own budget
+/// and has not seen it, accepts it once — and then nobody accepts it again.
+/// The next window claims in the cluster again (the control).
+#[tokio::test]
+async fn a_flood_past_the_claim_budget_writes_no_more_and_locks_nobody_out() {
+    let (logs, _guard) = capture();
+    let key = TestKey::ec("k-ec-1");
+    let idp = MockIdp::new(ISSUER, &[&key]);
+    let fake = FakeKube::new();
+    let a = replica_with(&fake, &idp, "console-a", Some((3, 100)));
+    let b = replica(&fake, &idp, "console-b");
+
+    let mut started = Vec::new();
+    for i in 0..5 {
+        let s = start_login(&a).await;
+        grant(&idp, &key, &format!("code-{i}"), &s);
+        let done = callback(&a, &s, &format!("code-{i}")).await;
+        assert_signed_in(&done, &format!("sign-in {i} on A"));
+        let note = logs.note(&done.header("x-request-id").unwrap(), "signInClaim");
+        let want = if i < 3 { "cluster" } else { "processOnly" };
+        assert_eq!(note.as_deref(), Some(want), "sign-in {i}");
+        started.push(s);
+    }
+    assert_eq!(
+        claim_events(&fake).len(),
+        3,
+        "the budget is the most A writes in a window"
+    );
+    assert_eq!(
+        logs.count("sign-in claim budget for the minute is spent"),
+        1,
+        "announced once a window, not once a request"
+    );
+    assert_eq!(idp.token_calls(), 5);
+
+    // The bound on the degradation.
+    let fourth = &started[3];
+    assert_replay_refused(
+        &callback(&a, fourth, "code-3").await,
+        "the 4th replayed on A",
+    );
+    assert_signed_in(
+        &callback(&b, fourth, "code-3").await,
+        "the 4th on B, which never saw it: the stated limit",
+    );
+    assert_replay_refused(&callback(&b, fourth, "code-3").await, "…and on B again");
+    assert_replay_refused(&callback(&a, fourth, "code-3").await, "…and on A again");
+    assert_eq!(idp.token_calls(), 6, "one extra token request, never more");
+
+    // The control: the next window claims in the cluster again.
+    a.app.clock.advance(60);
+    let s = start_login(&a).await;
+    grant(&idp, &key, "code-next", &s);
+    let done = callback(&a, &s, "code-next").await;
+    assert_signed_in(&done, "the next window");
+    assert_eq!(
+        logs.note(&done.header("x-request-id").unwrap(), "signInClaim")
+            .as_deref(),
+        Some("cluster")
+    );
+    assert_eq!(
+        claim_events(&fake).len(),
+        5,
+        "B's claim of the 4th, and this one"
+    );
+    fake.assert_strict();
+}
+
+/// **With the budget spent and the process's record full of live states, a
+/// sign-in is served unrecorded — memory stays bounded, nobody is refused.**
+/// The boundary stated as a row: such a state is not refused again either.
+#[tokio::test]
+async fn a_full_record_past_the_budget_serves_unrecorded() {
+    let (logs, _guard) = capture();
+    let key = TestKey::ec("k-ec-1");
+    let idp = MockIdp::new(ISSUER, &[&key]);
+    let fake = FakeKube::new();
+    let a = replica_with(&fake, &idp, "console-a", Some((0, 1)));
+
+    let first = start_login(&a).await;
+    grant(&idp, &key, "code-1", &first);
+    let done = callback(&a, &first, "code-1").await;
+    assert_signed_in(&done, "the first, recorded in A");
+    assert_eq!(
+        logs.note(&done.header("x-request-id").unwrap(), "signInClaim")
+            .as_deref(),
+        Some("processOnly")
+    );
+    let second = start_login(&a).await;
+    grant(&idp, &key, "code-2", &second);
+    let done = callback(&a, &second, "code-2").await;
+    assert_signed_in(&done, "the second, unrecorded");
+    assert_eq!(
+        logs.note(&done.header("x-request-id").unwrap(), "signInClaim")
+            .as_deref(),
+        Some("unrecorded")
+    );
+    assert_eq!(logs.count("its own record is full of live states"), 1);
+    assert_replay_refused(&callback(&a, &first, "code-1").await, "the recorded one");
+    assert_signed_in(
+        &callback(&a, &second, "code-2").await,
+        "the unrecorded one is not refused: the stated limit",
+    );
+    assert_eq!(claim_events(&fake).len(), 0, "a budget of 0 writes nothing");
     fake.assert_strict();
 }
 

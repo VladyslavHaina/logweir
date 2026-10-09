@@ -1887,9 +1887,22 @@ What this relies on, and what it does not cover:
 * **A rolling upgrade from a release before FX-13a.** Old replicas do not
   claim, so until the last of them is gone a state can still be replayed
   through one of them.
-* **Each claim is a Kubernetes write.** One per callback whose cookie opened
-  and whose `state` matched — the same callbacks that each made a token
-  request before — bounded by the sign-in limit per client (*Rate limits*).
+* **Each claim is a Kubernetes write that nobody authenticated, so it is
+  bounded.** A login cookie costs one unauthenticated `/auth/login`, and the
+  sign-in limit bounds each client but deliberately no total (*Rate
+  limits*). So each console process also remembers the states it redeemed —
+  a replay that reaches the same replica is refused without a Kubernetes
+  call — and sends at most **120 claims a minute** to the cluster (about
+  7,200 Events alive per replica at the default one-hour TTL). Past that
+  budget, a flood from many addresses, a sign-in is **served, not
+  refused** (a refusal would lock every operator out, which FX-13 rules
+  out), with its state recorded in that process only: a replay on the same
+  replica is still refused, while each other replica could accept one
+  replay of it until the window ends. The audit line says which happened,
+  `signInClaim: cluster`, `processOnly`, or `unrecorded` once the process's
+  own record (65,536 live states) is full too, and the console logs `this
+  console's sign-in claim budget for the minute is spent` (or `… its own
+  record is full of live states`) once a minute while it lasts.
 
 JWKS are cached. An unknown `kid` provokes at most one refetch per minute —
 that is what makes a provider's key rotation work without a restart, and what
@@ -2157,7 +2170,9 @@ operator does about the residual:
   throttling metrics for this client too. A burst of `login_state_replayed`
   is someone driving callbacks with copied login cookies; it costs the
   provider nothing, and `login_state_claim_failed` says sign-ins are being
-  refused because Kubernetes would not record their claims.
+  refused because Kubernetes would not record their claims. The audit note
+  `signInClaim: processOnly` or `unrecorded` (and its once-a-minute warning)
+  says a flood has spent a console's cluster-claim budget.
 * **Keep a break-glass path** that does not sign in through the provider: the
   in-cluster administrator mode (`api.console.mode: localAdmin`, reached only
   by `kubectl port-forward deploy/<release>-api`; *What ships today, and what

@@ -688,8 +688,12 @@ reason=SignInStateRedeemed` lists them with the Pod that redeemed each.
 Readiness dry-runs the create, so a console that lacks the grant — say, one
 run out of band under its own RBAC — stays NotReady with the warning `this
 console cannot record a redeemed sign-in state` rather than refusing every
-sign-in. During a rolling upgrade from a release before FX-13a the old
-replicas do not claim, so the guarantee holds once the last of them is gone.
+sign-in. Each console process writes at most 120 claims a minute; past
+that, in a many-address flood, sign-ins are still served and their states
+recorded in that process only (audit note `signInClaim: processOnly`), so the
+cluster never takes more than that from unauthenticated traffic. During a
+rolling upgrade from a release before FX-13a the old replicas do not claim,
+so the guarantee holds once the last of them is gone.
 Details: [docs/api.md](../../docs/api.md), *Sign-in*.
 
 ### The identity provider inside the cluster: a private CA, a name, a path

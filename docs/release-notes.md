@@ -1430,7 +1430,13 @@ a warning naming the claim, and **no token request**. A claim that cannot be
 recorded refuses the sign-in `503 kubernetes_unavailable` with
 `login_state_claim_failed`, again before any token request. Readiness
 dry-runs the claim until one succeeds, so a console that cannot record one is
-never ready. The claim names the Pod that redeemed the state and nothing
+never ready. A claim is a cluster write nobody authenticated, so it is
+bounded: each process remembers the states it redeemed (a replay on the same
+replica never reaches Kubernetes) and sends at most 120 claims a minute to the
+cluster; past that, in a many-address flood, sign-ins are still served and
+their states recorded in that process only (audit note `signInClaim:
+processOnly`, one warning a minute), so another replica could accept one
+replay of each until the window ends. The claim names the Pod that redeemed the state and nothing
 about the state, the person or the provider; the API server expires it
 (`--event-ttl`, one hour by default). Separately (FX-32), the problem
 rendering kept only `Allow` from a handler's headers, so the callback's
@@ -1443,8 +1449,9 @@ console run outside the chart needs that grant in its own namespace, or it
 stays NotReady with the warning `this console cannot record a redeemed
 sign-in state`. A cluster whose `kube-apiserver --event-ttl` is below ten
 minutes lets a replay through once a claim has expired. Alert on
-`login_state_replayed` (someone driving callbacks with a copied cookie) and
-`login_state_claim_failed`.
+`login_state_replayed` (someone driving callbacks with a copied cookie),
+`login_state_claim_failed`, and the audit note `signInClaim: processOnly`
+or `unrecorded` (a flood has spent a console's claim budget).
 **Scope:** rows through the whole router over the fake API server, which
 answers an `events` create of a taken name `AlreadyExists` atomically and
 checks the namespace agreement the real one validates
@@ -1456,7 +1463,11 @@ token request; two console processes over one cluster redeem a state once,
 in sequence (the login started on one, finished on the other) and at once; a
 claim refused 403 or 500 refuses the sign-in before any token request; a
 successful sign-in is unchanged and its claim carries no state, nonce, code,
-cookie or identity; readiness dry-runs until one succeeds and then holds.
+cookie or identity; readiness dry-runs until one succeeds and then holds; a
+replay on the same replica makes no Kubernetes call; past a shrunk budget
+the next sign-ins are served with no claim written, announced once, a replay
+on that replica is refused and the other replica accepts it once (the stated
+limit), and the next window claims again.
 `tests/oidc_login.rs` drives seven callback refusals and reads the clearing
 `Set-Cookie` on the response the browser gets; unit rows hold what the
 rendering keeps and drops. The chart's grant is pinned both ways by

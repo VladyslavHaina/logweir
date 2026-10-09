@@ -46,13 +46,26 @@
 //! the state, and the API server expires it (`--event-ttl`, one hour by
 //! default) long after the 600 seconds the state can live.
 //!
+//! A CLAIM IS A CLUSTER WRITE THAT NOBODY AUTHENTICATED, SO IT IS BOUNDED.
+//! Each process also remembers the states it redeemed ([`SignInClaims::admit`],
+//! one lock): a replay that reaches the same replica is refused without a
+//! Kubernetes call, and at most [`CLUSTER_CLAIMS_PER_WINDOW`] claims a minute
+//! go to the cluster. Past that budget — a flood from many addresses, which
+//! the per-client limiter deliberately does not cap in total (FX-13) — a state
+//! is recorded in this process only and the sign-in is SERVED: a lockout is
+//! what FX-13 rules out, and the degradation is bounded (at most one replay
+//! per other replica, until the window ends), announced once a window and on
+//! every such audit line (`signInClaim: processOnly`, or `unrecorded` once the
+//! process's own record is full of live states).
+//!
 //! THE BROWSER NEVER SEES A PROVIDER TOKEN, and the redirect that ends a
 //! successful login carries no fragment, no query and no credential: it is
 //! `303 See Other` to a path on this origin, with the session cookie in a
 //! `Set-Cookie` header.
 
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
@@ -98,13 +111,84 @@ fn redirect(location: &str, cookies: &[String]) -> Response {
 /// (`HOSTNAME`, which Kubernetes sets to the Pod's name).
 pub const UNNAMED_REPLICA: &str = "logweir-api";
 
+/// The most claims ONE console process records in the cluster per
+/// [`CLAIM_WINDOW_SECONDS`] (FX-13a).
+///
+/// THE BOUND ON WHAT AN UNAUTHENTICATED FLOOD CAN WRITE INTO THE CLUSTER. A
+/// claim is a Kubernetes write made for a callback that has not signed anybody
+/// in yet, and a login cookie costs one unauthenticated `/auth/login`. The
+/// sign-in limiter bounds each client, and deliberately bounds no total (FX-13:
+/// no global budget, and a full key table serves new keys untracked), so
+/// without this an attacker with many addresses could create Events as fast
+/// as it can send requests — about a kilobyte of etcd each, kept for the
+/// cluster's `--event-ttl` — on the shared cluster. With it, one process
+/// writes at most 120 claims a minute (two a second, far above any honest
+/// sign-in rate) and so keeps at most about 7,200 alive at the default
+/// one-hour TTL. Past it nothing is refused (refusing would be the lockout
+/// FX-13 rules out): the state is recorded in this process only
+/// ([`Admission::ProcessOnly`]), which still refuses every replay that reaches
+/// this replica, until the window ends.
+pub const CLUSTER_CLAIMS_PER_WINDOW: u32 = 120;
+
+/// The cluster-claim window, in seconds.
+pub const CLAIM_WINDOW_SECONDS: i64 = 60;
+
+/// The most redeemed states one process remembers itself: about 65,536 names
+/// of 47 bytes plus their expiry, a few MiB. Each is forgotten once its login
+/// state could no longer open (its `iat` plus 600 s).
+pub const MAX_LOCAL_CLAIMS: usize = 65_536;
+
+/// How a callback's `state` is admitted, decided under one lock per process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// This process already redeemed the state: a replay, refused without a
+    /// Kubernetes call.
+    Replayed,
+    /// Claim it in the cluster: the normal path, and the one that holds
+    /// across replicas.
+    Cluster,
+    /// This window's cluster budget is spent: the state is recorded in this
+    /// process only, so a replay here is still refused, while one replay on
+    /// each other replica could be accepted until the window ends. `announce`
+    /// is true once per window.
+    ProcessOnly {
+        /// Whether this is the window's first such admission.
+        announce: bool,
+    },
+    /// The budget is spent AND this process's record is full of live states:
+    /// the state is not recorded at all. Served anyway: refusing is the
+    /// lockout FX-13 rules out. `announce` is true once per window.
+    Unrecorded {
+        /// Whether this is the window's first such admission.
+        announce: bool,
+    },
+}
+
+#[derive(Debug, Default)]
+struct Ledger {
+    /// Every state name this process remembers.
+    names: HashSet<String>,
+    /// The same names in the order they arrived, each with the second its
+    /// login state stops opening; the front is swept as it expires.
+    order: VecDeque<(i64, String)>,
+    /// The current window's start, and how many cluster claims it made.
+    window_start: i64,
+    window_claims: u32,
+    /// The windows whose two degradations were last announced, each once.
+    announced_process_only: Option<i64>,
+    announced_unrecorded: Option<i64>,
+}
+
 /// FX-13a: where this replica records a redeemed sign-in `state`, as whom,
-/// and whether it has shown that it can.
+/// whether it has shown that it can, and what it remembers itself.
 #[derive(Debug)]
 pub struct SignInClaims {
     namespace: String,
     replica: String,
     writable: AtomicBool,
+    cluster_budget: u32,
+    local_capacity: usize,
+    ledger: Mutex<Ledger>,
 }
 
 impl SignInClaims {
@@ -115,6 +199,23 @@ impl SignInClaims {
     /// invalid.
     #[must_use]
     pub fn new(namespace: impl Into<String>, replica: Option<&str>) -> Self {
+        Self::with_bounds(
+            namespace,
+            replica,
+            CLUSTER_CLAIMS_PER_WINDOW,
+            MAX_LOCAL_CLAIMS,
+        )
+    }
+
+    /// The same, with other bounds. Production uses [`SignInClaims::new`];
+    /// tests shrink the bounds to reach them.
+    #[must_use]
+    pub fn with_bounds(
+        namespace: impl Into<String>,
+        replica: Option<&str>,
+        cluster_budget: u32,
+        local_capacity: usize,
+    ) -> Self {
         let replica = replica
             .filter(|name| name.len() <= 128 && crate::validate::is_dns_subdomain(name))
             .unwrap_or(UNNAMED_REPLICA)
@@ -123,7 +224,83 @@ impl SignInClaims {
             namespace: namespace.into(),
             replica,
             writable: AtomicBool::new(false),
+            cluster_budget,
+            local_capacity,
+            ledger: Mutex::new(Ledger::default()),
         }
+    }
+
+    /// Admit one callback's state, named `name`, whose login state stops
+    /// opening at `expires_at` (Unix seconds), at `now`.
+    ///
+    /// ONE LOCK, ONE DECISION: the check against what this process already
+    /// redeemed, the window's cluster budget and the record are decided
+    /// together, so two callbacks with one state on ONE replica are told apart
+    /// here, before either reaches Kubernetes; across replicas the cluster's
+    /// create decides. The name is recorded on every path but
+    /// [`Admission::Unrecorded`] — on [`Admission::Cluster`] too, so a replay
+    /// that reaches this replica after its budget is spent is still refused.
+    pub fn admit(&self, name: &str, expires_at: i64, now: i64) -> Admission {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while ledger.order.front().is_some_and(|(at, _)| *at <= now) {
+            if let Some((_, gone)) = ledger.order.pop_front() {
+                ledger.names.remove(&gone);
+            }
+        }
+        if ledger.names.contains(name) {
+            return Admission::Replayed;
+        }
+        if now - ledger.window_start >= CLAIM_WINDOW_SECONDS {
+            ledger.window_start = now;
+            ledger.window_claims = 0;
+        }
+        let within_budget = ledger.window_claims < self.cluster_budget;
+        if within_budget {
+            ledger.window_claims += 1;
+        }
+        let recorded = ledger.names.len() < self.local_capacity;
+        if recorded {
+            ledger.names.insert(name.to_string());
+            ledger.order.push_back((expires_at, name.to_string()));
+        }
+        if within_budget {
+            return Admission::Cluster;
+        }
+        let window = Some(ledger.window_start);
+        if recorded {
+            let announce = ledger.announced_process_only != window;
+            ledger.announced_process_only = window;
+            Admission::ProcessOnly { announce }
+        } else {
+            let announce = ledger.announced_unrecorded != window;
+            ledger.announced_unrecorded = window;
+            Admission::Unrecorded { announce }
+        }
+    }
+
+    /// The cluster claims this process makes per window.
+    #[must_use]
+    pub fn cluster_budget(&self) -> u32 {
+        self.cluster_budget
+    }
+
+    /// The most redeemed states this process remembers.
+    #[must_use]
+    pub fn local_capacity(&self) -> usize {
+        self.local_capacity
+    }
+
+    /// How many redeemed states this process remembers.
+    #[must_use]
+    pub fn remembered(&self) -> usize {
+        self.ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .names
+            .len()
     }
 
     /// The namespace claims are recorded in.
@@ -359,37 +536,70 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
     }
 
     // FX-13a: CLAIM THE STATE BEFORE THE CODE IS EXCHANGED. Exactly one
-    // callback per `state` gets past this line, on any replica: see the
+    // callback per `state` gets past this block, on any replica: see the
     // module documentation. Nothing below it may run for a state that was not
-    // claimed — that includes the token request.
+    // admitted — that includes the token request.
     let claim = shared
         .sign_in_claims
         .claim_for(&shared.keys, &login_state.state, state.now());
-    match state.kube().claim_sign_in_state(&claim, false).await {
-        Ok(()) => {}
-        Err(KubeFailure::AlreadyExists) => {
-            tracing::warn!(
-                claim = %claim.metadata.name.as_deref().unwrap_or_default(),
-                "a sign-in state was presented again after it was redeemed; refused before any \
-                 token request (login_state_replayed)"
-            );
-            return refuse(
-                "login_state_replayed",
-                "This sign-in was already used. Start again at /auth/login.",
-            );
+    let claim_name = claim.metadata.name.clone().unwrap_or_default();
+    let replayed = || -> Response {
+        tracing::warn!(
+            claim = %claim_name,
+            "a sign-in state was presented again after it was redeemed; refused before any \
+             token request (login_state_replayed)"
+        );
+        refuse(
+            "login_state_replayed",
+            "This sign-in was already used. Start again at /auth/login.",
+        )
+    };
+    match shared.sign_in_claims.admit(
+        &claim_name,
+        login_state.iat + session::LOGIN_STATE_SECONDS,
+        state.now().timestamp(),
+    ) {
+        Admission::Replayed => return replayed(),
+        Admission::Cluster => match state.kube().claim_sign_in_state(&claim, false).await {
+            Ok(()) => audit.note("signInClaim", "cluster"),
+            Err(KubeFailure::AlreadyExists) => return replayed(),
+            Err(failure) => {
+                tracing::warn!(
+                    failure = ?failure,
+                    namespace = %shared.sign_in_claims.namespace(),
+                    "a sign-in state could not be recorded as redeemed; the sign-in is refused \
+                     before any token request (login_state_claim_failed)"
+                );
+                return refuse_as(
+                    ProblemCode::KubernetesUnavailable,
+                    "login_state_claim_failed",
+                    "The sign-in could not be recorded. Start again at /auth/login.",
+                );
+            }
+        },
+        Admission::ProcessOnly { announce } => {
+            audit.note("signInClaim", "processOnly");
+            if announce {
+                tracing::warn!(
+                    budget = shared.sign_in_claims.cluster_budget(),
+                    "this console's sign-in claim budget for the minute is spent: until the \
+                     window ends, states are recorded in this process only, so another replica \
+                     could accept one replay of each (audit note signInClaim=processOnly); this \
+                     is logged once a window"
+                );
+            }
         }
-        Err(failure) => {
-            tracing::warn!(
-                failure = ?failure,
-                namespace = %shared.sign_in_claims.namespace(),
-                "a sign-in state could not be recorded as redeemed; the sign-in is refused \
-                 before any token request (login_state_claim_failed)"
-            );
-            return refuse_as(
-                ProblemCode::KubernetesUnavailable,
-                "login_state_claim_failed",
-                "The sign-in could not be recorded. Start again at /auth/login.",
-            );
+        Admission::Unrecorded { announce } => {
+            audit.note("signInClaim", "unrecorded");
+            if announce {
+                tracing::warn!(
+                    budget = shared.sign_in_claims.cluster_budget(),
+                    remembered = shared.sign_in_claims.local_capacity(),
+                    "this console's sign-in claim budget is spent and its own record is full of \
+                     live states: states are served unrecorded until either drains (audit note \
+                     signInClaim=unrecorded); this is logged once a window"
+                );
+            }
         }
     }
 
@@ -506,6 +716,106 @@ pub async fn logout(State(state): State<AppState>, actor: super::Actor) -> Respo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const T0: i64 = 1_800_000_000;
+
+    /// **One process: a state it redeemed is a replay until that state could
+    /// no longer open, and is then forgotten.**
+    #[test]
+    fn the_ledger_refuses_a_name_it_holds_and_forgets_it_when_its_state_expires() {
+        let claims = SignInClaims::with_bounds("ns", None, 10, 10);
+        assert_eq!(claims.admit("a", T0 + 600, T0), Admission::Cluster);
+        assert_eq!(
+            claims.admit("a", T0 + 600, T0 + 1),
+            Admission::Replayed,
+            "a name admitted to the cluster is remembered here too"
+        );
+        assert_eq!(claims.admit("a", T0 + 600, T0 + 599), Admission::Replayed);
+        assert_eq!(claims.remembered(), 1);
+        // At its expiry the state cannot open any more (the cookie check
+        // refuses it first), so the name is swept on the next admission.
+        assert_eq!(claims.admit("b", T0 + 1200, T0 + 600), Admission::Cluster);
+        assert_eq!(claims.remembered(), 1, "`a` was swept, `b` recorded");
+    }
+
+    /// **Past the cluster budget a state is recorded here and SERVED — never
+    /// refused — announced once a window; the next window claims in the cluster
+    /// again.**
+    #[test]
+    fn the_cluster_budget_degrades_to_this_process_never_to_a_refusal() {
+        let claims = SignInClaims::with_bounds("ns", None, 2, 100);
+        assert_eq!(claims.admit("a", T0 + 600, T0), Admission::Cluster);
+        assert_eq!(claims.admit("b", T0 + 600, T0), Admission::Cluster);
+        assert_eq!(
+            claims.admit("c", T0 + 600, T0 + 1),
+            Admission::ProcessOnly { announce: true }
+        );
+        assert_eq!(
+            claims.admit("d", T0 + 600, T0 + 2),
+            Admission::ProcessOnly { announce: false },
+            "announced once a window, not once a request"
+        );
+        assert_eq!(
+            claims.admit("c", T0 + 600, T0 + 3),
+            Admission::Replayed,
+            "a state recorded here only is still refused here"
+        );
+        // The control: the next window claims in the cluster again.
+        assert_eq!(
+            claims.admit("e", T0 + 660, T0 + CLAIM_WINDOW_SECONDS),
+            Admission::Cluster
+        );
+        assert_eq!(claims.admit("f", T0 + 660, T0 + 61), Admission::Cluster);
+        assert_eq!(
+            claims.admit("g", T0 + 660, T0 + 62),
+            Admission::ProcessOnly { announce: true },
+            "a new window announces again"
+        );
+    }
+
+    /// **Past the budget with the record full of live states, a state is served
+    /// unrecorded — bounded memory, still no refusal.**
+    #[test]
+    fn a_full_record_past_the_budget_serves_unrecorded() {
+        let claims = SignInClaims::with_bounds("ns", None, 0, 2);
+        assert_eq!(
+            claims.admit("a", T0 + 600, T0),
+            Admission::ProcessOnly { announce: true }
+        );
+        assert_eq!(
+            claims.admit("b", T0 + 600, T0),
+            Admission::ProcessOnly { announce: false }
+        );
+        assert_eq!(
+            claims.admit("c", T0 + 600, T0),
+            Admission::Unrecorded { announce: true },
+            "the worse degradation is announced on its own"
+        );
+        assert_eq!(
+            claims.remembered(),
+            2,
+            "the record never grows past its bound"
+        );
+        assert_eq!(
+            claims.admit("c", T0 + 600, T0 + 1),
+            Admission::Unrecorded { announce: false },
+            "an unrecorded state is, by definition, not refused again"
+        );
+        // Within budget a full record does not matter: the cluster records it.
+        let claims = SignInClaims::with_bounds("ns", None, 5, 1);
+        assert_eq!(claims.admit("a", T0 + 600, T0), Admission::Cluster);
+        assert_eq!(claims.admit("b", T0 + 600, T0), Admission::Cluster);
+        assert_eq!(claims.remembered(), 1);
+    }
+
+    /// The production bounds are the documented ones.
+    #[test]
+    fn the_production_bounds_are_the_documented_ones() {
+        let claims = SignInClaims::new("ns", None);
+        assert_eq!(claims.cluster_budget(), 120);
+        assert_eq!(claims.local_capacity(), 65_536);
+        assert_eq!(CLAIM_WINDOW_SECONDS, 60);
+    }
 
     #[test]
     fn the_next_parameter_can_only_be_a_ui_path_on_this_origin() {
