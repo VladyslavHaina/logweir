@@ -890,6 +890,26 @@ async fn a_refused_connection_adopts_an_existing_probe_job_without_reading_it() 
             false,
             Requeue::After(REQUEUE_SECS),
         ),
+        // FX-19: a Job already being collected, or already given its TTL by
+        // an earlier pass, is left alone — nothing to collect twice.
+        (
+            "a Job being collected",
+            reaping_job(true, true, true),
+            false,
+            Requeue::AwaitChange,
+        ),
+        (
+            "a finished Job already given its TTL",
+            reaping_job(true, true, false),
+            false,
+            Requeue::AwaitChange,
+        ),
+        (
+            "a Job deleted before any TTL",
+            reaping_job(true, false, true),
+            false,
+            Requeue::AwaitChange,
+        ),
     ] {
         let routes = vec![
             Route {
