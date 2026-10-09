@@ -427,6 +427,46 @@ pub struct PointTopicView {
     /// it did not look, or the view does not say where it looked. An owner
     /// nobody checked for is never published as the admin-API route.
     pub apply_route: String,
+    /// **PROD-03.0.** Whether the topic's archived records carry Confluent
+    /// wire-format framing (magic byte 0 and a schema id), judged by the
+    /// backup run from the archived bytes and never from a registry. ABSENT is
+    /// NOT ASSESSED — a point recorded before format 1.5.0, or a catalog
+    /// synced by an older runner — and never "not schema-dependent".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_dependency: Option<PointSchemaDependencyView>,
+}
+
+/// **PROD-03.0.** One topic's schema dependency, as the catalog's view lists
+/// it. No Logweir build captures a schema registry, so a `schemaDependent`
+/// topic's records need a registry the archive does not carry: applications
+/// may not read them after a restore unless the registry that issued
+/// `schemaIds` is reachable from the target.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PointSchemaDependencyView {
+    /// `schemaDependent` (a key or value side is framed: registry not
+    /// captured), `notDetected` (neither side over the records judged), or
+    /// `notAssessed` (nothing could be judged; `reason` says why).
+    pub verdict: String,
+    /// `sampled` (a bounded sample of the topic's archived records was
+    /// judged) or `complete` (every one was), for a judged topic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    /// `noRecords` or `segmentUnreadable`, for a `notAssessed` topic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The sides that need the registry: `key`, `value`, or both.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub sides: Vec<String>,
+    /// The schema ids those sides name, ascending, at most 16.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub schema_ids: Vec<u32>,
+    /// More ids were seen than `schemaIds` lists.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(default)]
+    pub schema_ids_omitted: bool,
 }
 
 /// One recovery point, with its two verdicts kept apart.
@@ -586,6 +626,21 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
                         .is_some_and(|d| !d.is_empty()),
                 )
                 .to_string(),
+                schema_dependency: t.schema_dependency.as_ref().map(|d| {
+                    PointSchemaDependencyView {
+                        verdict: bounded(&d.verdict, 32),
+                        basis: d.basis.as_deref().map(|b| bounded(b, 32)),
+                        reason: d.reason.as_deref().map(|r| bounded(r, 32)),
+                        sides: d.sides.iter().take(2).map(|w| bounded(w, 8)).collect(),
+                        schema_ids: d
+                            .schema_ids
+                            .iter()
+                            .take(logweir_core::schema_dependency::SCHEMA_IDS_LISTED)
+                            .copied()
+                            .collect(),
+                        schema_ids_omitted: d.schema_ids_omitted,
+                    }
+                }),
             })
             .collect(),
         topics_omitted: entry.topics_omitted,
