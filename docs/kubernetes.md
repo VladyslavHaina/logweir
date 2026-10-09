@@ -9447,7 +9447,9 @@ ones).
 
 The console API's own principal is not in that list: the chart renders it under
 `api.enabled` (`<release>-api`, `<release>-api-trustpolicies` and
-`<release>-api-trustroster`), and [install.md](install.md) tables every grant.
+`<release>-api-trustroster`; in shared mode also `<release>-api-signin`,
+`create` on `events` in the release namespace for its sign-in claims, FX-13a),
+and [install.md](install.md) tables every grant.
 Its two cluster-scoped trust reads are `get`/`list` on `trustpolicies` and `get`
 on the ONE roster, `trustrosters` with `resourceNames: ["default"]`. The console
 reads `TrustRoster/default` and the governing `TrustPolicy` only to compare them
