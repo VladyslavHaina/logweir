@@ -2039,6 +2039,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a silent connection meets the console's header deadline",
             "h2c",
         ),
+        // PROD-04.1 (2026-10-09): a backup records the committed positions of
+        // the groups it names, one outcome each, never offset 0 for absence.
+        (
+            "consumer position evidence for selected groups",
+            "consumer_positions",
+        ),
     ];
     assert_eq!(
         items.len(),

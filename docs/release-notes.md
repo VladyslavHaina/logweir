@@ -29,8 +29,8 @@ early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
 one crate that may hold `unsafe` code, and the consumer-group and ACL reads
 behind it), 38 (FX-20, the binding for every other credential reference)
 39 (FX-18, a topic phase 0 creates is used only once the cluster serves
-it) and 40 (FX-24, a silent connection meets the console's header deadline)
-so far. Items continue the next entry's
+it), 40 (FX-24, a silent connection meets the console's header deadline)
+and 41 (PROD-04.1, consumer position evidence for selected groups) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -84,6 +84,12 @@ Item 40 is fix-now row FX-24, proven by rows on the built console binary and
 live on the host in localAdmin mode; it changes the console only, and the PoC
 upgrade that carries it repeats the silent-socket probe against the shared-mode
 console.
+Item 41 is row PROD-04.1, proven by unit, seam, corpus and parity rows and on
+the compose stack (Kafka 4.3.1 with the `acl` and `streams-protocol` profiles,
+and the default 3.7.1 line); it changes the runner's signed receipt and
+catalog record, the catalog's view (runner and controller), the product API
+and the `Backup` and `BackupSchedule` CRDs, and the PoC upgrade that carries it
+runs a schedule selecting a group and reads its point.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -920,6 +926,70 @@ at the PoC upgrade that carries this item.
 **Rollback:** an older console serves HTTP/2 prior knowledge again and leaves a
 silent connection open; nothing is stored, so nothing needs converting.
 
+#### 41. A backup can record the committed positions of the consumer groups it names, as signed evidence (PROD-04.1)
+
+**Added.** A backup now records, for each consumer group it is asked about,
+where that group would resume — read through Logweir's own client just before
+the engine starts, and signed in the receipt's new `consumer_positions` block
+(receipt and catalog point format **1.5.0**). Name the groups in the plan
+(`source.consumer_groups`), on the command line (`logweir backup run
+--consumer-group <id>`, repeatable) or on a `Backup`/`BackupSchedule`
+(`spec.consumerGroups`; at most 100 exact ids). Every selected group gets
+exactly one outcome: `captured` — its type and state, whether it was active,
+and one position per partition of every backed-up topic, each judged against
+the partition's marks and the archive (`withinArchive`, `atArchiveEnd`,
+`beforeArchive`, `beyondArchive`, `beforeLogStart`, `noArchivedData`;
+`PositionBeyondEnd` above the partition's end) — `excluded` with a reason
+(`GroupTypeNotCaptured` for a share or streams group; `GroupNotFound`), or
+`failed` with a reason (for example `NotVisibleToPrincipal` for a group the
+backup principal may not describe, `PositionsUnstable` for a pending
+transactional offset commit). A partition with no committed offset is
+`noCommittedPosition`, never offset 0. Both readers check thirteen new arms (22
+to 34) and print one `consumer_positions` line per group;
+`verify_scorecard.py` is 1.23.0. The catalog point binds the block by its
+digest, and the catalog's view and the product API (`PointView.consumerPositions`)
+show the snapshot's freshness and how many of each group's positions relate to
+archived data
+([backup-receipt.md](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-150),
+[kubernetes.md](kubernetes.md#consumer-position-evidence-specconsumergroups),
+[stability.md](stability.md#receipt-and-catalog-point-format-150-consumer_positions-prod-041)).
+
+What it does not do: positions read while applications run are **not atomic**
+with the records the engine reads (the receipt says when and which groups were
+active); on Kafka 3.7.x, which types no group, every selected group is
+`excluded: GroupTypeNotCaptured`; nothing resets a group — applying positions
+is PROD-04.2's reviewed cutover. With the source gone, the positions are read
+from the evidence store ([the recovery path](formats/backup-receipt.md#recovering-positions-with-the-source-offline)).
+An engine consumer-group snapshot beside a foreign archive is only an import
+source, every group typed `unknown`.
+
+**Do:** nothing for existing plans and objects: a backup that selects no group
+writes the receipt it wrote before, and its plan and run-policy digest are
+unchanged. Apply the CRDs before setting `spec.consumerGroups`, and give the
+backup principal Describe on each selected group (and on the cluster, for a
+complete listing). **Scope:** the core rules and the arms
+(`crates/logweir-core/src/consumer_positions.rs`,
+`crates/logweir-core/tests/backup_receipt.rs`, one row per arm), the builder
+(`crates/logweir/src/backup/consumer_positions.rs`), the seam
+(`crates/logweir/tests/consumer_positions_seam.rs`), the corpus and the parity
+gate over both readers, the catalog, view and API rows
+(`crates/logweir/tests/catalog.rs`, `crates/logweir/tests/check_cli.rs`,
+`crates/weirkeeper/tests/catalog_controller.rs`,
+`crates/logweir-api/tests/d3_reads.rs`), the controller rows
+(`crates/weirkeeper/tests/backup_controller.rs`,
+`crates/weirkeeper/tests/schedule_controller.rs`), and live on the compose stack
+through the shipped binary, `e2e/tests/position_evidence.rs`: one outcome per
+group of each type on 4.3.1 and the 3.7.1 rule on the default line, a group
+hidden from the backup principal, a rebalance during the capture, a position
+beyond the end, expired records and deleted offsets, a partition added during
+the capture, and the capture read after the source topic and group are gone.
+**Rollback:** an older runner ignores `source.consumer_groups`, refuses
+`--consumer-group`, and records no positions; the 1.5.0 receipts and records
+already written stay valid under every major-1 reader. An older controller
+refuses a run whose frozen inputs carry `consumerGroups`
+(`PlanConfigMapConflict`): let those runs finish, or remove
+`spec.consumerGroups` from the schedule, first.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -981,7 +1051,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39 and 40, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40 and 41, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -999,7 +1069,9 @@ console and the status of three CRDs, and needs each destination,
 retention, notification and inline-archive credential Secret bound; item 39
 changes the runner's phase 0 only and needs nothing; item 40 changes the
 console only and needs nothing unless an ingress dials the console with
-HTTP/2. To roll back to
+HTTP/2; item 41 changes the runner's receipts and records, the catalog's view,
+the product API and two CRDs (apply the CRDs), and needs nothing until a plan
+or object selects consumer groups. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -1027,6 +1099,11 @@ HTTP/2. To roll back to
    the new status fields, and the bound Secrets keep working. Roll the console
    back with them (an older console offers `existing` on a create again,
    which only this API refuses).
+6. Before rolling the controller back past item 41, let every run whose frozen
+   inputs carry `consumerGroups` finish, or remove `spec.consumerGroups` from
+   its schedule: an older controller refuses such a frozen plan
+   (`PlanConfigMapConflict`). The 1.5.0 receipts and records already written
+   stay valid.
 
 ---
 
