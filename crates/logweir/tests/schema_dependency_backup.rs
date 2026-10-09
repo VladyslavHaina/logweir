@@ -518,7 +518,10 @@ fn a_backup_run_signs_a_1_5_0_receipt_naming_the_framed_topic() {
 /// A KBAK v1 segment of `(key, value)` records, zstd-compressed when `zstd`,
 /// with the frame of record `pad` (when given) declaring one byte more than
 /// its fields use — a record no decoder may accept.
-fn kbak(records: &[(Option<Vec<u8>>, Option<Vec<u8>>)], zstd: bool, pad: Option<usize>) -> Vec<u8> {
+/// A record's key and value bytes, `None` for null.
+type Raw = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+fn kbak(records: &[Raw], zstd: bool, pad: Option<usize>) -> Vec<u8> {
     let opt = |out: &mut Vec<u8>, v: &Option<Vec<u8>>| match v {
         None => out.extend_from_slice(&(-1i32).to_le_bytes()),
         Some(b) => {

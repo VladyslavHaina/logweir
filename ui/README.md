@@ -1359,7 +1359,7 @@ contacted to say it, by the backup, the API or this page.
 The console says it in three places, in the same words:
 
 * **the restore review** (step 6): a `schema registry` fact for the SELECTED
-  topics, and — when any is schema-dependent — a warning that opens with
+  topics, and -- when any is schema-dependent -- a warning that opens with
   **"Registry not captured: applications may not read these records after
   restore."** and names each topic with its sides and ids, for example `orders
   (key and value: schema ids 2, 3, 4; sampled)`;

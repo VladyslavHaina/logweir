@@ -54,7 +54,10 @@ fn protobuf_empty(id: u32) -> Vec<u8> {
     frame(id, &[0x00])
 }
 
-fn tally(records: &[(Option<Vec<u8>>, Option<Vec<u8>>)]) -> TopicTally {
+/// A record's key and value bytes, `None` for null.
+type Raw = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+fn tally(records: &[Raw]) -> TopicTally {
     let mut t = TopicTally::default();
     for (k, v) in records {
         t.observe(k.as_deref(), v.as_deref());
@@ -108,7 +111,7 @@ fn receipt_with(entry: &TopicSchemaDependency, records: u64) -> BackupReceipt {
 
 /// The verdict for `records`, judged completely, after the receipt's arms
 /// accepted it.
-fn judge(records: &[(Option<Vec<u8>>, Option<Vec<u8>>)]) -> TopicSchemaDependency {
+fn judge(records: &[Raw]) -> TopicSchemaDependency {
     let entry = tally(records).finish(true);
     receipt_with(&entry, records.len() as u64)
         .validate_invariants()

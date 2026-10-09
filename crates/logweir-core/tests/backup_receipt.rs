@@ -1720,7 +1720,8 @@ const ARM_24_TAIL: &str = " is not a verdict this format defines: the verdict is
 
 #[test]
 fn arm_24_refuses_a_verdict_reason_or_basis_outside_the_closed_sets() {
-    let cases: Vec<(&str, Box<dyn Fn(&mut TopicSchemaDependency)>, &str)> = vec![
+    type Mutation = Box<dyn Fn(&mut TopicSchemaDependency)>;
+    let cases: Vec<(&str, Mutation, &str)> = vec![
         (
             "a verdict outside the three",
             Box::new(|e| e.verdict = "registryNeeded".into()),

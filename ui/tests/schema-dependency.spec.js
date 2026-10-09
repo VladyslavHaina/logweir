@@ -204,3 +204,21 @@ test("prod030_the_catalog_page_names_each_points_schema_dependent_topics", () =>
   const quiet = renderPoints({ items: [page.items[1]] }, "team-a", "archive", "dest-a");
   assert.equal(byId(quiet, "catalog-schema-dependency"), null);
 });
+
+// The live row's emitter (`emit-schema-dependency.js`, run by
+// `e2e/tests/schema_dependency.rs` over a live backup's catalog point) renders
+// through the same functions these rows hold, so a renamed or replaced
+// renderer cannot leave the live row printing something these rows never
+// checked.
+test("prod030_the_live_rows_emitter_renders_through_the_functions_held_here", () => {
+  const emitter = readFileSync(fileURLToPath(new URL("./emit-schema-dependency.js",
+    import.meta.url)), "utf8");
+  for (const name of ["renderPoints", "pointSchemaDependencyText", "schemaDependencyText",
+    "renderSchemaDependencyWarning", "sourceFactsOfEntry", "catalogRecoveryPoint"]) {
+    assert.ok(new RegExp("\\b" + name + "\\b").test(emitter), name);
+  }
+  const sources = [...emitter.matchAll(/from "([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(sources.filter((src) => !src.startsWith("../")), ["node:fs"],
+    "the emitter imports the file reader and the console's own modules, nothing else");
+});
+
