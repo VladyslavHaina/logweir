@@ -89,6 +89,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
         config_coverage: None,
         topic_configuration: None,
         owner_detection: None,
+        schema_dependency: None,
     }
 }
 

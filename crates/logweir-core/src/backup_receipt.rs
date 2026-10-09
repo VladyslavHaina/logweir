@@ -61,6 +61,19 @@
 //! Every receipt this build signs carries it, so every one is written as
 //! [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] ([`format_version_for`]).
 //!
+//! # 1.5.0: schema dependency (PROD-03.0)
+//!
+//! `schema_dependency` records, per named topic, whether the archived keys and
+//! values carry Confluent wire-format framing (magic byte 0 and a schema id),
+//! judged from the segment bytes the run just wrote — never from a registry,
+//! which Logweir never contacts — with the schema ids seen
+//! ([`TopicSchemaDependency`]; the detection contract is
+//! `crate::schema_dependency`). Arms 22-29 read it, and only when it is
+//! present. ABSENT means NOT ASSESSED for every topic, never "not
+//! schema-dependent" ([`SchemaDependency::of`]). Every receipt this build signs
+//! carries it, so every one is written as
+//! [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`].
+//!
 //! # A backup that produces no verifiable evidence is a backup an auditor has
 //! # to take Logweir's word for
 //!
@@ -179,7 +192,143 @@ pub struct BackupReceipt {
     /// `topic_configuration`; ABSENT reads as empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_detection: Option<Vec<String>>,
+    /// **Format 1.5.0 (PROD-03.0).** Per named topic, whether the archived
+    /// records carry Confluent wire-format framing — magic byte 0 and a schema
+    /// id — so that an application needs the schema registry that issued those
+    /// ids to read them after a restore. Judged by Logweir from the archived
+    /// segment bytes this run wrote, never from a registry (Logweir contacts
+    /// none), with keys and values judged separately
+    /// (`crate::schema_dependency` is the detection contract). One entry per
+    /// `source.topics` entry and no others (arm 23).
+    ///
+    /// No registry is ever captured (`docs/stability.md` Never #2), so a
+    /// `schemaDependent` topic reads "schema-dependent, registry not captured"
+    /// on every surface.
+    ///
+    /// ABSENT means NOT ASSESSED for every topic — every receipt before 1.5.0
+    /// — and never "not schema-dependent": [`SchemaDependency::of`] is the
+    /// one reader and answers [`SchemaDependency::NotAssessed`] for an absent
+    /// block or entry. Appended LAST and skipped when absent, so an older
+    /// document round-trips byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_dependency: Option<BTreeMap<String, TopicSchemaDependency>>,
 }
+
+/// **PROD-03.0, receipt 1.5.0.** What the archived bytes of ONE topic say
+/// about its dependence on a schema registry.
+///
+/// | `verdict` | `reason` | `basis` | `key`/`value` | meaning |
+/// |---|---|---|---|---|
+/// | `schemaDependent` | — | `sampled`/`complete` | both | at least one side is dependent ([`SideFraming::dependent`]): its records carry Confluent framing, so a reader needs the registry, which was not captured |
+/// | `notDetected` | — | `sampled`/`complete` | both | neither side is dependent over the records judged |
+/// | `notAssessed` | `noRecords` | — | neither | the archive holds no record of the topic, so there is nothing to judge |
+/// | `notAssessed` | `segmentUnreadable` | — | neither | a segment the sample needed could not be read or decoded, or decoded to a count its manifest does not record |
+///
+/// `basis` is `complete` exactly when every record the receipt counts for
+/// the topic was judged, and `sampled` otherwise (arm 26).
+///
+/// Strings on the wire, not enums, for the reason `ReceiptAuth::mode` gives;
+/// the closed sets are enforced by arm 24 in both readers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TopicSchemaDependency {
+    /// `schemaDependent`, `notDetected` or `notAssessed` —
+    /// [`crate::schema_dependency::VERDICTS`].
+    pub verdict: String,
+    /// `noRecords` or `segmentUnreadable` —
+    /// [`crate::schema_dependency::NOT_ASSESSED_REASONS`] — present exactly
+    /// when `verdict` is `notAssessed` (arm 24).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// `sampled` or `complete` — [`crate::schema_dependency::BASES`] —
+    /// present exactly when `verdict` is not `notAssessed` (arm 24).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    /// The record KEYS judged, present exactly when `verdict` is not
+    /// `notAssessed` (arm 25).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<SideFraming>,
+    /// The record VALUES judged, beside `key` and over the same records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<SideFraming>,
+}
+
+/// One side (the keys, or the values) of one topic's judged records.
+///
+/// Every judged record counts once on each side: as `framed`, `unframed` or
+/// `nulls` (a null key, or a null value — a tombstone). `nulls` never count
+/// toward the share: a side is `dependent` exactly when at least one record
+/// is framed and at least one in
+/// [`crate::schema_dependency::DEPENDENT_SHARE_DENOMINATOR`] of its NON-NULL
+/// records is (arm 28).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SideFraming {
+    /// Whether this side depends on the registry, by the threshold above.
+    pub dependent: bool,
+    /// Records whose bytes on this side are framed
+    /// ([`crate::schema_dependency::framed_schema_id`]).
+    pub framed: u64,
+    /// Non-null records whose bytes on this side are not framed.
+    pub unframed: u64,
+    /// Records with no bytes on this side: a null key, or a null value.
+    pub nulls: u64,
+    /// The distinct schema ids the framed records name, ascending, at most
+    /// [`crate::schema_dependency::SCHEMA_IDS_LISTED`] — the smallest ones
+    /// when more were seen (arm 27).
+    pub schema_ids: Vec<u32>,
+    /// How many distinct schema ids the framed records name, listed or not.
+    pub schema_id_count: u64,
+}
+
+/// A topic's schema dependency as a READER uses it.
+///
+/// `NotAssessed` is what an absent `schema_dependency` block, an absent
+/// entry, a `notAssessed` entry, or a verdict this build does not recognise
+/// means. It is never `NotDetected`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaDependency {
+    SchemaDependent,
+    NotDetected,
+    NotAssessed,
+}
+
+impl SchemaDependency {
+    /// The reader's side of the wire: anything outside the closed set is
+    /// `NotAssessed`, never `NotDetected`.
+    #[must_use]
+    pub fn from_wire(verdict: &str) -> Self {
+        match verdict {
+            "schemaDependent" => Self::SchemaDependent,
+            "notDetected" => Self::NotDetected,
+            _ => Self::NotAssessed,
+        }
+    }
+
+    /// `topic`'s verdict in `receipt`: `NotAssessed` for a receipt without
+    /// the 1.5.0 block or without an entry for the topic.
+    #[must_use]
+    pub fn of(receipt: &BackupReceipt, topic: &str) -> Self {
+        receipt
+            .schema_dependency
+            .as_ref()
+            .and_then(|block| block.get(topic))
+            .map_or(Self::NotAssessed, |e| Self::from_wire(&e.verdict))
+    }
+}
+
+/// **PROD-03.0.** The `format_version` of a receipt that carries
+/// `schema_dependency` — the MINOR after PROD-01.3's 1.4.0. Every receipt this
+/// build signs carries the block, so every one is 1.5.0
+/// ([`format_version_for`]); 1.5.0 defines every earlier minor's fields and
+/// values. An older reader ignores the field inside major 1 and reads the
+/// document under it.
+pub const FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY: &str = "1.5.0";
+
+/// The first minor of format 1 that defines `schema_dependency` (arm 22). A
+/// renumber moves this, [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`] and
+/// `docs/verify_scorecard.py`'s `RECEIPT_SCHEMA_DEPENDENCY_SINCE_MINOR`
+/// together; `tests/backup_receipt.rs::the_written_version_defines_schema_dependency`
+/// keeps them coherent.
+pub const SCHEMA_DEPENDENCY_SINCE_MINOR: u64 = 5;
 
 /// The `format_version` this build WRITES for a receipt that pins no manifest
 /// version (a pinned one is [`FORMAT_VERSION_WITH_MANIFEST_VERSION`]; see
@@ -631,10 +780,13 @@ pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
 
 /// The `format_version` a receipt is written with — the NEWEST minor whose
 /// fields it uses, so a receipt carrying both features names the version that
-/// defines both: [`FORMAT_VERSION_WITH_AUTH_MODES`] when the auth mode is one
+/// defines both: [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`] when it carries
+/// `schema_dependency` (PROD-03.0 — every receipt this build signs; 1.5.0
+/// defines every earlier field and value), else
+/// [`FORMAT_VERSION_WITH_AUTH_MODES`] when the auth mode is one
 /// PROD-01.3 added (it also defines PROD-05.1's `topic_configuration` and
 /// FX-7's pin), else [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] when it
-/// carries `topic_configuration` (PROD-05.1 — every receipt this build signs),
+/// carries `topic_configuration` (PROD-05.1),
 /// else
 /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] when it pins the manifest's
 /// version, else [`RECEIPT_FORMAT_VERSION`] — FX-4's 1.1.0. The ONE place a
@@ -643,9 +795,12 @@ pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
 pub fn format_version_for(
     archive: &ReceiptArchive,
     topic_configuration: bool,
+    schema_dependency: bool,
     auth: &ReceiptAuth,
 ) -> &'static str {
-    if crate::connection::is_prod_01_3_auth_mode(&auth.mode) {
+    if schema_dependency {
+        FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
+    } else if crate::connection::is_prod_01_3_auth_mode(&auth.mode) {
         FORMAT_VERSION_WITH_AUTH_MODES
     } else if topic_configuration {
         FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
@@ -786,6 +941,31 @@ impl BackupReceipt {
     ///     lists `declared` and `kafkaTopicResources` each at most once.
     /// 21. every recorded owner's basis names a source `owner_detection` lists
     ///     (absent reads as empty).
+    ///
+    /// Arms 22-29 (format 1.5.0, PROD-03.0) read `schema_dependency` — with
+    /// `source.topics` and `records` as the context it is judged in — and run
+    /// only when it is present, so every document without it is decided
+    /// exactly as before:
+    ///
+    /// 22. `schema_dependency` is present only under a minor of at least 5.
+    /// 23. it covers exactly `source.topics`.
+    /// 24. a topic's `verdict` is one of `crate::schema_dependency::VERDICTS`;
+    ///     a `notAssessed` one has a `reason` from
+    ///     `NOT_ASSESSED_REASONS` and no `basis`, any other a `basis` from
+    ///     `BASES` and no `reason`.
+    /// 25. `key` and `value` are both present exactly when the topic was
+    ///     judged, and count the same records, at least one.
+    /// 26. a `complete` basis judged exactly the records `records` counts for
+    ///     the topic, a `sampled` one at most that many, and `noRecords` is
+    ///     said only of a topic `records` counts none of.
+    /// 27. a side's `schema_ids` are distinct, ascending and plausible
+    ///     (`1..=MAX_SCHEMA_ID`), `min(schema_id_count, SCHEMA_IDS_LISTED)` of
+    ///     them, and `schema_id_count` is at least 1 exactly when `framed` is,
+    ///     and at most `framed`.
+    /// 28. a side's `dependent` is
+    ///     `crate::schema_dependency::dependent_by_share(framed, unframed)`.
+    /// 29. a judged topic is `schemaDependent` exactly when a side is
+    ///     dependent.
     pub fn validate_invariants(&self) -> Result<(), String> {
         // ARM 1. GC12 for this document: a reader refuses a major it has
         // never seen rather than guessing at a shape.
@@ -1203,6 +1383,172 @@ impl BackupReceipt {
                          \"declared\", a \"kafkaTopicResource\" owner \"kafkaTopicResources\"",
                         owner.basis
                     ));
+                }
+            }
+        }
+        // ARMS 22-29 (format 1.5.0, PROD-03.0): the `schema_dependency` block,
+        // and only when it is present — every earlier receipt is decided
+        // exactly as before. Topics in name order (the map's own), and per
+        // topic arms 24, 25 and 26, then 27 and 28 for the key side and then
+        // the value side, then 29.
+        if let Some(dependency) = &self.schema_dependency {
+            // ARM 22. A document that declares a minor before 5 cannot carry
+            // a 1.5 field.
+            let minor = parse_semver(&self.format_version).map_or(0, |(_, minor, _)| minor);
+            if minor < SCHEMA_DEPENDENCY_SINCE_MINOR {
+                return Err(format!(
+                    "schema_dependency is present but format_version {:?} predates it: the \
+                     field is defined from 1.{SCHEMA_DEPENDENCY_SINCE_MINOR}.0",
+                    self.format_version
+                ));
+            }
+            // ARM 23. The judged set and the named set are the same set — the
+            // twin of arms 3, 7 and 14.
+            let judged: std::collections::BTreeSet<&str> =
+                dependency.keys().map(String::as_str).collect();
+            if judged != named_topics {
+                return Err(format!(
+                    "schema_dependency covers {} but the named topic set is {}",
+                    render_set(&judged),
+                    render_set(&named_topics)
+                ));
+            }
+            for (topic, entry) in dependency {
+                use crate::schema_dependency as sd;
+                let shown =
+                    |s: Option<&String>| s.map_or("absent".to_string(), |s| format!("{s:?}"));
+                // ARM 24. The verdict, and a reason or a basis as it requires,
+                // from closed sets.
+                let assessed = entry.verdict != sd::NOT_ASSESSED;
+                let fits = sd::VERDICTS.contains(&entry.verdict.as_str())
+                    && if assessed {
+                        entry.reason.is_none()
+                            && entry
+                                .basis
+                                .as_deref()
+                                .is_some_and(|b| sd::BASES.contains(&b))
+                    } else {
+                        entry.basis.is_none()
+                            && entry
+                                .reason
+                                .as_deref()
+                                .is_some_and(|r| sd::NOT_ASSESSED_REASONS.contains(&r))
+                    };
+                if !fits {
+                    return Err(format!(
+                        "schema_dependency[{topic:?}] verdict {:?} with reason {} and basis {} \
+                         is not a verdict this format defines: the verdict is \
+                         \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \
+                         \"notAssessed\" topic has a reason, \"noRecords\" or \
+                         \"segmentUnreadable\", and no basis, and any other topic has a basis, \
+                         \"sampled\" or \"complete\", and no reason",
+                        entry.verdict,
+                        shown(entry.reason.as_ref()),
+                        shown(entry.basis.as_ref())
+                    ));
+                }
+                // ARM 25. Both sides exactly when the topic was judged, over
+                // the same records, at least one.
+                let side_shown = |s: Option<&SideFraming>| {
+                    s.map_or("absent".to_string(), |s| {
+                        format!("{} records", sd::judged_records(s))
+                    })
+                };
+                let fits = match (&entry.key, &entry.value) {
+                    (Some(k), Some(v)) => {
+                        assessed
+                            && sd::judged_records(k) == sd::judged_records(v)
+                            && sd::judged_records(k) >= 1
+                    }
+                    (None, None) => !assessed,
+                    _ => false,
+                };
+                if !fits {
+                    return Err(format!(
+                        "schema_dependency[{topic:?}] verdict {:?} records key {} and value {}: \
+                         a judged topic records a key side and a value side over the same \
+                         records, at least one, and a \"notAssessed\" topic records neither",
+                        entry.verdict,
+                        side_shown(entry.key.as_ref()),
+                        side_shown(entry.value.as_ref())
+                    ));
+                }
+                // ARM 26. What was judged, against what the receipt counts.
+                // Arms 3 and 23 make the count exist; `0` is not assumed.
+                let counted = u128::from(self.records.get(topic).copied().unwrap_or(0));
+                let judged_n = entry.key.as_ref().map_or(0, sd::judged_records);
+                let fits = match (entry.basis.as_deref(), entry.reason.as_deref()) {
+                    (Some(sd::BASIS_COMPLETE), _) => judged_n == counted,
+                    (Some(_), _) => judged_n <= counted,
+                    (None, Some(sd::REASON_NO_RECORDS)) => counted == 0,
+                    (None, _) => true,
+                };
+                if !fits {
+                    let under = entry
+                        .basis
+                        .as_ref()
+                        .or(entry.reason.as_ref())
+                        .map_or("absent".to_string(), |s| format!("{s:?}"));
+                    return Err(format!(
+                        "schema_dependency[{topic:?}] judges {judged_n} records under {under} \
+                         and records counts {counted}: a \"complete\" basis judges every record \
+                         the receipt counts, a \"sampled\" one at most that many, and \
+                         \"noRecords\" is said only of a topic that counts none"
+                    ));
+                }
+                for (name, side) in [("key", &entry.key), ("value", &entry.value)] {
+                    let Some(side) = side else {
+                        continue;
+                    };
+                    // ARM 27. The ids: distinct, ascending, plausible, as many
+                    // as the count allows, and a count that fits the framing.
+                    let listed = side.schema_ids.len() as u64;
+                    let fits = side.schema_ids.windows(2).all(|w| w[0] < w[1])
+                        && side
+                            .schema_ids
+                            .iter()
+                            .all(|id| (1..=sd::MAX_SCHEMA_ID).contains(id))
+                        && listed == side.schema_id_count.min(sd::SCHEMA_IDS_LISTED as u64)
+                        && (side.schema_id_count >= 1) == (side.framed >= 1)
+                        && side.schema_id_count <= side.framed;
+                    if !fits {
+                        return Err(format!(
+                            "schema_dependency[{topic:?}].{name} lists schema_ids {:?} with \
+                             schema_id_count {} and framed {}: the ids are distinct, ascending \
+                             and from 1 to 16777215, all of them when the count is 16 or fewer \
+                             and 16 otherwise, and the count is at least 1 exactly when a \
+                             record is framed and never above the framed count",
+                            side.schema_ids, side.schema_id_count, side.framed
+                        ));
+                    }
+                    // ARM 28. The threshold: `dependent` is what the counts
+                    // say, never a claim beside them.
+                    if side.dependent != sd::dependent_by_share(side.framed, side.unframed) {
+                        return Err(format!(
+                            "schema_dependency[{topic:?}].{name} is {} with framed {} and \
+                             unframed {}: a side is dependent exactly when at least one record \
+                             and at least one in ten of its non-null records are framed",
+                            if side.dependent {
+                                "dependent"
+                            } else {
+                                "not dependent"
+                            },
+                            side.framed,
+                            side.unframed
+                        ));
+                    }
+                }
+                // ARM 29. The verdict is what the sides say.
+                if let (Some(k), Some(v)) = (&entry.key, &entry.value) {
+                    let dependent = k.dependent || v.dependent;
+                    if (entry.verdict == sd::SCHEMA_DEPENDENT) != dependent {
+                        return Err(format!(
+                            "schema_dependency[{topic:?}] verdict {:?} does not fit its sides: a \
+                             judged topic is \"schemaDependent\" exactly when its key side or \
+                             its value side is dependent",
+                            entry.verdict
+                        ));
+                    }
                 }
             }
         }

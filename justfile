@@ -133,7 +133,7 @@ golden:
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
 scorecard_schema_version := "1.7.0"
-receipt_schema_version := "1.4.0"
+receipt_schema_version := "1.5.0"
 catalog_schema_version := "1.4.0"
 
 schema:

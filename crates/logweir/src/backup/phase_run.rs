@@ -619,8 +619,10 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         // PROD-01.3: the version follows the auth mode too — 1.4.0 for
         // `scramSha256`, `plain` and `mtls` (it defines PROD-05.1's block as
         // well), PROD-05.1's 1.3.0 document otherwise.
-        format_version: logweir_core::backup_receipt::format_version_for(&archive, true, &auth)
-            .to_string(),
+        format_version: logweir_core::backup_receipt::format_version_for(
+            &archive, true, false, &auth,
+        )
+        .to_string(),
         run_id: outcome.run_id.clone(),
         backup_id: outcome.backup_id.clone(),
         requested_at: outcome.requested_at,
@@ -659,6 +661,7 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         // model, so a topic without an owner reads "not checked" when it is
         // empty and never "applied through the admin API".
         owner_detection: Some(outcome.owner_detection.clone()),
+        schema_dependency: None,
     }
 }
 
