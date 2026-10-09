@@ -1423,15 +1423,26 @@ accept to its close.**
 - **The ceiling.** At most 256 connections are served at once, and further
   ones wait in the kernel's listen queue until one closes. Silent sockets
   cannot hold that ceiling for longer than the ten-second head deadline, nor
-  clients that stop reading for much longer than the thirty-second stall: the
-  kernel still accepts a stopped reader's bytes for a few seconds, so a
-  connection is held until the stall clock, which starts at the last byte the
-  kernel took, runs out (about 35 s measured on macOS).
+  clients that stop reading an ordinary answer for much longer than the
+  thirty-second stall: the kernel still accepts a stopped reader's bytes for a
+  few seconds, so a connection is held until the stall clock, which starts at
+  the last byte the kernel took, runs out (about 35 s measured on macOS).
+- **An event stream whose client stops reading** is the exception. Its
+  heartbeats are too small to fill the kernel's buffers, so no write is ever
+  pending and the stall clock never starts: the stream is held to its own
+  300-second ceiling, then the ten-second idle deadline, up to 310 s. An actor
+  may hold at most four streams per namespace.
 
-These bounds end abandoned and stalled clients. A client that goes on reading
-or sending, however slowly, keeps its connection, so they do not stop a
-deliberate slow-rate client: in shared mode that is what the ingress and
-`api.console.networkPolicy.enabled` (off by default) are for.
+**What these bounds do not stop (open: FX-24c).** They end abandoned and
+stalled clients, not slow ones. The stall clock restarts on every byte, so a
+client that reads, or sends, as little as one byte every thirty seconds keeps
+its connection for as long as it keeps that up, and 256 such clients hold every
+connection the console has. In shared mode only an enforcing NetworkPolicy
+keeps such peers away from the API pod, and `api.console.networkPolicy.enabled`
+is off by default (Docker Desktop accepts a NetworkPolicy without enforcing it).
+A client that comes through the ingress can do far less, because the ingress
+does not relay pipelined requests to the pod. FX-24c is the open row for a
+per-peer cap or a minimum rate.
 HTTP/2 is not served: a client that opens with the HTTP/2 preface (prior
 knowledge, `h2c`) is closed at its first line. A shutdown signal gives open
 connections ten seconds to finish, then drops them and exits 0.

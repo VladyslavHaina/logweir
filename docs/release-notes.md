@@ -937,18 +937,30 @@ pending write, or a request body's pending read, that moves no byte for that
 long fails, and the connection and its slot are released. It is a stall
 deadline, not a total: it restarts on every byte, so a slow but steady reader
 keeps its connection, and an operation event stream that is being read is
-never cut by it (between heartbeats it has nothing to write). A JSON
+never cut by it (between heartbeats it has nothing to write); a stream whose
+client stops reading is held to its own 300-second ceiling instead, up to
+310 s with the idle deadline after it. A JSON
 mutation body must also arrive whole within **sixty seconds**
 (`JSON_BODY_DEADLINE`), so one that trickles a byte at a time is ended too.
 A body that stops, or misses the total, is answered `400 malformed_request`
 ("The request body stopped arriving before it was complete." or "The request
 body was not received within 60 seconds.") and the connection is closed after
-the answer. A client that keeps reading or sending, however slowly, keeps its
-connection; these bounds end abandoned and stalled clients, not a deliberate
-slow-rate one ([api.md](api.md#conventions)).
-**Do:** nothing. A client that pauses mid-transfer for more than thirty
-seconds, or sends a mutation body over more than sixty, sees its connection
-closed and retries; the console's own browser client does neither.
+the answer. These bounds end abandoned and stalled clients, not slow ones: a
+client that reads, or sends, as little as one byte every thirty seconds keeps
+its connection, so 256 such clients can still hold every connection. In shared
+mode only an enforcing NetworkPolicy keeps such peers away from the API pod,
+and `api.console.networkPolicy.enabled` is off by default; the ingress does
+not relay pipelined requests, so clients that come through it can do far
+less. **That case is open as FX-24c** ([api.md](api.md#conventions)).
+**Do:** nothing is required. A client that pauses mid-transfer for more than
+thirty seconds, or sends a mutation body over more than sixty, sees its
+connection closed and retries; the console's own browser client does neither.
+In shared mode on a cluster whose network plugin enforces NetworkPolicy,
+consider `api.console.networkPolicy.enabled: true`, with the ingress
+controller's selectors and the identity provider's egress (`oidcCIDRs` or
+`oidcPeers`; [chart README](../charts/logweir/README.md)), so that only the
+ingress controller can reach the API pod: until FX-24c it is the one bound on
+slow-rate clients.
 **Scope:** rows on the built binary (`crates/logweir-api/tests/local_admin.rs`):
 256 clients that pipeline requests for a 156 KiB asset and read nothing hold
 every connection slot, then a request queued behind them is answered no
