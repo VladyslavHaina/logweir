@@ -34,8 +34,9 @@ it), 40 (FX-24, a silent connection meets the console's header deadline),
 read as matching; the engine's first patch), 42 (PROD-11.1, a restore
 can select a window start) and 43 (PROD-08.1a, complete coverage requested
 and shown through the CRDs, the API and the console), 44 (FX-24b, a
-client that stops reading or sending meets a stall deadline) and 45 (FX-29, a
-controller no longer rewrites a status whose content has not changed) so far. Items continue the next entry's
+client that stops reading or sending meets a stall deadline), 45 (FX-29, a
+controller no longer rewrites a status whose content has not changed) and 46 (FX-20c,
+a destination's Test access compares every grant's binding) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -101,6 +102,10 @@ Item 45 is fix-now row FX-29, proven by controller rows over a fake API that
 applies each status patch as the API server does and counts the writes; it
 changes the controller only, and the PoC upgrade that carries it resumes the
 two suspended schedules and watches their `resourceVersion`.
+Item 46 is fix-now row FX-20c, proven by contract, runner, controller, API and
+console rows over one shared fixture; it changes the controller and the
+runner (the check plan and a new check row), and the PoC upgrade that carries
+it re-creates PoC batch 4's F6 thief destination, tests it, and deletes it.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1269,6 +1274,63 @@ schedule's slot is skipped after one that ran, or a destination loses its CA;
 suspending the schedule, or restoring the `ConfigMap`, stops it. Nothing stored
 needs converting: the objects this build rewrote read the same to an older one.
 
+#### 46. A destination's *Test access* compares every grant's binding, and is never READY for a destination a backup would refuse (FX-20c)
+
+**Changed.** A readiness check compared a credential's binding (item 38) only
+where it opened a store, and a check never opens one for some grants: a
+destination's `archiveWrite` (a check may not write into the archive prefix)
+and a separate `evidenceWrite` Secret when no marker probe runs. So a
+destination whose only grant named another destination's `archiveWrite`
+Secret tested **ready** on the PoC (`destination.credentialProjected:
+Projected`) while its backup was refused `CredentialBindingMismatch`. Now a
+`Preflight` lists, in its check plan, every `SecretKeys` grant the run would
+present — on *Test access* every grant the destination declares, whichever
+roles are exercised; on a backup readiness check `archiveWrite` and
+`evidenceWrite`; on a restore preflight the source's `archiveRead` and the
+evidence destination's `evidenceWrite` — and projects each one's
+`logweir-binding` key, and nothing else of it, beside its destination's
+expected binding. The new blocking row **`destination.credentialBound`**
+compares them in the check pod with no request: `ready`/`CredentialBound`, or
+`notReady`/`CredentialBindingMismatch` naming each refused grant by its
+`spec.access` field, its destination and its Secret, and whether its binding
+was absent or written for another object or endpoint, with one
+`<grant>=bound|CredentialBindingMismatch` fact per grant. The controller
+expects the row whenever a grant is listed, so a check that does not answer it
+is `unknown`, never `ready`. No Secret value and no binding value reaches a
+status, the API or the console, and nothing is dialled with a foreign
+credential. The product API returns the row in the preflight's `checks` and
+the destination's `lastTest` follows the verdict; the console's *Test access*
+panel shows it among the blocking rows. A workload-identity grant carries no
+binding and is not listed (FX-20b).
+**Do:** roll the controller and the runner image together (the chart does):
+an older runner refuses a plan that lists a grant (`phase: Failed`,
+`CheckContractMismatch`, naming `grantBindings`). Re-run *Test access* on each
+destination after the upgrade; a grant that now reads
+`CredentialBindingMismatch` would have been refused by the next run that
+presents it (a backup for `archiveWrite`, a restore or a verification for the
+read grants) — bind its own Secret, or stop naming another destination's
+([kubernetes.md](kubernetes.md) §20.10).
+**Scope:** the plan contract's rows (`crates/logweir-core/tests/check_contract.rs`,
+`crates/logweir-core/src/credential_binding.rs`); the runner's rows over each
+kind with a map for the pod's environment — the F6 thief `notReady` by name
+and its bound control `ready`, one foreign grant among bound ones named alone,
+absent, foreign and lost-expectation refusals, a backup readiness check's
+unprobed `evidenceWrite`, a restore preflight's two destinations, and no store
+handle built for any of it (`crates/logweir/tests/check_grant_binding.rs`);
+the controller's rendered plans and pods for every operation, a
+`DestinationAccess` that exercises one grant and compares four while
+projecting only one credential, and the verdict through `assemble` (`notReady`
+with the row, `unknown` without it, `ready` only when it is ready)
+(`crates/weirkeeper/tests/preflight_controller.rs`); the product API
+(`crates/logweir-api/tests/destinations.rs`) and the console
+(`ui/tests/credential-binding.spec.js`) over one fixture, which the runner's
+and the controller's rows hold their output to. The live row — PoC batch 4's
+F6 thief re-created, tested and deleted — is the next PoC upgrade's.
+**Rollback:** an older controller lists no grant and an older runner emits no
+binding row: *Test access* reverts to the overclaim this item fixes, and every
+run still refuses a foreign Secret. Nothing is stored, so nothing needs
+converting.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1334,7 +1396,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44 and 45, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45 and 46, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1361,7 +1423,9 @@ notification and metrics, the standing authorization's scope (format
 1.1.0), the product API and the console, and needs nothing unless a
 rehearsal is to verify every record (a new schedule and a new
 authorization); item 44 changes the console only and needs nothing; item 45
-changes the controller only (and two CRD descriptions) and needs nothing. To roll back to
+changes the controller only (and two CRD descriptions) and needs nothing; item 46
+changes the controller and the runner together (the check plan and a check
+row) and needs nothing beyond rolling them together. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
