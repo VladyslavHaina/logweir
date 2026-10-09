@@ -120,6 +120,7 @@ fn receipt() -> BackupReceipt {
         topic_configuration: None,
         owner_detection: None,
         schema_dependency: None,
+        generations: None,
     }
 }
 

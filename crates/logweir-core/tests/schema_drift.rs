@@ -31,8 +31,9 @@ fn justfile_schema_version(name: &str) -> String {
 /// the `$id` and the `format_version` it writes. They must be one number, or a
 /// renumber would regenerate one file and sign documents naming another. The
 /// CURRENT file is each document's newest MINOR's — for the receipt since
-/// PROD-03.0 the 1.5.0 every receipt this build signs carries
-/// (`schema_dependency`); the older files are frozen beside it.
+/// PROD-01.4a the 1.6.0 every receipt this build signs carries
+/// (`generations`, beside PROD-03.0's 1.5.0 `schema_dependency`); the older
+/// files are frozen beside it.
 #[test]
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
@@ -41,7 +42,7 @@ fn the_justfile_schema_versions_are_the_writers_constants() {
     );
     assert_eq!(
         justfile_schema_version("receipt"),
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS
     );
 }
 
@@ -409,7 +410,7 @@ fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
     let checked_in = current_schema(
         "backup-receipt",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS,
     );
     assert_eq!(
         generated.trim_end(),
@@ -418,7 +419,7 @@ fn backup_receipt_schema_has_no_drift() {
          review the diff — a field added is a MINOR bump, a field removed or \
          retyped is a MAJOR bump (Global Constraint 12), and the receipt's \
          format_version is its own and not the scorecard's.",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS
     );
 }
 
@@ -440,7 +441,7 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         v["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-            logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS
         )
     );
     assert!(
@@ -796,5 +797,54 @@ fn the_frozen_1_4_0_receipt_schema_is_still_prod_01_3s() {
     assert_eq!(
         logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY,
         "1.5.0"
+    );
+}
+
+/// **PROD-01.4a: PROD-03.0's 1.5.0 receipt schema is FROZEN** beside the 1.6.0
+/// one. It still describes every receipt signed before PROD-01.4a: it names
+/// itself 1.5.0, carries `schema_dependency`, `topic_configuration` and the
+/// five auth modes, and does NOT describe `generations`. `just schema` no
+/// longer regenerates it.
+#[test]
+fn the_frozen_1_5_0_receipt_schema_is_still_prod_03_0s() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.5.0.json"
+    ))
+    .expect("the frozen 1.5.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.5.0.json"
+    );
+    assert!(frozen["properties"]["schema_dependency"].is_object());
+    assert!(frozen["properties"]["topic_configuration"].is_object());
+    assert!(
+        frozen["properties"].get("generations").is_none(),
+        "the frozen 1.5.0 schema must not describe the 1.6.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
+    assert!(current["properties"]["generations"].is_object());
+    assert!(
+        !current["required"]
+            .as_array()
+            .expect("a required array")
+            .iter()
+            .any(|r| r == "generations"),
+        "generations is OPTIONAL: every receipt before 1.6.0 lacks it and must still validate"
+    );
+    let identity = &current["definitions"]["TopicIdentity"];
+    for field in [
+        "topic_id",
+        "topic_id_after",
+        "topic_id_source",
+        "topic_id_reason",
+        "topic_id_after_reason",
+    ] {
+        assert!(identity["properties"][field].is_object(), "{field}");
+    }
+    assert_eq!(
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS,
+        "1.6.0"
     );
 }

@@ -72,7 +72,22 @@
 //! present. ABSENT means NOT ASSESSED for every topic, never "not
 //! schema-dependent" ([`SchemaDependency::of`]). Every receipt this build signs
 //! carries it, so every one is written as
-//! [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`].
+//! [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`] or later.
+//!
+//! # 1.6.0: the topic's ID before and after the engine (PROD-01.4a)
+//!
+//! `generations` records, per named topic, the topic ID (KIP-516) Logweir's
+//! own DescribeTopics read returned immediately before the engine
+//! (`topic_id`) and immediately after it (`topic_id_after`), in Kafka's text
+//! form, or `null` with the reason ([`TopicIdentity`]). It is what tells a
+//! topic deleted and recreated under the same name — a NEW generation, whose
+//! offsets mean other records — from the same topic
+//! (`crate::topic_identity`). ABSENT (every receipt before 1.6.0) means the
+//! generation is UNKNOWN for every topic, never "the same". Arms 36-40 read
+//! it, and only when it is present. Every receipt this build signs carries
+//! it, so every one is written as [`FORMAT_VERSION_WITH_GENERATIONS`].
+//! PROD-02.1 extends the same block with the offset observation and the
+//! lineage of decision §3.2.
 //!
 //! # A backup that produces no verifiable evidence is a backup an auditor has
 //! # to take Logweir's word for
@@ -214,6 +229,70 @@ pub struct BackupReceipt {
     /// absent, so an older document round-trips byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_dependency: Option<BTreeMap<String, TopicSchemaDependency>>,
+    /// **Format 1.6.0 (PROD-01.4a).** Per named topic, the topic ID Logweir's
+    /// own DescribeTopics read returned before the engine and after it, or
+    /// why there is none ([`TopicIdentity`]). One entry per `source.topics`
+    /// entry and no others (arm 37).
+    ///
+    /// ABSENT means the generation of every topic is UNKNOWN — every receipt
+    /// before 1.6.0 — and never "the same as the previous point":
+    /// `crate::topic_identity::between` reads an absent block as
+    /// `NotEstablished`. Appended LAST and skipped when absent, so an older
+    /// document round-trips byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generations: Option<BTreeMap<String, TopicIdentity>>,
+}
+
+/// **PROD-01.4a, receipt 1.6.0.** What one run observed about one topic's
+/// identity: the topic ID (KIP-516) before the engine and after it.
+///
+/// # Where each part comes from
+///
+/// Logweir's OWN DescribeTopics read of the source (`logweir-rdkafka-ffi`,
+/// OD-6 (a2)), through the engine's principal: once immediately before the
+/// engine starts, once immediately after it exits. The text is Kafka's, the
+/// one `kafka-topics.sh --describe` prints, derived from the ID's two halves
+/// (`crate::topic_identity::topic_id_text`). Kafka's two reserved IDs, which
+/// no topic is ever given, are never written: the all-zero ID — Kafka's "no
+/// ID", a cluster below inter-broker protocol 2.8 — becomes `null` with
+/// `noTopicId`, and `AAAAAAAAAAAAAAAAAAAAAQ` (`Uuid.ONE_UUID`,
+/// `METADATA_TOPIC_ID`) `null` with `reservedTopicId`.
+///
+/// | field | present | meaning |
+/// |---|---|---|
+/// | `topic_id` | always, possibly `null` | the ID before the engine |
+/// | `topic_id_after` | always, possibly `null` | the ID after it; a different non-null value means the topic was recreated WHILE the engine ran |
+/// | `topic_id_source` | exactly when an ID is recorded (arm 40) | `describeTopics` (this build), or `engineManifest` (decision §6.3, not written by this build) |
+/// | `topic_id_reason` | exactly when `topic_id` is `null` (arm 39) | why: `noTopicId`, `notAuthorized`, `topicNotFound`, `readFailed`, `notRead` or `reservedTopicId` |
+/// | `topic_id_after_reason` | exactly when `topic_id_after` is `null` (arm 39) | the same, for the read after the engine |
+///
+/// `null` means UNKNOWN, never "the same" (decision §3.1): a reason says why,
+/// so a refused read (`notAuthorized`) is never mistaken for a broker that has
+/// no IDs (`noTopicId`). A reader reads an absent `topic_id` or
+/// `topic_id_after` as `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TopicIdentity {
+    /// The topic ID before the engine, or `null`. Kafka's text: 22 URL-safe
+    /// base64 characters, the last of which carries two bits (arm 38 also
+    /// refuses Kafka's reserved IDs, which the pattern cannot).
+    #[serde(default)]
+    #[schemars(regex(pattern = r"^[A-Za-z0-9_-]{21}[AQgw]$"))]
+    pub topic_id: Option<String>,
+    /// The topic ID after the engine, or `null`; the same form.
+    #[serde(default)]
+    #[schemars(regex(pattern = r"^[A-Za-z0-9_-]{21}[AQgw]$"))]
+    pub topic_id_after: Option<String>,
+    /// Where the recorded IDs came from: `describeTopics` or
+    /// `engineManifest` (`crate::topic_identity::TOPIC_ID_SOURCES`). Present
+    /// exactly when at least one ID is recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id_source: Option<String>,
+    /// Why `topic_id` is `null` (`crate::topic_identity::TOPIC_ID_REASONS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id_reason: Option<String>,
+    /// Why `topic_id_after` is `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id_after_reason: Option<String>,
 }
 
 /// **PROD-03.0, receipt 1.5.0.** What the archived bytes of ONE topic say
@@ -322,7 +401,7 @@ impl SchemaDependency {
 
 /// **PROD-03.0.** The `format_version` of a receipt that carries
 /// `schema_dependency` — the MINOR after PROD-01.3's 1.4.0. Every receipt this
-/// build signs carries the block, so every one is 1.5.0
+/// build signs carries the block, so every one is 1.5.0 or later
 /// ([`format_version_for`]); 1.5.0 defines every earlier minor's fields and
 /// values. An older reader ignores the field inside major 1 and reads the
 /// document under it.
@@ -379,9 +458,11 @@ pub const CONFIG_SOURCES: [&str; 6] = [
 
 /// **PROD-05.1.** The `format_version` of a receipt that carries
 /// `topic_configuration` — the MINOR after FX-7's 1.2.0. Every receipt this
-/// build signs carries the block, pinned or not, so every one is 1.3.0
-/// ([`format_version_for`]); a 1.0.0, 1.1.0 or 1.2.0 reader ignores the field
-/// inside major 1 and reads the document under it.
+/// build signs carries the block, pinned or not; until PROD-01.4a that made
+/// every one 1.3.0, and since then every one is
+/// [`FORMAT_VERSION_WITH_GENERATIONS`] ([`format_version_for`]). A 1.0.0,
+/// 1.1.0 or 1.2.0 reader ignores the field inside major 1 and reads the
+/// document under it.
 pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
 
 /// The first minor of format 1 that defines `topic_configuration` (arm 12). A
@@ -770,6 +851,22 @@ pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 /// `docs/verify_scorecard.py`'s `RECEIPT_AUTH_MODES_SINCE_MINOR` follows it.
 pub const AUTH_MODES_SINCE_MINOR: u64 = 4;
 
+/// **PROD-01.4a.** The `format_version` of a receipt that carries
+/// `generations` — a MINOR bump over [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`]
+/// (PROD-03.0's 1.5.0) under OD-7 (a): arms 36-40 read only the new optional
+/// block, so every document without it is decided exactly as before, and an
+/// older reader ignores the field inside major 1. Every receipt this build
+/// signs carries the block, so every one is 1.6.0; it includes every earlier
+/// minor.
+pub const FORMAT_VERSION_WITH_GENERATIONS: &str = "1.6.0";
+
+/// The first minor of format 1 that defines `generations` (arm 36). A
+/// renumber moves this, [`FORMAT_VERSION_WITH_GENERATIONS`] and
+/// `docs/verify_scorecard.py`'s `RECEIPT_GENERATIONS_SINCE_MINOR` together;
+/// `tests/backup_receipt.rs::the_written_version_defines_generations` keeps
+/// them coherent.
+pub const GENERATIONS_SINCE_MINOR: u64 = 6;
+
 /// The version id a reader may PIN, out of what a store answered.
 ///
 /// `None` for no answer, for a blank one, and for S3's literal `"null"` — the
@@ -796,14 +893,21 @@ pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
 /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] when it pins the manifest's
 /// version, else [`RECEIPT_FORMAT_VERSION`] — FX-4's 1.1.0. The ONE place a
 /// writer decides it.
+///
+/// [`FORMAT_VERSION_WITH_GENERATIONS`] (PROD-01.4a) comes first: a receipt
+/// carrying `generations` is 1.6.0, which defines every earlier minor's
+/// fields. Every receipt this build signs carries it.
 #[must_use]
 pub fn format_version_for(
     archive: &ReceiptArchive,
     topic_configuration: bool,
     schema_dependency: bool,
     auth: &ReceiptAuth,
+    generations: bool,
 ) -> &'static str {
-    if schema_dependency {
+    if generations {
+        FORMAT_VERSION_WITH_GENERATIONS
+    } else if schema_dependency {
         FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
     } else if crate::connection::is_prod_01_3_auth_mode(&auth.mode) {
         FORMAT_VERSION_WITH_AUTH_MODES
@@ -971,6 +1075,26 @@ impl BackupReceipt {
     ///     `crate::schema_dependency::dependent_by_share(framed, unframed)`.
     /// 29. a judged topic is `schemaDependent` exactly when a side is
     ///     dependent.
+    ///
+    /// Arms 36-40 (format 1.6.0, PROD-01.4a) read `generations` — with
+    /// `source.topics` as its context — and run only when it is present, so
+    /// every document without it is decided exactly as before. Topics in name
+    /// order; per topic, arms 38, 39 and 40, each over `topic_id` then
+    /// `topic_id_after`:
+    ///
+    /// 36. `generations` is present only under a minor of at least 6.
+    /// 37. it covers exactly `source.topics`.
+    /// 38. every recorded ID is canonical (`crate::topic_identity::is_canonical`):
+    ///     22 URL-safe base64 characters over 16 bytes, never one of Kafka's
+    ///     reserved IDs (zero, `AAAAAAAAAAAAAAAAAAAAAQ`).
+    /// 39. a reason is present exactly when its ID is `null`, from the closed
+    ///     set.
+    /// 40. `topic_id_source` is present exactly when an ID is recorded, from
+    ///     the closed set.
+    ///
+    /// Two different recorded IDs are NOT refused: they are a fact the run
+    /// observed (the topic was recreated while the engine ran), which a reader
+    /// reports (`crate::topic_identity::within_capture`).
     pub fn validate_invariants(&self) -> Result<(), String> {
         // ARM 1. GC12 for this document: a reader refuses a major it has
         // never seen rather than guessing at a shape.
@@ -1555,6 +1679,100 @@ impl BackupReceipt {
                             entry.verdict
                         ));
                     }
+                }
+            }
+        }
+        // ARMS 36-40 (format 1.6.0, PROD-01.4a): the `generations` block, and
+        // only when it is present. Every earlier receipt is decided exactly as
+        // before. Topics in name order (the map's own).
+        if let Some(generations) = &self.generations {
+            // ARM 36. A document that declares a minor before 6 cannot carry
+            // a 1.6 field.
+            let minor = parse_semver(&self.format_version).map_or(0, |(_, minor, _)| minor);
+            if minor < GENERATIONS_SINCE_MINOR {
+                return Err(format!(
+                    "generations is present but format_version {:?} predates it: the field \
+                     is defined from 1.{GENERATIONS_SINCE_MINOR}.0",
+                    self.format_version
+                ));
+            }
+            // ARM 37. The observed set and the named set are the same set —
+            // the twin of arms 3, 7 and 14.
+            let observed: std::collections::BTreeSet<&str> =
+                generations.keys().map(String::as_str).collect();
+            if observed != named_topics {
+                return Err(format!(
+                    "generations covers {} but the named topic set is {}",
+                    render_set(&observed),
+                    render_set(&named_topics)
+                ));
+            }
+            for (topic, entry) in generations {
+                let reads = [
+                    ("topic_id", &entry.topic_id, &entry.topic_id_reason),
+                    (
+                        "topic_id_after",
+                        &entry.topic_id_after,
+                        &entry.topic_id_after_reason,
+                    ),
+                ];
+                // ARM 38. A recorded ID is Kafka's text form of a real ID.
+                for (field, id, _) in reads {
+                    if let Some(id) = id {
+                        if !crate::topic_identity::is_canonical(id) {
+                            return Err(format!(
+                                "generations[{topic:?}].{field} {id:?} is not a topic ID this \
+                                 format defines: 22 characters of URL-safe base64 without \
+                                 padding over the ID's 16 bytes, and never one of Kafka's \
+                                 reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)"
+                            ));
+                        }
+                    }
+                }
+                // ARM 39. A reason exactly when the ID is null, from the
+                // closed set: null is UNKNOWN, and the reason says why.
+                for (field, id, reason) in reads {
+                    let fits = match (id, reason) {
+                        (Some(_), None) => true,
+                        (None, Some(reason)) => {
+                            crate::topic_identity::TOPIC_ID_REASONS.contains(&reason.as_str())
+                        }
+                        _ => false,
+                    };
+                    if !fits {
+                        let rendered = match reason {
+                            Some(reason) => format!("{reason:?}"),
+                            None => "absent".to_string(),
+                        };
+                        let state = if id.is_some() { "recorded" } else { "null" };
+                        return Err(format!(
+                            "generations[{topic:?}].{field}_reason {rendered} does not fit a \
+                             {state} {field}: a reason is present exactly when the ID is null, \
+                             and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \
+                             \"readFailed\", \"notRead\" or \"reservedTopicId\""
+                        ));
+                    }
+                }
+                // ARM 40. A source exactly when an ID is recorded, from the
+                // closed set.
+                let recorded = entry.topic_id.is_some() || entry.topic_id_after.is_some();
+                let fits = match &entry.topic_id_source {
+                    Some(source) => {
+                        recorded
+                            && crate::topic_identity::TOPIC_ID_SOURCES.contains(&source.as_str())
+                    }
+                    None => !recorded,
+                };
+                if !fits {
+                    let rendered = match &entry.topic_id_source {
+                        Some(source) => format!("{source:?}"),
+                        None => "absent".to_string(),
+                    };
+                    return Err(format!(
+                        "generations[{topic:?}].topic_id_source {rendered} does not fit its \
+                         IDs: a source is present exactly when an ID is recorded, and is \
+                         \"describeTopics\" or \"engineManifest\""
+                    ));
                 }
             }
         }

@@ -687,6 +687,7 @@ mod tests {
             topic_configuration: None,
             owner_detection: None,
             schema_dependency: None,
+            generations: None,
         };
         assert_eq!(receipt.validate_invariants(), Ok(()));
     }
@@ -891,6 +892,7 @@ mod tests {
             topic_configuration: Some(m),
             owner_detection: Some(vec!["declared".into()]),
             schema_dependency: None,
+            generations: None,
         };
         assert_eq!(receipt.validate_invariants(), Ok(()));
     }

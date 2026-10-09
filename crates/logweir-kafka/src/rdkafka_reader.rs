@@ -582,6 +582,13 @@ impl ClusterReader for RdKafkaReader {
             .collect())
     }
 
+    fn topic_ids(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, crate::topic_ids::TopicIdRead)>, KafkaError> {
+        self.read_topic_ids(topics)
+    }
+
     fn replication_factors(&self, topics: &[String]) -> Result<BTreeMap<String, u32>, KafkaError> {
         if topics.is_empty() {
             return Ok(BTreeMap::new());

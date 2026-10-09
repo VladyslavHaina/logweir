@@ -34,9 +34,10 @@ pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 /// **PROD-05.1.** The format of a record whose topics carry the receipt's
 /// `topic_configuration` (`topics[].configuration`, and `topics[].partitions`
 /// from it) — the MINOR after FX-7's 1.2.0. Written exactly when the receipt
-/// is a 1.3.0 one that carries the block, which every receipt this build
-/// signs is; a record backfilled from an older receipt keeps the format it
-/// would have had (reading rule 2: an older reader ignores the fields).
+/// carries the block and nothing newer decides (every receipt PROD-05.1's
+/// builds signed, before PROD-03.0's 1.5.0); a record backfilled from an
+/// older receipt keeps the format it would have had (reading rule 2: an older
+/// reader ignores the fields).
 pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
 
 /// **PROD-01.3.** The format of a record whose `source.auth_mode` is one of the
@@ -53,12 +54,22 @@ pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 /// **PROD-03.0.** The format of a record whose topics carry the receipt's
 /// `schema_dependency` (`topics[].schema_dependency`) — copied from a receipt
 /// that is itself 1.5.0 (`logweir_core::backup_receipt::
-/// FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`), which every receipt this build
-/// signs is. A MINOR bump over [`FORMAT_VERSION_WITH_AUTH_MODES`]: one
+/// FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`), which every receipt PROD-03.0's
+/// builds signed is. A MINOR bump over [`FORMAT_VERSION_WITH_AUTH_MODES`]: one
 /// optional field, and 1.5.0 defines every earlier minor's fields and values
 /// (reading rule 2: an older reader ignores the field). A record backfilled
 /// from an older receipt keeps the format it would have had.
 pub const FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY: &str = "1.5.0";
+/// **PROD-01.4a.** The format of a record whose topics carry the receipt's
+/// `generations` entry (`topics[].identity`: the topic ID before and after the
+/// engine) — copied from a receipt that is itself 1.6.0
+/// (`logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS`). A MINOR
+/// bump over [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`]: an optional field,
+/// which an older reader ignores (reading rule 2), and a 1.6.0 record carries
+/// every earlier minor's fields. Written exactly when the receipt carries the block,
+/// which every receipt this build signs does; a record backfilled from an older
+/// receipt keeps the format it would have had.
+pub const FORMAT_VERSION_WITH_GENERATIONS: &str = "1.6.0";
 
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
@@ -174,7 +185,9 @@ pub struct CatalogPoint {
     /// [`FORMAT_VERSION_WITH_AUTH_MODES`] (`1.4.0`) for one whose
     /// `source.auth_mode` is a mode PROD-01.3 added, or
     /// [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`] (`1.5.0`) for one whose topics
-    /// carry the receipt's schema dependency (PROD-03.0). Major `1`; a higher major is
+    /// carry the receipt's schema dependency (PROD-03.0), or
+    /// [`FORMAT_VERSION_WITH_GENERATIONS`] (`1.6.0`) for one whose topics carry
+    /// the receipt's topic IDs (PROD-01.4a). Major `1`; a higher major is
     /// [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry,
     /// never fatal for the sync (D3 §5.2 rule 1).
     #[schemars(regex(pattern = r"^1\.[0-9]+\.[0-9]+$"))]
@@ -344,6 +357,20 @@ pub struct RecordTopic {
     /// that predates 1.5.0. Never read as "not schema-dependent".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_dependency: Option<logweir_core::backup_receipt::TopicSchemaDependency>,
+    /// **Format 1.6.0 (PROD-01.4a).** The receipt's `generations` entry for
+    /// this topic, copied and never recomputed: the topic ID (KIP-516)
+    /// Logweir's DescribeTopics read returned before the engine and after it,
+    /// or `null` with the reason. It is what tells a topic deleted and
+    /// recreated under the same name — a new generation, whose offsets mean
+    /// other records — from the same topic
+    /// (`logweir_core::topic_identity::by_topic_id`).
+    ///
+    /// Receipt-derived under rule 3 — `reader::cross_check` refuses a record
+    /// whose copy the receipt does not back. ABSENT means UNKNOWN (rule 2):
+    /// every record before 1.6.0, and every record derived from a receipt that
+    /// predates 1.6.0. Never read as "the same generation".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<logweir_core::backup_receipt::TopicIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

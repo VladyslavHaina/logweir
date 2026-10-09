@@ -36,9 +36,10 @@ can select a window start) and 43 (PROD-08.1a, complete coverage requested
 and shown through the CRDs, the API and the console), 44 (FX-24b, a
 client that stops reading or sending meets a stall deadline), 45 (FX-29, a
 controller no longer rewrites a status whose content has not changed), 46
-(PROD-03.0, schema-dependent topics flagged from the archived bytes) and 47
+(PROD-03.0, schema-dependent topics flagged from the archived bytes), 47
 (FX-28, a sign-in whose identity provider stalls is answered at the provider
-deadline) so far. Items continue the next entry's
+deadline) and 48 (PROD-01.4a, each topic's ID in the receipt and the catalog
+point) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -114,6 +115,11 @@ Item 47 is fix-now row FX-28, proven by rows over a loopback identity
 provider that stalls and on the built console binary; it changes the console
 only, and the PoC upgrade that carries it signs in through Dex (a stall cannot
 be simulated on the live Dex).
+Item 48 is PROD-01.4a, proven on a compose stack on the 3.7.1, 3.9.2 and 4.3.1
+broker lines against the brokers' own tools; it changes the runner's signed
+receipt and catalog record only, and the PoC upgrade that carries it runs one
+scheduled backup and checks its receipt's `generations` against the source's
+topic IDs.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1406,6 +1412,56 @@ Live: the PoC upgrade that carries this item signs in through Dex; a stall
 cannot be simulated on the live Dex.
 **Rollback:** an older console reads a stalled provider's body with no
 deadline again; nothing is stored, so nothing needs converting.
+#### 48. A backup receipt records each topic's ID before and after the engine; a recreated topic is a new generation (PROD-01.4a)
+
+**Added.** A topic deleted and created again under the same name is a new
+topic: its offsets restart at zero and mean other records. Until now no
+signed document could tell it from the same topic — the engine reads no topic
+IDs, and a recreation refilled past the old end can look continuous. `logweir
+backup run` now reads each named topic's ID (KIP-516) itself, through
+DescribeTopics, as the last read before the engine and again the moment the
+engine exits, and the receipt records both, per topic, in Kafka's own text
+(the `TopicId` `kafka-topics.sh --describe` prints), or `null` with the reason:
+`noTopicId` (a cluster below inter-broker protocol 2.8 has none),
+`notAuthorized` (refused by name, never read as absent), `topicNotFound`,
+`readFailed`, `notRead` or `reservedTopicId` (Kafka's reserved
+`AAAAAAAAAAAAAAAAAAAAAQ`, a sentinel no topic is given). Receipt and catalog
+point are format **1.6.0** (`generations`, `topics[].identity`); every receipt
+this build signs is 1.6.0. Two points' IDs decide their generation: different
+IDs are a new generation, never a continuation; equal IDs the same one only
+when the later capture's read after the engine recorded the same ID too; a
+topic whose ID changed during its own capture is flagged; and an unknown ID is
+"not established", never "the same" (`docs/formats/backup-receipt.md`). Both
+verifiers check five new arms (36–40), refuse Kafka's reserved IDs in a
+receipt and in a catalog point's copy, and print one `generations` line per
+topic; `verify_scorecard.py` is 1.25.0. DescribeTopics is the third call family in the one crate that may hold
+`unsafe` code (item 37); every other crate still forbids it. No command,
+console page or API field compares two points yet: PROD-02.1's coverage view
+is the first consumer.
+**Do:** nothing. The read needs `Describe` on each topic, which the engine's
+own read already needs; a refused or failed read is recorded and never fails
+the backup.
+**Scope:**
+- `crates/logweir-rdkafka-ffi/src/topics.rs`: unit rows for every input
+  refusal, a bounded call with no broker, librdkafka's two immediate answers,
+  and a 100,000-call soak (+0 KiB); Guard Malloc over the unit rows and
+  macOS `leaks` over the live rows;
+- `crates/logweir-kafka/src/topic_ids.rs` and
+  `crates/logweir-core/src/topic_identity.rs`: the answer mapping (a transport
+  failure is `Unreachable`, never "not found"), the canonical text from the
+  ID's two halves, and the generation rule, each with unit rows and mutants;
+- receipt arms 36–40 in both readers, twelve corpus cases, the parity gate;
+- `e2e/tests/topic_ids.rs` on the compose stack, on Kafka 3.7.1, 3.9.2 and
+  4.3.1: the product's ID equals the broker CLI's (IDs with `-` and `_`
+  included); two real backups around a delete-and-recreate give a new
+  generation for that topic and the same generation for the control topic;
+  the `acl` profile's restricted principal is refused by name; and
+  `e2e/tests/topic_identity.rs`'s oracle now requires the product's read to
+  equal the CLI's on every one of its rows.
+**Rollback:** an older runner writes 1.3.0, 1.4.0 or 1.5.0 receipts again,
+with no IDs, and its points' generations read "not established" against newer
+ones. The 1.6.0 receipts and records already written stay valid under every
+major-1 reader; readers before 1.25.0 ignore the IDs.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -1472,7 +1528,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46 and 47, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 and 48, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1502,7 +1558,8 @@ authorization); item 44 changes the console only and needs nothing; item 45
 changes the controller only (and two CRD descriptions) and needs nothing; item 46
 changes the runner's receipts and catalog records, the catalog's view (runner
 and controller), the product API and the console, and needs nothing; item 47
-changes the console only and needs nothing. To roll back to
+changes the console only and needs nothing; item 48 changes the runner's
+receipts and catalog records and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

@@ -277,15 +277,14 @@ def test_a_catalog_point_verifies_signature_only_under_its_own_payload_type():
         # scorecard: nothing about availability was checked, and the record's
         # copied facts are only worth what the receipt they name is worth.
         assert "This signature covers the record only" in r.stdout
-        assert "No invariant of this document type is evaluated" in r.stdout
+        assert "One check of this document type is evaluated by this build" in r.stdout
 
 
-def test_a_catalog_point_evaluates_no_invariant_of_its_own():
+def test_a_catalog_point_evaluates_only_its_copied_topic_ids():
     # A record that is internally absurd — a covered window running backwards,
     # a `point_id` that its own receipt digest does not imply — still verifies,
-    # because this reader makes no semantic claim about the type. The test
-    # exists so that a later build which DOES evaluate invariants has to change
-    # it deliberately rather than discovering the difference in production.
+    # because this reader makes ONE semantic claim about the type (PROD-01.4a
+    # review M1, changed deliberately): the topic IDs it copies are real ones.
     doc = dict(CATALOG_POINT)
     doc["covered"] = {"from_ms": 99, "to_ms": 1}
     doc["point_id"] = "lwp1-" + "f" * 32
@@ -293,7 +292,31 @@ def test_a_catalog_point_evaluates_no_invariant_of_its_own():
         p, s = _write_signed(d, "absurd", CATALOG_POINT_TYPE, doc)
         r = run_typed("catalog-point", p, s, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "No invariant of this document type is evaluated" in r.stdout
+        assert "No other is." in r.stdout
+
+
+def test_a_catalog_point_copying_kafkas_reserved_topic_id_is_refused():
+    # PROD-01.4a review M1: a record whose topics[].identity copies Kafka's
+    # reserved (0, 1) ID is refused, in the Rust reader's words; the control,
+    # the same record with a real ID, verifies.
+    good = dict(CATALOG_POINT)
+    good["topics"] = [{"name": "orders", "records": 1,
+                       "identity": {"topic_id": "gtOq2VXiTCK1QM2UtERijA",
+                                    "topic_id_after": "gtOq2VXiTCK1QM2UtERijA",
+                                    "topic_id_source": "describeTopics"}}]
+    bad = json.loads(json.dumps(good))
+    bad["topics"][0]["identity"]["topic_id"] = "AAAAAAAAAAAAAAAAAAAAAQ"
+    with tempfile.TemporaryDirectory() as d:
+        p, s = _write_signed(d, "good", CATALOG_POINT_TYPE, good)
+        r = run_typed("catalog-point", p, s, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        p, s = _write_signed(d, "bad", CATALOG_POINT_TYPE, bad)
+        r = run_typed("catalog-point", p, s, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            'INVALID: topics["orders"].identity.topic_id "AAAAAAAAAAAAAAAAAAAAAQ" is not a topic '
+            "ID this format defines"
+        ) in r.stderr, r.stderr
 
 
 def test_a_catalog_point_never_verifies_as_a_scorecard_or_a_receipt():
@@ -882,7 +905,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.24.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.25.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -2257,9 +2280,12 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.24.0 (PROD-03.0) adds the backup receipt's eight `schema_dependency`
     # arms (22-29, format 1.5.0), its shape check and the `schema_dependency`
     # lines. Map still five.
+    # 1.25.0 (PROD-01.4a) adds the backup receipt's five `generations` arms
+    # (36-40, format 1.6.0), its shape check and the `generations` lines. Map
+    # still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.24.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.25.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -2286,6 +2312,83 @@ def test_the_topic_configuration_minor_is_the_rust_readers():
     m = re.search(r"pub const TOPIC_CONFIGURATION_SINCE_MINOR: u64 = (\d+);", rust)
     assert m, "backup_receipt.rs no longer declares TOPIC_CONFIGURATION_SINCE_MINOR"
     assert mod.RECEIPT_TOPIC_CONFIGURATION_SINCE_MINOR == int(m.group(1))
+
+
+def test_the_generations_minor_is_the_rust_readers():
+    # Arm 36's minor is ONE number in each reader (PROD-01.4a); a renumber must
+    # move both, and the arm's message is built from it on both sides.
+    mod = _verifier_module()
+    rust = (pathlib.Path(__file__).resolve().parent.parent
+            / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    m = re.search(r"pub const GENERATIONS_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "backup_receipt.rs no longer declares GENERATIONS_SINCE_MINOR"
+    assert mod.RECEIPT_GENERATIONS_SINCE_MINOR == int(m.group(1))
+
+
+def test_the_topic_id_reasons_and_sources_are_the_rust_readers():
+    # Arms 39 and 40's closed sets are the Rust constants', read from the
+    # source, in their order (PROD-01.4a).
+    mod = _verifier_module()
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "crates/logweir-core/src/topic_identity.rs").read_text()
+    values = dict(re.findall(r'pub const ([A-Z_0-9]+): &str = "([^"]+)";', src))
+    for const, got in (("TOPIC_ID_REASONS", mod.RECEIPT_TOPIC_ID_REASONS),
+                       ("TOPIC_ID_SOURCES", mod.RECEIPT_TOPIC_ID_SOURCES)):
+        block = src.split(f"pub const {const}", 1)[1].split("];", 1)[0]
+        names = re.findall(r"\b([A-Z][A-Z_0-9]+)\b", block.split("=", 1)[1])
+        assert tuple(values[n] for n in names) == got, (const, names)
+
+
+def test_a_topic_id_is_canonical_exactly_as_the_rust_reader_says():
+    # The twin of `topic_identity.rs`'s tests: Kafka's text from PROD-01.4's
+    # measured IDs, and every shape arm 38 refuses.
+    mod = _verifier_module()
+    for good in ("gtOq2VXiTCK1QM2UtERijA", "tpWwuKExQo2lN9NziDMpYg",
+                 "NSSUDfCtRqWqyhqP5Vttsw", "Cf6zT_mcTNCoxuPmv1Ztxw",
+                 "AAAAAAAAAAAAAAAAAAAAAg"):  # (0, 2), the reserved ID's neighbour
+        assert mod._is_canonical_topic_id(good), good
+    for bad in ("Cf6zT/mcTNCoxuPmv1Ztxw",  # librdkafka's standard alphabet (C4)
+                "AAAAAAAAAAAAAAAAAAAAAA",  # Kafka's "no ID"
+                "AAAAAAAAAAAAAAAAAAAAAQ",  # Kafka's reserved ONE_UUID (review M1)
+                "gtOq2VXiTCK1QM2UtERijA==", "gtOq2VXiTCK1QM2UtERij",
+                "gtOq2VXiTCK1QM2UtERijB",  # stray trailing bits
+                "gtOq2VXiTCK1QM2UtERij.", "", None, 7):
+        assert not mod._is_canonical_topic_id(bad), bad
+
+
+def test_the_generation_lines_say_one_changed_or_unknown():
+    mod = _verifier_module()
+    assert mod._generation_lines(None) == [
+        "generations: not recorded, so no topic ID is known from this receipt and each "
+        "topic's generation is UNKNOWN, never the same as another point's"
+    ]
+    a, b = "gtOq2VXiTCK1QM2UtERijA", "tpWwuKExQo2lN9NziDMpYg"
+    lines = mod._generation_lines({
+        "same": {"topic_id": a, "topic_id_after": a, "topic_id_source": "describeTopics"},
+        "changed": {"topic_id": a, "topic_id_after": b, "topic_id_source": "describeTopics"},
+        "unknown": {"topic_id": None, "topic_id_after": None,
+                    "topic_id_reason": "noTopicId", "topic_id_after_reason": "notAuthorized"},
+    })
+    assert lines == [
+        f'generations["changed"]: topic ID CHANGED during the capture ({a} before, {b} after): '
+        "the topic was deleted and recreated while it ran, so this point mixes two generations",
+        f'generations["same"]: topic ID {a} before and after the capture (describeTopics), one '
+        "generation",
+        'generations["unknown"]: topic ID not recorded (noTopicId) before the capture and not '
+        "recorded (notAuthorized) after it, so its generation is not established by ID and is "
+        "UNKNOWN",
+    ], lines
+
+
+def test_a_generations_block_of_the_wrong_type_is_refused_at_the_shape_layer():
+    mod = _verifier_module()
+    doc = json.loads((FIX / "backup-receipt.json").read_text())
+    doc["generations"] = {"orders": {"topic_id": 7}}
+    assert mod._receipt_shape(doc) == 'generations["orders"].topic_id is not a string'
+    doc["generations"] = ["orders"]
+    assert mod._receipt_shape(doc) == "generations is not an object"
+    doc["generations"] = {"orders": None}
+    assert mod._receipt_shape(doc) == 'generations["orders"] is not an object'
 
 
 def test_the_portability_classes_and_sources_are_the_rust_readers():

@@ -607,11 +607,11 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// `BackupOutcome` -> the document. A pure projection: every field is a value
 /// the outcome already carries, and nothing here measures anything.
 ///
-/// `format_version` is `FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY` (`1.5.0`,
-/// PROD-03.0) of THIS document type (independent of the scorecard's), because
-/// this build writes `schema_dependency` on every receipt, beside
-/// `topic_configuration`, pinned or not and for every auth mode (1.5.0 defines
-/// PROD-01.3's modes too) — by
+/// `format_version` is `FORMAT_VERSION_WITH_GENERATIONS` (`1.6.0`,
+/// PROD-01.4a) of THIS document type (independent of the scorecard's), because
+/// this build writes `generations` and PROD-03.0's `schema_dependency` (1.5.0)
+/// on every receipt, beside `topic_configuration`, pinned or not and for every
+/// auth mode (1.6.0 defines PROD-01.3's modes too) — by
 /// `logweir_core::backup_receipt::format_version_for`, the one place that
 /// decides it. `source.auth` is `BackupOutcome::source_auth` rendered as the
 /// two strings `ReceiptAuth` holds — **never a password, and no field that
@@ -630,10 +630,11 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
     let auth = receipt_auth(&outcome.source_auth);
     BackupReceipt {
         // PROD-03.0: every receipt this build signs carries
-        // `schema_dependency`, so every one is 1.5.0 — which defines
-        // PROD-01.3's auth modes and PROD-05.1's block as well.
+        // `schema_dependency` (1.5.0), and since PROD-01.4a `generations` too,
+        // so every one is 1.6.0 — which defines PROD-01.3's auth modes and
+        // PROD-05.1's block as well.
         format_version: logweir_core::backup_receipt::format_version_for(
-            &archive, true, true, &auth,
+            &archive, true, true, &auth, true,
         )
         .to_string(),
         run_id: outcome.run_id.clone(),
@@ -667,8 +668,9 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         config_coverage: Some(outcome.config_coverage.clone()),
         // PROD-05.1: ALWAYS written beside `config_coverage`, so every receipt
         // this build signs carries its topics' configuration model (and is
-        // 1.5.0, for PROD-03.0's block below) — a receipt never leaves it to
-        // be read as NOT RECORDED by omission when it was observed.
+        // 1.6.0, for PROD-03.0's and PROD-01.4a's blocks below) — a receipt
+        // never leaves it to be read as NOT RECORDED by omission when it was
+        // observed.
         topic_configuration: Some(outcome.topic_configuration.clone()),
         // PROD-05.1: where the run looked for owners — written beside the
         // model, so a topic without an owner reads "not checked" when it is
@@ -679,6 +681,10 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         // registry — never left to be read as NOT ASSESSED by omission when it
         // was judged.
         schema_dependency: Some(outcome.schema_dependency.clone()),
+        // PROD-01.4a: ALWAYS written, one entry per named topic, so a receipt
+        // never leaves a topic's ID to be read as unknown by omission when it
+        // was read — and a null ID always says why.
+        generations: Some(outcome.generations.clone()),
     }
 }
 

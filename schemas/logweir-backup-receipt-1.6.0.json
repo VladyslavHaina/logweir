@@ -1,0 +1,499 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://logweir.dev/schemas/logweir-backup-receipt-1.6.0.json",
+  "title": "BackupReceipt",
+  "description": "The signed record of one `logweir backup run`.\n\nField order is the document's own serialisation order (`serde_json` is built with `preserve_order`, so declaration order IS byte order through `crate::det_json::to_deterministic_json`). Do not reorder without regenerating the current receipt schema (`just schema`; the 1.0.0 and 1.1.0 files are frozen) and re-minting `e2e/fixtures/signed/backup-receipt.json`.",
+  "type": "object",
+  "required": [
+    "archive",
+    "backup_id",
+    "covered",
+    "engine",
+    "exit_code",
+    "finished_at",
+    "format_version",
+    "records",
+    "requested_at",
+    "run_id",
+    "source",
+    "started_at",
+    "triggered_by"
+  ],
+  "properties": {
+    "archive": {
+      "$ref": "#/definitions/ReceiptArchive"
+    },
+    "backup_id": {
+      "description": "The engine's own identifier for the archive this run wrote. Distinct from `run_id`: two runs can be asked to append to one backup set, and `archive.manifest_key` is keyed on THIS.",
+      "type": "string"
+    },
+    "config_coverage": {
+      "description": "**Format 1.1.0 (FX-4).** Per named topic, whether the archive's record of the topic's configuration was captured, and the topic's EFFECTIVE `message.timestamp.type` with where that value came from. One entry per `source.topics` entry and no others (arm 7).\n\nABSENT means UNKNOWN for every topic — the state of every receipt written before 1.1.0 — and is never read as `captured`: a reader goes through [`SourceConfigCoverage`], whose answer for an absent block is [`ConfigCoverage::Unknown`]. Appended LAST (declaration order is byte order) and skipped when absent, so a 1.0.0 document round-trips byte-for-byte.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/TopicConfigCoverage"
+      },
+      "nullable": true
+    },
+    "covered": {
+      "$ref": "#/definitions/ReceiptCovered"
+    },
+    "engine": {
+      "$ref": "#/definitions/ReceiptEngine"
+    },
+    "exit_code": {
+      "description": "The engine's exit status, as `crate::engine::BackupFacts` measured it — NOT the `logweir` process's own exit code, which maps through Global Constraint 11. Invariant 2 below is the biconditional that makes this field mean something: a receipt for a failed backup names no manifest.",
+      "type": "integer",
+      "format": "int32"
+    },
+    "finished_at": {
+      "description": "When the engine subprocess finished.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "format_version": {
+      "description": "Semver of THIS format — [`RECEIPT_FORMAT_VERSION`] (`1.1.0`) since FX-4, or [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] (`1.2.0`) for a receipt that pins `archive.manifest_version_id` (FX-7); `1.0.0` before FX-4. Independent of the scorecard's.\n\nThe schema PINS the major with a pattern rather than leaving the field an unconstrained string, for the reason `crate::scorecard::Scorecard::format_version` records: without it a document reading `\"9.9.9\"` validated cleanly against the file named `logweir-backup-receipt-1.0.0.json`, so a schema-only validator — the one route that does not go through `validate_invariants` — accepted exactly the document GC12 exists to refuse. Any `1.x.y` is allowed, because a MINOR bump adds optional fields only and a 1.0.0 reader must still read it.",
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$"
+    },
+    "generations": {
+      "description": "**Format 1.6.0 (PROD-01.4a).** Per named topic, the topic ID Logweir's own DescribeTopics read returned before the engine and after it, or why there is none ([`TopicIdentity`]). One entry per `source.topics` entry and no others (arm 37).\n\nABSENT means the generation of every topic is UNKNOWN — every receipt before 1.6.0 — and never \"the same as the previous point\": `crate::topic_identity::between` reads an absent block as `NotEstablished`. Appended LAST and skipped when absent, so an older document round-trips byte for byte.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/TopicIdentity"
+      },
+      "nullable": true
+    },
+    "owner_detection": {
+      "description": "**Format 1.3.0 (PROD-05.1).** WHERE the run looked for declarative owners: `declared` (the plan carried `source.topic_owners`) and/or `kafkaTopicResources` (it was given Strimzi `KafkaTopic` resources), from the closed set `crate::topic_configuration::OWNER_DETECTION_SOURCES` (arm 20), each at most once. EMPTY means the run looked nowhere: a topic without an `owner` then has an owner NOT CHECKED, and a reader never says it is applied through the admin API. Every owner's basis names a source listed here (arm 21). Present only beside `topic_configuration`; ABSENT reads as empty.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "nullable": true
+    },
+    "records": {
+      "description": "Records captured, per topic. Invariant 3 requires exactly one entry per `source.topics` entry and no others: a receipt that counts a topic the run was never asked to back up, or omits one it was, is describing some other run.\n\nA `BTreeMap`, so the key order is the topic names' own order and two runs over the same topic set produce byte-identical bytes here.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0.0
+      }
+    },
+    "requested_at": {
+      "description": "When the run was requested — the same clock reading `Scorecard::requested_at` carries.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "run_id": {
+      "description": "ULID of the run that produced this receipt. Also the object key stem in the evidence bucket, exactly as `Scorecard::run_id` is.",
+      "type": "string"
+    },
+    "schema_dependency": {
+      "description": "**Format 1.5.0 (PROD-03.0).** Per named topic, whether the archived records carry Confluent wire-format framing — magic byte 0 and a schema id — so that an application needs the schema registry that issued those ids to read them after a restore. Judged by Logweir from the archived segment bytes this run wrote, never from a registry (Logweir contacts none), with keys and values judged separately (`crate::schema_dependency` is the detection contract). One entry per `source.topics` entry and no others (arm 23).\n\nNo registry is ever captured (`docs/stability.md` Never #2), so a `schemaDependent` topic reads \"schema-dependent, registry not captured\" on every surface.\n\nABSENT means NOT ASSESSED for every topic — every receipt before 1.5.0 — and never \"not schema-dependent\". [`SchemaDependency::of`] states that rule in one place (it answers [`SchemaDependency::NotAssessed`] for an absent block or entry); each surface — the two verifiers, the catalog rule-3 check, the API and the console — applies the same rule itself and holds it with its own row. Appended LAST and skipped when absent, so an older document round-trips byte for byte.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/TopicSchemaDependency"
+      },
+      "nullable": true
+    },
+    "source": {
+      "$ref": "#/definitions/ReceiptSource"
+    },
+    "started_at": {
+      "description": "When the engine subprocess started. Logweir-measured, never engine-reported (`crate::engine::BackupFacts`): `backup` has no `--format` and writes no report file.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "topic_configuration": {
+      "description": "**Format 1.3.0 (PROD-05.1).** Per named topic, the configuration model a restore rebuilds the topic from: partition count, replication factor, the recorded configuration entries with their portability, and the declarative owner. One entry per `source.topics` entry and no others (arm 14); requires `config_coverage` (arm 13), whose read it shares.\n\nABSENT means NOT RECORDED for every topic — every receipt before 1.3.0 — and never \"no configuration\": a reader that needs a topic's settings then has none, and says so. Appended LAST and skipped when absent, so an older document round-trips byte for byte.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/TopicConfiguration"
+      },
+      "nullable": true
+    },
+    "triggered_by": {
+      "description": "Free text from `--triggered-by`. Deliberately **not** a metric label: unbounded cardinality, for the reason `Scorecard::triggered_by` records.",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ConfigEntry": {
+      "description": "One recorded configuration entry: the value in force, where it came from, and its portability class.",
+      "type": "object",
+      "required": [
+        "portability",
+        "source"
+      ],
+      "properties": {
+        "portability": {
+          "description": "One of `crate::topic_configuration::PORTABILITY_CLASSES`: `inherited` exactly when the source is not the topic's override (arm 17), else the table's class for the key.",
+          "type": "string"
+        },
+        "source": {
+          "description": "One of [`CONFIG_SOURCES`]; `dynamicTopicConfig` is the topic's own explicit override.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value. ABSENT exactly when `portability` is `secret` (arm 17): a sensitive entry is recorded by key, never by value.",
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "EffectiveConfigValue": {
+      "description": "One configuration value as the broker reported it: the value in force and where it came from.",
+      "type": "object",
+      "required": [
+        "source",
+        "value"
+      ],
+      "properties": {
+        "source": {
+          "description": "One of [`CONFIG_SOURCES`]. `dynamicTopicConfig` is a topic override; every other named source is the broker's.",
+          "type": "string"
+        },
+        "value": {
+          "description": "For `timestamp_type`: `CreateTime` or `LogAppendTime` ([`TIMESTAMP_TYPES`]).",
+          "type": "string"
+        }
+      }
+    },
+    "ReceiptArchive": {
+      "description": "What was written, and where. The two fields an auditor needs in order to go and look: the manifest's key, and a digest over the exact manifest bytes THIS RUN READ BACK (not over bytes Logweir remembers writing) — and, on a versioned bucket, WHICH VERSION of that key those bytes were.",
+      "type": "object",
+      "required": [
+        "manifest_key",
+        "manifest_sha256",
+        "prefix"
+      ],
+      "properties": {
+        "manifest_key": {
+          "description": "Empty **if and only if** the backup did not exit 0 — invariant 2.",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "description": "`\"sha256:<hex>\"` over the manifest bytes read back after the run.",
+          "type": "string"
+        },
+        "manifest_version_id": {
+          "description": "**FX-7, format `1.2.0`.** The object store's VERSION id for the manifest bytes this run read back — present only when the store answered that read with one, i.e. on a bucket with versioning enabled.\n\n**ABSENT means \"no version was pinned\"**: an unversioned bucket (whose objects carry no version id, or S3's literal `null`, which names an object an overwrite replaces in place), or a receipt written before this field existed. Never read as \"version zero\" and never inferred.\n\nA reader that finds it compares the key's CURRENT version with it: a different current version means the backup set was written again after this receipt was signed, which the manifest digest alone cannot see — engine 0.21.0 rewrites a set's segments in place and can leave the manifest bytes identical. And it can read THIS version by id, which a versioned bucket retains whatever the current one is.\n\nAbsent when `None`, and that is the compatibility argument: declaration order is byte order, and an absent field writes nothing, so a receipt without a pin is byte-for-byte the [`RECEIPT_FORMAT_VERSION`] document it would be without FX-7.",
+          "type": "string",
+          "nullable": true
+        },
+        "prefix": {
+          "description": "The object-store prefix everything this run wrote lives under. GC6: Logweir writes only under its own `logweir/` prefix.",
+          "type": "string"
+        }
+      }
+    },
+    "ReceiptAuth": {
+      "description": "How the source client was told to authenticate. **Never a password, and no field that could hold one** — the render-side twin of `crate::engine::AuthRender`, whose doc comment states the same rule for the same reason: the secret reaches the engine through its own `${VAR}` environment expansion and is never interpolated by us, so it can never be interpolated into a document we then sign and publish.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "description": "**A CLOSED SET, VERSIONED: `\"plaintext\"` or `\"scramSha512\"` in every format, and from 1.4.0 also `\"scramSha256\"`, `\"plain\"` or `\"mtls\"` (PROD-01.3).** Any other value — or a new value under a format that predates it — is refused by BOTH readers (arm 5 below, and `docs/verify_scorecard.py::check_backup_receipt_invariants`'s mirror), so a receipt naming an undefined spelling is never signed and never verifies.\n\nThese are `logweir_core::spec::AuthSpec`'s serde tag values, which is what makes ONE spelling possible at all: they are the strings an adopter writes in a spec, `KafkaCluster.spec.auth.mode`'s CRD enum byte for byte, the only values `AuthSpec::mode_str()` can return, and — since Task 17 copies this field — what `Backup.status.auth.mode`'s CRD description promises. A `String` and not an enum on the wire because a reader must be able to REPORT a value it refuses; the closed set is enforced by the arm, where both readers can state it in the same words.",
+          "type": "string"
+        },
+        "username": {
+          "description": "The SASL username, when there is one. `null` under `plaintext` — which is not the same as an empty username — and under `mtls`, whose identity is the client certificate.",
+          "default": null,
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "ReceiptCovered": {
+      "description": "The time range the archive covers, in **EPOCH MILLISECONDS**, as a HALF-OPEN interval: `from_ms` is inclusive, `to_ms` is EXCLUSIVE.\n\n# The end is exclusive, and both documents now say so (I22)\n\n`config/crd/backups.yaml` documents `Backup.status.windowCovered.toMs` as the exclusive end, and Task 17 copies these two numbers into it. Task 5 shipped invariant 4 as `<=` — accepting `from_ms == to_ms` as an \"instantaneous window\" — which made the receipt and the CRD two descriptions of one range under rules that disagreed. Invariant 4 is now strict, and `crates/logweir/src/backup/phase_run.rs` converts the manifest's inclusive newest `end_timestamp` to an exclusive bound in the one place that measures it.\n\n# Not RFC 3339, and this is the interface, not a preference (I22)\n\n`Backup.status.windowCovered{fromMs,toMs}` mirrors this shape as two `int64`s, and a Kubernetes status subresource has no date-time type to mirror a string into. Two representations of one window — a string here and an integer there — would need a conversion nobody owns, and the first disagreement between them would be invisible: both would still be well-formed. So the receipt speaks the operator's units, and the operator copies the numbers.",
+      "type": "object",
+      "required": [
+        "from_ms",
+        "to_ms"
+      ],
+      "properties": {
+        "from_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "to_ms": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "ReceiptEngine": {
+      "description": "The pinned engine that took the backup. `digest` is why this block is worth signing: GC7 pins by digest and never by tag, and a receipt that named only a version would be satisfied by any binary claiming it.",
+      "type": "object",
+      "required": [
+        "digest",
+        "id",
+        "version"
+      ],
+      "properties": {
+        "digest": {
+          "description": "`\"sha256:…\"`, from `third_party/kafka-backup-binary.digest`.",
+          "type": "string"
+        },
+        "id": {
+          "description": "`\"oso-cli\"`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "`\"v0.21.0\"` — at or above the GC8 floor.",
+          "type": "string"
+        }
+      }
+    },
+    "ReceiptSource": {
+      "description": "The SOURCE cluster, as measured — never as a spec claimed it.",
+      "type": "object",
+      "required": [
+        "auth",
+        "bootstrap_servers",
+        "cluster_id",
+        "topics"
+      ],
+      "properties": {
+        "auth": {
+          "$ref": "#/definitions/ReceiptAuth"
+        },
+        "bootstrap_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cluster_id": {
+          "description": "Read from the broker at phase −1, never from the spec. GC18(c)'s fourth rail records the source `cluster_id` and re-asserts it is not the restore target; this is where the recorded value is attested.",
+          "type": "string"
+        },
+        "topics": {
+          "description": "The named topic allowlist the run was given. GC18(c) rail 1: a named set with no glob metacharacter (**G-GLOB**), so this list is the exact set of topics, not a pattern that a reader would have to re-expand against a cluster it cannot see.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "SideFraming": {
+      "description": "One side (the keys, or the values) of one topic's judged records.\n\nEvery judged record counts once on each side: as `framed`, `unframed` or `nulls` (a null key, or a null value — a tombstone). `nulls` never count toward the share: a side is `dependent` exactly when at least one record is framed and at least one in [`crate::schema_dependency::DEPENDENT_SHARE_DENOMINATOR`] of its NON-NULL records is (arm 28).",
+      "type": "object",
+      "required": [
+        "dependent",
+        "framed",
+        "nulls",
+        "schema_id_count",
+        "schema_ids",
+        "unframed"
+      ],
+      "properties": {
+        "dependent": {
+          "description": "Whether this side depends on the registry, by the threshold above.",
+          "type": "boolean"
+        },
+        "framed": {
+          "description": "Records whose bytes on this side are framed ([`crate::schema_dependency::framed_schema_id`]).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "nulls": {
+          "description": "Records with no bytes on this side: a null key, or a null value.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "schema_id_count": {
+          "description": "How many distinct schema ids the framed records name, listed or not.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "schema_ids": {
+          "description": "The distinct schema ids the framed records name, ascending, at most [`crate::schema_dependency::SCHEMA_IDS_LISTED`] — the smallest ones when more were seen (arm 27).",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        },
+        "unframed": {
+          "description": "Non-null records whose bytes on this side are not framed.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TopicConfigCoverage": {
+      "description": "What Logweir established about ONE topic's configuration at capture (receipt 1.1.0, FX-4).\n\n# Where the answer comes from\n\nLogweir's OWN DescribeConfigs read of the topic, taken by `logweir backup run` immediately before the engine starts, through the same principal the engine uses — NOT the engine's capture, which is non-fatal, all-or-nothing across the run's topics and invisible in the manifest. That read is then compared with the manifest the engine wrote:\n\n| `coverage` | `reason` | meaning | |---|---|---| | `captured` | — | the read succeeded AND the manifest's `configurations` for this topic equal the explicit overrides the engine captures (its own filter: topic-override source, not read-only, not sensitive, on its allowlist). The manifest is a complete record of them, so a configuration parity check may compare against it. | | `captureDenied` | — | the broker's authorizer refused the read (`TOPIC_AUTHORIZATION_FAILED`). The engine runs as the same principal, so an empty manifest record says nothing. | | `notCaptured` | `describeFailed` | the read failed for any other reason (a timeout, an unknown topic, a broker error). | | `notCaptured` | `manifestDiffers` | the read succeeded but the manifest does not record the same overrides — the engine's own capture failed (one denied topic empties them all), or the configuration changed between the two reads. |\n\nOverrides outside the engine's allowlist are never part of the claim: `captured` says the ARCHIVE's configuration record is complete, not that every setting of the topic was archived (that is PROD-05.1's portability table).\n\nStrings on the wire, not enums, for the reason `ReceiptAuth::mode` gives: a reader must be able to REPORT a value it refuses. The closed sets are enforced by arms 8, 9 and 11 in both readers.",
+      "type": "object",
+      "required": [
+        "coverage"
+      ],
+      "properties": {
+        "coverage": {
+          "description": "`captured`, `notCaptured` or `captureDenied` — [`COVERAGE_VALUES`].",
+          "type": "string"
+        },
+        "reason": {
+          "description": "`describeFailed` or `manifestDiffers` — [`NOT_CAPTURED_REASONS`] — present exactly when `coverage` is `notCaptured` (arm 9).",
+          "type": "string",
+          "nullable": true
+        },
+        "timestamp_type": {
+          "description": "The topic's EFFECTIVE `message.timestamp.type` as Logweir's read returned it, and where that value came from — the broker-default arm of FX-8, which the manifest cannot carry (the engine keeps explicit overrides only). ABSENT when the read did not succeed (arm 10) or the broker returned no such entry: the timestamp type is then NOT RECORDED, never assumed `CreateTime`.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/EffectiveConfigValue"
+            }
+          ],
+          "nullable": true
+        }
+      }
+    },
+    "TopicConfiguration": {
+      "description": "**PROD-05.1, receipt 1.3.0.** One topic's configuration model: what a restore needs to rebuild the topic rather than leave it to a target broker's defaults.\n\n# Where each part comes from\n\n- `partitions`: the ARCHIVE's record, the manifest's `original_partition_count` — the manifest this run read back and digested, so the count a restore creates the topic with. ABSENT when the manifest does not record one, never `0`. - `replication_factor`: Logweir's OWN metadata read of the source, through the engine's principal, immediately before the engine — the SMALLEST replica count of the topic's partitions (a partition mid-reassignment also lists the replicas being added). Only where that read named no factor for the topic does the manifest's `source_replication_factor` stand, and engine 0.23.3 records that for the first topic it saves only (`merge_manifests` drops it from every later save) unless it is Logweir's build `0.23.3+logweir.2` or later, whose patch 0002 records every topic's (FX-21). When the metadata read is unavailable — it failed, or the reader cannot answer — the run logs a warning and records the factor only where the manifest has one: for every other topic it is ABSENT, NOT RECORDED, never `0` and never the target's. - `entries`: Logweir's OWN DescribeConfigs read before the engine — the same read as `config_coverage` — filtered by `crate::topic_configuration::records`: every explicit override, and the effective value of every semantic key. Present exactly when that read succeeded (arm 15); a `captureDenied` or `describeFailed` topic records none, which reads as NOT RECORDED, never as \"no overrides\". - `owner`: the plan's declaration (`source.topic_owners`), or a Strimzi `KafkaTopic` resource the run was given. A topic with an owner is restored by exporting desired state for that owner, never through the admin API around it. A topic WITHOUT one has \"no owner found\" only where the receipt's `owner_detection` says the run looked; where it is empty, the owner was NOT CHECKED.",
+      "type": "object",
+      "properties": {
+        "entries": {
+          "description": "The recorded configuration entries, by key. ABSENT when the read did not succeed; present and possibly empty when it did.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/ConfigEntry"
+          },
+          "nullable": true
+        },
+        "owner": {
+          "description": "The topic's declarative owner, when one manages it.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TopicOwner"
+            }
+          ],
+          "nullable": true
+        },
+        "partitions": {
+          "description": "The source's partition count, as the archive's manifest records it.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0,
+          "nullable": true
+        },
+        "replication_factor": {
+          "description": "The source's replication factor: Logweir's own metadata read before the engine (the smallest replica count of the topic's partitions), else the manifest's where that read named none. When the read is unavailable the run warns and the manifest's factor stands where it has one. ABSENT when neither names one — NOT RECORDED, never `0`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0,
+          "nullable": true
+        }
+      }
+    },
+    "TopicIdentity": {
+      "description": "**PROD-01.4a, receipt 1.6.0.** What one run observed about one topic's identity: the topic ID (KIP-516) before the engine and after it.\n\n# Where each part comes from\n\nLogweir's OWN DescribeTopics read of the source (`logweir-rdkafka-ffi`, OD-6 (a2)), through the engine's principal: once immediately before the engine starts, once immediately after it exits. The text is Kafka's, the one `kafka-topics.sh --describe` prints, derived from the ID's two halves (`crate::topic_identity::topic_id_text`). Kafka's two reserved IDs, which no topic is ever given, are never written: the all-zero ID — Kafka's \"no ID\", a cluster below inter-broker protocol 2.8 — becomes `null` with `noTopicId`, and `AAAAAAAAAAAAAAAAAAAAAQ` (`Uuid.ONE_UUID`, `METADATA_TOPIC_ID`) `null` with `reservedTopicId`.\n\n| field | present | meaning | |---|---|---| | `topic_id` | always, possibly `null` | the ID before the engine | | `topic_id_after` | always, possibly `null` | the ID after it; a different non-null value means the topic was recreated WHILE the engine ran | | `topic_id_source` | exactly when an ID is recorded (arm 40) | `describeTopics` (this build), or `engineManifest` (decision §6.3, not written by this build) | | `topic_id_reason` | exactly when `topic_id` is `null` (arm 39) | why: `noTopicId`, `notAuthorized`, `topicNotFound`, `readFailed`, `notRead` or `reservedTopicId` | | `topic_id_after_reason` | exactly when `topic_id_after` is `null` (arm 39) | the same, for the read after the engine |\n\n`null` means UNKNOWN, never \"the same\" (decision §3.1): a reason says why, so a refused read (`notAuthorized`) is never mistaken for a broker that has no IDs (`noTopicId`). A reader reads an absent `topic_id` or `topic_id_after` as `null`.",
+      "type": "object",
+      "properties": {
+        "topic_id": {
+          "description": "The topic ID before the engine, or `null`. Kafka's text: 22 URL-safe base64 characters, the last of which carries two bits (arm 38 also refuses Kafka's reserved IDs, which the pattern cannot).",
+          "default": null,
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$",
+          "nullable": true
+        },
+        "topic_id_after": {
+          "description": "The topic ID after the engine, or `null`; the same form.",
+          "default": null,
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$",
+          "nullable": true
+        },
+        "topic_id_after_reason": {
+          "description": "Why `topic_id_after` is `null`.",
+          "type": "string",
+          "nullable": true
+        },
+        "topic_id_reason": {
+          "description": "Why `topic_id` is `null` (`crate::topic_identity::TOPIC_ID_REASONS`).",
+          "type": "string",
+          "nullable": true
+        },
+        "topic_id_source": {
+          "description": "Where the recorded IDs came from: `describeTopics` or `engineManifest` (`crate::topic_identity::TOPIC_ID_SOURCES`). Present exactly when at least one ID is recorded.",
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "TopicOwner": {
+      "description": "A declarative owner of a topic's configuration.",
+      "type": "object",
+      "required": [
+        "basis",
+        "kind",
+        "reference"
+      ],
+      "properties": {
+        "basis": {
+          "description": "`kafkaTopicResource` (a Strimzi `KafkaTopic` named it; `strimzi` only) or `declared` (the plan said so).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`strimzi` or `external`.",
+          "type": "string"
+        },
+        "reference": {
+          "description": "Where the desired state lives: `<namespace>/<name>` of the `KafkaTopic`, or the plan's own words. 1 to 256 characters.",
+          "type": "string"
+        }
+      }
+    },
+    "TopicSchemaDependency": {
+      "description": "**PROD-03.0, receipt 1.5.0.** What the archived bytes of ONE topic say about its dependence on a schema registry.\n\n| `verdict` | `reason` | `basis` | `key`/`value` | meaning | |---|---|---|---|---| | `schemaDependent` | — | `sampled`/`complete` | both | at least one side is dependent ([`SideFraming::dependent`]): its records carry Confluent framing, so a reader needs the registry, which was not captured | | `notDetected` | — | `sampled`/`complete` | both | neither side is dependent over the records judged | | `notAssessed` | `noRecords` | — | neither | the archive holds no record of the topic, so there is nothing to judge | | `notAssessed` | `segmentUnreadable` | — | neither | a segment the sample needed could not be read or decoded, or decoded to a count its manifest does not record, or the detector failed | | `notAssessed` | `segmentTooLargeForDetection` | — | neither | a segment the sample needed is stored, or decompresses, larger than the detector reads at backup time | | `notAssessed` | `detectionTimeBudgetExceeded` | — | neither | the backup's detection time budget ran out before the topic was judged |\n\n`basis` is `complete` exactly when every record the receipt counts for the topic was judged, and `sampled` otherwise (arm 26).\n\nStrings on the wire, not enums, for the reason `ReceiptAuth::mode` gives; the closed sets are enforced by arm 24 in both readers.",
+      "type": "object",
+      "required": [
+        "verdict"
+      ],
+      "properties": {
+        "basis": {
+          "description": "`sampled` or `complete` — [`crate::schema_dependency::BASES`] — present exactly when `verdict` is not `notAssessed` (arm 24).",
+          "type": "string",
+          "nullable": true
+        },
+        "key": {
+          "description": "The record KEYS judged, present exactly when `verdict` is not `notAssessed` (arm 25).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SideFraming"
+            }
+          ],
+          "nullable": true
+        },
+        "reason": {
+          "description": "`noRecords`, `segmentUnreadable`, `segmentTooLargeForDetection` or `detectionTimeBudgetExceeded` — [`crate::schema_dependency::NOT_ASSESSED_REASONS`] — present exactly when `verdict` is `notAssessed` (arm 24).",
+          "type": "string",
+          "nullable": true
+        },
+        "value": {
+          "description": "The record VALUES judged, beside `key` and over the same records.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SideFraming"
+            }
+          ],
+          "nullable": true
+        },
+        "verdict": {
+          "description": "`schemaDependent`, `notDetected` or `notAssessed` — [`crate::schema_dependency::VERDICTS`].",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -6370,6 +6370,7 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
         topic_configuration: None,
         owner_detection: None,
         schema_dependency: None,
+        generations: None,
     }
 }
 

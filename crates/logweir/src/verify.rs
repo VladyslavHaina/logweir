@@ -424,6 +424,57 @@ pub fn coverage_lines(
         .collect()
 }
 
+/// One line per topic of a backup receipt's `generations` (PROD-01.4a), or
+/// the one line that says it is absent: the topic ID before and after the
+/// capture, and what those two reads say about the point's generation
+/// (`logweir_core::topic_identity::within_capture`). `docs/verify_scorecard.py`
+/// prints the same lines, and `scripts/check-verifier-parity.sh` compares every
+/// line starting `generations` between the two readers.
+///
+/// An unknown ID is never read as "the same": a topic whose reads recorded no
+/// ID says why, and that its generation is not established by ID.
+#[must_use]
+pub fn generation_lines(
+    block: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicIdentity>>,
+) -> Vec<String> {
+    use logweir_core::topic_identity::{within_capture, WithinCapture};
+    let Some(block) = block else {
+        return vec![
+            "generations: not recorded, so no topic ID is known from this receipt and each \
+             topic's generation is UNKNOWN, never the same as another point's"
+                .to_string(),
+        ];
+    };
+    let side = |id: &Option<String>, reason: &Option<String>| match (id, reason) {
+        (Some(id), _) => id.clone(),
+        (None, Some(reason)) => format!("not recorded ({reason})"),
+        (None, None) => "not recorded".to_string(),
+    };
+    block
+        .iter()
+        .map(|(topic, entry)| {
+            let said = match within_capture(entry) {
+                WithinCapture::Unchanged { topic_id } => format!(
+                    "topic ID {topic_id} before and after the capture ({}), one generation",
+                    entry.topic_id_source.as_deref().unwrap_or("no source")
+                ),
+                WithinCapture::Changed { before, after } => format!(
+                    "topic ID CHANGED during the capture ({before} before, {after} after): the \
+                     topic was deleted and recreated while it ran, so this point mixes two \
+                     generations"
+                ),
+                WithinCapture::NotEstablished => format!(
+                    "topic ID {} before the capture and {} after it, so its generation is not \
+                     established by ID and is UNKNOWN",
+                    side(&entry.topic_id, &entry.topic_id_reason),
+                    side(&entry.topic_id_after, &entry.topic_id_after_reason)
+                ),
+            };
+            format!("generations[{topic:?}]: {said}")
+        })
+        .collect()
+}
+
 /// One line per topic of a backup receipt's `topic_configuration`
 /// (PROD-05.1), or the one line that says it is absent.
 /// `docs/verify_scorecard.py` prints the same lines, and
@@ -670,6 +721,9 @@ pub enum Verdict {
         /// The 1.5.0 block (PROD-03.0), as read; `None` is NOT ASSESSED.
         schema_dependency:
             Option<BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>>,
+        /// The 1.6.0 block (PROD-01.4a), as read; `None` is UNKNOWN for every
+        /// topic.
+        generations: Option<BTreeMap<String, logweir_core::backup_receipt::TopicIdentity>>,
     },
     /// The signature verified over these exact bytes under this key, and the
     /// sidecar's `payloadType` is the one asked for. **Nothing about the
@@ -680,6 +734,16 @@ pub enum Verdict {
     /// exit 0 that silently meant less than the scorecard's exit 0 would be
     /// the worst thing this command could do.
     SignatureOnly {
+        payload_type: String,
+        key_id: String,
+    },
+    /// **A catalog point record (PROD-01.4a review M1).** The signature
+    /// verified, AND the one check this build makes of the record held: every
+    /// topic ID it copies is a real topic ID in Kafka's text
+    /// (`logweir_core::topic_identity::refuse_copied_topic_ids`). Nothing
+    /// else: its other copied facts are worth what the receipt it names is
+    /// worth, and that receipt is not fetched here.
+    CatalogPoint {
         payload_type: String,
         key_id: String,
     },
@@ -835,6 +899,23 @@ pub fn verify_scorecard(
             topic_configuration: receipt.topic_configuration,
             owner_detection: receipt.owner_detection,
             schema_dependency: receipt.schema_dependency,
+            generations: receipt.generations,
+        });
+    }
+    if payload_type == PAYLOAD_TYPE_CATALOG_POINT {
+        // PROD-01.4a review M1: a record that copies Kafka's reserved topic ID
+        // (or any text that is not a real ID) is refused, as the receipt it
+        // copies from would be by arm 38. Bytes that are not JSON fall through
+        // to the signature-level verdict as before: there is no ID in them.
+        if let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Err(e) = logweir_core::topic_identity::refuse_copied_topic_ids(&record) {
+                eprintln!("SIGNATURE VALID but the document is self-contradicting: {e}");
+                return Err(ExitCode::SigningOrLock);
+            }
+        }
+        return Ok(Verdict::CatalogPoint {
+            payload_type: payload_type.to_string(),
+            key_id: matched_key_id,
         });
     }
     if payload_type != PAYLOAD_TYPE_SCORECARD {
@@ -1004,6 +1085,8 @@ struct ReceiptBlocks<'a> {
     /// PROD-03.0's 1.5.0 block; `None` is NOT ASSESSED.
     schema_dependency:
         Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>>,
+    /// PROD-01.4a's 1.6.0 block; `None` is UNKNOWN.
+    generations: Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicIdentity>>,
 }
 
 /// What a `BackupReceipt` verdict prints.
@@ -1064,8 +1147,14 @@ fn print_backup_receipt(
     for line in schema_dependency_lines(blocks.schema_dependency) {
         println!("schema:    {line}");
     }
+    // PROD-01.4a: the topic ID before and after the capture, one line per
+    // topic — or the line that says it was not recorded, which is UNKNOWN and
+    // never "the same generation".
+    for line in generation_lines(blocks.generations) {
+        println!("identity:  {line}");
+    }
     println!(
-        "checked:   the signature AND all twenty-nine backup-receipt invariants \
+        "checked:   the signature AND all thirty-four backup-receipt invariants \
          (format_version, exit_code/manifest_key, records/topics, covered window, \
          source.auth.mode, config_coverage's six: its version, its topic set, \
          coverage, reason, timestamp-after-a-read, timestamp value and source, \
@@ -1073,10 +1162,12 @@ fn print_backup_receipt(
          set, entries exactly where the read succeeded, closed source and class, \
          secret and inherited, the owner, counts of at least one, \
          owner_detection's two: its closed set beside the model, an owner only from \
-         a source it lists, and schema_dependency's eight: its version, its topic set, \
+         a source it lists, schema_dependency's eight: its version, its topic set, \
          closed verdict, reason and basis, both sides exactly when judged, the judged \
          count against records, the schema ids, the one-in-ten threshold, and the \
-         verdict from its sides)"
+         verdict from its sides, and the topic IDs' five: their version, their topic \
+         set, Kafka's text and never the zero ID, a reason exactly for a null ID, a \
+         source exactly for a recorded one)"
     );
 }
 
@@ -1091,6 +1182,21 @@ fn print_signature_only(payload_type: &str, key_id: &str) {
     println!(
         "checked:   the SIGNATURE only — this build evaluates no invariant \
          for this document type"
+    );
+}
+
+/// What a `CatalogPoint` verdict prints: the signature, and the one check
+/// of the record's own content this build makes — said in as many words, so
+/// an exit 0 never reads as a claim about the point's availability or its
+/// other copied facts.
+fn print_catalog_point(payload_type: &str, key_id: &str) {
+    println!("signature: VALID  key {key_id}");
+    println!("payload:   {payload_type}");
+    println!(
+        "checked:   the SIGNATURE, and one check of this document type: every topic ID \
+         the record copies (topics[].identity) is a real topic ID in Kafka's text. \
+         Nothing else: not that the point is available, nor that its other copied facts \
+         are true — verify the backup receipt it names"
     );
 }
 
@@ -1121,6 +1227,7 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             topic_configuration,
             owner_detection,
             schema_dependency,
+            generations,
         }) => {
             print_backup_receipt(
                 &payload_type,
@@ -1134,6 +1241,7 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
                     topic_configuration: topic_configuration.as_ref(),
                     owner_detection: owner_detection.as_deref(),
                     schema_dependency: schema_dependency.as_ref(),
+                    generations: generations.as_ref(),
                 },
             );
             ExitCode::Ok
@@ -1143,6 +1251,13 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             key_id,
         }) => {
             print_signature_only(&payload_type, &key_id);
+            ExitCode::Ok
+        }
+        Ok(Verdict::CatalogPoint {
+            payload_type,
+            key_id,
+        }) => {
+            print_catalog_point(&payload_type, &key_id);
             ExitCode::Ok
         }
         Err(c) => c,

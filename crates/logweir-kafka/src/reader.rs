@@ -692,6 +692,26 @@ pub trait ClusterReader: Send + Sync {
         let _ = topics;
         Ok(BTreeMap::new())
     }
+    /// **PROD-01.4a.** Per named topic, its topic ID (KIP-516) through
+    /// DescribeTopics — one verdict per name, in the order given
+    /// ([`crate::topic_ids`]): the ID in Kafka's text, `NoId` from a broker
+    /// that has none, `NotFound`, `NotAuthorized` (named, never "absent"), or
+    /// `Failed`. The outer `Err` is the call itself failing; a transport
+    /// failure is [`KafkaError::Unreachable`], never `NotFound`.
+    ///
+    /// The DEFAULT reads none: every name is
+    /// [`crate::topic_ids::TopicIdRead::NotRead`], so a reader that does not
+    /// implement it — every test double — can only leave an ID `null` with
+    /// the reason `notRead`, never record a guessed one.
+    fn topic_ids(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, crate::topic_ids::TopicIdRead)>, KafkaError> {
+        Ok(topics
+            .iter()
+            .map(|t| (t.clone(), crate::topic_ids::TopicIdRead::NotRead))
+            .collect())
+    }
     /// **FX-18.** Wait, at most `within`, until `topic` — which the caller has
     /// just CREATED with `partitions` partitions — is SERVED: its metadata
     /// lists every partition with a leader, and every leader answers a

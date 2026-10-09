@@ -90,6 +90,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
         topic_configuration: None,
         owner_detection: None,
         schema_dependency: None,
+        generations: None,
     }
 }
 
@@ -1564,10 +1565,10 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // document. `just schema` is the only sanctioned way to change the file.
     // The CURRENT file is the newest MINOR's, named by the writer's constant
     // (FX-7 fix round, review M-2; 1.3.0 since PROD-05.1, 1.4.0 since
-    // PROD-01.3's auth modes, 1.5.0 since PROD-03.0's schema dependency), so a
-    // renumber moves the constant and the justfile, not this test; the 1.0.0
-    // to 1.4.0 files are frozen beside it.
-    let version = logweir::catalog::record::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY;
+    // PROD-01.3's auth modes, 1.5.0 since PROD-03.0's schema dependency, 1.6.0
+    // since PROD-01.4a's topic IDs), so a renumber moves the constant and the
+    // justfile, not this test; the 1.0.0 to 1.5.0 files are frozen beside it.
+    let version = logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS;
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../schemas/logweir-catalog-point-{version}.json"
     ));
@@ -2606,4 +2607,186 @@ fn the_frozen_1_4_0_catalog_point_schema_is_still_prod_01_3s() {
     let current: serde_json::Value =
         serde_json::from_str(&logweir::catalog::schema::catalog_point_schema()).unwrap();
     assert!(current["definitions"]["RecordTopic"]["properties"]["schema_dependency"].is_object());
+}
+
+// ---------------------------------------------------------------------------
+// PROD-01.4a: `topics[].identity`, catalog point 1.6.0
+// ---------------------------------------------------------------------------
+
+/// **PROD-03.0's 1.5.0 catalog-point schema is FROZEN** beside PROD-01.4a's
+/// 1.6.0 one: it names itself 1.5.0, carries `topics[].configuration` and
+/// `topics[].schema_dependency`, and does NOT describe `topics[].identity`.
+#[test]
+fn the_frozen_1_5_0_catalog_point_schema_is_still_prod_03_0s() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../schemas/logweir-catalog-point-1.5.0.json");
+    let frozen: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display())),
+    )
+    .expect("the frozen schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-catalog-point-1.5.0.json"
+    );
+    let topic = &frozen["definitions"]["RecordTopic"]["properties"];
+    assert!(topic["configuration"].is_object());
+    assert!(topic["schema_dependency"].is_object());
+    assert!(
+        topic.get("identity").is_none(),
+        "the frozen 1.5.0 schema must not describe the 1.6.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir::catalog::schema::catalog_point_schema()).unwrap();
+    assert!(current["definitions"]["RecordTopic"]["properties"]["identity"].is_object());
+    assert!(current["definitions"]["TopicIdentity"]["properties"]["topic_id_after"].is_object());
+    assert_ne!(current["$id"], frozen["$id"]);
+    // At least 1.6.0, not an exact pin: receipt and catalog-point versions are
+    // renumbered when several format-bumping rows integrate together, and a
+    // renumber only raises this constant.
+    assert_format_at_least(
+        logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS,
+        "1.6.0",
+        "generations is defined",
+    );
+}
+
+/// A document's `format_version` is at least `min` (the minor that defines the
+/// field under test), surviving the integration renumber of receipt and
+/// catalog-point versions where an exact pin would break a sibling's CI.
+fn assert_format_at_least(actual: &str, min: &str, what: &str) {
+    let triple = |v: &str| -> (u64, u64, u64) {
+        let mut it = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    };
+    assert!(
+        triple(actual) >= triple(min),
+        "{what}: format_version {actual:?} is below the minimum {min:?} that defines this field"
+    );
+}
+
+const ID_A: &str = "gtOq2VXiTCK1QM2UtERijA";
+const ID_B: &str = "tpWwuKExQo2lN9NziDMpYg";
+
+/// The 1.3.0 receipt at 1.6.0: `orders` read with ID A before the engine and
+/// ID B after it — recreated during the capture.
+fn receipt_1_6() -> BackupReceipt {
+    let mut r = receipt_1_3();
+    r.format_version = logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS.into();
+    r.generations = Some(BTreeMap::from([(
+        "orders".to_string(),
+        TopicIdentity {
+            topic_id: Some(ID_A.into()),
+            topic_id_after: Some(ID_B.into()),
+            topic_id_source: Some("describeTopics".into()),
+            topic_id_reason: None,
+            topic_id_after_reason: None,
+        },
+    )]));
+    assert_eq!(r.validate_invariants(), Ok(()));
+    r
+}
+
+/// The writer COPIES the receipt's topic IDs at 1.6.0; an older receipt leaves
+/// them absent (UNKNOWN) and keeps the format it had.
+#[test]
+fn a_1_6_0_record_copies_the_receipts_topic_ids() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_6();
+    let p = point_for(&r, "s3://kafka-backups/prod", &key);
+    assert_eq!(
+        p.format_version,
+        logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS
+    );
+    assert_eq!(
+        p.topics[0].identity,
+        r.generations.as_ref().unwrap().get("orders").cloned()
+    );
+    // It carries every earlier minor's fields too.
+    assert!(p.topics[0].configuration.is_some());
+    let older = point_for(&receipt_1_3(), "s3://kafka-backups/prod", &key);
+    assert_eq!(older.format_version, "1.3.0");
+    assert_eq!(older.topics[0].identity, None);
+    let text = String::from_utf8(older.canonical_bytes().unwrap()).unwrap();
+    assert!(!text.contains("\"identity\""), "{text}");
+}
+
+/// **Rule 3 for the IDs.** A record whose topic IDs its receipt does not back
+/// — an ID swapped, a recreation hidden, IDs beside a receipt that records
+/// none — is a `RecordMismatch`: a catalog that could swap an ID would make a
+/// recreated topic read as the same generation. A record that knows less
+/// agrees.
+#[test]
+fn a_record_claiming_topic_ids_its_receipt_does_not_back_is_a_record_mismatch() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_6();
+    let bytes = receipt_bytes(&r);
+    let honest = point_for(&r, "s3://kafka-backups/prod", &key);
+    assert_eq!(reader::cross_check(&honest, &r, &bytes), CrossCheck::Agrees);
+    // The recreation during the capture, hidden: both IDs made the same.
+    let mut hidden = honest.clone();
+    hidden.topics[0].identity.as_mut().unwrap().topic_id_after = Some(ID_A.into());
+    match reader::cross_check(&hidden, &r, &bytes) {
+        CrossCheck::RecordMismatch(d) => assert_eq!(
+            d,
+            vec![format!(
+                "topics[\"orders\"].identity: {ID_A} before, {ID_A} after vs {ID_A} before, \
+                 {ID_B} after"
+            )]
+        ),
+        other => panic!("a hidden recreation must not agree: {other:?}"),
+    }
+    // IDs beside a receipt that records none.
+    let old = receipt_1_3();
+    let mut invented = point_for(&old, "s3://kafka-backups/prod", &key);
+    invented.topics[0].identity = honest.topics[0].identity.clone();
+    match reader::cross_check(&invented, &old, &receipt_bytes(&old)) {
+        CrossCheck::RecordMismatch(d) => {
+            assert_eq!(d.len(), 1, "{d:?}");
+            assert!(d[0].ends_with("vs none in the receipt"), "{d:?}");
+        }
+        other => panic!("IDs the receipt cannot hold must not agree: {other:?}"),
+    }
+    // Knowing less is not a contradiction.
+    let mut quieter = honest.clone();
+    quieter.topics[0].identity = None;
+    assert_eq!(
+        reader::cross_check(&quieter, &r, &bytes),
+        CrossCheck::Agrees
+    );
+}
+
+/// **Rule 4 for the IDs.** Two records of one point conflict only where both
+/// carry IDs and they differ.
+#[test]
+fn two_records_conflict_on_topic_ids_only_where_both_carry_them() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_6();
+    let a = point_for(&r, "s3://kafka-backups/prod", &key);
+    let mut b = point_for(&r, "s3://dr-copy/prod", &key);
+    b.topics[0].identity = None;
+    assert!(matches!(
+        reader::reconcile(&a, &b),
+        Duplicate::SameIdentity { .. }
+    ));
+    let mut c = a.clone();
+    c.archive.location_id = "s3://dr-copy/prod".into();
+    let ids = c.topics[0].identity.as_mut().unwrap();
+    ids.topic_id = None;
+    ids.topic_id_source = Some("describeTopics".into());
+    ids.topic_id_reason = Some("notAuthorized".into());
+    match reader::reconcile(&a, &c) {
+        Duplicate::Conflict(d) => assert_eq!(
+            d,
+            vec![format!(
+                "topics[\"orders\"].identity: {ID_A} before, {ID_B} after vs null \
+                 (notAuthorized) before, {ID_B} after"
+            )]
+        ),
+        other => panic!("two copies disagreeing on a topic's IDs are a conflict: {other:?}"),
+    }
 }

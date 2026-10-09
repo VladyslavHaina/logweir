@@ -68,6 +68,9 @@ pub mod time_basis;
 /// PROD-05.1: the topic configuration model's portability table, the capture
 /// rule and the detection of declarative owners.
 pub mod topic_configuration;
+/// PROD-01.4a: the topic ID's canonical text, its closed sets, and the
+/// generation rule two points' IDs are read by.
+pub mod topic_identity;
 /// PLAT-19.1 / decision D3 §7.4: the trust lifecycle — `decide`,
 /// `may_sign_new` and `claimed_signing_time`, with `now` always an argument.
 pub mod trust;

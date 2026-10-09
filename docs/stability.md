@@ -351,7 +351,8 @@ documents — the backup receipt's `source.auth.mode` and the scorecard's
 `target.auth.mode` — and the catalog point record copies the receipt's.
 
 - **The value set is versioned, and only a document that names a new value
-  moves.** A receipt or catalog point naming one of the three is **1.4.0**, a
+  moves.** A receipt or catalog point naming one of the three is **1.4.0** (on
+  builds before PROD-03.0, which writes every receipt as 1.5.0), a
   scorecard **1.5.0**; every document of a `plaintext` or `scramSha512` run is
   written at the version it always was, byte for byte. Each new schema file
   differs from the frozen one beside it in that field's description only.
@@ -634,6 +635,57 @@ the schema ids seen (the 16 smallest and a count) and how much was judged
 - **Rollback** is safe in both directions: an older runner writes 1.3.0/1.4.0
   receipts and records with no block (their topics then read not assessed), and
   the 1.5.0 documents already written stay valid under every reader.
+
+### Receipt and catalog-point format 1.6.0: the topic's ID before and after the engine (PROD-01.4a)
+
+PROD-01.4a adds one optional block to the backup receipt, `generations`, and
+its per-topic copy to the catalog point record, `topics[].identity`, and moves
+both documents to **1.6.0** (`schemas/logweir-backup-receipt-1.6.0.json` and
+`schemas/logweir-catalog-point-1.6.0.json`, PROD-03.0's 1.5.0 files frozen
+beside them). Per named topic it records the topic ID (KIP-516) Logweir's own
+DescribeTopics read returned immediately before the engine and immediately
+after it — through `logweir-rdkafka-ffi`, the one crate OD-6 (a2) lets call
+librdkafka directly — in Kafka's text form, or `null` with the reason
+([the receipt format](formats/backup-receipt.md#generations--the-topics-id-before-and-after-the-engine-format-160);
+[the decision record](to-do/decisions/PROD-01.4-topic-identity.md)).
+
+- **`null` means unknown, never "the same".** A null ID says why
+  (`noTopicId` from a broker below inter-broker protocol 2.8, `notAuthorized`,
+  `topicNotFound`, `readFailed`, `notRead`, `reservedTopicId`), and the
+  generation rule (`logweir_core::topic_identity`) never reads two unknown IDs
+  as one generation: two different pre-capture IDs are a new generation, two
+  equal ones the same generation only when the later capture's own after-read
+  recorded the same ID too, anything else not established. Kafka's reserved
+  IDs (`AAAAAAAAAAAAAAAAAAAAAA`, `AAAAAAAAAAAAAAAAAAAAAQ`), which no topic is
+  ever given, are never recorded (arm 38) and never accepted from a catalog
+  record by either verifier, so no two points read as one generation through a
+  sentinel. A receipt without
+  the block — every receipt before 1.6.0 — has every topic's generation
+  unknown.
+- **Every receipt this build signs carries the block**, so every one is 1.6.0,
+  whatever its auth mode or pin; 1.6.0 includes every earlier minor. The
+  statements above that a receipt is 1.3.0 (PROD-05.1), 1.4.0 (PROD-01.3) or
+  1.5.0 (PROD-03.0) hold for builds before PROD-01.4a.
+- **Five arms, 36 to 40, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block, and judges it against `source.topics` the way
+  arm 7 judges `config_coverage`. No document without the block changes
+  verdict; the corpus (`e2e/fixtures/invariants/`, a case per refusing arm and
+  three accepted shapes) and the parity gate re-prove that on every `just
+  lint`; `verify_scorecard.py` is 1.25.0. Two different recorded IDs are not
+  refused — they are what the run observed — and both readers say so.
+- **Readers built before PROD-01.4a** accept every 1.6.0 document — the major
+  is unchanged and the block is an optional field they ignore — print no topic
+  ID, and do not run arms 36 to 40. A 1.6.0 receipt naming one of PROD-01.3's
+  modes is refused by a reader before PROD-01.3, exactly as a 1.4.0 one.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.3.0,
+  1.4.0 or 1.5.0 receipts and records again, with no IDs; the 1.6.0 documents
+  already written stay valid under both readers.
+- **The `unsafe` perimeter grows by one call.** `rd_kafka_DescribeTopics` joins
+  the group and ACL calls in `logweir-rdkafka-ffi` under the same rules (owned
+  values, every object destroyed once, bounded, inputs refused before
+  sending); every other crate keeps `forbid(unsafe_code)`
+  (`scripts/check-unsafe-scope.sh`). Its exit is PROD-01.4b: a released
+  rust-rdkafka that wraps DescribeTopics safely.
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -1716,7 +1768,7 @@ What changes for an operator:
   Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
   bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
   merges the two views for you yet (PROD-09.2 owns that merge).
-- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), from PROD-03.0 `1.5.0` (it carries `schema_dependency` too), and an unpinned one still has no `manifest_version_id` key.
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), from PROD-03.0 `1.5.0` (it carries `schema_dependency` too), from PROD-01.4a `1.6.0` (it carries `generations` too), and an unpinned one still has no `manifest_version_id` key.
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and

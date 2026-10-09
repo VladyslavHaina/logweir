@@ -1030,7 +1030,7 @@ fn a_backup_records_each_topics_model_and_its_owner() {
     assert!(verified["rust_checked"]
         .as_str()
         .unwrap()
-        .contains("all twenty-one"));
+        .contains("all thirty-four"));
     // WHERE THE RUN LOOKED for owners (fix round, M2): the plan's
     // declarations and the `KafkaTopic` resources — so a topic neither owns is
     // "no declarative owner found", applied through the admin API, and an

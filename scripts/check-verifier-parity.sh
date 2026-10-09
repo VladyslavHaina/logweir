@@ -266,6 +266,9 @@ receipt_sd_dependent_cases=0
 receipt_sd_key_cases=0
 receipt_sd_absent_cases=0
 receipt_sd_entry_cases=0
+receipt_gen_same_cases=0
+receipt_gen_changed_cases=0
+receipt_gen_unknown_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
     receipt_count=$((receipt_count + 1))
@@ -469,6 +472,50 @@ $rust_sd"
         case "$want_sd" in *"key framed "*", dependent"*) receipt_sd_key_cases=$((receipt_sd_key_cases + 1)) ;; esac
         case "$want_sd" in *"schema_dependency: not assessed"*) receipt_sd_absent_cases=$((receipt_sd_absent_cases + 1)) ;; esac
         case "$want_sd" in *": not assessed ("*) receipt_sd_entry_cases=$((receipt_sd_entry_cases + 1)) ;; esac
+        # PROD-01.4a: both readers print each topic's IDs before and after the
+        # capture, one line per topic or the one line saying they were not
+        # recorded, and the SAME lines. What each line SAYS is derived from the
+        # DOCUMENT — one generation where the two IDs are equal, CHANGED where
+        # they differ, not established otherwise — so a reader that called a
+        # recreated topic "one generation", or an unknown ID anything but
+        # unknown, fails here even if the other reader made the same mistake.
+        rust_gen="$(grep -oE 'generations(\[|:).*' "$tmp/rust.all" || true)"
+        py_gen="$(grep -oE 'generations(\[|:).*' "$tmp/py.all" || true)"
+        [ -n "$rust_gen" ] || fail "$name: drill verify printed no generations line for an accepted receipt"
+        if [ "$rust_gen" != "$py_gen" ]; then
+            fail "$name: the two readers print DIFFERENT generations lines.
+  rust:
+$rust_gen
+  python:
+$py_gen"
+        fi
+        want_gen="$("$PY" -c 'import json, sys
+gens = json.load(open(sys.argv[1])).get("generations")
+if gens is None:
+    print("generations: not recorded")
+for t in sorted(gens or {}):
+    b, a = gens[t].get("topic_id"), gens[t].get("topic_id_after")
+    if b is not None and a is not None and b == a:
+        print("generations[" + json.dumps(t) + "] one generation")
+    elif b is not None and a is not None:
+        print("generations[" + json.dumps(t) + "] CHANGED")
+    else:
+        print("generations[" + json.dumps(t) + "] not established")' "$doc")"
+        got_gen="$(printf '%s\n' "$rust_gen" | sed -n \
+            -e 's/^\(generations: not recorded\),.*/\1/p' \
+            -e 's/^\(generations\[".*"\]\): topic ID [A-Za-z0-9_-]\{22\} before and after the capture (.*), \(one generation\)$/\1 \2/p' \
+            -e 's/^\(generations\[".*"\]\): topic ID \(CHANGED\) during the capture .*/\1 \2/p' \
+            -e 's/^\(generations\[".*"\]\): .*, so its generation is \(not established\) by ID and is UNKNOWN$/\1 \2/p')"
+        if [ "$got_gen" != "$want_gen" ]; then
+            fail "$name: the generations lines do not say what the receipt's topic IDs say.
+  want:
+$want_gen
+  got:
+$rust_gen"
+        fi
+        case "$want_gen" in *"] one generation"*) receipt_gen_same_cases=$((receipt_gen_same_cases + 1)) ;; esac
+        case "$want_gen" in *"] CHANGED"*) receipt_gen_changed_cases=$((receipt_gen_changed_cases + 1)) ;; esac
+        case "$want_gen" in *"] not established"*) receipt_gen_unknown_cases=$((receipt_gen_unknown_cases + 1)) ;; esac
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -489,6 +536,9 @@ fi
 if [ "$receipt_sd_dependent_cases" -eq 0 ] || [ "$receipt_sd_key_cases" -eq 0 ] \
     || [ "$receipt_sd_absent_cases" -eq 0 ] || [ "$receipt_sd_entry_cases" -eq 0 ]; then
     fail "the accepted backup-receipt cases do not include a schema-dependent topic ($receipt_sd_dependent_cases), a dependent key side ($receipt_sd_key_cases), a receipt without the block ($receipt_sd_absent_cases) and a not-assessed entry ($receipt_sd_entry_cases), so the schema dependency lines (PROD-03.0) were never told apart"
+fi
+if [ "$receipt_gen_same_cases" -eq 0 ] || [ "$receipt_gen_changed_cases" -eq 0 ] || [ "$receipt_gen_unknown_cases" -eq 0 ]; then
+    fail "the accepted backup-receipt cases do not include a topic with one generation ($receipt_gen_same_cases), one recreated during the capture ($receipt_gen_changed_cases) and one whose ID is unknown ($receipt_gen_unknown_cases), so the generations lines (PROD-01.4a) were never told apart"
 fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
 
@@ -623,12 +673,17 @@ CATALOG_PIN_VERSION="1.2.0"
 CATALOG_MODEL_VERSION="1.3.0"
 # PROD-01.3 (merged after PROD-05.1): the catalog point format whose
 # `source.auth_mode` may name one of the three modes PROD-01.3 added
-# (`scramSha256`, `plain`, `mtls`) — record.rs's FORMAT_VERSION_WITH_AUTH_MODES,
-# the newest MINOR. A renumber moves that constant, the justfile's
-# `catalog_schema_version` and this line together.
+# (`scramSha256`, `plain`, `mtls`) — record.rs's FORMAT_VERSION_WITH_AUTH_MODES.
+# (PROD-03.0's 1.5.0, `topics[].schema_dependency`, sits between it and
+# PROD-01.4a's; this script signs no 1.5.0 record.)
 CATALOG_AUTH_VERSION="1.4.0"
+# PROD-01.4a (merged after PROD-03.0): the catalog point format whose topics
+# carry the receipt's topic IDs (`topics[].identity`) — record.rs's
+# FORMAT_VERSION_WITH_GENERATIONS, the newest MINOR. A renumber moves that
+# constant, the justfile's `catalog_schema_version` and this line together.
+CATALOG_IDENTITY_VERSION="1.6.0"
 mkdir -p "$tmp/catalog"
-"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" "$CATALOG_MODEL_VERSION" "$CATALOG_AUTH_VERSION" <<'PYEOF'
+"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" "$CATALOG_MODEL_VERSION" "$CATALOG_AUTH_VERSION" "$CATALOG_IDENTITY_VERSION" <<'PYEOF'
 import base64, hashlib, json, pathlib, sys
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -638,6 +693,7 @@ coverage_version = sys.argv[4]
 pin_version = sys.argv[5]
 model_version = sys.argv[6]
 auth_version = sys.argv[7]
+identity_version = sys.argv[8]
 key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
 der = key.public_key().public_bytes(
     serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -750,6 +806,27 @@ modes["source"]["auth_mode"] = "mtls"
 modes_payload = json.dumps(modes, indent=2).encode() + b"\n"
 (out / "auth14.json").write_bytes(modes_payload)
 (out / "auth14.sig").write_text(sign(modes_payload))
+# PROD-01.4a: the record this build writes — format 1.6.0, its topic rows
+# carrying the receipt's topic IDs before and after the engine. Signature-only
+# like the rest: both readers must ACCEPT it; its facts are the Rust catalog
+# reader's rule-3 cross-check (`reader::cross_check`, `unbacked_identity`).
+identity = json.loads(json.dumps(modes))
+identity["format_version"] = identity_version
+identity["topics"][0]["identity"] = {
+    "topic_id": "gtOq2VXiTCK1QM2UtERijA",
+    "topic_id_after": "tpWwuKExQo2lN9NziDMpYg",
+    "topic_id_source": "describeTopics",
+}
+identity_payload = json.dumps(identity, indent=2).encode() + b"\n"
+(out / "identity16.json").write_bytes(identity_payload)
+(out / "identity16.sig").write_text(sign(identity_payload))
+# PROD-01.4a review M1: the same record copying Kafka's reserved (0, 1) topic
+# ID. Both readers must REFUSE it, with the same text.
+reserved = json.loads(json.dumps(identity))
+reserved["topics"][0]["identity"]["topic_id"] = "AAAAAAAAAAAAAAAAAAAAAQ"
+reserved_payload = json.dumps(reserved, indent=2).encode() + b"\n"
+(out / "identity16reserved.json").write_bytes(reserved_payload)
+(out / "identity16reserved.sig").write_text(sign(reserved_payload))
 PYEOF
 
 catalog_case() {
@@ -791,6 +868,29 @@ grep -q "manifest_version_id=fx7-manifest-version-0001" "$tmp/py.out" \
     || fail "verify_scorecard.py does not print the pinned manifest version a $CATALOG_PIN_VERSION catalog point carries (FX-7)"
 catalog_case modelled catalog-point 0 0
 catalog_case auth14 catalog-point 0 0
+catalog_case identity16 catalog-point 0 0
+grep -q '"topic_id_after": "tpWwuKExQo2lN9NziDMpYg"' "$tmp/catalog/identity16.json" \
+    || fail "the $CATALOG_IDENTITY_VERSION catalog point case no longer carries a topic's IDs, so it proves nothing about PROD-01.4a's identity"
+# PROD-01.4a review M1: a record copying Kafka's reserved topic ID is refused
+# by both readers (drill verify 4, the script 1), with the SAME text.
+catalog_case identity16reserved catalog-point 4 1
+set +e
+"$BIN" drill verify --payload-type catalog-point --scorecard "$tmp/catalog/identity16reserved.json" \
+    --signature "$tmp/catalog/identity16reserved.sig" --public-key "$FIX/public.pem" >"$tmp/rust.out" 2>"$tmp/rust.err"
+set -e
+set +e
+"$PY" "$VERIFIER" --payload-type catalog-point "$tmp/catalog/identity16reserved.json" \
+    "$tmp/catalog/identity16reserved.sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+set -e
+rust_msg="$(sed -n 's/^SIGNATURE VALID but the document is self-contradicting: //p' "$tmp/rust.err")"
+py_msg="$(sed -n 's/^INVALID: //p' "$tmp/py.err")"
+want_msg='topics["orders"].identity.topic_id "AAAAAAAAAAAAAAAAAAAAAQ" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID'"'"'s 16 bytes, and never one of Kafka'"'"'s reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)'
+[ "$rust_msg" = "$want_msg" ] || fail "catalog-point/identity16reserved: drill verify's refusal is not the expected text.
+  got:  $rust_msg
+  want: $want_msg"
+[ "$py_msg" = "$want_msg" ] || fail "catalog-point/identity16reserved: the two readers refuse with DIFFERENT text.
+  rust:   $rust_msg
+  python: $py_msg"
 grep -q '"auth_mode": "mtls"' "$tmp/catalog/auth14.json" \
     || fail "the $CATALOG_AUTH_VERSION catalog point case no longer names an mTLS source, so it proves nothing about PROD-01.3's modes"
 
@@ -817,14 +917,16 @@ cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
 # reader has its own arm and its own sentence. Each is asserted against the
 # reader that produces it, which is what makes this a claim about both readers
 # rather than about one of them twice.
-grep -q "the SIGNATURE only" "$tmp/rust.all" \
-    || fail "drill verify stopped saying that a catalog point is checked SIGNATURE-ONLY.
+grep -q "the SIGNATURE, and one check of this document type" "$tmp/rust.all" \
+    || fail "drill verify stopped saying that a catalog point is checked by its SIGNATURE and one check of its copied topic IDs only.
 An exit 0 for this document type must never read like an exit 0 for a scorecard:
 the record's facts are recomputed from the backup receipt it names, and this
 command does not fetch it."
 grep -q "This signature covers the record only" "$tmp/py.all" \
     || fail "docs/verify_scorecard.py stopped saying that a catalog point is checked
 SIGNATURE-ONLY. See the sentence in its catalog-point arm."
+grep -q "One check of this document type is evaluated by this build" "$tmp/py.all" \
+    || fail "docs/verify_scorecard.py stopped saying which one check of a catalog point it makes (PROD-01.4a review M1)"
 grep -q "$CATALOG_PT" "$tmp/rust.all" \
     || fail "drill verify does not name the catalog-point media type it verified"
 grep -q "$CATALOG_PT" "$tmp/py.all" \
@@ -840,7 +942,7 @@ grep -q "sha256:aaaaaaaa" "$tmp/py.all" \
     || fail "verify_scorecard.py no longer prints the receipt digest that BINDS a catalog
 point; the short point_id is a display key and the digest is the binding (D3 §5.1)"
 
-echo "check-verifier-parity: both readers agree on all six catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION, $CATALOG_PIN_VERSION, $CATALOG_MODEL_VERSION and $CATALOG_AUTH_VERSION), and both report SIGNATURE-ONLY"
+echo "check-verifier-parity: both readers agree on all eight catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION, $CATALOG_PIN_VERSION, $CATALOG_MODEL_VERSION, $CATALOG_AUTH_VERSION and $CATALOG_IDENTITY_VERSION, and one copying a reserved topic ID, refused by both in the same words); both check the signature and the copied topic IDs only"
 
 # ---------------------------------------------------------------------------
 # FOURTH LOOP (FX-4): the scorecard at format 1.1.0, and what its exit 0 says

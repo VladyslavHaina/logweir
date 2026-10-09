@@ -35,8 +35,9 @@ pub fn run(which: &str) -> ExitCode {
         // revised: the backup's evidence is a new document, not new scorecard
         // fields (spec §7, GC12 as amended). Byte-identical to the CURRENT
         // receipt schema file, `schemas/logweir-backup-receipt-<v>.json` with
-        // `v` = `FORMAT_VERSION_WITH_TOPIC_CONFIGURATION` (1.3.0, PROD-05.1;
-        // FX-7's 1.2.0, FX-4's 1.1.0 and the 1.0.0 file are frozen beside it)
+        // `v` = `FORMAT_VERSION_WITH_GENERATIONS` (1.6.0, PROD-01.4a;
+        // PROD-03.0's 1.5.0, PROD-01.3's 1.4.0, PROD-05.1's 1.3.0, FX-7's
+        // 1.2.0, FX-4's 1.1.0 and the 1.0.0 file are frozen beside it)
         // — the CI drift arm regenerates
         // that file and `diff -u`s it, and
         // `crates/logweir/tests/cli_verify_gc12.rs::
