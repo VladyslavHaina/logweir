@@ -38,11 +38,20 @@ repository.workspace = true
 # rustls arm adds no HTTP stack at all. `openssl-tls`, `oauth`, `gzip` and the
 # jsonpatch-heavy optional features are deliberately NOT taken.
 #
+# `unstable-runtime` (FX-29) is three EMPTY cfg features of kube-runtime 0.99
+# (`unstable-runtime-subscribe`, `-stream-control`, `-reconcile-on`, each `[]`
+# in its manifest, with no optional dependency behind them): it adds no
+# package, and `Cargo.lock` does not move. It is taken for ONE constructor,
+# `Controller::for_stream`, which lets the `BackupSchedule` reconciler filter
+# its own watch to spec revisions (`backup_schedule::schedule_triggers`), so its
+# own `/status` writes no longer wake it. "Unstable" is kube's word for "the
+# signature may change in a later kube release"; a kube upgrade re-checks it.
+#
 # The exact list is asserted by
-# `tests/linkage.rs::kube_is_declared_without_default_features`: a fifth
+# `tests/linkage.rs::kube_is_declared_without_default_features`: a sixth
 # feature, a dropped entry or a dropped `default-features = false` fails that
 # test at ASSERTION time, with no build.
-kube = { version = "0.99", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
+kube = { version = "0.99", default-features = false, features = ["client", "runtime", "derive", "rustls-tls", "unstable-runtime"] }
 # Global Constraint 25: minimum Kubernetes 1.29, so the `v1_29` feature and no
 # other — `k8s-openapi` refuses to build with two version features at once,
 # which makes this a single-value choice rather than a set. `cargo info

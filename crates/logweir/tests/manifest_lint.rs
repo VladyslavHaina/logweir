@@ -432,8 +432,9 @@ fn weirkeeper_has_no_verb_on_secrets() {
 /// declaration is scoped to the text from itself to whichever comes first: the
 /// end of the enclosing item (`"\n}"`), or the next declaration binding the
 /// same identifier. Inside that region, `ident.method(` records
-/// `(T, method)`, and `Controller::new(ident`, `.owns(ident` or
-/// `.watches(ident` records `(T, <controller-watch>)` — a watcher LISTs and
+/// `(T, method)`, and `Controller::new(ident`, `.owns(ident`,
+/// `.watches(ident` or `watcher(ident` records `(T, <controller-watch>)` — a
+/// watcher LISTs and
 /// then WATCHes, which is the only caller `list`/`watch` on a reconciled kind
 /// ever has.
 fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
@@ -537,10 +538,12 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
                     }
                 }
                 let head = region[..hit].trim_end();
-                if ["Controller::new(", ".owns(", ".watches("]
-                    .iter()
-                    .any(|k| head.ends_with(k))
-                {
+                // `watcher(ident` IS THE SAME LIST-THEN-WATCH (FX-29): the
+                // `BackupSchedule` reconciler builds its trigger stream from
+                // `kube::runtime::watcher(api, …)` and hands it to
+                // `Controller::for_stream`, so its kind's `list`/`watch`
+                // caller is that call and not `Controller::new`.
+                if is_watch_call(head) {
                     out.entry(ty.clone()).or_default().insert(WATCH.to_string());
                 }
                 // A HANDLE PASSED TO THE SHARED `/status` WRITER IS A
@@ -562,6 +565,44 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
         }
     }
     out
+}
+
+/// Whether the text before a typed handle is a call that LISTs and then
+/// WATCHes it: `Controller::new(`, `.owns(`, `.watches(`, or `watcher(` as a
+/// whole word (FX-29). Only a whole word (review L-6): `start_watcher(api`
+/// is some other function, and counting it would hide an orphaned grant.
+fn is_watch_call(head: &str) -> bool {
+    let watcher = head
+        .strip_suffix("watcher(")
+        .is_some_and(|before| !before.ends_with(|c: char| c.is_alphanumeric() || c == '_'));
+    watcher
+        || ["Controller::new(", ".owns(", ".watches("]
+            .iter()
+            .any(|k| head.ends_with(k))
+}
+
+/// The call shapes [`is_watch_call`] accepts, and the look-alikes it refuses.
+#[test]
+fn a_watch_call_is_matched_as_a_whole_call() {
+    for head in [
+        "Controller::new(",
+        "        .owns(",
+        "x.watches(",
+        "        watcher(",
+        "kube::runtime::watcher(",
+        "schedule_triggers(\n        watcher(",
+    ] {
+        assert!(is_watch_call(head), "{head:?} lists and watches its handle");
+    }
+    for head in [
+        "start_watcher(",
+        "my_watcher(",
+        "rewatcher(",
+        "watchers(",
+        "get(",
+    ] {
+        assert!(!is_watch_call(head), "{head:?} is some other call");
+    }
 }
 
 /// Every granted **(resource, verb)** pair has a caller on that resource's own

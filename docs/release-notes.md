@@ -33,8 +33,9 @@ it), 40 (FX-24, a silent connection meets the console's header deadline),
 41 (FX-21, a replication factor the archive does not record is never
 read as matching; the engine's first patch), 42 (PROD-11.1, a restore
 can select a window start) and 43 (PROD-08.1a, complete coverage requested
-and shown through the CRDs, the API and the console) and 44 (FX-24b, a
-client that stops reading or sending meets a stall deadline) so far. Items continue the next entry's
+and shown through the CRDs, the API and the console), 44 (FX-24b, a
+client that stops reading or sending meets a stall deadline) and 45 (FX-29, a
+controller no longer rewrites a status whose content has not changed) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -96,6 +97,10 @@ new runner's engine identity.
 Item 44 is fix-now row FX-24b, proven the same way; it changes the console
 only, and the PoC upgrade that carries it repeats the slow-reader probe and
 the event-stream row against the shared-mode console.
+Item 45 is fix-now row FX-29, proven by controller rows over a fake API that
+applies each status patch as the API server does and counts the writes; it
+changes the controller only, and the PoC upgrade that carries it resumes the
+two suspended schedules and watches their `resourceVersion`.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1200,6 +1205,70 @@ probe runs at the PoC upgrade that carries this item.
 **Rollback:** an older console leaves a connection whose client stopped
 reading or sending open again; nothing is stored, so nothing needs converting.
 
+#### 45. A controller no longer rewrites a status whose content has not changed (FX-29)
+
+**Changed.** A `BackupSchedule` whose latest slot was skipped (`Missed`) right
+after a slot that ran rewrote its status on every reconcile, and every write
+woke the next reconcile: on the PoC both schedules wrote about 120 times a
+second each from 2026-10-09 02:00Z, with 323 MB of controller log in 67 minutes
+and API-server `429`s on the shared cluster. The cause was a merge patch: the
+skipped slot's record names no `Backup`, an absent key in a merge patch leaves
+the stored one, so the previous slot's `status.lastSlot.backupRef` stayed, and
+the controller read that leftover as a new decision on every pass and stamped
+`lastSlot.decidedAt` and `policy.evaluatedAt` with the clock. Now:
+
+- every status block the schedule controller writes replaces the stored one,
+  so a field that became absent is removed, and a "when" field
+  (`lastSlot.decidedAt`, `retentionReport.evaluatedAt`) is kept unless the
+  block it times changed — compared as the API server will store it;
+- the schedule controller is woken by a new schedule or a spec change, and
+  otherwise by its own requeue (at most 30 s); its own status writes no longer
+  wake it.
+
+The sweep of every controller that writes status found the same loop in three
+more: a `BackupDestination` whose CA `ConfigMap` went away (`observedAt`
+restamped beside a stale `caBundleSha256`), a `ProtectionPolicy` whose
+notification routes were removed or whose newest point lost an optional field
+(`evaluatedAt` restamped beside the stale field), and every `RetentionPolicy`
+in `Report` or `Enforce` mode whose catalog resolved
+(`lastEvaluation.at` was the clock of every evaluation). Each now writes once
+and settles. `RetentionPolicy` `status.lastEvaluation.at` and `BackupSchedule`
+`status.retentionReport.evaluatedAt` mean "when these findings were first
+reached", and their CRD descriptions say so ([kubernetes.md](kubernetes.md)
+§9 and §7f).
+**Do:** nothing is required. If a schedule was suspended to stop the loop,
+resume it after the controller rolls. The first reconcile after the upgrade
+writes each affected object once — a schedule's stale `backupRef` is removed
+and its `decidedAt` and `policy.evaluatedAt` move to that instant; a
+destination's stale `caBundleSha256` is removed.
+**Scope:** controller rows over `testing::ObjectStore`, which applies each
+`/status` merge patch as RFC 7386 says, enforces the `resourceVersion`
+precondition and counts writes (`crates/weirkeeper/tests/schedule_status_churn.rs`):
+the PoC schedule object itself, reconciled forty times in 0.4 s, is written
+once (forty times before); a fresh `Admitted` then `Missed` sequence is written
+once over twenty passes (twenty before) and its record names no `Backup`; a new
+slot still fires, writes and decides; a `suspend` edit still writes once; the
+watch filter triggers on a new object or a new spec revision and on none of four
+status writes. The class-sweep rows: a destination whose CA went away, twenty
+passes, one write (twenty before); a protection policy whose routes were
+removed settles after one write; a retention policy writes nothing once settled
+(every pass before). The requeue that is now each schedule's only clock is
+pinned too: every decision returns a timed requeue of at most 30 s, never
+`await_change()`, and a schedule driven only by that requeue, with no watch
+event, fires its next slot within one poll; a destination re-reads a rotated
+CA, a protection policy turns `Stale` as its point ages, and a retention
+policy starts its enforcement slot, each on the pass its own timed requeue
+runs. Each guard has a mutant that fails a row. Not proven live in this
+branch: the PoC upgrade that carries it resumes the two schedules outside
+02:00–03:00Z, expects each `resourceVersion` to stand for five minutes while
+no slot is due (one hourly history-inventory write, moving only
+`history.inventoriedAt` and `policy.evaluatedAt`, is allowed), and then
+watches the next slot fire and be decided once.
+**Rollback:** an older controller restores the old behaviour the next time a
+schedule's slot is skipped after one that ran, or a destination loses its CA;
+suspending the schedule, or restoring the `ConfigMap`, stops it. Nothing stored
+needs converting: the objects this build rewrote read the same to an older one.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1265,7 +1334,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43 and 44, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44 and 45, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1291,7 +1360,8 @@ window start (an older runner refuses a plan with one); item 43 changes the
 notification and metrics, the standing authorization's scope (format
 1.1.0), the product API and the console, and needs nothing unless a
 rehearsal is to verify every record (a new schedule and a new
-authorization); item 44 changes the console only and needs nothing. To roll back to
+authorization); item 44 changes the console only and needs nothing; item 45
+changes the controller only (and two CRD descriptions) and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

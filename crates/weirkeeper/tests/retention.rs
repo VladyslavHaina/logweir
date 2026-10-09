@@ -2592,8 +2592,9 @@ fn the_gate_catches_every_delete_spelling_the_review_planted() {
 ///
 /// The rule is the `metav1.Condition` rule generalised: a "when computed"
 /// timestamp moves when the thing it timestamps moves. The comparison is
-/// `crds::backup_schedule::RetentionReport::same_findings_as`, which compares
-/// every field of the report EXCEPT the instant.
+/// `conditions::keep_instant_unless_changed`, which compares every field of
+/// the report EXCEPT the instant, on the JSON the API server will store (FX-29
+/// replaced a typed comparison that a merge patch could not satisfy).
 ///
 /// A `#[test]` and not a `#[tokio::test]`, for the reason
 /// `the_retention_report_lands_on_the_schedule_status` gives: `Store` drives

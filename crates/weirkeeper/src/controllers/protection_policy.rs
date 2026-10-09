@@ -2160,20 +2160,36 @@ pub const CLEARABLE_STATUS_FIELDS: [&str; 7] = [
 ];
 
 /// The `{"status": …}` merge-patch body, with an explicit `null` for every
-/// clearable field this pass computed as `None`.
+/// clearable field this pass computed as `None` — and, since FX-29, for every
+/// key at ANY depth that `stored` carries and this status does not.
 ///
 /// [`crate::conditions::status_unchanged`] applies the body exactly as the API
 /// server would, so the no-op skip keeps working: a `null` for a key the object
 /// does not have is itself a no-op.
+///
+/// # Why the seven named fields were not enough (FX-29's class sweep)
+///
+/// `credentialBindings` is not among them, and neither is any optional field
+/// INSIDE `lastAvailablePoint`, `lastAttempt`, `missed` or `rehearsal`. Each of
+/// those, once it became `None`, stayed on the object under the merge — and
+/// [`settle_clock_fields`] compares the stored status with the computed one,
+/// so the stale key made "did the verdict change?" answer yes on every pass:
+/// `evaluatedAt` was `now` each time, and each write woke this reconciler's own
+/// watch. This controller is the only writer of the status, so
+/// [`crate::conditions::replacing`] makes the body replace what is stored.
 #[must_use]
-pub fn status_patch_body(status: &ProtectionPolicyStatus) -> Value {
+pub fn status_patch_body(
+    status: &ProtectionPolicyStatus,
+    stored: Option<&ProtectionPolicyStatus>,
+) -> Value {
     let mut body = serde_json::to_value(status).unwrap_or(Value::Null);
     if let Some(map) = body.as_object_mut() {
         for field in CLEARABLE_STATUS_FIELDS {
             map.entry(field.to_string()).or_insert(Value::Null);
         }
     }
-    json!({ "status": body })
+    let stored = stored.and_then(|s| serde_json::to_value(s).ok());
+    json!({ "status": crate::conditions::replacing(body, stored.as_ref()) })
 }
 
 /// Patch `/status`, with the S7 precondition and the no-op skip.
@@ -2183,7 +2199,7 @@ async fn write_status(
     status: &ProtectionPolicyStatus,
 ) -> Result<Commit, ReconcileError> {
     let name = policy.name_any();
-    let patch = status_patch_body(status);
+    let patch = status_patch_body(status, policy.status.as_ref());
     if status_unchanged(
         policy
             .status
@@ -2225,9 +2241,28 @@ async fn reconcile(
     ctx: Arc<ProtectionContext>,
 ) -> Result<Action, ReconcileError> {
     let outcome = reconcile_policy(&policy, &ctx, chrono::Utc::now()).await?;
-    Ok(Action::requeue(std::time::Duration::from_secs(
-        outcome.requeue_seconds,
-    )))
+    Ok(policy_action(&outcome))
+}
+
+/// The [`Action`] a pass returns: a timed requeue of the outcome's
+/// `requeue_seconds` — the evaluation interval, or
+/// [`REQUEUE_DELIVERY_SECONDS`] while a delivery is pending — never
+/// `await_change()`.
+///
+/// A recovery point AGES with no event on any object, so this requeue is
+/// what turns a policy `Stale` when its newest point crosses the objective
+/// (FX-29 review M-1, pinned by
+/// `protection_controller::a_point_that_ages_out_is_seen_by_the_timed_requeue`).
+#[must_use]
+pub fn policy_action(outcome: &Outcome) -> Action {
+    Action::requeue(std::time::Duration::from_secs(outcome.requeue_seconds))
+}
+
+/// The [`Action`] a failed pass returns: a timed requeue of
+/// [`ERROR_REQUEUE_SECONDS`].
+#[must_use]
+pub fn policy_error_action() -> Action {
+    Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
 }
 
 fn error_policy(
@@ -2240,7 +2275,7 @@ fn error_policy(
         error = %err,
         "protection policy reconcile failed; requeueing"
     );
-    Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
+    policy_error_action()
 }
 
 /// Run the `ProtectionPolicy` controller until the process ends.
