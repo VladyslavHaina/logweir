@@ -7257,6 +7257,7 @@ key's validity window?**
 |---|---|---|
 | `trust.basis` is `Current` or `Historical` | a signing time was read from the document and compared to the key's validity window | `Untrusted`, `SignedOutsideValidity`, as before — the document itself carries none |
 | `trust.signingTimeRead: absent` | a re-read completed and the document carried no signing time | the same, and no further read: the answer is on the record |
+| `trust.signingTimeRead: overCap` (FX-31) | the store answered with a document larger than the controller's read cap (§7b.4), so it was not re-read | the stored verdict is kept on an unverified basis, the sentence says the document was not re-read and names the cap, and no further read: the next would answer the same |
 | anything else — no `trust` block, a `trust` block with no `basis`, `None`, `Unverified`, or a spelling a later build invents | nothing has been compared to the window yet | one bounded re-read, then decide |
 
 Only `Current` and `Historical` are reachable through the window comparison, and
@@ -7349,8 +7350,9 @@ changes.
 
 **What it costs.** One `get` and one destination resolution per pre-`signedAt`
 object, then nothing: a successful read writes `signedAt`, a document that
-carries none records `signingTimeRead`, and an attempt that learned nothing is
-barred for fifteen minutes by `retryAfter`. The destination handle is UID-cached
+carries none records `signingTimeRead`, as does one over the controller's read
+cap (`overCap`), and an attempt that learned nothing is barred for fifteen
+minutes by `retryAfter`. The destination handle is UID-cached
 and the installation policy is cached, so the marginal cost is the `get` itself.
 A cluster with many such objects and an unreachable archive pays one failed
 `get` and one small patch per object per quarter hour until the archive answers
