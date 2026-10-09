@@ -66,6 +66,7 @@
 //!   ALSO refused outright when it is not a region name
 //!   ([`crate::guard::reject_invalid_storage_region`]), FX-20's fix round F1.
 
+use crate::destination::DestinationRole;
 use crate::engine::StorageUrl;
 
 pub use crate::connection::{
@@ -117,6 +118,52 @@ pub const NOTIFY_SLACK_CREDENTIAL_BINDING_ENV: &str = "NOTIFY_SLACK_CREDENTIAL_B
 /// What the controller expects [`NOTIFY_SLACK_CREDENTIAL_BINDING_ENV`] to be.
 pub const NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
     "NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED";
+
+/// FX-20c: the `(projected, expected)` pair a CHECK pod carries for one
+/// Secret-backed grant its plan lists in
+/// [`crate::check_contract::DestinationPlan::grant_bindings`] — the grant's
+/// Secret's [`CREDENTIAL_BINDING_KEY`] as an OPTIONAL `secretKeyRef`, and the
+/// destination's binding as a literal.
+///
+/// **ONLY THE BINDING.** No credential variable is projected beside it, so a
+/// grant the check does not exercise (`archiveWrite`, whose write no check may
+/// probe, or any grant beside the one a `destinationAccess` reads with) is
+/// COMPARED and never USED: nothing is dialled with a foreign Secret to learn
+/// that it is foreign. One pair per role, so one plan names each role once.
+#[must_use]
+pub const fn grant_binding_env(role: DestinationRole) -> (&'static str, &'static str) {
+    match role {
+        DestinationRole::ArchiveWrite => (
+            "LOGWEIR_ARCHIVE_WRITE_GRANT_BINDING",
+            "LOGWEIR_ARCHIVE_WRITE_GRANT_BINDING_EXPECTED",
+        ),
+        DestinationRole::ArchiveRead => (
+            "LOGWEIR_ARCHIVE_READ_GRANT_BINDING",
+            "LOGWEIR_ARCHIVE_READ_GRANT_BINDING_EXPECTED",
+        ),
+        DestinationRole::EvidenceWrite => (
+            "LOGWEIR_EVIDENCE_WRITE_GRANT_BINDING",
+            "LOGWEIR_EVIDENCE_WRITE_GRANT_BINDING_EXPECTED",
+        ),
+        DestinationRole::EvidenceRead => (
+            "LOGWEIR_EVIDENCE_READ_GRANT_BINDING",
+            "LOGWEIR_EVIDENCE_READ_GRANT_BINDING_EXPECTED",
+        ),
+    }
+}
+
+/// The `spec.access` field that names `role`'s grant — how a
+/// `destination.credentialBound` row names a grant to an operator, and the
+/// key of its per-grant fact.
+#[must_use]
+pub const fn grant_field(role: DestinationRole) -> &'static str {
+    match role {
+        DestinationRole::ArchiveWrite => "archiveWrite",
+        DestinationRole::ArchiveRead => "archiveRead",
+        DestinationRole::EvidenceWrite => "evidenceWrite",
+        DestinationRole::EvidenceRead => "evidenceRead",
+    }
+}
 
 /// The object-store credential pairs a runner checks at start-up, as
 /// `(projected, expected)`, in a fixed order. With
@@ -406,6 +453,32 @@ pub fn check_pair(
     )
 }
 
+/// FX-20c: compare one LISTED grant's binding ([`grant_binding_env`]) through
+/// a lookup — [`check_pair`]'s rule with one difference. A grant the plan
+/// lists is a grant the controller said it projected, so an ABSENT or blank
+/// expectation is not "a hand-run process" but a pod that lost the
+/// controller's half: it is refused, as [`UNBOUND_MISSING_EXPECTATION`],
+/// never accepted.
+///
+/// # Errors
+///
+/// [`CredentialBindingRefusal`] naming the grant's projected variable; never
+/// a value.
+pub fn check_grant_binding(
+    role: DestinationRole,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), CredentialBindingRefusal> {
+    let (projected_var, expected_var) = grant_binding_env(role);
+    let expected = get(expected_var)
+        .filter(|e| !e.trim().is_empty())
+        .unwrap_or_else(|| UNBOUND_MISSING_EXPECTATION.to_string());
+    check_credential_binding(
+        projected_var,
+        Some(&expected),
+        get(projected_var).as_deref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,5 +714,69 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    /// FX-20c: a LISTED grant's binding is compared fail-closed — an absent
+    /// expectation is a refusal, not a hand-run pass — and each role has its
+    /// own pair, distinct from every credential pair.
+    ///
+    /// KILLS: `check_grant_binding` delegating to `check_pair` (an absent
+    /// expectation would pass); two roles sharing one variable.
+    #[test]
+    fn a_listed_grant_is_compared_fail_closed_under_its_own_pair() {
+        let map = |pairs: Vec<(&'static str, &'static str)>| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| (*v).to_string())
+            }
+        };
+        let (p, e) = grant_binding_env(DestinationRole::ArchiveWrite);
+        // No expectation at all: REFUSED, unlike `check_pair`.
+        let refusal = check_grant_binding(DestinationRole::ArchiveWrite, &map(vec![(p, "v1:a")]))
+            .unwrap_err();
+        assert_eq!(refusal.binding_env, p);
+        assert!(check_pair(p, e, &map(vec![(p, "v1:a")])).is_ok());
+        // Absent and foreign: refused, and told apart.
+        assert!(
+            check_grant_binding(DestinationRole::ArchiveWrite, &map(vec![(e, "v1:a")]))
+                .unwrap_err()
+                .absent
+        );
+        assert!(
+            !check_grant_binding(
+                DestinationRole::ArchiveWrite,
+                &map(vec![(e, "v1:a"), (p, "v1:b")])
+            )
+            .unwrap_err()
+            .absent
+        );
+        // CONTROL: its own binding, alone or among several, is accepted.
+        assert_eq!(
+            check_grant_binding(
+                DestinationRole::ArchiveWrite,
+                &map(vec![(e, "v1:a"), (p, "v1:z, v1:a")])
+            ),
+            Ok(())
+        );
+        // One pair per role, none of them a credential pair.
+        let mut names: Vec<&str> = DestinationRole::ALL
+            .iter()
+            .flat_map(|r| {
+                let (p, e) = grant_binding_env(*r);
+                [p, e]
+            })
+            .collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), before, "two roles share a variable");
+        for (projected, expected) in STORE_BINDING_PAIRS {
+            assert!(!names.contains(&projected) && !names.contains(&expected));
+        }
+        for (credential, _, _) in GUARDED_CREDENTIALS {
+            assert!(!names.contains(&credential));
+        }
     }
 }

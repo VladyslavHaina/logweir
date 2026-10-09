@@ -155,6 +155,7 @@ fn destination() -> DestinationPlan {
         location: loc,
         ca_file: None,
         credentials: CredentialMode::Static,
+        grant_bindings: Vec::new(),
     }
 }
 
@@ -571,6 +572,117 @@ fn an_absent_evidence_write_grant_is_not_serialised_and_an_unknown_one_is_refuse
         serde_json::from_value::<GrantRef>(bogus).is_err(),
         "an evidence write on the ambient chain is not spellable"
     );
+}
+
+/// FX-20c: `grantBindings` is absent from a plan that lists none (so every
+/// such plan is byte-identical to an earlier controller's), names a role and a
+/// Secret and nothing else, rides only on the three readiness kinds, and names
+/// each role once per request. `compares_grant_bindings` — the predicate the
+/// runner's emission and the controller's expected-row mirror both read — is
+/// true exactly when one is listed.
+///
+/// KILLS: dropping `skip_serializing_if` (every plan's bytes change); dropping
+/// the duplicate-role refusal; dropping the readiness-only refusal;
+/// `compares_grant_bindings` answering `true` for an empty list.
+#[test]
+fn grant_bindings_are_references_on_readiness_plans_only_and_one_per_role() {
+    use logweir_core::check_contract::GrantBindingRef;
+    let bound = |role, secret: &str| GrantBindingRef {
+        role,
+        secret_name: secret.to_string(),
+    };
+    let mut plan = access_plan_with(vec![DestinationRole::ArchiveWrite], false, None);
+    let bytes = serde_json::to_string(&plan).unwrap();
+    assert!(!bytes.contains("grantBindings"), "{bytes}");
+    assert!(!plan.request.compares_grant_bindings());
+
+    let CheckRequest::DestinationAccess(r) = &mut plan.request else {
+        unreachable!()
+    };
+    r.destination.grant_bindings = vec![
+        bound(DestinationRole::ArchiveWrite, "lwd-primary-archive-write"),
+        bound(DestinationRole::EvidenceRead, "lwd-primary-evidence-read"),
+    ];
+    plan.validate().expect("two roles, two names");
+    assert!(plan.request.compares_grant_bindings());
+    let wire = serde_json::to_value(&plan).unwrap();
+    assert_eq!(
+        wire["request"]["destinationAccess"]["destination"]["grantBindings"][0],
+        serde_json::json!({"role": "ArchiveWrite", "secretName": "lwd-primary-archive-write"}),
+        "the wire spelling names a reference and never a value"
+    );
+    let mut smuggled =
+        wire["request"]["destinationAccess"]["destination"]["grantBindings"][0].clone();
+    smuggled["binding"] = serde_json::json!("v1:x");
+    assert!(
+        serde_json::from_value::<GrantBindingRef>(smuggled).is_err(),
+        "an entry cannot carry the binding (or anything else) in the plan"
+    );
+
+    // One role twice: refused.
+    let CheckRequest::DestinationAccess(r) = &mut plan.request else {
+        unreachable!()
+    };
+    r.destination
+        .grant_bindings
+        .push(bound(DestinationRole::ArchiveWrite, "other"));
+    let err = plan.validate().unwrap_err();
+    assert!(
+        matches!(&err, CheckPlanError::Field { field, .. } if field.ends_with("grantBindings[2].role")),
+        "{err:?}"
+    );
+    // Not an object name: refused.
+    let CheckRequest::DestinationAccess(r) = &mut plan.request else {
+        unreachable!()
+    };
+    r.destination.grant_bindings = vec![bound(DestinationRole::ArchiveWrite, "Not_A_Name")];
+    assert!(plan.validate().is_err());
+
+    // A RESTORE's two destinations share the one-role-once rule.
+    let mut source = destination();
+    source.grant_bindings = vec![bound(DestinationRole::ArchiveRead, "reader")];
+    let mut evidence = destination();
+    evidence.grant_bindings = vec![bound(DestinationRole::ArchiveRead, "reader-2")];
+    let restore = |evidence: DestinationPlan| CheckPlan {
+        request: CheckRequest::RestorePreflight(Box::new(
+            logweir_core::check_contract::RestorePreflightRequest {
+                plan_file: "/check/plan.yaml".into(),
+                plan_sha256: sha256_prefixed(b"plan"),
+                target: connection(),
+                source_destination: source.clone(),
+                evidence_destination: Some(evidence),
+                backup_id: "bk".into(),
+                manifest_key: "bk/manifest.json".into(),
+                checks: Vec::new(),
+                skip_checks: Vec::new(),
+            },
+        )),
+        ..access_plan_with(vec![DestinationRole::ArchiveWrite], false, None)
+    };
+    assert!(restore(evidence.clone()).validate().is_err());
+    evidence.grant_bindings = vec![bound(DestinationRole::EvidenceWrite, "writer")];
+    let ok = restore(evidence);
+    ok.validate()
+        .expect("archiveRead from the source, evidenceWrite from the evidence");
+    assert_eq!(ok.request.bound_destinations().len(), 2);
+
+    // An evidence fetch is not a readiness check: a listed binding is refused.
+    let mut fetched = destination();
+    fetched.grant_bindings = vec![bound(DestinationRole::EvidenceRead, "reader")];
+    let fetch = CheckPlan {
+        request: CheckRequest::EvidenceFetch(EvidenceFetchRequest {
+            destination: fetched,
+            objects: vec![EvidenceObjectRequest {
+                role: DestinationRole::EvidenceRead,
+                key: "logweir/receipts/x.json".into(),
+                max_bytes: 1024,
+                stream: Stream::EvidencePayload,
+            }],
+        }),
+        ..access_plan_with(vec![DestinationRole::ArchiveWrite], false, None)
+    };
+    assert!(fetch.validate().is_err());
+    assert!(!fetch.request.compares_grant_bindings());
 }
 
 /// A `sourceConnection` plan carries ONE connection and there is no field on
