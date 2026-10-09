@@ -2449,11 +2449,11 @@ export function setOriginalName(state, on, noOwner) {
 export const ORIGINAL_NAME_SENTENCE =
   "Restore under the ORIGINAL topic names: each topic is recreated under its own name -- a " +
   "new generation of the name, not the original topic -- instead of beside it under a prefix. " +
-  "Only into topics that do not exist: the runner refuses if a name exists, unless the target " +
-  "is another cluster than the archive's source it also refuses while any broker auto-creates " +
-  "topics, and it refuses when a declarative owner (a Strimzi KafkaTopic, GitOps, Terraform) " +
-  "manages a name. It needs its own approval subject, originalName: an ordinary approval " +
-  "cannot authorise it. Stop every producer of these names first.";
+  "Only into topics that do not exist: the runner refuses if a name exists; unless the target " +
+  "is a different cluster from the archive's source, it also refuses while any broker " +
+  "auto-creates topics; and it refuses when a declarative owner (a Strimzi KafkaTopic, GitOps, " +
+  "Terraform) manages a name. It needs its own approval subject, originalName: an ordinary " +
+  "approval cannot authorise it. Stop every producer of these names first.";
 
 /** PROD-15.1: the owner statement the plan signs as `owners: []`. */
 export const ORIGINAL_NAME_NO_OWNER_STATEMENT =

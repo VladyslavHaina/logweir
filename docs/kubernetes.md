@@ -6404,6 +6404,119 @@ does not copy `status.integrity.coverage`/`complete`; the console then reads
 "not recorded". Rolling the CRDs back prunes both spec fields from stored
 objects; their plans are untouched.
 
+### Restoring under the original topic names (PROD-15.1)
+
+**What it is.** Every other restore writes a NEW topic beside the old one
+(`restore-<instant>-orders`), so applications must move to a prefixed name. A
+restore under the ORIGINAL topic names writes `orders` itself — the recovery
+of a deleted topic, or of a lost cluster onto a replacement, without renaming
+anything. The owner's decision OD-2 (2026-10-05) allows exactly one such path
+and keeps the rest of `docs/stability.md`'s Never #1: Logweir never writes into
+a LIVE topic. It writes only a topic that does not exist, which it creates
+itself, exclusively, and the restored topic is a NEW generation of the name
+(Kafka assigns a new topic id; none can be preserved), never the original
+topic.
+
+**The plan** (the approver signs it, the runner executes it):
+
+```yaml
+target:
+  mode: newTopic                 # required: the identity ban stays in scratch mode
+  topic_naming:
+    prefix: ""                   # the identity mapping; an older runner refuses it
+    original_name:               # the explicit opt-in; an empty prefix without it is refused
+      owners: []                 # the approver's statement: no declarative owner of any restored name
+      # owner_path: true         # restore although an owner is found (see below)
+  topic_mapping_prefix: drill-   # still required: the LogAppendTime probe is created under it
+```
+
+**The `Restore`** declares it: `spec.target.topicNaming: {prefix: "",
+originalName: true}` in `newTopic` mode (a CEL rule refuses the declaration
+anywhere else). The console and the product API show such a restore — and the
+approval it needs — distinctly, and the controller refuses, before any Job,
+an object whose declaration and plan disagree (`ExecutionSpecInvalid`, the
+rule `spec.coverage` follows above).
+
+**Its own approval subject.** The approval document carries a separate,
+signed approval subject, `originalName` (v1: `approval_subject`, minted by
+`logweir drill approve --approval-subject original-name`, which reads the plan
+and refuses a subject that is not the plan's; v2: `approvalSubject`, which the
+console signs only for a `Restore` that declares `originalName`). An ordinary
+approval never authorises an original-name restore, and an `originalName`
+approval authorises nothing else: the controller refuses the pair terminally
+before any Job (`ApprovalSubjectMismatch`, "whose signed approval subject is
+not the one this Restore's plan needs"), and the runner refuses it again
+before it reads the archive or dials the target (exit 3). A standing rehearsal
+authorization never authorises one.
+
+**What the runner proves before anything is written** (exit 3,
+`refusal-reason=GuardRefused`, the message opening with the condition's name;
+nothing created, nothing deleted):
+
+| condition | refused as |
+|---|---|
+| `newTopic` mode and `prefix: ""` beside the block | `OriginalNameNotNewTopic`, `OriginalNamePrefixNotEmpty` |
+| every restored name is absent on the target | "already exists" (the refusal every restore gets) |
+| the target is not the source cluster — every known source cluster id (the bound recovery point's verified receipt, measured at backup; else the allowlist file's `source_cluster_id`) differs from the target's — OR every broker reports `auto.create.topics.enable=false` (read from every broker with DescribeConfigs) | `OriginalNameAutoCreateEnabled`; `OriginalNameAutoCreateUnknown` when a broker does not report it (a refused read is exit 1) |
+| somewhere was looked for a declarative owner (a Strimzi `KafkaTopic`, GitOps, Terraform) of a restored name, and none was found unless the plan chose the owner path | `OriginalNameOwnerNotChecked`, `OriginalNameOwnerPresent`, `OriginalNameOwnersInvalid` |
+| the `LogAppendTime` probe (the one write phase 0 makes, only on a `LogAppendTime` broker) is created as `<topic_mapping_prefix>logweir-probe-<plan hash>`, never under an original name, and that name is free | `OriginalNameProbeUnusable` |
+
+**Declarative owners: where the runner looks, and why it never assumes none.**
+An owner recreates a deleted name on its own and reverts the restored topic's
+settings — the pinned `retention.ms=-1` included — which can delete the
+restored records. The runner cannot read Kubernetes or a repository, so it
+looks in three places and REFUSES when it looked in none: the approved plan's
+`original_name.owners` (an empty list is the approver's signed statement that
+no owner exists; `{topic, kind: strimzi|external, reference}` names one); the
+target's `KafkaTopic` resources given to `logweir restore run
+--kafka-topic-resources <file>` (`kubectl get kafkatopics -A -o yaml`; CLI
+only); and, for a target that may be the source cluster, the owners the bound
+point's verified receipt recorded at backup time (PROD-05.1). **The controller
+does not list `KafkaTopic` resources** (child row PROD-05.1a, which needs a
+`kafka.strimzi.io` grant), so a `Restore` relies on the plan's statement or
+the receipt. **The owner path** (`owner_path: true`) restores although an
+owner is found: the approver states that the owner's reconciliation is paused
+for the restore (`strimzi.io/pause-reconciliation: "true"` on the
+`KafkaTopic`, and any GitOps sync that would revert that annotation
+suspended), so it neither creates the name first nor reverts the topic during
+the restore, and that it adopts the topic afterwards. Logweir still creates
+the topic itself, exclusively; before unpausing, make the owner's desired
+state keep the restored data (its `retention.ms`).
+
+**Creation is exclusive, and a race loses by name.** The topics are created
+after phase 5, with `CreateTopics`, which fails on a name that exists. A name
+that appears after phase 0 — a producer on a cluster that auto-creates, an
+operator, an owner — is looked for once more right before the create, and a
+`TOPIC_ALREADY_EXISTS` answer is the same refusal: exit 1 (phases 0–5 have
+run), the message opening `TargetTopicAppeared`, and nothing is written into a
+topic this run did not create (both modes). A topic this run created in the
+same request before losing is named and left in place, empty: Logweir never
+deletes a topic under its original name — teardown runs in scratch mode only,
+phase 9 never hands an identity mapping to the deleter, and the runner's
+deleter refuses every source topic's own name whatever the scratch prefix.
+
+**What does NOT change.** Phase 7 verifies the restored topics exactly as for
+any `newTopic` restore. The restore does not fence producers: stop every
+producer of a restored name before the restore and repoint consumers after it
+(consumer positions are not copied; PROD-04.2). `strip_offset_headers` stays
+`false`, so the next capture of the name starts a new generation (PROD-01.4).
+
+**Evidence.** The signed scorecard is format 1.8.0 and carries
+`target.original_name`: the approval subject and the approval document it was
+verified in (`v1Approval`, `governed`, `ordinary`), the cluster condition
+(`targetIsNotSource` with the source cluster id, or `autoCreateDisabled`),
+where owners were looked for and what was found, and whether the owner path
+was chosen. Both verifiers check it (arms ON-1 to ON-10) and print two
+`original name:` lines ([verify-a-scorecard.md](verify-a-scorecard.md)).
+
+**Upgrade and rollback.** Additive. An older runner refuses an original-name
+plan (it maps every topic onto itself, which its guard refuses, exit 3); an
+older controller ignores `topicNaming.originalName` and its runner refuses the
+plan; an older reader of an authorization document v2 refuses one that
+carries `approvalSubject` (unknown field) rather than read it as ordinary.
+Rolling the CRDs back prunes `topicNaming.originalName` from stored objects;
+their plans are untouched, and the next runner refuses them as above.
+
 ### The credential is validated by the RUNNER, and the controller checks nothing
 
 `weirkeeper` holds **no `get` on Secrets anywhere** (§9), so it never sees the

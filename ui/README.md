@@ -191,6 +191,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/pages.spec.js` | the behaviour suite over the page modules: the badge rules, the wizard, the approval form, the roster. |
 | `tests/design.spec.js` | the design system's guarantees: the token layer (Clarity's alias names, every token read is declared, the dark theme redefines aliases only), both schemes, reduced motion, the focus ring, badges with words, the stepper. |
 | `tests/datagrid.spec.js` | **PLAT-18.2**: the datagrid's filter, sort and pagination arithmetic, the lists that declare one, the 2,000-topic subset keeping every box, and focus surviving a re-render. |
+| `tests/original-name.spec.js` | **PROD-15.1**: the original-name choice, the owner statement, the golden plan, the request's declaration and the approval subject on the review step and the approvals page. |
 | `tests/mutation.spec.js` | drafts, one mutation state, idempotent creates, the guided submit and the approval subject -- driven through the real mount halves over a fake node and an in-memory API. |
 | `tests/contract.spec.js` | the decoders against `schemas/logweir-api-v1.openapi.json` itself: every console fixture is an instance of the published schema, and every decoder requires exactly what the schema requires. |
 | `tests/client.spec.js` | the mode probe, the two modes' reads and writes, the idempotency key, the field-error translation and the plan round trip -- driven through the real transport with the one platform call stubbed. |
@@ -1030,7 +1031,8 @@ API in the same words** (`routes/restores.rs::validate_topic_mapping`):
 | no topic selected | a restore of no topic is not a restore | `topicMapping` / `empty` |
 | a topic the point did not freeze | names it, and names `PlanTopicsNotInRecoveryPoint` | `topicMapping[i].source` / `invalid_topic` |
 | the same source twice | names both rows and the target they share | `topicMapping[i].target` / `duplicate_mapping` |
-| a prefix that is not a Kafka name, or an empty one (the identity map) | names the value and the 249-character bound | `target.topicNaming.prefix` / `invalid_prefix`, or `topicMapping[i].target` / `mapping_identity` |
+| a prefix that is not a Kafka name, or an empty one (the identity map) without the original-name choice | names the value and the 249-character bound | `target.topicNaming.prefix` / `invalid_prefix`, or `topicMapping[i].target` / `mapping_identity` |
+| the original-name choice without the owner statement | asks for the statement (the runner would refuse `OriginalNameOwnerNotChecked`) | -- (the API never sees the plan; the runner refuses it) |
 | a mapped name longer than a broker accepts | names the topic and the bound | `topicMapping[i].target` / `mapped_name_illegal` |
 
 A duplicate target can only be a duplicate SOURCE, because a prefix map over
@@ -1130,6 +1132,42 @@ timestamps. The long form, with the evidence rows, is
 [stability.md](../docs/stability.md), *Known limitations*, and
 [verify-a-scorecard.md](../docs/verify-a-scorecard.md), *What the scorecard does
 not claim*. Rows: `ui/tests/restore-semantics.spec.js`.
+
+## Restoring under the original topic names (PROD-15.1)
+
+**Step 4 offers "Restore under the original topic names" in `newTopic` mode
+only, as an explicit choice.** Ticking it sets the prefix to the identity
+mapping (`""`, the input disabled) and keeps `topic_mapping_prefix`, the
+runner's namespace for its `LogAppendTime` probe; unticking it brings the
+default prefix back, and the identity map is refused again. A switch to
+`scratch` drops the choice: the identity ban stays there. Beside the box the
+page shows `ORIGINAL_NAME_SENTENCE` (only into absent names; a new generation
+of each name, not the original topic; the cluster and owner conditions; its
+own approval subject; stop the producers first).
+
+**The owner statement is required before anything is sent.** The runner
+cannot read Kubernetes or a repository, so it refuses an original-name plan
+that looked for a declarative owner nowhere (`OriginalNameOwnerNotChecked`).
+The page asks the operator to state that no owner manages the names
+(`ORIGINAL_NAME_NO_OWNER_STATEMENT`), and the plan signs that statement as
+`original_name: {owners: []}`. The owner path is not offered here: a plan
+that restores although an owner manages a name is written by hand.
+
+**The plan, the request and the subject.** `ui/plan.js` renders
+`topic_naming: {prefix: "", original_name: {owners: []}}` (the golden
+`tests/fixtures/plan-original-name.golden.yaml`, which `ui_lint.rs` parses
+into the runner's `RestoreSpec` and `scripts/check-ui-behaviour.sh`
+re-emits), and refuses to render one without the statement or in scratch
+mode. The create request declares `target.topicNaming.originalName: true`;
+the review step shows the approval subject the plan needs (`originalName`, or
+`ordinary`). In console mode the page signs `approvalSubject: originalName`
+into the authorization document only for a Restore that declares it.
+
+**The approvals page shows the subject the SIGNED bytes carry**:
+`originalName`, `ordinary`, or `unknown` when the document cannot be read, with
+`ORIGINAL_NAME_APPROVAL_SENTENCE` beside an original-name Restore waiting for
+an approval (the CLI line, `logweir drill approve --approval-subject
+original-name`, included). Rows: `ui/tests/original-name.spec.js`.
 
 ## The replication factor: a default with its basis, an input, and a refusal before Create
 

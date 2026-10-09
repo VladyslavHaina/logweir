@@ -919,7 +919,7 @@ after an approver has signed.
 | `topicMapping` | `too_many` | more than 1000 rows. |
 | `topicMapping[i].source` | `invalid_topic` | the source is not a name a broker accepts (`^[a-zA-Z0-9._-]{1,249}$`). |
 | `topicMapping[i].target` | `mapped_name_illegal` | the mapped name is not one a broker accepts. The message names the source. |
-| `topicMapping[i].target` | `mapping_identity` | the target equals its source — a restore writing over the topic it came from. |
+| `topicMapping[i].target` | `mapping_identity` | the target equals its source — a restore writing over the topic it came from — and the request does not set `target.topicNaming.originalName` (below). |
 | `topicMapping[i].target` | `mapping_mismatch` | the target is not `prefix + source`. The message names the target that prefix produces. |
 | `topicMapping[i].target` | `duplicate_mapping` | two rows map to one target name. With an injective prefix map that is a repeated SOURCE, so the message names **both** rows and the target they share. |
 
@@ -930,6 +930,42 @@ could produce, and would send the operator to the wrong field.
 **Absent is exactly the behaviour this route had before the field existed**, and
 an absent declaration is left out of the idempotency request hash, so a client
 that predates it replays onto the same object it always did.
+
+### A restore under the original topic names (PROD-15.1)
+
+`POST .../restores` takes an optional `target.topicNaming.originalName`:
+
+```json
+{"target": {"mode": "newTopic", "topicNaming": {"prefix": "", "originalName": true}}}
+```
+
+`true` asks for a restore under the source's ORIGINAL topic names, into
+topics that do not exist (the owner's decision OD-2;
+[kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
+It is stored as `Restore.spec.target.topicNaming.originalName`; the plan must
+say the same (`target.topic_naming.original_name`), which the controller
+holds before any Job. Absent means `false`, is stored as absent, and leaves
+the idempotency request hash unchanged. A declared `topicMapping` maps every
+row onto itself.
+
+| `errors[].field` | `errors[].code` | when |
+|---|---|---|
+| `target.topicNaming.originalName` | `requires_new_topic` | `target.mode` is `scratch`: a scratch drill never restores under the original names. |
+| `target.topicNaming.prefix` | `prefix_with_original_name` | `originalName` is `true` and the prefix is not empty. |
+| `target.topicNaming.prefix` | `invalid_prefix` | without `originalName`, the prefix is empty, longer than 128 characters or not a legal topic name: every other restore writes NEW topics. |
+| `approvalBytes` | `approval_subject_mismatch` | the legacy approval route (`legacy-governed-v1`): the signed document's `approval_subject` is not the one the Restore needs — `originalName` for a Restore that declares it, absent for every other. |
+
+**Its own approval subject.** Both restore reads carry `approvalSubject`
+(`ordinary` or `originalName`), the subject the Restore needs, and
+`target.originalName`. The approvals list carries `approvalSubject` read from
+the SIGNED approval document (`approval_subject` in v1, `approvalSubject` in
+an authorization document v2): `ordinary`, `originalName`, or `unknown` when
+this service cannot read the document (the controller refuses such an
+approval). The console signs `approvalSubject: originalName` into the
+authorization document only for a Restore that declares it, and shows the
+subject on the review step and the approvals page. The controller refuses an
+approval whose subject is not the Restore's (`ApprovalSubjectMismatch`,
+terminal), and a standing rehearsal authorization never authorises one.
 
 ### The restore's signed time basis (FX-8)
 

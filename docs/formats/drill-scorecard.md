@@ -3,9 +3,16 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-drill-scorecard-1.6.0.json`](../../schemas/logweir-drill-scorecard-1.6.0.json)
+[`schemas/logweir-drill-scorecard-1.8.0.json`](../../schemas/logweir-drill-scorecard-1.8.0.json)
 and CI diffs it against the code on every build, so this document and the
-schema cannot drift apart silently. Format **1.6.0** (FX-23) adds the nested
+schema cannot drift apart silently. Format **1.8.0** (PROD-15.1) adds the
+nested optional [`target.original_name`](#targetoriginal_name-format-180): a
+restore under the source's original topic names, into topics the run created.
+Format **1.7.0** (PROD-11.1) added the nested optional
+[`source.selection`](#sourceselection-format-170), described by the frozen
+[`schemas/logweir-drill-scorecard-1.7.0.json`](../../schemas/logweir-drill-scorecard-1.7.0.json),
+and format **1.6.0** (FX-23), described by the frozen
+[`schemas/logweir-drill-scorecard-1.6.0.json`](../../schemas/logweir-drill-scorecard-1.6.0.json), added the nested
 optional [`sample.unsampled_topics`](#sampleunsampled_topics-format-160): the
 topics a sampled drill's `max_partitions` left without a sampled partition.
 Every SAMPLED-lane scorecard a build with FX-23's checks signs declares 1.6.0,
@@ -185,9 +192,10 @@ their refusal text, so the agreement is checked rather than asserted.
 | `target.cluster_id` | string | The target cluster's own id, read from it. |
 | `target.mode` | string, optional | Which of the two target modes the run was in: `scratch` or `newTopic`. **Absent means `scratch`**, which is what every document written before this field existed carries, so the three checked-in signed fixtures keep their bytes. |
 | `target.marker_topic` | string, optional | The **scratch** segregation proof: the cluster is in `allowedClusterIds` **and** this topic exists, both verified at phase 0, whose failure refuses the drill with exit 3 before anything runs. **Absent in `newTopic` mode**, because that mode skips both checks — a reader that saw the field there would be reading a verification that never ran. Both readers REFUSE a document that is `scratch` and omits it. |
-| `target.topic_mapping_prefix` | string | Prefix applied to restored topic names. |
+| `target.topic_mapping_prefix` | string | Prefix applied to restored topic names. `""` exactly on a restore under the original topic names (arm ON-3). |
 | `target.topic_mapping_sha256` | string | `sha256:` of the mapping, so the mapping is attested rather than described. |
 | `target.topic_mapping_entries` | integer | How many mapping entries there were. |
+| `target.original_name` | object, **optional** (1.8.0) | The restore wrote under the source's **original topic names**, into topics phase 0 proved absent and the run created itself. See [below](#targetoriginal_name-format-180). ABSENT means it did not: every mapped name differed from its source. |
 | `target.auth` | object, optional | How the target client authenticated: `mode` and, for a SASL mode, `username` — never a password. `mode` is `plaintext` or `scramSha512` in every format and from **1.5.0** also `scramSha256`, `plain` or `mtls` (PROD-01.3); a new value under an older version, or any other value, is refused by both readers. `mtls` has no `username` (the identity is the client certificate). Absent means plaintext. |
 
 ### `source.time_basis` (format 1.3.0)
@@ -345,6 +353,81 @@ together, the justfile's `scorecard_schema_version` and this schema file's
 name, `docs/verify_scorecard.py`'s `SCORECARD_SELECTION_SINCE_MINOR`, the parity
 script's `SCORECARD_SELECTION_VERSION`, and the corpus cases `selection_*.json`
 (their `format_version` and SEL-1's reason).
+
+### `target.original_name` (format 1.8.0)
+
+```json
+"original_name": {
+  "approval_subject": "originalName",
+  "approval_mode": "v1Approval",
+  "cluster_condition": "targetIsNotSource",
+  "source_cluster_id": "5L6g3nShT-eMCtK--X86sw",
+  "owner_detection": ["plan", "kafkaTopicResources"],
+  "owners": [
+    {"topic": "orders", "kind": "strimzi", "reference": "kafka/orders",
+     "found_in": "kafkaTopicResources"}
+  ],
+  "owner_path": true
+}
+```
+
+A plan may restore under the ORIGINAL topic names, into topics that do not
+exist (`target.topic_naming.original_name`,
+[the plan field](drill-spec.md#targettopic_namingoriginal_name-prod-151); the
+owner's decision OD-2). Such a restore is format 1.8.0 and carries this block,
+which records what the run proved before it wrote. **The restored topic is a
+new generation of its name, never the original topic**: Kafka assigns a new
+topic id at creation, and none can be preserved.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `approval_subject` | string | `originalName`: the separate approval subject phase 1 verified in the signed approval. An ordinary approval never authorises this restore. |
+| `approval_mode` | string | The approval document it was verified in: `v1Approval` (a per-run approval document v1), `governed` or `ordinary` (an authorization document v2 under that policy). A standing rehearsal authorization never authorises one. |
+| `cluster_condition` | string | Which condition admitted the identity mapping: `targetIsNotSource` (a known source cluster id differs from `target.cluster_id`) or `autoCreateDisabled` (the target is, or may be, the source cluster, and every broker reported `auto.create.topics.enable=false`). |
+| `source_cluster_id` | string, optional | The source cluster id compared: the bound point's verified receipt, else the allowlist file's. Required beside `targetIsNotSource`. |
+| `owner_detection` | string[] | Where the run looked for a declarative owner of a restored name: `plan` (the approved plan's `owners`), `kafkaTopicResources` (the `KafkaTopic` resources given with `--kafka-topic-resources`), `pointReceipt` (the owners the bound point's receipt recorded at backup). Never empty: an owner nobody looked for is never read as no owner. |
+| `owners` | object[] | Every owner found, sorted: `topic`, `kind` (`strimzi` or `external`), `reference` (a `KafkaTopic`'s `namespace/name`, a repository path) and `found_in` (one of `owner_detection`). |
+| `owner_path` | bool | Whether the approved plan chose the owner path (restore although an owner is found, its reconciliation paused). Required for any owner found. |
+
+Ten arms, enforced by both readers in the same position (after
+`source.selection`, before `redactions`) and words, fire only on a document
+carrying the block:
+
+| Arm | Refuses |
+|---|---|
+| ON-1 | the block under a `format_version` before 1.8.0 |
+| ON-2 | the block in a `scratch` document (the identity ban stays there) |
+| ON-3 | a non-empty `target.topic_mapping_prefix` |
+| ON-4 | an `approval_subject` other than `originalName` |
+| ON-5 | an `approval_mode` outside the three above |
+| ON-6 | a `cluster_condition` outside the two above |
+| ON-7 | `targetIsNotSource` with no `source_cluster_id`, or one equal to `target.cluster_id` |
+| ON-8 | an empty `owner_detection`, a repeated place, or one outside the three above |
+| ON-9 | an owner whose `found_in` is not in `owner_detection`, whose `kind` is unknown, or whose `topic` is blank |
+| ON-10 | an owner found with `owner_path: false` |
+
+A block that is not an object with these fields and types is refused when the
+document is read; an unknown key in it is ignored. Each arm reads only the new
+block, or judges an existing `target` field against it, and can only refuse:
+MINOR under OD-7 (a). Both readers print two lines for a document carrying the
+block:
+
+```text
+original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by v1Approval; the target cluster is not the source cluster (5L6g3nShT-eMCtK--X86sw)
+original name: declarative owners looked for in plan, kafkaTopicResources: orders (strimzi kafka/orders, from kafkaTopicResources); the approved plan chose the owner path
+```
+
+**The version only rises.** Each step that raises the version keeps the newer
+minor (`scorecard::newer_format_version`), so an original-name restore from a
+stated start is 1.8.0, never 1.7.0.
+
+**The number.** 1.8.0; 1.7.0 is PROD-11.1's. A renumber moves
+`scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` and
+`scorecard::ORIGINAL_NAME_SINCE_MINOR` together, the justfile's
+`scorecard_schema_version` and this schema file's name,
+`docs/verify_scorecard.py`'s `SCORECARD_ORIGINAL_NAME_SINCE_MINOR`, the parity
+script's `SCORECARD_ORIGINAL_NAME_VERSION`, and the corpus cases `original_name_*.json`
+(their `format_version` and ON-1's reason).
 
 ## `approval`
 

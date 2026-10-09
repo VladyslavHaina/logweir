@@ -1,11 +1,12 @@
-# The drill spec: `name`, `source.point`, `restore.time_basis`, `sample.coverage`, the replay selection and `notifications`
+# The drill spec: `name`, `source.point`, `restore.time_basis`, `sample.coverage`, the replay selection, `target.topic_naming.original_name` and `notifications`
 
-**This is not yet a complete drill-spec reference.** It documents exactly six
+**This is not yet a complete drill-spec reference.** It documents exactly seven
 things — the top-level `name` key, `source.point`, `restore.time_basis`,
 `sample.coverage` with its bound, the replay selection (a window start,
-`restore.point_in_time: "<start>/<end>"`) and the `notifications` block —
-because those are what Task 14, decision D3, FX-8, PROD-08.1 and PROD-11.1
-created and changed. Every other key of a drill spec is
+`restore.point_in_time: "<start>/<end>"`), a restore under the original topic
+names (`target.topic_naming.original_name`) and the `notifications` block —
+because those are what Task 14, decision D3, FX-8, PROD-08.1, PROD-11.1 and
+PROD-15.1 created and changed. Every other key of a drill spec is
 described today only by the commented example at
 [`examples/drill.yaml`](../../examples/drill.yaml) and by
 [`crates/logweir-core/src/spec.rs`](../../crates/logweir-core/src/spec.rs). A
@@ -409,6 +410,79 @@ plan said to restore from a start. That older runner IGNORES a
 `restore.partitions` key it does not know and restores every partition; no
 Logweir writer emits that key, and this release refuses it (the decision
 record's §6).
+
+---
+
+## `target.topic_naming.original_name` (PROD-15.1)
+
+```yaml
+target:
+  mode: newTopic                 # required
+  topic_mapping_prefix: drill-   # still required: the LogAppendTime probe's namespace
+  topic_naming:
+    prefix: ""                   # the identity mapping: orders -> orders
+    original_name:
+      owners: []                 # the approver's statement: no declarative owner
+      # owners: [{topic: orders, kind: strimzi, reference: kafka/orders}]
+      # owner_path: true         # restore although an owner is found
+```
+
+Optional. **A restore under the ORIGINAL topic names, into topics that do not
+exist** — the recovery of a deleted topic, or of a lost cluster onto a
+replacement, without renaming anything. Every other restore maps each topic to
+a new, prefixed name, and an empty `prefix` without this block is still
+refused (`maps onto itself`). The owner's decision OD-2 narrowed
+[`stability.md`](../stability.md)'s Never #1 to a LIVE topic: the restored
+topic is created by this run, exclusively, and is a new generation of the name
+(a new Kafka topic id), never the original topic.
+
+- **`owners`** (optional list): an empty list is the approver's signed
+  statement that no declarative owner (a Strimzi `KafkaTopic`, a GitOps
+  repository, Terraform) manages any restored name; an entry
+  `{topic, kind: strimzi|external, reference}` names one. Absent means the
+  plan states nothing, and the runner must find another place it looked.
+- **`owner_path`** (default `false`): restore although an owner is found. The
+  approver states that the owner's reconciliation is paused for the restore
+  and that it adopts the topic afterwards; Logweir still creates the topic
+  itself.
+
+The block is a strict object: an unknown key is a parse error (exit 1).
+
+**What the runner proves at phase 0** (exit 3, `refusal-reason=GuardRefused`,
+each message opening with the condition's name; nothing created): the mode is
+`newTopic` and `prefix` is `""` (`OriginalNameNotNewTopic`,
+`OriginalNamePrefixNotEmpty`); every restored name is absent on the target;
+the target is not the source cluster — every source cluster id known (the
+bound point's verified receipt, else the allowlist file's
+`source_cluster_id`) differs from the target's — or every broker reports
+`auto.create.topics.enable=false` (`OriginalNameAutoCreateEnabled`,
+`OriginalNameAutoCreateUnknown`); an owner was looked for somewhere — the
+plan's `owners`, the `KafkaTopic` resources given to `logweir restore run
+--kafka-topic-resources <file>` (optionally narrowed by `--strimzi-cluster`),
+or, for a target that may be the source, the owners the point's receipt
+recorded at backup — and none was found unless `owner_path` is `true`
+(`OriginalNameOwnerNotChecked`, `OriginalNameOwnerPresent`,
+`OriginalNameOwnersInvalid`); and the `LogAppendTime` probe's name,
+`<topic_mapping_prefix>logweir-probe-<12 hex of the plan hash>`, is legal, is
+no restored name and is free (`OriginalNameProbeUnusable`). The approval must
+carry the separate approval subject `originalName`
+(`ApprovalSubjectMismatch`; `logweir drill approve --approval-subject
+original-name` mints one).
+
+**Creation is exclusive.** The names are looked for once more right before
+`CreateTopics`, which itself fails on a name that exists; either way the run
+stops before the engine starts, exit 1, `TargetTopicAppeared`. Teardown never
+deletes a topic under its original name.
+
+**It is inside `plan_hash`.** A plan without the block serialises exactly as
+before.
+
+**Old plans, old runners.** A runner built before PROD-15.1 ignores the block
+and sees the empty prefix, which maps every topic onto itself: it refuses the
+plan at phase 0 (exit 3) before it writes anything. It never restores under
+the original names without the conditions above. The full account, with the
+`Restore` declaration and the approval subject, is
+[kubernetes.md](../kubernetes.md#restoring-under-the-original-topic-names-prod-151).
 
 ---
 

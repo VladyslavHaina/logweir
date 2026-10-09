@@ -585,6 +585,46 @@ manifest, and is signed
   That older runner ignores a `restore.partitions` key and restores every
   partition; no Logweir writer emits that key, and this release refuses it.
 
+### Scorecard format 1.8.0: `target.original_name`, a restore under the original topic names (PROD-15.1)
+
+The owner's decision OD-2 (2026-10-05) narrowed Never #1 (below) to a LIVE
+topic and allowed one path: a restore under the source's ORIGINAL topic names
+into topics that do not exist, created by the run itself, exclusively
+([the plan field](formats/drill-spec.md#targettopic_namingoriginal_name-prod-151),
+[kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
+
+- **The signed block.** Such a restore carries `target.original_name` and is
+  format **1.8.0** (MINOR): arms ON-1 to ON-10 read only the block or judge an
+  existing `target` field against it, and can only refuse (OD-7 (a)). Every
+  other document is the one it was; each version step keeps the newer minor.
+  A verifier older than `1.24.0` and a `logweir` built before PROD-15.1 accept
+  the document, ignore the block and print no `original name:` line
+  ([verify-a-scorecard.md](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves)).
+- **A separate approval subject, inside the signed bytes.** A per-run approval
+  document v1 gains the optional `approval_subject`; an authorization document
+  v2 gains the optional `approvalSubject`. Only `originalName` is written;
+  absent is an ordinary approval, read exactly as before. The v2 document's
+  `formatVersion` stays `"2"`: a reader that predates the field refuses a
+  document carrying it as an unknown field (the safer verdict, OD-7's third
+  case), never reads it as ordinary, and every document without it keeps its
+  bytes. An original-name plan needs the subject and the subject authorises
+  nothing else, in the runner (both directions, exit 3) and in the
+  controller's admission (`ApprovalSubjectMismatch`, terminal).
+- **An older runner refuses an original-name plan**: it ignores the
+  `original_name` block and sees an empty prefix, which maps every topic onto
+  itself, so its guard refuses the plan at phase 0 (exit 3) before anything is
+  written. An older controller ignores `topicNaming.originalName` and its
+  runner refuses the plan the same way.
+- **The `Restore` CRD** gains `spec.target.topicNaming.originalName`, allowed
+  only in `newTopic` mode with an empty prefix (a CEL rule); rolling the CRDs
+  back prunes it from stored objects, whose plans are unchanged and are then
+  refused as above.
+- **What stays refused**: a name that exists, in any mode; an identity mapping
+  in a scratch drill; a target that may be the source cluster unless every
+  broker reports `auto.create.topics.enable=false`; a declarative owner found
+  unless the plan chose the owner path, and an owner looked for nowhere.
+  Teardown never deletes a topic under its original name.
+
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
