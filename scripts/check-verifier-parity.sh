@@ -262,6 +262,10 @@ receipt_tb_cases=0
 receipt_model_cases=0
 receipt_unchecked_cases=0
 receipt_admin_cases=0
+receipt_sd_dependent_cases=0
+receipt_sd_key_cases=0
+receipt_sd_absent_cases=0
+receipt_sd_entry_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
     receipt_count=$((receipt_count + 1))
@@ -414,6 +418,57 @@ $rust_tc"
         fi
         case "$want_route" in *"owner not checked"*) receipt_unchecked_cases=$((receipt_unchecked_cases + 1)) ;; esac
         case "$want_route" in *"applied through the admin API"*) receipt_admin_cases=$((receipt_admin_cases + 1)) ;; esac
+        # PROD-03.0: both readers print the schema dependency, one line per
+        # topic or the one line saying it was not assessed (never "not
+        # schema-dependent"), and the SAME lines. The lines are ALSO derived
+        # here from the DOCUMENT — the verdict words, the judged count, each
+        # side's framed share, the dependent flag and the ids — so a reader that
+        # printed "no schema framing detected" for a schemaDependent topic, or
+        # dropped an id, fails here and not only when the two readers happen to
+        # disagree.
+        rust_sd="$(grep -oE 'schema_dependency(\[|:).*' "$tmp/rust.all" || true)"
+        py_sd="$(grep -oE 'schema_dependency(\[|:).*' "$tmp/py.all" || true)"
+        [ -n "$rust_sd" ] || fail "$name: drill verify printed no schema_dependency line for an accepted receipt"
+        if [ "$rust_sd" != "$py_sd" ]; then
+            fail "$name: the two readers print DIFFERENT schema dependency lines.
+  rust:
+$rust_sd
+  python:
+$py_sd"
+        fi
+        want_sd="$("$PY" -c 'import json, sys
+block = json.load(open(sys.argv[1])).get("schema_dependency")
+if block is None:
+    print("schema_dependency: not assessed, so whether any topic'"'"'s records need a schema registry is not known from this receipt")
+words = {"schemaDependent": "schema-dependent, registry not captured", "notDetected": "no schema framing detected"}
+def side(name, s):
+    out = "%s framed %d of %d non-null" % (name, s["framed"], s["framed"] + s["unframed"])
+    if s["dependent"]:
+        out += ", dependent"
+    if s["schema_ids"]:
+        out += ", schema ids " + ", ".join(str(i) for i in s["schema_ids"])
+        if s["schema_id_count"] > len(s["schema_ids"]):
+            out += " and %d more" % (s["schema_id_count"] - len(s["schema_ids"]))
+    return out
+for t in sorted(block or {}):
+    e = block[t]
+    said = words.get(e["verdict"], "not assessed (%s)" % e.get("reason"))
+    line = "schema_dependency[" + json.dumps(t) + "]: " + said
+    if e.get("key") is not None:
+        k = e["key"]
+        line += "; %d records judged (%s); %s; %s" % (k["framed"] + k["unframed"] + k["nulls"], e["basis"], side("key", k), side("value", e["value"]))
+    print(line)' "$doc")"
+        if [ "$rust_sd" != "$want_sd" ]; then
+            fail "$name: the schema dependency lines are not what the receipt's schema_dependency says.
+  want:
+$want_sd
+  got:
+$rust_sd"
+        fi
+        case "$want_sd" in *"registry not captured"*) receipt_sd_dependent_cases=$((receipt_sd_dependent_cases + 1)) ;; esac
+        case "$want_sd" in *"key framed "*", dependent"*) receipt_sd_key_cases=$((receipt_sd_key_cases + 1)) ;; esac
+        case "$want_sd" in *"schema_dependency: not assessed"*) receipt_sd_absent_cases=$((receipt_sd_absent_cases + 1)) ;; esac
+        case "$want_sd" in *": not assessed ("*) receipt_sd_entry_cases=$((receipt_sd_entry_cases + 1)) ;; esac
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -430,6 +485,10 @@ if [ "$receipt_model_cases" -eq 0 ]; then
 fi
 if [ "$receipt_unchecked_cases" -eq 0 ] || [ "$receipt_admin_cases" -eq 0 ]; then
     fail "the accepted backup-receipt cases do not include both an owner NOT CHECKED ($receipt_unchecked_cases) and one looked for and not found ($receipt_admin_cases), so the route words (PROD-05.1 M2) were never told apart"
+fi
+if [ "$receipt_sd_dependent_cases" -eq 0 ] || [ "$receipt_sd_key_cases" -eq 0 ] \
+    || [ "$receipt_sd_absent_cases" -eq 0 ] || [ "$receipt_sd_entry_cases" -eq 0 ]; then
+    fail "the accepted backup-receipt cases do not include a schema-dependent topic ($receipt_sd_dependent_cases), a dependent key side ($receipt_sd_key_cases), a receipt without the block ($receipt_sd_absent_cases) and a not-assessed entry ($receipt_sd_entry_cases), so the schema dependency lines (PROD-03.0) were never told apart"
 fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
 

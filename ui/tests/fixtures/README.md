@@ -267,3 +267,14 @@ digits). Two rows read it: `prod051_the_point_id_fixture_is_the_one_the_catalog_
 `node:crypto`) and `the_point_id_fixture_is_the_catalogs` in `crates/logweir/tests/catalog.rs`
 (`catalog::record::point_id`). A change on either side fails the side that changed. Re-minting the
 signed receipt changes its digest, so the fixture's two values are updated with it.
+
+## The schema dependency chain (`console/catalog-point-schema-dependency.json`, PROD-03.0)
+
+One fixture, three readers. `recordTopics` is a point record's `topics[].schema_dependency` as the
+backup receipt writes it (format 1.5.0); `entryTopics` is what the catalog sync Job lists for those
+topics, which `crates/logweir/tests/check_cli.rs` (`the_sync_lists_each_topics_schema_dependency_as_the_fixture_says`)
+derives from `recordTopics` and compares; `pointTopics` is what the product API publishes for those
+entries, which `crates/logweir-api/tests/d3_reads.rs`
+(`the_point_view_publishes_each_topics_schema_dependency`) seeds and compares; and
+`schema-dependency.spec.js` renders `pointTopics` in the catalog page and the restore wizard. A
+change on any side fails the side that changed.

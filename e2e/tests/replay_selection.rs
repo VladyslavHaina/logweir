@@ -33,7 +33,7 @@
 //! | `a_partition_with_nothing_in_the_window_…` | a start that leaves a partition with no record in the window is signed `preflight-failed` naming it, never `pass`, and creates nothing |
 //! | `an_older_runner_refuses_…` (ignored; needs `LOGWEIR_E2E_OLDER_RUNNER`) | main's runner from BEFORE PROD-11.1 refuses a plan stating a start, and a subset plan in the only form this build accepts; the same binary restores the same plan without either (the control, compared with this build's document); it IGNORES a subset beside a plain instant (the residual this build closes by refusing that plan at parse) |
 //! | `an_older_runner_refuses_a_partition_subset_plan` (ignored; needs `LOGWEIR_E2E_OLDER_RUNNER`) | any runner before PROD-11.1b — before PROD-11.1, or main's after it — refuses both subset forms: nothing created, nothing signed |
-//! | `older_readers_refuse_a_2_0_0_document` (ignored; needs `LOGWEIR_E2E_OLDER_READERS`) | every reader before 1.24.0 refuses the 2.0.0 documents the subset row signed, never `VALID` |
+//! | `older_readers_refuse_a_2_0_0_document` (ignored; needs `LOGWEIR_E2E_OLDER_READERS`) | every reader before 1.25.0 refuses the 2.0.0 documents the subset row signed, never `VALID` |
 //!
 //! Each row's own check is shown able to fail: the observed output is mutated
 //! (a record dropped, a record from outside the selection added) and the
@@ -1994,7 +1994,7 @@ fn an_older_runner_refuses_a_partition_subset_plan() {
     }
 }
 
-/// **Every reader before 1.24.0 refuses a 2.0.0 document** (the owner's
+/// **Every reader before 1.25.0 refuses a 2.0.0 document** (the owner's
 /// decision OD-9 (a)), never prints it `VALID`. Reads the signed 2.0.0
 /// documents `partition_subsets_on_two_topics_…` kept
 /// (`scorecard-subset-<label>.json`) with each reader named in

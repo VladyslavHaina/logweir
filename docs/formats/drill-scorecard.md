@@ -384,7 +384,7 @@ a 1.x reader would read as every partition restored —
 - **the sampled lane's fields** — `sample.partitions`, the per-partition count
   bound, the engine-report check — are the selected partitions'.
 
-So every reader before it (`verify_scorecard.py` before 1.24.0, `logweir drill
+So every reader before it (`verify_scorecard.py` before 1.25.0, `logweir drill
 verify` and `drill show` before PROD-11.1b) refuses a 2.0.0 document as an
 unsupported major instead of reading it. The media type keeps `version=1.0.0`,
 so an older reader reaches that refusal rather than a payload-type mismatch.

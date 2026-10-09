@@ -681,7 +681,7 @@ count) are pinned by
 A restore that states a partition subset signs format **2.0.0**, the format's
 first MAJOR: 1.7.0's fields with `source.selection.partitions` and
 `engine_runs` required, and `complete.partitions[]` and the sampled lane's
-fields naming the SELECTED partitions. Every reader before 1.24.0 refuses such
+fields naming the SELECTED partitions. Every reader before 1.25.0 refuses such
 a document as an unsupported major. Five arms: PS-1 (major 2 is read only for
 a document carrying a subset) is `Scorecard::refuse_unreadable_major`'s, which
 the arithmetic below does not count (it slices `validate_invariants` only), so
