@@ -32,14 +32,15 @@ use weirkeeper::conditions::{
 use weirkeeper::connection::{resolve, ConnectionUse};
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY, KEY_SCAN_TAIL_LINES};
 use weirkeeper::controllers::kafka_cluster::{
-    action_for, auth_mode_flag, being_deleted, crashed_status_patch, is_benign_race,
-    log_reconcile_error, name_limit_for_cluster, observed_at, observed_status_patch,
-    probe_job_name, probe_report, probe_started_patch, reconcile_cluster, refused_status_patch,
-    runner_argv, runner_job_spec, verdict, verdict_recorded, Deferred, KafkaClusterError,
+    action_for, auth_mode_flag, being_deleted, crashed_status_patch, log_reconcile_error,
+    name_limit_for_cluster, observed_at, observed_status_patch, probe_job_name, probe_report,
+    probe_started_patch, reachable_is_stale, reconcile_cluster, refused_status_patch, runner_argv,
+    runner_job_spec, stale_status_patch, verdict, verdict_recorded, Deferred, KafkaClusterError,
     ProbeReport, Requeue, CLUSTER_ID_PREFIX, CONDITION_REACHABLE, PROBE_CONDITION_REASONS,
     PROBE_DEADLINE_SECONDS, PROBE_JOB_PREFIX, PROBE_TTL_SECONDS, REACHABLE_PREFIX,
     REASON_PROBE_OUTPUT_UNREADABLE, REASON_PROBE_REPORTED_UNREACHABLE, REASON_PROBE_RUNNING,
-    REASON_REACHABLE, REQUEUE_SECS, RE_PROBE_SECS, SOURCE_PASSWORD_ENV, SOURCE_PASSWORD_SECRET_KEY,
+    REASON_PROBE_STALE, REASON_REACHABLE, REQUEUE_SECS, RE_PROBE_SECS, SOURCE_PASSWORD_ENV,
+    SOURCE_PASSWORD_SECRET_KEY, STALE_AFTER_SECS, VERDICT_RECORDED_ANNOTATION,
 };
 use weirkeeper::crds::kafka_cluster::{AuthMode, KafkaCluster, KafkaClusterStatus};
 use weirkeeper::job;
@@ -1777,6 +1778,8 @@ fn every_status_write_is_one_condition_and_a_matching_scalar_reason() {
         observed_status_patch(&c, &verdict(&ProbeReport::default()), 1, now()),
         crashed_status_patch(&c, "NoExitCode", JOB, now()),
         refused_status_patch(&c, TERMINAL_STATE_NAME_TOO_LONG, "too long", now()),
+        // FX-19 fix round: a reading too old to vouch for.
+        stale_status_patch(&c, "its probe Job has been in deletion since then", now()),
     ];
     for p in &patches {
         let status = &p["status"];
@@ -1873,15 +1876,15 @@ fn every_probe_condition_reason_is_a_valid_metav1_reason() {
     );
     assert_eq!(
         PROBE_CONDITION_REASONS.len(),
-        11,
-        "the four probe verdicts — Reachable, ProbeReportedUnreachable, ProbeOutputUnreadable, \
-         ProbeRunning — plus the four PLAT-07.1 saved-connection refusals this loop writes \
+        12,
+        "the five probe reasons — Reachable, ProbeReportedUnreachable, ProbeOutputUnreadable, \
+         ProbeRunning and FX-19's ProbeStale — plus the four PLAT-07.1 saved-connection refusals this loop writes \
          before any Job exists, plus PROD-01.3's PlainWithoutTls (a resolver refusal) and \
          CredentialBindingMismatch (the probe's own refusal of an unbound credential), plus \
          FX-11's PodCreationForbidden for a probe pod refused at creation; the last seven are \
          the shared terminal states and not a second vocabulary"
     );
-    for r in PROBE_CONDITION_REASONS.iter().skip(4) {
+    for r in PROBE_CONDITION_REASONS.iter().skip(5) {
         assert!(
             TERMINAL_STATES.contains(r),
             "`{r}` is written as a condition reason here, so it must be one of the shared \
@@ -1973,7 +1976,9 @@ async fn the_observed_status_patch_is_stable_across_passes() {
     // A finished Job whose pod's `runner` reports a fixed `finishedAt`, which is
     // what the fixtures above already carry.
     let mut patches = Vec::new();
-    for clock in [now(), utc(2026, 9, 10, 18, 30)] {
+    // Nine minutes apart, both inside the FX-19 staleness bound: past it the
+    // reading is no longer written as a verdict at all (the `fx19_*` stale rows).
+    for clock in [now(), utc(2026, 9, 10, 12, 9)] {
         let (client, _rec, bodies) =
             mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
         reconcile_cluster(&cluster(), &client, clock)
@@ -2070,11 +2075,12 @@ async fn a_steady_kafka_cluster_issues_no_second_status_patch() {
             .expect("the patched status is a KafkaClusterStatus — the API server stores it"),
     );
 
-    // A DIFFERENT CLOCK, six and a half hours later, over the same finished
+    // A DIFFERENT CLOCK, nine minutes later (inside the FX-19 staleness bound,
+    // past which the reading is not re-asserted), over the same finished
     // Job and the same log.
     let (client, _rec, bodies) =
         mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
-    reconcile_cluster(&steady, &client, utc(2026, 9, 10, 18, 30))
+    reconcile_cluster(&steady, &client, utc(2026, 9, 10, 12, 9))
         .await
         .expect("the second reconcile completes");
     let second = bodies.lock().expect("the recorder is readable").clone();
@@ -2682,22 +2688,33 @@ const NO_PODS: &str = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"item
 /// A probe Job in one of the states it passes through while it is collected.
 ///
 /// * `finished`: `Complete` at 11:59 (the probe ran), or still running;
-/// * `ttl`: carries the `ttlSecondsAfterFinished` this reconciler patches on
-///   ONLY after the status write that recorded the Job's verdict;
+/// * `recorded`: carries what this reconciler's TTL patch leaves — the TTL AND
+///   its own marker, `logweir.dev/probe-verdict-recorded` = the Job's UID —
+///   which it sends ONLY after the status write that recorded the Job's verdict;
 /// * `deleting`: carries a `deletionTimestamp` and the `foregroundDeletion`
 ///   finalizer — what the TTL controller's delete leaves on the Job while its
 ///   pod goes first.
-fn reaping_job(finished: bool, ttl: bool, deleting: bool) -> String {
-    let deletion = if deleting {
-        r#","deletionTimestamp":"2026-09-10T12:04:00Z","finalizers":["foregroundDeletion"]"#
-    } else {
-        ""
-    };
-    let ttl = if ttl {
-        format!(r#","ttlSecondsAfterFinished":{PROBE_TTL_SECONDS}"#)
-    } else {
-        String::new()
-    };
+fn reaping_job(finished: bool, recorded: bool, deleting: bool) -> String {
+    let mut job: Value = serde_json::from_str(&job_with_ttl(finished, None)).expect("JSON");
+    if recorded {
+        job["spec"]["ttlSecondsAfterFinished"] = serde_json::json!(PROBE_TTL_SECONDS);
+        job["metadata"]["annotations"] =
+            serde_json::json!({ VERDICT_RECORDED_ANNOTATION: JOB_UID });
+    }
+    if deleting {
+        job["metadata"]["deletionTimestamp"] = serde_json::json!("2026-09-10T12:04:00Z");
+        job["metadata"]["finalizers"] = serde_json::json!(["foregroundDeletion"]);
+    }
+    job.to_string()
+}
+
+/// A probe Job carrying a TTL that something OTHER than this reconciler put
+/// there at creation — a mutating admission policy, a defaulting webhook
+/// (FX-19 review M1) — and no marker. `None` is no TTL at all.
+fn job_with_ttl(finished: bool, ttl: Option<i32>) -> String {
+    let ttl = ttl.map_or_else(String::new, |t| {
+        format!(r#","ttlSecondsAfterFinished":{t}"#)
+    });
     let status = if finished {
         r#"{"conditions":[{"type":"Complete","status":"True",
            "lastProbeTime":"2026-09-10T11:59:00Z","lastTransitionTime":"2026-09-10T11:59:00Z"}]}"#
@@ -2706,7 +2723,7 @@ fn reaping_job(finished: bool, ttl: bool, deleting: bool) -> String {
     };
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{JOB}","namespace":"{NS}","uid":"{JOB_UID}"{deletion}}},
+  "metadata":{{"name":"{JOB}","namespace":"{NS}","uid":"{JOB_UID}"}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}{ttl}}},
   "status":{status}}}"#
     )
@@ -3122,18 +3139,21 @@ async fn fx19_not_found_while_a_job_is_collected_is_not_a_reconcile_error() {
     let error = reconcile_cluster(&reachable, &client, now())
         .await
         .expect_err("a 500 is not a race with the TTL controller");
-    assert!(!is_benign_race(&error), "and it is still a WARN: {error}");
+    let log = CapturedLog::start();
+    log_reconcile_error(NAME, &error);
+    assert_eq!(log.at("WARN").len(), 1, "and it is still a WARN: {error}");
 }
 
-/// **FX-19: WHAT `error_policy` STILL WARNS ON.** A `404` or a `409` that
-/// reaches it from a call this module does not answer in place is the same
-/// race (debug); everything else — a `500`, a `403`, a refusal, a missing
-/// namespace — is a WARN.
+/// **FX-19 FIX ROUND (review LOW-2): ONLY THE COLLECTION RACES ARE DEMOTED,
+/// AND THEY NEVER REACH `error_policy`.** A `404` or a `409` from any other
+/// call is not a known race: a `jobs.create` that keeps answering
+/// `AlreadyExists` (a Job the GET did not see) is a reconcile error and a
+/// WARN, and so is every code `error_policy` is handed.
 ///
-/// KILLS: a classifier that demotes every API error (the `500` and `403`
-/// rows), or none (the `404` and `409` rows).
-#[test]
-fn fx19_error_policy_demotes_only_the_two_races() {
+/// KILLS: any demotion in `error_policy` by status code (the 404 and 409 rows);
+/// a 409 on the probe Job's `POST` answered as an outcome.
+#[tokio::test]
+async fn fx19_error_policy_warns_on_every_error_it_is_handed() {
     let api = |code: u16| {
         KafkaClusterError::Api(kube::Error::Api(kube::core::ErrorResponse {
             status: "Failure".to_string(),
@@ -3142,42 +3162,34 @@ fn fx19_error_policy_demotes_only_the_two_races() {
             code,
         }))
     };
-    assert!(
-        is_benign_race(&api(404)),
-        "NotFound: a deletion raced the pass"
-    );
-    assert!(
-        is_benign_race(&api(409)),
-        "Conflict: a newer copy raced the pass"
-    );
-    for code in [400_u16, 403, 410, 422, 429, 500, 503] {
-        assert!(!is_benign_race(&api(code)), "{code} is still a WARN");
-    }
-    assert!(!is_benign_race(&KafkaClusterError::NoNamespace(
-        NAME.to_string()
-    )));
-    assert!(!is_benign_race(&KafkaClusterError::Refused(
-        TERMINAL_STATE_NAME_TOO_LONG,
-        "too long".to_string()
-    )));
-    // AND THE LINE `error_policy` WRITES FOR EACH: debug for the two races,
-    // WARN for the rest.
-    for (code, warns) in [(404_u16, 0_usize), (409, 0), (500, 1), (403, 1)] {
+    for code in [404_u16, 409, 403, 500] {
         let log = CapturedLog::start();
         log_reconcile_error(NAME, &api(code));
         assert_eq!(
             log.at("WARN").len(),
-            warns,
+            1,
             "{code}: {:?}",
             log.messages_at("WARN")
         );
-        assert_eq!(
-            log.at("DEBUG").len(),
-            1 - warns,
-            "{code}: {:?}",
-            log.messages_at("DEBUG")
-        );
     }
+
+    // A 409 that is NOT a collection race: the probe Job's POST.
+    let routes = answering(
+        creating_routes(),
+        "POST",
+        "/jobs",
+        409,
+        r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"AlreadyExists",
+            "message":"jobs.batch \"logweir-probe-orders-prod\" already exists","code":409}"#
+            .to_string(),
+    );
+    let (client, _rec, _bodies) = mock_client_recording_bodies(routes);
+    let error = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect_err("an AlreadyExists on the POST is a reconcile error, not a deferral");
+    let log = CapturedLog::start();
+    log_reconcile_error(NAME, &error);
+    assert_eq!(log.at("WARN").len(), 1, "{error}");
 }
 
 /// **FX-19: A REFUSED PROBE POD IS ONE WARN PER JOB, TOO.** FX-11's fail-fast
@@ -3237,6 +3249,8 @@ async fn fx19_a_refused_probe_pod_warns_once_per_job() {
         let mut job: Value =
             serde_json::from_str(&podless_probe_job("2026-09-10T11:59:15Z", true)).expect("JSON");
         job["spec"]["ttlSecondsAfterFinished"] = serde_json::json!(PROBE_TTL_SECONDS);
+        job["metadata"]["annotations"] =
+            serde_json::json!({ VERDICT_RECORDED_ANNOTATION: JOB_UID });
         job.to_string()
     };
     let (client, _rec, _bodies) = mock_client_recording_bodies(podless_probe_routes(
@@ -3482,4 +3496,456 @@ async fn fx19_a_superseded_write_ends_every_judging_pass_before_any_ttl() {
             log.messages_at("WARN")
         );
     }
+}
+
+// ===========================================================================
+// FX-19 FIX ROUND (2026-10-09) — the review's two MEDIUMs and LOW-1
+// ===========================================================================
+
+/// `job` with one more annotation.
+fn annotated(job: &str, key: &str, value: &str) -> String {
+    let mut job: Value = serde_json::from_str(job).expect("JSON");
+    job["metadata"]["annotations"] = serde_json::json!({ key: value });
+    job.to_string()
+}
+
+/// The instant one second past the staleness bound for a reading taken at
+/// 11:59, the instant every fixture's reading carries.
+fn past_the_bound() -> DateTime<Utc> {
+    utc(2026, 9, 10, 11, 59) + chrono::Duration::seconds(STALE_AFTER_SECS + 1)
+}
+
+/// **FX-19 FIX ROUND, review M1: A TTL SOMETHING ELSE PUT ON THE JOB IS NOT
+/// THIS RECONCILER'S MARKER.** A mutating admission policy can give every new
+/// Job a `ttlSecondsAfterFinished` at creation; the first landing read that
+/// as "verdict recorded" from birth, so a real crash was never recorded and
+/// `reachable: true` stood. Now only `logweir.dev/probe-verdict-recorded` =
+/// the Job's own UID, which this reconciler sends in the same patch as the
+/// TTL, counts:
+///
+/// * a crashed probe Job created with a foreign TTL is judged: `reachable`
+///   cleared, `NoExitCode`, one WARN, and the TTL patch carries 300 s and
+///   the marker;
+/// * a reading under a foreign day-long TTL is written, and the TTL is
+///   overwritten with the re-probe timer and the marker (the cadence stays
+///   five minutes);
+/// * a marker naming another UID — copied from another Job — is not this
+///   Job's;
+/// * CONTROL: the Job carrying this reconciler's marker is not re-read as a
+///   crash.
+///
+/// KILLS: the marker read as TTL presence; the UID comparison dropped; the
+/// marker left out of the TTL patch.
+#[tokio::test]
+async fn fx19_a_foreign_ttl_is_not_this_reconcilers_marker() {
+    let reachable = reachable_cluster().await;
+
+    // ---- a crash under a foreign TTL ---------------------------------------
+    let foreign = job_with_ttl(true, Some(100));
+    let parsed: k8s_openapi::api::batch::v1::Job =
+        serde_json::from_str(&foreign).expect("the fixture is a Job");
+    assert!(
+        !verdict_recorded(&parsed),
+        "a foreign TTL is not the marker"
+    );
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(every_route(foreign, NO_PODS.to_string()));
+    let outcome = reconcile_cluster(&reachable, &client, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(outcome.deferred, None, "judged, not deferred: {outcome:?}");
+    assert_eq!(outcome.reason.as_deref(), Some("NoExitCode"));
+    let statuses = patched_statuses(&seen);
+    assert_eq!(
+        statuses[0].get("reachable"),
+        Some(&Value::Null),
+        "the crash is recorded and `reachable` cleared: {}",
+        statuses[0]
+    );
+    let patches = job_patches(&seen);
+    assert_eq!(patches.len(), 1, "{seen:?}");
+    assert_eq!(
+        patches[0]["spec"]["ttlSecondsAfterFinished"],
+        serde_json::json!(PROBE_TTL_SECONDS),
+        "the foreign TTL is overwritten with the re-probe timer"
+    );
+    assert_eq!(
+        patches[0]["metadata"]["annotations"][VERDICT_RECORDED_ANNOTATION],
+        serde_json::json!(JOB_UID),
+        "and the marker travels in the same patch"
+    );
+    assert_eq!(
+        log.messages_at("WARN").len(),
+        1,
+        "{:?}",
+        log.messages_at("WARN")
+    );
+    drop(log);
+
+    // ---- a reading under a foreign day-long TTL ----------------------------
+    let (client, _rec, bodies) = mock_client_recording_bodies(answering(
+        finished_routes(0, log_body(&i14_tail())),
+        "GET",
+        "/jobs/logweir-probe-orders-prod",
+        200,
+        job_with_ttl(true, Some(86_400)),
+    ));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(outcome.reachable, Some(true));
+    assert!(
+        outcome.ttl_patched,
+        "the TTL is this reconciler's, not the policy's"
+    );
+    let patches = job_patches(&seen);
+    assert_eq!(
+        patches[0]["spec"]["ttlSecondsAfterFinished"],
+        serde_json::json!(PROBE_TTL_SECONDS)
+    );
+    assert_eq!(
+        patches[0]["metadata"]["annotations"][VERDICT_RECORDED_ANNOTATION],
+        serde_json::json!(JOB_UID)
+    );
+
+    // ---- a marker copied from another Job ----------------------------------
+    let copied = annotated(
+        &job_with_ttl(true, Some(PROBE_TTL_SECONDS)),
+        VERDICT_RECORDED_ANNOTATION,
+        "someone-elses-uid",
+    );
+    let parsed: k8s_openapi::api::batch::v1::Job =
+        serde_json::from_str(&copied).expect("the fixture is a Job");
+    assert!(
+        !verdict_recorded(&parsed),
+        "another Job's UID is not this Job's marker"
+    );
+    let (client, _rec, _bodies) =
+        mock_client_recording_bodies(every_route(copied, NO_PODS.to_string()));
+    let outcome = reconcile_cluster(&reachable, &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(outcome.reason.as_deref(), Some("NoExitCode"), "{outcome:?}");
+
+    // ---- CONTROL: this reconciler's own marker -----------------------------
+    let (client, _rec, bodies) = mock_client_recording_bodies(every_route(
+        reaping_job(true, true, false),
+        NO_PODS.to_string(),
+    ));
+    let outcome = reconcile_cluster(&reachable, &client, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(outcome.deferred, Some(Deferred::VerdictRecorded));
+    assert_eq!(count(&seen, "PATCH", "/status"), 0, "{seen:?}");
+}
+
+/// **FX-19 FIX ROUND, review M2: A STALLED DELETION CANNOT KEEP AN OLD
+/// `reachable: true` STANDING.** The probe Job's name is fixed, so while it is
+/// mid-deletion no newer probe can run. Inside the bound (the reading at 11:59,
+/// the pass at 12:00) the deletion is deferred as before and nothing is
+/// written; once the reading is older than `STALE_AFTER_SECS` (630 s, twice
+/// the re-probe interval) `reachable` is cleared with `ProbeStale` — and
+/// `observedAt`/`clusterId` stay — logged at WARN once over three passes: the
+/// stale pass, the same state again, and the Job still stuck but no longer
+/// marked deleting (a stale read).
+///
+/// KILLS: the bound removed (the deferral stands forever); the stale write's
+/// WARN on every pass; `observedAt` refreshed by a pass that observed nothing.
+#[tokio::test]
+async fn fx19_a_stalled_deletion_clears_reachable_once_the_reading_is_stale() {
+    let reachable = reachable_cluster().await;
+
+    // ---- CONTROL: inside the bound, deferred and silent --------------------
+    let (client, _rec, bodies) = mock_client_recording_bodies(every_route(
+        reaping_job(true, true, true),
+        NO_PODS.to_string(),
+    ));
+    let outcome = reconcile_cluster(&reachable, &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(outcome.deferred, Some(Deferred::JobBeingDeleted));
+    assert_eq!(outcome.reason, None);
+    assert_eq!(
+        count(&bodies.lock().expect("readable"), "PATCH", "/status"),
+        0
+    );
+    assert!(!reachable_is_stale(&reachable, now()));
+
+    // ---- past the bound: cleared, once -------------------------------------
+    let mut warns = Vec::new();
+    let at = past_the_bound();
+    assert!(reachable_is_stale(&reachable, at));
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(every_route(
+        reaping_job(true, true, true),
+        NO_PODS.to_string(),
+    ));
+    let outcome = reconcile_cluster(&reachable, &client, at)
+        .await
+        .expect("a stalled deletion is not a reconcile error");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(outcome.deferred, Some(Deferred::JobBeingDeleted));
+    assert_eq!(outcome.reason.as_deref(), Some(REASON_PROBE_STALE));
+    let statuses = patched_statuses(&seen);
+    assert_eq!(statuses.len(), 1, "{seen:?}");
+    assert_eq!(statuses[0].get("reachable"), Some(&Value::Null));
+    assert_eq!(statuses[0]["reason"], REASON_PROBE_STALE);
+    assert!(
+        statuses[0].get("observedAt").is_none() && statuses[0].get("clusterId").is_none(),
+        "the last real look's record stays: {}",
+        statuses[0]
+    );
+    assert_eq!(
+        conditions_of(&statuses[0]),
+        vec![(
+            CONDITION_REACHABLE.to_string(),
+            "Unknown".to_string(),
+            REASON_PROBE_STALE.to_string()
+        )]
+    );
+    let said = statuses[0]["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        said.contains("in deletion since 2026-09-10T12:04:00Z"),
+        "the message names the stalled deletion: {said}"
+    );
+    assert_eq!(count(&seen, "PATCH", "/jobs/logweir-probe-orders-prod"), 0);
+    warns.extend(log.messages_at("WARN"));
+    drop(log);
+    let stale = after_status(&reachable, &statuses[0]);
+    assert_eq!(reachable_of(&stale), None);
+
+    // ---- the same state again, and the Job read without its deletion -------
+    for job in [
+        reaping_job(true, true, true),
+        reaping_job(true, true, false),
+    ] {
+        let log = CapturedLog::start();
+        let (client, _rec, bodies) =
+            mock_client_recording_bodies(every_route(job, NO_PODS.to_string()));
+        reconcile_cluster(&stale, &client, at + chrono::Duration::seconds(15))
+            .await
+            .expect("the reconcile completes");
+        assert_eq!(
+            count(&bodies.lock().expect("readable"), "PATCH", "/status"),
+            0,
+            "nothing more to clear"
+        );
+        warns.extend(log.messages_at("WARN"));
+    }
+    assert_eq!(warns.len(), 1, "one stale reading, one WARN: {warns:?}");
+}
+
+/// **FX-19 FIX ROUND, review M2: A JUDGED JOB ITS TTL NEVER COLLECTS IS
+/// BOUNDED THE SAME WAY, AND NO DEFERRAL SLEEPS PAST THE BOUND.** The
+/// recorded-verdict deferral normally waits a re-probe interval; it now
+/// returns before the reading would turn stale, and past the bound it clears
+/// `reachable` (`ProbeStale`).
+///
+/// KILLS: the bound removed from the recorded-verdict deferral; a deferral
+/// that sleeps a full `RE_PROBE_SECS` past the bound.
+#[tokio::test]
+async fn fx19_a_judged_job_its_ttl_never_collects_cannot_keep_a_stale_reading() {
+    let reachable = reachable_cluster().await;
+    let route = || every_route(reaping_job(true, true, false), NO_PODS.to_string());
+
+    for (age, requeue) in [
+        (60_i64, Requeue::After(RE_PROBE_SECS)),
+        (500, Requeue::After(131)),
+    ] {
+        let (client, _rec, _bodies) = mock_client_recording_bodies(route());
+        let outcome = reconcile_cluster(
+            &reachable,
+            &client,
+            utc(2026, 9, 10, 11, 59) + chrono::Duration::seconds(age),
+        )
+        .await
+        .expect("the reconcile completes");
+        assert_eq!(outcome.deferred, Some(Deferred::VerdictRecorded));
+        assert_eq!(
+            outcome.requeue, requeue,
+            "reading {age} s old: looked at again by the bound at the latest"
+        );
+    }
+
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(route());
+    let outcome = reconcile_cluster(&reachable, &client, past_the_bound())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(outcome.reason.as_deref(), Some(REASON_PROBE_STALE));
+    let statuses = patched_statuses(&seen);
+    assert_eq!(statuses[0].get("reachable"), Some(&Value::Null));
+    assert!(statuses[0]["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not been collected by its TTL"));
+    assert_eq!(log.messages_at("WARN").len(), 1);
+}
+
+/// **FX-19 FIX ROUND, review M2: A READING OLDER THAN THE BOUND IS NOT WRITTEN
+/// AS A VERDICT.** A finished probe Job read for the first time long after it
+/// finished (its TTL never collected it, or the controller was down) carries a
+/// reading nobody has repeated: `ProbeStale`, `reachable` cleared, no
+/// `clusterId` and no `observedAt` from it — and the Job still gets its TTL and
+/// marker, so the next probe runs. CONTROL: the same Job read inside the bound
+/// writes the `Reachable` verdict.
+///
+/// KILLS: the STEP-3 staleness check removed.
+#[tokio::test]
+async fn fx19_a_stale_reading_is_not_written_as_a_verdict() {
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+    let outcome = reconcile_cluster(&cluster(), &client, past_the_bound())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(outcome.reason.as_deref(), Some(REASON_PROBE_STALE));
+    assert_eq!(outcome.reachable, None);
+    let status = &patched_statuses(&seen)[0];
+    assert_eq!(status["reason"], REASON_PROBE_STALE);
+    assert_eq!(status.get("reachable"), Some(&Value::Null));
+    assert!(status.get("clusterId").is_none() && status.get("observedAt").is_none());
+    assert!(
+        outcome.ttl_patched,
+        "the Job is still replaced on the cadence"
+    );
+    assert_eq!(
+        job_patches(&seen)[0]["metadata"]["annotations"][VERDICT_RECORDED_ANNOTATION],
+        serde_json::json!(JOB_UID)
+    );
+    assert_eq!(log.messages_at("WARN").len(), 1);
+    drop(log);
+
+    // CONTROL: inside the bound, the verdict.
+    let (client, _rec, _bodies) =
+        mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(outcome.reachable, Some(true));
+    assert_eq!(outcome.reason.as_deref(), Some(REASON_REACHABLE));
+}
+
+/// **FX-19 FIX ROUND, review M2: A PROBE IN FLIGHT DOES NOT RE-VOUCH FOR A
+/// STALE READING.** Normally a running probe leaves the last observation
+/// standing; past the bound its `ProbeRunning` write clears `reachable` too.
+/// CONTROL: inside the bound the running write carries no `reachable` key.
+///
+/// KILLS: the staleness check removed from `probe_started_patch`.
+#[tokio::test]
+async fn fx19_a_probe_in_flight_does_not_re_vouch_for_a_stale_reading() {
+    let reachable = reachable_cluster().await;
+    for (at, cleared) in [(now(), false), (past_the_bound(), true)] {
+        let (client, _rec, bodies) =
+            mock_client_recording_bodies(every_route(running_job_body(), NO_PODS.to_string()));
+        let outcome = reconcile_cluster(&reachable, &client, at)
+            .await
+            .expect("the reconcile completes");
+        assert_eq!(outcome.reason.as_deref(), Some(REASON_PROBE_RUNNING));
+        let status = &patched_statuses(&bodies.lock().expect("readable"))[0];
+        assert_eq!(
+            status.get("reachable") == Some(&Value::Null),
+            cleared,
+            "at {at}: {status}"
+        );
+    }
+}
+
+/// **FX-19 FIX ROUND, review LOW-1: AN UNREADABLE LOG IS ONE WARN PER JOB.**
+/// Pass 1 reads a log with no contract line: `ProbeOutputUnreadable`, one
+/// WARN, the TTL and marker. Pass 2 is the same Job (pod still there, now
+/// marked) over the status pass 1 left: the re-read changes nothing and logs
+/// at debug.
+///
+/// KILLS: the unreadable-log WARN on every pass that is not superseded.
+#[tokio::test]
+async fn fx19_an_unreadable_log_warns_once_per_job() {
+    let unreadable = log_body("a runner that printed nothing the contract names\n");
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(finished_routes(0, unreadable.clone()));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some(REASON_PROBE_OUTPUT_UNREADABLE)
+    );
+    let seen = bodies.lock().expect("readable").clone();
+    let after = after_status(&cluster(), &patched_statuses(&seen)[0]);
+    let mut warns = log.messages_at("WARN");
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    drop(log);
+
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(answering(
+        finished_routes(0, unreadable),
+        "GET",
+        "/jobs/logweir-probe-orders-prod",
+        200,
+        annotated(&job_body("Complete"), VERDICT_RECORDED_ANNOTATION, JOB_UID),
+    ));
+    reconcile_cluster(&after, &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(
+        count(&bodies.lock().expect("readable"), "PATCH", "/status"),
+        0
+    );
+    warns.extend(log.messages_at("WARN"));
+    assert_eq!(warns.len(), 1, "one unreadable Job, one WARN: {warns:?}");
+}
+
+/// **FX-19 FIX ROUND, review LOW-1: A CRASH WHOSE TTL PATCH FAILED IS STILL
+/// ONE WARN.** Pass 1 records the crash and WARNs, then its TTL patch answers
+/// `500` (a reconcile error, so the Job keeps no marker). Pass 2 re-judges the
+/// same unmarked Job over the crash status pass 1 left: nothing changes, so it
+/// logs at debug and patches the TTL.
+///
+/// KILLS: the crash WARN on every pass that is not superseded.
+#[tokio::test]
+async fn fx19_a_crash_whose_ttl_patch_failed_warns_once() {
+    let reachable = reachable_cluster().await;
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(answering(
+        every_route(reaping_job(true, false, false), NO_PODS.to_string()),
+        "PATCH",
+        "/jobs/logweir-probe-orders-prod",
+        500,
+        r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"etcd timeout",
+            "reason":"InternalError","code":500}"#
+            .to_string(),
+    ));
+    reconcile_cluster(&reachable, &client, now())
+        .await
+        .expect_err("the TTL patch's 500 is a reconcile error");
+    let seen = bodies.lock().expect("readable").clone();
+    let crashed = after_status(&reachable, &patched_statuses(&seen)[0]);
+    let mut warns = log.messages_at("WARN");
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    drop(log);
+
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(every_route(
+        reaping_job(true, false, false),
+        NO_PODS.to_string(),
+    ));
+    let outcome = reconcile_cluster(&crashed, &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert!(outcome.ttl_patched);
+    assert_eq!(
+        count(&bodies.lock().expect("readable"), "PATCH", "/status"),
+        0
+    );
+    warns.extend(log.messages_at("WARN"));
+    assert_eq!(warns.len(), 1, "one crashed Job, one WARN: {warns:?}");
 }

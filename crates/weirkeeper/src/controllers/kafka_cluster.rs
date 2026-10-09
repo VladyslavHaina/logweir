@@ -218,6 +218,9 @@ pub const PROBE_CONDITION_REASONS: &[&str] = &[
     REASON_PROBE_REPORTED_UNREACHABLE,
     REASON_PROBE_OUTPUT_UNREADABLE,
     REASON_PROBE_RUNNING,
+    // FX-19 fix round: the last reading is too old to vouch for. A probe
+    // reason, not a terminal state: the next probe that answers replaces it.
+    REASON_PROBE_STALE,
     crate::conditions::TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
     crate::conditions::TERMINAL_STATE_CONNECTION_REFERENCE_INVALID,
     crate::conditions::TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED,
@@ -738,20 +741,40 @@ enum StatusWrite {
     Superseded,
 }
 
+/// The annotation this reconciler puts on a probe Job, in the SAME merge patch
+/// as its TTL, once the status write that recorded the Job's verdict returned
+/// — FX-19. Its value is the Job's own `metadata.uid`.
+pub const VERDICT_RECORDED_ANNOTATION: &str = "logweir.dev/probe-verdict-recorded";
+
 /// Whether a finished probe Job's verdict is already on the status — FX-19.
 ///
-/// THE JOB'S OWN `ttlSecondsAfterFinished` IS THE MARKER. [`job::build`]
-/// creates every probe Job without one, and this reconciler patches it on
-/// ([`set_probe_ttl`]) only after the status write that recorded the Job's
-/// verdict — a reading, a crash or a refused pod — returned. A finished Job
-/// that carries it has been judged; a pod it no longer has was collected after
-/// the reading, and is no reason to judge it again or to clear `reachable`.
+/// # The marker is this reconciler's own, and never the TTL
+///
+/// [`set_probe_ttl`] writes [`VERDICT_RECORDED_ANNOTATION`] = the Job's UID
+/// beside the TTL, in one merge patch, and only after the status write that
+/// recorded the Job's verdict — a reading, a crash or a refused pod —
+/// returned. A finished Job that carries it has been judged; a pod it no
+/// longer has was collected after the reading, and is no reason to judge it
+/// again or to clear `reachable`.
+///
+/// The first landing read `ttlSecondsAfterFinished` itself (FX-19 review
+/// M1). That field has other writers: a mutating admission policy (Kyverno,
+/// Gatekeeper, a platform's defaulting webhook) can give every new Job a TTL
+/// at creation, and then every probe Job read as judged from birth — a real
+/// crash was never recorded and `reachable: true` stood through every failing
+/// probe, while the re-probe cadence became the foreign TTL. Nothing but this
+/// reconciler writes this annotation, and the UID makes a value copied onto
+/// another Job worthless.
 #[must_use]
 pub fn verdict_recorded(job: &Job) -> bool {
-    job.spec
+    let Some(uid) = job.metadata.uid.as_deref().filter(|u| !u.is_empty()) else {
+        return false;
+    };
+    job.metadata
+        .annotations
         .as_ref()
-        .and_then(|s| s.ttl_seconds_after_finished)
-        .is_some()
+        .and_then(|a| a.get(VERDICT_RECORDED_ANNOTATION))
+        .is_some_and(|v| v == uid)
 }
 
 /// Whether Kubernetes is deleting this probe Job — FX-19.
@@ -764,6 +787,103 @@ pub fn being_deleted(job: &Job) -> bool {
     job.metadata.deletion_timestamp.is_some()
 }
 
+/// How old the last probe reading (`status.observedAt`) may grow, with no
+/// newer probe answering, before `reachable` stops vouching for it — FX-19
+/// fix round (review M2).
+///
+/// **TWICE [`RE_PROBE_SECS`], 630 s: the console's own freshness budget.** A
+/// healthy connection's reading is replaced within one cadence plus the next
+/// probe's run — [`RE_PROBE_SECS`] + at most [`PROBE_DEADLINE_SECONDS`], about
+/// 315–450 s — so a healthy connection never reaches it. A probe Job whose
+/// deletion stalls (a finished pod `Terminating` on a node that went away, a
+/// foreign finalizer), or that its TTL never collects, does: the probe Job's
+/// name is fixed, so no newer probe can run while it exists, and before this
+/// bound the last reading stood for as long as that lasted. A `Restore` and a
+/// rehearsal admit a target on `reachable == true` alone, so the bound is
+/// what keeps them from admitting on a reading nobody has repeated.
+pub const STALE_AFTER_SECS: i64 = 2 * RE_PROBE_SECS as i64;
+
+/// `Reachable=Unknown`: the last reading is older than [`STALE_AFTER_SECS`]
+/// and no newer probe has answered, so `reachable` is cleared — FX-19.
+pub const REASON_PROBE_STALE: &str = "ProbeStale";
+
+/// Whether `reachable` asserts a reading older than [`STALE_AFTER_SECS`] at
+/// `now` — FX-19 fix round.
+///
+/// Only a `reachable` that is SET can be stale; a status that asserts nothing
+/// has nothing to clear. A set `reachable` with no `observedAt` beside it
+/// names no instant to vouch for, and is stale too.
+#[must_use]
+pub fn reachable_is_stale(cluster: &KafkaCluster, now: DateTime<Utc>) -> bool {
+    let Some(status) = cluster.status.as_ref() else {
+        return false;
+    };
+    if status.reachable.is_none() {
+        return false;
+    }
+    status
+        .observed_at
+        .as_ref()
+        .is_none_or(|at| reading_is_stale(*at, now))
+}
+
+/// Whether a reading taken at `observed` is older than [`STALE_AFTER_SECS`].
+#[must_use]
+pub fn reading_is_stale(observed: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    (now - observed).num_seconds() > STALE_AFTER_SECS
+}
+
+/// `default`, or sooner: the pass that would find the reading taken at
+/// `observed` stale, so a deferral or a re-read never sleeps past the bound.
+fn requeue_before_stale(
+    default: u64,
+    observed: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Requeue {
+    let until_stale = observed.map(|at| {
+        let left = STALE_AFTER_SECS + 1 - (now - at).num_seconds();
+        u64::try_from(left.max(1)).unwrap_or(1)
+    });
+    Requeue::After(until_stale.map_or(default, |u| u.min(default)))
+}
+
+/// The `/status` merge patch for a reading that is too old to vouch for —
+/// FX-19 fix round (review M2).
+///
+/// `reachable` cleared, `ProbeStale` in the scalar and the condition, and
+/// `observedAt` and `clusterId` LEFT ALONE: they stay the record of the last
+/// real look, which ages on in the console. `detail` names why no newer probe
+/// has answered; it and the stored `observedAt` are the whole message, so a
+/// later pass over the same state computes the same bytes and writes nothing.
+#[must_use]
+pub fn stale_status_patch(cluster: &KafkaCluster, detail: &str, now: DateTime<Utc>) -> Value {
+    let last = cluster
+        .status
+        .as_ref()
+        .and_then(|s| s.observed_at.as_ref())
+        .map_or_else(
+            || "no recorded instant".to_string(),
+            |t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        );
+    json!({
+        "status": {
+            "reachable": null,
+            "reason": REASON_PROBE_STALE,
+            "conditions": [condition(
+                cluster,
+                "Unknown",
+                REASON_PROBE_STALE,
+                &format!(
+                    "the last probe reading ({last}) is more than {STALE_AFTER_SECS} s old and \
+                     no newer probe has answered: {detail}; `reachable` is cleared rather than \
+                     left vouching for it, and the next probe that answers sets it again"
+                ),
+                now,
+            )],
+        }
+    })
+}
+
 /// The `/status` merge patch for the pass that CREATED a probe Job.
 ///
 /// It touches neither `reachable` nor `clusterId` nor `observedAt`: a merge
@@ -773,6 +893,17 @@ pub fn being_deleted(job: &Job) -> bool {
 /// controller has never seen the object".
 #[must_use]
 pub fn probe_started_patch(cluster: &KafkaCluster, job_name: &str, now: DateTime<Utc>) -> Value {
+    // FX-19 fix round (review M2): A PROBE IN FLIGHT DOES NOT RE-VOUCH FOR A
+    // STALE READING. Normally the last observation stands while the next probe
+    // runs; once it is older than `STALE_AFTER_SECS` it is cleared here too.
+    let stale = reachable_is_stale(cluster, now);
+    let message = if stale {
+        format!(
+            "probe Job {job_name} is running; the last observation is more than              {STALE_AFTER_SECS} s old, so `reachable` is cleared until this probe answers"
+        )
+    } else {
+        format!("probe Job {job_name} is running; the last observation, if any, stands")
+    };
     let mut patch = json!({
         "status": {
             "reason": REASON_PROBE_RUNNING,
@@ -780,11 +911,14 @@ pub fn probe_started_patch(cluster: &KafkaCluster, job_name: &str, now: DateTime
                 cluster,
                 "Unknown",
                 REASON_PROBE_RUNNING,
-                &format!("probe Job {job_name} is running; the last observation, if any, stands"),
+                &message,
                 now,
             )],
         }
     });
+    if stale {
+        patch["status"]["reachable"] = Value::Null;
+    }
     // PROD-01.3 security follow-up: publish the binding the credential Secret
     // must carry, so an operator creating it by hand can copy it. Public (a
     // UID and an endpoint digest); written only for a connection that HAS a
@@ -1150,6 +1284,20 @@ impl From<kube::Error> for KafkaClusterError {
 // The reconcile
 // ---------------------------------------------------------------------------
 
+/// The merge patch [`set_probe_ttl`] sends: the re-probe TTL and this
+/// reconciler's own verdict marker, together — FX-19.
+#[must_use]
+pub fn ttl_patch(job: &Job) -> Value {
+    json!({
+        "metadata": {
+            "annotations": {
+                VERDICT_RECORDED_ANNOTATION: job.metadata.uid.clone().unwrap_or_default()
+            }
+        },
+        "spec": { "ttlSecondsAfterFinished": PROBE_TTL_SECONDS }
+    })
+}
+
 /// Patch a FINISHED probe Job's `ttlSecondsAfterFinished` — which is also the
 /// re-probe timer ([`PROBE_TTL_SECONDS`]).
 ///
@@ -1161,14 +1309,21 @@ impl From<kube::Error> for KafkaClusterError {
 /// Returns whether the patch was applied. A Job that is already gone (`404`)
 /// is the state the TTL exists to reach, not an error (FX-19): there is
 /// nothing left to collect, and its deletion event starts the next probe.
-async fn set_probe_ttl(jobs: &Api<Job>, job_name: &str) -> Result<bool, KafkaClusterError> {
+///
+/// # The TTL and this reconciler's marker travel in ONE patch (FX-19 fix round)
+///
+/// [`ttl_patch`] carries [`VERDICT_RECORDED_ANNOTATION`] = the Job's UID beside
+/// [`PROBE_TTL_SECONDS`], so the Job reads "verdict recorded"
+/// ([`verdict_recorded`]) exactly when this reconciler gave it its TTL — and
+/// a TTL some admission policy put on the Job at creation is overwritten with
+/// the re-probe timer rather than trusted.
+async fn set_probe_ttl(jobs: &Api<Job>, job: &Job) -> Result<bool, KafkaClusterError> {
+    let job_name = job.name_any();
     match jobs
         .patch(
-            job_name,
+            &job_name,
             &PatchParams::default(),
-            &Patch::Merge(json!({
-                "spec": { "ttlSecondsAfterFinished": PROBE_TTL_SECONDS }
-            })),
+            &Patch::Merge(ttl_patch(job)),
         )
         .await
     {
@@ -1436,7 +1591,7 @@ async fn reconcile_cluster_inner(
                 (false, Requeue::AwaitChange)
             }
             Some(job) if backup::job_finished(&job) => {
-                let patched = set_probe_ttl(&jobs, &job_name).await?;
+                let patched = set_probe_ttl(&jobs, &job).await?;
                 info!(
                     cluster = %name,
                     namespace = %namespace,
@@ -1533,21 +1688,38 @@ async fn reconcile_cluster_inner(
     // crash, clearing a `reachable` its own reading recorded minutes ago. No
     // pod read, no status write, no TTL patch: the last recorded verdict
     // stands, and the Job's deletion event creates the next probe.
+    //
+    // BOUNDED (FX-19 fix round, review M2): a deletion that stalls — a pod
+    // `Terminating` on a node that went away, a foreign finalizer — keeps the
+    // fixed-name Job, so no newer probe can run; once the last reading is
+    // older than `STALE_AFTER_SECS`, `reachable` is cleared (`ProbeStale`).
     if being_deleted(&job) {
         debug!(
             cluster = %name,
             namespace = %namespace,
             job = %job_name,
             finished = backup::job_finished(&job),
-            ttl_set = verdict_recorded(&job),
+            verdict_recorded = verdict_recorded(&job),
             "the probe Job is being deleted; nothing is read from it, the last recorded verdict \
              stands, and the next probe is created once it is gone"
         );
-        return Ok(ProbeOutcome::deferred(
+        let since = job
+            .metadata
+            .deletion_timestamp
+            .as_ref()
+            .map_or_else(String::new, |t| {
+                t.0.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            });
+        return defer_or_mark_stale(
+            &clusters,
+            cluster,
+            &namespace,
             job_name,
-            false,
             Deferred::JobBeingDeleted,
-        ));
+            || format!("its probe Job has been in deletion since {since}"),
+            now,
+        )
+        .await;
     }
 
     // STEP 2. Running.
@@ -1655,14 +1827,22 @@ async fn reconcile_cluster_inner(
                 namespace = %namespace,
                 job = %job_name,
                 pod_present = found.pod.is_some(),
-                "the probe Job's verdict is already on the status (it carries its TTL), so the \
-                 absence of a terminated runner now is not a crash; nothing is re-judged"
+                "the probe Job's verdict is already on the status (it carries this reconciler's \
+                 marker), so the absence of a terminated runner now is not a crash; nothing is \
+                 re-judged"
             );
-            return Ok(ProbeOutcome::deferred(
+            // Bounded the same way: a judged Job its TTL never collects keeps
+            // the next probe from running.
+            return defer_or_mark_stale(
+                &clusters,
+                cluster,
+                &namespace,
                 job_name,
-                false,
                 Deferred::VerdictRecorded,
-            ));
+                || "its judged probe Job has not been collected by its TTL".to_string(),
+                now,
+            )
+            .await;
         }
         // FX-11: A JOB THAT NEVER HAD A POD, AND WAS TOLD WHY. Read before the
         // crash classification, which can only say `NoExitCode` for "no pod".
@@ -1708,7 +1888,7 @@ async fn reconcile_cluster_inner(
             // so a quota that is lifted is noticed within one cadence, and a
             // quota that is not costs one refused Job per cadence — never a
             // retry storm.
-            let ttl_patched = set_probe_ttl(&jobs, &job_name).await?;
+            let ttl_patched = set_probe_ttl(&jobs, &job).await?;
             return Ok(ProbeOutcome {
                 job_name,
                 created: false,
@@ -1762,7 +1942,7 @@ async fn reconcile_cluster_inner(
         // The TTL is the re-probe timer, exactly as on the happy path, and it is
         // patched only after the status above landed. Bounded: one probe Job per
         // `PROBE_TTL_SECONDS` + requeue, however long the crash cause lasts.
-        let ttl_patched = set_probe_ttl(&jobs, &job_name).await?;
+        let ttl_patched = set_probe_ttl(&jobs, &job).await?;
         return Ok(ProbeOutcome {
             job_name,
             created: false,
@@ -1800,6 +1980,57 @@ async fn reconcile_cluster_inner(
     let report = probe_report(&log);
     let v = verdict(&report);
     let observed = observed_at(&job, Some(pod), now);
+
+    // FX-19 fix round (review M2): A READING TOO OLD TO VOUCH FOR IS NOT
+    // WRITTEN AS A VERDICT. It is a Job its TTL never collected, or one a
+    // controller that was down for a while finds finished long ago; either
+    // way no newer probe has run, so `reachable` is cleared (`ProbeStale`)
+    // instead of re-asserted, and the Job gets its TTL so the next probe runs.
+    if reading_is_stale(observed, now) {
+        let taken = observed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let detail = format!(
+            "probe Job {job_name}'s own reading was taken at {taken} and the Job has not been \
+             replaced"
+        );
+        let wrote = patch_status_if_changed(
+            &clusters,
+            cluster,
+            &name,
+            stale_status_patch(cluster, &detail, now),
+        )
+        .await?;
+        if wrote == StatusWrite::Superseded {
+            return Ok(ProbeOutcome::deferred(
+                job_name,
+                false,
+                Deferred::StatusSuperseded,
+            ));
+        }
+        warn_when_first_recorded!(
+            wrote == StatusWrite::Changed,
+            cluster = %name,
+            namespace = %namespace,
+            job = %job_name,
+            reason = %detail,
+            "the probe reading is too old to vouch for; `reachable` is cleared (ProbeStale) and \
+             the Job gets the usual TTL, so the next probe runs"
+        );
+        let ttl_patched = if verdict_recorded(&job) {
+            false
+        } else {
+            set_probe_ttl(&jobs, &job).await?
+        };
+        return Ok(ProbeOutcome {
+            job_name,
+            created: false,
+            reachable: None,
+            cluster_id: None,
+            reason: Some(REASON_PROBE_STALE.to_string()),
+            ttl_patched,
+            requeue: Requeue::After(RE_PROBE_SECS),
+            deferred: None,
+        });
+    }
 
     let wrote = patch_status_if_changed(
         &clusters,
@@ -1840,7 +2071,7 @@ async fn reconcile_cluster_inner(
     let ttl_patched = if verdict_recorded(&job) {
         false
     } else {
-        set_probe_ttl(&jobs, &job_name).await?
+        set_probe_ttl(&jobs, &job).await?
     };
 
     if wrote == StatusWrite::Changed || ttl_patched {
@@ -1864,9 +2095,67 @@ async fn reconcile_cluster_inner(
         cluster_id: v.cluster_id,
         reason: Some(v.reason),
         ttl_patched,
-        requeue: Requeue::After(RE_PROBE_SECS),
+        // Never past the staleness bound: a Job its TTL does not collect is
+        // looked at again before this reading turns stale.
+        requeue: requeue_before_stale(RE_PROBE_SECS, Some(observed), now),
         deferred: None,
     })
+}
+
+/// A pass that forms no verdict on purpose (FX-19) — unless the last reading
+/// has outlived [`STALE_AFTER_SECS`], in which case it is cleared
+/// ([`stale_status_patch`]) and that is logged at WARN once per state, on the
+/// write that recorded it. `detail` names why no newer probe can answer.
+#[allow(clippy::too_many_arguments)]
+async fn defer_or_mark_stale(
+    clusters: &Api<KafkaCluster>,
+    cluster: &KafkaCluster,
+    namespace: &str,
+    job_name: String,
+    why: Deferred,
+    detail: impl FnOnce() -> String,
+    now: DateTime<Utc>,
+) -> Result<ProbeOutcome, KafkaClusterError> {
+    let name = cluster.name_any();
+    let mut outcome = ProbeOutcome::deferred(job_name, false, why);
+    let default = match outcome.requeue {
+        Requeue::After(secs) => secs,
+        Requeue::AwaitChange => REQUEUE_SECS,
+    };
+    if !reachable_is_stale(cluster, now) {
+        outcome.requeue = requeue_before_stale(
+            default,
+            cluster.status.as_ref().and_then(|s| s.observed_at),
+            now,
+        );
+        return Ok(outcome);
+    }
+    let detail = detail();
+    let wrote = patch_status_if_changed(
+        clusters,
+        cluster,
+        &name,
+        stale_status_patch(cluster, &detail, now),
+    )
+    .await?;
+    if wrote == StatusWrite::Superseded {
+        return Ok(ProbeOutcome::deferred(
+            outcome.job_name,
+            false,
+            Deferred::StatusSuperseded,
+        ));
+    }
+    warn_when_first_recorded!(
+        wrote == StatusWrite::Changed,
+        cluster = %name,
+        namespace = %namespace,
+        job = %outcome.job_name,
+        reason = %detail,
+        "the last probe reading is too old to vouch for and no newer probe can answer; \
+         `reachable` is cleared (ProbeStale)"
+    );
+    outcome.reason = Some(REASON_PROBE_STALE.to_string());
+    Ok(outcome)
 }
 
 /// The `kube::runtime` reconcile entry point. **THE ONE CLOCK READ IN THIS FILE
@@ -1887,40 +2176,26 @@ async fn reconcile(
 /// false` is an OUTCOME with a status written for it and a re-probe scheduled by
 /// the Job's TTL, not an error — the distinction interface I14 exists to make.
 ///
-/// A `404` or a `409` that still reaches here — an object gone or moved on
-/// between a read and a write this module does not answer itself — is the same
-/// race the reconcile answers in place (FX-19), so it is a debug line: the
-/// requeue (or the event that caused the race) resolves it.
+/// **EVERY ERROR THAT REACHES HERE IS A WARN** (FX-19 fix round, review
+/// LOW-2). The races of a Job being collected — the pod gone by the log read,
+/// the Job gone by its TTL patch, a status write that lost its precondition —
+/// are answered IN PLACE as outcomes and never get here. Anything else,
+/// including a `404` or a `409` from any other call (a `/status` subresource a
+/// bad CRD upgrade dropped, a `jobs.create` that keeps answering
+/// `AlreadyExists`), is not a known race and stays visible.
 fn error_policy(cluster: Arc<KafkaCluster>, err: &KafkaClusterError, _ctx: Arc<Context>) -> Action {
     log_reconcile_error(&cluster.name_any(), err);
     Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
 }
 
-/// [`error_policy`]'s log line: debug for [`is_benign_race`], WARN for
-/// everything else. Its own function so a row can read the level it chooses.
+/// [`error_policy`]'s log line, at WARN for every error. Its own function so
+/// a row can read the level.
 pub fn log_reconcile_error(cluster: &str, err: &KafkaClusterError) {
-    if is_benign_race(err) {
-        debug!(
-            cluster = %cluster,
-            error = %err,
-            "KafkaCluster probe reconcile raced a deletion or a newer copy; requeueing"
-        );
-    } else {
-        warn!(
-            cluster = %cluster,
-            error = %err,
-            "KafkaCluster probe reconcile failed; requeueing"
-        );
-    }
-}
-
-/// Whether a reconcile error is only a race with Kubernetes itself — an object
-/// that was deleted (`404`) or changed (`409`) between this pass's read and its
-/// write — and so no reason to WARN (FX-19). Everything else, a transport error
-/// or a refusal included, is.
-#[must_use]
-pub fn is_benign_race(err: &KafkaClusterError) -> bool {
-    matches!(err, KafkaClusterError::Api(kube::Error::Api(e)) if e.code == 404 || e.code == 409)
+    warn!(
+        cluster = %cluster,
+        error = %err,
+        "KafkaCluster probe reconcile failed; requeueing"
+    );
 }
 
 /// Run the `KafkaCluster` probe controller until the process ends.
