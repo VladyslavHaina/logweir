@@ -1435,14 +1435,22 @@ the readiness probe and the backup set check GET with a 0-byte cap. The caps:
   256 MiB and segments under 1 GiB. The catalog walk keeps its 256 KiB.
 - The evidence-fetch Job relays nothing for an object over `maxBytes` (before,
   it relayed a prefix the controller refused anyway).
+- Concurrent controller reads share ONE 128 MiB budget, a quarter of the
+  chart's 512Mi limit. Each read reserves its worst case before it reads
+  (a document 40 MiB with its parse, a manifest 64 MiB), and a read that does
+  not fit waits. Eight concurrent retention evaluations of 60 MiB manifests add
+  126 MB of peak memory with the budget, against 504 MB without it.
 
 Over a cap, the controller writes `NotAttempted`, naming the key and the cap.
-That verdict is final, never re-read on the schedule. The retention report
+That verdict is final, never re-read on the schedule; a signing-time re-read
+of such a document settles as `trust.signingTimeRead: overCap` (a CRD
+description gains the value). The retention report
 lists the set under `skipped`, and the CLI and runner fail operationally,
 naming the cap. Never a crash, never a pass.
 
 **Do:** nothing is required. Know the limit it makes visible. A 1.5.0 receipt
-is about 3.4 KB per topic, so a run that selects more than about **300 topics**
+is about 3.4 KB per topic, so a run that selects more than about **250–300 topics**
+(fewer with per-topic configuration overrides)
 writes a receipt over 1 MiB. No path verifies such a receipt now, and the run
 is not a recovery point. Before this item, the controller's own handle verified
 it, and an evidence-fetch relay did not. This moves a verdict only to the safer
@@ -1567,8 +1575,8 @@ authorization); item 44 changes the console only and needs nothing; item 45
 changes the controller only (and two CRD descriptions) and needs nothing; item 46
 changes the runner's receipts and catalog records, the catalog's view (runner
 and controller), the product API and the console, and needs nothing; item 47
-changes the console only and needs nothing; item 48 changes the controller,
-the runner and the check Jobs and needs nothing. To roll back to
+changes the console only and needs nothing; item 48 changes the controller
+(and two CRD descriptions), the runner and the check Jobs and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

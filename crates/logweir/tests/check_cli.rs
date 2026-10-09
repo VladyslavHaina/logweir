@@ -3975,6 +3975,12 @@ fn a_manifest_over_the_read_cap_is_refused_naming_the_cap() {
         vec![(MANIFEST_OBJECT_KEY.to_string(), caps::MANIFEST)],
         "one read, under the manifest cap"
     );
+    // REVIEW F7: nothing refused, so the remedy does not blame the store.
+    assert!(
+        row.remedy.contains("larger than this build reads")
+            && !row.remedy.contains("does not classify"),
+        "{row:?}"
+    );
 }
 
 /// The bound arithmetic is the execution guard's, including the

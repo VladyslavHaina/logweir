@@ -2087,7 +2087,7 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         // receipt's topic limit an operator must know.
         (
             "every object-store read has a size cap",
-            "about **300 topics**",
+            "about **250–300 topics**",
         ),
     ];
     assert_eq!(

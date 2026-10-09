@@ -308,6 +308,18 @@ fn archive_checks(
                 }
                 _ => class.to_string(),
             };
+            // NOTHING REFUSED, so the store's remedy would send an operator
+            // to a bucket policy that is fine (review F7): the object is too
+            // big for this build to read.
+            let remedy = if matches!(e, StoreError::TooLarge { .. }) {
+                OVER_CAP_MANIFEST_REMEDY
+            } else {
+                remedy_for(if class == CheckCode::ObjectNotFound {
+                    CheckCode::BackupSetNotFound
+                } else {
+                    class
+                })
+            };
             // A manifest that is NOT THERE is the backup set not being there,
             // which is the fact an operator acts on; every other refusal keeps
             // its store code so the remedy points at the bucket policy rather
@@ -325,7 +337,7 @@ fn archive_checks(
                              be read: {why}",
                             dest.name
                         ))
-                        .with_remedy(remedy_for(code))
+                        .with_remedy(remedy)
                         .with_scope(scope),
                 );
             }
@@ -1076,3 +1088,11 @@ pub fn details_stream(lines: &[String]) -> Vec<u8> {
     }
     out.into_bytes()
 }
+
+/// The remedy for a backup manifest over the read cap (FX-31 review F7): the
+/// store answered, the object is larger than this build reads, and no grant,
+/// bucket policy or network change makes it smaller.
+pub const OVER_CAP_MANIFEST_REMEDY: &str =
+    "The backup set's manifest is larger than this build reads (docs/kubernetes.md §7b.4). \
+     No grant or policy change helps: restore from a smaller set, or a build whose manifest \
+     cap holds this one.";

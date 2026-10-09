@@ -938,3 +938,137 @@ fn concurrent_reads_share_one_budget() {
          concurrent reads at this size"
     );
 }
+
+/// **Every controller read path reserves from the ONE budget before it reads**
+/// (FX-31 review F2). With the whole controller budget held, each of the five
+/// paths waits; released, each one finishes.
+///
+/// KILLS: "no reservation" in any one of `verify_evidence`, `observe_archive`,
+/// `observe_scorecard`, `read_signing_time` and `retention::evaluate` (that
+/// path finishes while the budget is held).
+#[test]
+fn every_controller_read_path_waits_for_the_budget() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use weirkeeper::read_budget::ReadBudget;
+    let receipt = fixture("e2e/fixtures/signed/backup-receipt.json");
+    type ReadPath = Box<dyn FnOnce(&Store) + Send>;
+    let paths: Vec<(&str, ReadPath)> = vec![
+        (
+            "verify_evidence",
+            Box::new(|s| {
+                let _ = verify(s, "sha256:x");
+            }),
+        ),
+        (
+            "observe_archive",
+            Box::new(|s| {
+                let _ = observe_archive(
+                    s,
+                    &EvidenceKeys {
+                        receipt: Some(PAYLOAD_KEY.to_string()),
+                        sidecar: Some(SIDECAR_KEY.to_string()),
+                        receipt_sha256: None,
+                    },
+                );
+            }),
+        ),
+        (
+            "observe_scorecard",
+            Box::new(|s| {
+                let _ = observe_scorecard(s, PAYLOAD_KEY);
+            }),
+        ),
+        (
+            "read_signing_time",
+            Box::new(|s| {
+                let _ = read_signing_time(
+                    Some(s),
+                    &SigningTimeNeed {
+                        payload_key: PAYLOAD_KEY.to_string(),
+                        payload_sha256: "sha256:x".to_string(),
+                        payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT.to_string(),
+                    },
+                );
+            }),
+        ),
+        (
+            "retention::evaluate",
+            Box::new(|s| {
+                let _ = weirkeeper::retention::evaluate(
+                    s,
+                    "s3://bucket/logweir/archive/",
+                    "logweir/archive/",
+                    &Retention {
+                        keep_last: Some(1),
+                        keep_days: None,
+                    },
+                    Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
+                );
+            }),
+        ),
+    ];
+    for (name, path) in paths {
+        let store = Store::in_memory("logweir/");
+        put(&store, PAYLOAD_KEY, &receipt);
+        put(&store, SIDECAR_KEY, b"{}");
+        put(
+            &store,
+            "logweir/archive/b1/manifest.json",
+            br#"{"topics":[{"partitions":[{"segments":[{"start_timestamp":1,"end_timestamp":2}]}]}]}"#,
+        );
+        let budget = ReadBudget::controller();
+        let held = budget.reserve(budget.total());
+        let (done, finished) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            path(&store);
+            let _ = done.send(());
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_millis(300)).is_err(),
+            "{name} read while the controller's whole budget was held: it reserves nothing"
+        );
+        drop(held);
+        assert!(
+            finished.recv_timeout(Duration::from_secs(20)).is_ok(),
+            "{name} did not finish once the budget was released"
+        );
+        worker.join().expect("the reader thread ends");
+    }
+}
+
+/// **The budget fits the controller it runs in** (FX-31 review F2): at most a
+/// quarter of the chart's controller memory limit, room for one manifest
+/// read, and a document read costs its cap plus the measured 37× parse.
+///
+/// KILLS: "a budget far too large"; "a document read that reserves only its
+/// bytes".
+#[test]
+fn the_read_budget_fits_the_charts_controller_limit() {
+    use weirkeeper::read_budget::{
+        CONTROLLER_READ_BUDGET_BYTES, DOCUMENT_READ_COST_BYTES, MANIFEST_READ_COST_BYTES,
+    };
+    let values: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(repo_root().join("charts/logweir/values.yaml"))
+            .expect("the chart's values read"),
+    )
+    .expect("the chart's values parse");
+    let limit = values["controller"]["resources"]["limits"]["memory"]
+        .as_str()
+        .expect("controller.resources.limits.memory is set");
+    let mib: u64 = limit
+        .strip_suffix("Mi")
+        .and_then(|n| n.parse().ok())
+        .expect("the limit is written in Mi");
+    let limit_bytes = mib << 20;
+    assert!(
+        4 * CONTROLLER_READ_BUDGET_BYTES <= limit_bytes,
+        "the read budget ({CONTROLLER_READ_BUDGET_BYTES} B) is more than a quarter of the \
+         controller's {limit} limit"
+    );
+    // Constant relations, held at compile time.
+    const _: () = assert!(MANIFEST_READ_COST_BYTES <= CONTROLLER_READ_BUDGET_BYTES);
+    const _: () = assert!(MANIFEST_READ_COST_BYTES >= caps::CONTROLLER_MANIFEST);
+    // A document read reserves its cap and its parse (the measured 37×).
+    const _: () = assert!(DOCUMENT_READ_COST_BYTES >= 38 * caps::CONTROLLER_DOCUMENT);
+}

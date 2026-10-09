@@ -1293,7 +1293,8 @@ impl Store {
     ///    compromised endpoint, an object replaced between the headers and
     ///    the body — is cut off at the first chunk that would take the total
     ///    past the cap, with [`OverCap::Streamed`]. That chunk is not kept,
-    ///    so the most this read ever holds is the cap plus one chunk.
+    ///    and the buffer grows by doubling but never past the cap, so the
+    ///    most this read ever holds is the cap plus the one chunk in hand.
     ///
     /// So the memory a read can take is the caller's decision, named at the
     /// call site from [`caps`], and not the size of whatever a bucket holds.
@@ -1313,6 +1314,10 @@ impl Store {
     ) -> Result<(Vec<u8>, Option<String>), StoreError> {
         let rt = &self.rt;
         rt.block_on(async {
+            // The one whole-body GET outside a version read (clippy.toml
+            // forbids it everywhere else): its body is taken through
+            // `read_within`'s two fences, never collected whole.
+            #[allow(clippy::disallowed_methods)]
             let r = self
                 .inner
                 .get(&OPath::from(key))
@@ -1398,6 +1403,9 @@ impl Store {
                 if size == 0 {
                     return Ok(Some(Vec::new()));
                 }
+                // PROD-03.0's ranged read, to exactly the size the HEAD
+                // reported and only when it is under the caller's cap.
+                #[allow(clippy::disallowed_methods)]
                 let b = self
                     .inner
                     .get_range(&path, 0..size)
@@ -1472,6 +1480,8 @@ impl Store {
                 version: Some(version.to_string()),
                 ..Default::default()
             };
+            // A version read's GET: its body goes through `read_within` too.
+            #[allow(clippy::disallowed_methods)]
             let r = self
                 .inner
                 .get_opts(&OPath::from(key), options)
@@ -2775,6 +2785,18 @@ async fn read_within(
                 cap: max_bytes,
                 observed: OverCap::Streamed { reported, read },
             });
+        }
+        // THE BUFFER NEVER GROWS PAST THE CAP (review F10). A store that
+        // reported less than it streams outgrows the reservation made from
+        // its report, and `Vec`'s own doubling could then take up to twice the
+        // cap. So it grows the way `Vec` would, doubling, but never past the
+        // cap: `read <= max_bytes` here, so the target always holds the chunk.
+        let needed = out.len() + chunk.len();
+        if out.capacity() < needed {
+            let target = needed
+                .max(out.capacity().saturating_mul(2))
+                .min(usize::try_from(max_bytes).unwrap_or(usize::MAX));
+            out.reserve_exact(target - out.len());
         }
         out.extend_from_slice(&chunk);
     }

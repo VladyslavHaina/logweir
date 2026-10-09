@@ -12,4 +12,14 @@ disallowed-methods = [
     # the lock carries rdkafka below 0.37; `crates/logweir/tests/unsafe_scope_gate.rs`
     # fails if it is removed before then.
     { path = "rdkafka::groups::GroupInfo::members", reason = "T1: unsound on rdkafka 0.36.2 for a group without members (NULL slice); use logweir_rdkafka_ffi::groups" },
+    # FX-31 (review F4). An object-store read names a cap, and the only reads
+    # that can are `logweir_store::Store::get_capped` / `get_version_capped`
+    # (and PROD-03.0's `get_bounded`). These are object_store's own whole-body
+    # reads: outside `crates/logweir-store/src`, which allows them at its three
+    # call sites, calling one is a read nothing bounds.
+    { path = "object_store::ObjectStoreExt::get", reason = "FX-31: reads a whole object; use logweir_store::Store::get_capped with a cap from logweir_store::caps" },
+    { path = "object_store::ObjectStoreExt::get_range", reason = "FX-31: use logweir_store::Store::get_capped (or get_bounded)" },
+    { path = "object_store::ObjectStore::get_opts", reason = "FX-31: use logweir_store::Store::get_capped / get_version_capped" },
+    { path = "object_store::ObjectStore::get_ranges", reason = "FX-31: use logweir_store::Store::get_capped" },
+    { path = "object_store::GetResult::bytes", reason = "FX-31: collects a whole body; use logweir_store::Store::get_capped" },
 ]

@@ -943,6 +943,25 @@ measured by `crates/weirkeeper/tests/read_caps.rs`: 16 MiB of JSON held 621 MB.
 A manifest is never parsed into a tree. The window is folded as the bytes
 stream past, so the retention report holds at most the 64 MiB it read.
 
+**Concurrent reads share one budget.** A cap bounds one read, and the
+controller runs reconciles concurrently: every schedule reconcile evaluates
+its retention report, and a controller start reconciles every schedule at
+once. So every controller read reserves its worst case out of one
+process-wide **128 MiB** budget (a quarter of the chart's 512Mi limit) before
+it reads, and holds the reservation until its bytes and its parse are freed:
+
+- a receipt or scorecard reserves 40 MiB, its 1 MiB cap plus the parse;
+- a manifest reserves 64 MiB.
+
+A read that does not fit waits. Measured in `crates/weirkeeper/tests/read_caps.rs`:
+- eight retention evaluations of 60 MiB manifests at once add 126 MB of peak
+  memory under the budget, and 504 MB without it;
+- sixteen 1 MB scorecards add 122 MB under the budget, and 413 MB without it.
+
+A degraded store makes evidence reads for every namespace wait on one another.
+The store's own request timeout bounds that wait, and it is the trade the
+controller's four-permit evidence-read pool already makes.
+
 **What an operator sees.** An object over its cap is never a crash and never
 a pass:
 
@@ -950,15 +969,17 @@ a pass:
 |---|---|
 | `Backup` and `Restore` `status.evidence.verification` | `NotAttempted`, with the detail `<key> is larger than the <cap>-byte cap weirkeeper reads (the store reports <n> bytes); nothing was verified`. The verdict is **final**: the object will not shrink, so it is not read again on the retry schedule. A new controller process reads it once more, and that read is refused on the size alone. |
 | The relay path (`evidenceFetch`) | The Job reports the object `present` and `truncated` and relays **no** bytes. The controller records `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`, as before. |
-| Retention report (`status.retentionReport.skipped` / `RetentionPolicy`) | The set is listed under `skipped`, and the reason names the cap. It is neither kept nor listed as removable. |
+| A `BackupSchedule`'s retention report (`status.retentionReport.skipped`) | The set is listed under `skipped`, and the reason names the cap. It is neither kept nor listed as removable. A `RetentionPolicy` works from the catalog view and reads no manifest here. |
 | `Preflight` restore check (`archive.backupSet`) | Not ready. The message ends `…could not be read: <code>: it is larger than the 268435456-byte read cap for a manifest`. |
 | Drill, `backup run`, `catalog sync` | An operational failure (exit 1) or an `Unreadable` point. The message names the cap. |
 
 **The limit this sets, measured.** A receipt is two-space pretty JSON. With
 FX-4's configuration coverage, PROD-05.1's 14 semantic entries and PROD-03.0's
 schema-dependency block per topic, a 1.5.0 receipt is about 3.4 KB per topic,
-so 1 MiB holds about **300 topics** (a 300-topic receipt measured 1,034,994
-bytes through the runner's own serializer). A run that
+so 1 MiB holds about **250–300 topics**: about 300 with no overrides (a
+300-topic receipt measured 1,034,994 bytes through the runner's own
+serializer), and fewer with per-topic configuration overrides (about 250 with
+five each). A run that
 selects more topics writes a receipt that neither path can verify. It reads
 `NotAttempted` naming the cap, and it is not a recovery point. This was
 already true of every evidence-fetch relay before FX-31. It is new for the
@@ -967,6 +988,14 @@ third case this moves a verdict to the safer side only. Lifting it means
 raising the relay and the controller caps together, with a parse that is
 bounded without the cap. It is proposed as a follow-up row and is not done in
 FX-31.
+
+**A manifest has a limit too.** An engine manifest is about 540 bytes per
+segment, so the retention report's 64 MiB holds about 124,000 segments. At
+Logweir's default 10 MiB segment that is about 1.2 TB in one backup set, and
+about 15 TB at the engine's 128 MiB default. A set whose manifest is larger is
+listed under `skipped` on every report, naming the cap, and is never listed as
+removable. Runner-side reads, such as a drill or a restore preflight, take a
+manifest of up to 256 MiB.
 
 ### 7c. A `TopicDiscovery` is one observation, and `unknown` is its honest default
 

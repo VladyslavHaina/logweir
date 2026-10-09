@@ -523,21 +523,28 @@ impl Drop for Tree {
 
 // ---------------------------------------------------------------- the guard
 
-/// Every read call in production source, with the text of its arguments.
+/// Every read call in production source (`crates/*/src`), with its file and
+/// line and the text of its arguments.
+///
+/// Matched BY SHAPE, not by receiver name (review F4): every
+/// `.get_capped(`, `.get_version_capped(`, `.get_bounded(`,
+/// `.manifest_facts(`, `.get_with_version(` and `.get_version(` call, and
+/// every `.get(` with two or more top-level arguments. In production source
+/// that last shape is exactly the `ObjectAccess` read: a map's, a slice's or a
+/// JSON value's `get` takes one.
 fn production_reads() -> Vec<(String, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
         .expect("crates/logweir-store sits two levels under the workspace root")
         .to_path_buf();
-    let patterns = [
+    let named_reads = [
         ".get_capped(",
         ".get_version_capped(",
+        ".get_bounded(",
         ".manifest_facts(",
-        "access.get(",
-        "access.get_with_version(",
-        "access.get_version(",
-        "archive.get(",
+        ".get_with_version(",
+        ".get_version(",
     ];
     let mut out = Vec::new();
     let mut stack = vec![root.join("crates")];
@@ -563,28 +570,21 @@ fn production_reads() -> Vec<(String, String)> {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("a source file reads");
-            for pat in patterns {
+            for pat in named_reads.iter().copied().chain(std::iter::once(".get(")) {
                 let mut from = 0;
                 while let Some(at) = text[from..].find(pat) {
                     let open = from + at + pat.len();
-                    let mut depth = 1usize;
-                    let mut end = open;
-                    for (i, c) in text[open..].char_indices() {
-                        match c {
-                            '(' => depth += 1,
-                            ')' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    end = open + i;
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
+                    from = open;
+                    let (args, top_level_args) = call_arguments(&text[open..]);
+                    if pat == ".get(" && top_level_args < 2 {
+                        continue;
+                    }
+                    // The method's own definition is not a read.
+                    if text[..open - pat.len()].ends_with("fn") {
+                        continue;
                     }
                     let line = text[..open].matches('\n').count() + 1;
-                    out.push((format!("{rel}:{line}"), text[open..end].to_string()));
-                    from = open;
+                    out.push((format!("{rel}:{line}"), args.to_string()));
                 }
             }
         }
@@ -592,14 +592,56 @@ fn production_reads() -> Vec<(String, String)> {
     out
 }
 
+/// The text up to a call's closing parenthesis, and how many top-level
+/// arguments it holds.
+fn call_arguments(after_open: &str) -> (&str, usize) {
+    let mut depth = 1usize;
+    let mut commas = 0usize;
+    let mut saw_any = false;
+    for (i, c) in after_open.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let args = &after_open[..i];
+                    let count = if saw_any { commas + 1 } else { 0 };
+                    // A trailing comma is not another argument.
+                    let count = if args.trim_end().ends_with(',') {
+                        count - 1
+                    } else {
+                        count
+                    };
+                    return (args, count);
+                }
+            }
+            ',' if depth == 1 => commas += 1,
+            c if !c.is_whitespace() => saw_any = true,
+            _ => {}
+        }
+    }
+    (after_open, 0)
+}
+
 /// **Every production read names its cap from the table**, and none is
-/// "far too large": each call's arguments name `caps::…`, the catalog walk's
-/// own `CATALOG_DOCUMENT_READ_CAP`, or a `max_bytes` its own caller chose
-/// (the evidence fetch's plan cap, the store's own pass-through), and none
-/// names `u64::MAX`.
+/// "far too large" (review F4: per crate, and by shape).
 ///
-/// KILLS: "a cap far too large" at any production read site (a `u64::MAX`
-/// or a literal in place of a named cap), including one a later change adds.
+/// - In `crates/weirkeeper/src`, the SHARED controller, a read may name only
+///   the controller's own rows: `CONTROLLER_DOCUMENT`, `CONTROLLER_MANIFEST`,
+///   `SIDECAR`, `PROBE`.
+/// - Elsewhere it names any `caps::` row, the catalog walk's
+///   `CATALOG_DOCUMENT_READ_CAP`, or a `max_bytes` its own caller chose.
+/// - Nowhere `u64::MAX`.
+///
+/// The compiler holds the rest: `clippy.toml` forbids `object_store`'s own
+/// whole-body reads (`ObjectStoreExt::get`, `get_range`, `get_opts`,
+/// `get_ranges`, `GetResult::bytes`) outside the store crate's three
+/// allowed call sites.
+///
+/// KILLS: "a cap far too large" at any production read site, a later one
+/// included: `u64::MAX`, a literal, or a runner-side cap such as
+/// `caps::SEGMENT` in the controller (the review's G1); a read through a
+/// receiver of another name (G2).
 #[test]
 fn every_production_read_names_a_cap_from_the_table() {
     let reads = production_reads();
@@ -608,14 +650,45 @@ fn every_production_read_names_a_cap_from_the_table() {
         "the scan must see the production reads, found {}: {reads:?}",
         reads.len()
     );
-    let named = ["caps::", "CATALOG_DOCUMENT_READ_CAP", "max_bytes"];
+    let controller = [
+        "caps::CONTROLLER_DOCUMENT",
+        "caps::CONTROLLER_MANIFEST",
+        "caps::SIDECAR",
+        "caps::PROBE",
+    ];
+    let elsewhere = ["caps::", "CATALOG_DOCUMENT_READ_CAP", "max_bytes"];
     let bad: Vec<&(String, String)> = reads
         .iter()
-        .filter(|(_, args)| args.contains("u64::MAX") || !named.iter().any(|n| args.contains(n)))
+        .filter(|(at, args)| {
+            let allowed: &[&str] = if at.starts_with("crates/weirkeeper/src/") {
+                &controller
+            } else {
+                &elsewhere
+            };
+            let names_another_cap = at.starts_with("crates/weirkeeper/src/")
+                && args.contains("caps::")
+                && !controller.iter().any(|n| args.contains(n));
+            args.contains("u64::MAX")
+                || names_another_cap
+                || !allowed.iter().any(|n| args.contains(n))
+        })
         .collect();
     assert!(
         bad.is_empty(),
-        "every production read names a cap from `logweir_store::caps` (or its caller's \
-         `max_bytes`) and never `u64::MAX`: {bad:#?}"
+        "every production read names a cap from `logweir_store::caps` (the controller only its \
+         own rows), or its caller's `max_bytes`, and never `u64::MAX`: {bad:#?}"
+    );
+    assert!(
+        reads
+            .iter()
+            .any(|(at, _)| at.starts_with("crates/weirkeeper/src/")),
+        "the scan sees the controller's reads: {reads:?}"
+    );
+    assert!(
+        reads
+            .iter()
+            .any(|(at, args)| at.starts_with("crates/logweir/src/check/")
+                && args.contains("caps::PROBE")),
+        "the scan sees the two-argument ObjectAccess reads: {reads:?}"
     );
 }

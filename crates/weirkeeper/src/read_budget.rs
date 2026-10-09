@@ -86,7 +86,6 @@ impl ReadBudget {
     /// Wait, on this blocking thread, until `bytes` fit, and reserve them.
     /// A request larger than the whole budget reserves the whole budget, so
     /// it waits for every other read and then runs alone, never forever.
-    #[must_use]
     pub fn reserve(&self, bytes: u64) -> Reservation<'_> {
         let bytes = bytes.min(self.total);
         let mut in_use = self.in_use.lock().unwrap_or_else(PoisonError::into_inner);
