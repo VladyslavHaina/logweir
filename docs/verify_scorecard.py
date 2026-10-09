@@ -494,7 +494,7 @@ FORMAT_VERSION = "1.4.0"
 # 22 to 26, mirrored byte for byte and in position from
 # `BackupReceipt::validate_invariants`: the block only from 1.5.0, covering
 # exactly the named topic set, every recorded ID in Kafka's text (22 URL-safe
-# base64 characters over 16 bytes, never the all-zero ID), a reason exactly for
+# base64 characters over 16 bytes, never Kafka's reserved zero or (0, 1) ID), a reason exactly for
 # a null ID from the closed set, and a source exactly for a recorded one. They
 # fire only on a document carrying the block (OD-7 (a)). The shape layer
 # refuses a block whose fields are not strings or null, and the `generations`
@@ -635,6 +635,7 @@ RECEIPT_TOPIC_ID_REASONS = (
     "topicNotFound",
     "readFailed",
     "notRead",
+    "reservedTopicId",
 )
 RECEIPT_TOPIC_ID_SOURCES = ("describeTopics", "engineManifest")
 
@@ -647,14 +648,17 @@ def _is_canonical_topic_id(text) -> bool:
     """Kafka's text form of a real topic ID — the twin of
     `logweir_core::topic_identity::is_canonical`: 22 URL-safe base64
     characters, no padding, over 16 bytes that re-encode to the SAME text (no
-    stray trailing bits), and never the all-zero ID (Kafka's "no ID")."""
+    stray trailing bits), and never one of Kafka's reserved IDs: the all-zero ID
+    ("no ID") or (0, 1), `AAAAAAAAAAAAAAAAAAAAAQ` (`ONE_UUID`,
+    `METADATA_TOPIC_ID`), which `org.apache.kafka.common.Uuid` never gives a
+    topic (PROD-01.4a review M1)."""
     if not isinstance(text, str) or len(text) != 22 or not set(text) <= _TOPIC_ID_ALPHABET:
         return False
     try:
         raw = base64.urlsafe_b64decode(text + "==")
     except (ValueError, TypeError):
         return False
-    if len(raw) != 16 or raw == bytes(16):
+    if len(raw) != 16 or raw in (bytes(16), bytes(15) + b"\x01"):
         return False
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") == text
 
@@ -2759,7 +2763,8 @@ def check_backup_receipt_invariants(doc) -> str:
                         f"generations[{_rust_debug_str(topic)}].{field} "
                         f"{_rust_debug_str(topic_id)} is not a topic ID this format defines: "
                         "22 characters of URL-safe base64 without padding over the ID's 16 "
-                        "bytes, and never the all-zero ID"
+                        "bytes, and never one of Kafka's reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, "
+                        "AAAAAAAAAAAAAAAAAAAAAQ)"
                     )
             # ARM 25. A reason exactly when the ID is null, from the closed set.
             for field, topic_id, reason in reads:
@@ -2774,7 +2779,7 @@ def check_backup_receipt_invariants(doc) -> str:
                         f"generations[{_rust_debug_str(topic)}].{field}_reason {rendered} "
                         f"does not fit a {state} {field}: a reason is present exactly when "
                         "the ID is null, and is \"noTopicId\", \"notAuthorized\", "
-                        "\"topicNotFound\", \"readFailed\" or \"notRead\""
+                        "\"topicNotFound\", \"readFailed\", \"notRead\" or \"reservedTopicId\""
                     )
             # ARM 26. A source exactly when an ID is recorded, from the closed set.
             recorded = entry.get("topic_id") is not None or entry.get("topic_id_after") is not None
@@ -2791,6 +2796,38 @@ def check_backup_receipt_invariants(doc) -> str:
                     "is \"describeTopics\" or \"engineManifest\""
                 )
 
+    return ""
+
+
+def _catalog_point_problem(doc) -> str:
+    """The one check this script makes of a catalog point record's content, or
+    "" when it holds — the twin of `logweir_core::topic_identity::
+    refuse_copied_topic_ids`, with the same text (PROD-01.4a review M1): every
+    topic ID the record copies (`topics[].identity.topic_id`,
+    `.topic_id_after`) is a real topic ID in Kafka's text, never one of
+    Kafka's reserved IDs."""
+    topics = doc.get("topics") if isinstance(doc, dict) else None
+    if not isinstance(topics, list):
+        return ""
+    for topic in topics:
+        identity = topic.get("identity") if isinstance(topic, dict) else None
+        if identity is None:
+            continue
+        name = topic.get("name")
+        rendered = _rust_debug_str(name) if isinstance(name, str) else "?"
+        for field in ("topic_id", "topic_id_after"):
+            value = identity.get(field) if isinstance(identity, dict) else None
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                return f"topics[{rendered}].identity.{field} is not a string"
+            if not _is_canonical_topic_id(value):
+                return (
+                    f"topics[{rendered}].identity.{field} {_rust_debug_str(value)} is not a "
+                    "topic ID this format defines: 22 characters of URL-safe base64 without "
+                    "padding over the ID's 16 bytes, and never one of Kafka's reserved IDs "
+                    "(AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)"
+                )
     return ""
 
 
@@ -3566,12 +3603,18 @@ def main(
         return 0
 
     if payload_type_wanted == PAYLOAD_TYPES["catalog-point"]:
-        # SIGNATURE-ONLY, and the lines below say why rather than leaving an
-        # exit 0 to be read as more than it is. A catalog point record is an
-        # INDEX over evidence that already exists; every fact in it that
+        # The signature, and ONE check of the record's own content (PROD-01.4a
+        # review M1): every topic ID it copies is a real topic ID in Kafka's
+        # text. Nothing else, and the lines below say why rather than leaving
+        # an exit 0 to be read as more than it is. A catalog point record is an
+        # INDEX over evidence that already exists; every other fact in it that
         # matters is recomputed from the backup receipt it names, and this
         # script deliberately does not fetch that receipt — it was handed three
         # local files and it phones nothing.
+        problem = _catalog_point_problem(doc)
+        if problem:
+            print(f"INVALID: {problem}", file=sys.stderr)
+            return 1
         print(f"VALID  payloadType={payload_type_wanted}")
         print(f"       {len(payload)} bytes verified under the presented key")
         if isinstance(doc, dict):
@@ -3598,8 +3641,9 @@ def main(
             "       This signature covers the record only. It is NOT a claim that the point "
             "is available, that its archive is readable, or that its copied facts are true: "
             "fetch the backup receipt named above, verify it with --payload-type "
-            "backup-receipt, and compare. No invariant of this document type is evaluated "
-            "by this build."
+            "backup-receipt, and compare. One check of this document type is evaluated by "
+            "this build: every topic ID the record copies (topics[].identity) is a real topic "
+            "ID in Kafka's text. No other is."
         )
         return 0
 

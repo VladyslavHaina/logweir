@@ -277,15 +277,14 @@ def test_a_catalog_point_verifies_signature_only_under_its_own_payload_type():
         # scorecard: nothing about availability was checked, and the record's
         # copied facts are only worth what the receipt they name is worth.
         assert "This signature covers the record only" in r.stdout
-        assert "No invariant of this document type is evaluated" in r.stdout
+        assert "One check of this document type is evaluated by this build" in r.stdout
 
 
-def test_a_catalog_point_evaluates_no_invariant_of_its_own():
+def test_a_catalog_point_evaluates_only_its_copied_topic_ids():
     # A record that is internally absurd — a covered window running backwards,
     # a `point_id` that its own receipt digest does not imply — still verifies,
-    # because this reader makes no semantic claim about the type. The test
-    # exists so that a later build which DOES evaluate invariants has to change
-    # it deliberately rather than discovering the difference in production.
+    # because this reader makes ONE semantic claim about the type (PROD-01.4a
+    # review M1, changed deliberately): the topic IDs it copies are real ones.
     doc = dict(CATALOG_POINT)
     doc["covered"] = {"from_ms": 99, "to_ms": 1}
     doc["point_id"] = "lwp1-" + "f" * 32
@@ -293,7 +292,31 @@ def test_a_catalog_point_evaluates_no_invariant_of_its_own():
         p, s = _write_signed(d, "absurd", CATALOG_POINT_TYPE, doc)
         r = run_typed("catalog-point", p, s, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "No invariant of this document type is evaluated" in r.stdout
+        assert "No other is." in r.stdout
+
+
+def test_a_catalog_point_copying_kafkas_reserved_topic_id_is_refused():
+    # PROD-01.4a review M1: a record whose topics[].identity copies Kafka's
+    # reserved (0, 1) ID is refused, in the Rust reader's words; the control,
+    # the same record with a real ID, verifies.
+    good = dict(CATALOG_POINT)
+    good["topics"] = [{"name": "orders", "records": 1,
+                       "identity": {"topic_id": "gtOq2VXiTCK1QM2UtERijA",
+                                    "topic_id_after": "gtOq2VXiTCK1QM2UtERijA",
+                                    "topic_id_source": "describeTopics"}}]
+    bad = json.loads(json.dumps(good))
+    bad["topics"][0]["identity"]["topic_id"] = "AAAAAAAAAAAAAAAAAAAAAQ"
+    with tempfile.TemporaryDirectory() as d:
+        p, s = _write_signed(d, "good", CATALOG_POINT_TYPE, good)
+        r = run_typed("catalog-point", p, s, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        p, s = _write_signed(d, "bad", CATALOG_POINT_TYPE, bad)
+        r = run_typed("catalog-point", p, s, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            'INVALID: topics["orders"].identity.topic_id "AAAAAAAAAAAAAAAAAAAAAQ" is not a topic '
+            "ID this format defines"
+        ) in r.stderr, r.stderr
 
 
 def test_a_catalog_point_never_verifies_as_a_scorecard_or_a_receipt():
@@ -2318,10 +2341,12 @@ def test_a_topic_id_is_canonical_exactly_as_the_rust_reader_says():
     # measured IDs, and every shape arm 24 refuses.
     mod = _verifier_module()
     for good in ("gtOq2VXiTCK1QM2UtERijA", "tpWwuKExQo2lN9NziDMpYg",
-                 "NSSUDfCtRqWqyhqP5Vttsw", "Cf6zT_mcTNCoxuPmv1Ztxw"):
+                 "NSSUDfCtRqWqyhqP5Vttsw", "Cf6zT_mcTNCoxuPmv1Ztxw",
+                 "AAAAAAAAAAAAAAAAAAAAAg"):  # (0, 2), the reserved ID's neighbour
         assert mod._is_canonical_topic_id(good), good
     for bad in ("Cf6zT/mcTNCoxuPmv1Ztxw",  # librdkafka's standard alphabet (C4)
                 "AAAAAAAAAAAAAAAAAAAAAA",  # Kafka's "no ID"
+                "AAAAAAAAAAAAAAAAAAAAAQ",  # Kafka's reserved ONE_UUID (review M1)
                 "gtOq2VXiTCK1QM2UtERijA==", "gtOq2VXiTCK1QM2UtERij",
                 "gtOq2VXiTCK1QM2UtERijB",  # stray trailing bits
                 "gtOq2VXiTCK1QM2UtERij.", "", None, 7):

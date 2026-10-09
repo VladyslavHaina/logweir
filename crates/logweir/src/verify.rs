@@ -673,6 +673,16 @@ pub enum Verdict {
         payload_type: String,
         key_id: String,
     },
+    /// **A catalog point record (PROD-01.4a review M1).** The signature
+    /// verified, AND the one check this build makes of the record held: every
+    /// topic ID it copies is a real topic ID in Kafka's text
+    /// (`logweir_core::topic_identity::refuse_copied_topic_ids`). Nothing
+    /// else: its other copied facts are worth what the receipt it names is
+    /// worth, and that receipt is not fetched here.
+    CatalogPoint {
+        payload_type: String,
+        key_id: String,
+    },
 }
 
 /// The function the Interfaces block promises. `run` is a thin printer over it,
@@ -825,6 +835,22 @@ pub fn verify_scorecard(
             topic_configuration: receipt.topic_configuration,
             owner_detection: receipt.owner_detection,
             generations: receipt.generations,
+        });
+    }
+    if payload_type == PAYLOAD_TYPE_CATALOG_POINT {
+        // PROD-01.4a review M1: a record that copies Kafka's reserved topic ID
+        // (or any text that is not a real ID) is refused, as the receipt it
+        // copies from would be by arm 24. Bytes that are not JSON fall through
+        // to the signature-level verdict as before: there is no ID in them.
+        if let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Err(e) = logweir_core::topic_identity::refuse_copied_topic_ids(&record) {
+                eprintln!("SIGNATURE VALID but the document is self-contradicting: {e}");
+                return Err(ExitCode::SigningOrLock);
+            }
+        }
+        return Ok(Verdict::CatalogPoint {
+            payload_type: payload_type.to_string(),
+            key_id: matched_key_id,
         });
     }
     if payload_type != PAYLOAD_TYPE_SCORECARD {
@@ -1083,6 +1109,21 @@ fn print_signature_only(payload_type: &str, key_id: &str) {
     );
 }
 
+/// What a `CatalogPoint` verdict prints: the signature, and the one check
+/// of the record's own content this build makes — said in as many words, so
+/// an exit 0 never reads as a claim about the point's availability or its
+/// other copied facts.
+fn print_catalog_point(payload_type: &str, key_id: &str) {
+    println!("signature: VALID  key {key_id}");
+    println!("payload:   {payload_type}");
+    println!(
+        "checked:   the SIGNATURE, and one check of this document type: every topic ID \
+         the record copies (topics[].identity) is a real topic ID in Kafka's text. \
+         Nothing else: not that the point is available, nor that its other copied facts \
+         are true — verify the backup receipt it names"
+    );
+}
+
 pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: &str) -> ExitCode {
     // Resolved BEFORE anything is read: a bad `--payload-type` is a bad
     // command line, and reporting it after a file-read failure would blame
@@ -1132,6 +1173,13 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             key_id,
         }) => {
             print_signature_only(&payload_type, &key_id);
+            ExitCode::Ok
+        }
+        Ok(Verdict::CatalogPoint {
+            payload_type,
+            key_id,
+        }) => {
+            print_catalog_point(&payload_type, &key_id);
             ExitCode::Ok
         }
         Err(c) => c,

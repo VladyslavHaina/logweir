@@ -760,6 +760,13 @@ identity["topics"][0]["identity"] = {
 identity_payload = json.dumps(identity, indent=2).encode() + b"\n"
 (out / "identity15.json").write_bytes(identity_payload)
 (out / "identity15.sig").write_text(sign(identity_payload))
+# PROD-01.4a review M1: the same record copying Kafka's reserved (0, 1) topic
+# ID. Both readers must REFUSE it, with the same text.
+reserved = json.loads(json.dumps(identity))
+reserved["topics"][0]["identity"]["topic_id"] = "AAAAAAAAAAAAAAAAAAAAAQ"
+reserved_payload = json.dumps(reserved, indent=2).encode() + b"\n"
+(out / "identity15reserved.json").write_bytes(reserved_payload)
+(out / "identity15reserved.sig").write_text(sign(reserved_payload))
 PYEOF
 
 catalog_case() {
@@ -804,6 +811,26 @@ catalog_case auth14 catalog-point 0 0
 catalog_case identity15 catalog-point 0 0
 grep -q '"topic_id_after": "tpWwuKExQo2lN9NziDMpYg"' "$tmp/catalog/identity15.json" \
     || fail "the $CATALOG_IDENTITY_VERSION catalog point case no longer carries a topic's IDs, so it proves nothing about PROD-01.4a's identity"
+# PROD-01.4a review M1: a record copying Kafka's reserved topic ID is refused
+# by both readers (drill verify 4, the script 1), with the SAME text.
+catalog_case identity15reserved catalog-point 4 1
+set +e
+"$BIN" drill verify --payload-type catalog-point --scorecard "$tmp/catalog/identity15reserved.json" \
+    --signature "$tmp/catalog/identity15reserved.sig" --public-key "$FIX/public.pem" >"$tmp/rust.out" 2>"$tmp/rust.err"
+set -e
+set +e
+"$PY" "$VERIFIER" --payload-type catalog-point "$tmp/catalog/identity15reserved.json" \
+    "$tmp/catalog/identity15reserved.sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+set -e
+rust_msg="$(sed -n 's/^SIGNATURE VALID but the document is self-contradicting: //p' "$tmp/rust.err")"
+py_msg="$(sed -n 's/^INVALID: //p' "$tmp/py.err")"
+want_msg='topics["orders"].identity.topic_id "AAAAAAAAAAAAAAAAAAAAAQ" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID'"'"'s 16 bytes, and never one of Kafka'"'"'s reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)'
+[ "$rust_msg" = "$want_msg" ] || fail "catalog-point/identity15reserved: drill verify's refusal is not the expected text.
+  got:  $rust_msg
+  want: $want_msg"
+[ "$py_msg" = "$want_msg" ] || fail "catalog-point/identity15reserved: the two readers refuse with DIFFERENT text.
+  rust:   $rust_msg
+  python: $py_msg"
 grep -q '"auth_mode": "mtls"' "$tmp/catalog/auth14.json" \
     || fail "the $CATALOG_AUTH_VERSION catalog point case no longer names an mTLS source, so it proves nothing about PROD-01.3's modes"
 
@@ -830,14 +857,16 @@ cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
 # reader has its own arm and its own sentence. Each is asserted against the
 # reader that produces it, which is what makes this a claim about both readers
 # rather than about one of them twice.
-grep -q "the SIGNATURE only" "$tmp/rust.all" \
-    || fail "drill verify stopped saying that a catalog point is checked SIGNATURE-ONLY.
+grep -q "the SIGNATURE, and one check of this document type" "$tmp/rust.all" \
+    || fail "drill verify stopped saying that a catalog point is checked by its SIGNATURE and one check of its copied topic IDs only.
 An exit 0 for this document type must never read like an exit 0 for a scorecard:
 the record's facts are recomputed from the backup receipt it names, and this
 command does not fetch it."
 grep -q "This signature covers the record only" "$tmp/py.all" \
     || fail "docs/verify_scorecard.py stopped saying that a catalog point is checked
 SIGNATURE-ONLY. See the sentence in its catalog-point arm."
+grep -q "One check of this document type is evaluated by this build" "$tmp/py.all" \
+    || fail "docs/verify_scorecard.py stopped saying which one check of a catalog point it makes (PROD-01.4a review M1)"
 grep -q "$CATALOG_PT" "$tmp/rust.all" \
     || fail "drill verify does not name the catalog-point media type it verified"
 grep -q "$CATALOG_PT" "$tmp/py.all" \
@@ -853,7 +882,7 @@ grep -q "sha256:aaaaaaaa" "$tmp/py.all" \
     || fail "verify_scorecard.py no longer prints the receipt digest that BINDS a catalog
 point; the short point_id is a display key and the digest is the binding (D3 §5.1)"
 
-echo "check-verifier-parity: both readers agree on all seven catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION, $CATALOG_PIN_VERSION, $CATALOG_MODEL_VERSION, $CATALOG_AUTH_VERSION and $CATALOG_IDENTITY_VERSION), and both report SIGNATURE-ONLY"
+echo "check-verifier-parity: both readers agree on all eight catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION, $CATALOG_PIN_VERSION, $CATALOG_MODEL_VERSION, $CATALOG_AUTH_VERSION and $CATALOG_IDENTITY_VERSION, and one copying a reserved topic ID, refused by both in the same words); both check the signature and the copied topic IDs only"
 
 # ---------------------------------------------------------------------------
 # FOURTH LOOP (FX-4): the scorecard at format 1.1.0, and what its exit 0 says

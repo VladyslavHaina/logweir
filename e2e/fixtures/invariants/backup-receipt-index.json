@@ -416,6 +416,14 @@
     "arm": ""
   },
   {
+    "id": "receipt_1_5_reserved_id_recorded_as_null",
+    "file": "receipt_1_5_reserved_id_recorded_as_null.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
     "id": "generations_under_format_1_4_0",
     "file": "generations_under_format_1_4_0.json",
     "rust_exit": 4,
@@ -436,40 +444,48 @@
     "file": "generations_zero_topic_id.json",
     "rust_exit": 4,
     "python_exit": 1,
-    "reason": "generations[\"orders\"].topic_id \"AAAAAAAAAAAAAAAAAAAAAA\" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never the all-zero ID",
-    "arm": "generations[\"orders\"].topic_id \"AAAAAAAAAAAAAAAAAAAAAA\" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never the all-zero ID"
+    "reason": "generations[\"orders\"].topic_id \"AAAAAAAAAAAAAAAAAAAAAA\" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never one of Kafka's reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)",
+    "arm": "generations[\"orders\"].topic_id \"AAAAAAAAAAAAAAAAAAAAAA\" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never one of Kafka's reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)"
+  },
+  {
+    "id": "generations_reserved_topic_id",
+    "file": "generations_reserved_topic_id.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "generations[\"orders\"].topic_id \"AAAAAAAAAAAAAAAAAAAAAQ\" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never one of Kafka's reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)",
+    "arm": "generations[\"orders\"].topic_id \"AAAAAAAAAAAAAAAAAAAAAQ\" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never one of Kafka's reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)"
   },
   {
     "id": "generations_topic_id_in_the_standard_alphabet",
     "file": "generations_topic_id_in_the_standard_alphabet.json",
     "rust_exit": 4,
     "python_exit": 1,
-    "reason": "generations[\"orders\"].topic_id_after \"Cf6zT/mcTNCoxuPmv1Ztxw\" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never the all-zero ID",
-    "arm": "generations[\"orders\"].topic_id_after \"Cf6zT/mcTNCoxuPmv1Ztxw\" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never the all-zero ID"
+    "reason": "generations[\"orders\"].topic_id_after \"Cf6zT/mcTNCoxuPmv1Ztxw\" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never one of Kafka's reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)",
+    "arm": "generations[\"orders\"].topic_id_after \"Cf6zT/mcTNCoxuPmv1Ztxw\" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never one of Kafka's reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)"
   },
   {
     "id": "generations_reason_beside_a_topic_id",
     "file": "generations_reason_beside_a_topic_id.json",
     "rust_exit": 4,
     "python_exit": 1,
-    "reason": "generations[\"orders\"].topic_id_reason \"readFailed\" does not fit a recorded topic_id: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\" or \"notRead\"",
-    "arm": "generations[\"orders\"].topic_id_reason \"readFailed\" does not fit a recorded topic_id: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\" or \"notRead\""
+    "reason": "generations[\"orders\"].topic_id_reason \"readFailed\" does not fit a recorded topic_id: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\", \"notRead\" or \"reservedTopicId\"",
+    "arm": "generations[\"orders\"].topic_id_reason \"readFailed\" does not fit a recorded topic_id: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\", \"notRead\" or \"reservedTopicId\""
   },
   {
     "id": "generations_null_topic_id_without_a_reason",
     "file": "generations_null_topic_id_without_a_reason.json",
     "rust_exit": 4,
     "python_exit": 1,
-    "reason": "generations[\"payments\"].topic_id_after_reason absent does not fit a null topic_id_after: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\" or \"notRead\"",
-    "arm": "generations[\"payments\"].topic_id_after_reason absent does not fit a null topic_id_after: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\" or \"notRead\""
+    "reason": "generations[\"payments\"].topic_id_after_reason absent does not fit a null topic_id_after: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\", \"notRead\" or \"reservedTopicId\"",
+    "arm": "generations[\"payments\"].topic_id_after_reason absent does not fit a null topic_id_after: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\", \"notRead\" or \"reservedTopicId\""
   },
   {
     "id": "generations_reason_outside_the_set",
     "file": "generations_reason_outside_the_set.json",
     "rust_exit": 4,
     "python_exit": 1,
-    "reason": "generations[\"payments\"].topic_id_reason \"transport\" does not fit a null topic_id: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\" or \"notRead\"",
-    "arm": "generations[\"payments\"].topic_id_reason \"transport\" does not fit a null topic_id: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\" or \"notRead\""
+    "reason": "generations[\"payments\"].topic_id_reason \"transport\" does not fit a null topic_id: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\", \"notRead\" or \"reservedTopicId\"",
+    "arm": "generations[\"payments\"].topic_id_reason \"transport\" does not fit a null topic_id: a reason is present exactly when the ID is null, and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \"readFailed\", \"notRead\" or \"reservedTopicId\""
   },
   {
     "id": "generations_source_without_a_topic_id",
