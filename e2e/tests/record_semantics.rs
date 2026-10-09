@@ -25,7 +25,8 @@
 //! The expected divergence sets below are PROD-01.1's capability contract for
 //! the pinned engine, `CONTRACT_ENGINE` (`docs/to-do/decisions/PROD-01.1-record-semantics.md`;
 //! stated on 0.21.0, re-measured unchanged on 0.23.3 by PROD-00.3f and on
-//! Logweir's build of it, `0.23.3+logweir.1`, by PROD-00.2): the
+//! Logweir's build of it, `0.23.3+logweir.1`, by PROD-00.2, and on build
+//! `0.23.3+logweir.2`, FX-21's patch 0002, by FX-21): the
 //! known counterexamples, stated exactly. They are not desired behaviour.
 //! When the engine changes — READ_COMMITTED capture through PROD-00.3, say —
 //! the row goes red and the contract and this file change together.
@@ -450,7 +451,9 @@ fn kill_own_restores() {
 /// It is a LITERAL on purpose, and it moves with the pin only after the rows
 /// have been re-run on the new engine (A-3f-1): PROD-00.3f moved it from
 /// `0.21.0` to `0.23.3` with that run, and PROD-00.2 to Logweir's build of the
-/// same source, `0.23.3+logweir.1`, which is the engine the images ship and
+/// same source, `0.23.3+logweir.1`, and FX-21 to its build 2,
+/// `0.23.3+logweir.2` (patch 0002 changes only the manifest's replication
+/// factors; these rows re-ran on it), which is the engine the images ship and
 /// CI's e2e job runs (OSO's 0.23.3 release now records outcomes like any other
 /// engine-matrix row). `crates/logweir/tests/engine_pin.rs`
 /// fails when it differs from the pin `doctor` accepts, so a bump cannot leave
@@ -458,7 +461,7 @@ fn kill_own_restores() {
 /// nothing. That guard runs in CI's workspace job and never in this package:
 /// `engine-matrix` runs this package with each row's own engine, so nothing
 /// here may compare the engine with the pin.
-const CONTRACT_ENGINE: &str = "0.23.3+logweir.1";
+const CONTRACT_ENGINE: &str = "0.23.3+logweir.2";
 
 fn contract_applies(row: &str) -> bool {
     let v = engine_version();
@@ -3132,6 +3135,7 @@ fn complete_coverage_over_faulted_targets_on_the_real_broker_and_archive() {
                 chrono::DateTime::from_timestamp_millis(end).unwrap(),
             ),
             window_floor_source: WindowFloorSource::ArchiveManifest,
+            source_partitions: Default::default(),
             default_replication_factor: 1,
             checkpoint_state: demo_dir().join("cv-checkpoint.json"),
             checkpoint_interval_secs: 30,
@@ -3301,6 +3305,7 @@ fn complete_coverage_cost_per_gigabyte_and_partition() {
                 chrono::DateTime::from_timestamp_millis(span.1).unwrap(),
             ),
             window_floor_source: WindowFloorSource::ArchiveManifest,
+            source_partitions: Default::default(),
             default_replication_factor: 1,
             checkpoint_state: demo_dir().join("cv-cost-checkpoint.json"),
             checkpoint_interval_secs: 30,
@@ -3459,4 +3464,315 @@ fn complete_coverage_discloses_a_compaction_hole_inside_the_span() {
         assert_eq!(p["offset_holes"], 1, "{p}");
     }
     assert_eq!(b["replay"]["expected"], json!(source.len()), "{b}");
+}
+
+// ================================================================ PROD-08.1a
+
+/// The console's own plan emitter (`ui/plan.js` `renderPlanBytes`), run by
+/// node over `fields` — the EXACT bytes the console hands the product API's
+/// create route, which stores them unchanged as `Restore.spec.planBytes`.
+fn console_plan_bytes(fields: &Value) -> String {
+    let script = "import { renderPlanBytes } from './ui/plan.js';\n\
+                  process.stdout.write(renderPlanBytes(JSON.parse(process.argv[1])));\n";
+    let mut cmd = std::process::Command::new("node");
+    cmd.current_dir(root())
+        .args(["--input-type=module", "-e", script, "--"])
+        .arg(fields.to_string());
+    let out = kafka::output_within(cmd, 60).expect("node ran");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the console's emitter refused the fields: {}",
+        out.stderr_utf8()
+    );
+    out.stdout_utf8()
+}
+
+/// The fields the console's restore wizard would hand `renderPlanBytes` for
+/// a full `newTopic` restore of `backup_id`, with `coverage` as the advanced
+/// choice left it: `None` unticked, `Some(bound)` ticked with that bound.
+fn console_fields(
+    backup_id: &str,
+    topic: &str,
+    prefix: &str,
+    span: (i64, i64),
+    coverage: Option<Option<u64>>,
+) -> Value {
+    let (boot, endpoint) = (kafka::bootstrap(), kafka::s3_endpoint());
+    let mut sample = json!({
+        "windowStart": rfc3339(span.0),
+        "windowEnd": rfc3339(span.1),
+        "recordsPerPartition": 25,
+        "anchor": "head",
+    });
+    if let Some(bound) = coverage {
+        sample["coverage"] = json!("complete");
+        if let Some(n) = bound {
+            sample["completeMaxRecords"] = json!(n);
+        }
+    }
+    let store = |bucket: &str, prefix: &str| {
+        json!({"bucket": bucket, "prefix": prefix, "region": "us-east-1",
+               "endpoint": endpoint, "pathStyle": true, "allowHttp": true})
+    };
+    json!({
+        "name": "prod-08-1a-console",
+        "backupSetRef": backup_id,
+        "topics": [topic],
+        "pointInTime": rfc3339(span.1),
+        "source": store(ARCHIVE_BUCKET, backup_id),
+        "target": {"bootstrapServers": [boot], "mode": "newTopic", "topicPrefix": prefix,
+                   "topicMappingPrefix": prefix, "markerTopic": "logweir.scratch",
+                   "replicationFactor": 1, "teardown": "delete"},
+        "sample": sample,
+        "objectives": {"rtoSeconds": 900},
+        "evidence": store(EVIDENCE_BUCKET, "logweir/"),
+    })
+}
+
+/// The target cluster id the run's kept signed scorecard names -- the
+/// `cluster` label every runner gauge carries.
+fn kept_target_cluster(row: &Row, label: &str) -> String {
+    let path = demo_dir().join(format!(
+        "record-semantics/{}-{label}.scorecard.json",
+        row.name
+    ));
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let scorecard: Value = serde_json::from_slice(&bytes).expect("the kept scorecard is JSON");
+    scorecard["target"]["cluster_id"]
+        .as_str()
+        .expect("the scorecard names its target cluster")
+        .to_string()
+}
+
+/// One gauge's whole line in a runner metrics textfile: the name, the
+/// `cluster` label, any further labels, and the value, from line start to
+/// line end. A predicate that matched a value without its name is met by
+/// other series in the same file.
+fn gauge_line(name: &str, cluster: &str, more_labels: &str, value: u8) -> String {
+    format!("\n{name}{{cluster=\"{cluster}\"{more_labels}}} {value}\n")
+}
+
+/// One `logweir restore run` over the console's exact bytes, approved over
+/// those bytes, writing its metrics textfile beside the outcome files.
+fn run_console_plan(row: &mut Row, label: &str, bytes: &str, target: String) -> (Restored, String) {
+    let metrics = demo_dir().join(format!("record-semantics/{}-{label}.prom", row.name));
+    std::fs::create_dir_all(metrics.parent().expect("a parent")).expect("the outcome dir");
+    let owned = bytes.to_string();
+    let path = metrics.clone();
+    let run = {
+        let h = std::thread::spawn(move || {
+            let spec = serde_yaml::Value::Null;
+            let mut o = RunOpts::new(&spec);
+            o.restore_run = true;
+            o.spec_bytes = Some(&owned);
+            o.metrics = Some(&path);
+            run_with(o)
+        });
+        join_within(
+            h,
+            RESTORE_DEADLINE_SECS,
+            "logweir restore run (console plan)",
+        )
+    };
+    let verdict = verdict(&run);
+    eprintln!(
+        "[recsem] {} {label}: logweir restore run exit={} outcome={}",
+        row.name, verdict["exit"], verdict["outcome"]
+    );
+    let observed = if topic_exists(&target) {
+        kafka::read_topic(&target, PARTS, Isolation::Committed)
+            .unwrap_or_else(|e| panic!("reading {target}: {e}"))
+    } else {
+        Vec::new()
+    };
+    // The signed scorecard, kept for the controller/API/console chain the
+    // report runs over it (`.e2e/<project>/record-semantics/`).
+    if let Ok(bytes) = std::fs::read(&run.scorecard) {
+        let kept = demo_dir().join(format!(
+            "record-semantics/{}-{label}.scorecard.json",
+            row.name
+        ));
+        std::fs::write(&kept, bytes).expect("the scorecard is kept");
+    }
+    let prom = std::fs::read_to_string(&metrics).unwrap_or_default();
+    (
+        Restored {
+            target,
+            verdict,
+            observed,
+        },
+        prom,
+    )
+}
+
+/// **PROD-08.1a, live: a plan the CONSOLE built asks for complete coverage,
+/// and the run verifies every record — or, past its bound, signs
+/// `covered: false` and is never a pass.**
+///
+/// Three source partitions of eight records each, backed up in two segments
+/// per partition with the shipped `logweir backup run`. Three plans, each the
+/// console emitter's exact bytes for the same full restore, run by the shipped
+/// `logweir restore run`:
+///
+/// 1. complete, no bound — exit 0, `pass`, the signed block covered and exact
+///    over all 24 records, every segment verified, three partitions compared;
+/// 2. complete, `complete_max_records: 8` — the first partition fits and the
+///    second would pass the bound, so it and the third are not compared:
+///    exit 2, `fail-integrity`, `integrity.result` not `pass`, `covered:
+///    false` naming the bound; the metrics file says `fail-integrity`,
+///    `coverage="complete"` and `complete_covered 0`, and no `pass` label;
+/// 3. the box unticked — the sampled plan, byte for byte the console's old
+///    bytes — signs `coverage: sampled` and no complete block.
+///
+/// Every restore's output is ALSO compared record by record with the archive
+/// by the oracle, so a `pass` here is not taken on the runner's word.
+#[test]
+fn a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stack() {
+    let mut row = Row::new("cc-console");
+    let topic = row.source_topic("cc-console", &[("message.timestamp.type", "CreateTime")]);
+    let fixture = eight_per_partition("cc-console");
+    kafka::produce_plain(&topic, &fixture).expect("produce");
+    let source = kafka::read_topic(&topic, PARTS, Isolation::Committed).expect("source");
+    assert_fixture_landed("cc-console", &fixture, &source);
+    let backup_id = row.backup_id("cc-console");
+    backup_ok(&backup_id, &[&topic], 4);
+    let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
+    let span = archive_span(&archive);
+
+    let plan = |row: &mut Row, label: &str, coverage: Option<Option<u64>>| {
+        let (prefix, target) = row.target(label, &topic);
+        let bytes =
+            console_plan_bytes(&console_fields(&backup_id, &topic, &prefix, span, coverage));
+        let kept = demo_dir().join(format!("record-semantics/{}-{label}.plan.yaml", row.name));
+        std::fs::create_dir_all(kept.parent().expect("a parent")).expect("the outcome dir");
+        std::fs::write(&kept, &bytes).expect("the plan is kept");
+        (bytes, target)
+    };
+
+    let (full_bytes, full_target) = plan(&mut row, "cfull", Some(None));
+    assert!(
+        full_bytes.contains("\n  coverage: \"complete\"\n")
+            && !full_bytes.contains("max_partitions"),
+        "the console's complete plan: {full_bytes}"
+    );
+    let (full, full_prom) = run_console_plan(&mut row, "cfull", &full_bytes, full_target);
+
+    let (bound_bytes, bound_target) = plan(&mut row, "cbound", Some(Some(8)));
+    assert!(
+        bound_bytes.contains("\n  complete_max_records: 8\n"),
+        "{bound_bytes}"
+    );
+    let (bounded, bound_prom) = run_console_plan(&mut row, "cbound", &bound_bytes, bound_target);
+
+    let (sampled_bytes, sampled_target) = plan(&mut row, "sampled", None);
+    assert!(!sampled_bytes.contains("coverage"), "{sampled_bytes}");
+    let (sampled, _) = run_console_plan(&mut row, "sampled", &sampled_bytes, sampled_target);
+
+    let rep_full = replay(&archive, |_| true, &full.observed);
+    record_outcome(
+        "cc-console",
+        &source,
+        &source,
+        &archive,
+        &[
+            ("complete, no bound", &full, &rep_full[..], &[][..]),
+            ("complete, bound 8", &bounded, &[][..], &[][..]),
+            ("sampled", &sampled, &[][..], &[][..]),
+        ],
+        &capture(&source, &archive),
+        json!({"bound": 8, "span": [span.0, span.1]}),
+    );
+    if !contract_applies("cc-console") {
+        return;
+    }
+    // 1. Every record, covered and exact — and the oracle agrees.
+    assert_verdict("complete, no bound", &full, 0, "pass");
+    assert!(rep_full.is_empty(), "the oracle found {rep_full:?}");
+    let b = complete_block(&full);
+    assert_eq!(b["covered"], true, "{b}");
+    assert_eq!(b["replay"]["expected"], json!(source.len()), "{b}");
+    assert_eq!(b["replay"]["matching"], json!(source.len()), "{b}");
+    assert_eq!(b["archive"]["segments_verified"], 6, "{b}");
+    assert_eq!(b["partitions"].as_array().map(Vec::len), Some(3), "{b}");
+    // THE EXACT LINES (review L4): a `contains("} 1")` is met by other series
+    // in the same file, so each gauge is matched as its whole line, labelled
+    // with the cluster the scorecard names.
+    let full_cluster = kept_target_cluster(&row, "cfull");
+    let full_cluster = full_cluster.as_str();
+    assert!(
+        full_prom.contains(&gauge_line(
+            "logweir_drill_integrity_coverage",
+            full_cluster,
+            ",coverage=\"complete\"",
+            1
+        )),
+        "{full_prom}"
+    );
+    assert!(
+        full_prom.contains(&gauge_line(
+            "logweir_drill_integrity_complete_covered",
+            full_cluster,
+            "",
+            1
+        )),
+        "{full_prom}"
+    );
+
+    // 2. Past the bound: covered: false, never a pass, on every surface the
+    // runner writes.
+    assert_verdict("complete, bound 8", &bounded, 2, "fail-integrity");
+    assert_ne!(bounded.verdict["integrity"]["result"], "pass");
+    let b = complete_block(&bounded);
+    assert_eq!(b["covered"], false, "{b}");
+    assert!(
+        b["incomplete_reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("complete_max_records")),
+        "{b}"
+    );
+    let compared: Vec<bool> = b["partitions"]
+        .as_array()
+        .expect("partitions")
+        .iter()
+        .map(|p| p["compared"] == true)
+        .collect();
+    assert_eq!(compared, vec![true, false, false], "{b}");
+    assert!(
+        bound_prom.contains("outcome=\"fail-integrity\""),
+        "{bound_prom}"
+    );
+    assert!(!bound_prom.contains("outcome=\"pass\""), "{bound_prom}");
+    assert!(!bound_prom.contains("result=\"pass\""), "{bound_prom}");
+    let bound_cluster = kept_target_cluster(&row, "cbound");
+    let bound_cluster = bound_cluster.as_str();
+    assert!(
+        bound_prom.contains(&gauge_line(
+            "logweir_drill_integrity_complete_covered",
+            bound_cluster,
+            "",
+            0
+        )),
+        "{bound_prom}"
+    );
+    assert!(
+        !bound_prom.contains(&gauge_line(
+            "logweir_drill_integrity_complete_covered",
+            bound_cluster,
+            "",
+            1
+        )),
+        "{bound_prom}"
+    );
+
+    // 3. The unticked box: sampled, and it never claims complete.
+    assert_verdict("sampled", &sampled, 0, "pass");
+    assert_eq!(
+        sampled.verdict["integrity"]["verification"]["coverage"], "sampled",
+        "{}",
+        sampled.verdict
+    );
+    assert!(sampled.verdict["integrity"]["verification"]
+        .get("complete")
+        .is_none());
 }

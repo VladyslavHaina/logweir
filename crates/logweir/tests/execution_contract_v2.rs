@@ -133,9 +133,18 @@ fn scope_value(prefix: &str, cluster: &str) -> serde_json::Value {
 /// A standing authorization for `uid`, over `prefix`/`cluster`, signed by a
 /// freshly generated `GovernedApproval` key that the keyring pins.
 fn signed_authorization(uid: &str, prefix: &str, cluster: &str) -> SignedAuthorization {
+    signed_authorization_with(uid, scope_value(prefix, cluster), "1.0.0")
+}
+
+/// [`signed_authorization`] over any scope, at any `formatVersion`.
+fn signed_authorization_with(
+    uid: &str,
+    scope: serde_json::Value,
+    format_version: &str,
+) -> SignedAuthorization {
     let issued = Utc::now() - chrono::Duration::days(1);
     let document = serde_json::to_vec(&serde_json::json!({
-        "formatVersion": "1.0.0",
+        "formatVersion": format_version,
         "kind": "StandingRehearsalAuthorization",
         "subjectRef": {
             "apiVersion": "logweir.dev/v1alpha1",
@@ -144,7 +153,7 @@ fn signed_authorization(uid: &str, prefix: &str, cluster: &str) -> SignedAuthori
             "name": "weekly-orders",
             "uid": uid,
         },
-        "scope": scope_value(prefix, cluster),
+        "scope": scope,
         "issuedAt": issued.to_rfc3339(),
         "expiresAt": (issued + chrono::Duration::days(30)).to_rfc3339(),
     }))
@@ -173,6 +182,105 @@ fn signed_authorization(uid: &str, prefix: &str, cluster: &str) -> SignedAuthori
         sidecar,
         keys,
     }
+}
+
+/// A standing authorization MINTED by this build's own `logweir drill approve
+/// --standing` code path over `scope`, for `uid` — the bytes an approver would
+/// hand the cluster — with the keyring that pins the minting key.
+fn minted_authorization(uid: &str, scope: &serde_json::Value) -> SignedAuthorization {
+    use logweir::approve::{mint_standing, ApproveArgs, StandingArgs};
+    let dir = tempfile::tempdir().unwrap();
+    let scope_path = dir.path().join("scope.json");
+    std::fs::write(&scope_path, scope.to_string()).unwrap();
+    let approver = SigningKey::generate_ed25519();
+    let key = dir.path().join("approver.pem");
+    std::fs::write(&key, approver.to_pkcs8_pem().unwrap()).unwrap();
+    let out = dir.path().join("standing-authorization.json");
+    let args = ApproveArgs {
+        spec: None,
+        key,
+        approver: String::new(),
+        ticket: String::new(),
+        out: out.clone(),
+        subject_kind: "RehearsalSchedule".to_string(),
+        standing: Some(StandingArgs {
+            schedule_namespace: "team-a".to_string(),
+            schedule_name: "weekly-orders".to_string(),
+            schedule_uid: uid.to_string(),
+            scope: scope_path,
+            valid_days: 30,
+            issued_at: Some(Utc::now() - chrono::Duration::days(1)),
+        }),
+    };
+    mint_standing(&args, Utc::now()).expect("this build mints the scope");
+    let keys = serde_json::to_vec(&serde_json::json!({
+        "formatVersion": "1.0.0",
+        "keys": [{
+            "keyId": approver.key_id(),
+            "publicKeyPem": approver.verifying_key().to_public_key_pem().unwrap(),
+            "usages": ["GovernedApproval"],
+        }],
+    }))
+    .unwrap();
+    SignedAuthorization {
+        document: std::fs::read(&out).unwrap(),
+        sidecar: std::fs::read(out.with_extension("sig")).unwrap(),
+        keys,
+    }
+}
+
+/// The scope a complete-only standing authorization signs (review M1):
+/// `coverage: complete` and `maxPartitions: 0`.
+fn complete_only_scope() -> serde_json::Value {
+    let mut scope = scope_value("rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    scope["coverage"] = serde_json::json!("complete");
+    scope["maxPartitions"] = serde_json::json!(0);
+    scope
+}
+
+/// The three plans a complete-only scope is judged against: an ordinary
+/// sampled rehearsal plan, a sampled plan whose partition bound is 0 (the one
+/// sampled plan a 0 bound does not exclude by itself), and a complete plan.
+fn complete_only_cases() -> [(&'static str, String); 3] {
+    [
+        ("sampled, max_partitions 200", REHEARSAL_PLAN.to_string()),
+        (
+            "sampled, max_partitions 0",
+            REHEARSAL_PLAN.replace("  max_partitions: 200\n", "  max_partitions: 0\n"),
+        ),
+        (
+            "complete",
+            REHEARSAL_PLAN.replace("  max_partitions: 200\n", "  coverage: complete\n"),
+        ),
+    ]
+}
+
+/// One standing run of `bin` over `plan` under `signed`.
+fn run_standing(bin: &std::path::Path, plan: &str, signed: &SignedAuthorization) -> (i32, String) {
+    let fixture = fixture_with_plan(plan.as_bytes().to_vec());
+    let m = mount(&fixture, signed);
+    let contract = standing_contract(&fixture, signed, "uid-1");
+    let argv = standing_argv(&m);
+    invoke_bin(
+        bin,
+        &m,
+        &fixture,
+        &env_map(&contract),
+        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+}
+
+/// Whether a run got past every authorization check: none of the three
+/// refusals is named, and it failed later (no broker listens on 19099).
+fn past_authorization(code: i32, transcript: &str) -> bool {
+    code != 0
+        && ![
+            "RehearsalScopeViolation",
+            "AuthorizationInvalid",
+            "AuthorizationExpired",
+        ]
+        .iter()
+        .any(|t| transcript.contains(t))
 }
 
 fn contract_for(bundle: &ApprovalBundleBytes, version: wire::ContractVersion) -> ExecutionContract {
@@ -792,6 +900,25 @@ fn invoke(
     env: &BTreeMap<String, String>,
     extra: &[&str],
 ) -> (i32, String) {
+    invoke_bin(
+        std::path::Path::new(env!("CARGO_BIN_EXE_logweir")),
+        m,
+        fixture,
+        env,
+        extra,
+    )
+}
+
+/// [`invoke`] with another `logweir` binary — an OLDER build's, for the rows
+/// that prove what a reader built before a format change does with a document
+/// this build mints.
+fn invoke_bin(
+    bin: &std::path::Path,
+    m: &Mounted,
+    fixture: &Fixture,
+    env: &BTreeMap<String, String>,
+    extra: &[&str],
+) -> (i32, String) {
     // **A standing-authorized run carries NO `--approval` and its trigger
     // names the schedule and slot** — PLAT-14.3b. Decided by the CONTRACT the
     // environment carries, exactly as `load_startup_inputs` decides it: a run
@@ -800,7 +927,7 @@ fn invoke(
     // unpinned material rather than for a missing flag.
     let standing = env.get(wire::AUTHORIZATION_KIND_ENV).map(String::as_str)
         == Some(wire::AUTHORIZATION_KIND_STANDING);
-    let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
+    let mut command = Command::new(bin);
     command.args(["restore", "run", "--spec"]).arg(&m.plan);
     if !standing {
         command.arg("--approval").arg(&m.approval);
@@ -1064,6 +1191,216 @@ fn a_minted_authorization_is_refused_by_the_real_binary() {
         "{transcript}"
     );
     assert!(!transcript.contains("19099"), "{transcript}");
+}
+
+/// **PROD-08.1a: the runner's half of "the coverage is signed", through the
+/// real binary.** The rehearsal plan asks for `sample.coverage: complete`
+/// (and so states no `max_partitions`). Under a 1.0.0 scope — every scope
+/// signed before the field existed, which authorises sampled rehearsals only —
+/// it is refused before any client, naming the coverage. Under a 1.1.0 scope
+/// that signed `coverage: complete` the SAME plan gets past every
+/// authorization check and fails later for a reason that is not the
+/// authorization (no broker listens).
+///
+/// KILLS: the runner reading the plan's coverage as admissible under any
+/// scope (the first half admits); the coverage arm refusing a complete plan
+/// whatever the scope says (the second half refuses).
+#[test]
+fn a_complete_plan_runs_only_under_a_scope_that_signed_complete_coverage() {
+    let complete_plan = REHEARSAL_PLAN.replace("  max_partitions: 200\n", "  coverage: complete\n");
+    assert!(
+        complete_plan.contains("coverage: complete"),
+        "{complete_plan}"
+    );
+    let fixture = fixture_with_plan(complete_plan.as_bytes().to_vec());
+
+    let old = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    let m = mount(&fixture, &old);
+    let contract = standing_contract(&fixture, &old, "uid-1");
+    let argv = standing_argv(&m);
+    let (code, transcript) = invoke(
+        &m,
+        &fixture,
+        &env_map(&contract),
+        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    assert_eq!(code, 3, "{transcript}");
+    assert!(
+        transcript.contains("RehearsalScopeViolation"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("`sample.coverage: complete`")
+            && transcript.contains("authorises `sampled` coverage"),
+        "{transcript}"
+    );
+    assert!(!transcript.contains("19099"), "{transcript}");
+
+    let mut scope = scope_value("rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    scope["coverage"] = serde_json::json!("complete");
+    scope["maxPartitions"] = serde_json::json!(0);
+    let signed = signed_authorization_with("uid-1", scope, "1.1.0");
+    let m = mount(&fixture, &signed);
+    let contract = standing_contract(&fixture, &signed, "uid-1");
+    let argv = standing_argv(&m);
+    let (code, transcript) = invoke(
+        &m,
+        &fixture,
+        &env_map(&contract),
+        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    for not_expected in [
+        "RehearsalScopeViolation",
+        "AuthorizationInvalid",
+        "AuthorizationExpired",
+    ] {
+        assert!(
+            !transcript.contains(not_expected),
+            "a scope that signed complete coverage covers this plan; not {not_expected} (exit \
+             {code}):\n{transcript}"
+        );
+    }
+    assert_ne!(code, 0, "no broker is running, so it cannot succeed");
+}
+
+/// **PROD-08.1a review M1, this build's half.** A complete-only scope MINTED
+/// by this build (`coverage: complete`, `maxPartitions: 0`, formatVersion
+/// 1.1.0) admits the complete plan and refuses both sampled plans by their
+/// coverage, before any client.
+///
+/// KILLS: the minter writing another version or dropping a field (the
+/// format assertion); the coverage equality removed (the zero-bound sampled
+/// plan gets past the authorization).
+#[test]
+fn a_complete_only_scope_this_build_mints_admits_only_the_complete_plan() {
+    let signed = minted_authorization("uid-1", &complete_only_scope());
+    let doc: serde_json::Value = serde_json::from_slice(&signed.document).unwrap();
+    assert_eq!(doc["formatVersion"], "1.1.0", "{doc}");
+    assert_eq!(doc["scope"]["coverage"], "complete", "{doc}");
+    assert_eq!(doc["scope"]["maxPartitions"], 0, "{doc}");
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_logweir"));
+    for (label, plan) in complete_only_cases() {
+        let (code, transcript) = run_standing(bin, &plan, &signed);
+        if label == "complete" {
+            assert!(
+                past_authorization(code, &transcript),
+                "{label} (exit {code}):\n{transcript}"
+            );
+        } else {
+            assert_eq!(code, 3, "{label}: {transcript}");
+            assert!(
+                transcript.contains("RehearsalScopeViolation")
+                    && transcript.contains("authorises `complete`"),
+                "{label}: {transcript}"
+            );
+            assert!(
+                !transcript.contains("19099"),
+                "{label}: refused before any client"
+            );
+        }
+    }
+}
+
+/// **PROD-08.1a review M1, the OLDER reader's half — the reason the complete
+/// scope signs `maxPartitions: 0`.** `LOGWEIR_OLDER_RUNNER` names a `logweir`
+/// binary built before format 1.1.0 (main before this row). It ignores
+/// `coverage` and reads the document this build mints as a SAMPLED scope with
+/// a partition bound of 0, so it refuses the ordinary sampled plan (past the
+/// bound) and the complete plan (no bound: unbounded), before any client —
+/// where, with a positive bound, it would have run the sampled one.
+///
+/// The zero-bound sampled plan is inside a 0 bound, so the older runner's
+/// authorization checks pass it and the run fails later (here: no broker).
+/// It samples no partition, and every build's phase 7 refuses an empty
+/// selection before any verdict (`phase7_verify.rs`, "zero sample
+/// selections"; exit 1, no scorecard), so it can never be signed a pass —
+/// and an older controller never starts it, because its Approval controller
+/// refuses the scope (a bound of 0 is not a positive bound). The row asserts
+/// what the older binary does with it, so a change in that is seen.
+///
+/// `#[ignore]`d: it needs the older binary. When `LOGWEIR_COMPLETE_SCOPE_OUT`
+/// names a directory, the minted document, sidecar and keyring are written
+/// there for the older CONTROLLER's checks (run from that build's tree).
+///
+/// ```text
+/// LOGWEIR_OLDER_RUNNER=<main>/target/debug/logweir \
+///   cargo test -p logweir --test execution_contract_v2 -- --ignored older_runner
+/// ```
+#[test]
+#[ignore = "needs LOGWEIR_OLDER_RUNNER, a logweir binary built before standing format 1.1.0"]
+fn an_older_runner_refuses_every_plan_under_a_complete_only_scope_this_build_mints() {
+    let older = std::path::PathBuf::from(
+        std::env::var("LOGWEIR_OLDER_RUNNER").expect("LOGWEIR_OLDER_RUNNER names a binary"),
+    );
+    let signed = minted_authorization("uid-1", &complete_only_scope());
+    if let Some(out) = std::env::var_os("LOGWEIR_COMPLETE_SCOPE_OUT") {
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("standing-authorization.json"), &signed.document).unwrap();
+        std::fs::write(out.join("standing-authorization.sig"), &signed.sidecar).unwrap();
+        std::fs::write(out.join("authorization-keys.json"), &signed.keys).unwrap();
+    }
+    for (label, plan) in complete_only_cases() {
+        let (code, transcript) = run_standing(&older, &plan, &signed);
+        eprintln!("[older runner] {label}: exit {code}");
+        match label {
+            "sampled, max_partitions 200" => {
+                assert_eq!(code, 3, "{label}: {transcript}");
+                assert!(
+                    transcript.contains("RehearsalScopeViolation")
+                        && transcript
+                            .contains("samples up to 200 partitions; the signed scope permits 0"),
+                    "{label}: {transcript}"
+                );
+                assert!(
+                    !transcript.contains("19099"),
+                    "{label}: refused before any client"
+                );
+            }
+            "complete" => {
+                assert_eq!(code, 3, "{label}: {transcript}");
+                assert!(
+                    transcript.contains("RehearsalScopeViolation")
+                        && transcript
+                            .contains("so it is unbounded; the signed scope permits at most 0"),
+                    "{label}: {transcript}"
+                );
+                assert!(
+                    !transcript.contains("19099"),
+                    "{label}: refused before any client"
+                );
+            }
+            _ => {
+                // The documented corner: inside a 0 bound, so past the older
+                // runner's authorization; it fails later, never a pass.
+                assert!(
+                    past_authorization(code, &transcript),
+                    "{label} (exit {code}):\n{transcript}"
+                );
+            }
+        }
+    }
+    // The control: the SAME older binary runs an ordinary sampled plan under a
+    // sampled scope with a positive bound — so the refusals above are the 0
+    // bound's, not an older binary that refuses every standing run.
+    let sampled = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    let (code, transcript) = run_standing(&older, REHEARSAL_PLAN, &sampled);
+    assert!(
+        past_authorization(code, &transcript),
+        "the control (exit {code}):\n{transcript}"
+    );
+    // The hole the 0 closes: a complete scope signed with a POSITIVE bound
+    // (which this build's minter and readers now refuse) is read by the older
+    // binary as a sampled scope, and it runs the ordinary sampled plan.
+    let mut wide = complete_only_scope();
+    wide["maxPartitions"] = serde_json::json!(200);
+    let wide = signed_authorization_with("uid-1", wide, "1.1.0");
+    let (code, transcript) = run_standing(&older, REHEARSAL_PLAN, &wide);
+    assert!(
+        past_authorization(code, &transcript),
+        "without the 0, the older runner admits a sampled plan under a complete-only scope \
+         (exit {code}):\n{transcript}"
+    );
 }
 
 /// The control: the SAME plan under an authorization that covers it gets past

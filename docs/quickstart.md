@@ -56,7 +56,7 @@ them can approve their own restore, or enforce a deletion plan they wrote.
 ### 1. Install
 
 1. Check the floors: Kubernetes 1.29+, amd64 or arm64 nodes, and engine
-   0.21.0, with Logweir's build of 0.23.3 (`0.23.3+logweir.1`) the engine the
+   0.21.0, with Logweir's build of 0.23.3 (`0.23.3+logweir.2`) the engine the
    images ship
    ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
 2. Choose images: the published digests of the exact CI run you deploy, not
@@ -311,7 +311,8 @@ before upgrading the controller*), with the identity backed up beforehand.
 | *pending* | `result: Pending` | the evidence fetch has not answered yet |
 | *records verified in the sampled window* | `Restore.status.completion.recordsRestored` (`sample.records_restored`) | records read back from the new topics inside the sampled window — not the total written, and not the matching count |
 | *records sampled and matching* | `completion.recordsSampledMatching` | how many sampled records matched byte for byte |
-| verification scope `sampled` / `degraded` / `none` | `verificationScope.level` | how the records were compared; `complete` does not exist |
+| verification scope `sampled` / `degraded` / `none` | `verificationScope.level` | how the records were compared; `complete` is not a level |
+| *coverage: sampled* / *complete, covered* / *complete, NOT covered -- not a pass* | `Restore.status.integrity.coverage` and `.complete.covered` (`verificationScope.coverage`) | how MUCH was compared, as the signed scorecard says (PROD-08.1a); absent is not recorded, never complete, and `covered: false` is never a pass ([kubernetes.md](kubernetes.md) §12) |
 | *Visible user topics only — completeness not established* | `status.selection.coverage: VisibleUserTopicsOnly` | a dynamic run backed up what its principal could see; Kafka hides the rest silently |
 | *All user topics (attested complete)* | `AllUserTopicsAttested` | only with an administrator's attestation ([kubernetes.md](kubernetes.md) §22.2) |
 | catalog availability / verification | `Available`…`Partial` / `Verified`…`NotAttempted` | two separate axes; *selectable* needs both ([kubernetes.md](kubernetes.md) §7d) |
@@ -452,7 +453,7 @@ which shares no code with Logweir.
   architecture (`docker create` the image, then `docker cp
   <container>:/usr/local/bin/kafka-backup .`), or build it from a checkout
   with `scripts/engine-source.sh build`. `kafka-backup --version` prints
-  `kafka-backup 0.23.3+logweir.1`.
+  `kafka-backup 0.23.3+logweir.2`.
 
 ### 1. Write the drill spec
 
@@ -506,7 +507,7 @@ logweir doctor \
 `doctor` checks credentials, the engine **version** and glibc floor, target
 reachability, the marker topic and the approver key — before a drill is
 attempted. It compares the engine's own `--version` output against the pinned
-`0.23.3+logweir.1`, Logweir's build, as a whole token (`0.23.3+logweir.2` or
+`0.23.3+logweir.2`, Logweir's build, as a whole token (`0.23.3+logweir.1` or
 `0.23.3` is a mismatch; OSO's own `0.23.3` passes only as the declared
 rollback, named as OSO's release). It also refuses an engine whose version is
 not the one the run would sign (`LOGWEIR_ENGINE_VERSION`, or the image's
@@ -568,8 +569,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
 # Optional engine override. Both doctor and drill run search LOGWEIR_ENGINE_BIN,
 # ./.engine/kafka-backup, /usr/local/bin/kafka-backup, then PATH.
 export LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
-export LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1
-export LOGWEIR_ENGINE_DIGEST=sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3
+export LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2
+export LOGWEIR_ENGINE_DIGEST=sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8
 
 logweir drill run \
   --spec drill.yaml \

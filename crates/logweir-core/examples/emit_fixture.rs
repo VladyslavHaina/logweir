@@ -59,6 +59,7 @@ fn main() {
             // Absent, which `skip_serializing_if` keeps OUT of the bytes: the
             // signed 1.0.0 fixtures this example reproduces predate FX-8.
             time_basis: None,
+            selection: None,
         },
         target: TargetInfo {
             cluster_id: "MkU3OEVBNTcwNTJENDM2Qk".into(),

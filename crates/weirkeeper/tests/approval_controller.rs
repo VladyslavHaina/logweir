@@ -2317,6 +2317,39 @@ fn each_standing_claim_refuses_by_its_own_name() {
     );
 }
 
+/// **PROD-08.1a review M1: the partition bound is positive on a sampled scope
+/// and exactly 0 on a scope that authorises complete coverage.** A complete
+/// scope with `maxPartitions: 0` is verified (it is the only shape the minter
+/// signs); a complete scope with a positive bound is `ScopeInvalid`, because an
+/// older reader would read it as a sampled scope it could run sampled plans
+/// under. A sampled scope with 0 stays `ScopeInvalid`, and a sampled scope
+/// with a positive bound stays verified (the controls).
+///
+/// KILLS: the controller's zero test left as it was (the complete scope with 0
+/// is refused); the coverage ignored (the complete scope with 200 verifies).
+#[test]
+fn a_complete_scope_signs_a_partition_bound_of_zero_and_a_sampled_one_a_positive_bound() {
+    use logweir_core::execution_contract::StandingAuthorization;
+    use logweir_core::spec::Coverage;
+    let base: StandingAuthorization =
+        serde_json::from_str(&standing_fixture()).expect("the fixture parses");
+    let subject = standing_subject();
+    let inside = at("2026-09-10T00:00:00Z");
+    let with = |coverage: Option<Coverage>, max_partitions: u32| {
+        let mut doc = base.clone();
+        doc.format_version = "1.1.0".to_string();
+        doc.scope.coverage = coverage;
+        doc.scope.max_partitions = max_partitions;
+        approval::validate_standing_document(&doc, &subject, "sha256:aa", inside)
+            .map_err(|refusal| refusal.reason())
+    };
+    assert_eq!(with(Some(Coverage::Complete), 0), Ok(()));
+    assert_eq!(with(Some(Coverage::Complete), 200), Err("ScopeInvalid"));
+    assert_eq!(with(None, 0), Err("ScopeInvalid"));
+    assert_eq!(with(Some(Coverage::Sampled), 0), Err("ScopeInvalid"));
+    assert_eq!(with(None, 200), Ok(()));
+}
+
 // ===========================================================================
 // PLAT-19.1 — trust resolution in place of `load_roster` (D3 §7.1, §7.3, §7.4)
 //

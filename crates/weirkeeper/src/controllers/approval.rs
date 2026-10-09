@@ -803,15 +803,20 @@ pub fn validate_standing_document(
         || scope.topic_prefix.trim().is_empty()
         || scope.topics.is_empty()
         || scope.topics.iter().any(|topic| topic.trim().is_empty())
-        || scope.max_partitions == 0
+        // PROD-08.1a review M1: the partition bound is positive on a sampled
+        // scope and exactly 0 on one that authorises complete coverage (what
+        // makes an older reader refuse every plan under it).
+        || (scope.max_partitions == 0)
+            != (scope.signed_coverage() == logweir_core::spec::Coverage::Complete)
         || scope.records_per_partition == 0
         || scope.deadline_seconds == 0
         || !scope.is_scratch_only();
     if scope_invalid {
         return Err(ApprovalRefusal::ScopeInvalid {
             detail: "the standing authorization scope must name a template digest, target \
-                     cluster, topic prefix, at least one non-blank topic, positive bounds, and \
-                     exactly scratch mode"
+                     cluster, topic prefix, at least one non-blank topic, positive bounds (but \
+                     maxPartitions, which is 0 exactly when the scope authorises complete \
+                     coverage), and exactly scratch mode"
                 .to_string(),
         });
     }

@@ -308,8 +308,10 @@ pub struct EffectiveConfigValue {
 ///   replica count of the topic's partitions (a partition mid-reassignment
 ///   also lists the replicas being added). Only where that read named no
 ///   factor for the topic does the manifest's `source_replication_factor`
-///   stand, and the pinned engine records that for the first topic it saves
-///   only (`merge_manifests` drops it from every later save; FX-21). When the
+///   stand, and engine 0.23.3 records that for the first topic it saves only
+///   (`merge_manifests` drops it from every later save) unless it is
+///   Logweir's build `0.23.3+logweir.2` or later, whose patch 0002 records
+///   every topic's (FX-21). When the
 ///   metadata read is unavailable — it failed, or the reader cannot answer —
 ///   the run logs a warning and records the factor only where the manifest
 ///   has one: for every other topic it is ABSENT, NOT RECORDED, never `0` and
@@ -423,9 +425,19 @@ impl ConfigCoverage {
 /// configuration?". [`SourceConfigCoverage::unknown`] (no receipt: a plan not
 /// bound to a recovery point) and a receipt without the 1.1.0 block both
 /// answer [`ConfigCoverage::Unknown`] for every topic.
+///
+/// **FX-21.** It also lends the receipt's own record of each source topic's
+/// replication factor ([`SourceConfigCoverage::replication_factor`], from
+/// `topic_configuration`, format 1.3.0), which a parity check reads where the
+/// archive's manifest records none: engine 0.23.3 records the factor in the
+/// manifest for the first topic it saves only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceConfigCoverage {
     recorded: Option<BTreeMap<String, TopicConfigCoverage>>,
+    /// `topic_configuration[<topic>].replication_factor`, for every topic the
+    /// receipt records one for; empty for no receipt and for a receipt before
+    /// 1.3.0.
+    factors: BTreeMap<String, u32>,
 }
 
 impl SourceConfigCoverage {
@@ -435,13 +447,32 @@ impl SourceConfigCoverage {
         Self::default()
     }
 
-    /// The receipt's own block, copied. The caller must have VERIFIED the
-    /// receipt's signature: this type trusts what it is handed.
+    /// The receipt's own blocks, copied: `config_coverage` and the
+    /// replication factors `topic_configuration` records. The caller must have
+    /// VERIFIED the receipt's signature: this type trusts what it is handed.
     #[must_use]
     pub fn from_receipt(receipt: &BackupReceipt) -> Self {
         Self {
             recorded: receipt.config_coverage.clone(),
+            factors: receipt
+                .topic_configuration
+                .iter()
+                .flatten()
+                .filter_map(|(topic, c)| {
+                    c.replication_factor
+                        .filter(|f| *f >= 1)
+                        .map(|f| (topic.clone(), f))
+                })
+                .collect(),
         }
+    }
+
+    /// **FX-21.** The source `topic`'s replication factor as the receipt
+    /// records it (`topic_configuration`, format 1.3.0), or `None` when it
+    /// records none — NOT RECORDED, never a default.
+    #[must_use]
+    pub fn replication_factor(&self, topic: &str) -> Option<u32> {
+        self.factors.get(topic).copied()
     }
 
     /// `topic`'s coverage; `Unknown` for anything not recorded.

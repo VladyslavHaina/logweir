@@ -498,7 +498,8 @@ type Column = (&'static str, &'static str, &'static str);
 /// their ORDER are copied verbatim from `task-15b-brief.md`'s Produces table
 /// (`KafkaCluster` ROLE/REACHABLE/CLUSTER-ID/AGE, `BackupSchedule`
 /// SCHEDULE/SUSPEND/LAST/NEXT/READY/AGE, `Backup` PHASE/EXIT/RECORDS/SIGNED/AGE,
-/// `Restore` MODE/PHASE/EXIT/REASON/OUTCOME/INTEGRITY/RTO/SIGNED/AGE, `Approval`
+/// `Restore` MODE/PHASE/EXIT/REASON/OUTCOME/INTEGRITY/RTO/SIGNED/AGE (plus
+/// PROD-08.1a's COVERAGE after INTEGRITY), `Approval`
 /// SUBJECT/VERIFIED/APPROVER/KEY-ID/AGE, `TrustRoster` KEYS/LOADED/EXPIRED/AGE);
 /// the `jsonPath` and `type` beside each name are the declarations those names
 /// are required to keep, so a column that survives a RENAME of the field it
@@ -565,6 +566,8 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
             ("REASON", ".status.reason", "string"),
             ("OUTCOME", ".status.outcome", "string"),
             ("INTEGRITY", ".status.integrity.result", "string"),
+            // PROD-08.1a: what the signed scorecard verified.
+            ("COVERAGE", ".status.integrity.coverage", "string"),
             ("RTO", ".status.measured.rtoSeconds", "integer"),
             ("SIGNED", ".status.evidence.verification.result", "string"),
             ("AGE", ".metadata.creationTimestamp", "date"),
@@ -2764,9 +2767,18 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
     inames.sort();
     assert_eq!(
         inames,
-        vec!["level", "partialReason", "result"],
+        vec![
+            "complete",
+            "coverage",
+            "level",
+            "partialReason",
+            "result",
+            "unsampledTopics"
+        ],
         "`status.integrity` carries `partialReason` beside `level` and `result` — a `partial` \
-         with no reason is a badge an auditor cannot act on"
+         with no reason is a badge an auditor cannot act on — and, since PROD-08.1a, the \
+         signed `coverage`, a complete verification's `complete` block and FX-23's \
+         `unsampledTopics`"
     );
 
     // `measured` is what the run achieved; `objectives` is what was asked
