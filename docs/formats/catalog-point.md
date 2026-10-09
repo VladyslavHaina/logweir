@@ -3,7 +3,10 @@
 `application/vnd.logweir.catalog-point+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-catalog-point-1.3.0.json`](../../schemas/logweir-catalog-point-1.3.0.json),
+[`schemas/logweir-catalog-point-1.5.0.json`](../../schemas/logweir-catalog-point-1.5.0.json)
+(PROD-04.1; PROD-01.3's [`1.4.0`](../../schemas/logweir-catalog-point-1.4.0.json)
+and PROD-05.1's [`1.3.0`](../../schemas/logweir-catalog-point-1.3.0.json) are
+frozen beside it),
 regenerated from the Rust type by `just schema` and `diff -u`'d against the
 checked-in file by `just schema-check`, so this document and the schema cannot
 drift apart silently. A MINOR bump is a new schema file beside the old one: the
@@ -135,7 +138,7 @@ all of them wanted:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; this build writes `1.4.0` for a record whose `source.auth_mode` is `scramSha256`, `plain` or `mtls` (PROD-01.3), else `1.3.0` for a record whose receipt carries `topic_configuration` (every receipt it signs), else `1.2.0` for a record that carries `archive.manifest_version_id`, else `1.1.0`. |
+| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; this build writes `1.5.0` for a record that carries `consumer_positions` (PROD-04.1), else `1.4.0` for a record whose `source.auth_mode` is `scramSha256`, `plain` or `mtls` (PROD-01.3), else `1.3.0` for a record whose receipt carries `topic_configuration` (every receipt it signs), else `1.2.0` for a record that carries `archive.manifest_version_id`, else `1.1.0`. |
 | `point_id` | string | `lwp1-` + 32 lowercase hex. See [Point identity](#point-identity). |
 | `recorded_at` | RFC 3339 | When the RECORD was written. **Not** a fact about the backup. |
 | `receipt.key` / `.sidecar_key` | string | Where the signed backup receipt and its sidecar are, in this archive's evidence root. |
@@ -170,6 +173,7 @@ all of them wanted:
 | `topics[].partitions` | int, **optional** | The source's partition count, receipt-derived from the receipt's [`topic_configuration`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) (format 1.3.0): the count the archive manifest records and a restore creates the topic with. ABSENT — every record before 1.3.0, and a 1.3.0 one whose manifest recorded none — is unknown. See [absent means unknown](#absent-means-unknown-never-zero). |
 | `topics[].configuration` | object, **optional** (1.3.0) | The backup receipt's [`topic_configuration`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) entry for the topic, COPIED: `partitions`, `replication_factor`, the recorded `entries` with their `source` and `portability`, and the declarative `owner`. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0 — and is never read as "no configuration". |
 | `owner_detection` | string[], **optional** (1.3.0) | The backup receipt's [`owner_detection`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130), COPIED: where the run looked for declarative owners (`declared`, `kafkaTopicResources`). EMPTY means it looked nowhere, so a topic without an `owner` has its owner NOT CHECKED — never "applied through the admin API". Receipt-derived (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0. |
+| `consumer_positions` | object, **optional** (1.5.0) | The receipt's [`consumer_positions`](backup-receipt.md#consumer_positions--consumer-position-evidence-format-150), SUMMARISED and BOUND: `sha256` (the digest of the receipt block's deterministic JSON), `observed_from` and `observed_to` (when the positions were read, before the engine: the snapshot's freshness against `capture.started_at`), `listing`, and per selected group (`groups[]`, id order) its `group_id`, `outcome`, `reason`, `group_type`, `active` and, for a captured group, `positions` counted — `related` (within the archive or at its end), `not_related`, `never_committed`, `beyond_end`, `failed`, `not_observed`. Receipt-derived: `reader::cross_check` recomputes the summary from the verified receipt, digest first, and a record whose summary the receipt does not back is a `RecordMismatch` (rule 3). ABSENT: the backup selected no group, or the record predates 1.5.0 — never "no positions". The positions themselves are the receipt's. |
 | `source.cluster_id` | string | Read from the broker at admission and carried by the receipt — never from a spec. |
 | `source.bootstrap_servers` | string[] | Addressing. |
 | `source.auth_mode` | string | The receipt's `source.auth.mode`, copied: `plaintext` or `scramSha512`, and from 1.4.0 also `scramSha256`, `plain` or `mtls` — the receipt's versioned closed set. |
@@ -348,6 +352,14 @@ none of them.
   stays as above. No verifier evaluates a catalog record's invariants, so an
   older reader still reads it; the receipt it names is what an older verifier
   refuses.
+  **1.5.0 (PROD-04.1)** is the fifth: `consumer_positions`, written only for a
+  point whose receipt carries the block (a backup that selected consumer
+  groups); every other record stays as above. The catalog's view lists it for
+  an `Available` point — the snapshot's freshness and, per group (at most 32,
+  else counted), its outcome and position counts — and the product API
+  publishes it as `PointView.consumerPositions`, with
+  `observedBeforeRecoveryPointMs`. A catalog synced by an older runner lists no
+  summary.
 * **A major bump** is for a change a `1.x` reader could misread — a field whose
   meaning changed, or a required field removed. It writes under a new key path.
 * **Absent optional fields are unknown**, in every version.

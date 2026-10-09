@@ -474,7 +474,7 @@ pub struct BackupScheduleSpec {
     /// rail exits 3 without contacting the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub all_user_topics: Option<AllUserTopics>,
-    /// **PROD-04.1.** Consumer groups whose committed positions each run
+    /// Consumer groups whose committed positions each run
     /// records as evidence in its signed receipt (`consumer_positions`), by
     /// exact id — never a pattern, never "all groups". Each selected group gets
     /// exactly one outcome: captured (one position per partition of every
