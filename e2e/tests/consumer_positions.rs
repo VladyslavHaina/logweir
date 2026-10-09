@@ -41,7 +41,7 @@ use logweir_kafka::positions::{
     PositionsError, TopicPartition, COMMIT_METADATA_MARKER,
 };
 use logweir_kafka::rdkafka_reader::RdKafkaReader;
-use logweir_kafka::reader::{AuthConfig, ClusterReader};
+use logweir_kafka::reader::AuthConfig;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::producer::{BaseProducer, Producer};
@@ -220,17 +220,8 @@ impl Cluster {
             ],
             &format!("create topic {topic}"),
         );
-        let r = self.reader();
-        for _ in 0..60 {
-            if r.list_topics()
-                .map(|ts| ts.iter().any(|t| t.name == topic && t.error.is_none()))
-                .unwrap_or(false)
-            {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        panic!("topic {topic} still absent 15 s after --create");
+        // FX-18: served, not merely listed (`harness::await_created_on`).
+        harness::await_created_on(&self.plaintext, topic, partitions);
     }
 
     /// A super-user reader (the default broker has no authorizer; on `acl`

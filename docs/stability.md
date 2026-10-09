@@ -1271,6 +1271,11 @@ Before, rust-rdkafka answered the refused read as an empty configuration, phase 
 default `CreateTime`, and the probe was skipped
 ([the ruling](#an-empty-configuration-answer-is-a-refused-read-never-no-overrides-prod-040-t13-fx-4)).
 
+Since FX-18 phase 0 reads the probe's value back, and creates each target
+topic, only once the cluster serves the topic: it waits, bounded, until every
+partition has a leader that answers, and a topic still not served at the bound
+is exit 1 naming it, never a pass and never a guessed value.
+
 ### The restore window's end is inclusive; the backup receipt's `covered.to_ms` is exclusive
 
 A `Restore`'s window is a closed interval: the engine's PITR filter is `timestamp >= start &&

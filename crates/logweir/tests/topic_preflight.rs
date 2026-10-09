@@ -130,6 +130,13 @@ struct BrokerDouble {
     broker_refused: bool,
     /// FX-4 / T13: the probe topic's configuration read is REFUSED.
     readback_refused: bool,
+    /// FX-18: how many configuration reads of a just-created topic answer
+    /// `TopicNotFound` before it is readable — a creation still propagating.
+    readback_lag: std::sync::atomic::AtomicUsize,
+    /// FX-18: every `await_served(topic, partitions)` call, in order.
+    served: Mutex<Vec<(String, i32)>>,
+    /// FX-18: `await_served` answers this instead of `Ok`.
+    never_served: Option<KafkaError>,
 }
 
 impl BrokerDouble {
@@ -143,7 +150,25 @@ impl BrokerDouble {
             already_there: Vec::new(),
             broker_refused: false,
             readback_refused: false,
+            readback_lag: 0.into(),
+            served: Mutex::new(Vec::new()),
+            never_served: None,
         }
+    }
+
+    /// FX-18: the first `n` reads of a just-created topic's configuration
+    /// answer `TopicNotFound`, as a broker whose metadata does not hold the
+    /// topic yet does.
+    fn lagging_readback(self, n: usize) -> Self {
+        self.readback_lag
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+        self
+    }
+
+    /// FX-18: a created topic the cluster never serves.
+    fn never_serving(mut self, e: KafkaError) -> Self {
+        self.never_served = Some(e);
+        self
     }
 
     fn refusing_broker_configs(mut self) -> Self {
@@ -198,6 +223,18 @@ impl ClusterReader for BrokerDouble {
             )));
         }
         match self.readable_after_creation.lock().unwrap().get(topic) {
+            Some(_)
+                if self
+                    .readback_lag
+                    .fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |n| n.checked_sub(1),
+                    )
+                    .is_ok() =>
+            {
+                Err(KafkaError::TopicNotFound(topic.to_string()))
+            }
             Some(c) => Ok(c.clone()),
             None => panic!(
                 "phase 0 read topic_configs({topic:?}), a topic Logweir has not created. The \
@@ -212,6 +249,21 @@ impl ClusterReader for BrokerDouble {
             return Err(logweir_kafka::reader::empty_broker_config_answer(1001));
         }
         Ok(self.broker.clone())
+    }
+    fn await_served(
+        &self,
+        topic: &str,
+        partitions: i32,
+        _within: std::time::Duration,
+    ) -> Result<(), KafkaError> {
+        self.served
+            .lock()
+            .unwrap()
+            .push((topic.to_string(), partitions));
+        match &self.never_served {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
     }
     fn consume_range(
         &self,
@@ -350,6 +402,7 @@ fn phase0_calls_broker_configs_and_never_topic_configs_before_creation() {
     let mut preflight = admitted.topic_preflight.clone();
     phase0_admit::create_target_topics(
         &creator,
+        &reader,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -388,6 +441,7 @@ fn every_mapped_target_topic_is_created_with_the_pinned_config_set() {
     let mut preflight = admitted.topic_preflight.clone();
     phase0_admit::create_target_topics(
         &creator,
+        &reader,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -520,6 +574,146 @@ fn a_logappendtime_broker_that_honours_the_override_is_admitted() {
         vec!["drill-orders".to_string()],
         "the probe topic is deleted on this branch too: at phase 0 the manifest's partition count \
          is not known, so a one-partition probe topic left behind would be the wrong target"
+    );
+}
+
+/// **FX-18.** The `LogAppendTime` probe reads its topic back only once the
+/// cluster serves it.
+///
+/// A broker whose metadata does not hold a just-created topic yet answers its
+/// configuration read `TopicNotFound` (or, through T13, an empty answer named
+/// "not authorized"). PROD-00.3f's matrix row hit it once in two runs.
+///
+/// NEGATIVE CONTROL: put `reader.topic_configs(&probe)` back in
+/// `target_topic_preflight` and this plan, which the broker honours, exits 1
+/// with `TopicNotFound` instead of being admitted.
+#[test]
+fn the_probe_readback_waits_for_the_topic_phase_0_just_created() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[("log.message.timestamp.type", "LogAppendTime")])
+        .readable("drill-orders", &[("message.timestamp.type", "CreateTime")])
+        .lagging_readback(2);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("the override is honoured once the topic is readable");
+    assert_eq!(admitted.topic_preflight.timestamp_type, "LogAppendTime");
+    assert_eq!(
+        *reader.served.lock().unwrap(),
+        vec![("drill-orders".to_string(), 1)],
+        "the one-partition probe is awaited before it is read"
+    );
+    assert_eq!(
+        *deleter.calls.lock().unwrap(),
+        vec!["drill-orders".to_string()]
+    );
+}
+
+/// **FX-18.** Every target topic Logweir creates is SERVED before the engine
+/// is handed it, each with the partition count it was created with.
+///
+/// The engine retries `NOT_LEADER_FOR_PARTITION` on produce but not a
+/// partition its first metadata read lists without a leader.
+///
+/// NEGATIVE CONTROL: delete the `await_served` loop from
+/// `create_target_topics` and `served` is empty.
+#[test]
+fn every_created_target_topic_is_served_before_the_restore_runs() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[]);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("admitted");
+    assert!(
+        reader.served.lock().unwrap().is_empty(),
+        "nothing created yet"
+    );
+    let mut preflight = admitted.topic_preflight.clone();
+    phase0_admit::create_target_topics(
+        &creator,
+        &reader,
+        &admitted.topic_mapping,
+        &facts_for(&[("orders", 3), ("payments", 1)]),
+        spec.target.default_replication_factor,
+        &mut preflight,
+    )
+    .expect("created and served");
+    let created: Vec<String> = creator
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    let served = reader.served.lock().unwrap().clone();
+    assert_eq!(
+        served,
+        vec![
+            ("drill-orders".to_string(), 3),
+            ("drill-payments".to_string(), 1)
+        ]
+    );
+    assert_eq!(
+        served.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(),
+        created,
+        "exactly the created topics, no more"
+    );
+}
+
+/// **FX-18.** A created target topic the cluster never serves is an
+/// operational failure (exit 1) naming the topic, and `topics_created` still
+/// names every topic this run created. Nothing tears them down on this error:
+/// the run returns before phase 9, as it does for a failed create in the same
+/// batch, so the record is for whoever removes them by hand.
+#[test]
+fn a_created_target_topic_that_is_never_served_is_operational() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[]).never_serving(KafkaError::Client(
+        "drill-orders/0: ListOffsets: NotLeaderForPartition".into(),
+    ));
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("admitted");
+    let mut preflight = admitted.topic_preflight.clone();
+    let e = phase0_admit::create_target_topics(
+        &creator,
+        &reader,
+        &admitted.topic_mapping,
+        &facts_for(&[("orders", 3), ("payments", 1)]),
+        spec.target.default_replication_factor,
+        &mut preflight,
+    )
+    .expect_err("a topic that is never served is not handed to the engine");
+    assert_eq!(e.exit_code(), ExitCode::Operational, "{e}");
+    let text = e.to_string();
+    assert!(text.contains("drill-orders"), "{text}");
+    assert!(text.contains("NotLeaderForPartition"), "{text}");
+    assert_eq!(
+        preflight.topics_created,
+        vec!["drill-orders".to_string(), "drill-payments".to_string()]
     );
 }
 
@@ -954,6 +1148,7 @@ fn the_outcome_preflight_is_the_one_phase_0_built() {
     let mut preflight = admitted.topic_preflight.clone();
     phase0_admit::create_target_topics(
         &creator,
+        &reader,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -1143,6 +1338,7 @@ fn topics_created_names_only_the_topics_this_run_created() {
     let mut preflight = admitted.topic_preflight.clone();
     phase0_admit::create_target_topics(
         &creator,
+        &reader,
         &admitted.topic_mapping,
         &facts,
         spec.target.default_replication_factor,
@@ -1183,6 +1379,7 @@ fn topics_created_names_only_the_topics_this_run_created() {
     let mut preflight = admitted.topic_preflight.clone();
     let e = phase0_admit::create_target_topics(
         &racing,
+        &reader,
         &admitted.topic_mapping,
         &facts,
         spec.target.default_replication_factor,

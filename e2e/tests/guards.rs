@@ -434,7 +434,8 @@ impl Drop for RevertTimestampType {
 #[test]
 fn a_logappendtime_broker_accepts_or_refuses_a_per_topic_override() {
     use logweir_kafka::reader::{
-        ClusterReader, NewTopicSpec, TopicCreator, TopicDeleter, TARGET_TOPIC_CONFIGS,
+        ClusterReader, NewTopicSpec, TopicCreator, TopicDeleter, CREATED_TOPIC_SETTLE,
+        TARGET_TOPIC_CONFIGS,
     };
 
     // Start from a known state, and make sure the probe topic is not left over
@@ -501,11 +502,17 @@ fn a_logappendtime_broker_accepts_or_refuses_a_per_topic_override() {
         "creating the probe topic failed: {created:?}"
     );
 
-    let readback = ClusterReader::topic_configs(&scoped, PROBE_TOPIC)
-        .expect("the probe topic describes")
-        .get("message.timestamp.type")
-        .cloned()
-        .unwrap_or_default();
+    // FX-18: through the seam phase 0 reads its own probe with, which waits
+    // until the cluster serves the topic. A plain `topic_configs` here, right
+    // after the create, got the empty answer of a broker that did not hold the
+    // topic yet ("DescribeConfigs answered this visible topic with no
+    // configuration"): PROD-00.3f's matrix row, once in two runs.
+    let readback =
+        ClusterReader::created_topic_configs(&scoped, PROBE_TOPIC, 1, CREATED_TOPIC_SETTLE)
+            .expect("the probe topic describes")
+            .get("message.timestamp.type")
+            .cloned()
+            .unwrap_or_default();
     println!(
         "--- residual 3, ANSWER: a broker on log.message.timestamp.type=LogAppendTime, asked for \
          a per-topic message.timestamp.type=CreateTime, reports message.timestamp.type={readback} \

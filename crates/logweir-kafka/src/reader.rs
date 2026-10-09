@@ -570,6 +570,71 @@ pub fn empty_broker_config_answer(broker_id: i32) -> KafkaError {
     ))
 }
 
+/// **FX-18.** How long a caller that has just CREATED a topic waits for the
+/// cluster to serve it before reading it.
+///
+/// A successful `CreateTopics` means the controller has committed the topic,
+/// not that every broker has applied it. Until they have, a read of the new
+/// topic gets the answers [`Settling::NotYet`] names: `UnknownTopicOrPartition`
+/// from a broker whose metadata does not hold it yet, `LeaderNotAvailable`
+/// before a leader is elected, `NotLeaderForPartition` from a broker that has
+/// not yet become the leader it is listed as. On an idle single broker that
+/// window is milliseconds; main CI run 37753000930 (`e2e/tests/topic_identity.rs`
+/// c02) and PROD-00.3f's matrix row (`e2e/tests/guards.rs`) each hit it once.
+/// Thirty seconds is a bound for a wedged cluster, not an expected wait: a
+/// served topic ends the wait at once.
+pub const CREATED_TOPIC_SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The longest pause between two attempts in [`settle`].
+const SETTLE_MAX_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// **FX-18.** One attempt at a read that may be racing a topic's creation.
+#[derive(Debug)]
+pub enum Settling<T> {
+    /// The read answered.
+    Done(T),
+    /// An answer a topic gives while its creation is still propagating. It is
+    /// retried until the deadline and then returned as it is, so a caller that
+    /// classifies the error (not found, not authorized) still can.
+    NotYet(KafkaError),
+    /// Any other answer. Returned at once: waiting cannot change it.
+    Failed(KafkaError),
+}
+
+/// **FX-18.** Run `attempt` until it is [`Settling::Done`] or
+/// [`Settling::Failed`], retrying [`Settling::NotYet`] with a doubling pause
+/// (50 ms up to one second) until `within` has passed, then returning the last
+/// `NotYet` error.
+///
+/// A bounded poll on the condition, never a fixed sleep: a topic that is
+/// served on the first attempt costs no wait at all, and one that never is
+/// costs `within` and the answer it last gave.
+///
+/// # Errors
+///
+/// The `Failed` error at once, or the last `NotYet` error at the deadline.
+pub fn settle<T>(
+    within: std::time::Duration,
+    mut attempt: impl FnMut() -> Settling<T>,
+) -> Result<T, KafkaError> {
+    let deadline = std::time::Instant::now() + within;
+    let mut pause = std::time::Duration::from_millis(50);
+    loop {
+        match attempt() {
+            Settling::Done(value) => return Ok(value),
+            Settling::Failed(error) => return Err(error),
+            Settling::NotYet(error) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Err(error);
+                }
+                std::thread::sleep(pause.min(deadline - now));
+                pause = (pause * 2).min(SETTLE_MAX_PAUSE);
+            }
+        }
+    }
+}
+
 pub trait ClusterReader: Send + Sync {
     fn cluster_id(&self) -> Result<String, KafkaError>;
     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError>;
@@ -626,6 +691,63 @@ pub trait ClusterReader: Send + Sync {
     fn replication_factors(&self, topics: &[String]) -> Result<BTreeMap<String, u32>, KafkaError> {
         let _ = topics;
         Ok(BTreeMap::new())
+    }
+    /// **FX-18.** Wait, at most `within`, until `topic` — which the caller has
+    /// just CREATED with `partitions` partitions — is SERVED: its metadata
+    /// lists every partition with a leader, and every leader answers a
+    /// ListOffsets read. Only the answers of a creation still propagating are
+    /// waited out ([`Settling::NotYet`]); any other answer is returned at once.
+    ///
+    /// Call it between a create and the first read or write that needs the
+    /// topic (a watermark read, a DescribeConfigs, a restore). A producer
+    /// retries these answers on its own; a one-shot read does not.
+    ///
+    /// The DEFAULT is `Ok(())` at once: a reader with no cluster behind it —
+    /// every test double — has no propagation to wait for.
+    ///
+    /// # Errors
+    ///
+    /// The last answer the topic gave, when it is still not served at
+    /// `within`; any other failure at once.
+    fn await_served(
+        &self,
+        topic: &str,
+        partitions: i32,
+        within: std::time::Duration,
+    ) -> Result<(), KafkaError> {
+        let _ = (topic, partitions, within);
+        Ok(())
+    }
+    /// **FX-18.** [`Self::topic_configs`] for a topic the caller has just
+    /// CREATED: [`Self::await_served`], then the read, retrying
+    /// [`KafkaError::TopicNotFound`] (a broker whose metadata does not hold the
+    /// topic yet) until `within` from the start.
+    ///
+    /// The DEFAULT returns any other answer — [`KafkaError::NotAuthorized`]
+    /// included — at once. `RdKafkaReader` also waits out `NotAuthorized`,
+    /// because there that error is T13's inference from an EMPTY answer
+    /// ([`empty_topic_config_answer`]), which a just-created topic gives before
+    /// the answering broker holds it and which metadata read a moment later
+    /// then calls "visible".
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::await_served`], then as [`Self::topic_configs`].
+    fn created_topic_configs(
+        &self,
+        topic: &str,
+        partitions: i32,
+        within: std::time::Duration,
+    ) -> Result<BTreeMap<String, String>, KafkaError> {
+        let started = std::time::Instant::now();
+        self.await_served(topic, partitions, within)?;
+        settle(within.saturating_sub(started.elapsed()), || {
+            match self.topic_configs(topic) {
+                Ok(configs) => Settling::Done(configs),
+                Err(e @ KafkaError::TopicNotFound(_)) => Settling::NotYet(e),
+                Err(e) => Settling::Failed(e),
+            }
+        })
     }
     fn consume_range(
         &self,
