@@ -104,7 +104,8 @@ changes the controller only, and the PoC upgrade that carries it resumes the
 two suspended schedules and watches their `resourceVersion`.
 Item 46 is fix-now row FX-20c, proven by contract, runner, controller, API and
 console rows over one shared fixture; it changes the controller and the
-runner (the check plan and a new check row), and the PoC upgrade that carries
+runner (the check plan, a new check row, and a `RetentionPolicy`'s `Enforced`
+after a binding refusal), and the PoC upgrade that carries
 it re-creates PoC batch 4's F6 thief destination, tests it, and deletes it.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
@@ -1301,7 +1302,11 @@ status, the API or the console, and nothing is dialled with a foreign
 credential. The product API returns the row in the preflight's `checks` and
 the destination's `lastTest` follows the verdict; the console's *Test access*
 panel shows it among the blocking rows. A workload-identity grant carries no
-binding and is not listed (FX-20b).
+binding and is not listed (FX-20b). The same sweep fixed one more surface: a
+`RetentionPolicy` whose run was refused `CredentialBindingMismatch` read
+`Enforced=True` again on the next evaluation pass (`UnattendedDeletionEnabled`
+or `RunInProgress`); the refusal now stands on `Enforced` until a later run is
+harvested.
 **Do:** roll the controller and the runner image together (the chart does):
 an older runner refuses a plan that lists a grant (`phase: Failed`,
 `CheckContractMismatch`, naming `grantBindings`). Re-run *Test access* on each
@@ -1324,11 +1329,14 @@ with the row, `unknown` without it, `ready` only when it is ready)
 (`crates/weirkeeper/tests/preflight_controller.rs`); the product API
 (`crates/logweir-api/tests/destinations.rs`) and the console
 (`ui/tests/credential-binding.spec.js`) over one fixture, which the runner's
-and the controller's rows hold their output to. The live row — PoC batch 4's
+and the controller's rows hold their output to; the retention hold over real
+passes, with a generic refusal and a later successful run as its controls
+(`crates/weirkeeper/tests/retention_policy_controller.rs`). The live row — PoC batch 4's
 F6 thief re-created, tested and deleted — is the next PoC upgrade's.
 **Rollback:** an older controller lists no grant and an older runner emits no
-binding row: *Test access* reverts to the overclaim this item fixes, and every
-run still refuses a foreign Secret. Nothing is stored, so nothing needs
+binding row: *Test access* reverts to the overclaim this item fixes (and a
+refused retention run's `Enforced` flips back to `True` on the next pass), and
+every run still refuses a foreign Secret. Nothing is stored, so nothing needs
 converting.
 
 ### Required operator actions after `v0.2.0-rc.1`
@@ -1425,7 +1433,8 @@ rehearsal is to verify every record (a new schedule and a new
 authorization); item 44 changes the console only and needs nothing; item 45
 changes the controller only (and two CRD descriptions) and needs nothing; item 46
 changes the controller and the runner together (the check plan and a check
-row) and needs nothing beyond rolling them together. To roll back to
+row, and the retention controller's `Enforced` after a binding refusal) and
+needs nothing beyond rolling them together. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

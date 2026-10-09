@@ -7432,3 +7432,87 @@ async fn fx20_a_binding_refusal_is_named_on_the_enforced_condition() {
         Some("CredentialBindingMismatch")
     );
 }
+
+/// **FX-20c, the class sweep: a binding refusal is not un-said by the next
+/// decision.** After a run refused its credential, the next evaluation pass
+/// in the same slot decided to enforce again and published
+/// `Enforced=True/UnattendedDeletionEnabled` — a policy reading "enforced"
+/// while every run of it was refused `CredentialBindingMismatch` (observed on
+/// this build before the fix). The refusal now stands until a later run is
+/// harvested.
+///
+/// CONTROLS: a generic exit-3 refusal is not held (the hold keys on the
+/// binding reason), and a newest run that exited 0 is not held (the hold
+/// keys on the run the refusal was written for).
+///
+/// KILLS: `held_binding_refusal` answering `None` (the first assertion reads
+/// `True`); the hold applied to any exit 3; the hold outliving its run.
+#[tokio::test]
+async fn fx20c_a_binding_refusal_stands_on_enforced_until_a_later_run() {
+    let digest = learned_digest().await;
+    let spec = unattended_enforcing();
+    let at = now();
+    let refused_after = |line: &'static str| {
+        let spec = spec.clone();
+        let digest = digest.clone();
+        async move {
+            let (started, run_id) = start_pass(&spec, &json!({}), at, &digest).await;
+            harvest_pass_logging(
+                &spec,
+                &started,
+                at + chrono::Duration::minutes(1),
+                &run_id,
+                3,
+                &digest,
+                line,
+            )
+            .await
+        }
+    };
+    let next_pass = |status: Value| {
+        let spec = spec.clone();
+        let digest = digest.clone();
+        async move {
+            let f = quiet_pass(
+                &policy(spec, status.clone()),
+                at + chrono::Duration::minutes(2),
+                &digest,
+            )
+            .await;
+            after(&status, &f)
+        }
+    };
+
+    let refused = refused_after(
+        "logweir-retention: CredentialBindingMismatch: x\nretention-refusal=CredentialBindingMismatch\n",
+    )
+    .await;
+    let next = next_pass(refused.clone()).await;
+    let enforced = condition_of(&next, "Enforced").expect("Enforced");
+    assert_eq!(enforced["status"], "False", "{enforced}");
+    assert_eq!(enforced["reason"], "CredentialBindingMismatch");
+    assert!(
+        enforced["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(next["lastEnforcement"]["runId"].as_str().expect("run id")),
+        "the held refusal names the run that was refused: {enforced}"
+    );
+
+    // CONTROL: the same exit without the binding line is not held.
+    let generic = refused_after("retention-refusal=SomethingThisBuildDoesNotKnow\n").await;
+    let next = next_pass(generic).await;
+    assert_eq!(
+        condition_of(&next, "Enforced").expect("Enforced")["status"],
+        "True"
+    );
+
+    // CONTROL: a newest run that exited 0 releases the hold.
+    let mut released = refused.clone();
+    released["lastEnforcement"]["exitCode"] = json!(0);
+    let next = next_pass(released).await;
+    assert_eq!(
+        condition_of(&next, "Enforced").expect("Enforced")["status"],
+        "True"
+    );
+}

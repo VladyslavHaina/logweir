@@ -94,7 +94,7 @@ use crate::conditions::{keep_instant_unless_changed, merge_condition, status_unc
 use crate::crds::backup::Backup;
 use crate::crds::recovery_catalog::RecoveryCatalog;
 use crate::crds::restore::Restore;
-use crate::crds::retention_policy::{RetentionMode, RetentionPolicy};
+use crate::crds::retention_policy::{RetentionEnforcementRun, RetentionMode, RetentionPolicy};
 use crate::crds::{Condition, Time};
 use crate::destination::{self, ResolveError, ResolvedDestination};
 use crate::job::RunnerOwner;
@@ -2958,12 +2958,28 @@ impl Pass<'_> {
                     }
                 ),
             ),
-            (
-                CONDITION_ENFORCED,
-                if decision.start { "True" } else { "False" },
-                decision.reason,
-                decision.message.clone(),
-            ),
+            // FX-20c (the class sweep): A BINDING REFUSAL IS NOT UN-SAID BY
+            // THE NEXT DECISION. After a run refused its credential
+            // (`Enforced=False/CredentialBindingMismatch`), the following
+            // evaluation pass in the same slot decided `start` again and
+            // published `Enforced=True` (`UnattendedDeletionEnabled`,
+            // `RunInProgress`) while every run of the policy was refused. The
+            // controller reads no Secret, so only a later run can see a
+            // rebound one; until one is harvested, the refusal stands.
+            match (decision.start, self.held_binding_refusal()) {
+                (true, Some(message)) => (
+                    CONDITION_ENFORCED,
+                    "False",
+                    REASON_CREDENTIAL_BINDING_MISMATCH,
+                    message,
+                ),
+                _ => (
+                    CONDITION_ENFORCED,
+                    if decision.start { "True" } else { "False" },
+                    decision.reason,
+                    decision.message.clone(),
+                ),
+            },
             (
                 CONDITION_EXTERNAL_CONFLICT,
                 "False",
@@ -3303,6 +3319,34 @@ impl Pass<'_> {
     }
 
     /// The conditions as this pass believes they now stand.
+    /// FX-20c: the stored `Enforced=False/CredentialBindingMismatch` message,
+    /// when the newest run is FINISHED, exited 3, and is the run that
+    /// condition was written for — the refusal an evaluation pass must not
+    /// overwrite with a decision to enforce. `None` once a later run has
+    /// started (its `finishedAt` is cleared) or finished otherwise.
+    fn held_binding_refusal(&self) -> Option<String> {
+        let refused = self.existing_conditions().into_iter().find(|c| {
+            c.r#type == CONDITION_ENFORCED
+                && c.status == "False"
+                && c.reason.as_deref() == Some(REASON_CREDENTIAL_BINDING_MISMATCH)
+        })?;
+        let message = refused.message?;
+        let observed = self.observed();
+        let last = observed
+            .as_ref()
+            .and_then(|status| status.get("lastEnforcement").cloned())
+            .and_then(|r| serde_json::from_value::<RetentionEnforcementRun>(r).ok())
+            .or_else(|| {
+                self.policy
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.last_enforcement.clone())
+            })?;
+        let run = last.run_id.as_deref()?;
+        (last.finished_at.is_some() && last.exit_code == Some(3) && message.contains(run))
+            .then_some(message)
+    }
+
     fn existing_conditions(&self) -> Vec<Condition> {
         self.observed()
             .and_then(|status| status.get("conditions").cloned())

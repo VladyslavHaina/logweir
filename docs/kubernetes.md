@@ -8566,7 +8566,10 @@ request**, and refuses an absent or different binding with
   run would present, probed or not (below);
 * `logweir-retention`: exit 3, `retention-refusal=CredentialBindingMismatch`,
   `Enforced=False/CredentialBindingMismatch` on the `RetentionPolicy`; nothing
-  is deleted;
+  is deleted. The refusal **stands** on `Enforced` until a later run is
+  harvested (FX-20c): the controller reads no Secret, so only the next run can
+  see a rebound one, and the evaluation passes in between no longer publish
+  `Enforced=True` over it;
 * `logweir notify deliver`: `notify-result=<sink>:refused` for that sink only
   (the others are still attempted), and
   `NotificationsDelivered=False/CredentialBindingMismatch` (§7e).
