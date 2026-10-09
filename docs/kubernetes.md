@@ -2703,10 +2703,12 @@ scope must itself say `coverage: complete` (document format 1.1.0, below):
 over the mounted bundle — requires the plan's coverage to equal the signed one.
 A scope that states no `coverage`, which is every scope signed before this
 field, authorises sampled rehearsals only, so a complete plan under it is
-refused by name; a scope that says `complete` refuses a sampled plan too (a
-runner and a controller both older than format 1.1.0 read such a scope as a
-sampled one:
-[stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)). When
+refused by name; a scope that says `complete` refuses a sampled plan too. A
+scope that says `complete` signs `maxPartitions: 0`, and every reader of this
+build refuses one with any other value: a runner or controller older than
+format 1.1.0 ignores `coverage`, and under a partition bound of 0 it runs
+nothing
+([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)). When
 the scope states `completeMaxRecords`, the plan's bound must be present and no
 larger. The runner cannot see `templateDigest`; it can see the signed scope, so
 an approver who signed sampled rehearsals never finds a complete one run in
@@ -3018,11 +3020,16 @@ logweir drill approve --standing \
 `scope.json` is D3 §4.3's scope in camelCase — `templateDigest`,
 `targetClusterId`, `topicPrefix`, `topics`, `maxPartitions`,
 `recordsPerPartition`, `deadlineSeconds`, `modes` — and, for a schedule whose
-`spec.bounds.coverage` is `complete`, **`coverage: complete`** and optionally
-**`completeMaxRecords`** (PROD-08.1a): a scope carrying either is minted at
-`formatVersion` 1.1.0, every other one at 1.0.0 as before. A scope that states
-no `coverage` authorises sampled rehearsals only; `completeMaxRecords` without
-`coverage: complete`, or of 0, is refused before anything is signed.
+`spec.bounds.coverage` is `complete`, **`coverage: complete`** with
+**`maxPartitions: 0`**, and optionally **`completeMaxRecords`** (PROD-08.1a): a
+scope carrying either new field is minted at `formatVersion` 1.1.0, every other
+one at 1.0.0 as before. A scope that states no `coverage` authorises sampled
+rehearsals only; `completeMaxRecords` without `coverage: complete`, or of 0, and
+`coverage: complete` beside any `maxPartitions` but 0, are refused before
+anything is signed. The 0 is what makes a runner or controller older than
+format 1.1.0 refuse every plan under the document instead of reading it as a
+sampled scope; the schedule's own `spec.bounds.maxPartitions` still bounds the
+point a slot selects, inside the signed `templateDigest`.
 `--spec`, `--approver` and `--ticket` are refused: this document binds a SCOPE
 and covers every slot, and its versions carry neither an approver nor a
 ticket, so a value given for them would not be signed. The two files become the

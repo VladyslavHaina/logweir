@@ -956,17 +956,23 @@ outcome, and even over a status whose other fields say pass. The API's
 **The standing authorization signs the coverage (format 1.1.0).** A rehearsal
 scope gains optional `coverage` and `completeMaxRecords`; the plan's coverage
 must EQUAL the signed one (absent = sampled), and a signed record bound must be
-met. `logweir drill approve --standing` mints 1.1.0 only when the scope carries
-one of them. A scope signed before this field authorises sampled rehearsals
-only, so no existing authorization admits a complete plan
+met. A scope that authorises complete coverage signs `maxPartitions: 0`, and
+every reader of this build refuses one with any other value: a runner or
+controller older than 1.1.0 ignores `coverage`, and under a partition bound of
+0 it runs nothing (its `Approval` controller refuses the scope, its
+plan-in-scope check every real plan). `logweir drill approve --standing` mints
+1.1.0 only when the scope carries one of the new fields. A scope signed before
+this field authorises sampled rehearsals only, so no existing authorization
+admits a complete plan
 ([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)).
 
 **Do:** apply the CRDs (both new fields are additive and absent means sampled,
 so every existing `Restore`, `RehearsalSchedule`, template digest and plan hash
 is unchanged). To rehearse with complete coverage, create a NEW
-`RehearsalSchedule` with `spec.bounds.coverage: complete`, add `"coverage":
-"complete"` to its `scope.json`, and sign a new authorization for its
-`status.templateDigest`. Budget for the cost: complete coverage reads every
+`RehearsalSchedule` with `spec.bounds.coverage: complete`, write `"coverage":
+"complete"` and `"maxPartitions": 0` in its `scope.json` (the minter refuses
+any other `maxPartitions` beside `complete`), and sign a new authorization for
+its `status.templateDigest`. Budget for the cost: complete coverage reads every
 archived record of the restored topics and the whole restored output — about a
 minute per GiB of one-KiB records with an optimised build on a laptop, against
 about five seconds for the sampled check. A plan written with the CLI that asks
@@ -982,8 +988,13 @@ schedule firing only under a scope that signed complete, a sampled schedule's
 plan unchanged, a `covered: false` slot never a pass), `logweir-api`
 (`complete_coverage.rs`, over the console fixtures it writes), the runner
 (the standing document minted at 1.1.0 and admitted through the real binary,
-a `covered: false` run never a pass in the notification or the metrics), and
-`ui/tests/complete-coverage.spec.js`; planted mutants, each killed. Live: a
+a complete scope minted and read only with `maxPartitions: 0`, a `covered:
+false` run never a pass in the notification or the metrics), the `Approval`
+controller (the zero bound only beside complete), and
+`ui/tests/complete-coverage.spec.js`; planted mutants, each killed. An older
+build's runner binary and `Approval` controller (`main` before this item) were
+run against a complete-only scope this build minted, and ran nothing under it
+(`execution_contract_v2.rs`, an `#[ignore]`d row taking `LOGWEIR_OLDER_RUNNER`). Live: a
 plan built by the console's own emitter, run with complete coverage on the
 compose stack over real records and through the controller's and the API's
 projections. The k8s rows (the CRDs, a `Restore` and a rehearsal through the
@@ -991,14 +1002,11 @@ real controller, the console in a browser) run at the next PoC upgrade.
 **Rollback:** an older controller ignores the spec fields (an older CRD prunes
 them) and runs the plan as written; it does not copy the status fields, and
 the console then reads "not recorded". An older runner or controller ignores a
-1.1.0 scope's fields: it never runs a complete verification under it (a
-complete plan with no `max_partitions` is refused as unbounded), and it reads a
-scope that signs only complete coverage as a sampled one. With BOTH rolled back, a
-hand-written standing `Restore` with a sampled plan runs under such a scope (a
-rehearsal slot cannot: its `templateDigest` no longer matches), so before
-rolling both back, delete the standing `Approval` of every authorization whose
-scope states `coverage: complete`. The version class of format 1.1.0 is an
-open owner decision for that reason
+1.1.0 scope's fields and reads a complete-only scope as a sampled scope with a
+partition bound of 0: its `Approval` controller refuses it, and its
+plan-in-scope check refuses every real plan, so nothing runs under a
+complete-only authorization after a rollback (fail closed). An older minter
+refuses a `scope.json` with `maxPartitions: 0`
 ([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)).
 
 ### Required operator actions after `v0.2.0-rc.1`
