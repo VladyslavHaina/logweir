@@ -73,9 +73,20 @@ pub fn scorecard_schema() -> String {
     }
     property(selection, "partitions").array().min_items = Some(1);
     property(selection, "engine_runs").number().minimum = Some(1.0);
-    property(def(&mut root.definitions, "TopicPartitions"), "partitions")
-        .array()
-        .min_items = Some(1);
+    // PS-3 in the schema too (review L5): each list non-empty, distinct and
+    // not negative, and the topic not empty. Ascending order is the readers'.
+    let topic = def(&mut root.definitions, "TopicPartitions");
+    property(topic, "topic").string().min_length = Some(1);
+    let partitions = property(topic, "partitions").array();
+    partitions.min_items = Some(1);
+    partitions.unique_items = Some(true);
+    match partitions.items.as_mut() {
+        Some(schemars::schema::SingleOrVec::Single(item)) => match item.as_mut() {
+            Schema::Object(o) => o.number().minimum = Some(0.0),
+            Schema::Bool(_) => panic!("TopicPartitions.partitions' items are a schema object"),
+        },
+        _ => panic!("TopicPartitions.partitions has one item schema"),
+    }
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');
     out

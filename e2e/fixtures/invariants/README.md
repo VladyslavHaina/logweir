@@ -698,6 +698,7 @@ from `verification_1_4_sampled.json`, the complete ones from
 |---|---|
 | `subsets_2_0_sampled` | ACCEPT: `orders` [0, 2] from the archive's floor, one run, a sampled verification |
 | `subsets_2_0_complete_pass` | ACCEPT: `orders` [0, 1] from a start, a complete pass over its window |
+| `subsets_2_0_complete_mixed_pass` | ACCEPT: `orders` [0] narrowed and `payments` restored WHOLE (no subset, every partition selected), `engine_runs` 2, a complete pass: PS-5 reads a topic without a subset as selected (review L2) |
 | `subsets_under_format_1_7_0` | PS-2: a subset under 1.7.0, which an older reader would read as every partition |
 | `selection_1_7_without_a_start` | PS-2: a 1.7.0 block with no start |
 | `subsets_list_unsorted` | PS-3: `[2, 0]` |

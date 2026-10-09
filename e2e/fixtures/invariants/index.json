@@ -809,6 +809,13 @@
   "reason": ""
  },
  {
+  "id": "subsets_2_0_complete_mixed_pass",
+  "file": "subsets_2_0_complete_mixed_pass.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
   "id": "subsets_under_format_1_7_0",
   "file": "subsets_under_format_1_7_0.json",
   "rust_exit": 4,

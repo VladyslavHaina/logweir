@@ -882,7 +882,11 @@ fn a_topic_subset_from_a_start_is_restored_and_signed_under_both_coverages() {
             "{label}: {}",
             r.summary()
         );
-        assert_eq!(r.scorecard["format_version"], json!("1.7.0"), "{label}");
+        assert_format_at_least(
+            r.scorecard["format_version"].as_str().unwrap_or_default(),
+            "1.7.0",
+            label,
+        );
         assert_eq!(
             signed_selection(&r),
             &json!({"window_start_ms": start, "window_end_ms": end}),
@@ -1001,7 +1005,10 @@ fn partition_subsets_on_two_topics_are_two_engine_runs_and_sign_2_0_0() {
     let a = row.source_topic("a", &[]);
     let b = row.source_topic("b", &[]);
     let c = row.source_topic("c", &[]);
-    for t in [&a, &b, &c] {
+    // Review L2: C is restored WHOLE beside A's and B's subsets (the mixed
+    // shape, one more engine run); D is archived and never restored.
+    let d = row.source_topic("d", &[]);
+    for t in [&a, &b, &c, &d] {
         let recs = layout(
             s,
             t,
@@ -1014,8 +1021,8 @@ fn partition_subsets_on_two_topics_are_two_engine_runs_and_sign_2_0_0() {
         kafka::produce_plain(t, &recs).expect("produce");
     }
     let backup_id = row.backup_id("ab");
-    backup_ok(&backup_id, &[&a, &b, &c], 1000);
-    let archives: BTreeMap<&str, Archive> = [&a, &b]
+    backup_ok(&backup_id, &[&a, &b, &c, &d], 1000);
+    let archives: BTreeMap<&str, Archive> = [&a, &b, &c]
         .into_iter()
         .map(|t| {
             (
@@ -1041,11 +1048,11 @@ fn partition_subsets_on_two_topics_are_two_engine_runs_and_sign_2_0_0() {
             end,
             partitions: subsets.clone(),
         };
-        let prefix = row.prefix(label, &[&a, &b, &c]);
+        let prefix = row.prefix(label, &[&a, &b, &c, &d]);
         let r = restore_run(
             restore_spec(
                 &backup_id,
-                &[&a, &b],
+                &[&a, &b, &c],
                 &prefix,
                 &sel,
                 (start.unwrap_or(s), end),
@@ -1055,7 +1062,7 @@ fn partition_subsets_on_two_topics_are_two_engine_runs_and_sign_2_0_0() {
         );
         let mut diffs = BTreeMap::new();
         let mut unselected_restored = 0usize;
-        for t in [&a, &b] {
+        for t in [&a, &b, &c] {
             let want = expected_of(&archives[t.as_str()], t, &sel);
             let got = observed(&format!("{prefix}{t}"));
             diffs.insert(t.clone(), diff(&want, &got));
@@ -1092,8 +1099,17 @@ fn partition_subsets_on_two_topics_are_two_engine_runs_and_sign_2_0_0() {
             "{label}: an unselected partition holds a record"
         );
         assert!(
-            !topic_exists(&format!("{prefix}{c}")),
+            !topic_exists(&format!("{prefix}{d}")),
             "{label}: a topic the plan did not select was restored"
+        );
+        // C, restored whole: every one of its partitions holds its records.
+        let whole = observed(&format!("{prefix}{c}"));
+        assert_eq!(
+            (0..PARTS)
+                .filter(|p| whole.get(p).is_some_and(|r| !r.is_empty()))
+                .count(),
+            usize::try_from(PARTS).unwrap(),
+            "{label}: C is restored whole"
         );
         assert_eq!(
             (r.exit, r.outcome()),
@@ -1101,14 +1117,18 @@ fn partition_subsets_on_two_topics_are_two_engine_runs_and_sign_2_0_0() {
             "{label}: {}",
             r.summary()
         );
-        assert_eq!(r.scorecard["format_version"], json!("2.0.0"), "{label}");
+        assert_format_at_least(
+            r.scorecard["format_version"].as_str().unwrap_or_default(),
+            "2.0.0",
+            label,
+        );
         let mut want_block = json!({
             "window_end_ms": end,
             "partitions": [
                 {"topic": a, "partitions": [0, 2]},
                 {"topic": b, "partitions": [1]},
             ],
-            "engine_runs": 2,
+            "engine_runs": 3,
         });
         if let Some(st) = start {
             want_block["window_start_ms"] = json!(st);
@@ -1146,7 +1166,7 @@ fn partition_subsets_on_two_topics_are_two_engine_runs_and_sign_2_0_0() {
             }
             want_lines.push(l);
         }
-        want_lines.push(subset_line(&subsets, start, end, 2, true, before));
+        want_lines.push(subset_line(&subsets, start, end, 3, true, before));
         assert_eq!(lines, want_lines, "{label}");
     }
 
@@ -1157,7 +1177,7 @@ fn partition_subsets_on_two_topics_are_two_engine_runs_and_sign_2_0_0() {
         end,
         partitions: BTreeMap::new(),
     };
-    let prefix = row.prefix("unnarrowed", &[&a, &b, &c]);
+    let prefix = row.prefix("unnarrowed", &[&a, &b, &c, &d]);
     let r = restore_run(
         restore_spec(&backup_id, &[&a, &b], &prefix, &sel, (s, end), true),
         Vec::new(),
@@ -1176,7 +1196,13 @@ fn partition_subsets_on_two_topics_are_two_engine_runs_and_sign_2_0_0() {
         "{}",
         r.summary()
     );
-    assert_eq!(r.scorecard["format_version"], json!("1.4.0"));
+    // No subset: a major-1 document (at least the complete lane's 1.4.0),
+    // never 2.x.
+    assert_format_at_least(
+        r.scorecard["format_version"].as_str().unwrap_or_default(),
+        "1.4.0",
+        "the unnarrowed control",
+    );
     assert!(r.scorecard["source"].get("selection").is_none());
 }
 
@@ -1271,7 +1297,11 @@ fn a_record_in_an_unselected_partition_fails_the_restore() {
                         "python_lines": selection_lines(&py_out)},
         }));
         write_outcome("widened", &json!({ "cases": cases }));
-        assert_eq!(r.scorecard["format_version"], json!("2.0.0"), "{label}");
+        assert_format_at_least(
+            r.scorecard["format_version"].as_str().unwrap_or_default(),
+            "2.0.0",
+            label,
+        );
         assert_eq!((rust_rc, py_rc), (0, 0), "{label}: {rust_out}\n{py_out}");
         assert_eq!(
             selection_lines(&rust_out),
@@ -1390,7 +1420,11 @@ fn a_selected_partition_with_nothing_in_the_window_is_preflight_failed() {
         "{}",
         r.summary()
     );
-    assert_eq!(r.scorecard["format_version"], json!("2.0.0"));
+    assert_format_at_least(
+        r.scorecard["format_version"].as_str().unwrap_or_default(),
+        "2.0.0",
+        "the subset",
+    );
     assert_eq!(
         signed_selection(&r)["partitions"],
         json!([{"topic": topic, "partitions": [0, 2]}])
@@ -1980,8 +2014,20 @@ fn an_older_runner_refuses_a_partition_subset_plan() {
     if theirs.exit == Some(0) {
         let (ours, _) = run("start-only-this-build", &start_only, None);
         assert_eq!((ours.exit, ours.outcome()), (Some(0), Some("pass")));
-        assert_eq!(theirs.scorecard["format_version"], json!("1.7.0"));
-        assert_eq!(ours.scorecard["format_version"], json!("1.7.0"));
+        assert_format_at_least(
+            theirs.scorecard["format_version"]
+                .as_str()
+                .unwrap_or_default(),
+            "1.7.0",
+            "theirs",
+        );
+        assert_format_at_least(
+            ours.scorecard["format_version"]
+                .as_str()
+                .unwrap_or_default(),
+            "1.7.0",
+            "ours",
+        );
         assert_eq!(
             ours.scorecard["source"]["selection"],
             theirs.scorecard["source"]["selection"]
@@ -2028,7 +2074,8 @@ fn older_readers_refuse_a_2_0_0_document() {
         let version = serde_json::from_slice::<Value>(&std::fs::read(&doc).unwrap()).unwrap()
             ["format_version"]
             .clone();
-        assert_eq!(version, json!("2.0.0"), "{label}");
+        let version = version.as_str().unwrap_or_default().to_string();
+        assert_format_at_least(&version, "2.0.0", label);
         let (rust_rc, py_rc, rust_out, py_out) = read_with_both(&doc, &sig);
         assert_eq!(
             (rust_rc, py_rc),
@@ -2073,10 +2120,10 @@ fn older_readers_refuse_a_2_0_0_document() {
             if reader.ends_with(".py") {
                 assert_eq!(o.status.code(), Some(1), "{reader}: {out}");
                 assert!(
-                    out.contains(
-                        "format_version 2.0.0 has a major version newer than this reader \
+                    out.contains(&format!(
+                        "format_version {version} has a major version newer than this reader \
                          understands"
-                    ),
+                    )),
                     "{reader} must refuse {label} as an unsupported major: {out}"
                 );
             } else {

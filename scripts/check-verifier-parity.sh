@@ -1886,11 +1886,23 @@ def windowed(start):
 
 
 whole = (("orders", [0, 1]),)
+
+
+def mixed_block():
+    # Review L2: orders/0 narrowed, payments/0 a topic with no subset.
+    b = windowed(None)
+    rows = b["complete"]["partitions"]
+    rows[1]["topic"], rows[1]["partition"] = "payments", 0
+    rows[1]["target_topic"] = "drill-payments"
+    return b
+
+
 cases = {
     "floor-sampled": doc(subset()),
     "start-sampled": doc(subset(start=START)),
     "start-complete": doc(subset(whole, start=START), block=windowed(START)),
     "start-complete-fail": not_a_pass(doc(subset(whole, start=START), block=windowed(START))),
+    "mixed-complete": doc(subset((("orders", [0]),), runs=2), block=mixed_block()),
     "ps1-start-only": doc({"window_start_ms": START, "window_end_ms": END}),
     "ps1-no-block": doc(None),
     "ps2-subset-under-1.7.0": doc(subset(start=START), version="1.7.0"),
@@ -1913,7 +1925,7 @@ for name, d in cases.items():
 PYEOF
 read -r SUB_START SUB_END <"$tmp/scorecard-subset/window.txt"
 
-for name in floor-sampled start-sampled start-complete start-complete-fail; do
+for name in floor-sampled start-sampled start-complete start-complete-fail mixed-complete; do
     doc="$tmp/scorecard-subset/$name.json"
     sig="$tmp/scorecard-subset/$name.sig"
     set +e
@@ -1947,6 +1959,7 @@ replay selection: ONLY orders partitions [0, 2] (every partition of any other re
 replay selection: ONLY orders partitions [0, 2] (every partition of any other restored topic), ${started}${proved}; no record before the start was expected; a sampled check does not prove that none was restored" ;;
         start-complete) want="replay selection: ONLY orders partitions [0, 1] (every partition of any other restored topic), ${started}${proved}; no record before the start was restored or expected" ;;
         start-complete-fail) want="replay selection: ONLY orders partitions [0, 1] (every partition of any other restored topic), ${started}${expected}; no record before the start was expected" ;;
+        mixed-complete) want="replay selection: ONLY orders partitions [0] (every partition of any other restored topic), from the archive's floor to epoch-ms $SUB_END (inclusive), in 2 engine run(s); $proved" ;;
     esac
     if [ "$rust_lines" != "$want" ]; then
         fail "scorecard/$name: expected the subset and sample coverage lines to be

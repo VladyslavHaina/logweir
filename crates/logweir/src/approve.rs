@@ -169,6 +169,12 @@ pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<St
     }
     let spec_text =
         std::fs::read_to_string(spec_path).map_err(|e| format!("{}: {e}", spec_path.display()))?;
+    // PROD-11.1b (review L4): never sign a partition subset this release's
+    // runner would refuse, because a runner that predates it might not.
+    if args.subject_kind == "Restore" {
+        refuse_unparseable_subset_plan(&spec_text)
+            .map_err(|why| format!("{}: {why}", spec_path.display()))?;
+    }
     let plan_hash = sha256_prefixed(spec_text.as_bytes());
 
     let key = SigningKey::from_pem_file(&args.key).map_err(|e| {
@@ -225,6 +231,52 @@ pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<St
         out = args.out.display(),
         sig = sig_path.display(),
     ))
+}
+
+/// The name `logweir drill approve` refuses an unparseable partition-subset
+/// plan under ([`refuse_unparseable_subset_plan`]).
+pub const SUBSET_PLAN_UNPARSEABLE: &str = "SubsetPlanUnparseable";
+
+/// **PROD-11.1b (review L4).** A `Restore` plan that states
+/// `restore.partitions` must PARSE under this release's grammar before an
+/// approval is minted over it, or the approval is refused, named
+/// [`SUBSET_PLAN_UNPARSEABLE`], and nothing is signed.
+///
+/// Why here and not only at run time: this release's runner and preview
+/// refuse a subset written beside a plain instant (`PlanUnparseable`), but an
+/// approval binds bytes, not a parse, and a runner that predates partition
+/// subsets ignores the unknown key and restores EVERY partition of the plan
+/// the approver narrowed. The grammar keeps a subset beside an interval no
+/// such runner parses; this keeps an approval from ever carrying one that is
+/// not.
+///
+/// Only a plan that names the key is judged: every other plan is minted
+/// exactly as before, including bytes that are not YAML at all, which no
+/// runner parses either.
+///
+/// # Errors
+/// The refusal sentence, starting with [`SUBSET_PLAN_UNPARSEABLE`].
+pub fn refuse_unparseable_subset_plan(spec_text: &str) -> Result<(), String> {
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(spec_text) else {
+        return Ok(());
+    };
+    let names_a_subset = doc
+        .get("restore")
+        .and_then(|r| r.get("partitions"))
+        .is_some_and(|p| !p.is_null());
+    if !names_a_subset {
+        return Ok(());
+    }
+    serde_yaml::from_str::<logweir_core::spec::DrillSpec>(spec_text)
+        .map(|_| ())
+        .map_err(|e| {
+            format!(
+                "{SUBSET_PLAN_UNPARSEABLE}: the plan states restore.partitions but does not parse \
+                 under this release's plan grammar ({e}). No approval was minted: a runner that \
+                 predates partition subsets could run an approval of these bytes and restore \
+                 every partition. Write the point in time as \"<start>/<end>\" or \"../<end>\"."
+            )
+        })
 }
 
 /// Mint the **signed standing rehearsal authorization** D3 §4.3(e) defines —

@@ -835,3 +835,83 @@ fn drill_approve_hands_the_mint_the_wall_clock() {
         "and nothing was signed: {transcript}"
     );
 }
+
+// ===========================================================================
+// PROD-11.1b (review L4): no approval over a subset plan this release refuses
+// ===========================================================================
+
+/// The example drill spec with a `restore` block naming a partition subset,
+/// its point in time written as `point_in_time`.
+fn subset_spec(point_in_time: &str) -> String {
+    let base = example_spec();
+    assert!(
+        !base.contains("\nrestore:"),
+        "the example states no restore block"
+    );
+    format!(
+        "{base}\nrestore:\n  point_in_time: \"{point_in_time}\"\n  partitions:\n    orders: [0, 2]\n"
+    )
+}
+
+/// **`drill approve` refuses an unparseable subset plan, by name, and signs
+/// nothing.** A subset beside a plain instant is refused at parse by this
+/// release's runner and preview (`PlanUnparseable`), but an approval binds
+/// bytes: minted, it could be run by a runner that predates partition subsets,
+/// which ignores the key and restores every partition. THE CONTROL: the same
+/// subset beside the open-start interval mints, and a plan with no subset is
+/// minted as before (every other row in this file).
+///
+/// KILLS: the parse check removed from `mint`; `refuse_unparseable_subset_plan`
+/// reading a plan with the key as one without it.
+#[test]
+fn approve_refuses_an_unparseable_subset_plan_by_name_and_signs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = write_key(dir.path());
+    let run = |text: &str, name: &str| {
+        let spec = dir.path().join(format!("{name}.yaml"));
+        std::fs::write(&spec, text).unwrap();
+        let out = dir.path().join(format!("{name}.approval.json"));
+        let o = bin()
+            .args(["drill", "approve"])
+            .arg("--spec")
+            .arg(&spec)
+            .arg("--key")
+            .arg(&key)
+            .args(["--approver", "sre-oncall@example.com"])
+            .args(["--ticket", "CHG-40881"])
+            .arg("--out")
+            .arg(&out)
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stderr).to_string(),
+            out,
+        )
+    };
+    let (code, stderr, out) = run(&subset_spec("2026-09-07T14:05:00Z"), "instant");
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains(logweir::approve::SUBSET_PLAN_UNPARSEABLE)
+            && stderr.contains("restore.partitions"),
+        "{stderr}"
+    );
+    assert!(!out.exists(), "nothing was signed");
+    assert!(!out.with_extension("sig").exists());
+
+    // THE CONTROL: the open-start interval is this release's spelling.
+    let (code, stderr, out) = run(&subset_spec("../2026-09-07T14:05:00Z"), "interval");
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(out.exists());
+
+    // The predicate itself: no key, a null key or bytes that are not YAML are
+    // not judged; a subset beside an instant is.
+    use logweir::approve::refuse_unparseable_subset_plan as judge;
+    assert_eq!(judge(&example_spec()), Ok(()));
+    assert_eq!(judge("restore:\n  partitions: null\n"), Ok(()));
+    assert_eq!(judge(": : not yaml : ["), Ok(()));
+    assert!(judge(&subset_spec("2026-09-07T14:05:00Z"))
+        .unwrap_err()
+        .starts_with("SubsetPlanUnparseable: "));
+    assert_eq!(judge(&subset_spec("../2026-09-07T14:05:00Z")), Ok(()));
+}

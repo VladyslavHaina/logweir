@@ -763,10 +763,12 @@ fn the_frozen_1_7_0_scorecard_schema_does_not_describe_partition_subsets() {
     assert_eq!(label["partitions"]["minItems"], 1);
     assert!(label["partitions"].get("nullable").is_none());
     assert_eq!(label["engine_runs"]["minimum"], 1.0);
-    assert_eq!(
-        current["definitions"]["TopicPartitions"]["properties"]["partitions"]["minItems"],
-        1
-    );
+    let topic = &current["definitions"]["TopicPartitions"]["properties"];
+    assert_eq!(topic["partitions"]["minItems"], 1);
+    // Review L5: PS-3's distinct, not-negative partitions and non-empty topic.
+    assert_eq!(topic["partitions"]["uniqueItems"], true);
+    assert_eq!(topic["partitions"]["items"]["minimum"], 0.0);
+    assert_eq!(topic["topic"]["minLength"], 1);
     assert_eq!(
         logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS,
         "2.0.0"

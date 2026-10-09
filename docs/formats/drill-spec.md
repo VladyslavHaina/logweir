@@ -381,7 +381,11 @@ partition of a plan an approver narrowed; it cannot parse either interval, so
 it refuses the plan (`drill spec does not parse`, exit 1) before it touches
 anything. A subset beside a plain instant, or with no `point_in_time`, does not
 parse in this release; neither does `"../<end>"` without a subset, so a plan
-has one spelling.
+has one spelling. `logweir drill approve` parses a `Restore` plan that states
+`restore.partitions` before it signs anything, and refuses one that does not
+parse (`SubsetPlanUnparseable`, exit 1, nothing written): an approval binds
+bytes, and no approval this release mints carries a subset an older runner
+would widen.
 
 **One engine run per distinct subset.** The engine's partition filter applies
 to every topic of one run, so topics with different subsets restore in
