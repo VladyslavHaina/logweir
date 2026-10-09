@@ -76,6 +76,14 @@ enum Behaviour {
     /// Send the head (with the document's full `content-length`) and the
     /// first `sent` bytes of the body, then nothing.
     StallAfterHead { sent: usize },
+    /// Read the request and send nothing at all: the stall is BEFORE the
+    /// response head (FX-28 review M1).
+    NoHead,
+    /// Trickle the head over `head_over`, then send one body byte and stall:
+    /// with one deadline over the request and the body the answer comes at
+    /// the deadline; with a timer per phase it would come at `head_over`
+    /// plus the deadline (FX-28 review M1).
+    SlowHeadThenStall { head_over: Duration },
     /// Send the head, then the body in `chunks` pieces, `gap` apart.
     Steady { chunks: usize, gap: Duration },
     /// Serve the document with a padding field that takes it past
@@ -89,10 +97,10 @@ struct WireState {
     behaviours: BTreeMap<&'static str, Behaviour>,
     /// Every request path, in arrival order.
     requests: Vec<String>,
-    /// Stalled responses whose head was sent and whose body was withheld.
+    /// Stalled responses: the body, or the whole answer, withheld.
     withheld: usize,
-    /// For each stalled response, how long after its head the console hung
-    /// up on it — `None` while it has not.
+    /// For each stalled response, how long after the stall began the console
+    /// hung up on it — `None` while it has not.
     hangups: Vec<Option<Duration>>,
 }
 
@@ -143,7 +151,7 @@ impl Wire {
     }
 
     /// Wait (bounded) until every stalled response has been hung up on, and
-    /// return how long after its head each one was.
+    /// return how long after its stall began each one was.
     ///
     /// ASYNC, for the router rows: the client's connection task runs on the
     /// test's own single-threaded runtime, and it is that task which closes
@@ -266,10 +274,37 @@ fn answer(mut stream: TcpStream, idp: &MockIdp, state: &Arc<Mutex<WireState>>) {
          connection: close\r\n\r\n",
         document.len()
     );
+    match behaviour {
+        Behaviour::NoHead => return hold(stream, state),
+        Behaviour::SlowHeadThenStall { head_over } => {
+            let pieces = 14;
+            let gap = head_over / pieces;
+            for piece in head.as_bytes().chunks(head.len().div_ceil(pieces as usize)) {
+                std::thread::sleep(gap);
+                if stream
+                    .write_all(piece)
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            if stream
+                .write_all(&document[..1])
+                .and_then(|()| stream.flush())
+                .is_err()
+            {
+                return;
+            }
+            return hold(stream, state);
+        }
+        _ => {}
+    }
     if stream.write_all(head.as_bytes()).is_err() {
         return;
     }
     match behaviour {
+        Behaviour::NoHead | Behaviour::SlowHeadThenStall { .. } => unreachable!("answered above"),
         Behaviour::Serve | Behaviour::Oversize => {
             let _ = stream.write_all(&document);
             let _ = stream.flush();
@@ -289,33 +324,38 @@ fn answer(mut stream: TcpStream, idp: &MockIdp, state: &Arc<Mutex<WireState>>) {
         Behaviour::StallAfterHead { sent } => {
             let _ = stream.write_all(&document[..sent.min(document.len())]);
             let _ = stream.flush();
-            let since = Instant::now();
-            let index = {
-                let mut state = state.lock().unwrap();
-                state.withheld += 1;
-                state.hangups.push(None);
-                state.hangups.len() - 1
-            };
-            // Hold the rest back, and watch for the client hanging up.
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-            let mut probe = [0u8; 64];
-            while since.elapsed() < HOLD_LIMIT {
-                match stream.read(&mut probe) {
-                    Ok(0) => {
-                        state.lock().unwrap().hangups[index] = Some(since.elapsed());
-                        return;
-                    }
-                    Ok(_) => {}
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) => {}
-                    Err(_) => {
-                        state.lock().unwrap().hangups[index] = Some(since.elapsed());
-                        return;
-                    }
-                }
+            hold(stream, state);
+        }
+    }
+}
+
+/// Send nothing more, and watch (bounded by [`HOLD_LIMIT`]) for the client
+/// hanging up, recording when it did.
+fn hold(mut stream: TcpStream, state: &Arc<Mutex<WireState>>) {
+    let since = Instant::now();
+    let index = {
+        let mut state = state.lock().unwrap();
+        state.withheld += 1;
+        state.hangups.push(None);
+        state.hangups.len() - 1
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+    let mut probe = [0u8; 64];
+    while since.elapsed() < HOLD_LIMIT {
+        match stream.read(&mut probe) {
+            Ok(0) => {
+                state.lock().unwrap().hangups[index] = Some(since.elapsed());
+                return;
+            }
+            Ok(_) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => {
+                state.lock().unwrap().hangups[index] = Some(since.elapsed());
+                return;
             }
         }
     }
@@ -502,7 +542,7 @@ async fn assert_stalled_and_bounded(wire: &Wire, elapsed: Duration) {
         "the wire sent one head and withheld its body"
     );
     let hangups = wire.hangups_within(SLACK).await;
-    eprintln!("FX-28 evidence: answered after {elapsed:?}; the provider saw the hang-up {hangups:?} after its head");
+    eprintln!("FX-28 evidence: answered after {elapsed:?}; the provider saw the hang-up {hangups:?} after the stall began");
     assert!(
         hangups
             .iter()
@@ -519,6 +559,117 @@ async fn assert_stalled_and_bounded(wire: &Wire, elapsed: Duration) {
 fn the_provider_deadline_is_ten_seconds() {
     assert_eq!(PROVIDER_DEADLINE, EXPECTED_DEADLINE);
     assert_eq!(MAX_PROVIDER_BODY, 512 * 1024);
+}
+
+/// **A provider that accepts the request and never sends a head fails the
+/// sign-in within the deadline** (FX-28 review M1). The deadline covers the
+/// request phase, not only the body: a timer around the body alone leaves
+/// this row "still pending after 15 s".
+#[tokio::test]
+async fn a_provider_that_stalls_before_its_head_fails_the_login_within_the_deadline() {
+    let (log, _guard) = capture();
+    let key = TestKey::ec("k1");
+    let wire = Wire::start(&[&key]);
+    wire.set(DISCOVERY, Behaviour::NoHead);
+    let app = console(&wire);
+
+    let (response, elapsed) = timed(&app, get("/auth/login", None)).await;
+    response.assert_problem(503, "kubernetes_unavailable");
+    assert_eq!(log.audit(&response)["failureCode"], "provider_timeout");
+    assert_eq!(wire.requests_to(DISCOVERY), 1);
+    assert_stalled_and_bounded(&wire, elapsed).await;
+}
+
+/// How long the slow-head row's provider takes over its head.
+const SLOW_HEAD: Duration = Duration::from_secs(7);
+
+/// **ONE deadline covers the request and the body together** (FX-28 review
+/// M1). The provider trickles its head over seven seconds, then sends one
+/// body byte and stalls. One deadline answers at ten seconds; a timer per
+/// phase (ten for the head, ten more for the body) would answer at about
+/// seventeen, past this row's bound.
+#[tokio::test]
+async fn a_slow_head_then_a_stalled_body_shares_one_deadline() {
+    let (log, _guard) = capture();
+    let key = TestKey::ec("k1");
+    let wire = Wire::start(&[&key]);
+    wire.set(
+        DISCOVERY,
+        Behaviour::SlowHeadThenStall {
+            head_over: SLOW_HEAD,
+        },
+    );
+    let app = console(&wire);
+
+    let (response, elapsed) = timed(&app, get("/auth/login", None)).await;
+    response.assert_problem(503, "kubernetes_unavailable");
+    assert_eq!(log.audit(&response)["failureCode"], "provider_timeout");
+    assert!(
+        elapsed < SLOW_HEAD + EXPECTED_DEADLINE - Duration::from_secs(2),
+        "answered after {elapsed:?}: the body had a deadline of its own after the head"
+    );
+    // `assert_stalled_and_bounded`'s `withheld == 1` says the wire got its
+    // whole head and the body byte out before the console hung up.
+    assert_stalled_and_bounded(&wire, elapsed).await;
+}
+
+/// **A TLS handshake that stalls is bounded by the same deadline**, at the
+/// production client over an `https://` URL: the peer accepts TCP and never
+/// answers the ClientHello. The stall is named `HttpError::Deadline` (the
+/// request's own timer, not the dial's longer one), and the console hangs up.
+#[tokio::test]
+async fn a_tls_handshake_that_stalls_is_bounded_by_the_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().unwrap().port();
+    let hung_up: Arc<Mutex<Option<Duration>>> = Arc::default();
+    let seen = Arc::clone(&hung_up);
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let since = Instant::now();
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+        let mut probe = [0u8; 1024];
+        while since.elapsed() < HOLD_LIMIT {
+            match stream.read(&mut probe) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => break,
+            }
+        }
+        *seen.lock().unwrap() = Some(since.elapsed());
+    });
+    let client = HyperHttpClient::new(false, &TlsTrust::system()).expect("the client builds");
+
+    let started = Instant::now();
+    let bound = EXPECTED_DEADLINE + SLACK;
+    let answered = tokio::time::timeout(
+        bound,
+        client.get(&format!("https://127.0.0.1:{port}{DISCOVERY}")),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("a stalled TLS handshake was still pending after {bound:?}"));
+    let elapsed = started.elapsed();
+    assert_eq!(answered, Err(HttpError::Deadline));
+    assert!(
+        elapsed >= EXPECTED_DEADLINE - EARLY && elapsed <= bound,
+        "answered after {elapsed:?}"
+    );
+    let until = Instant::now() + SLACK;
+    while hung_up.lock().unwrap().is_none() && Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let hang_up = *hung_up.lock().unwrap();
+    eprintln!("FX-28 evidence (TLS stall): answered after {elapsed:?}; the peer saw the hang-up {hang_up:?} after accept");
+    assert!(
+        hang_up.is_some_and(|at| at <= bound),
+        "the console released the stalled handshake's connection: {hang_up:?}"
+    );
 }
 
 /// **A discovery document whose body stalls fails the sign-in within the
@@ -870,7 +1021,7 @@ fn the_built_binary_answers_a_stalled_sign_in_and_closes_the_connection() {
     let hangups = wire.hangups_within_blocking(SLACK);
     eprintln!(
         "FX-28 evidence (binary): status line after {first_byte:?}, closed after {closed:?}; \
-         the provider saw the hang-up {hangups:?} after its head"
+         the provider saw the hang-up {hangups:?} after the stall began"
     );
     assert!(
         hangups.iter().all(|h| h.is_some_and(|at| at <= bound)),

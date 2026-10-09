@@ -71,13 +71,15 @@ pub const PROVIDER_DEADLINE: Duration = Duration::from_secs(10);
 /// before the first probe (FX-28).
 ///
 /// The deadline bounds a request in flight. Keepalive is for the connection
-/// between requests: the client pools connections, and a pooled connection
-/// whose peer has gone (a provider pod rescheduled, a NAT that dropped its
-/// state) would otherwise only be found dead by the next sign-in, which would
-/// spend its whole deadline writing into it. With keepalive the kernel
-/// notices within [`PROVIDER_KEEPALIVE`] plus
-/// [`PROVIDER_KEEPALIVE_RETRIES`] × [`PROVIDER_KEEPALIVE_INTERVAL`] and the
-/// pool drops the connection.
+/// between requests: the client pools connections, and without it a pooled
+/// connection whose peer has gone silently (a provider pod rescheduled, a NAT
+/// that dropped its state) stays in the pool until it is idle-expired, and
+/// every sign-in that picks it up spends its whole deadline writing into it.
+/// With keepalive the kernel declares such a connection dead after about a
+/// minute of idleness — [`PROVIDER_KEEPALIVE`] plus
+/// [`PROVIDER_KEEPALIVE_RETRIES`] × [`PROVIDER_KEEPALIVE_INTERVAL`] — and the
+/// pool drops it. A sign-in inside that minute can still pick it up and meet
+/// the deadline once (the client retries only a request it never sent).
 pub const PROVIDER_KEEPALIVE: Duration = Duration::from_secs(30);
 /// The interval between two keepalive probes. See [`PROVIDER_KEEPALIVE`].
 pub const PROVIDER_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
@@ -500,7 +502,8 @@ impl Provider {
     ///
     /// # Errors
     ///
-    /// [`OidcError::ProviderUnreachable`] or [`OidcError::ProviderMetadata`].
+    /// [`OidcError::ProviderUnreachable`], [`OidcError::ProviderTimeout`] or
+    /// [`OidcError::ProviderMetadata`].
     pub async fn discovery(&self) -> Result<Discovery, OidcError> {
         if let Some(cached) = self
             .cache
@@ -1157,10 +1160,7 @@ impl TlsTrust {
 /// that combination for any non-loopback host, so a production issuer cannot
 /// be downgraded by a configuration typo.
 pub struct HyperHttpClient {
-    http: hyper_util::client::legacy::Client<
-        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-        http_body_util::Full<bytes::Bytes>,
-    >,
+    http: hyper_util::client::legacy::Client<BoundedConnect, http_body_util::Full<bytes::Bytes>>,
 }
 
 impl HyperHttpClient {
@@ -1180,21 +1180,9 @@ impl HyperHttpClient {
         let tls = rustls::ClientConfig::builder()
             .with_root_certificates(trust.root_store()?)
             .with_no_client_auth();
-        let builder = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls);
-        let connector = if allow_plain_http {
-            builder
-                .https_or_http()
-                .enable_http1()
-                .wrap_connector(provider_tcp_connector())
-        } else {
-            builder
-                .https_only()
-                .enable_http1()
-                .wrap_connector(provider_tcp_connector())
-        };
         Ok(Self {
             http: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-                .build(connector),
+                .build(provider_connector(allow_plain_http, tls)),
         })
     }
 
@@ -1258,6 +1246,82 @@ impl HyperHttpClient {
             )));
         }
         Ok(body)
+    }
+}
+
+/// The connector the provider's client dials through, and the ONE place it
+/// is assembled (FX-28): the scheme policy (`https_only`, or `https_or_http`
+/// for the loopback escape hatch), TLS over [`provider_tcp_connector`] with
+/// its keepalive, and a deadline on the dial itself ([`BoundedConnect`]).
+fn provider_connector(allow_plain_http: bool, tls: rustls::ClientConfig) -> BoundedConnect {
+    let builder = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls);
+    let schemes = if allow_plain_http {
+        builder.https_or_http()
+    } else {
+        builder.https_only()
+    };
+    BoundedConnect {
+        inner: schemes
+            .enable_http1()
+            .wrap_connector(provider_tcp_connector()),
+        deadline: CONNECT_DEADLINE,
+    }
+}
+
+/// The bound on one dial — TCP connect and TLS handshake — on its own.
+///
+/// A request's dial is already inside [`PROVIDER_DEADLINE`]. This bound is
+/// for the dial that outlives its request: when a pooled connection frees up
+/// while a request is still dialling, hyper-util hands the request the pooled
+/// connection and finishes the dial in a task of its own, outside the
+/// request's timer. A provider (or middlebox) that accepts TCP and never
+/// answers the TLS handshake would hold that task and its socket for as long
+/// as the peer stays up, keepalive notwithstanding (a live peer answers the
+/// probes). Two seconds longer than the request's deadline, so inside a
+/// request the request's own timer always fires first and the stall is named
+/// [`HttpError::Deadline`].
+const CONNECT_DEADLINE: Duration = Duration::from_secs(PROVIDER_DEADLINE.as_secs() + 2);
+
+/// A boxed error, the shape hyper-util's connector contract takes.
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The TLS-over-TCP connector with a deadline on each dial.
+#[derive(Clone)]
+struct BoundedConnect {
+    inner: hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+    deadline: Duration,
+}
+
+/// The stream a dial yields: TLS, or plain TCP for the loopback escape hatch.
+type ProviderStream =
+    hyper_rustls::MaybeHttpsStream<hyper_util::rt::TokioIo<tokio::net::TcpStream>>;
+
+impl tower::Service<http::Uri> for BoundedConnect {
+    type Response = ProviderStream;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn Future<Output = Result<ProviderStream, BoxError>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), BoxError>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, uri: http::Uri) -> Self::Future {
+        let dialling = self.inner.call(uri);
+        let deadline = self.deadline;
+        Box::pin(async move {
+            tokio::time::timeout(deadline, dialling)
+                .await
+                .map_err(|_| -> BoxError {
+                    format!(
+                        "connecting to the provider did not complete within {} seconds",
+                        deadline.as_secs()
+                    )
+                    .into()
+                })?
+        })
     }
 }
 
@@ -1481,6 +1545,112 @@ mod tests {
             !socket2::SockRef::from(default.inner()).keepalive().unwrap(),
             "the default connector dials without keepalive, so the row above is the setting"
         );
+    }
+
+    /// A TLS configuration with no anchor: enough for a plain-HTTP dial and
+    /// for a handshake that never gets an answer.
+    fn bare_tls() -> rustls::ClientConfig {
+        let _ = weirkeeper::install_default_crypto_provider();
+        rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth()
+    }
+
+    /// **FX-28 review M2: the CLIENT's connector — the one `HyperHttpClient`
+    /// is built over — dials with keepalive and keeps its scheme policy.**
+    /// `provider_connector` is the one place the client's connector is
+    /// assembled, so a revert to `HttpsConnectorBuilder::build()` (hyper-util's
+    /// default connector, keepalive off) fails here, not only in the helper's
+    /// own row above. The loopback arm (`https_or_http`) dials plain TCP and
+    /// the socket is read back; the production arm (`https_only`) refuses the
+    /// same `http://` URL before it dials. The dial carries its own deadline,
+    /// longer than the request's.
+    #[tokio::test]
+    async fn the_client_connector_dials_with_keepalive_and_its_scheme_policy() {
+        use tower::ServiceExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let uri: http::Uri = format!("http://{}/", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+
+        let loopback = provider_connector(true, bare_tls());
+        assert_eq!(loopback.deadline, CONNECT_DEADLINE);
+        assert!(CONNECT_DEADLINE > PROVIDER_DEADLINE);
+        let dialled = loopback
+            .oneshot(uri.clone())
+            .await
+            .expect("the loopback arm dials plain HTTP");
+        let hyper_rustls::MaybeHttpsStream::Http(io) = &dialled else {
+            panic!("a plain-HTTP URL yields a plain stream");
+        };
+        let socket = socket2::SockRef::from(io.inner());
+        assert!(socket.keepalive().unwrap(), "SO_KEEPALIVE is on");
+        assert_eq!(socket.tcp_keepalive_time().unwrap(), PROVIDER_KEEPALIVE);
+        assert_eq!(
+            socket.tcp_keepalive_interval().unwrap(),
+            PROVIDER_KEEPALIVE_INTERVAL
+        );
+        assert_eq!(
+            socket.tcp_keepalive_retries().unwrap(),
+            PROVIDER_KEEPALIVE_RETRIES
+        );
+
+        let refused = provider_connector(false, bare_tls())
+            .oneshot(uri)
+            .await
+            .err()
+            .expect("the production arm refuses a plain-HTTP URL");
+        assert_eq!(refused.to_string(), "unsupported scheme http");
+    }
+
+    /// **FX-28 review L1: a dial that stalls is ended by the connector's own
+    /// deadline**, so a dial that outlives its request (the pool handed the
+    /// request another connection) cannot hold its task and socket while a
+    /// peer accepts TCP and never answers the TLS handshake. The listener is
+    /// bound and never accepted: the kernel completes the TCP handshake and
+    /// the ClientHello goes unanswered. NEGATIVE CONTROL: the same dial
+    /// without the wrapper is still pending after a second.
+    #[tokio::test]
+    async fn a_dial_that_stalls_is_ended_by_the_connector_deadline() {
+        use tower::ServiceExt as _;
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let uri: http::Uri = format!("https://{}/", silent.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let production = provider_connector(false, bare_tls());
+
+        let unbounded = tokio::time::timeout(
+            Duration::from_secs(1),
+            production.inner.clone().oneshot(uri.clone()),
+        )
+        .await;
+        assert!(
+            unbounded.is_err(),
+            "the control: a bare dial into a silent handshake is still pending"
+        );
+
+        let bounded = BoundedConnect {
+            inner: production.inner,
+            deadline: Duration::from_millis(300),
+        };
+        let started = std::time::Instant::now();
+        let refused = tokio::time::timeout(Duration::from_secs(5), bounded.oneshot(uri))
+            .await
+            .expect("the wrapper ends the dial")
+            .err()
+            .expect("a silent handshake is not a connection");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(3),
+            "ended after {elapsed:?}"
+        );
+        assert!(
+            refused.to_string().contains("did not complete within"),
+            "{refused}"
+        );
+        drop(silent);
     }
 
     /// **A stalled request and a failed one stay apart** all the way to the
