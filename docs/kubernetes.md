@@ -1578,7 +1578,16 @@ no configuration is reconstructed by hand.**
    (`PointView.topics[]`, for points whose receipt is format 1.3.0 or later); the wizard
    defaults the plan's replication factor from them, capped at the target's
    broker count, and says so. The operator still types the list: a listed topic
-   set is not yet offered as a choice.
+   set is not yet offered as a choice. Since PROD-03.0 each listed topic also
+   carries its schema dependency (`PointView.topics[].schemaDependency`, receipt
+   format 1.5.0): the recovery-point step and the review name every
+   schema-dependent topic with the schema ids its keys or values reference,
+   under **"Registry not captured: applications may not read these records
+   after restore."** — Logweir never captures a schema registry, so an
+   application reading the restored records needs the registry that issued
+   those ids, reachable from where it runs. Nothing is blocked; a topic without
+   the field, or one the backup could not judge, is said to be not assessed,
+   never "no registry needed" ([the contract](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
 5. **The plan is bound to the point.** It carries `source.backup: <backupId>`
    and `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`;
    the restore point in time defaults to `coveredTo − 1 ms` (the catalog's end
@@ -9185,6 +9194,31 @@ A `Backup` does not look for declarative owners yet (no `KafkaTopic` listing,
 no declared owners: PROD-05.1a), so its receipt records `owner_detection: []`,
 both readers say each topic's owner was not checked, and the product API
 publishes `applyRoute: unknown` for it, never the admin-API route.
+
+Every `Backup` run by a runner from PROD-03.0 on also records, per topic,
+whether the archived keys or values carry Confluent wire-format framing — the
+receipt's [`schema_dependency`](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150),
+copied into the catalog point and published by the product API. The runner
+judges a bounded sample of the segments it just wrote, through the archive
+credential it already holds: **no schema registry is contacted, and none needs
+to be reachable from the runner**. The sample is at most two segments per
+partition for at most eight partitions per topic, streamed, with six bytes kept
+per key and value. A segment stored over 16 MiB, a zstd frame declaring a
+window over 8 MiB or a body decompressing past 256 MiB leaves its topic
+`notAssessed (segmentTooLargeForDetection)`; detection stops after **120 s per
+backup** (a hard stop: no read or scan continues past it) and leaves the rest
+`notAssessed (detectionTimeBudgetExceeded)`; any other failure is
+`segmentUnreadable`. None of these fails the backup. **Memory:** detection
+adds at most about **17 MB** to the runner, measured — the worst case is a
+16 MiB incompressible segment held while scanned (+16.6 MB); a 1 GiB zstd
+bomb, a zstd frame declaring a 128 MiB window and a 250 MiB lz4 body each add
+2.4 MB. **Time:** give a `Backup` whose `spec.deadlineSeconds` is tight up to
+120 s more for detection after the engine, or detection may be cut short by
+the Job's deadline before the receipt is signed. A topic with no record reads
+`notAssessed (noRecords)`. Detection reads only Confluent's payload prefix:
+schema ids in record headers, Apicurio's 8-byte ids and other registries'
+framing read `notDetected`
+([the stated limits](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
 
 ### 21.7 Skipping a check is not answering it
 

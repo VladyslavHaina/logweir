@@ -844,8 +844,15 @@ Logweir does not back up, restore or check a schema registry: Confluent Schema
 Registry, Apicurio, RBAC-MDS and CSFLE are a product boundary
 ([Never #2](stability.md#never--four-entries)). Records are restored as bytes,
 and no field shows that the schemas needed to read them exist where they are
-restored. [PROD-03.0](to-do/product-expansion.md#prod-030--flag-schema-dependent-topics)
-plans to flag topics that depend on a registry.
+restored. What the evidence does show, since
+[PROD-03.0](to-do/product-expansion.md#prod-030--flag-schema-dependent-topics),
+is which topics NEED one: the signed backup receipt's `schema_dependency`
+(format 1.5.0) records, per topic and from the archived bytes alone, whether
+its keys or values carry Confluent wire-format framing and which schema ids
+they name ("schema-dependent, registry not captured"), and the catalog point,
+the product API and the console's restore review repeat it. An absent block is
+"not assessed", never "no registry needed"
+([the receipt field](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
 
 ### Consumer positions and application recovery
 

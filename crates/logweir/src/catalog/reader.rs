@@ -264,6 +264,7 @@ pub fn cross_check(
     disagreements.extend(unbacked_coverage(point, receipt));
     disagreements.extend(unbacked_configuration(point, receipt));
     disagreements.extend(unbacked_owner_detection(point, receipt));
+    disagreements.extend(unbacked_schema_dependency(point, receipt));
     if disagreements.is_empty() {
         CrossCheck::Agrees
     } else {
@@ -364,6 +365,66 @@ fn unbacked_owner_detection(point: &CatalogPoint, receipt: &BackupReceipt) -> Op
                 .map_or_else(|| "none in the receipt".to_string(), |d| format!("{d:?}"))
         )
     })
+}
+
+/// **PROD-03.0, rule 3 for `topics[].schema_dependency`.** The same one-way
+/// rule as [`unbacked_coverage`]: a record may carry LESS than its receipt (an
+/// older writer copies nothing: absent is NOT ASSESSED, rule 2), never more
+/// and never something else. A record that says `notDetected` beside a
+/// receipt that says `schemaDependent` — or that names schema ids the receipt
+/// does not — would hide from a restore that its records need a registry.
+fn unbacked_schema_dependency(point: &CatalogPoint, receipt: &BackupReceipt) -> Vec<String> {
+    point
+        .topics
+        .iter()
+        .filter_map(|t| {
+            let claimed = t.schema_dependency.as_ref()?;
+            let backed = receipt
+                .schema_dependency
+                .as_ref()
+                .and_then(|block| block.get(&t.name));
+            (backed != Some(claimed)).then(|| {
+                format!(
+                    "topics[{:?}].schema_dependency: {} vs {}",
+                    t.name,
+                    dependency_summary(claimed),
+                    backed.map_or_else(|| "none in the receipt".to_string(), dependency_summary)
+                )
+            })
+        })
+        .collect()
+}
+
+/// A schema dependency entry in one short phrase, for a disagreement line:
+/// the verdict and the ids its dependent sides name.
+fn dependency_summary(e: &logweir_core::backup_receipt::TopicSchemaDependency) -> String {
+    let (ids, _) = logweir_core::schema_dependency::dependent_ids(e);
+    format!("{:?} ids {ids:?}", e.verdict)
+}
+
+/// **PROD-03.0, rule 4.** Two records of one point must agree on a topic's
+/// schema dependency wherever BOTH carry one; one carrying none (an older
+/// writer) is not a conflict.
+fn schema_dependency_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
+    a.topics
+        .iter()
+        .filter_map(|ta| {
+            let da = ta.schema_dependency.as_ref()?;
+            let db = b
+                .topics
+                .iter()
+                .find(|tb| tb.name == ta.name)
+                .and_then(|tb| tb.schema_dependency.as_ref())?;
+            (da != db).then(|| {
+                format!(
+                    "topics[{:?}].schema_dependency: {} vs {}",
+                    ta.name,
+                    dependency_summary(da),
+                    dependency_summary(db)
+                )
+            })
+        })
+        .collect()
 }
 
 /// A model entry in one short phrase, for a disagreement line: counts, the
@@ -470,6 +531,7 @@ pub fn reconcile(a: &CatalogPoint, b: &CatalogPoint) -> Duplicate {
     let mut disagreements = ReceiptFacts::of_record(a).disagreements(&ReceiptFacts::of_record(b));
     disagreements.extend(coverage_conflicts(a, b));
     disagreements.extend(configuration_conflicts(a, b));
+    disagreements.extend(schema_dependency_conflicts(a, b));
     if !disagreements.is_empty() {
         return Duplicate::Conflict(disagreements);
     }

@@ -63,6 +63,14 @@ logweir-engine-oso = { path = "../logweir-engine-oso" }
 p256 = { version = "0.13", features = ["pkcs8", "pem"] }
 serde_json.workspace = true
 tempfile = "3"
+# PROD-03.0: `tests/schema_dependency_*.rs` write zstd-compressed KBAK segments
+# (a decompression bomb among them) and `schema_dependency_memory.rs` reads a
+# child process's peak RSS through `getrusage`, a safe API (a counting global
+# allocator needs `unsafe`, which the workspace lint forbids). Both crates are
+# already in the graph — `zstd` through `logweir-engine-oso`, `nix` through
+# `object_store` — so no package is added; only the `resource` feature.
+zstd = "0.13"
+nix = { version = "0.31", default-features = false, features = ["resource"] }
 
 # `unsafe_code = "forbid"` for every target of this package, tests and build
 # scripts included (the root Cargo.toml's `[workspace.lints.rust]`).

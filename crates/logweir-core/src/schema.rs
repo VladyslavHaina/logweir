@@ -49,8 +49,9 @@ pub fn scorecard_schema() -> String {
 /// stop describing the type.
 ///
 /// **The current file is the newest MINOR** (FX-7 fix round, review M-2):
-/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_AUTH_MODES>.json`
-/// (`1.4.0`, PROD-01.3's three new `source.auth.mode` values; PROD-05.1's
+/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY>.json`
+/// (`1.5.0`, PROD-03.0's `schema_dependency`; PROD-01.3's 1.4.0 file, with its
+/// three new `source.auth.mode` values, PROD-05.1's
 /// 1.3.0 `topic_configuration` file and FX-7's 1.2.0
 /// `archive.manifest_version_id` file are frozen beside it), its `$id` built
 /// from that ONE constant, so a renumber is the constant and a file name
@@ -72,7 +73,7 @@ pub fn backup_receipt_schema() -> String {
         .into_root_schema_for::<BackupReceipt>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-        crate::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES
+        crate::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');
