@@ -50,6 +50,19 @@ use crate::problem::{
 /// The largest JSON mutation body, 1 MiB.
 pub const MAX_JSON_BODY: usize = 1024 * 1024;
 
+/// How long [`read_json`] waits for a whole body, from its first read to the
+/// last byte (FX-24b).
+///
+/// THE TRANSPORT'S STALL DEADLINE IS NOT ENOUGH ON ITS OWN. `main.rs` fails a
+/// body read that receives nothing for thirty seconds, but a client that sends
+/// one byte every twenty-nine seconds never stalls, and a 1 MiB body at that
+/// pace would hold its connection permit for most of a year. This is the total, and it
+/// is twice the stall so each bound keeps its own job: a body that stops is
+/// ended by the stall at thirty seconds, one that trickles by this at sixty.
+/// Sixty seconds for at most 1 MiB asks for 17 KiB/s, which any client
+/// that means to send the body clears; the console's own bodies are a few KiB.
+pub const JSON_BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The Content-Security-Policy on every response, verbatim from the contract
 /// decision.
 pub const CONTENT_SECURITY_POLICY: &str =
@@ -660,20 +673,47 @@ pub fn is_json_content_type(headers: &http::HeaderMap) -> bool {
     })
 }
 
-/// Read a JSON body of at most `limit` bytes into a strict DTO.
+/// Read a JSON body of at most `limit` bytes, within [`JSON_BODY_DEADLINE`],
+/// into a strict DTO.
+///
+/// A body that is not whole by the deadline, or that stops arriving for the
+/// transport's stall deadline, is `malformed_request`: what arrived is not a
+/// request. Dropping the unfinished body is also what makes hyper close the
+/// connection after the answer rather than wait for the rest.
 ///
 /// # Errors
 ///
-/// `payload_too_large`, `malformed_request` (not JSON) or `validation_failed`
-/// (well-formed JSON that does not match the DTO, unknown fields included).
+/// `payload_too_large`, `malformed_request` (not JSON, or not received in
+/// time) or `validation_failed` (well-formed JSON that does not match the
+/// DTO, unknown fields included).
 pub async fn read_json<T: DeserializeOwned>(body: Body, limit: usize) -> Result<T, ApiError> {
-    let bytes = match http_body_util::Limited::new(body, limit).collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(error) => {
+    let collected = tokio::time::timeout(
+        JSON_BODY_DEADLINE,
+        http_body_util::Limited::new(body, limit).collect(),
+    )
+    .await;
+    let bytes = match collected {
+        Ok(Ok(collected)) => collected.to_bytes(),
+        Err(_) => {
+            return Err(ApiError::new(
+                ProblemCode::MalformedRequest,
+                format!(
+                    "The request body was not received within {} seconds.",
+                    JSON_BODY_DEADLINE.as_secs()
+                ),
+            ));
+        }
+        Ok(Err(error)) => {
             if error.is::<http_body_util::LengthLimitError>() {
                 return Err(ApiError::new(
                     ProblemCode::PayloadTooLarge,
                     format!("The request body exceeds {limit} bytes."),
+                ));
+            }
+            if crate::transport::is_timeout(error.as_ref()) {
+                return Err(ApiError::new(
+                    ProblemCode::MalformedRequest,
+                    "The request body stopped arriving before it was complete.",
                 ));
             }
             return Err(ApiError::new(
