@@ -3036,10 +3036,10 @@ fn one_address_outside_the_trusted_set_cannot_hold_the_ceiling() {
             let i = clients.len();
             let mut stream = connect_with_receive_buffer(&runtime, address, 4096)
                 .unwrap_or_else(|e| panic!("client {i}: {e}"));
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            // A client the server has already closed may refuse the write.
+            // A client the server has already closed may refuse the socket
+            // option (macOS answers `EINVAL` on a reset socket, the FX-24b
+            // review's L1) and the write; either is the refusal under test.
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
             let _ = stream.write_all(requests.as_bytes());
             clients.push(stream);
         }
@@ -3050,9 +3050,14 @@ fn one_address_outside_the_trusted_set_cannot_hold_the_ceiling() {
     let mut open = 0;
     let mut refused = 0;
     for (i, stream) in clients.iter_mut().enumerate() {
-        stream
+        if stream
             .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+            .is_err()
+        {
+            // Already reset by the server: see the open loop above.
+            refused += 1;
+            continue;
+        }
         let mut byte = [0u8; 1];
         match stream.read(&mut byte) {
             Ok(1) => open += 1,
