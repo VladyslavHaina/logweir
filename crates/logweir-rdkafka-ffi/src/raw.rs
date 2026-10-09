@@ -409,39 +409,8 @@ mod tests {
 mod soak {
     use super::*;
     use crate::code;
+    use crate::test_support::rss_kib;
     use rdkafka::producer::Producer;
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-
-    /// This process's resident set in KiB, from `ps`, bounded at 10 s.
-    fn rss_kib() -> u64 {
-        let mut child = Command::new("ps")
-            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("ps runs");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            match child.try_wait().expect("ps can be waited on") {
-                Some(_) => break,
-                None if Instant::now() > deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("ps did not answer within 10 s");
-                }
-                None => std::thread::sleep(Duration::from_millis(5)),
-            }
-        }
-        let mut out = String::new();
-        child
-            .stdout
-            .take()
-            .expect("piped")
-            .read_to_string(&mut out)
-            .expect("ps output");
-        out.trim().parse().expect("a number of KiB")
-    }
 
     /// One call librdkafka refuses at once: `groups` names the ids to send
     /// (none, or one id twice).
