@@ -113,7 +113,7 @@ pub fn run(
             failed.push((
                 target.clone(),
                 "never deleted: a mapped target equal to its source is a topic under its original \
-                 name (PROD-15.1)"
+                 name"
                     .to_string(),
             ));
         }

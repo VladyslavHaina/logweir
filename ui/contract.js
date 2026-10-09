@@ -691,9 +691,11 @@ const BACKUP = shapeOf(
   },
 );
 
+// PROD-15.1: `originalName` -- whether the restore writes under the ORIGINAL
+// topic names -- required, as the schema requires it.
 const RESTORE_TARGET = shapeOf(
   "RestoreTargetView",
-  { clusterRef: objectOf(NAME_REF), mode: str, topicPrefix: str },
+  { clusterRef: objectOf(NAME_REF), mode: str, topicPrefix: str, originalName: bool },
 );
 
 // FX-8 (review M-2): the signed scorecard's `source.time_basis` as the
@@ -734,6 +736,9 @@ const RESTORE = shapeOf(
     target: objectOf(RESTORE_TARGET), deadlineSeconds: int,
     newTopics: listOf(str), operation: objectOf(OPERATION_SUMMARY),
     coverage: objectOf(RESTORE_COVERAGE),
+    // PROD-15.1: the approval subject this restore needs -- `originalName` or
+    // `ordinary`.
+    approvalSubject: str,
   },
   {
     createdAt: str, planBytes: opaque,
@@ -763,6 +768,9 @@ const APPROVAL = shapeOf(
     subjectRef: objectOf(SUBJECT_REF), planHash: str,
     approvalBytesLength: int, sidecarBytesLength: int,
     conditions: listOf(objectOf(CONDITION)),
+    // PROD-15.1: the approval subject the SIGNED document carries --
+    // `originalName`, `ordinary`, or `unknown` (not readable).
+    approvalSubject: str,
   },
   {
     createdAt: str, verified: bool, matchedKeyId: str, approver: str,
@@ -1037,7 +1045,7 @@ const CREATE_SCHEDULE_REQUEST = shapeOf(
   },
 );
 
-const TOPIC_NAMING_REQUEST = shapeOf("TopicNamingRequest", { prefix: str });
+const TOPIC_NAMING_REQUEST = shapeOf("TopicNamingRequest", { prefix: str }, { originalName: bool });
 
 const RESTORE_TARGET_REQUEST = shapeOf(
   "RestoreTargetRequest",

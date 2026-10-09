@@ -190,7 +190,31 @@ export function renderPlanBytes(fields) {
   }
   out.push("  mode: " + quote(requireMode(target.mode)));
   out.push("  topic_naming:");
-  out.push("    prefix: " + quote(needed(target.topicPrefix, "target.topicPrefix")));
+  if (target.originalName === true) {
+    // PROD-15.1: A RESTORE UNDER THE ORIGINAL TOPIC NAMES -- the empty prefix
+    // (the identity mapping, which an older runner refuses) beside the block
+    // that opts in, in `newTopic` mode only, with the operator's owner
+    // statement: `owners: []` says no declarative owner manages any restored
+    // name. A plan without the statement is one the runner refuses
+    // (`OriginalNameOwnerNotChecked`), so it is never rendered.
+    if (target.mode !== "newTopic") {
+      throw new TypeError(
+        "OriginalNameNotNewTopic: a restore under the original topic names is a newTopic " +
+          "restore; scratch never restores under the original names",
+      );
+    }
+    if (target.originalNameNoOwner !== true) {
+      throw new TypeError(
+        "OriginalNameOwnerNotChecked: a restore under the original topic names states that no " +
+          "declarative owner manages the names (target.originalNameNoOwner)",
+      );
+    }
+    out.push("    prefix: \"\"");
+    out.push("    original_name:");
+    out.push("      owners: []");
+  } else {
+    out.push("    prefix: " + quote(needed(target.topicPrefix, "target.topicPrefix")));
+  }
   // UNREAD in `newTopic` mode and still required by the grammar: it is the
   // SCRATCH prefix and has no serde default, because an empty prefix maps
   // every source topic onto ITSELF. A document that omitted it would not

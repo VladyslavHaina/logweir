@@ -4862,7 +4862,7 @@ spec:
                     properties:
                       originalName:
                         description: |-
-                          **PROD-15.1: restore under the ORIGINAL topic names**, into topics that do not exist (OD-2): `true` declares what the plan's `target.topic_naming.original_name` block says, beside `prefix: ""` in `newTopic` mode ([`ORIGINAL_NAME_RULE`]). It is what a list, the API and the console read to show the restore — and its separate approval subject, `originalName` — distinctly, without parsing the plan; the controller refuses an object whose declaration and plan disagree (`ExecutionSpecInvalid`) and an approval whose signed subject is not the plan's (`ApprovalSubjectMismatch`), before any Job exists.
+                          **Restore under the ORIGINAL topic names**, into topics that do not exist: `true` declares what the plan's `target.topic_naming.original_name` block says, beside `prefix: ""` in `newTopic` mode ([`ORIGINAL_NAME_RULE`]). It is what a list, the API and the console read to show the restore — and its separate approval subject, `originalName` — distinctly, without parsing the plan; the controller refuses an object whose declaration and plan disagree (`ExecutionSpecInvalid`) and an approval whose signed subject is not the plan's (`ApprovalSubjectMismatch`), before any Job exists.
 
                           ABSENT MEANS FALSE and is not serialised, so every object written before this field is byte-identical. An older controller ignores the key; its runner refuses the plan (a topic mapped onto itself), so nothing runs under a reading that drops it.
                         nullable: true

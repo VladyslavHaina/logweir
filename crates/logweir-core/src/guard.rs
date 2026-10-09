@@ -520,7 +520,7 @@ pub fn check_topic_mapping(
                 return Err(GuardRefusal(format!(
                     "topic_mapping maps `{t}` onto itself; the target must differ from the source \
                      (a restore under the original topic names states \
-                     target.topic_naming.original_name in newTopic mode, PROD-15.1)"
+                     target.topic_naming.original_name in newTopic mode)"
                 )))
             }
             Some(dst) if dst != t && original_name => {

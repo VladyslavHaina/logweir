@@ -2403,6 +2403,73 @@ export function setTopicPrefix(state, value) {
   target.topicMappingPrefix = next;
 }
 
+/** PROD-15.1: whether this plan restores under the ORIGINAL topic names --
+ *  `newTopic` mode with the choice ticked. Scratch never does: the identity
+ *  ban stays in scratch mode. */
+export function originalNameChosen(state) {
+  const target = ((state || {}).fields || {}).target || {};
+  return target.mode === "newTopic" && target.originalName === true;
+}
+
+/** PROD-15.1: THE ONE PLACE THE ORIGINAL-NAME CHOICE IS WRITTEN.
+ *
+ *  On: `topicNaming.prefix` becomes the empty string -- the identity mapping
+ *  the plan's `topic_naming: {prefix: "", original_name: {...}}` is -- and the
+ *  scratch prefix (`topicMappingPrefix`, where the runner's LogAppendTime probe
+ *  is created and the only names its deleter may touch) keeps a real value.
+ *  `noOwner` is the operator's statement that no declarative owner manages any
+ *  restored name: the plan carries it as `owners: []`, signed with the plan.
+ *  Off: the default prefix comes back, both keys equal again. */
+export function setOriginalName(state, on, noOwner) {
+  const s = state || {};
+  const target = (s.fields || {}).target;
+  if (target === undefined || target === null) {
+    return;
+  }
+  if (on === true && target.mode === "newTopic") {
+    const scratch = typeof target.topicMappingPrefix === "string" &&
+        target.topicMappingPrefix.length > 0
+      ? target.topicMappingPrefix
+      : defaultPrefixFor(s);
+    target.originalName = true;
+    target.originalNameNoOwner = noOwner === true;
+    target.topicPrefix = "";
+    target.topicMappingPrefix = scratch;
+    return;
+  }
+  const was = target.originalName === true;
+  target.originalName = false;
+  target.originalNameNoOwner = false;
+  if (was || target.topicPrefix === "") {
+    setTopicPrefix(s, defaultPrefixFor(s));
+  }
+}
+
+/** PROD-15.1: what the original-name choice means, beside the box. */
+export const ORIGINAL_NAME_SENTENCE =
+  "Restore under the ORIGINAL topic names: each topic is recreated under its own name -- a " +
+  "new generation of the name, not the original topic -- instead of beside it under a prefix. " +
+  "Only into topics that do not exist: the runner refuses if a name exists, unless the target " +
+  "is another cluster than the archive's source it also refuses while any broker auto-creates " +
+  "topics, and it refuses when a declarative owner (a Strimzi KafkaTopic, GitOps, Terraform) " +
+  "manages a name. It needs its own approval subject, originalName: an ordinary approval " +
+  "cannot authorise it. Stop every producer of these names first.";
+
+/** PROD-15.1: the owner statement the plan signs as `owners: []`. */
+export const ORIGINAL_NAME_NO_OWNER_STATEMENT =
+  "No declarative owner -- a Strimzi KafkaTopic, a GitOps or Terraform definition -- manages " +
+  "any of these names. (The runner cannot look for one itself; an owner recreates a deleted " +
+  "name and reverts the restored topic's settings. To restore although an owner manages a " +
+  "name, its reconciliation paused, write the plan by hand with owner_path: true.)";
+
+/** PROD-15.1: the approval subject a plan on screen needs, in words. */
+export function approvalSubjectText(state) {
+  return originalNameChosen(state)
+    ? "originalName -- a restore under the ORIGINAL topic names; only an approval signed for " +
+      "this subject authorises it"
+    : "ordinary";
+}
+
 /** The prefix the RUN will map through, for the mode this plan is in -- the
  *  JavaScript half of `logweir_core::spec::target_topic_prefix` over the
  *  domain this page can produce.
@@ -2548,6 +2615,16 @@ export function mappingProblems(state) {
       return problems;
     }
     seen.set(target, source);
+  }
+  // PROD-15.1: the original names ARE the identity mapping, and the one
+  // statement it needs is the owner statement.
+  if (originalNameChosen(s)) {
+    if ((((s.fields || {}).target) || {}).originalNameNoOwner !== true) {
+      problems.originalName =
+        "state that no declarative owner manages these names: a restore under the original " +
+        "names is refused unless the plan says where an owner was looked for";
+    }
+    return problems;
   }
   if (typeof prefix !== "string" || prefix.length === 0) {
     problems.topicPrefix =
@@ -3605,7 +3682,9 @@ export function renderTargetStep(state) {
     (labelled ? "" : "<p class=\"note\">" + TARGET_ROLE_SENTENCE + "</p>") +
     markerWarning +
     "<div class=\"field\"><label for=\"topic-prefix\">topicNaming.prefix</label>" +
-    "<input id=\"topic-prefix\" name=\"topicPrefix\" value=\"" + esc(prefix) + "\"" +
+    "<input id=\"topic-prefix\" name=\"topicPrefix\" value=\"" +
+    esc(originalNameChosen(s) ? "" : prefix) + "\"" +
+    (originalNameChosen(s) ? " disabled" : "") +
     invalidAttributes("topic-prefix", errors.topicPrefix) + ">" +
     fieldErrorLine("topic-prefix", errors.topicPrefix) +
     (typeof mapping.topicPrefix === "string"
@@ -3614,10 +3693,40 @@ export function renderTargetStep(state) {
     "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
     "produces for this instant, so a topic name says both what it is and what point it was " +
     "recovered to. It is editable.</p></div>" +
+    renderOriginalNameChoice(s) +
     renderReplicationField(s) +
     renderTopicSubset(s) +
     renderRecoveryLimits(s) +
     "</section>"
+  );
+}
+
+/** PROD-15.1: the original-name choice -- `newTopic` mode only -- and, once
+ *  chosen, the owner statement the plan signs. */
+export function renderOriginalNameChoice(state) {
+  const s = state || {};
+  const target = ((s.fields || {}).target) || {};
+  if (target.mode !== "newTopic") {
+    return "";
+  }
+  const chosen = originalNameChosen(s);
+  const problem = mappingProblems(s).originalName;
+  return (
+    "<div class=\"field\" id=\"original-name-field\">" +
+    "<label class=\"inline\" for=\"original-name\">" +
+    "<input type=\"checkbox\" id=\"original-name\" name=\"originalName\"" +
+    (chosen ? " checked" : "") + "> Restore under the original topic names</label>" +
+    "<p class=\"note\" id=\"original-name-meaning\">" + esc(ORIGINAL_NAME_SENTENCE) + "</p>" +
+    (chosen
+      ? "<label class=\"inline\" for=\"original-name-no-owner\">" +
+        "<input type=\"checkbox\" id=\"original-name-no-owner\" name=\"originalNameNoOwner\"" +
+        (target.originalNameNoOwner === true ? " checked" : "") + "> " +
+        esc(ORIGINAL_NAME_NO_OWNER_STATEMENT) + "</label>" +
+        (typeof problem === "string"
+          ? "<p class=\"complaint\" id=\"original-name-complaint\">" + esc(problem) + "</p>"
+          : "")
+      : "") +
+    "</div>"
   );
 }
 
@@ -4016,7 +4125,14 @@ export function renderPlanStep(prepared, state) {
       ["time basis", "<span id=\"review-time-basis\">" + esc(timeBasisText(s)) + "</span>"],
       // PROD-08.1a: HOW MUCH THE RUN WILL VERIFY, beside the plan that says so.
       ["coverage", "<span id=\"review-coverage\">" + esc(coverageText(s)) + "</span>"],
+      // PROD-15.1: THE APPROVAL SUBJECT, distinct where the approver reads it.
+      ["approval subject", "<span id=\"review-approval-subject\">" +
+        esc(approvalSubjectText(s)) + "</span>"],
     ]) +
+    (originalNameChosen(s)
+      ? "<p class=\"caveat\" id=\"review-original-name\">" + esc(ORIGINAL_NAME_SENTENCE) +
+        "</p>"
+      : "") +
     // AND WHAT IT COSTS, where it is reviewed, when it is chosen.
     ((((s.fields || {}).sample) || {}).coverage === COVERAGE_COMPLETE
       ? "<p class=\"caveat\" id=\"review-coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) +
@@ -4690,6 +4806,9 @@ export function wizardDraftValues(state) {
     pointInTime: f.pointInTime,
     mode: target.mode,
     topicPrefix: target.topicPrefix,
+    // PROD-15.1: the choice and the owner statement, as booleans.
+    originalName: target.originalName === true,
+    originalNameNoOwner: target.originalNameNoOwner === true,
     targetCluster: s.targetClusterName,
     targetClusterUid: s.targetClusterUid,
     endpoint: source.endpoint,
@@ -4799,8 +4918,13 @@ export function applyWizardDraft(state, draft) {
       selectTarget(state, byName.uid, byName.name);
     }
   }
-  if (typeof d.topicPrefix === "string") {
+  if (typeof d.topicPrefix === "string" && d.topicPrefix.length > 0) {
     setTopicPrefix(state, d.topicPrefix);
+  }
+  // PROD-15.1: the original-name choice comes back only as a ticked box in
+  // `newTopic` mode; anything else leaves the prefix the draft kept.
+  if (d.originalName === true) {
+    setOriginalName(state, true, d.originalNameNoOwner === true);
   }
   // FX-5: a factor the operator SET comes back as set. An empty one -- or an
   // older draft with none -- leaves the default to be worked out again from
@@ -4900,7 +5024,14 @@ export function draftFrom(object, fields) {
   if (typeof target.mode === "string") {
     nextTarget.mode = target.mode;
   }
-  if (typeof (target.topicNaming || {}).prefix === "string") {
+  if ((target.topicNaming || {}).originalName === true) {
+    // PROD-15.1: an original-name Restore prefills the choice; its scratch
+    // prefix stays the one the fields carry (the runner's probe namespace),
+    // and the owner statement is the operator's to make again.
+    nextTarget.originalName = true;
+    nextTarget.originalNameNoOwner = false;
+    nextTarget.topicPrefix = "";
+  } else if (typeof (target.topicNaming || {}).prefix === "string") {
     // BOTH KEYS, for `setTopicPrefix`'s reason. This one builds a fields
     // object rather than mutating a state, so it writes them here; the row
     // `the_prefix_is_one_value_in_both_modes` walks this call site too.
@@ -4994,7 +5125,11 @@ export function restoreBody(state, prepared) {
     target: {
       clusterRef: { name: s.targetClusterName },
       mode: target.mode,
-      topicNaming: { prefix: target.topicPrefix },
+      // PROD-15.1: the original-name declaration rides beside the empty
+      // prefix, and only for that plan: every other object is what it was.
+      topicNaming: originalNameChosen(s)
+        ? { prefix: "", originalName: true }
+        : { prefix: target.topicPrefix },
     },
     deadlineSeconds: typeof s.deadlineSeconds === "number" ? s.deadlineSeconds : 3600,
   };
@@ -7264,6 +7399,8 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   const timeBasis = node.querySelector("#time-basis");
   const coverage = node.querySelector("#coverage-complete");
   const coverageBound = node.querySelector("#coverage-bound");
+  const originalName = node.querySelector("#original-name");
+  const originalNameNoOwner = node.querySelector("#original-name-no-owner");
   const refresh = async () => {
     if (!active(lifecycle)) {
       return;
@@ -7295,7 +7432,14 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (mode !== null) {
       state.fields.target.mode = valueOf(mode);
     }
-    if (prefix !== null) {
+    // PROD-15.1: the box decides, the owner statement beside it; leaving
+    // `newTopic` mode clears the choice (scratch never restores under the
+    // original names).
+    if (originalName !== null || state.fields.target.originalName === true) {
+      setOriginalName(state, originalName !== null && originalName.checked === true,
+        originalNameNoOwner !== null && originalNameNoOwner.checked === true);
+    }
+    if (prefix !== null && !originalNameChosen(state)) {
       // An emptied prefix is the default prefix again: the field SHOWS the
       // default when the value is empty, and the plan must be what it shows.
       setTopicPrefix(state, valueOf(prefix) || defaultPrefixFor(state));

@@ -174,8 +174,8 @@ pub struct TopicNaming {
     /// result is what `status.newTopics` records, and — for `mode: scratch` —
     /// what phase 9 tears down.
     pub prefix: String,
-    /// **PROD-15.1: restore under the ORIGINAL topic names**, into topics that
-    /// do not exist (OD-2): `true` declares what the plan's
+    /// **Restore under the ORIGINAL topic names**, into topics that do not
+    /// exist: `true` declares what the plan's
     /// `target.topic_naming.original_name` block says, beside `prefix: ""` in
     /// `newTopic` mode ([`ORIGINAL_NAME_RULE`]). It is what a list, the API and
     /// the console read to show the restore — and its separate approval

@@ -1697,6 +1697,73 @@ fn the_complete_coverage_the_console_writes_is_the_one_the_runner_reads() {
     );
 }
 
+// ---- 18a3. the original-name plan the console writes is the one the runner reads (PROD-15.1)
+
+#[test]
+fn the_original_name_plan_the_console_writes_is_the_one_the_runner_reads() {
+    // ARM 1 of the original-name golden (arm 2 is
+    // `ui/tests/original-name.spec.js`, which byte-compares the emitter's
+    // output with the same file, and `scripts/check-ui-behaviour.sh` re-runs
+    // the emitter and `diff -u`s it).
+    //
+    // `RestoreSpec` HAS NO `deny_unknown_fields` at its top, so a golden that
+    // spelt the block `originalName:` would parse -- into an empty prefix with
+    // no opt-in, which the runner refuses only after an approver signed it. So
+    // this arm asserts the block ARRIVES, that the runner reads the plan as an
+    // original-name restore needing that approval subject, and that its shape
+    // passes condition 1; and that the plain goldens carry no block.
+    let golden_path = ui_root()
+        .join("tests")
+        .join("fixtures")
+        .join("plan-original-name.golden.yaml");
+    let golden = read(&golden_path);
+    let spec: logweir_core::spec::RestoreSpec = serde_yaml::from_str(&golden).unwrap_or_else(|e| {
+        panic!(
+            "{} does not deserialise into logweir_core::spec::RestoreSpec: {e}. Regenerate with \
+             `node ui/tests/emit-plan.js plan-original-name-fields.json > \
+             ui/tests/fixtures/plan-original-name.golden.yaml` AFTER fixing the emitter.",
+            shown(&golden_path)
+        )
+    });
+    let block = spec
+        .target
+        .original_name()
+        .unwrap_or_else(|| panic!("{} carries no original_name block", shown(&golden_path)));
+    assert_eq!(block.owners.as_deref(), Some(&[][..]), "the owner statement: owners: []");
+    assert!(!block.owner_path);
+    assert!(logweir_core::original_name::is_original_name_restore(&spec));
+    assert_eq!(logweir_core::original_name::refuse_shape(&spec), None);
+    assert_eq!(
+        logweir_core::original_name::ApprovalSubject::of_plan(&spec),
+        logweir_core::original_name::ApprovalSubject::OriginalName
+    );
+    assert_eq!(logweir_core::spec::target_topic_prefix(&spec), "");
+    assert!(
+        spec.target.topic_mapping_prefix.chars().count() >= 3,
+        "the scratch prefix the probe is created under stays a real prefix"
+    );
+    for plain in [
+        "plan.golden.yaml",
+        "plan-point.golden.yaml",
+        "plan-time-basis.golden.yaml",
+        "plan-complete.golden.yaml",
+    ] {
+        let spec: logweir_core::spec::RestoreSpec =
+            serde_yaml::from_str(&read(&ui_root().join("tests").join("fixtures").join(plain)))
+                .expect("the golden parses");
+        assert!(
+            spec.target.original_name().is_none(),
+            "{plain} must not restore under the original names"
+        );
+    }
+    let gate = read(&repo_root().join("scripts").join("check-ui-behaviour.sh"));
+    assert!(
+        gate.contains("plan-original-name.golden.yaml")
+            && gate.contains("plan-original-name-fields.json"),
+        "scripts/check-ui-behaviour.sh must re-emit and diff the original-name golden as well"
+    );
+}
+
 // ---- 18b. the catalog-bound plan carries the recovery point binding (PLAT-15.2)
 
 #[test]

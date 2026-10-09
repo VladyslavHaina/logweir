@@ -243,7 +243,7 @@ pub fn refuse_shape(spec: &DrillSpec) -> Option<String> {
             "{ORIGINAL_NAME_NOT_NEW_TOPIC}: target.topic_naming.original_name is set and \
              target.mode is scratch. A scratch drill maps through target.topic_mapping_prefix and \
              tears down what it created, so it never restores under the original names; set \
-             target.mode: newTopic for an original-name restore (PROD-15.1), or remove the block"
+             target.mode: newTopic for an original-name restore, or remove the block"
         ));
     }
     let prefix = spec
