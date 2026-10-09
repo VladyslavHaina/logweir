@@ -336,6 +336,24 @@ impl Broker {
         }
     }
 
+    /// CreatePartitions to `total`, through the admin API, waited on.
+    fn add_partitions(&self, topic: &str, total: usize) {
+        use rdkafka::admin::{AdminClient, AdminOptions, NewPartitions};
+        use rdkafka::client::DefaultClientContext;
+        let admin: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
+            .set("bootstrap.servers", &self.plaintext)
+            .create()
+            .expect("an admin client");
+        let res = block_on(admin.create_partitions(
+            &[NewPartitions::new(topic, total)],
+            &AdminOptions::new().request_timeout(Some(Duration::from_secs(20))),
+        ))
+        .expect("the CreatePartitions call answers");
+        for r in res {
+            r.unwrap_or_else(|(t, e)| panic!("add partitions to {t}: {e}"));
+        }
+    }
+
     fn delete_group(&self, group: &str) {
         let _ = self.exec(
             &[
@@ -348,6 +366,34 @@ impl Broker {
             ],
             false,
         );
+    }
+}
+
+/// Drive one rdkafka admin future to completion on THIS thread, with a hard
+/// deadline (FX-4's helper: rdkafka resolves admin futures from its own
+/// thread, so no async runtime is needed).
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+    struct Unpark(std::thread::Thread);
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    let mut f = std::pin::pin!(f);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+            return v;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "an admin call did not answer within 60 s"
+        );
+        std::thread::park_timeout(Duration::from_millis(100));
     }
 }
 
@@ -1261,19 +1307,9 @@ fn a_partition_added_during_the_capture_is_listed_not_observed() {
     for line in std::io::BufReader::new(stdout).lines() {
         let line = line.expect("a stdout line");
         if !added && line.trim() == "progress-phase=-1:engine" {
-            broker.cli_ok(
-                &[
-                    "/opt/kafka/bin/kafka-topics.sh",
-                    "--bootstrap-server",
-                    broker.in_network,
-                    "--alter",
-                    "--topic",
-                    &topic,
-                    "--partitions",
-                    "3",
-                ],
-                "add a partition",
-            );
+            // In process, through the admin API: a CLI in the container takes
+            // seconds, and the engine can finish first.
+            broker.add_partitions(&topic, 3);
             added = true;
         }
         out.extend_from_slice(line.as_bytes());
@@ -1301,7 +1337,8 @@ fn a_partition_added_during_the_capture_is_listed_not_observed() {
     assert_eq!(
         facts.len(),
         3,
-        "the partition read after the engine is listed"
+        "the partition read after the engine is listed: {:#?}",
+        b.block().topics
     );
     assert!(facts[0].observed && facts[1].observed && !facts[2].observed);
     let positions = positions_of(b.group(&group));
