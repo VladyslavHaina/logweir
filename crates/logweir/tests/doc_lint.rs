@@ -2055,6 +2055,10 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "complete coverage through the CRDs, the API and the console",
             "spec.coverage: complete",
         ),
+        // PROD-01.4a (2026-10-09, item 44): every receipt records each
+        // topic's ID before and after the engine, and a recreated topic is a
+        // new generation.
+        ("each topic's ID before and after the engine", "generations"),
     ];
     assert_eq!(
         items.len(),

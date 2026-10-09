@@ -33,8 +33,8 @@ it), 40 (FX-24, a silent connection meets the console's header deadline),
 41 (FX-21, a replication factor the archive does not record is never
 read as matching; the engine's first patch), 42 (PROD-11.1, a restore
 can select a window start), 43 (PROD-08.1a, complete coverage requested
-and shown through the CRDs, the API and the console) and 45 (PROD-01.4a,
-each topic's ID in the receipt and the catalog point) so far; 44 is held for FX-24b. Items continue the next entry's
+and shown through the CRDs, the API and the console) and 44 (PROD-01.4a,
+each topic's ID in the receipt and the catalog point) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -93,7 +93,7 @@ the compose stack (`cluster3`) with three engines; it changes the runner's
 phase 7 and the engine (patch 0002, build `0.23.3+logweir.2`), so the PoC
 refresh that carries it runs a multi-topic backup and restore and reads the
 new runner's engine identity.
-Item 45 is PROD-01.4a, proven on a compose stack on the 3.7.1, 3.9.2 and 4.3.1
+Item 44 is PROD-01.4a, proven on a compose stack on the 3.7.1, 3.9.2 and 4.3.1
 broker lines against the brokers' own tools; it changes the runner's signed
 receipt and catalog record only, and the PoC upgrade that carries it runs one
 scheduled backup and checks its receipt's `generations` against the source's
@@ -1137,7 +1137,7 @@ complete-only authorization after a rollback (fail closed). An older minter
 refuses a `scope.json` with `maxPartitions: 0`
 ([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)).
 
-#### 45. A backup receipt records each topic's ID before and after the engine; a recreated topic is a new generation (PROD-01.4a)
+#### 44. A backup receipt records each topic's ID before and after the engine; a recreated topic is a new generation (PROD-01.4a)
 
 **Added.** A topic deleted and created again under the same name is a new
 topic: its offsets restart at zero and mean other records. Until now no
@@ -1250,7 +1250,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43 and 45, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43 and 44, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1276,7 +1276,7 @@ window start (an older runner refuses a plan with one); item 43 changes the
 notification and metrics, the standing authorization's scope (format
 1.1.0), the product API and the console, and needs nothing unless a
 rehearsal is to verify every record (a new schedule and a new
-authorization); item 45 changes the runner's receipts and catalog
+authorization); item 44 changes the runner's receipts and catalog
 records and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
