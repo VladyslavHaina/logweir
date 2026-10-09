@@ -867,3 +867,37 @@ services:
       timeout: 30s
       retries: 18
       start_period: 20s
+
+  # --- profile `registry`: Karapace's REST proxy, beside the registry --------
+  # PROD-03.0's live row produces Avro, JSON Schema and Protobuf records through
+  # it, so the archived bytes carry the Confluent wire format a real serializer
+  # writes (magic byte 0, the registry's schema id, Protobuf's message
+  # indexes) — Karapace's serializers, which register in `registry` above. The
+  # same pinned image, its REST entrypoint. Logweir never talks to either
+  # service: only the test producing the data does.
+  registry-rest:
+    image: ghcr.io/aiven-open/karapace:6.2.3@sha256:6d5b1ff1b77c497108be8be8359c9072294847cba5aa0767fc168ec70632d78f
+    hostname: registry-rest
+    profiles: [registry]
+    networks: [kafka-net]
+    depends_on:
+      registry: { condition: service_healthy }
+    entrypoint: ["python3", "-m", "karapace.kafka_rest_apis"]
+    ports:
+      - "${LOGWEIR_E2E_REGISTRY_REST_PORT:-9142}:8082"
+    environment:
+      KARAPACE_KARAPACE_REST: "true"
+      KARAPACE_ADVERTISED_HOSTNAME: registry-rest
+      KARAPACE_BOOTSTRAP_URI: kafka-broker-1:9094
+      KARAPACE_HOST: 0.0.0.0
+      KARAPACE_PORT: 8082
+      KARAPACE_REGISTRY_HOST: registry
+      KARAPACE_REGISTRY_PORT: 8081
+      KARAPACE_CLIENT_ID: logweir-e2e-registry-rest
+      KARAPACE_LOG_LEVEL: WARNING
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/topics', timeout=5)"]
+      interval: 5s
+      timeout: 10s
+      retries: 36
+      start_period: 10s

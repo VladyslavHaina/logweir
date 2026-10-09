@@ -370,6 +370,12 @@ pub struct Ran {
     /// `source_replication_factor` for each NAMED topic it mentions — the
     /// counts `topic_configuration` records, from the same read-back.
     pub manifest_layouts: BTreeMap<String, crate::backup::config_coverage::Layout>,
+    /// **PROD-03.0.** Per NAMED topic, the schema dependency judged from a
+    /// bounded sample of the segments the manifest just read back lists —
+    /// `crate::backup::schema_dependency::detect`, through the same read-only
+    /// archive handle. Never fatal: a segment it cannot judge makes its topic
+    /// `notAssessed`.
+    pub schema_dependency: BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>,
 }
 
 pub fn run(
@@ -530,6 +536,12 @@ pub fn run(
     // panicking in a release build's wrapping.
     let covered_to_ms = newest_inclusive.saturating_add(1);
 
+    // **PROD-03.0.** The named topics' schema dependency, from the archived
+    // BYTES this run wrote: a bounded sample of each topic's segments, read
+    // back through the read-only archive handle and decoded with Logweir's own
+    // `.kbak` decoder. No registry is contacted. Never fatal.
+    let schema_dependency = crate::backup::schema_dependency::detect(&archive, &plan.topics, store);
+
     Ok(Ran {
         facts,
         manifest_key: set.manifest_key,
@@ -540,6 +552,7 @@ pub fn run(
         covered_to_ms,
         manifest_configurations,
         manifest_layouts,
+        schema_dependency,
     })
 }
 
@@ -594,11 +607,11 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// `BackupOutcome` -> the document. A pure projection: every field is a value
 /// the outcome already carries, and nothing here measures anything.
 ///
-/// `format_version` is `FORMAT_VERSION_WITH_TOPIC_CONFIGURATION` (`1.3.0`,
-/// PROD-05.1) of THIS document type (independent of the scorecard's), because
-/// this build writes `topic_configuration` on every receipt, pinned or not —
-/// or `FORMAT_VERSION_WITH_AUTH_MODES` (`1.4.0`, PROD-01.3) when the source's
-/// auth mode is one PROD-01.3 added — by
+/// `format_version` is `FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY` (`1.5.0`,
+/// PROD-03.0) of THIS document type (independent of the scorecard's), because
+/// this build writes `schema_dependency` on every receipt, beside
+/// `topic_configuration`, pinned or not and for every auth mode (1.5.0 defines
+/// PROD-01.3's modes too) — by
 /// `logweir_core::backup_receipt::format_version_for`, the one place that
 /// decides it. `source.auth` is `BackupOutcome::source_auth` rendered as the
 /// two strings `ReceiptAuth` holds — **never a password, and no field that
@@ -616,11 +629,13 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
     };
     let auth = receipt_auth(&outcome.source_auth);
     BackupReceipt {
-        // PROD-01.3: the version follows the auth mode too — 1.4.0 for
-        // `scramSha256`, `plain` and `mtls` (it defines PROD-05.1's block as
-        // well), PROD-05.1's 1.3.0 document otherwise.
-        format_version: logweir_core::backup_receipt::format_version_for(&archive, true, &auth)
-            .to_string(),
+        // PROD-03.0: every receipt this build signs carries
+        // `schema_dependency`, so every one is 1.5.0 — which defines
+        // PROD-01.3's auth modes and PROD-05.1's block as well.
+        format_version: logweir_core::backup_receipt::format_version_for(
+            &archive, true, true, &auth,
+        )
+        .to_string(),
         run_id: outcome.run_id.clone(),
         backup_id: outcome.backup_id.clone(),
         requested_at: outcome.requested_at,
@@ -651,15 +666,58 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         },
         config_coverage: Some(outcome.config_coverage.clone()),
         // PROD-05.1: ALWAYS written beside `config_coverage`, so every receipt
-        // this build signs is 1.3.0 and carries its topics' configuration
-        // model — a receipt never leaves it to be read as NOT RECORDED by
-        // omission when it was observed.
+        // this build signs carries its topics' configuration model (and is
+        // 1.5.0, for PROD-03.0's block below) — a receipt never leaves it to
+        // be read as NOT RECORDED by omission when it was observed.
         topic_configuration: Some(outcome.topic_configuration.clone()),
         // PROD-05.1: where the run looked for owners — written beside the
         // model, so a topic without an owner reads "not checked" when it is
         // empty and never "applied through the admin API".
         owner_detection: Some(outcome.owner_detection.clone()),
+        // PROD-03.0: ALWAYS written, so every receipt this build signs is
+        // 1.5.0 and says, per named topic, whether its records need a schema
+        // registry — never left to be read as NOT ASSESSED by omission when it
+        // was judged.
+        schema_dependency: Some(outcome.schema_dependency.clone()),
     }
+}
+
+/// **PROD-03.0 (the review's L1).** The schema dependency block is advisory:
+/// it must never be the reason a backup goes unsigned. When the receipt's own
+/// arms refuse the block — a manifest this build did not foresee, a detector
+/// defect — every topic's entry becomes `notAssessed (segmentUnreadable)`,
+/// which the arms always accept, and the run says so at `warn`. Every other
+/// refusal is left for step 1 of `persist_receipt` to report.
+pub fn signable_schema_dependency(mut receipt: BackupReceipt) -> BackupReceipt {
+    let Err(refusal) = receipt.validate_invariants() else {
+        return receipt;
+    };
+    if !refusal.starts_with("schema_dependency") {
+        return receipt;
+    }
+    tracing::warn!(
+        run_id = %receipt.run_id,
+        refusal = %refusal,
+        "the schema dependency this run judged contradicts the receipt; every topic's is          recorded as notAssessed (segmentUnreadable) so the backup is still signed"
+    );
+    // Keyed by the NAMED topics, so a block whose topic set was the refusal
+    // (arm 23) is mended too.
+    receipt.schema_dependency = Some(
+        receipt
+            .source
+            .topics
+            .iter()
+            .map(|topic| {
+                (
+                    topic.clone(),
+                    logweir_core::schema_dependency::not_assessed(
+                        logweir_core::schema_dependency::REASON_SEGMENT_UNREADABLE,
+                    ),
+                )
+            })
+            .collect(),
+    );
+    receipt
 }
 
 /// `AuthRender` -> `ReceiptAuth`. The wire spellings, and the ONE place they
@@ -739,7 +797,7 @@ pub(crate) fn persist_receipt(
 ) -> Result<Persisted, BackupError> {
     let sig = |e: String| BackupError::Signing(e);
     crate::backup::print_progress_step(crate::backup::PROGRESS_STEP_SIGN);
-    let receipt = build_receipt(outcome);
+    let receipt = signable_schema_dependency(build_receipt(outcome));
 
     // 1. Refuse to sign a self-contradicting document.
     receipt.validate_invariants().map_err(|e| {

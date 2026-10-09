@@ -585,6 +585,56 @@ manifest, and is signed
   That older runner ignores a `restore.partitions` key and restores every
   partition; no Logweir writer emits that key, and this release refuses it.
 
+### Receipt and catalog-point format 1.5.0: `schema_dependency` (PROD-03.0)
+
+PROD-03.0 adds one optional block to the backup receipt, `schema_dependency`,
+and its per-topic copy to the catalog point record,
+`topics[].schema_dependency`, and moves both documents to **1.5.0**
+(`schemas/logweir-backup-receipt-1.5.0.json` and
+`schemas/logweir-catalog-point-1.5.0.json`, PROD-01.3's 1.4.0 files frozen
+beside them). Per named topic it records whether the archived keys or values
+carry Confluent wire-format framing (magic byte 0 and a plausible schema id),
+the schema ids seen (the 16 smallest and a count) and how much was judged
+(`sampled` or `complete`), or why nothing was (`notAssessed` with a reason)
+([the receipt format and the detection contract](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
+
+- **Within Never #2.** The judgement reads archived BYTES only: no schema
+  registry is contacted, no schema is resolved, and nothing is captured from a
+  registry. A `schemaDependent` topic is said to be "schema-dependent, registry
+  not captured" so an operator knows what a restore will not bring back. Never
+  #2 is unchanged; whether to narrow it is OD-2's open item #2.
+- **Absent means not assessed.** A receipt without the block — every receipt
+  before 1.5.0 — and a `notAssessed` entry are never read as "not
+  schema-dependent", on any surface.
+- **Every receipt this build signs carries the block**, for every auth mode,
+  pinned or not, so every one is 1.5.0 (which defines every earlier minor's
+  fields and values), and every catalog record it writes is 1.5.0.
+- **Eight arms, 22 to 29, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block and judges it against `source.topics` and
+  `records`; no document without the block changes verdict. The threshold (at
+  least one record, and one in ten of a side's non-null records, framed) is
+  the format's: arm 28 holds `dependent` to the counts, so a writer cannot sign
+  a verdict its counts contradict. The corpus (a case for every arm, three
+  accepted 1.5.0 documents) and the parity gate re-prove it on every
+  `just lint`.
+- **Detection never fails a backup and is bounded.** It runs after the archive
+  and manifest exist, streams at most two segments per partition for at most
+  eight partitions per topic, keeps six bytes of each key and value, and stops
+  at 16 MiB stored per segment, a zstd window of 8 MiB, 256 MiB decompressed
+  per segment and 120 s per backup (a hard stop); past a cap, or on any failure
+  (a caught panic included), the topic is `notAssessed` with its reason. It
+  adds at most about 17 MB of memory, measured (the worst case is a 16 MiB
+  incompressible segment held while scanned). A block the receipt's own arms
+  would refuse is signed as `notAssessed` instead, so it never leaves a backup
+  unsigned.
+- **Readers built before PROD-03.0** (`verify_scorecard.py` 1.23.0 and earlier,
+  and an older `logweir`) accept every 1.5.0 document — the major is unchanged
+  and the block is an optional field they ignore — print no schema line and do
+  not run arms 22 to 29.
+- **Rollback** is safe in both directions: an older runner writes 1.3.0/1.4.0
+  receipts and records with no block (their topics then read not assessed), and
+  the 1.5.0 documents already written stay valid under every reader.
+
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
@@ -1666,7 +1716,7 @@ What changes for an operator:
   Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
   bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
   merges the two views for you yet (PROD-09.2 owns that merge).
-- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), and an unpinned one still has no `manifest_version_id` key.
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), from PROD-03.0 `1.5.0` (it carries `schema_dependency` too), and an unpinned one still has no `manifest_version_id` key.
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and
