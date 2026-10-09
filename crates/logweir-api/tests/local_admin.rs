@@ -2484,6 +2484,15 @@ fn the_rate_floor_and_peer_cap_these_rows_measure_are_mains() {
         1,
         "src/main.rs builds a peer cap somewhere else too"
     );
+    // ONCE, AND BY THE SOCKET PEER (review L2): a second `.admit(` — say,
+    // re-keying a connection on the client its `X-Forwarded-For` names —
+    // would leave the count of `.admit(peer_ip)` at one and let a header move
+    // a connection out of its peer's share.
+    assert_eq!(
+        code.matches(".admit(").count(),
+        1,
+        "src/main.rs admits a connection somewhere else too"
+    );
     assert_eq!(
         code.matches(".admit(peer_ip)").count(),
         1,
@@ -2909,6 +2918,29 @@ fn a_peer_outside_the_trusted_set_is_capped_at_its_share() {
         held.set_nonblocking(false).unwrap();
     }
 
+    // A REFUSAL GIVES ITS PERMIT BACK (review L3). The listener has 256
+    // permits; this peer holds 32 of them, so a refusal that kept its permit
+    // would leave no permit at all by the 225th of these, which is then never
+    // accepted (and the place-back below is never answered either). One at a
+    // time: never more than 33 sockets open.
+    const MORE_REFUSALS: usize = 240;
+    const _: () = assert!(PEER_CAP + 1 + MORE_REFUSALS > 256);
+    for i in 0..MORE_REFUSALS {
+        if let Err(why) = refused_at_once(&address, None) {
+            panic!(
+                "over-cap connection {} of {MORE_REFUSALS} after the first refusal: {why}\n{}",
+                i + 1,
+                server.log()
+            );
+        }
+    }
+    assert!(
+        first.elapsed() < HEADER_DEADLINE.saturating_sub(RELEASE_MARGIN),
+        "inconclusive, not a product failure: {MORE_REFUSALS} refusals took until {:?}, past \
+         the held connections' header deadline",
+        first.elapsed()
+    );
+
     drop(silent.remove(0));
     let deadline = first + HEADER_DEADLINE.saturating_sub(RELEASE_MARGIN);
     let answer = answered_before(port, deadline).unwrap_or_else(|last| {
@@ -2924,7 +2956,133 @@ fn a_peer_outside_the_trusted_set_is_capped_at_its_share() {
         "the server closed a connection over the cap without saying why:\n{}",
         server.log()
     );
+    assert!(
+        server
+            .log()
+            .contains(&format!("\"per_peer_cap\":{PEER_CAP}"))
+            && !server.log().contains(CAP_OFF_WARNING),
+        "the start line must say the cap is on, at {PEER_CAP} (review L1):\n{}",
+        server.log()
+    );
     drop(answered);
+}
+
+/// The warning shared mode logs at start when no trusted proxy is configured,
+/// so the per-peer cap is off (review L1).
+const CAP_OFF_WARNING: &str = "the per-peer connection cap is off";
+
+/// Connect to `address`, send `request` if any, and require the server to
+/// close the connection unanswered within two seconds: a connection over its
+/// peer's cap. macOS answers `EINVAL` to an option call on a socket the server
+/// has already reset (the FX-24b review's L1); that is the refusal too.
+fn refused_at_once(address: &SocketAddr, request: Option<&str>) -> Result<(), String> {
+    let mut stream = TcpStream::connect_timeout(address, Duration::from_secs(5))
+        .map_err(|e| format!("connect: {e}"))?;
+    if stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .is_err()
+        || stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .is_err()
+    {
+        return Ok(());
+    }
+    if let Some(request) = request {
+        // The write may meet a connection the server has already closed.
+        let _ = stream.write_all(request.as_bytes());
+    }
+    let mut received = Vec::new();
+    match stream.read_to_end(&mut received) {
+        Ok(_) if received.is_empty() => Ok(()),
+        Ok(_) => Err(format!(
+            "the server answered: {:?}",
+            String::from_utf8_lossy(&received[..received.len().min(80)])
+        )),
+        Err(e) if e.kind() == ErrorKind::ConnectionReset => Ok(()),
+        Err(e) if received.is_empty() => Err(format!(
+            "not closed within 2 s ({e}): the listener never accepted it, or served it"
+        )),
+        Err(e) => Err(format!(
+            "the server answered, then {e}: {:?}",
+            String::from_utf8_lossy(&received[..received.len().min(80)])
+        )),
+    }
+}
+
+/// **A forwarded header cannot move a connection out of its peer's share
+/// (FX-24c, review L2).**
+///
+/// The cap is keyed on the accepted socket's peer before a byte is read,
+/// never on a header. Shared mode, TEST-NET-1 trusted, loopback outside it:
+/// each of [`PEER_CAP`] keep-alive connections asks `/healthz` with its own
+/// `X-Forwarded-For`, the last four claiming an address INSIDE the trusted
+/// range, and is answered and held. The next connection, claiming the
+/// trusted proxy as well, is still closed unanswered. A cap re-keyed on the
+/// forwarded client — "one share per real client behind the proxy" — lets
+/// every one of them through (the review's mutant R2, 40 of 40 held).
+#[test]
+fn a_forwarded_header_cannot_move_a_connection_out_of_its_peers_share() {
+    let fixture = Fixture::new("peercapxff");
+    let (server, port) = start_shared_server(&fixture, "trustedProxyCidrs: [\"192.0.2.0/24\"]\n");
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let ask = |forwarded: &str, close: bool| {
+        format!(
+            "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Forwarded-For: {forwarded}\r\n{}\r\n",
+            if close { "Connection: close\r\n" } else { "" }
+        )
+    };
+    let first = Instant::now();
+    let mut held = Vec::with_capacity(PEER_CAP);
+    for i in 0..PEER_CAP {
+        let forwarded = if i + 4 >= PEER_CAP {
+            "192.0.2.7".to_owned()
+        } else {
+            format!("203.0.113.{}", i + 1)
+        };
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
+            .unwrap_or_else(|e| panic!("connection {i}: {e}"));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream.write_all(ask(&forwarded, false).as_bytes()).unwrap();
+        let mut status = [0u8; 12];
+        stream.read_exact(&mut status).unwrap_or_else(|e| {
+            panic!(
+                "connection {i} (X-Forwarded-For: {forwarded}) was not answered inside the \
+                 peer's share: {e}\n{}",
+                server.log()
+            )
+        });
+        assert!(
+            status.starts_with(b"HTTP/1.1 200"),
+            "connection {i}: {:?}",
+            String::from_utf8_lossy(&status)
+        );
+        held.push(stream);
+    }
+    assert!(
+        first.elapsed() < HEADER_DEADLINE.saturating_sub(RELEASE_MARGIN),
+        "inconclusive, not a product failure: holding the share took {:?}, past the held \
+         connections' idle deadline",
+        first.elapsed()
+    );
+    if let Err(why) = refused_at_once(&address, Some(&ask("192.0.2.7", true))) {
+        panic!(
+            "connection {} from loopback, claiming the trusted proxy in X-Forwarded-For past \
+             its peer's {PEER_CAP} places, was not refused: {why}\n{}",
+            PEER_CAP + 1,
+            server.log()
+        );
+    }
+    assert!(
+        server.log().contains(CAP_REFUSAL),
+        "the refusal was not logged:\n{}",
+        server.log()
+    );
+    drop(held);
 }
 
 /// [`PEER_CAP`] + 8 connections from loopback that send nothing, opened in
@@ -2988,6 +3146,14 @@ fn the_trusted_proxy_is_never_capped_as_one_peer() {
     let fixture = Fixture::new("peercaptrusted");
     let (server, port) = start_shared_server(&fixture, "trustedProxyCidrs: [\"127.0.0.1/32\"]\n");
     held_past_the_cap(&server, port, "the trusted proxy");
+    assert!(
+        server
+            .log()
+            .contains(&format!("\"per_peer_cap\":{PEER_CAP}"))
+            && !server.log().contains(CAP_OFF_WARNING),
+        "a configured trusted proxy turns the cap on, and the start line says so:\n{}",
+        server.log()
+    );
 }
 
 /// **With no trusted-proxy set, no peer is capped (FX-24c).** The console
@@ -2999,6 +3165,13 @@ fn without_a_trusted_proxy_set_no_peer_is_capped() {
     let fixture = Fixture::new("peercapnone");
     let (server, port) = start_shared_server(&fixture, "");
     held_past_the_cap(&server, port, "a peer of a console with no trusted proxy");
+    // And it says so at start, as a warning (review L1): an uncapped install
+    // and a capped one that refuses nobody look the same otherwise.
+    assert!(
+        server.log().contains("\"per_peer_cap\":0") && server.log().contains(CAP_OFF_WARNING),
+        "a shared console with no trusted proxy must say at start that the cap is off:\n{}",
+        server.log()
+    );
 }
 
 /// **One address outside the trusted set cannot hold the ceiling, however it
