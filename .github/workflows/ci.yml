@@ -81,9 +81,10 @@ jobs:
       # uses to seed the drill archive. Every engine run by `logweir` below is
       # LOGWEIR'S BUILD, the one the runner image carries: the vendored
       # tarball, verified, plus the patch folder, compiled natively over
-      # `.engine/kafka-backup`. It prints `kafka-backup 0.23.3+logweir.1`,
-      # which is PROD-01.1's CONTRACT_ENGINE, so the record-semantics contract
-      # is asserted on the shipped engine on every run.
+      # `.engine/kafka-backup`. It prints the build env's ENGINE_VERSION
+      # (third_party/kafka-backup-build.env), which PROD-01.1's CONTRACT_ENGINE
+      # must equal (crates/logweir/tests/engine_pin.rs), so the record-semantics
+      # contract is asserted on the shipped engine on every run.
       - name: Build Logweir's engine from the vendored source
         run: bash scripts/engine-source.sh build
       - run: just e2e-up

@@ -123,9 +123,9 @@ spec:
                 # refused with exit 1. Keep them in lockstep with
                 # third_party/kafka-backup-build.env.
                 - name: LOGWEIR_ENGINE_VERSION
-                  value: "0.23.3+logweir.1"
+                  value: "0.23.3+logweir.2"
                 - name: LOGWEIR_ENGINE_DIGEST
-                  value: "sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3"
+                  value: "sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8"
                 # The rendered restore.yaml and the restore checkpoint land
                 # here. Pod-local and never uploaded — a crashed restore is not
                 # resumable in v0.1 (docs/stability.md).

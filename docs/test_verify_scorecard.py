@@ -2884,6 +2884,17 @@ def test_the_scorecard_parity_line_never_reads_absent_as_assessed():
     assert mod._parity_line(["drill-orders: configuration (captureDenied)"]) == (
         "configuration parity: NOT ASSESSED for drill-orders: configuration (captureDenied)"
     )
+    # FX-21: a replication factor or partition count the source's record
+    # lacks is named in the same line, never read as a match.
+    assert mod._parity_line(
+        [
+            "drill-orders: configuration (unknown)",
+            "drill-payments: replication_factor (notRecorded)",
+        ]
+    ) == (
+        "configuration parity: NOT ASSESSED for drill-orders: configuration (unknown); "
+        "drill-payments: replication_factor (notRecorded)"
+    )
 
 
 def test_a_not_assessed_value_serde_would_refuse_is_refused_here_too():
@@ -3052,6 +3063,10 @@ def test_the_restore_decided_settings_are_the_rust_readers():
         mod._parity_key("t: configuration not assessed (unknown)")
         == "configuration not assessed (unknown)"
     )
+    assert (
+        mod._parity_key("t: replication_factor not assessed (notRecorded)")
+        == "replication_factor not assessed (notRecorded)"
+    )
 
 
 def test_a_new_topic_document_with_the_block_labels_nothing_intended_and_omits_no_decided_setting():
@@ -3090,6 +3105,15 @@ def test_a_new_topic_document_with_the_block_labels_nothing_intended_and_omits_n
     doc["topic_parity"]["unexpected_divergence"] = [
         "restore-x-orders: min.insync.replicas",
         "restore-x-orders: configuration not assessed (unknown)",
+    ]
+    doc["topic_parity"]["not_reconstructed"] = []
+    assert mod.check_invariants(doc) == ""
+    # FX-21: so do the twins of a partition count and a replication factor the
+    # source's record lacks, as in Rust.
+    doc = _new_topic_doc()
+    doc["topic_parity"]["unexpected_divergence"] = [
+        "restore-x-orders: partition_count not assessed (notRecorded)",
+        "restore-x-orders: replication_factor not assessed (notRecorded)",
     ]
     doc["topic_parity"]["not_reconstructed"] = []
     assert mod.check_invariants(doc) == ""

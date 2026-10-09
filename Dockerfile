@@ -21,7 +21,7 @@
 # THE ENGINE IS LOGWEIR'S BUILD OF THE VENDORED OSO SOURCE (OD-3, decided
 # 2026-10-07; PROD-00.2). The `engine-logweir` stage verifies the tarball's
 # checksum, applies `third_party/kafka-backup-patches/` in order, stamps the
-# version identity (`kafka-backup 0.23.3+logweir.1`) and compiles it `--locked`
+# version identity (`kafka-backup 0.23.3+logweir.2`) and compiles it `--locked`
 # for the image's platform. OSO publishes its own image for linux/amd64 only;
 # building the source is what gives this image an arm64 variant, engine CVE
 # fixes on Logweir's schedule, and a version string nobody can mistake for

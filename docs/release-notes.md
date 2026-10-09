@@ -27,10 +27,11 @@ binding), 34 (FX-16, a point-bound restore restores its point's set), 35
 (PROD-00.2, the engine built from the vendored source), 36 (FX-23, an
 early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
 one crate that may hold `unsafe` code, and the consumer-group and ACL reads
-behind it), 38 (FX-20, the binding for every other credential reference)
+behind it), 38 (FX-20, the binding for every other credential reference),
 39 (FX-18, a topic phase 0 creates is used only once the cluster serves
-it) and 40 (FX-24, a silent connection meets the console's header deadline)
-so far. Items continue the next entry's
+it), 40 (FX-24, a silent connection meets the console's header deadline)
+and 41 (FX-21, a replication factor the archive does not record is never
+read as matching; the engine's first patch) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -84,6 +85,11 @@ Item 40 is fix-now row FX-24, proven by rows on the built console binary and
 live on the host in localAdmin mode; it changes the console only, and the PoC
 upgrade that carries it repeats the silent-socket probe against the shared-mode
 console.
+Item 41 is fix-now row FX-21, proven by unit, phase and reader rows and on
+the compose stack (`cluster3`) with three engines; it changes the runner's
+phase 7 and the engine (patch 0002, build `0.23.3+logweir.2`), so the PoC
+refresh that carries it runs a multi-topic backup and restore and reads the
+new runner's engine identity.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -920,6 +926,73 @@ at the PoC upgrade that carries this item.
 **Rollback:** an older console serves HTTP/2 prior knowledge again and leaves a
 silent connection open; nothing is stored, so nothing needs converting.
 
+#### 41. A replication factor the archive does not record is never read as matching; the engine records every topic's (FX-21)
+
+**Changed.** Engine 0.23.3 records a topic's source replication factor in the
+archive's manifest for the FIRST topic a backup saves only, and phase 7 used
+the restored topic's own factor in place of a missing one, so every other
+topic's replication-factor difference was signed as no divergence. Phase 7 now
+compares the factor only where the source's is recorded: the manifest's, else
+the bound recovery point's receipt (`topic_configuration`, format 1.3.0,
+Logweir's own read of the source). Where neither records it, the scorecard
+names it in `topic_parity.not_assessed` as `"<target topic>:
+replication_factor (notRecorded)"`, with the twin `"<target topic>:
+replication_factor not assessed (notRecorded)"` in `unexpected_divergence`, and
+both readers print it in their `configuration parity: NOT ASSESSED for …`
+line. A partition count the manifest does not record (an archive before engine
+0.17) is the same case. The engine itself is fixed too: Logweir's first real
+engine patch, `0002-manifest-replication-factor.patch`, makes the manifest
+record every topic's factor, so the engine is now `kafka-backup
+0.23.3+logweir.2` (build-input digest
+`sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8`,
+appended to `third_party/kafka-backup-builds.txt`); `logweir doctor` accepts
+exactly that version. No document format moves: the new entries are content
+in two existing lists that can only move a verdict to the safer side (MINOR
+under OD-7's third case, [stability](stability.md#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
+**Do:** roll the controller and the runner image together, as for item 35. A
+standalone CLI install replaces its engine with build 2 and exports
+`LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest
+([quickstart.md](quickstart.md), step 4). No field marks FX-21's documents:
+a reader tells them apart by the writer identity every scorecard carries,
+`engine.version` (`0.23.3+logweir.2`, or a later `+logweir.<n>`) with
+`engine.digest` (`sha256:2bca49d7…`), which a runner image declares and ships
+beside the `logweir` that wrote the document, plus the archive's manifest
+(`source.backup_id`, `source.manifest_sha256`). For a scorecard with any other
+`engine.version`, or one a standalone CLI signed, a topic whose
+`topics[].source_replication_factor` the manifest lacks has no
+replication-factor finding, whatever the scorecard lists.
+**Scope:** unit rows over the rule (not recorded, recorded as 0 or less, only
+the factor missing) in both modes, phase-7 rows through `run` (no record, the
+receipt's factor where the manifest has none, the manifest's first where both
+do, the partition count, a `newTopic` document phase 8 signs), the arm NR-5
+row in both readers and the parity script's new case, and ten mutants, all
+killed (`claude/artifacts/fx-21/mutants/`). Live, on compose slot 1 with `cluster3`
+(Kafka 3.7.1): three topics at factors 3, 2 and 3 backed up in one run and
+restored by `newTopic` restores, unbound and bound to the point, on three
+engines. OSO's 0.23.3 (the container route) and Logweir's `0.23.3+logweir.1`
+recorded one factor of three; this build named the other two `notRecorded`
+unbound and compared all three from the receipt bound, and a `logweir` built
+before FX-21 signed the same two topics with no replication-factor entry at
+all. `0.23.3+logweir.2` recorded all three, each the broker's. The engine's
+own unit rows for the patch fail without it. Parity on one stack (Kafka 3.7.1),
+the engines run natively: `full_drill` 15/15, G-PITR and the record-semantics
+rows (contract asserted on build 2) compared SAME between builds 1 and 2, and
+the demo drill, the suites and the record-semantics files compared SAME
+between OSO's 0.23.3 (container route) and build 2; the replication factor
+the patch now records appears in none of those outputs. On a loaded host a
+natively built engine can fail a restore it starts within a second of phase
+0 creating the target topics (`Partition N not available`; measured 1 restore
+in 7 and, in the review, 1 in 17), so the parity runs waited 5 s before a
+restore (a test shim; [e2e/README.md](../e2e/README.md)); the race is its own
+tracker row.
+**Rollback:** an older `logweir` writes the old silence again; the documents
+this build wrote stay valid for every reader. An engine rollback (to
+`+logweir.1`, or OSO's 0.23.3 with `ENGINE_SOURCE=oso`) records one factor per
+backup again, which this build then names `notRecorded` unless a 1.3.0 receipt
+is bound. Archives are unaffected in either direction: the patch changes what
+the manifest records, never the segment format, and a manifest with every
+factor is read by every engine that reads one with the first.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -962,7 +1035,8 @@ In addition to the next entry's six, in its order:
 - **Verify an image digest before you deploy it** with the pinned commands in
   [install.md](install.md#verify-the-images) (item 35); a standalone CLI
   install replaces its engine with Logweir's build and exports
-  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1` and its digest.
+  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest (build 2 since
+  item 41).
 - **Bind every destination, retention, notification and inline-archive
   credential Secret, one at a time, with `scripts/bind-credential.py`**
   (item 38), after suspending the schedules that use them and rolling the
@@ -981,7 +1055,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39 and 40, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40 and 41, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -999,7 +1073,8 @@ console and the status of three CRDs, and needs each destination,
 retention, notification and inline-archive credential Secret bound; item 39
 changes the runner's phase 0 only and needs nothing; item 40 changes the
 console only and needs nothing unless an ingress dials the console with
-HTTP/2. To roll back to
+HTTP/2; item 41 changes the runner (phase 7 and the engine's build)
+only. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

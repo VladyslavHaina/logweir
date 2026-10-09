@@ -2780,7 +2780,8 @@ def _parity_line(not_assessed):
     """`topic_parity.not_assessed` as one sentence, or "" when every topic was
     assessed — the twin of `crates/logweir/src/verify.rs::parity_line` (FX-4).
     ABSENT is NOT RECORDED (every 1.0.0 scorecard, and a 1.1.0 one whose drill
-    stopped before phase 7), never "every topic assessed"."""
+    stopped before phase 7), never "every topic assessed". Every entry is named
+    as written, FX-21's `replication_factor (notRecorded)` included."""
     if not_assessed is None:
         return (
             "configuration parity: not recorded, so an empty unexpected_divergence proves "

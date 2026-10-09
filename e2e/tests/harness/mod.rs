@@ -250,21 +250,33 @@ fn probe_engine_bin() -> PathBuf {
 
 /// The digest that names the engine that runs, recorded into every signed
 /// document a suite writes. Logweir's build (PROD-00.2) is named by its
-/// build-input digest, `ENGINE_DIGEST` in `third_party/kafka-backup-build.env`;
-/// OSO's released binary — the default shim, and every engine-matrix row that
+/// build-input digest, as the build ledger records it (below); OSO's released binary — the default shim, and every engine-matrix row that
 /// extracts one — by the image digest it came from. Which one is decided by
 /// what the engine PRINTS (`engine_version`), never assumed, so a row cannot
 /// record one engine's digest beside another's version.
+///
+/// **FX-21: the ledger, not the build env.** Logweir's build is looked up by
+/// the version it PRINTS in `third_party/kafka-backup-builds.txt`, the
+/// append-only ledger of every build, so an earlier build run at this
+/// checkout (FX-21's old-engine rows run `0.23.3+logweir.1` beside the
+/// current pin) is named by its own digest, never the newest build's. For the
+/// current build the two agree: `scripts/engine-source.sh` refuses a ledger
+/// whose last line is not the build env's pair.
 pub fn engine_digest() -> String {
-    if engine_version().contains("+logweir.") {
-        let build = std::fs::read_to_string(root().join("third_party/kafka-backup-build.env"))
-            .expect("third_party/kafka-backup-build.env");
-        return build
+    let version = engine_version();
+    if version.contains("+logweir.") {
+        let ledger = std::fs::read_to_string(root().join("third_party/kafka-backup-builds.txt"))
+            .expect("third_party/kafka-backup-builds.txt");
+        return ledger
             .lines()
-            .find_map(|l| l.strip_prefix("ENGINE_DIGEST="))
-            .expect("third_party/kafka-backup-build.env sets ENGINE_DIGEST")
-            .trim()
-            .to_string();
+            .filter(|l| !l.starts_with('#'))
+            .find_map(|l| {
+                let (v, d) = l.split_once(' ')?;
+                (v == version).then(|| d.trim().to_string())
+            })
+            .unwrap_or_else(|| {
+                panic!("engine {version} is not a build in third_party/kafka-backup-builds.txt")
+            });
     }
     std::fs::read_to_string(root().join("third_party/kafka-backup-binary.digest"))
         .expect("third_party/kafka-backup-binary.digest")

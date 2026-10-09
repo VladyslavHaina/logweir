@@ -879,21 +879,32 @@ pub struct TargetDiffSummary {
 pub struct TopicParity {
     pub intentionally_deviated: Vec<String>,
     pub unexpected_divergence: Vec<String>,
-    /// **Format 1.1.0 (FX-4).** The mapped target topics whose CONFIGURATION
-    /// parity was not assessed, each as `"<target topic>: configuration
-    /// (<why>)"`. `<why>` is the SOURCE topic's capture coverage from the
-    /// verified backup receipt — `unknown` (the restore was bound to no
-    /// receipt, or to one that predates 1.1.0), `notCaptured` or
-    /// `captureDenied` — or `targetReadDenied` when the source was captured
-    /// but the TARGET topic's configuration could not be read (its keys are
-    /// then not compared at all).
+    /// **Format 1.1.0 (FX-4).** What was not assessed per mapped target
+    /// topic, each as `"<target topic>: <what> (<why>)"`.
     ///
-    /// For a topic listed here, the two lists above still name every
-    /// configuration difference the archive's OWN record shows, but their
-    /// silence proves nothing: a denied DescribeConfigs at capture leaves the
-    /// manifest's configuration empty, which compares as "no divergence".
-    /// Partition count and replication factor do not depend on that capture
-    /// and are assessed either way.
+    /// - `configuration` (FX-4): the topic's CONFIGURATION parity. `<why>` is
+    ///   the SOURCE topic's capture coverage from the verified backup receipt
+    ///   — `unknown` (the restore was bound to no receipt, or to one that
+    ///   predates 1.1.0), `notCaptured` or `captureDenied` — or
+    ///   `targetReadDenied` when the source was captured but the TARGET
+    ///   topic's configuration could not be read (its keys are then not
+    ///   compared at all). For such a topic, the two lists above still name
+    ///   every configuration difference the archive's OWN record shows, but
+    ///   their silence proves nothing: a denied DescribeConfigs at capture
+    ///   leaves the manifest's configuration empty, which compares as "no
+    ///   divergence".
+    /// - `replication_factor` or `partition_count` (FX-21), `<why>` always
+    ///   `notRecorded`: the source's value is recorded nowhere phase 7 reads
+    ///   it (the manifest; for the factor, also the bound receipt's 1.3.0
+    ///   `topic_configuration`), so it was not compared. Engine 0.23.3
+    ///   records the factor for the first topic a backup saves only. Partition
+    ///   count and replication factor do not depend on the configuration
+    ///   capture and are compared wherever the source's value is recorded. A
+    ///   writer before FX-21 compared the target's own value with itself
+    ///   instead, so its silence about such a topic is not parity.
+    ///
+    /// Each entry has a fail-safe twin `"<target topic>: <what> not assessed
+    /// (<why>)"` in `unexpected_divergence`.
     ///
     /// ABSENT means NOT RECORDED — every 1.0.0 document, and a document whose
     /// phase 7 never ran — and is never read as "every topic assessed";
@@ -3329,6 +3340,19 @@ mod tests {
         other
             .validate_invariants()
             .expect("a key the restore does not decide is not 'not reconstructed'");
+        // FX-21: the fail-safe twin of a partition count or replication factor
+        // the source's record lacks names neither setting as its `<key>`, so a
+        // newTopic document carrying it is accepted without the twin in
+        // `not_reconstructed` (the restore's deviation on it is unknown).
+        let mut unrecorded = new_topic_not_reconstructed();
+        unrecorded.topic_parity.unexpected_divergence = vec![
+            "restore-x-orders: partition_count not assessed (notRecorded)".into(),
+            "restore-x-orders: replication_factor not assessed (notRecorded)".into(),
+        ];
+        unrecorded.topic_parity.not_reconstructed = Some(vec![]);
+        unrecorded
+            .validate_invariants()
+            .expect("a twin of an unrecorded source value is not 'not reconstructed'");
         let mut scratch = empty.clone();
         scratch.target.mode = TargetMode::Scratch;
         scratch.target.marker_topic = Some("logweir.scratch".into());
@@ -3362,6 +3386,10 @@ mod tests {
             "configuration not assessed (unknown)"
         );
         assert_eq!(parity_key("a: b: retention.ms"), "retention.ms");
+        assert_eq!(
+            parity_key("t: replication_factor not assessed (notRecorded)"),
+            "replication_factor not assessed (notRecorded)"
+        );
     }
 
     /// ORDER: a deviation COPIED into the new field and left intended violates

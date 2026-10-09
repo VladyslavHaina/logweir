@@ -273,6 +273,20 @@ impl Inputs {
         Ok(())
     }
 
+    /// The version the NEXT build of the shipped inputs would carry:
+    /// `<release>+logweir.<n + 1>`. The planted cases bump from whatever the
+    /// build env names, so a real build landing (FX-21's `+logweir.2`) does
+    /// not turn a planted "next build" into a recorded one.
+    fn next_version() -> String {
+        let version = env_value(
+            &read("third_party/kafka-backup-build.env"),
+            "ENGINE_VERSION",
+        )
+        .expect("the build env names ENGINE_VERSION");
+        let (release, n) = version.split_once("+logweir.").unwrap();
+        format!("{release}+logweir.{}", n.parse::<u64>().unwrap() + 1)
+    }
+
     /// A NEW BUILD, the way the README says to make one: bump `n`, record
     /// the digest the inputs then give, and append the pair to the ledger.
     fn with_new_build(self) -> Self {
@@ -414,7 +428,14 @@ fn the_shipped_patch_folder_follows_its_policy() {
     let names = check_patch_folder(&Inputs::real().patches).unwrap();
     // The set the build applies, in order. A patch that lands or is dropped
     // moves this line, and the README's table, with it.
-    assert_eq!(names, ["0001-lockfile-rustls-h2-spin.patch"], "{names:?}");
+    assert_eq!(
+        names,
+        [
+            "0001-lockfile-rustls-h2-spin.patch",
+            "0002-manifest-replication-factor.patch",
+        ],
+        "{names:?}"
+    );
 }
 
 /// THE POSITIVE CONTROL: a well-formed patch with its digest recorded is
@@ -568,7 +589,7 @@ fn every_rule_is_refused_by_both_implementations() {
         ),
         (
             "a version bump without re-recording the digest",
-            Inputs::real().with_env_line("ENGINE_VERSION", "0.23.3+logweir.2"),
+            Inputs::real().with_env_line("ENGINE_VERSION", &Inputs::next_version()),
             "bump the <n>",
         ),
         (
@@ -610,8 +631,14 @@ fn every_rule_is_refused_by_both_implementations() {
         (
             "an <n> that falls",
             Inputs::real().with_ledger(&format!(
-                "0.23.3+logweir.2 sha256:{}\n0.23.3+logweir.1 {}\n",
+                "{} sha256:{}\n{} {}\n",
+                Inputs::next_version(),
                 "a".repeat(64),
+                env_value(
+                    &read("third_party/kafka-backup-build.env"),
+                    "ENGINE_VERSION"
+                )
+                .unwrap(),
                 env_value(&read("third_party/kafka-backup-build.env"), "ENGINE_DIGEST").unwrap()
             )),
             "must rise",
@@ -619,10 +646,11 @@ fn every_rule_is_refused_by_both_implementations() {
         (
             "one digest under two versions",
             Inputs::real()
-                .with_env_line("ENGINE_VERSION", "0.23.3+logweir.2")
+                .with_env_line("ENGINE_VERSION", &Inputs::next_version())
                 .with_ledger(&format!(
-                    "{}\n0.23.3+logweir.2 {}\n",
+                    "{}\n{} {}\n",
                     read("third_party/kafka-backup-builds.txt").trim_end(),
+                    Inputs::next_version(),
                     env_value(&read("third_party/kafka-backup-build.env"), "ENGINE_DIGEST")
                         .unwrap()
                 )),
@@ -715,7 +743,7 @@ fn the_digest_names_every_input() {
     );
     let bumped = Inputs::real()
         .with_patch("0901-fix.patch", &good_patch())
-        .with_env_line("ENGINE_VERSION", "0.23.3+logweir.2");
+        .with_env_line("ENGINE_VERSION", &Inputs::next_version());
     let none = Inputs::real();
     for (why, other) in [
         ("renamed", renamed),
@@ -806,6 +834,57 @@ fn check_sources_policy(policy: &str, gate_line: &str) -> Result<(), String> {
         return Err(format!("the gate does not check sources: `{gate_line}`"));
     }
     Ok(())
+}
+
+/// FX-21 review L2: a patch's oracle that lives in the engine's own tests runs
+/// in `scripts/ci-check.sh`, over the tree it prepares for `cargo deny`, and
+/// each named test must report `ok` there. Patch 0002 brings three; every one
+/// is in the patch AND in the gate's list, so dropping a test from either, or
+/// the gate's `cargo test`, fails here. The gate's live negative control (the
+/// hunk removed from a prepared tree: two of the three FAILED, exit 1) is
+/// `claude/artifacts/fx-21/fixround/gates/ci-oracle-negative-hunk-removed.log`.
+#[test]
+fn ci_check_runs_patch_0002s_engine_oracle() {
+    const ORACLE: [&str; 3] = [
+        "test_merge_manifests_updates_replication_factor",
+        "test_merge_manifests_preserves_replication_factor_when_none",
+        "test_manifest_persistence_keeps_every_topics_replication_factor",
+    ];
+    let check = |ci: &str, patch: &str| -> Result<(), String> {
+        let runs = ci.lines().any(|l| {
+            l.contains("CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo test --locked")
+                && !l.trim_start().starts_with('#')
+        }) && ci
+            .contains("--manifest-path \"$engine_src/Cargo.toml\" -p kafka-backup-core --lib");
+        if !runs {
+            return Err("ci-check.sh does not run the engine's library tests".into());
+        }
+        for t in ORACLE {
+            if !patch.contains(&format!("fn {t}()")) {
+                return Err(format!("patch 0002 no longer carries {t}"));
+            }
+            if !ci.contains(t) {
+                return Err(format!("ci-check.sh does not require {t} to pass"));
+            }
+        }
+        Ok(())
+    };
+    let ci = read("scripts/ci-check.sh");
+    let patch = read("third_party/kafka-backup-patches/0002-manifest-replication-factor.patch");
+    check(&ci, &patch).unwrap();
+    // Negative controls: the gate's run dropped, a test dropped from the
+    // gate's list, a test dropped from the patch.
+    let no_run = ci.replace(
+        "CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo test --locked",
+        "CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo build --locked",
+    );
+    assert!(check(&no_run, &patch).is_err());
+    for t in ORACLE {
+        let unlisted = ci.replace(t, "test_something_else");
+        assert!(check(&unlisted, &patch).unwrap_err().contains(t));
+        let untested = patch.replace(&format!("fn {t}()"), "fn renamed()");
+        assert!(check(&ci, &untested).unwrap_err().contains(t));
+    }
 }
 
 /// REVIEW M2: both graphs — the engine's own lockfile and Logweir's — admit
