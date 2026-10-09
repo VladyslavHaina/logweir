@@ -582,6 +582,43 @@ Artifacts are in the run directory, `artifacts/prod-01-4/`:
 - `rule-mutants.{py,log}` (first round, 10 of 10 killed) and `rule-mutants-fix.{py,log}` (fix round, 25 of 25 killed, including the review's R1–R5);
 - `upstream/`: the rdkafka 0.37.0–0.39.0 crates, the PR #721 diff (sha256 `ba214e48…`) and kafka-protocol 0.18.0 (sha256 `099d5c2f…`).
 
+## 12. Landed: PROD-01.4a (2026-10-09)
+
+Branch `claude/prod-01-4a`. OD-6 (a2): DescribeTopics joins PROD-04.0b's perimeter, the first wrapper TI-OC1 asked for.
+
+**The call.** `logweir-rdkafka-ffi::topics::describe_topics(client, names, timeout)`, on `raw::run` like the group and ACL calls (PROD-04.0 §14's seven steps):
+- bounded: librdkafka's request timeout plus `POLL_MARGIN`, and at most 1000 names per call (one Metadata request each);
+- inputs refused before anything is sent: no names, more than 1000, a blank, NUL-bearing, repeated or over-249-byte name;
+- the topic collection in a guard destroyed exactly once (librdkafka copies the names, `rdkafka_admin.c:9245-9249`);
+- values only: the ID as its two `i64` halves, never `rd_kafka_Uuid_base64str` (C4); the per-topic error with its integer code (T12); a name the broker skipped is absent from the answer, never guessed.
+
+**The meaning** (pure, `--no-default-features`): `logweir-kafka::topic_ids` maps an answer to `Id` (Kafka's text from the halves, `logweir-core::topic_identity::topic_id_text`), `NoId` (the zero UUID), `NotFound` (3), `NotAuthorized` (29, by name), `Failed` (another code, or no entry for a requested name). A whole-call failure is a `KafkaError`, and a transport failure (no result in the bound, `_TIMED_OUT`, `_TRANSPORT`, `_ALL_BROKERS_DOWN`, `_TIMED_OUT_QUEUE`, `_RESOLVE`) is `Unreachable`, never `TopicNotFound`. `ClusterReader::topic_ids` defaults to `NotRead`, so a reader that does not implement it can only leave an ID unknown.
+
+**The field, as landed — three deviations from §3.2, each deliberate:**
+- **Versions.** The receipt is **1.5.0** and the catalog point **1.5.0**, not 1.1.0: FX-4, FX-7, PROD-05.1 and PROD-01.3 took 1.1.0–1.4.0 first. The arms are **22–26**, not 6–10, for the same reason.
+- **Reasons.** `generations.<topic>` carries `topic_id`, `topic_id_after`, `topic_id_source` (§3.1) and, beside each null ID, `topic_id_reason` / `topic_id_after_reason` from a closed five (`noTopicId`, `notAuthorized`, `topicNotFound`, `readFailed`, `notRead`). §3.1 says null is unknown; the reason says WHY, so a refused read is never mistaken for a broker with no IDs.
+- **The catalog copy** is `topics[].identity` (the whole entry: both IDs, the source and the reasons) instead of a flat `topics[].topic_id`, which could hold neither the after-read nor a reason. PROD-02.1's `topics[].generation` (token, verdict) sits beside it when it lands.
+
+Arms 22–26 (both readers, byte for byte): the block only from 1.5.0; covering exactly `source.topics`; every recorded ID canonical (22 URL-safe characters over 16 bytes that re-encode to themselves, never zero); a reason exactly for a null ID; a source exactly for a recorded one. Two different recorded IDs are not refused. MINOR under OD-7 (a). `verify_scorecard.py` 1.24.0 (1.23.0 was PROD-11.1's).
+
+**The ID path in the backup.** `logweir backup run` reads every named topic's ID as the last read before the engine (after the execution claim and FX-4's configuration read) and again the moment the engine exits, and writes both into every receipt it signs. Never fatal: each failure is a recorded reason; a change during the capture is logged as a warning.
+
+**The rule** (`logweir-core::topic_identity`): R1 and §4.4's ID condition exactly as `classify` and `intra_run` implement them — two different pre-capture IDs are `New` (`TopicIdChanged`), never a continuation; a capture whose two reads differ is `ChangedDuringCapture`; equal IDs and no change are `Same`; anything else, including a previous point from another source cluster, is `NotEstablished` with its reason. That last verdict is today's fallback: unknown, never the same generation, until PROD-02.1's offset rule (R2–R6) runs for it. Equal IDs still need R2–R6 for offset-dependent consumers (FP1).
+
+**Not landed here, and why.** No product surface compares two points yet: the API's `PointView`/`AvailablePointView` and the catalog view carry no IDs, and nothing computes a lineage. PROD-02.1 owns that consumer (the lineage, the token, the view and the console); its rows TI-02.1-1, -6 and -9 can now use real IDs. The check runner's inventory (§6.1 "IDs in topic discovery") and restore-target identity (PROD-07.x, 15.1) are their rows' consumers of `ClusterReader::topic_ids`.
+
+**Measured** (compose slot 3, `--profiles acl,auth`; `e2e/tests/topic_ids.rs` and this record's oracle, whose ground-truth read now also requires the product's DescribeTopics to equal `kafka-topics.sh --describe`):
+
+| Line | product ID = CLI's | recreation between two real backups | refusal by name (`acl`) | absent topic | oracle (`topic_identity.rs`) |
+| --- | --- | --- | --- | --- | --- |
+| 3.7.1 | 4 topics, 3 IDs with `-`/`_` | `New`; control `Same`; readers agree; catalog copies | `NotAuthorized`; super user reads the ID; restored after the ACL is removed | `NotFound` | 52 passed, c10 ignored |
+| 3.9.2 | 4 topics, all 4 IDs with `-`/`_` | `New`; control `Same`; readers agree; catalog copies | `NotAuthorized`; super user reads the ID; restored after the ACL is removed | `NotFound` | 52 passed, c10 ignored |
+| 4.3.1 | 6 topics, 2 IDs with `-`/`_` | `New`; control `Same`; readers agree; catalog copies | `NotAuthorized`; super user reads the ID; restored after the ACL is removed | `NotFound` | 52 passed, c10 ignored |
+
+The oracle's 18 live rows read the broker's ID four times each on every line, and the product's read equalled the CLI's every time. On 3.7.1 the whole e2e suite, run as CI runs it, passed (210 passed, 37 ignored). A closed port is `Unreachable` after the 2 s bound ("Timed out waiting for controller" on 3.7.1, "Failed while waiting for controller: Local: Timed out" on 3.9.2 and 4.3.1). Memory: both 100,000-call soaks +0 KiB, with and without Guard Malloc; a planted double destroy of the collection crashes under Guard Malloc; macOS `leaks --atExit` over the four live rows on 4.3.1: `0 leaks for 0 total leaked bytes`. Mutants: 45 planted (the FFI request and read, the answer mapping, the text and the rule, both readers' arms and lines, the backup's two reads, the catalog copy and rules 3–4), all killed; the one first-pass survivor (`between` ignoring the source cluster) gained its row.
+
+**For PROD-01.4b.** Rebase rust-rdkafka PR #721 (or a successor) with a text form derived from the halves in Kafka's URL-safe alphabet; once a released rdkafka wraps DescribeTopics safely, `topics.rs` leaves the perimeter.
+
 ---
 
 Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).
