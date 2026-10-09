@@ -234,6 +234,39 @@ No CRD changes. The runner image changes (the window start, phase 7, the block, 
 | **N1** (second pass, MEDIUM): "no record before the start was restored" printed and signed for the sampled lane, which does not prove it | One predicate, `BeforeTheStart::of(integrity.result, verification)` (Python `_before_the_start`), ends both readers' `replay selection:` line: "restored or expected" only over a complete verification that passed; the sampled lane says the sampled check does not prove it; anything else says only "expected". The writer's coverage note (pre-verdict) never says "restored"; the qualified sampled-pass line says the sampled check does not prove it (§5.3) | rows per lane in core, `cli_verify.rs`, the orchestrator row, pytest and the parity loop (sampled, complete, complete-fail); mutants N1a–N1f, each restoring the unproven sentence in one place (§7) |
 | **N2** (second pass, LOW): `stability.md` said the existing fields name the start | Reworded: nothing an older reader prints is false; none names the start; the free-text coverage note does, which `drill show` prints; a sampled document's `sample.window_start` is its sample window | `stability.md`, `verify-a-scorecard.md`, `drill-scorecard.md`, §5.4 |
 
+## 12. PROD-11.1b: OD-9 decided (a), partition subsets under scorecard 2.0.0 (2026-10-09)
+
+The owner decided OD-9 as (a) on 2026-10-09. Row PROD-11.1b lifted the
+refusal of §0.2 and §5.5:
+
+- **The plan.** `ReplaySelection::from_spec` no longer refuses
+  `restore.partitions` by name; it refuses the shapes no archive can satisfy
+  (a subset for a topic the plan does not select, an empty subset, a repeated
+  or negative partition), and resolution refuses a partition the archive does
+  not list (`PartitionNotInArchive`). §6's residual is closed by the grammar:
+  a subset is written ONLY beside an interval form of `point_in_time`
+  (`"<start>/<end>"`, or `"../<end>"`, an ISO 8601 open start: from the
+  archive's floor), which a runner from before PROD-11.1 cannot parse; one
+  between PROD-11.1 and PROD-11.1b cannot parse `"../<end>"` and refuses the
+  key by name beside `"<start>/<end>"`. A subset beside a plain instant does
+  not parse. Standing authorizations still refuse any selection (A6).
+- **Execution.** The multi-run engine path of §4 is reachable: one engine run
+  per distinct subset, each rendered run checked by phase 5 against the
+  approved spec; phases 4 and 7 judge the selection (every other partition of
+  a narrowed topic held empty on both lanes).
+- **The scorecard.** A run that states a subset signs format **2.0.0** and only
+  then: `source.selection {window_start_ms?, window_end_ms, partitions[],
+  engine_runs}` with `partitions` required, and `complete.partitions[]` and
+  the sampled lane's fields naming the selected partitions. Every other
+  document is the 1.x it was. Both readers read major 2 for that shape alone
+  (PS-1) and add PS-2 to PS-5 (`docs/formats/drill-scorecard.md`); every
+  older reader refuses a 2.0.0 document (`docs/verify-a-scorecard.md`).
+  `schemas/logweir-drill-scorecard-2.0.0.json` is the current schema; 1.7.0 is
+  frozen.
+
+The evidence (compose rows, mutants, the older-runner and older-reader runs)
+is in the PROD-11.1b report (`claude/prod-11-1b.result.md`).
+
 ---
 
 Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).

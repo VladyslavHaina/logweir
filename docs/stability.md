@@ -30,6 +30,10 @@ adopter's evidence bucket is a document some reader may already parse, so:
     follow-up ruling, the same day), because it can only weaken an older
     reader's verdict.
 
+  The first MAJOR the owner has decided is [OD-9](to-do/product-expansion.md#owner-decisions)
+  (a), 2026-10-09: a partition-subset restore's scorecard is format **2.0.0**
+  ([below](#scorecard-format-200-a-partition-subset-restore-prod-111b-the-first-major)).
+
   On 2026-10-07 the owner added a third, general case (FX-7's review V3 and
   FX-3):
   - **A new cause for an existing value, or new content in an existing field,
@@ -571,19 +575,80 @@ manifest, and is signed
   straddling the start counts all of its records into the per-partition
   bound. The writer's coverage note never says none was restored, and both
   readers say it only over a complete pass
-  ([the format](formats/drill-scorecard.md#sourceselection-format-170)).
-- **Partition subsets are refused** (`restore.partitions`,
-  `PartitionSubsetsAwaitOwnerDecision`, exit 3 before anything runs) until the
-  owner decides OD-9. A subset-narrowed document would be misread by every
-  reader before it (its unselected partitions read as restored), so it is a
-  MAJOR change under OD-7; the proposal is a 2.0.0 document written only when a
-  subset is stated.
+  ([the format](formats/drill-scorecard.md#sourceselection-format-170-and-200)).
+- **Partition subsets are format 2.0.0** (PROD-11.1b, below). PROD-11.1
+  refused them by name (`PartitionSubsetsAwaitOwnerDecision`): a
+  subset-narrowed 1.7.0 document would be misread by every reader before it
+  (its unselected partitions read as restored), so it is a MAJOR change under
+  OD-7, which the owner decided as OD-9.
 - **A runner built before PROD-11.1 refuses a plan stating a start**: it reads
   `point_in_time` as one instant, so the interval form does not parse
   (`drill spec does not parse`, exit 1), and it creates and signs nothing. It
   never restores from the floor what the plan said to restore from a start.
-  That older runner ignores a `restore.partitions` key and restores every
-  partition; no Logweir writer emits that key, and this release refuses it.
+
+### Scorecard format 2.0.0: a partition-subset restore (PROD-11.1b), the first MAJOR
+
+**The owner's decision.** [OD-9](to-do/product-expansion.md#owner-decisions),
+decided (a) on 2026-10-09: a scorecard for a partition-subset restore is
+written as format **2.0.0**, and only then; every other scorecard stays 1.x.
+Older verifiers refuse a 2.0.0 document instead of reading it as a full
+restore. This is the format's first MAJOR, and it carries the owner's recorded
+decision the rule above requires.
+
+**Why MAJOR.** A restore that states `restore.partitions`
+([the plan field](formats/drill-spec.md#a-partition-subset-restorepartitions-prod-111b))
+restores only the selected partitions of each narrowed topic, and two EXISTING
+fields then name the selection, not the topic: `integrity.verification.complete.partitions[]`
+lists the selected partitions (1.4.0 defined it as "one entry per partition
+of every restored topic"), and the sampled lane's count bound, presence check
+and engine-report check are the selected partitions'. A 1.x reader would
+read the narrowed restore as every partition restored and verified (the
+PROD-11.1 review's H1, measured on 1.21.0 and 1.22.0). An unknown key inside
+`source.selection` is ignored by a 1.x reader, so no MINOR could carry it.
+
+**What 2.0.0 is.** 1.7.0's fields, with `source.selection` required and its
+`partitions` (non-empty) and `engine_runs` required in it; `window_start_ms`
+is optional there (absent: the window started at the archive's floor). The
+schema is [`schemas/logweir-drill-scorecard-2.0.0.json`](../schemas/logweir-drill-scorecard-2.0.0.json),
+which pins `format_version` to `2.x.y`; every 1.x schema is frozen beside it,
+and `schemas/logweir-drill-scorecard-1.7.0.json` still describes every other
+document this build writes. The media type keeps `version=1.0.0`, so an older
+reader reaches its major refusal rather than a payload-type mismatch
+([the format](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
+
+- **Written for a subset, and only then.** `format_version_with_selection`
+  writes 2.0.0 exactly when the signed block names a subset; a start-only
+  restore is 1.7.0 and an unnarrowed one the 1.4.0, 1.5.0 or 1.6.0 document it
+  was, byte for byte. Every version step keeps the newer version, by major and
+  then minor, so no later step lowers 2.0.0.
+- **The readers.** `logweir drill verify`, `drill show` and
+  `verify_scorecard.py` 1.24.0 read major 2 for that shape alone (arm PS-1: a
+  2.x document without `source.selection.partitions` is refused before any
+  arm), apply every major-1 arm to it, and add PS-2 (a 1.x block is a start
+  only) to PS-5 ([the arms](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
+  A major above 2 is refused, naming 2.0.0.
+- **Every older reader refuses it**, never prints it `VALID`:
+  `verify_scorecard.py` before 1.24.0 and a `logweir` built before PROD-11.1
+  as a newer major; a `logweir` built between PROD-11.1 and PROD-11.1b as a
+  newer major, or (a subset from the archive's floor, whose block has no
+  start) at deserialisation, one step earlier
+  ([measured](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves)).
+  An adopter who verifies subset restores upgrades the verifier first.
+- **Older runners refuse a subset plan.** A subset is written only beside an
+  interval form of `point_in_time` (`"<start>/<end>"`, or `"../<end>"` from the
+  archive's floor). A runner built before PROD-11.1 cannot parse either and
+  refuses the plan (`drill spec does not parse`, exit 1) instead of ignoring
+  the unknown `partitions` key and restoring every partition — the residual the
+  PROD-11.1 record's §6 left; a runner built between PROD-11.1 and PROD-11.1b
+  refuses it too (`"../<end>"` does not parse; beside `"<start>/<end>"` it
+  refuses the key by name). A subset beside a plain instant does not parse in
+  this release, so no Logweir plan carries one.
+- **Standing authorizations still refuse any selection**: a rehearsal
+  restores every partition from the archive's floor (`plan_within_scope`).
+- **Rollback.** An older runner refuses subset plans (above) and an older
+  reader refuses 2.0.0 documents; 2.0.0 scorecards already written stay
+  verifiable with this release's readers and later. Start-only and
+  unnarrowed documents are unchanged in both directions.
 
 ### The product API's OpenAPI document is pre-release, and says so
 

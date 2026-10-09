@@ -2046,7 +2046,8 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "replication_factor (notRecorded)",
         ),
         // PROD-11.1 (2026-10-08): a plan may select a window start (partition
-        // subsets are refused until OD-9), and the scorecard signs it.
+        // subsets were refused until OD-9; item 45), and the scorecard signs
+        // it.
         ("a restore can select a window start", "source.selection"),
         // PROD-08.1a (2026-10-08, item 43): complete coverage requested
         // through the CRDs, the API and the console, and a standing scope
@@ -2061,6 +2062,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         (
             "a stopped client meets the console's stall deadline",
             "IO_STALL_TIMEOUT",
+        ),
+        // PROD-11.1b (2026-10-09, item 45, OD-9 (a)): a partition subset,
+        // and the scorecard's first MAJOR it signs.
+        (
+            "a partition subset signs scorecard format 2.0.0",
+            "logweir-drill-scorecard-2.0.0.json",
         ),
     ];
     assert_eq!(

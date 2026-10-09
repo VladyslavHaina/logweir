@@ -34,7 +34,9 @@ it), 40 (FX-24, a silent connection meets the console's header deadline),
 read as matching; the engine's first patch), 42 (PROD-11.1, a restore
 can select a window start) and 43 (PROD-08.1a, complete coverage requested
 and shown through the CRDs, the API and the console) and 44 (FX-24b, a
-client that stops reading or sending meets a stall deadline) so far. Items continue the next entry's
+client that stops reading or sending meets a stall deadline) and 45
+(PROD-11.1b, a restore can select a partition subset, signed as scorecard
+format 2.0.0) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -96,6 +98,13 @@ new runner's engine identity.
 Item 44 is fix-now row FX-24b, proven the same way; it changes the console
 only, and the PoC upgrade that carries it repeats the slow-reader probe and
 the event-stream row against the shared-mode console.
+Item 45 is row PROD-11.1b (the owner's decision OD-9 (a)), proven by unit,
+phase, preview and reader rows, the parity script and the invariant corpus,
+and on the compose stack (subset restores, a faulty engine, older runners and
+older readers); it changes the runner (the plan grammar, phase 7's evidence
+and the signed scorecard, whose first MAJOR it introduces), the restore
+preview and both verifiers, and the PoC upgrade that carries it runs a
+subset `Restore` and reads its scorecard with both readers.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1020,9 +1029,9 @@ complete verification that passed; for a sampled document it says the
 sampled check does not prove it.
 **Refused:** `restore.partitions` (a partition subset), by name,
 `PartitionSubsetsAwaitOwnerDecision`, until the owner decides how a
-subset-narrowed scorecard is versioned (OD-9); and a plan stating a start
-under a standing rehearsal authorization, which restores every partition from
-the floor.
+subset-narrowed scorecard is versioned (OD-9; decided and implemented by
+item 45); and a plan stating a start under a standing rehearsal
+authorization, which restores every partition from the floor.
 **Do:** nothing for a plan without a start. A runner older than this release
 refuses a plan with a start (`drill spec does not parse`, exit 1) before it
 touches anything, so roll the runner forward before submitting one. The
@@ -1200,6 +1209,61 @@ probe runs at the PoC upgrade that carries this item.
 **Rollback:** an older console leaves a connection whose client stopped
 reading or sending open again; nothing is stored, so nothing needs converting.
 
+#### 45. A restore can select a partition subset, and its scorecard is format 2.0.0 (PROD-11.1b)
+
+**Added.** A drill or restore plan may name per-topic partition subsets,
+`restore.partitions: {orders: [0, 2], payments: [1]}`, written beside the
+interval form of `restore.point_in_time`: `"<start>/<end>"`, or `"../<end>"`
+for a window from the archive's floor
+([drill-spec.md](formats/drill-spec.md#a-partition-subset-restorepartitions-prod-111b)).
+A named topic restores only the listed partitions; the others restore whole.
+Topics with different subsets restore in different engine runs (the engine's
+filter applies to every topic of a run), which phase 5 checks against the
+approved plan. Phases 4 and 7 judge the selection only: every other partition
+of a narrowed topic must be empty on the target, and a record there fails the
+run under both coverages. A subset the archive cannot satisfy (a topic the
+plan does not select, an empty, repeated or negative partition, a partition
+the archive does not list) is refused, exit 3, before anything is created; a
+selected partition with no record in the window is signed `preflight-failed`.
+The restore preflight previews it through the same function
+(`PartitionNotInBackupSet`, `SelectionInvalid`).
+**The scorecard is format 2.0.0** — the format's first MAJOR, by the owner's
+decision OD-9 (a) of 2026-10-09 — written ONLY for a restore that states a
+subset: `source.selection` names the subsets and the engine runs, and a
+complete block's `partitions[]` and the sampled lane's fields name the
+selected partitions
+([stability.md](stability.md#scorecard-format-200-a-partition-subset-restore-prod-111b-the-first-major)).
+Every other scorecard is the 1.x document it was. `verify_scorecard.py`
+1.24.0 and `logweir drill verify` read it (arms PS-1 to PS-5) and print the
+subset; every older verifier refuses it instead of reading it as a full
+restore. Schema: `schemas/logweir-drill-scorecard-2.0.0.json`; 1.7.0 is
+frozen beside it.
+**Refused, still:** a selection under a standing rehearsal authorization; a
+subset beside a plain instant, which does not parse.
+**Do:** upgrade every verifier that will read a subset restore's scorecard
+(older ones refuse it), and roll the runner forward before submitting a
+subset plan: an older runner refuses one (`drill spec does not parse`, or
+`PartitionSubsetsAwaitOwnerDecision`) before it touches anything. Nothing
+for a plan without a subset. The `Restore` CRD, the product API (which passes
+`planBytes` through) and the console are unchanged; the console's selection
+is PROD-11.1a.
+**Scope:** unit, phase, preview, reader, parity and corpus rows; compose rows
+(the default stack with `COMPOSE_PROFILES=auth`, Kafka 3.7.1, engine
+`0.23.3+logweir.2`) with an oracle of their own: two topics with different
+subsets (two engine runs) from the floor under both coverages and from a
+start, every unselected partition empty and signed 2.0.0, read alike by both
+readers; an engine that ignores the filter, failed under both coverages; a
+selected partition with nothing in the window, `preflight-failed`; the
+refusals; a runner from before PROD-11.1 and main's runner from before this
+release refusing subset plans, with the unnarrowed and start-only documents
+of the two builds the same shape; and every `verify_scorecard.py` from 1.16.0
+to 1.23.0 and both older `logweir` readers refusing the signed 2.0.0
+documents.
+**Rollback:** an older runner refuses subset plans and an older reader
+refuses 2.0.0 scorecards, so roll the verifiers back last; 2.0.0 scorecards
+already written stay verifiable with this release's readers. Start-only and
+unnarrowed documents are unchanged in both directions.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1265,7 +1329,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43 and 44, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44 and 45, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1291,7 +1355,10 @@ window start (an older runner refuses a plan with one); item 43 changes the
 notification and metrics, the standing authorization's scope (format
 1.1.0), the product API and the console, and needs nothing unless a
 rehearsal is to verify every record (a new schedule and a new
-authorization); item 44 changes the console only and needs nothing. To roll back to
+authorization); item 44 changes the console only and needs nothing; item 45
+changes the runner, the restore preview and both verifiers, and needs
+nothing for a plan without a partition subset (an older runner refuses a
+subset plan, and an older verifier a subset scorecard). To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
