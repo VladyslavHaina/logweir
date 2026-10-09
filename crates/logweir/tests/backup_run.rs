@@ -2105,3 +2105,161 @@ fn the_signed_receipt_records_each_topics_configuration_capture_coverage() {
         ExitCode::Ok
     );
 }
+
+// ---------------------------------------------------------------------------
+// PROD-01.4a: the receipt's topic IDs, end to end through the backup seam.
+// ---------------------------------------------------------------------------
+
+/// A source reader that answers DescribeTopics from a SCRIPT, one answer per
+/// call, so a test can make the read after the engine see another topic than
+/// the read before it. `orders` is recreated while the engine runs (A, then
+/// B); `ledger` keeps its ID; `refunds` is refused, then not found.
+struct IdReader {
+    calls: Mutex<usize>,
+}
+
+const ID_A: &str = "gtOq2VXiTCK1QM2UtERijA";
+const ID_B: &str = "tpWwuKExQo2lN9NziDMpYg";
+const ID_L: &str = "NSSUDfCtRqWqyhqP5Vttsw";
+
+impl ClusterReader for IdReader {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        Ok("SOURCE-CLUSTER-00000001".into())
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        Ok(vec![])
+    }
+    fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        Ok(vec![])
+    }
+    fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(BTreeMap::new())
+    }
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(BTreeMap::new())
+    }
+    fn consume_range(
+        &self,
+        _topic: &str,
+        _partition: i32,
+        _from: i64,
+        _max: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        Ok(vec![])
+    }
+    fn topic_ids(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, logweir_kafka::topic_ids::TopicIdRead)>, KafkaError> {
+        use logweir_kafka::topic_ids::TopicIdRead as R;
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        let after = *calls > 1;
+        Ok(topics
+            .iter()
+            .map(|t| {
+                let read = match (t.as_str(), after) {
+                    ("orders", false) => R::Id(ID_A.into()),
+                    ("orders", true) => R::Id(ID_B.into()),
+                    ("ledger", _) => R::Id(ID_L.into()),
+                    (_, false) => R::NotAuthorized,
+                    (_, true) => R::NotFound,
+                };
+                (t.clone(), read)
+            })
+            .collect())
+    }
+}
+
+/// **PROD-01.4a, the receipt.** The block is signed with the run, one entry
+/// per named topic: each ID read BEFORE the engine and AFTER it, so a topic
+/// recreated while the engine ran carries two different IDs (and the rule
+/// calls the point changed during its capture); a topic that kept its ID
+/// carries it twice; a refused read is `null` with `notAuthorized`, never
+/// absent, and the read after says `topicNotFound`. The reader is asked
+/// exactly twice. The receipt verifies through the shipped reader, and its
+/// catalog point copies the block.
+#[test]
+fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
+    use logweir_core::topic_identity::{between, Generation};
+    let f = fixture(
+        &spec_yaml("mvp-demo", "[orders, ledger, refunds]", ""),
+        &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+    );
+    let engine = RecordingEngine::ok(
+        ["orders", "ledger", "refunds"]
+            .iter()
+            .map(|t| topic_facts(t, vec![segment(2, 1_756_000_000_000, 1_756_000_010_000)]))
+            .collect(),
+    );
+    let (store, _k, _b) = archive_for("mvp-demo");
+    let reader = IdReader {
+        calls: Mutex::new(0),
+    };
+
+    let outcome = exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
+    assert_eq!(
+        *reader.calls.lock().unwrap(),
+        2,
+        "one read before, one after"
+    );
+    let (doc, _v) = store.get(&outcome.receipt_key).unwrap();
+    let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
+    assert_eq!(receipt.format_version, "1.5.0");
+    let g = receipt
+        .generations
+        .clone()
+        .expect("the block is always written");
+    assert_eq!(g.len(), 3);
+    assert_eq!(g["orders"].topic_id.as_deref(), Some(ID_A));
+    assert_eq!(g["orders"].topic_id_after.as_deref(), Some(ID_B));
+    assert_eq!(
+        g["orders"].topic_id_source.as_deref(),
+        Some("describeTopics")
+    );
+    assert_eq!(g["ledger"].topic_id.as_deref(), Some(ID_L));
+    assert_eq!(g["ledger"].topic_id_after.as_deref(), Some(ID_L));
+    assert_eq!(g["refunds"].topic_id, None);
+    assert_eq!(
+        g["refunds"].topic_id_reason.as_deref(),
+        Some("notAuthorized")
+    );
+    assert_eq!(
+        g["refunds"].topic_id_after_reason.as_deref(),
+        Some("topicNotFound")
+    );
+    assert_eq!(g["refunds"].topic_id_source, None);
+    // The rule over this one point: `orders` changed during its capture.
+    assert_eq!(
+        between(None, &receipt, "orders"),
+        Generation::ChangedDuringCapture {
+            before: ID_A.into(),
+            after: ID_B.into()
+        }
+    );
+    assert!(matches!(
+        between(None, &receipt, "ledger"),
+        Generation::NotEstablished(_)
+    ));
+    let (sig, _v2) = store.get(&outcome.sidecar_key).unwrap();
+    let dir = f._dir.path();
+    assert_eq!(
+        verify_receipt(dir, &doc, &sig, &dir.join("signing.pub.pem")),
+        ExitCode::Ok
+    );
+    let record_key = outcome
+        .catalog_key
+        .clone()
+        .expect("the run wrote its catalog point");
+    let (record, _) = store.get(&record_key).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
+    assert_eq!(record["format_version"], "1.5.0");
+    for t in record["topics"].as_array().expect("topics") {
+        let name = t["name"].as_str().unwrap();
+        assert_eq!(
+            t["identity"],
+            serde_json::to_value(&g[name]).unwrap(),
+            "{name}"
+        );
+    }
+}
