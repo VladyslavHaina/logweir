@@ -283,16 +283,33 @@ presence check are over `[window_start_ms, window_end_ms]`; a complete
 verification expects every archived record whose own timestamp is in that
 window.
 
-**The existing fields name the window too**, so a reader that predates the
-block never reads the restore as one from the archive's floor:
-`sample.window_start` is never earlier than the stated start;
-`sample.coverage_note` opens with `replay selection: every partition of every
-restored topic, from epoch-ms S (the plan's stated window start, inclusive) to
-epoch-ms E (inclusive); no record before the start was restored or expected`
-and, under the sampled lane, names the one limit a start adds (an in-window
-record held in a segment whose last record is before the start is not found
-by a sampled check; `sample.coverage: complete` finds it); and a complete
-block's `window.start_ms` is the stated start.
+**Existing fields carry the start too.** `sample.coverage_note` opens with
+`replay selection: every partition of every restored topic, from epoch-ms S
+(the plan's stated window start, inclusive) to epoch-ms E (inclusive); no
+record before the start was expected`, and under the sampled lane goes on
+`; a sampled check does not prove that none was restored` and names the one
+limit a start adds (an in-window record held in a segment whose last record
+is before the start is not found by a sampled check; `sample.coverage:
+complete` finds it). The note is written before phase 7 judges anything, so
+it never says that no record before the start was RESTORED. A complete
+block's `window.start_ms` is the stated start, and `sample.window_start` is
+never earlier than it (for a sampled document that is the sample window,
+which an unnarrowed document can share; the coverage note is the field that
+names the start). No older verifier prints either free-text field; what they
+do print is true of the restore (`verify-a-scorecard.md`).
+
+**What the documents prove about records before the start (review N1).** A
+COMPLETE verification whose `integrity.result` is `pass` proves that none was
+restored: a restored record below the start is `unexpected` there, and IV-6
+holds a complete pass to none. A SAMPLED check does not: its sample is drawn
+from the window, and its per-partition count bound counts every record of a
+segment that straddles the start, so an engine that restored such a
+segment's earlier records stays inside every bound. Both readers end the
+`replay selection:` line accordingly: `no record before the start was
+restored or expected` for a complete pass; `no record before the start was
+expected; a sampled check does not prove that none was restored` for a
+sampled document; `no record before the start was expected` otherwise (a
+complete verification that did not pass, or none).
 
 Three arms, enforced by both readers in the same position (after
 `sample.unsampled_topics`, before `redactions`) and words, fire only on a
@@ -311,10 +328,11 @@ MINOR: a 1.23.0 reader would ignore it and read the restore as every
 partition — OD-9). Each arm reads only the new block, or
 judges an existing field against it, and can only refuse: MINOR under OD-7
 (a). Both readers print one `replay selection:` coverage line for a document
-carrying the block, and for a sampled `pass` the `sample coverage:` line is
-QUALIFIED by the window (`a sampled pass over a replay selection from
-epoch-ms S to epoch-ms E: …`); `logweir drill show` shows
-`sample.coverage_note`, which opens with the same sentence.
+carrying the block (above), and for a sampled `pass` the `sample coverage:`
+line is QUALIFIED by the window (`a sampled pass over a replay selection from
+epoch-ms S to epoch-ms E: …; no record before the start was expected, and a
+sampled check does not prove that none was restored`); `logweir drill show`
+shows `sample.coverage_note`, which opens with the writer's sentence.
 
 **The version only rises.** A restore that states a start AND is sampled
 (FX-23's 1.6.0) is 1.7.0; each step that raises the version keeps the newer

@@ -799,7 +799,7 @@ history is:
 | `1.20.0` | Knows backup-receipt and catalog-point format `1.3.0` (PROD-05.1). Adds the backup receipt's eight `topic_configuration` arms (12–19) and two `owner_detection` arms (20–21), their shape checks (the counts are `u32`, an entry's value a string or absent, `owner_detection` a list of strings) and the `topic_configuration` lines: per topic the recorded partition count, replication factor, entry counts by portability class and the apply route — never a configuration value. The route is the admin API only where `owner_detection` says the run looked for an owner; otherwise the line says the owner was not checked. Every document without the block is decided exactly as before. |
 | `1.21.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.4.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.4.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
 | `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line naming them; for every sampled `pass` it also prints a `sample coverage:` line saying whether the document's version proves FX-23's checks ran (only 1.6.0 or later does). Every document without the field is decided exactly as before. |
-| `1.23.0` | Knows scorecard format `1.7.0` (PROD-11.1). Adds `source.selection`'s three arms (SEL-1 to SEL-3: only from 1.7.0; a start before the end; a complete block over the block's window) and its shape check (an object with two integers), prints the `replay selection:` coverage line, and for a sampled `pass` over a selection prints the `sample coverage:` line QUALIFIED by the window (`a sampled pass over a replay selection from epoch-ms S to epoch-ms E: …`) instead of the unqualified 1.6.0 line. Every document without the block is decided exactly as before. |
+| `1.23.0` | Knows scorecard format `1.7.0` (PROD-11.1). Adds `source.selection`'s three arms (SEL-1 to SEL-3: only from 1.7.0; a start before the end; a complete block over the block's window) and its shape check (an object with two integers), prints the `replay selection:` coverage line — saying no record before the start was RESTORED only over a complete verification that passed, and for a sampled document that the sampled check does not prove it — and for a sampled `pass` over a selection prints the `sample coverage:` line QUALIFIED by the window (`a sampled pass over a replay selection from epoch-ms S to epoch-ms E: …`) instead of the unqualified 1.6.0 line. Every document without the block is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
@@ -817,12 +817,21 @@ mapped partition was held to its own count bound, …` (every partition was,
 over the restore window), and `1.21.0`, `1.22.0` and main's reader print, for
 the complete one, `integrity coverage: every selected record compared: 18
 expected, 18 restored, 18 matching, …`. None claims a restore from the
-archive's floor; the document's `sample.window_start` is the start,
-`sample.coverage_note` opens with it, and a complete block's
-`window.start_ms` is it. `1.23.0` adds the `replay selection:` line and says
-`a sampled pass over a replay selection from epoch-ms 1760000000030 to
-epoch-ms 1760000010000: …` instead of the unqualified line
-([the record](to-do/decisions/PROD-11.1-replay-selection.md) §5.4).
+archive's floor, and none names the start: the field that does is the
+free-text `sample.coverage_note`, which `logweir drill show` prints (a
+complete block's `window.start_ms` is the start too).
+
+`1.23.0` adds the `replay selection:` line and says `a sampled pass over a
+replay selection from epoch-ms 1760000000030 to epoch-ms 1760000010000: …`
+instead of the unqualified line. Each lane claims only what it proves about
+the records before the start: the line ends `no record before the start was
+restored or expected` only over a complete verification that passed (a
+restored record below the start is `unexpected` there); a sampled document
+ends `no record before the start was expected; a sampled check does not
+prove that none was restored` (a segment straddling the start counts all of
+its records into the per-partition bound), and anything else `no record
+before the start was expected`
+([the record](to-do/decisions/PROD-11.1-replay-selection.md) §5.3, §5.4).
 
 A verifier older than `1.22.0`, and a `logweir` built before FX-23, accept a
 1.6.0 scorecard — the major is unchanged — ignore `sample.unsampled_topics`

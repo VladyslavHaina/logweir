@@ -938,7 +938,9 @@ the start too
 ([stability.md](stability.md#scorecard-format-170-sourceselection-a-restore-from-a-stated-window-start-prod-111)).
 `verify_scorecard.py` 1.23.0 and `logweir drill verify` check it (arms SEL-1
 to SEL-3), print a `replay selection:` line, and qualify a sampled `pass` by
-its window.
+its window. Each says no record before the start was restored only over a
+complete verification that passed; for a sampled document it says the
+sampled check does not prove it.
 **Refused:** `restore.partitions` (a partition subset), by name,
 `PartitionSubsetsAwaitOwnerDecision`, until the owner decides how a
 subset-narrowed scorecard is versioned (OD-9); and a plan stating a start

@@ -475,15 +475,27 @@ manifest, and is signed
   `[start, end]`, and a complete verification expects every archived record
   whose own timestamp is in that window. Every partition of every restored
   topic is restored: the block narrows the window, never the partitions.
-- **An older reader never reads it as a restore from the floor**, because the
-  existing fields name the start: `sample.window_start` is never earlier than
-  it, `sample.coverage_note` opens with `replay selection: … from epoch-ms S
-  (the plan's stated window start, inclusive) …`, and a complete block's
-  `window.start_ms` is it. What 1.21.0, 1.22.0 and main's `logweir drill
-  verify` print for a sampled and a complete document is quoted in
-  [`verify-a-scorecard.md`](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves);
-  this release's readers also print a `replay selection:` line and qualify a
-  sampled pass by the window.
+- **Nothing an older reader prints about it is false** (review N2). What
+  1.21.0, 1.22.0 and main's `logweir drill verify` print for a sampled and a
+  complete document is quoted in
+  [`verify-a-scorecard.md`](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves):
+  a sampled pass's per-partition guarantee holds over the window, and a
+  complete pass's `every selected record compared` is true. They print
+  nothing that names the start: the field that does is the free-text
+  `sample.coverage_note` (it opens with `replay selection: … from epoch-ms S
+  (the plan's stated window start, inclusive) …`), which `logweir drill show`
+  of any version prints; a complete block's `window.start_ms` is the start
+  too, while a sampled document's `sample.window_start` is its sample window,
+  which an unnarrowed document can share. This release's readers print a
+  `replay selection:` line and qualify a sampled pass by the window.
+- **Each lane claims only what it proves about records before the start**
+  (review N1). Only a complete verification that passed proves none was
+  restored (a restored record below the start is `unexpected`, and IV-6 holds
+  a complete pass to none); a sampled check does not, because a segment
+  straddling the start counts all of its records into the per-partition
+  bound. The writer's coverage note never says none was restored, and both
+  readers say it only over a complete pass
+  ([the format](formats/drill-scorecard.md#sourceselection-format-170)).
 - **Partition subsets are refused** (`restore.partitions`,
   `PartitionSubsetsAwaitOwnerDecision`, exit 3 before anything runs) until the
   owner decides OD-9. A subset-narrowed document would be misread by every
