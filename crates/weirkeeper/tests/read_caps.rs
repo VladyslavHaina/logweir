@@ -338,6 +338,8 @@ const TEST_NAME: &str = "the_controller_read_paths_hold_bounded_memory_over_a_51
 const CHILD_ENV: &str = "FX31_MEM_CHILD";
 const ROOT_ENV: &str = "FX31_MEM_ROOT";
 const PEAK_LINE: &str = "FX31_PEAK_RSS=";
+/// What a capped child prints about each path's answer; the parent relays it.
+const CHILD_LINE: &str = "[fx31-child]";
 
 /// This process's own peak resident set, in bytes (`ru_maxrss` is kilobytes on
 /// Linux and bytes on macOS). Read by the CHILD at its end, so each child
@@ -428,9 +430,6 @@ fn run_child(mode: &str, root: &Path) {
     match mode {
         "baseline" | "capped" => {
             let r = verify(&store, &sha256_prefixed(b"x"));
-            if mode == "capped" {
-                assert_eq!(r.result, VerificationVerdict::NotAttempted, "{r:?}");
-            }
             let keys = EvidenceKeys {
                 receipt: Some(PAYLOAD_KEY.to_string()),
                 sidecar: Some(SIDECAR_KEY.to_string()),
@@ -438,8 +437,11 @@ fn run_child(mode: &str, root: &Path) {
             };
             let o = observe_archive(&store, &keys).expect("an observation");
             assert!(o.presence.payload && o.presence.sidecar, "{o:?}");
-            let _ = observe_scorecard(&store, "logweir/drills/r2.scorecard.json");
-            let _ = read_signing_time(
+            let (_, refused) = split_refused(observe_scorecard(
+                &store,
+                "logweir/drills/r2.scorecard.json",
+            ));
+            let signing_time = read_signing_time(
                 Some(&store),
                 &SigningTimeNeed {
                     payload_key: PAYLOAD_KEY.to_string(),
@@ -459,6 +461,37 @@ fn run_child(mode: &str, root: &Path) {
             )
             .expect("the listing answers");
             assert_eq!(report.skipped.len(), 1, "{report:?}");
+            if mode == "capped" {
+                // What each path SAID, for the record a live run keeps.
+                println!(
+                    "{CHILD_LINE} verify_evidence: {:?} {:?}",
+                    r.result, r.detail
+                );
+                println!(
+                    "{CHILD_LINE} observe_archive: presence {:?}, receipt_sha256 {:?}",
+                    o.presence, o.receipt_sha256
+                );
+                println!("{CHILD_LINE} observe_scorecard: read_refused {refused:?}");
+                println!("{CHILD_LINE} read_signing_time: {signing_time:?}");
+                println!(
+                    "{CHILD_LINE} retention skipped: {:?}",
+                    report.skipped[0].reason
+                );
+                assert_eq!(r.result, VerificationVerdict::NotAttempted, "{r:?}");
+                assert!(
+                    r.detail
+                        .as_deref()
+                        .is_some_and(|d| names(d, caps::CONTROLLER_DOCUMENT)),
+                    "{r:?}"
+                );
+                assert!(refused.is_some_and(|d| names(&d, caps::CONTROLLER_DOCUMENT)));
+                assert!(
+                    matches!(&signing_time, SigningTime::Unreadable(d) if names(d, caps::CONTROLLER_DOCUMENT))
+                );
+                assert!(report.skipped[0]
+                    .reason
+                    .contains(&format!("{}-byte read cap", caps::CONTROLLER_MANIFEST)));
+            }
         }
         "uncapped" => {
             let (bytes, _) = store
@@ -511,6 +544,9 @@ fn child_peak_over(mode: &str, root: &Path, live: Option<&str>) -> u64 {
     };
     let out = cmd.output().expect("the child test process starts");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines().filter(|l| l.contains(CHILD_LINE)) {
+        eprintln!("{mode}: {}", &line[line.find(CHILD_LINE).unwrap_or(0)..]);
+    }
     assert!(
         out.status.success(),
         "the {mode} child failed: {}\n{stdout}\n{}",
@@ -605,8 +641,12 @@ fn the_controller_read_paths_hold_bounded_memory_over_a_512_mib_object() {
         "the controller's read paths over {PLANTED}-byte objects added {added} bytes of resident \
          memory at their peak; each must be refused at its cap, never read (bound {BOUND})"
     );
+    // FOUR TIMES THE BOUND, NOT THE OBJECT'S SIZE: the planted objects are
+    // sparse, so the control reads zeros, and macOS compresses idle zero pages
+    // under memory pressure — a loaded host measured the 512 MiB read at
+    // 251 MB resident. The meter still has to tell that read from the bound.
     assert!(
-        whole > PLANTED / 2,
+        whole > 4 * BOUND,
         "the control added only {whole} bytes; the meter cannot tell a capped read from a whole \
          one at this size"
     );
@@ -664,7 +704,7 @@ fn the_controller_read_paths_hold_bounded_memory_against_minio() {
         "the capped paths added {added} bytes over S3 (bound {BOUND})"
     );
     assert!(
-        whole > size / 2,
-        "the control added only {whole} bytes over S3"
+        whole > 4 * BOUND,
+        "the control added only {whole} bytes over S3 (objects of {size} bytes)"
     );
 }

@@ -1395,7 +1395,7 @@ Controller rows (`crates/weirkeeper/tests/read_caps.rs`):
 - an oversized receipt, sidecar, scorecard, signing-time re-read and manifest
   each name the cap, while the signed fixture verifies;
 - in a child process, the five controller read paths over 512 MiB objects add
-  0 B of peak RSS. A read under a cap far too large adds 511 MiB. Over a 16 MiB
+  0 B of peak RSS, while a read under a cap far too large adds hundreds of MiB. Over a 16 MiB
   manifest of tiny values, the streaming fold adds the bytes, while a
   `serde_json::Value` of them adds 37 times their size.
 
