@@ -2062,7 +2062,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a stopped client meets the console's stall deadline",
             "IO_STALL_TIMEOUT",
         ),
-        // PROD-03.0 (2026-10-09, item 45): topics whose records need a schema
+        // FX-29 (2026-10-09, item 45): a status is written only when its
+        // content moves; the field whose leftover spun the PoC's schedules.
+        (
+            "a controller no longer rewrites an unchanged status",
+            "status.lastSlot.backupRef",
+        ),
+        // PROD-03.0 (2026-10-09, item 46): topics whose records need a schema
         // registry are flagged from the archived bytes, and the console says
         // the registry was not captured.
         (

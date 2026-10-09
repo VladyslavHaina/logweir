@@ -1044,22 +1044,28 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
         "this file reads the clock exactly once, in the `kube::runtime` reconcile wrapper. A \
          second read is a second slot."
     );
+    // FX-29 REVIEW M-1 MOVED THE BODY, AND THE NEEDLE FOLLOWED IT. The
+    // wrapper now reads the clock once and hands it, as an argument, to
+    // `reconcile_pass` — public so a test can drive the controller by its own
+    // requeue — and `reconcile_pass` hands that ONE instant to both the
+    // decision and the requeue. The property is unchanged: one read, bound
+    // once, and the decision and the requeue agree about what time it is.
     let wrapper = fn_body(
         &src,
         "async fn reconcile(\n    schedule: Arc<BackupSchedule>,",
     );
+    let pass = fn_body(&src, "pub async fn reconcile_pass(");
     assert!(
-        wrapper.contains("let now = Utc::now();")
-            && wrapper.contains(
-                "reconcile_schedule_with_archive(&schedule, &ctx.client, ctx.archive.as_ref(), \
-                 now)"
-            ),
+        wrapper
+            .contains("reconcile_pass(&schedule, &ctx.client, ctx.archive.as_ref(), Utc::now())")
+            && pass.contains("reconcile_schedule_with_archive(schedule, client, archive, now)")
+            && pass.contains("schedule_action(&outcome.decision, now)"),
         "the one clock read is the wrapper's, it is bound ONCE, and it is handed straight to \
          `reconcile_schedule_with_archive` as an argument — beside the archive handle Task 19 \
          threads through, which is a value on the context and not a second clock. The binding \
          matters now that the requeue interval is also computed from it (D1 §4.5 step 8): two \
          `Utc::now()` calls in one reconcile would let the decision and the requeue disagree \
-         about what time it is. Got:\n{wrapper}"
+         about what time it is. Got:\n{wrapper}\n{pass}"
     );
 
     // AND `slot.rs` READS NO CLOCK AT ALL (review finding LOW-2). Both the

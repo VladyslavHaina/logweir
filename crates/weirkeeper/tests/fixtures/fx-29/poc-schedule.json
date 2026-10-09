@@ -1,0 +1,136 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "BackupSchedule",
+  "metadata": {
+    "creationTimestamp": "2026-09-25T00:46:58Z",
+    "generation": 3,
+    "name": "sch-klp5kny4fbji4r2clgj4l4bdaf",
+    "namespace": "logweir-poc",
+    "resourceVersion": "22669098",
+    "uid": "0d27ddf5-1c97-44fe-8ce7-ea357d45a035"
+  },
+  "spec": {
+    "archive": {
+      "url": "logweir-destination://primary"
+    },
+    "concurrencyPolicy": "Forbid",
+    "destinationRef": {
+      "name": "primary"
+    },
+    "schedule": "0 2 * * *",
+    "sourceRef": {
+      "name": "conn-pu7pwgan6rdxmaxflvg3rmchxk"
+    },
+    "suspend": false,
+    "topics": [
+      "orders",
+      "payments"
+    ]
+  },
+  "status": {
+    "activeRuns": [],
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-10-09T12:12:06.259745715Z",
+        "message": "slot 20261009-020000 is past its starting deadline and was not fired; catchUpPolicy is None, so it is counted in status.missedSlots and the next firing is 2026-10-10T02:00:00Z",
+        "observedGeneration": 3,
+        "reason": "SlotMissed",
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-10-08T02:00:00.004839083Z",
+        "message": "History is retained: no run is owned by this schedule, so deleting it leaves all 16 run(s), their plan ConfigMaps and their archives in place.",
+        "observedGeneration": 3,
+        "reason": "Retained",
+        "status": "True",
+        "type": "HistoryRetained"
+      }
+    ],
+    "history": {
+      "estimatedBytes": 136634,
+      "inventoriedAt": "2026-10-09T12:52:02.190384672Z",
+      "legacyMigratableRuns": 0,
+      "legacyOwnedRuns": 0,
+      "ownershipScanComplete": true,
+      "runCount": 16,
+      "runCountCapped": false
+    },
+    "lastFireTime": "2026-10-08T02:00:00Z",
+    "lastMissedSlot": "20261009-020000",
+    "lastSlot": {
+      "attempt": 0,
+      "backupRef": {
+        "name": "logweir-backup-sch-klp5kny4fbji4r2clgj4l4bdaf-20261008-020000"
+      },
+      "decidedAt": "2026-10-09T13:15:56.545098710Z",
+      "disposition": "Missed",
+      "dueAt": "2026-10-09T02:00:00Z",
+      "reason": "SlotMissed",
+      "slot": "20261009-020000"
+    },
+    "missedSlots": {
+      "count": 4,
+      "countCapped": false,
+      "lastEvaluatedSlot": "20261009-020000",
+      "recent": [
+        {
+          "reason": "PastStartingDeadline",
+          "recordedAt": "2026-10-09T11:52:02.176698797Z",
+          "slot": "20261009-020000"
+        },
+        {
+          "reason": "PastStartingDeadline",
+          "recordedAt": "2026-10-07T23:50:30.993261003Z",
+          "slot": "20261007-020000"
+        },
+        {
+          "reason": "PastStartingDeadline",
+          "recordedAt": "2026-09-28T09:13:51.368963919Z",
+          "slot": "20260928-020000"
+        }
+      ]
+    },
+    "nextFireTime": "2026-10-10T02:00:00Z",
+    "nextRuns": [
+      {
+        "at": "2026-10-10T02:00:00Z",
+        "localTime": "2026-10-10T02:00:00+00:00"
+      },
+      {
+        "at": "2026-10-11T02:00:00Z",
+        "localTime": "2026-10-11T02:00:00+00:00"
+      },
+      {
+        "at": "2026-10-12T02:00:00Z",
+        "localTime": "2026-10-12T02:00:00+00:00"
+      },
+      {
+        "at": "2026-10-13T02:00:00Z",
+        "localTime": "2026-10-13T02:00:00+00:00"
+      },
+      {
+        "at": "2026-10-14T02:00:00Z",
+        "localTime": "2026-10-14T02:00:00+00:00"
+      }
+    ],
+    "observedGeneration": 3,
+    "policy": {
+      "effectiveSince": "2026-10-09T12:12:06.259745715Z",
+      "evaluatedAt": "2026-10-09T13:15:56.545098710Z",
+      "generation": 3,
+      "runPolicySha256": "sha256:1ea450d05600cb8bb8a0c7189b59f8db0d420733b9ba63c9fd99dce713bbd5ca",
+      "timeZone": "UTC",
+      "tzdb": "chrono-tz 0.10.4"
+    },
+    "retentionReport": {
+      "awsCli": [],
+      "evaluatedAt": "2026-09-25T00:46:58.371239504Z",
+      "mcCli": [],
+      "note": "this schedule writes to a saved BackupDestination, and the controller's single archive handle only evaluates schedules that do not name one; retention for this destination is reported by a RetentionPolicy",
+      "setsKept": [],
+      "setsThatWouldBeRemoved": [],
+      "skipped": []
+    }
+  }
+}

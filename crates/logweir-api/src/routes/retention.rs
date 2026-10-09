@@ -128,7 +128,9 @@ pub struct SkippedEntryView {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionEvaluationView {
-    /// When.
+    /// When an evaluation first reached the findings below. Later evaluations
+    /// that find the same keep this instant, so it is when the findings last
+    /// changed, not when the controller last looked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<DateTime<Utc>>,
     /// How many points were considered.

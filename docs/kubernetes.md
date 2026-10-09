@@ -2275,6 +2275,18 @@ digest it sits next to; the `ConfigMap` itself is created by the pass that start
 the run, so the ref can name an object that does not exist yet, which is the
 documented absent-object behaviour and not a fault.
 
+**`status.lastEvaluation.at` is when the findings beside it were first
+reached** (FX-29), not when the controller last looked. The controller
+evaluates on every reconcile, and a later evaluation that finds the same counts,
+candidates, protected and skipped points, plan and plan expiry keeps the instant;
+the first one that finds something different moves it. It used to be the clock
+of every evaluation, and since this controller's own status write wakes it, every
+`Report` or `Enforce` policy whose catalog resolved rewrote its status on every
+pass for as long as it existed. The `EVALUATED` printer column therefore reads
+"how long these findings have stood"; whether the controller is alive is the
+`Ready` and `Evaluated` conditions' business, and a new plan digest still moves
+`at` the moment it is rendered.
+
 **A retention run is recorded on the object BEFORE its Job exists.** The order
 is: the run record (`status.lastEnforcement.runId`, `startedAt`, `planSha256`,
 with every terminal field of the previous run cleared), and only then
@@ -4545,6 +4557,50 @@ kubectl --context docker-desktop get backupschedule nightly \
 default, and `kubectl explain backupschedule.status.lastMissedSlot` states the
 one-hour horizon it reproduces, so both are discoverable from the cluster and
 not only from this page.
+
+### A schedule's status moves when its content does (FX-29)
+
+**What wakes the controller.** A schedule is reconciled when it is created,
+when its spec changes (a new `metadata.generation`), and on the requeue every
+pass returns — at most 30 seconds, sooner when a retry or a slot is due first.
+A status write does not wake it: the controller is the only writer of a
+schedule's status, so a status event is its own last write coming back. A
+status edited by hand (clearing a stale reservation, say) is read at the next
+requeue.
+
+**What it writes.** Nothing, when the status it computes is the one the object
+already carries. The three "when" fields move only with what they time:
+
+- `status.lastSlot.decidedAt` is when the decision recorded beside it was
+  reached. It moves when the slot, `dueAt`, the attempt, the disposition, the
+  reason or the `backupRef` moves, and never on a reconcile that reaches the
+  same decision again.
+- `status.retentionReport.evaluatedAt` is when the report's findings were first
+  reached; an evaluation that finds the same keeps it.
+- `status.policy.evaluatedAt` is when the status last moved.
+
+One write is not about a decision: `status.history.inventoriedAt` moves once
+an hour, when the controller re-inventories the schedule's retained runs, and
+`policy.evaluatedAt` moves with it. A schedule watched for a steady
+`resourceVersion` therefore still writes about once an hour.
+
+`status.lastSlot.backupRef` is present only when the decision names a `Backup`
+(`Admitted`, `CaughtUp`, `Retried`, `Failed`, and `Exhausted` when an attempt exists). A
+`Missed`, `Blocked`, `NameUnavailable` or `Released` slot carries none.
+
+**Upgrading.** Before FX-29 a slot decided `Missed` (or `Blocked`, or
+`NameUnavailable`) right after one that ran kept the earlier slot's
+`backupRef`, because a merge patch cannot remove a key it does not send — and
+the controller read that leftover as a different decision on every pass, wrote
+a fresh `decidedAt` each time, and was woken by its own write: about 120 status
+writes a second per schedule on the PoC, until the next slot. The first
+reconcile after the upgrade removes the leftover reference with one status
+write, which moves `decidedAt` and `policy.evaluatedAt` once, to the instant of
+that write. Nothing else is rewritten. **Rolling back** restores the old
+behaviour the next time a slot is skipped or blocked after one that ran; a
+schedule that is spinning stops when it is suspended
+(`kubectl patch backupschedule <name> --type merge -p '{"spec":{"suspend":true}}'`)
+or when its next slot is decided.
 
 ### A schedule's retention report reports. It never deletes
 
