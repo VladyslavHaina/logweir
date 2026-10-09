@@ -646,7 +646,8 @@ mod tests {
         let records: BTreeMap<&String, u64> = topics.iter().map(|t| (*t, 1)).collect();
         let receipt: logweir_core::backup_receipt::BackupReceipt =
             serde_json::from_value(serde_json::json!({
-                "format_version": "1.5.0",
+                "format_version":
+                    logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS,
                 "run_id": "r", "backup_id": "b",
                 "requested_at": "2027-01-15T08:00:00Z",
                 "started_at": "2027-01-15T08:00:01Z",

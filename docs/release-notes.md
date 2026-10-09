@@ -1233,9 +1233,11 @@ transactional offset commit, `GroupVanishedDuringCapture` for a group deleted
 while it was read). A partition with no committed offset is counted, never
 offset 0. **The receipt's size depends on the selection, never on
 partitions** — 9 KB for 10 groups over 20 topics of 12 partitions and 44 KB for
-100 groups over 10 of 11, where inline positions would have been 482 KB and
-1.9 MB, over the catalog's 256 KiB read — so the catalog reads such a point
-`Available` and the console offers it. Both readers check six new receipt arms
+100 groups over 10 of 11 through the runner's own builder (52 KB and 66 KB live
+on Kafka 4.3.1, most of it the topics' configuration model), where inline
+positions would have been 482 KB and 1.9 MB (513 KB and 2.1 MB live), over the
+catalog's 256 KiB read — so the catalog reads such a point `Available` and the
+console offers it. Both readers check six new receipt arms
 (22 to 27) and, given the positions document (`--consumer-positions <file>`),
 fourteen more over it (CP-1 to CP-14), refusing a document changed after
 signing; they print one `consumer_positions` line per group and, with the

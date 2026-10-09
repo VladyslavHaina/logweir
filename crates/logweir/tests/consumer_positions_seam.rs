@@ -166,6 +166,21 @@ fn evidence() -> Store {
     Store::in_memory("logweir/")
 }
 
+/// The minor of a `1.x.y` version.
+fn minor_of(version: &str) -> u64 {
+    version
+        .split('.')
+        .nth(1)
+        .and_then(|m| m.parse().ok())
+        .unwrap_or_else(|| panic!("{version} is not 1.x.y"))
+}
+
+/// Whether `version` is major 1 at a minor of at least `since`: the version
+/// that defines a field, or a later one.
+fn defines(version: &str, since: u64) -> bool {
+    version.starts_with("1.") && minor_of(version) >= since
+}
+
 #[test]
 fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
     let f = Fixture::new();
@@ -206,7 +221,16 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
         .expect("the receipt was put");
     let receipt: logweir_core::backup_receipt::BackupReceipt =
         serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(receipt.format_version, "1.5.0");
+    // AT LEAST the minor that defines the block: a later minor that also
+    // defines it (a renumber at integration) is the same claim.
+    assert!(
+        defines(
+            &receipt.format_version,
+            logweir_core::backup_receipt::CONSUMER_POSITIONS_SINCE_MINOR
+        ),
+        "{}",
+        receipt.format_version
+    );
     assert_eq!(receipt.validate_invariants(), Ok(()));
     assert_eq!(receipt.consumer_positions.as_ref(), Some(block));
 
@@ -250,7 +274,14 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
     let point: logweir::catalog::record::CatalogPoint = serde_json::from_slice(&record).unwrap();
     let summary = point.consumer_positions.expect("the summary travels");
     assert_eq!(summary.sha256, block.digest().unwrap());
-    assert_eq!(point.format_version, "1.5.0");
+    assert!(
+        defines(
+            &point.format_version,
+            minor_of(logweir::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS)
+        ),
+        "{}",
+        point.format_version
+    );
 
     // CONTROL: the same backup selecting nothing writes the receipt it wrote
     // before PROD-04.1.

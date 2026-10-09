@@ -2140,7 +2140,9 @@ mod tests {
             manifest_key: None,
             manifest_sha256: None,
             recorded_at: None,
-            format_version: Some("1.5.0".into()),
+            format_version: Some(
+                crate::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.into(),
+            ),
             availability: Availability::Available,
             signature: SignatureVerdict::Verified,
             signer_key_id: None,

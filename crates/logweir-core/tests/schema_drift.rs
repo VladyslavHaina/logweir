@@ -786,9 +786,18 @@ fn the_frozen_1_4_0_receipt_schema_is_still_prod_01_3s() {
             .any(|r| r == "consumer_positions"),
         "consumer_positions is OPTIONAL: a backup that selects no group writes none"
     );
+    // AT LEAST 1.5.0, and the minor arm 22 gates on: a renumber at
+    // integration moves both together, never below PROD-01.3's 1.4.0.
+    let minor: u64 = logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+        .split('.')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(minor >= 5);
     assert_eq!(
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS,
-        "1.5.0"
+        minor,
+        logweir_core::backup_receipt::CONSUMER_POSITIONS_SINCE_MINOR
     );
 }
 

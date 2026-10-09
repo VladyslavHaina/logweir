@@ -362,8 +362,14 @@ own builder with every group committed on every partition
 | 10 groups over 20 topics × 12 partitions | 9,264 bytes | 4,046 bytes | 481,703 bytes |
 | 100 groups over 10 topics × 11 partitions | 43,715 bytes | 37,527 bytes | 1,943,683 bytes |
 
-Before this split those positions were inline, and both receipts were over the
-catalog's cap (the review measured 487,437 and 1,947,657 bytes).
+Live on Kafka 4.3.1 through `logweir backup run`
+(`e2e/tests/position_evidence.rs::a_large_selection_keeps_the_receipt_small_and_its_positions_verified`,
+one record in every partition), the same two selections signed 52,049 and
+65,530-byte receipts — most of it the topics' configuration model, which grows
+with topics, not groups — beside 512,787 and 2,087,137-byte positions
+documents. Before this split those positions were inline, and both receipts
+were over the catalog's cap (the review measured 487,437 and 1,947,657
+bytes).
 
 **The positions document** is `logweir/backups/<backup_id>/<run_id>.consumer-positions.json`,
 beside the receipt, put create-only BEFORE the receipt (a receipt never names a

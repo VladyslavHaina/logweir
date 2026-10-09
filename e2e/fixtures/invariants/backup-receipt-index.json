@@ -400,8 +400,8 @@
     "arm": ""
   },
   {
-    "id": "consumer_positions_under_format_1_4_0",
-    "file": "consumer_positions_under_format_1_4_0.json",
+    "id": "consumer_positions_under_the_minor_before_it",
+    "file": "consumer_positions_under_the_minor_before_it.json",
     "rust_exit": 4,
     "python_exit": 1,
     "reason": "consumer_positions is present but format_version \"1.4.0\" predates it: the field is defined from 1.5.0",

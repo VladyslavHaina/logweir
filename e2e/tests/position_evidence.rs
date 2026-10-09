@@ -17,7 +17,7 @@
 //! | `expired_records_and_deleted_offsets_are_never_read_as_positions` | a position below the log start (DeleteRecords) is `beforeLogStart`; a group whose offsets on one topic were deleted (the shape offset expiry leaves) is `noCommittedPosition` there, never 0, and keeps its other topic's position | the CLI shows no row for the deleted offsets |
 //! | `a_partition_added_during_the_capture_is_listed_not_observed` | a partition added while the engine runs is listed for each captured group as `notObserved: PartitionAddedDuringCapture` | the partitions read at capture are captured |
 //! | `the_capture_is_readable_after_the_source_topic_and_group_are_gone` | after the backup the source topic and group are deleted; the receipt still verifies under both readers and still says where the group was | the source itself now answers the group absent |
-//! | `a_large_selection_keeps_the_receipt_small_and_its_positions_verified` | review H1's two sizes live — 100 groups (the most) over 10 topics of 11 partitions, and 10 groups over 20 of 12, every group committed on every partition: the signed receipt stays under 64 KiB (a quarter of the catalog's read cap), every group is captured with counts over every partition, the positions document holds all of them and both readers verify it, and the catalog point carries the summary | the positions document itself is over 256 KiB at both sizes: inline, the receipt would have been `Unreadable` to the catalog |
+//! | `a_large_selection_keeps_the_receipt_small_and_its_positions_verified` | review H1's two sizes live — 100 groups (the most) over 10 topics of 11 partitions, and 10 groups over 20 of 12, one record in every partition and every group committed at its end: the signed receipt stays under 128 KiB (half the catalog's read cap; measured 65,530 and 52,049 bytes, most of it the topics' configuration model) and its block under `MAX_BLOCK_BYTES`, every group is captured with every position related, the positions document holds all of them and both readers verify it, and the catalog point carries the summary | the positions document itself is over 256 KiB at both sizes: inline, the receipt would have been `Unreadable` to the catalog |
 //!
 //! # Running them
 //!
@@ -308,6 +308,39 @@ impl Broker {
         producer
             .flush(Duration::from_secs(30))
             .unwrap_or_else(|e| panic!("flush {topic}: {e}"));
+    }
+
+    /// One record in every partition of every topic in `topics`, through ONE
+    /// producer flushed once.
+    fn produce_everywhere(&self, topics: &[String], partitions: i32) {
+        use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+        let producer: BaseProducer = rdkafka::config::ClientConfig::new()
+            .set("bootstrap.servers", &self.plaintext)
+            .set("message.timeout.ms", "30000")
+            .create()
+            .expect("a producer");
+        for topic in topics {
+            for partition in 0..partitions {
+                let payload = format!("{topic}-{partition}");
+                loop {
+                    match producer.send(
+                        BaseRecord::to(topic)
+                            .partition(partition)
+                            .key("k")
+                            .payload(&payload),
+                    ) {
+                        Ok(()) => break,
+                        Err((e, _)) if e.to_string().contains("QueueFull") => {
+                            producer.poll(Duration::from_millis(50));
+                        }
+                        Err((e, _)) => panic!("produce to {topic}: {e}"),
+                    }
+                }
+            }
+        }
+        producer
+            .flush(Duration::from_secs(60))
+            .unwrap_or_else(|e| panic!("flush: {e}"));
     }
 
     /// A non-member commit of `offset` on each `(topic, partition)` for
@@ -875,7 +908,21 @@ fn every_selected_group_gets_one_outcome_in_the_signed_receipt() {
         plan_groups,
         cli_groups: vec![last, absent.clone()],
     });
-    assert_eq!(b.receipt.format_version, "1.5.0");
+    // AT LEAST the minor that defines the block (a renumber at integration
+    // makes it later, never earlier).
+    let minor: u64 = b
+        .receipt
+        .format_version
+        .split('.')
+        .nth(1)
+        .and_then(|m| m.parse().ok())
+        .expect("a 1.x.y receipt");
+    assert!(
+        b.receipt.format_version.starts_with("1.")
+            && minor >= logweir_core::backup_receipt::CONSUMER_POSITIONS_SINCE_MINOR,
+        "{}",
+        b.receipt.format_version
+    );
     let block = b.block();
     assert_eq!(
         block.groups.len(),
@@ -1570,9 +1617,12 @@ fn a_large_selection_keeps_the_receipt_small_and_its_positions_verified() {
         for t in &names {
             broker.create_topic(t, partitions as u32);
         }
+        // One record in every partition, through one producer: the backup
+        // archives offset 0 everywhere, and a commit at 1 is `atArchiveEnd`.
+        broker.produce_everywhere(&names, partitions);
         let every: Vec<(&str, i32, i64)> = names
             .iter()
-            .flat_map(|t| (0..partitions).map(move |p| (t.as_str(), p, 0)))
+            .flat_map(|t| (0..partitions).map(move |p| (t.as_str(), p, 1)))
             .collect();
         for id in &ids {
             broker.commit(id, &every);
@@ -1593,9 +1643,17 @@ fn a_large_selection_keeps_the_receipt_small_and_its_positions_verified() {
             "receipt_bytes": b.receipt_bytes.len(), "document_bytes": doc_bytes.len(),
         });
         eprintln!("[prod-04-1] h1 {size}");
+        // The catalog reads a receipt whole up to 256 KiB: this one is under
+        // half of it, and the block in it under its proved bound.
         assert!(
-            b.receipt_bytes.len() < 64 * 1024,
+            b.receipt_bytes.len() < 128 * 1024,
             "the receipt is not well under the catalog's 256 KiB read cap: {size}"
+        );
+        let block = logweir_core::det_json::to_deterministic_json(b.block()).unwrap();
+        assert!(
+            block.len() < logweir_core::consumer_positions::MAX_BLOCK_BYTES,
+            "the block is over its bound: {} bytes, {size}",
+            block.len()
         );
         assert!(
             doc_bytes.len() > 256 * 1024,
@@ -1607,6 +1665,11 @@ fn a_large_selection_keeps_the_receipt_small_and_its_positions_verified() {
             let c = g.counts.expect("counts");
             assert_eq!(c.total(), total as u64, "{id}: every partition counted");
             assert_eq!(c.never_committed, 0, "{id} committed everywhere");
+            assert_eq!(
+                u64::from(c.related),
+                total as u64,
+                "{id}: every position is at the archive's end, so relates"
+            );
             assert_eq!(doc.groups[id].positions.len(), total, "{id}");
         }
         let verify = verify_both(&b);

@@ -2435,7 +2435,7 @@ fn the_point_id_fixture_is_the_catalogs() {
 /// `hidden` failed — bound to the positions document that holds them.
 fn receipt_1_5_at(position: i64) -> BackupReceipt {
     let mut r = receipt_1_3();
-    r.format_version = "1.5.0".into();
+    r.format_version = logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.into();
     let doc: logweir_core::consumer_positions::PositionsDocument =
         serde_json::from_value(serde_json::json!({
             "format_version": "1.0.0",

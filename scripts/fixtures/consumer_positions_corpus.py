@@ -57,7 +57,11 @@ def facts(p, marks=None, after=None, archived=None):
 
 
 BASE = json.loads((CORPUS / "receipt_1_3_with_topic_configuration.json").read_text())
-BASE["format_version"] = "1.5.0"
+# The minor that defines the block, read from the verifier (which
+# `test_the_consumer_positions_minor_is_the_rust_readers` holds to the Rust
+# constant): a renumber at integration moves it, and this script is rerun.
+SINCE = V.RECEIPT_CONSUMER_POSITIONS_SINCE_MINOR
+BASE["format_version"] = f"1.{SINCE}.0"
 
 
 def document():
@@ -193,8 +197,8 @@ def strip(r, gid, *names):
 
 RECEIPT_CASES = [
     ("receipt_1_5_with_consumer_positions", lambda r: r),
-    ("consumer_positions_under_format_1_4_0",
-     lambda r: r.update(format_version="1.4.0") or r),
+    ("consumer_positions_under_the_minor_before_it",
+     lambda r: r.update(format_version=f"1.{SINCE - 1}.0") or r),
     ("consumer_positions_no_group",
      lambda r: r["consumer_positions"].update(groups={}) or r),
     ("consumer_positions_capture_ends_before_it_starts",

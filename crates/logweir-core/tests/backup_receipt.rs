@@ -1658,7 +1658,8 @@ fn pristine_document() -> PositionsDocument {
 /// excluded GroupNotFound, `hidden` failed NotVisibleToPrincipal.
 fn pristine_1_5() -> BackupReceipt {
     let mut doc = pristine_1_3();
-    doc.format_version = "1.5.0".to_string();
+    doc.format_version =
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.to_string();
     let block = serde_json::json!({
         "observed_from": "2026-09-09T11:02:15Z",
         "observed_to": "2026-09-09T11:02:16Z",
@@ -1734,13 +1735,17 @@ fn a_1_5_0_receipt_and_its_document_satisfy_every_invariant() {
 }
 
 #[test]
-fn arm_22_refuses_consumer_positions_under_a_minor_before_5() {
+fn arm_22_refuses_consumer_positions_under_the_minor_before_it() {
+    use logweir_core::backup_receipt::CONSUMER_POSITIONS_SINCE_MINOR as SINCE;
     let mut doc = pristine_1_5();
-    doc.format_version = "1.4.0".to_string();
+    let before = format!("1.{}.0", SINCE - 1);
+    doc.format_version = before.clone();
     assert_eq!(
         doc.validate_invariants().unwrap_err(),
-        "consumer_positions is present but format_version \"1.4.0\" predates it: the field is \
-         defined from 1.5.0"
+        format!(
+            "consumer_positions is present but format_version {before:?} predates it: the field \
+             is defined from 1.{SINCE}.0"
+        )
     );
 }
 
@@ -2050,10 +2055,16 @@ fn the_written_version_defines_consumer_positions() {
     assert_eq!(minor, CONSUMER_POSITIONS_SINCE_MINOR);
     let mut archive = pristine().archive;
     let mut auth = pristine().source.auth;
-    assert_eq!(format_version_for(&archive, true, &auth, true), "1.5.0");
+    assert_eq!(
+        format_version_for(&archive, true, &auth, true),
+        FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+    );
     archive.manifest_version_id = Some("v1".into());
     auth.mode = "mtls".into();
-    assert_eq!(format_version_for(&archive, true, &auth, true), "1.5.0");
+    assert_eq!(
+        format_version_for(&archive, true, &auth, true),
+        FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+    );
     assert_eq!(format_version_for(&archive, true, &auth, false), "1.4.0");
 }
 
@@ -2091,7 +2102,8 @@ fn validate_consumer_positions_document_has_exactly_fourteen_return_err_statemen
 #[test]
 fn cp_1_refuses_a_document_for_a_receipt_that_selected_no_group() {
     let mut doc = pristine_1_3();
-    doc.format_version = "1.5.0".into();
+    doc.format_version =
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.into();
     let positions = pristine_document();
     let bytes = positions.to_bytes().unwrap();
     assert_eq!(
