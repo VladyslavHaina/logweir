@@ -27,10 +27,15 @@ binding), 34 (FX-16, a point-bound restore restores its point's set), 35
 (PROD-00.2, the engine built from the vendored source), 36 (FX-23, an
 early-stopped restore is never signed `pass`), 37 (PROD-04.0b, the
 one crate that may hold `unsafe` code, and the consumer-group and ACL reads
-behind it), 38 (FX-20, the binding for every other credential reference)
+behind it), 38 (FX-20, the binding for every other credential reference),
 39 (FX-18, a topic phase 0 creates is used only once the cluster serves
-it), 40 (FX-24, a silent connection meets the console's header deadline)
-and 41 (PROD-04.1, consumer position evidence for selected groups) so far. Items continue the next entry's
+it), 40 (FX-24, a silent connection meets the console's header deadline),
+41 (FX-21, a replication factor the archive does not record is never
+read as matching; the engine's first patch), 42 (PROD-11.1, a restore
+can select a window start) 43 (PROD-08.1a, complete coverage requested
+and shown through the CRDs, the API and the console), 44 (FX-24b, a
+client that stops reading or sending meets a stall deadline) and 45
+(PROD-04.1, consumer position evidence for selected groups) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -84,7 +89,15 @@ Item 40 is fix-now row FX-24, proven by rows on the built console binary and
 live on the host in localAdmin mode; it changes the console only, and the PoC
 upgrade that carries it repeats the silent-socket probe against the shared-mode
 console.
-Item 41 is row PROD-04.1, proven by unit, seam, corpus and parity rows and on
+Item 41 is fix-now row FX-21, proven by unit, phase and reader rows and on
+the compose stack (`cluster3`) with three engines; it changes the runner's
+phase 7 and the engine (patch 0002, build `0.23.3+logweir.2`), so the PoC
+refresh that carries it runs a multi-topic backup and restore and reads the
+new runner's engine identity.
+Item 44 is fix-now row FX-24b, proven the same way; it changes the console
+only, and the PoC upgrade that carries it repeats the slow-reader probe and
+the event-stream row against the shared-mode console.
+Item 45 is row PROD-04.1, proven by unit, seam, corpus and parity rows and on
 the compose stack (Kafka 4.3.1 with the `acl` and `streams-protocol` profiles,
 and the default 3.7.1 line); it changes the runner's signed receipt and
 catalog record, the catalog's view (runner and controller), the product API
@@ -850,7 +863,6 @@ against a sentinel) is the next PoC upgrade's.
 the new status fields; bound Secrets keep working with them. An older console
 offers `existing` again, which this API refuses — roll the console with the
 controller.
-
 #### 39. A topic phase 0 creates is read, or handed to the engine, only once the cluster serves it (FX-18)
 
 **Changed.** Phase 0 creates the target topics (and, on a `LogAppendTime`
@@ -898,10 +910,8 @@ knowledge, `h2c`) is closed at its first line instead of being served HTTP/2,
 which had no header deadline either. Browsers, an ingress controller dialling
 an HTTP backend and kubelet probes all speak HTTP/1.1 to the console, and
 nothing Logweir ships spoke HTTP/2 to it. The deadline covers the request head
-only: a body a handler is reading and an answer a client has stopped reading
-have none, and **that case is still open (FX-24b)**: until it lands, clients
-that send requests and stop reading the answers can hold all 256 connections
-and the console answers nobody ([api.md](api.md#conventions)).
+only; a body a handler is reading and an answer a client has stopped reading
+are bounded by item 44 (FX-24b) ([api.md](api.md#conventions)).
 **Do:** nothing, unless an ingress controller was configured to dial the
 console's Service with HTTP/2 (an `h2c` or gRPC backend, never the chart's
 setting): return it to HTTP/1.1, or the console is unreachable through it
@@ -926,7 +936,278 @@ at the PoC upgrade that carries this item.
 **Rollback:** an older console serves HTTP/2 prior knowledge again and leaves a
 silent connection open; nothing is stored, so nothing needs converting.
 
-#### 41. A backup can record the committed positions of the consumer groups it names, as signed evidence (PROD-04.1)
+#### 41. A replication factor the archive does not record is never read as matching; the engine records every topic's (FX-21)
+
+**Changed.** Engine 0.23.3 records a topic's source replication factor in the
+archive's manifest for the FIRST topic a backup saves only, and phase 7 used
+the restored topic's own factor in place of a missing one, so every other
+topic's replication-factor difference was signed as no divergence. Phase 7 now
+compares the factor only where the source's is recorded: the manifest's, else
+the bound recovery point's receipt (`topic_configuration`, format 1.3.0,
+Logweir's own read of the source). Where neither records it, the scorecard
+names it in `topic_parity.not_assessed` as `"<target topic>:
+replication_factor (notRecorded)"`, with the twin `"<target topic>:
+replication_factor not assessed (notRecorded)"` in `unexpected_divergence`, and
+both readers print it in their `configuration parity: NOT ASSESSED for …`
+line. A partition count the manifest does not record (an archive before engine
+0.17) is the same case. The engine itself is fixed too: Logweir's first real
+engine patch, `0002-manifest-replication-factor.patch`, makes the manifest
+record every topic's factor, so the engine is now `kafka-backup
+0.23.3+logweir.2` (build-input digest
+`sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8`,
+appended to `third_party/kafka-backup-builds.txt`); `logweir doctor` accepts
+exactly that version. No document format moves: the new entries are content
+in two existing lists that can only move a verdict to the safer side (MINOR
+under OD-7's third case, [stability](stability.md#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
+**Do:** roll the controller and the runner image together, as for item 35. A
+standalone CLI install replaces its engine with build 2 and exports
+`LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest
+([quickstart.md](quickstart.md), step 4). No field marks FX-21's documents:
+a reader tells them apart by the writer identity every scorecard carries,
+`engine.version` (`0.23.3+logweir.2`, or a later `+logweir.<n>`) with
+`engine.digest` (`sha256:2bca49d7…`), which a runner image declares and ships
+beside the `logweir` that wrote the document, plus the archive's manifest
+(`source.backup_id`, `source.manifest_sha256`). For a scorecard with any other
+`engine.version`, or one a standalone CLI signed, a topic whose
+`topics[].source_replication_factor` the manifest lacks has no
+replication-factor finding, whatever the scorecard lists.
+**Scope:** unit rows over the rule (not recorded, recorded as 0 or less, only
+the factor missing) in both modes, phase-7 rows through `run` (no record, the
+receipt's factor where the manifest has none, the manifest's first where both
+do, the partition count, a `newTopic` document phase 8 signs), the arm NR-5
+row in both readers and the parity script's new case, and ten mutants, all
+killed (`claude/artifacts/fx-21/mutants/`). Live, on compose slot 1 with `cluster3`
+(Kafka 3.7.1): three topics at factors 3, 2 and 3 backed up in one run and
+restored by `newTopic` restores, unbound and bound to the point, on three
+engines. OSO's 0.23.3 (the container route) and Logweir's `0.23.3+logweir.1`
+recorded one factor of three; this build named the other two `notRecorded`
+unbound and compared all three from the receipt bound, and a `logweir` built
+before FX-21 signed the same two topics with no replication-factor entry at
+all. `0.23.3+logweir.2` recorded all three, each the broker's. The engine's
+own unit rows for the patch fail without it. Parity on one stack (Kafka 3.7.1),
+the engines run natively: `full_drill` 15/15, G-PITR and the record-semantics
+rows (contract asserted on build 2) compared SAME between builds 1 and 2, and
+the demo drill, the suites and the record-semantics files compared SAME
+between OSO's 0.23.3 (container route) and build 2; the replication factor
+the patch now records appears in none of those outputs. On a loaded host a
+natively built engine can fail a restore it starts within a second of phase
+0 creating the target topics (`Partition N not available`; measured 1 restore
+in 7 and, in the review, 1 in 17), so the parity runs waited 5 s before a
+restore (a test shim; [e2e/README.md](../e2e/README.md)); the race is its own
+tracker row.
+**Rollback:** an older `logweir` writes the old silence again; the documents
+this build wrote stay valid for every reader. An engine rollback (to
+`+logweir.1`, or OSO's 0.23.3 with `ENGINE_SOURCE=oso`) records one factor per
+backup again, which this build then names `notRecorded` unless a 1.3.0 receipt
+is bound. Archives are unaffected in either direction: the patch changes what
+the manifest records, never the segment format, and a manifest with every
+factor is read by every engine that reads one with the first.
+
+#### 42. A restore can select a window start, and the scorecard signs it (PROD-11.1)
+
+**Added.** A drill or restore plan may state an inclusive window START, as the
+interval form of its point in time:
+`restore.point_in_time: "<start>/<end>"`
+([drill-spec.md](formats/drill-spec.md#a-window-start-restorepoint_in_time-startend-prod-111)).
+A single instant is what it was. Every partition of every topic the plan names
+is restored from the start; a start before the archive's coverage (never moved
+to it), a start at or after the end and a window no archived segment overlaps
+are refused (exit 3) before any target topic is created. Phases 4 and 7 judge
+the window only. The restore preflight previews it through the same function
+execution uses (`WindowStartBeforeCoverage`, `SelectionEmpty`,
+`SelectionInvalid`). The scorecard is format **1.7.0** and carries
+`source.selection {window_start_ms, window_end_ms}`; its existing fields
+(`sample.window_start`, `sample.coverage_note`, a complete block's window) name
+the start too
+([stability.md](stability.md#scorecard-format-170-sourceselection-a-restore-from-a-stated-window-start-prod-111)).
+`verify_scorecard.py` 1.23.0 and `logweir drill verify` check it (arms SEL-1
+to SEL-3), print a `replay selection:` line, and qualify a sampled `pass` by
+its window. Each says no record before the start was restored only over a
+complete verification that passed; for a sampled document it says the
+sampled check does not prove it.
+**Refused:** `restore.partitions` (a partition subset), by name,
+`PartitionSubsetsAwaitOwnerDecision`, until the owner decides how a
+subset-narrowed scorecard is versioned (OD-9); and a plan stating a start
+under a standing rehearsal authorization, which restores every partition from
+the floor.
+**Do:** nothing for a plan without a start. A runner older than this release
+refuses a plan with a start (`drill spec does not parse`, exit 1) before it
+touches anything, so roll the runner forward before submitting one. The
+`Restore` CRD and the console are unchanged (the console's selection is
+PROD-11.1a); a `Restore` carries the plan bytes as they are.
+**Scope:** compose rows (slot 2 with `COMPOSE_PROFILES=auth`, Kafka 3.7.1,
+engine `0.23.3+logweir.1`) with an oracle of their own: inclusive vs exclusive
+at the start with equal and non-monotonic timestamps; a segment whose last
+record is before the start hides an in-window record, which complete coverage
+fails (the engine's limit, PROD-01.1b); a topic subset from a start under both
+coverages, read by both verifiers; the refusals (a partition subset among
+them) with a control; a compaction hole inside a sub-window; a newer backup
+set arriving after approval; a partition whose records all precede the start,
+signed `preflight-failed` naming it (phase 5's existing rule for a partition
+with nothing in the window), never `pass`; and main's runner from before this release
+refusing a plan with a start, with the same plan without it restoring.
+**Rollback:** an older runner refuses plans with a start (above) and ignores a
+`restore.partitions` key (which no Logweir writer emits). 1.7.0 scorecards
+already written stay valid under the older readers, which ignore the block;
+the document's `sample.window_start` and `sample.coverage_note` still name the
+start.
+
+#### 43. A `Restore`, a rehearsal and the console can ask for complete coverage, and every surface says sampled or complete (PROD-08.1a)
+
+**Added.** Item 30's complete verification can now be requested and read
+outside a plan file. A `Restore` declares `spec.coverage: complete` (and
+`spec.completeMaxRecords`) beside a plan that says the same — the controller
+refuses, `ExecutionSpecInvalid` before any approval is waited for, a
+declaration the plan bytes do not say, in either direction. A
+`RehearsalSchedule` asks with `spec.bounds.coverage`/`completeMaxRecords`
+(inside `templateDigest`; each slot's plan then states no `max_partitions`).
+The product API's create route carries both fields; every restore read carries
+`coverage {requested, recorded, covered, incompleteReason}`; the operation
+view's `verificationScope` adds `coverage`, a complete block with every
+partition's exact counts, and FX-23's `unsampledTopics`; the rehearsal view's
+`bounds` carry the coverage. The controller copies the signed coverage, the
+complete block and the unsampled topics onto `Restore.status.integrity`, and a
+`COVERAGE` printer column reads it. The console's restore wizard offers complete
+coverage as a closed advanced choice with its cost stated beside it, never as
+the default; the History list, the Restore detail and the operation view say
+sampled or complete and show a complete run's per-partition counts. The
+runner's notification body adds `integrity.coverage`/`covered` and its metrics
+`logweir_drill_integrity_coverage` and `logweir_drill_integrity_complete_covered`
+([kubernetes.md](kubernetes.md) §12 *Complete coverage* and §7g,
+[api.md](api.md#the-restores-coverage-prod-081a), [metrics.md](metrics.md)).
+
+**`covered: false` is never a pass, anywhere.** The `Restore` badge's
+`Verified` condition is `CompleteNotCovered` beside it: for a real one
+(`fail-integrity`, exit 2), because the rule reads `covered` before the
+outcome, and even over a status whose other fields say pass. The API's
+`verifiedSuccess`, the console's badge and list verdict and a rehearsal's
+`lastSucceeded` all refuse it; the notification and the metrics label carry
+`fail-integrity`, and `logweir_drill_integrity_complete_covered` is 0.
+
+**The standing authorization signs the coverage (format 1.1.0).** A rehearsal
+scope gains optional `coverage` and `completeMaxRecords`; the plan's coverage
+must EQUAL the signed one (absent = sampled), and a signed record bound must be
+met. A scope that authorises complete coverage signs `maxPartitions: 0`, and
+every reader of this build refuses one with any other value: a runner or
+controller older than 1.1.0 ignores `coverage`, and under a partition bound of
+0 it runs nothing (its `Approval` controller refuses the scope, its
+plan-in-scope check every real plan). `logweir drill approve --standing` mints
+1.1.0 only when the scope carries one of the new fields. A scope signed before
+this field authorises sampled rehearsals only, so no existing authorization
+admits a complete plan
+([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)).
+
+**Do:** apply the CRDs (both new fields are additive and absent means sampled,
+so every existing `Restore`, `RehearsalSchedule`, template digest and plan hash
+is unchanged). To rehearse with complete coverage, create a NEW
+`RehearsalSchedule` with `spec.bounds.coverage: complete`, write `"coverage":
+"complete"` and `"maxPartitions": 0` in its `scope.json` (the minter refuses
+any other `maxPartitions` beside `complete`), and sign a new authorization for
+its `status.templateDigest`. Budget for the cost: complete coverage reads every
+archived record of the restored topics and the whole restored output — about a
+minute per GiB of one-KiB records with an optimised build on a laptop, against
+about five seconds for the sampled check. A plan written with the CLI that asks
+for complete coverage needs `spec.coverage: complete` on its `Restore`, or the
+controller refuses it.
+**Scope:** unit and mock-cluster rows in `logweir-core` (the scope predicate
+and the 1.1.0 admission, each arm with a control), `weirkeeper`
+(`restore_controller.rs`: the declaration refused both ways before the
+approval is read, admitted and reaching the plan ConfigMap byte for byte, the
+signed block copied all-or-nothing, `CompleteNotCovered`;
+`rehearsal_controller.rs`: the coverage inside `templateDigest`, a complete
+schedule firing only under a scope that signed complete, a sampled schedule's
+plan unchanged, a `covered: false` slot never a pass), `logweir-api`
+(`complete_coverage.rs`, over the console fixtures it writes), the runner
+(the standing document minted at 1.1.0 and admitted through the real binary,
+a complete scope minted and read only with `maxPartitions: 0`, a `covered:
+false` run never a pass in the notification or the metrics), the `Approval`
+controller (the zero bound only beside complete), and
+`ui/tests/complete-coverage.spec.js`; planted mutants, each killed. An older
+build's runner binary and `Approval` controller (`main` before this item) were
+run against a complete-only scope this build minted, and ran nothing under it
+(`execution_contract_v2.rs`, an `#[ignore]`d row taking `LOGWEIR_OLDER_RUNNER`). Live: a
+plan built by the console's own emitter, run with complete coverage on the
+compose stack over real records and through the controller's and the API's
+projections. The k8s rows (the CRDs, a `Restore` and a rehearsal through the
+real controller, the console in a browser) run at the next PoC upgrade.
+**Rollback:** an older controller ignores the spec fields (an older CRD prunes
+them) and runs the plan as written; it does not copy the status fields, and
+the console then reads "not recorded". An older runner or controller ignores a
+1.1.0 scope's fields and reads a complete-only scope as a sampled scope with a
+partition bound of 0: its `Approval` controller refuses it, and its
+plan-in-scope check refuses every real plan, so nothing runs under a
+complete-only authorization after a rollback (fail closed). An older minter
+refuses a `scope.json` with `maxPartitions: 0`
+([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)).
+
+#### 44. A client that stops reading an answer, or stops sending a body, meets the console's stall deadline (FX-24b)
+
+**Changed.** After FX-24 the console (`logweir-api`) timed out a connection
+that never finished its request head, and nothing after the head: a client
+that sent requests and stopped reading the answers left the console waiting
+on a write the kernel would not take, and a signed-in client that sent a head
+and stopped sending its body left a handler waiting on the body, each with no
+deadline. 256 such clients, the console's connection ceiling, held every slot,
+and the console answered nobody: measured on the built binary, a real request
+behind them was unanswered at 30 s. Now a connection may wait on its client
+for **thirty seconds with no progress** (`IO_STALL_TIMEOUT`): an answer's
+pending write, or a request body's pending read, that moves no byte for that
+long fails, and the connection and its slot are released. It is a stall
+deadline, not a total: it restarts on every byte, so a slow but steady reader
+keeps its connection, and an operation event stream that is being read is
+never cut by it (between heartbeats it has nothing to write); a stream whose
+client stops reading is held to its own 300-second ceiling instead, up to
+310 s with the idle deadline after it. A JSON
+mutation body must also arrive whole within **sixty seconds**
+(`JSON_BODY_DEADLINE`), so one that trickles a byte at a time is ended too.
+A body that stops, or misses the total, is answered `400 malformed_request`
+("The request body stopped arriving before it was complete." or "The request
+body was not received within 60 seconds.") and the connection is closed after
+the answer. These bounds end abandoned and stalled clients, not slow ones: a
+client that reads, or sends, as little as one byte every thirty seconds keeps
+its connection, so 256 such clients can still hold every connection. In shared
+mode only an enforcing NetworkPolicy keeps such peers away from the API pod,
+and `api.console.networkPolicy.enabled` is off by default; the ingress does
+not relay pipelined requests, so clients that come through it can do far
+less. **That case is open as FX-24c** ([api.md](api.md#conventions)).
+**Do:** nothing is required. A client that pauses mid-transfer for more than
+thirty seconds, or sends a mutation body over more than sixty, sees its
+connection closed and retries; the console's own browser client does neither.
+In shared mode on a cluster whose network plugin enforces NetworkPolicy,
+consider `api.console.networkPolicy.enabled: true`, with the ingress
+controller's selectors and the identity provider's egress (`oidcCIDRs` or
+`oidcPeers`; [chart README](../charts/logweir/README.md)), so that only the
+ingress controller can reach the API pod: until FX-24c it is the one bound on
+slow-rate clients.
+**Scope:** rows on the built binary (`crates/logweir-api/tests/local_admin.rs`):
+256 clients that pipeline requests for a 156 KiB asset and read nothing hold
+every connection slot, then a request queued behind them is answered no
+sooner than thirty seconds after the first and within forty-five of the last,
+every one of them ended by the server before its answers were all sent, and a
+single such client on its own is ended the same way; a
+reader taking 8 KiB every 150 ms receives fourteen answers over more than
+thirty-five seconds, uncut; the operation event stream of a running backup,
+served by a fake API server, is still open with a heartbeat after the
+deadline; a signed-in body that stops is answered and closed at thirty seconds
+(not at the sixty-second total) while one sent three seconds late is read
+normally; one that trickles a byte every four seconds is answered and closed at
+sixty; the deadlines are pinned to their documented values at their call
+sites. Unit rows over the two guards in `src/transport.rs` on loopback
+sockets and stub IO. The connection's own reads are deliberately not timed:
+the server keeps one pending for the whole of every answer to notice a client
+leaving, and a timer there would cut every event stream at thirty seconds (a
+mutant shows it). Live, the built binary on the host in localAdmin mode: a
+request behind 256 non-reading clients answered 35.1 s after the first of them
+connected, every one of them ended by the server (before: unanswered at 48 s,
+none ended), a stopped body answered and closed at 30.0 s (still open at 75 s
+before), a trickling one at 60.0 s (nothing at 90 s before), while a steady
+reader took 42 s and an event stream heartbeated past 48 s on both. The controller's in-pod health listener already bounds the
+whole exchange, its write included, at two seconds. The shared-mode console's
+probe runs at the PoC upgrade that carries this item.
+**Rollback:** an older console leaves a connection whose client stopped
+reading or sending open again; nothing is stored, so nothing needs converting.
+
+#### 45. A backup can record the committed positions of the consumer groups it names, as signed evidence (PROD-04.1)
 
 **Added.** A backup now records, for each consumer group it is asked about,
 where that group would resume — read through Logweir's own client just before
@@ -946,7 +1227,7 @@ backup principal may not describe, `PositionsUnstable` for a pending
 transactional offset commit). A partition with no committed offset is
 `noCommittedPosition`, never offset 0. Both readers check thirteen new arms (22
 to 34) and print one `consumer_positions` line per group;
-`verify_scorecard.py` is 1.23.0. The catalog point binds the block by its
+`verify_scorecard.py` is 1.24.0. The catalog point binds the block by its
 digest, and the catalog's view and the product API (`PointView.consumerPositions`)
 show the snapshot's freshness and how many of each group's positions relate to
 archived data
@@ -1032,7 +1313,8 @@ In addition to the next entry's six, in its order:
 - **Verify an image digest before you deploy it** with the pinned commands in
   [install.md](install.md#verify-the-images) (item 35); a standalone CLI
   install replaces its engine with Logweir's build and exports
-  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.1` and its digest.
+  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest (build 2 since
+  item 41).
 - **Bind every destination, retention, notification and inline-archive
   credential Secret, one at a time, with `scripts/bind-credential.py`**
   (item 38), after suspending the schedules that use them and rolling the
@@ -1042,16 +1324,19 @@ In addition to the next entry's six, in its order:
 
 ### Verification scope after `v0.2.0-rc.1`
 
-- **Complete coverage is a command-line plan value.** Only `logweir drill run`
-  and `logweir restore run` can ask for it (item 30). Record checks in a
-  `Restore` or a rehearsal remain samples, and `verificationScope` still never
-  says `complete`; the signed scorecard says which in
-  `integrity.verification.coverage`.
+- **Complete coverage can be asked for by a plan, a `Restore`, a rehearsal and
+  the console** (items 30 and 41). A `Restore` or a rehearsal that does not ask
+  still verifies a sample. The signed scorecard says which in
+  `integrity.verification.coverage`; the `Restore`'s status, the product API
+  (`Restore.coverage`, `verificationScope.coverage`) and the console repeat
+  it. A protection event's `verification_scope` describes a policy's newest
+  POINT and still never says `complete`. A complete verification that did not
+  cover the restore (`covered: false`) is never a pass.
 
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40 and 41, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44 and 45, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1069,8 +1354,17 @@ console and the status of three CRDs, and needs each destination,
 retention, notification and inline-archive credential Secret bound; item 39
 changes the runner's phase 0 only and needs nothing; item 40 changes the
 console only and needs nothing unless an ingress dials the console with
-HTTP/2; item 41 changes the runner's receipts and records, the catalog's view,
-the product API and two CRDs (apply the CRDs), and needs nothing until a plan
+HTTP/2; item 41 changes the runner (phase 7 and the engine's build)
+only; item 42 changes the runner, the restore preview and the
+controller's standing-scope check, and needs nothing for a plan without a
+window start (an older runner refuses a plan with one); item 43 changes the
+`Restore` and `RehearsalSchedule` CRDs, the controller, the runner's
+notification and metrics, the standing authorization's scope (format
+1.1.0), the product API and the console, and needs nothing unless a
+rehearsal is to verify every record (a new schedule and a new
+authorization); item 44 changes the console only and needs nothing; item
+45 changes the runner's receipts and records, the catalog's view, the
+product API and two CRDs (apply the CRDs), and needs nothing until a plan
 or object selects consumer groups. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
@@ -1099,7 +1393,7 @@ or object selects consumer groups. To roll back to
    the new status fields, and the bound Secrets keep working. Roll the console
    back with them (an older console offers `existing` on a create again,
    which only this API refuses).
-6. Before rolling the controller back past item 41, let every run whose frozen
+6. Before rolling the controller back past item 45, let every run whose frozen
    inputs carry `consumerGroups` finish, or remove `spec.consumerGroups` from
    its schedule: an older controller refuses such a frozen plan
    (`PlanConfigMapConflict`). The 1.5.0 receipts and records already written

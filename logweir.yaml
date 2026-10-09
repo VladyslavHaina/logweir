@@ -4806,11 +4806,33 @@ spec:
               bounds:
                 description: The bounds it runs inside.
                 properties:
+                  completeMaxRecords:
+                    description: 'The bound on each complete verification — the plan''s
+                      `sample.complete_max_records`. Only with `coverage: complete`
+                      (CEL). A slot the bound stops signs `covered: false`, which
+                      is recorded as a failed rehearsal and never as a pass. Absent:
+                      no bound beyond `deadlineSeconds`.'
+                    format: int64
+                    minimum: 1
+                    nullable: true
+                    type: integer
                   concurrencyPolicy:
                     default: Forbid
                     description: Whether two may run at once. `Forbid` in v1.
                     enum:
                     - Forbid
+                    type: string
+                  coverage:
+                    description: |-
+                      How much of each rehearsal phase 7 verifies: `sampled` (absent means this) or `complete`, rendered into every slot's plan as `sample.coverage` and onto every slot's `Restore` as `spec.coverage`. Complete COSTS MORE: every slot then reads every archived record of the restored topics and the whole restored output — about a minute per GiB of one-KiB records with an optimised build on a laptop, against about five seconds for the sampled check — so choose the cron and `deadlineSeconds` with that in mind.
+
+                      Under `complete`, the slot's plan states no `sample.max_partitions` (a complete verification checks every partition, and the runner refuses the pair); `maxPartitions` still bounds which point a slot may select, as it always has, and `recordsPerPartition` is unread.
+
+                      SIGNED TWICE. `templateDigest` is the digest of this spec minus `suspend`, so a schedule that states the field has a different digest and needs its own signed authorization, and the spec is sealed, so it cannot be changed after one is signed. And the standing authorization's scope must itself say `coverage: complete` (document format 1.1.0): the controller and the runner both refuse a complete plan under a scope that does not. Absent, it is not serialised, so every existing schedule's digest is what it was.
+                    enum:
+                    - sampled
+                    - complete
+                    nullable: true
                     type: string
                   deadlineSeconds:
                     default: 3600
@@ -4905,6 +4927,11 @@ spec:
                     minimum: 60
                     type: integer
                 type: object
+                x-kubernetes-validations:
+                - message: 'completeMaxRecords bounds a complete verification and
+                    is set only with coverage: complete'
+                  rule: '!has(self.completeMaxRecords) || (has(self.coverage) && self.coverage
+                    == ''complete'')'
               objectives:
                 description: What a pass means.
                 nullable: true
@@ -5321,6 +5348,11 @@ spec:
     - jsonPath: .status.integrity.result
       name: INTEGRITY
       type: string
+    - description: 'what the signed scorecard verified: sampled or complete; empty
+        is not recorded, never complete'
+      jsonPath: .status.integrity.coverage
+      name: COVERAGE
+      type: string
     - jsonPath: .status.measured.rtoSeconds
       name: RTO
       type: integer
@@ -5395,6 +5427,26 @@ spec:
                 type: object
               backupSetRef:
                 description: The backup set inside `sourceArchive` — a `backupId`.
+                type: string
+              completeMaxRecords:
+                description: 'The bound on a complete verification — the plan''s `sample.complete_max_records`:
+                  the most archived records it decodes, summed over every restored
+                  partition. Only with `coverage: complete` (CEL), checked against
+                  the plan like `coverage`. A run the bound stops signs `covered:
+                  false`, never a pass. Absent: no bound.'
+                format: int64
+                minimum: 1
+                nullable: true
+                type: integer
+              coverage:
+                description: |-
+                  How much of the restore phase 7 verifies: `sampled` (absent means this) or `complete` — every record of every restored partition, compared with the archive, with exact per-partition counts. Complete COSTS MORE: it reads every archived record of the restored topics and the whole restored output (about a minute per GiB of one-KiB records with an optimised build on a laptop, against about five seconds for the sampled check). A run its bound stops, or whose archive it cannot compare, signs `covered: false`, which is never a pass.
+
+                  A DECLARATION OF WHAT `planBytes` SAYS, CHECKED AGAINST IT. The plan is what the approver signs and what the runner executes; this field states its `sample.coverage` where a list, a printer column and the console can read it without parsing the plan. The controller refuses a `Restore` whose plan says otherwise (absent here means the plan must be sampled) before an approval is waited for or anything is created: `Failed`, reason `ExecutionSpecInvalid`. `spec` is immutable and the approval binds the plan bytes, so coverage cannot change after the approval — a different coverage is a different plan, a different hash and a new approval.
+                enum:
+                - sampled
+                - complete
+                nullable: true
                 type: string
               deadlineSeconds:
                 description: The Job's `activeDeadlineSeconds`.
@@ -5576,6 +5628,10 @@ spec:
                 spec.authorization (a standing authorization); a Restore is never
                 unauthorized
               rule: has(self.approvalRef) != has(self.authorization)
+            - message: 'completeMaxRecords bounds a complete verification and is set
+                only with coverage: complete'
+              rule: '!has(self.completeMaxRecords) || (has(self.coverage) && self.coverage
+                == ''complete'')'
           status:
             description: '`Restore.status`.'
             nullable: true
@@ -5912,6 +5968,221 @@ spec:
                   and — when the result is `partial` — why (interface **I34**).
                 nullable: true
                 properties:
+                  complete:
+                    description: A complete verification's result, copied from the
+                      signed `integrity.verification.complete` — present exactly when
+                      `coverage` is `complete` and the document's block was well formed.
+                    nullable: true
+                    properties:
+                      archive:
+                        description: Archive integrity over every segment of the restored
+                          partitions.
+                        properties:
+                          offsetHoles:
+                            description: Source offsets inside the decoded span no
+                              archived record holds — a compacted source's holes.
+                              Disclosed, never a fault.
+                            format: int64
+                            type: integer
+                          recordsDecoded:
+                            description: Archived records decoded.
+                            format: int64
+                            type: integer
+                          segments:
+                            description: Segments the manifest lists for the restored
+                              partitions.
+                            format: int64
+                            type: integer
+                          segmentsFailedCount:
+                            description: How many segments were examined and found
+                              wrong (the keys are in the signed scorecard's `segments_failed`).
+                            format: int64
+                            type: integer
+                          segmentsUnverifiedCount:
+                            description: How many segments could not be examined (`segments_unverified`).
+                            format: int64
+                            type: integer
+                          segmentsVerified:
+                            description: Segments whose sha256, decode and manifest
+                              count all agreed.
+                            format: int64
+                            type: integer
+                        required:
+                        - offsetHoles
+                        - recordsDecoded
+                        - segments
+                        - segmentsFailedCount
+                        - segmentsUnverifiedCount
+                        - segmentsVerified
+                        type: object
+                      covered:
+                        description: '`true` when every partition of every restored
+                          topic was compared.'
+                        type: boolean
+                      incompleteReason:
+                        description: 'Why `covered` is `false`: the bound, an archive
+                          without lineage headers, a segment that could not be decoded.'
+                        maxLength: 1024
+                        nullable: true
+                        type: string
+                      maxRecords:
+                        description: The plan's `sample.complete_max_records`, the
+                          bound in force.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      partitionCount:
+                        description: How many partitions the signed block lists.
+                        format: int64
+                        type: integer
+                      partitions:
+                        description: One row per partition, sorted by topic and partition
+                          — ABSENT when the signed block lists more than [`COMPLETE_PARTITIONS_MAX`].
+                        items:
+                          description: One partition of a complete verification.
+                          properties:
+                            compared:
+                              description: '`false` when this partition was not compared
+                                — past the bound, or its expected output could not
+                                be established.'
+                              type: boolean
+                            partition:
+                              description: The partition.
+                              format: int32
+                              type: integer
+                            replay:
+                              description: Its exact counts.
+                              properties:
+                                duplicates:
+                                  description: Restored records repeating a source
+                                    offset already seen.
+                                  format: int64
+                                  type: integer
+                                expected:
+                                  description: 'Archived records the window selects:
+                                    the expected output.'
+                                  format: int64
+                                  type: integer
+                                matching:
+                                  description: Expected records restored byte for
+                                    byte, headers in order.
+                                  format: int64
+                                  type: integer
+                                mismatched:
+                                  description: Expected records whose restored copy
+                                    differs.
+                                  format: int64
+                                  type: integer
+                                missing:
+                                  description: Expected records with no restored copy.
+                                  format: int64
+                                  type: integer
+                                outOfOrder:
+                                  description: Restored records below a source offset
+                                    seen before them.
+                                  format: int64
+                                  type: integer
+                                restored:
+                                  description: Records the target holds.
+                                  format: int64
+                                  type: integer
+                                unexpected:
+                                  description: Restored records that are no expected
+                                    record.
+                                  format: int64
+                                  type: integer
+                              required:
+                              - duplicates
+                              - expected
+                              - matching
+                              - mismatched
+                              - missing
+                              - outOfOrder
+                              - restored
+                              - unexpected
+                              type: object
+                            targetTopic:
+                              description: The restored topic it was compared with.
+                              maxLength: 249
+                              nullable: true
+                              type: string
+                            topic:
+                              description: The archive-side (source) topic.
+                              maxLength: 249
+                              type: string
+                          required:
+                          - compared
+                          - partition
+                          - replay
+                          - topic
+                          type: object
+                        maxItems: 256
+                        nullable: true
+                        type: array
+                      replay:
+                        description: The replay comparison, summed over every compared
+                          partition.
+                        properties:
+                          duplicates:
+                            description: Restored records repeating a source offset
+                              already seen.
+                            format: int64
+                            type: integer
+                          expected:
+                            description: 'Archived records the window selects: the
+                              expected output.'
+                            format: int64
+                            type: integer
+                          matching:
+                            description: Expected records restored byte for byte,
+                              headers in order.
+                            format: int64
+                            type: integer
+                          mismatched:
+                            description: Expected records whose restored copy differs.
+                            format: int64
+                            type: integer
+                          missing:
+                            description: Expected records with no restored copy.
+                            format: int64
+                            type: integer
+                          outOfOrder:
+                            description: Restored records below a source offset seen
+                              before them.
+                            format: int64
+                            type: integer
+                          restored:
+                            description: Records the target holds.
+                            format: int64
+                            type: integer
+                          unexpected:
+                            description: Restored records that are no expected record.
+                            format: int64
+                            type: integer
+                        required:
+                        - duplicates
+                        - expected
+                        - matching
+                        - mismatched
+                        - missing
+                        - outOfOrder
+                        - restored
+                        - unexpected
+                        type: object
+                    required:
+                    - archive
+                    - covered
+                    - partitionCount
+                    - replay
+                    type: object
+                  coverage:
+                    description: |-
+                      The signed `integrity.verification.coverage` (scorecard format 1.4.0): `sampled` or `complete`, what the run ACTUALLY verified. A CLAIM until `evidence.verification` says `Valid`, like `result`.
+
+                      ABSENT MEANS NOT RECORDED — a scorecard before 1.4.0, a run that signed none, or one not read yet — and is read as a sampled check, NEVER as a complete one: nothing re-reads old evidence as a stronger guarantee.
+                    maxLength: 16
+                    nullable: true
+                    type: string
                   level:
                     description: '`byte-fingerprint`, `consume-only` or `not-attempted`.
                       The scorecard''s own kebab-case spellings, carried through unchanged
@@ -5937,6 +6208,20 @@ spec:
                       not examined — and is NOT a pass.'
                     nullable: true
                     type: string
+                  unsampledTopics:
+                    description: '**FX-23.** The signed `sample.unsampled_topics`
+                      (format 1.6.0): the restored topics a SAMPLED check''s partition
+                      cap left without a sampled partition — counted against their
+                      bound, not compared record by record. Absent means none is recorded
+                      as unsampled (and says nothing for a document before 1.6.0).
+                      All of it or nothing: a list past [`UNSAMPLED_TOPICS_MAX`] is
+                      not copied.'
+                    items:
+                      maxLength: 249
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
                 type: object
               jobRef:
                 description: The Job that ran, or is running, this restore.

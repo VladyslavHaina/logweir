@@ -127,9 +127,16 @@ pub const SPEC_RULES: [SpecRule; 2] = [
     ),
 ];
 
-/// The rules attached below `.spec`.
-pub const NESTED_RULES: [(&[&str], &str, &str); 1] =
-    [(&["point"], I3_POINT_SOURCE_RULE, I3_POINT_SOURCE_MESSAGE)];
+/// The rules attached below `.spec`. The second (complete coverage's record bound) is shared with
+/// `Restore`'s `.spec` (`super::restore::COMPLETE_MAX_RECORDS_RULE`).
+pub const NESTED_RULES: [(&[&str], &str, &str); 2] = [
+    (&["point"], I3_POINT_SOURCE_RULE, I3_POINT_SOURCE_MESSAGE),
+    (
+        &["bounds"],
+        super::restore::COMPLETE_MAX_RECORDS_RULE,
+        super::restore::COMPLETE_MAX_RECORDS_MESSAGE,
+    ),
+];
 
 fn default_true() -> bool {
     true
@@ -335,6 +342,38 @@ pub struct RehearsalBounds {
     /// defaults apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_resources: Option<RunnerResources>,
+    /// How much of each rehearsal phase 7 verifies: `sampled`
+    /// (absent means this) or `complete`, rendered into every slot's plan as
+    /// `sample.coverage` and onto every slot's `Restore` as `spec.coverage`.
+    /// Complete COSTS MORE: every slot then reads every archived record of the
+    /// restored topics and the whole restored output — about a minute per GiB
+    /// of one-KiB records with an optimised build on a laptop, against about
+    /// five seconds for the sampled check — so choose the cron and
+    /// `deadlineSeconds` with that in mind.
+    ///
+    /// Under `complete`, the slot's plan states no `sample.max_partitions`
+    /// (a complete verification checks every partition, and the runner
+    /// refuses the pair); `maxPartitions` still bounds which point a slot may
+    /// select, as it always has, and `recordsPerPartition` is unread.
+    ///
+    /// SIGNED TWICE. `templateDigest` is the digest of this spec minus
+    /// `suspend`, so a schedule that states the field has a different digest
+    /// and needs its own signed authorization, and the spec is sealed, so it
+    /// cannot be changed after one is signed. And the standing authorization's
+    /// scope must itself say `coverage: complete` (document format 1.1.0):
+    /// the controller and the runner both refuse a complete plan under a scope
+    /// that does not. Absent, it is not serialised, so every existing
+    /// schedule's digest is what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<super::restore::VerificationCoverage>,
+    /// The bound on each complete verification — the plan's
+    /// `sample.complete_max_records`. Only with `coverage: complete` (CEL).
+    /// A slot the bound stops signs `covered: false`, which is recorded as a
+    /// failed rehearsal and never as a pass. Absent: no bound beyond
+    /// `deadlineSeconds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub complete_max_records: Option<i64>,
 }
 
 /// What a passing rehearsal has to achieve.

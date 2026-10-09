@@ -118,7 +118,7 @@ Logweir does not link upstream's core or consume OSO operator CRDs. It builds
 the MIT-licensed engine from the vendored source with its own patch folder and
 redistributes it, with the source and attribution in
 [third_party](third_party/README.md). The engine the images ship is Logweir's
-build of `kafka-backup` 0.23.3 (`0.23.3+logweir.1`) and the full-drill engine
+build of `kafka-backup` 0.23.3 (`0.23.3+logweir.2`) and the full-drill engine
 floor is 0.21.0;
 [the support matrix](docs/support-matrix.md) distinguishes exercised versions
 from unsupported or untested ones. The engine's own `validation run` is not

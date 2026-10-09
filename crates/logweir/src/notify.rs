@@ -98,13 +98,32 @@ fn redact_ureq_error(e: &ureq::Error) -> String {
 /// `reason` is free text arriving with a document that, by construction, no
 /// Logweir writer produced, and this body is pasted verbatim into Slack and
 /// PagerDuty. The path is the whole actionable signal.
+///
+/// **PROD-08.1a.** `integrity.coverage` says HOW MUCH was verified —
+/// `sampled`, `complete`, or `null` for a scorecard that records none (before
+/// format 1.4.0), which a sink must read as a sampled check and never as a
+/// complete one — and a complete verification adds `integrity.covered`. A
+/// `covered: false` run's `outcome` is never `pass` (phase 8 scores any
+/// result other than `pass` as `fail-integrity`, and arm IV-6 refuses the
+/// pair); the field says WHY it is not, in a word a sink can branch on. The
+/// `incomplete_reason` text does not travel, for the reason `redactions`'
+/// does not: this body is pasted verbatim into Slack and PagerDuty.
 pub fn notify_body(sc: &Scorecard) -> serde_json::Value {
+    let verification = sc.integrity.verification.as_ref();
+    let mut integrity = serde_json::json!({
+        "level": sc.integrity.level,
+        "result": sc.integrity.result,
+        "coverage": verification.map(|v| v.coverage.as_str()),
+    });
+    if let Some(complete) = verification.and_then(|v| v.complete.as_ref()) {
+        integrity["covered"] = serde_json::json!(complete.covered);
+    }
     serde_json::json!({
         "run_id": sc.run_id,
         "outcome": sc.outcome,
         "rto_excluding_preflight_seconds": sc.measured.rto_excluding_preflight_seconds,
         "rpo_seconds": sc.measured.rpo_seconds,
-        "integrity": { "level": sc.integrity.level, "result": sc.integrity.result },
+        "integrity": integrity,
         "self_attested": sc.approval.self_attested,
         "redactions": sc.redactions.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
     })

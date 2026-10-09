@@ -476,7 +476,18 @@ FORMAT_VERSION = "1.4.0"
 # before 1.6.0 only the canary and one count bound over every topic together,
 # because such a document is the same bytes whichever build signed it.
 #
-# 1.23.0 (PROD-04.1) knows receipt format 1.5.0 and its `consumer_positions`:
+# 1.23.0 (PROD-11.1) knows scorecard format 1.7.0 and its optional
+# `source.selection`: a narrowed restore's stated inclusive window start and
+# its end (a START only: partition subsets are refused by the runner until the
+# owner decides OD-9). Three arms, SEL-1 to SEL-3, mirrored byte for byte and
+# in position from `Scorecard::validate_invariants`: the block only under a
+# version of at least 1.7.0, a start before the end, and a complete block over
+# the selection's window. They fire only on a document carrying the block, so
+# every document without it is decided exactly as before (OD-7 (a)). The shape
+# layer refuses a block that is not the writer's shape; a `replay selection:`
+# coverage line names the window, and the sampled-pass line of a narrowed
+# document is qualified by its window, in the Rust reader's words.
+# 1.24.0 (PROD-04.1) knows receipt format 1.5.0 and its `consumer_positions`:
 # the consumer position evidence of the groups a backup selected. Thirteen
 # arms, 22 to 34, mirrored byte for byte and in position from
 # `BackupReceipt::validate_invariants`: the block only under a version of at
@@ -492,7 +503,7 @@ FORMAT_VERSION = "1.4.0"
 # its PositionBeyondEnd, re-derived from its partition's facts. They fire only
 # on a document carrying the block (OD-7 (a)). The `consumer_positions` lines
 # say, per group, its outcome and how many positions relate to archived data.
-SCRIPT_VERSION = "1.23.0"
+SCRIPT_VERSION = "1.24.0"
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
 # `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
@@ -510,6 +521,12 @@ RECEIPT_AUTH_MODES_SINCE_MINOR = 4
 # `crates/logweir-core/src/connection.rs`, which they must equal.
 ORIGINAL_AUTH_MODES = ("plaintext", "scramSha512")
 PROD_01_3_AUTH_MODES = ("scramSha256", "plain", "mtls")
+
+# The first minor of SCORECARD format 1 that defines `source.selection` (arm
+# SEL-1, PROD-11.1) -- `SELECTION_SINCE_MINOR` in
+# `crates/logweir-core/src/scorecard.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_selection_minor_is_the_rust_readers`).
+SCORECARD_SELECTION_SINCE_MINOR = 7
 
 # The first minor of SCORECARD format 1 that defines `sample.unsampled_topics`
 # (arm US-1, FX-23) -- `UNSAMPLED_TOPICS_SINCE_MINOR` in
@@ -975,6 +992,18 @@ def _time_basis_shape_ok(block) -> bool:
         if not isinstance(listed, list) or not all(isinstance(t, str) for t in listed):
             return False
     return True
+
+
+def _selection_shape_ok(block) -> bool:
+    """`source.selection` has the shape `SelectionLabel` deserialises
+    (PROD-11.1, format 1.7.0): an object whose `window_start_ms` and
+    `window_end_ms` are both i64. Unknown keys are ignored, as serde ignores
+    them."""
+    return (
+        isinstance(block, dict)
+        and _int_in(block.get("window_start_ms"), 64)
+        and _int_in(block.get("window_end_ms"), 64)
+    )
 
 
 def _int_in(x, bits) -> bool:
@@ -1478,6 +1507,18 @@ def check_invariants(doc) -> str:
         return (
             "source.time_basis is not an object of an optional string plan and two arrays "
             "of strings, producer_time and not_recorded"
+        )
+
+    # Also shape (PROD-11.1, scorecard 1.7.0): `source.selection` is an
+    # `Option<SelectionLabel>` over there, so `null` is ABSENT and anything
+    # that is not the writer's shape is refused at DESERIALISATION. Arms SEL-1
+    # to SEL-7 below compare its fields, so the shape is asserted first. The
+    # bad shapes are cases in `shape-index.json`.
+    selection = source.get("selection")
+    if selection is not None and not _selection_shape_ok(selection):
+        return (
+            "source.selection is not an object of the shape the writer gives it: a window start "
+            "and a window end, both integers"
         )
 
     # Also shape, and also the Rust reader's type doing the work over there:
@@ -2159,6 +2200,44 @@ def check_invariants(doc) -> str:
                 "\"complete\"; a complete verification compares every restored partition and "
                 "leaves no topic unsampled"
             )
+
+    # `source.selection` (format 1.7.0, PROD-11.1): arms SEL-1 to SEL-3,
+    # mirrored ARM FOR ARM, IN THIS POSITION (after `sample.unsampled_topics`,
+    # before `redactions`) and with the same words from
+    # `Scorecard::validate_invariants`. They fire ONLY on a document carrying
+    # the block, so every document before 1.7.0 is decided exactly as before.
+    # Not interpolated except SEL-1's version. The shape layer above has
+    # proved its two integers.
+    if selection is not None:
+        # SEL-1. A version before 1.7.0 cannot carry the 1.7.0 block.
+        minor = _minor(version)
+        if not (
+            doc_major == 1
+            and minor is not None
+            and minor >= SCORECARD_SELECTION_SINCE_MINOR
+        ):
+            return (
+                f"source.selection is present but format_version "
+                f"{_rust_debug_str(version)} predates it: the block is defined from "
+                f"1.{SCORECARD_SELECTION_SINCE_MINOR}.0"
+            )
+        start = selection["window_start_ms"]
+        end = selection["window_end_ms"]
+        # SEL-2. A stated start is before the end.
+        if start >= end:
+            return (
+                "source.selection.window_start_ms is not before window_end_ms; a selection's "
+                "window holds at least one instant after its start"
+            )
+        # SEL-3. The complete block's window is the selection's.
+        complete = verification.get("complete") if verification is not None else None
+        if complete is not None:
+            window = complete["window"]
+            if window.get("start_ms") != start or window["end_ms"] != end:
+                return (
+                    "integrity.verification.complete.window is not source.selection's window; "
+                    "the expected output is selected by the plan's own start and end"
+                )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -3208,6 +3287,19 @@ def _sampled_pass_lines(doc):
     sampled = block is None or block.get("coverage") == "sampled"
     if doc.get("outcome") != "pass" or not sampled:
         return []
+    # PROD-11.1 (review H1): over a narrowed window the guarantee is QUALIFIED
+    # by it, in the Rust reader's words (`sampled_pass_lines_over`).
+    window = doc["source"].get("selection")
+    if window is not None:
+        return [
+            f"sample coverage: a sampled pass over a replay selection from epoch-ms "
+            f"{window['window_start_ms']} to epoch-ms {window['window_end_ms']}: every mapped "
+            "partition was held to its own count bound over that window, max_partitions "
+            "reached every topic before a second partition of any, and a readable engine "
+            "report lacking a partition with records in that window was refused; no record "
+            "before the start was expected, and a sampled check does not prove that none was "
+            "restored"
+        ]
     version = doc.get("format_version")
     if (
         _major(version) == 1
@@ -3225,6 +3317,44 @@ def _sampled_pass_lines(doc):
         "canary and one count bound over every topic together, not a per-partition count "
         "bound, a sample of every topic or an engine-report check (a build from before FX-23 "
         "may have signed it)"
+    ]
+
+
+def _before_the_start(doc):
+    """What a document from a stated start proves about the records BEFORE
+    that start -- the twin of `BeforeTheStart::of` in `crates/logweir-core/
+    src/scorecard.rs` (PROD-11.1 review N1), in the same words. Only a
+    COMPLETE verification whose `integrity.result` is `pass` shows none was
+    restored (a restored record below the start is `unexpected` there, and
+    IV-6 holds a complete pass to none); a SAMPLED check cannot (its sample is
+    drawn from the window, and a segment straddling the start counts all of
+    its records into the bound); anything else says only that none was
+    expected."""
+    block = doc["integrity"].get("verification")
+    coverage = None if block is None else block.get("coverage")
+    if coverage == "complete" and doc["integrity"].get("result") == "pass":
+        return "no record before the start was restored or expected"
+    if coverage == "sampled":
+        return (
+            "no record before the start was expected; a sampled check does not prove that "
+            "none was restored"
+        )
+    return "no record before the start was expected"
+
+
+def _selection_lines(block, before):
+    """`source.selection` as lines -- the twin of `crates/logweir/src/
+    verify.rs::selection_lines` (PROD-11.1): the writer's sentence
+    (`SelectionLabel::sentence`), ending in `before`, what this document
+    proves about the records before the start (`_before_the_start`, review
+    N1). Absent prints nothing: the restore selected every record from the
+    archive's floor."""
+    if block is None:
+        return []
+    return [
+        f"replay selection: every partition of every restored topic, from epoch-ms "
+        f"{block['window_start_ms']} (the plan's stated window start, inclusive) to epoch-ms "
+        f"{block['window_end_ms']} (inclusive); {before}"
     ]
 
 
@@ -3291,7 +3421,8 @@ def _parity_line(not_assessed):
     """`topic_parity.not_assessed` as one sentence, or "" when every topic was
     assessed — the twin of `crates/logweir/src/verify.rs::parity_line` (FX-4).
     ABSENT is NOT RECORDED (every 1.0.0 scorecard, and a 1.1.0 one whose drill
-    stopped before phase 7), never "every topic assessed"."""
+    stopped before phase 7), never "every topic assessed". Every entry is named
+    as written, FX-21's `replication_factor (notRecorded)` included."""
     if not_assessed is None:
         return (
             "configuration parity: not recorded, so an empty unexpected_divergence proves "
@@ -3568,6 +3699,10 @@ def main(
             doc["sample"].get("unsampled_topics")
         ):
             print(f"       coverage: {line}")
+        # PROD-11.1: the replay selection a narrowed restore restored, in the
+        # words `logweir drill verify` prints (`selection_lines`).
+        for line in _selection_lines(doc["source"].get("selection"), _before_the_start(doc)):
+            print(f"       coverage: {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -3612,6 +3747,8 @@ def main(
             "partitions' sums; "
             "sample.unsampled_topics only from 1.6.0, never empty, sorted, each topic once and "
             "not blank, and never beside a complete verification; "
+            "source.selection only from 1.7.0, its start before its end, and a complete block "
+            "over its window; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

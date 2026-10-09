@@ -856,12 +856,19 @@ cases = {
     "absent-1.0.0": ("1.0.0", None),
     "not-assessed-1.1.0": (current, ["drill-orders: configuration (captureDenied)"]),
     "all-assessed-1.1.0": (current, []),
+    # FX-21: a replication factor the source's record lacks is named in the
+    # same list, with its fail-safe twin, and never reads as a match.
+    "rf-not-recorded-1.1.0": (current, ["drill-orders: replication_factor (notRecorded)"]),
 }
 for name, (version, not_assessed) in cases.items():
     doc = json.loads(json.dumps(base))
     doc["format_version"] = version
     if not_assessed is not None:
         doc["topic_parity"]["not_assessed"] = not_assessed
+        doc["topic_parity"]["unexpected_divergence"] += [
+            e.replace(" (", " not assessed (", 1) for e in not_assessed
+            if "replication_factor" in e
+        ]
     payload = (json.dumps(doc, indent=2) + "\n").encode()
     t = pt.encode()
     msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
@@ -873,7 +880,7 @@ for name, (version, not_assessed) in cases.items():
          "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
 PYEOF
 
-for name in absent-1.0.0 not-assessed-1.1.0 all-assessed-1.1.0; do
+for name in absent-1.0.0 not-assessed-1.1.0 all-assessed-1.1.0 rf-not-recorded-1.1.0; do
     doc="$tmp/scorecard11/$name.json"
     sig="$tmp/scorecard11/$name.sig"
     set +e
@@ -900,6 +907,7 @@ for name in absent-1.0.0 not-assessed-1.1.0 all-assessed-1.1.0; do
         absent-1.0.0) want="not recorded" ;;
         not-assessed-1.1.0) want="NOT ASSESSED for drill-orders: configuration (captureDenied)" ;;
         all-assessed-1.1.0) want="" ;;
+        rf-not-recorded-1.1.0) want="NOT ASSESSED for drill-orders: replication_factor (notRecorded)" ;;
     esac
     if [ -z "$want" ]; then
         [ -z "$rust_parity" ] || fail "scorecard/$name: a document that assessed every topic printed: $rust_parity"
@@ -1589,3 +1597,182 @@ for name in us1-under-1.5.0 us2-unordered us3-beside-complete; do
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (unsampled topics refused)"
 done
 echo "check-verifier-parity: both readers accept $SCORECARD_UNSAMPLED_VERSION scorecards, say the same about what a sampled pass proves at each version and the topics the sample left out, and refuse each of the three unsampled-topics arms with the same words"
+
+# ---------------------------------------------------------------------------
+# SELECTION LOOP (PROD-11.1): the scorecard's `source.selection` (a stated
+# window START; partition subsets are refused by the runner until OD-9), and
+# what an exit 0 says about a narrowed restore.
+# ---------------------------------------------------------------------------
+#
+# Four documents both readers ACCEPT, and the `replay selection:` and
+# `sample coverage:` lines each must print — the SAME lines from both,
+# compared WHOLE:
+#
+#   sampled   a 1.7.0 sampled pass narrowed by a start: the selection line and
+#             the sampled-pass line QUALIFIED by the window (review H1), both
+#             saying the sampled check does NOT prove that no record before
+#             the start was restored (review N1)
+#   complete  a 1.7.0 complete pass narrowed by a start: the selection line
+#             saying no record before the start was restored or expected (a
+#             complete pass proves it), no sampled-pass line
+#   complete-fail  the same complete block under a fail-integrity outcome:
+#             the selection line says only that none was expected
+#   absent    a 1.7.0 sampled pass with no block: no selection line, the
+#             unqualified 1.6.0-or-later sampled-pass line
+#
+# and three both readers REFUSE with the same full text, one per arm SEL-1 to
+# SEL-3. Generated and signed here with the throwaway fixture key, like the
+# loops above.
+#
+# The scorecard format that defines `source.selection` —
+# `FORMAT_VERSION_WITH_SELECTION` and `SELECTION_SINCE_MINOR`; a renumber moves
+# all three.
+SCORECARD_SELECTION_VERSION="1.7.0"
+mkdir -p "$tmp/scorecard-sel"
+"$PY" - "$ROOT" "$tmp/scorecard-sel" "$SC_PT" "$SCORECARD_SELECTION_VERSION" <<'PYEOF'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+root, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+current = sys.argv[4]
+fix = root / "e2e" / "fixtures" / "signed"
+key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+base = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
+sampled = {"coverage": "sampled", "comparison_basis": "archive",
+           "header_order": "notVerified", "application": "notAttempted",
+           "gaps": [], "pruned": []}
+complete = json.loads(
+    (root / "e2e" / "fixtures" / "invariants" / "verification_1_4_complete_pass.json")
+    .read_text())["integrity"]["verification"]
+END = complete["complete"]["window"]["end_ms"]
+START = END - 55_200_000
+
+
+def sel(start=START, end=END):
+    return {"window_start_ms": start, "window_end_ms": end}
+
+
+def doc(selection, version=current, block=None):
+    d = json.loads(json.dumps(base))
+    d["format_version"] = version
+    d["integrity"]["verification"] = json.loads(json.dumps(block or sampled))
+    if selection is not None:
+        d["source"]["selection"] = selection
+    return d
+
+
+def not_a_pass(d):
+    d["outcome"] = "fail-integrity"
+    d["integrity"]["result"] = "fail"
+    d["integrity"]["partial_reason"] = "not a pass"
+    d["engine"]["matrix_verdict"] = "pass-degraded"
+    return d
+
+
+def windowed(start):
+    b = json.loads(json.dumps(complete))
+    b["complete"]["window"] = {"end_ms": END} if start is None else {"start_ms": start, "end_ms": END}
+    return b
+
+
+cases = {
+    "sampled": doc(sel()),
+    "complete": doc(sel(), block=windowed(START)),
+    "complete-fail": not_a_pass(doc(sel(), block=windowed(START))),
+    "absent": doc(None),
+    "sel1-under-1.6.0": doc(sel(), version="1.6.0"),
+    "sel2-start-at-end": doc(sel(start=END)),
+    "sel3-window": doc(sel(), block=windowed(None)),
+}
+for name, d in cases.items():
+    payload = (json.dumps(d, indent=2) + "\n").encode()
+    t = pt.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{name}.json").write_bytes(payload)
+    (out / f"{name}.sig").write_text(json.dumps(
+        {"payloadType": pt,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+(out / "window.txt").write_text(f"{START} {END}\n")
+PYEOF
+read -r SEL_START SEL_END <"$tmp/scorecard-sel/window.txt"
+
+for name in sampled complete complete-fail absent; do
+    doc="$tmp/scorecard-sel/$name.json"
+    sig="$tmp/scorecard-sel/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 0 ] || { cat "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 0"; }
+    [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 0"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_lines="$(grep -oE '(replay selection|sample coverage): .*' "$tmp/rust.all" || true)"
+    py_lines="$(grep -oE '(replay selection|sample coverage): .*' "$tmp/py.all" || true)"
+    if [ "$rust_lines" != "$py_lines" ]; then
+        fail "scorecard/$name: the two readers say different things about the selection.
+  rust:   $rust_lines
+  python: $py_lines"
+    fi
+    selection_head="replay selection: every partition of every restored topic, from epoch-ms $SEL_START (the plan's stated window start, inclusive) to epoch-ms $SEL_END (inclusive); "
+    sampled_before="no record before the start was expected; a sampled check does not prove that none was restored"
+    narrowed_pass="sample coverage: a sampled pass over a replay selection from epoch-ms $SEL_START to epoch-ms $SEL_END: every mapped partition was held to its own count bound over that window, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in that window was refused; no record before the start was expected, and a sampled check does not prove that none was restored"
+    case "$name" in
+        sampled) want="$narrowed_pass
+${selection_head}${sampled_before}" ;;
+        complete) want="${selection_head}no record before the start was restored or expected" ;;
+        complete-fail) want="${selection_head}no record before the start was expected" ;;
+        absent) want="sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition was held to its own count bound, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in the window was refused" ;;
+    esac
+    if [ "$rust_lines" != "$want" ]; then
+        fail "scorecard/$name: expected the selection and sample coverage lines to be
+$want
+got:
+$rust_lines"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (selection)"
+done
+
+for name in sel1-under-1.6.0 sel2-start-at-end sel3-window; do
+    doc="$tmp/scorecard-sel/$name.json"
+    sig="$tmp/scorecard-sel/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 4"; }
+    [ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 1"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
+    py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
+    case "$name" in
+        sel1-under-1.6.0) want_msg="source.selection is present but format_version \"1.6.0\" predates it: the block is defined from $SCORECARD_SELECTION_VERSION" ;;
+        sel2-start-at-end) want_msg="source.selection.window_start_ms is not before window_end_ms; a selection's window holds at least one instant after its start" ;;
+        sel3-window) want_msg="integrity.verification.complete.window is not source.selection's window; the expected output is selected by the plan's own start and end" ;;
+    esac
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
+        fail "scorecard/$name: the refusal differs between the two readers or from its arm.
+  rust:   $rust_msg
+  python: $py_msg
+  want:   $want_msg"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (selection refused)"
+done
+echo "check-verifier-parity: both readers accept $SCORECARD_SELECTION_VERSION scorecards, say the same about the selection, what a narrowed sampled pass proves and what each lane proves before the start, and refuse each of the three selection arms with the same words"

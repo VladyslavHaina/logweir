@@ -369,6 +369,7 @@ fn build(
             Orders::Around => WindowFloorSource::InheritedFromSpec,
             _ => WindowFloorSource::ArchiveManifest,
         },
+        source_partitions: Default::default(),
         default_replication_factor: 1,
         checkpoint_state: "/tmp/fx23/checkpoint.json".into(),
         checkpoint_interval_secs: 30,

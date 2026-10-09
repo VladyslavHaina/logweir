@@ -1212,6 +1212,29 @@ function projectRestore(item) {
       status.timeBasis.plan = item.timeBasis.plan;
     }
   }
+  // PROD-08.1a: THE COVERAGE, under the custom resource's own names, so one
+  // badge rule and one list line read it in both modes: what the Restore asks
+  // for on `spec` (absent when sampled, as the CRD stores it), what its signed
+  // scorecard recorded on `status.integrity`. A list row carries `covered` and
+  // its reason; the full block arrives with the detail's operation route.
+  const coverage = item.coverage || null;
+  if (coverage !== null) {
+    if (coverage.requested === "complete") {
+      object.spec.coverage = "complete";
+    }
+    if (typeof coverage.completeMaxRecords === "number") {
+      object.spec.completeMaxRecords = coverage.completeMaxRecords;
+    }
+    if (typeof coverage.recorded === "string") {
+      status.integrity = { coverage: coverage.recorded };
+      if (typeof coverage.covered === "boolean") {
+        status.integrity.complete = { covered: coverage.covered };
+        if (typeof coverage.incompleteReason === "string") {
+          status.integrity.complete.incompleteReason = coverage.incompleteReason;
+        }
+      }
+    }
+  }
   object.status = status;
   return object;
 }
@@ -1313,7 +1336,11 @@ function mergeOperation(object, operation, trust, scope) {
   // absent-scope sentence, which is what an absent scope means.
   if (operation.kind === "restore" && scope !== null && scope !== undefined) {
     const copied = { level: scope.level };
-    for (const field of ["recordsSampled", "recordsSampledMatching", "recordsExpected"]) {
+    // PROD-08.1a / FX-23: the signed coverage, a complete verification's
+    // exact counts and the topics a sampled check left unsampled travel with
+    // the scope they qualify.
+    for (const field of ["recordsSampled", "recordsSampledMatching", "recordsExpected",
+      "coverage", "complete", "unsampledTopics"]) {
       if (scope[field] !== null && scope[field] !== undefined) {
         copied[field] = scope[field];
       }
@@ -2779,6 +2806,15 @@ function requestBody(plural, object) {
     }
     if (spec.evidenceDestinationRef !== undefined) {
       body.evidenceDestinationRef = { name: spec.evidenceDestinationRef.name };
+    }
+    // PROD-08.1a: the coverage the plan asks for, declared beside it and
+    // stored on `Restore.spec`, where the controller holds it to the plan.
+    // Sent only when stated, so a sampled restore sends what it always did.
+    if (spec.coverage === "complete") {
+      body.coverage = "complete";
+      if (typeof spec.completeMaxRecords === "number") {
+        body.completeMaxRecords = spec.completeMaxRecords;
+      }
     }
     // THE DECLARED MAPPING RIDES ON THE REQUEST AND NOT ON THE OBJECT
     // (PLAT-11.2). `Restore.spec` has no topic list, so this travels beside

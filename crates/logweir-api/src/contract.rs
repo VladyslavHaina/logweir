@@ -1229,6 +1229,19 @@ pub enum RestoreMode {
     NewTopic,
 }
 
+/// **PROD-08.1a.** How much of a restore phase 7 verifies: `sampled` (the
+/// default) or `complete` — every record of every restored partition, which
+/// reads the whole archive of those partitions and the whole output and so
+/// costs more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RestoreCoverage {
+    /// A sampled check: the canary and the manifest's count bound.
+    Sampled,
+    /// Every record of every restored partition, with exact counts.
+    Complete,
+}
+
 /// How restored topics are named.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -1321,6 +1334,20 @@ pub struct CreateRestoreRequest {
     /// 128 printable characters. Absent keeps the idempotency hash unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// **PROD-08.1a.** The coverage `planBytes` asks for (`sample.coverage`),
+    /// stored as `Restore.spec.coverage`. A DECLARATION, like `topicMapping`:
+    /// this route never parses the plan, so it cannot compare the two; the
+    /// controller does, before any approval is waited for, and refuses a
+    /// `Restore` whose plan says otherwise (`ExecutionSpecInvalid`). Absent
+    /// means `sampled`, is stored as absent, and keeps the idempotency hash
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<RestoreCoverage>,
+    /// **PROD-08.1a.** The plan's `sample.complete_max_records`, stored as
+    /// `Restore.spec.completeMaxRecords`: at least 1, and only with
+    /// `coverage: complete`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complete_max_records: Option<i64>,
 }
 
 /// A restore target, as stored.
@@ -1393,8 +1420,36 @@ pub struct Restore {
     /// never "every selection used the topics' own clocks".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_basis: Option<RestoreTimeBasisView>,
+    /// **PROD-08.1a.** The coverage this restore asks for and the coverage its
+    /// signed scorecard says it verified — on the list too, so a row says
+    /// sampled or complete without a second read.
+    pub coverage: RestoreCoverageView,
     /// The normalized status summary.
     pub operation: OperationSummary,
+}
+
+/// **PROD-08.1a.** `Restore.coverage`: asked for, and signed.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreCoverageView {
+    /// What the Restore asks for: `spec.coverage`, absent read as `sampled`.
+    /// The controller has held it to the plan's own `sample.coverage`.
+    pub requested: RestoreCoverage,
+    /// `spec.completeMaxRecords`, the bound on a complete verification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complete_max_records: Option<i64>,
+    /// What the signed scorecard says it verified — a CLAIM until the evidence
+    /// verifies. ABSENT MEANS NOT RECORDED (a scorecard before format 1.4.0, a
+    /// refused run, or one not read yet), never complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded: Option<RestoreCoverage>,
+    /// For a recorded complete verification: whether it covered every
+    /// partition. `false` is NEVER a pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered: Option<bool>,
+    /// Why `covered` is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
 }
 
 /// `Restore.timeBasis` (FX-8): the signed time-basis label.

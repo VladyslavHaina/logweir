@@ -4711,6 +4711,7 @@ fn the_restore_printer_columns_are_the_contract() {
             "REASON",
             "OUTCOME",
             "INTEGRITY",
+            "COVERAGE",
             "RTO",
             "SIGNED",
             "AGE"
@@ -10012,5 +10013,570 @@ async fn fx20_the_inline_restore_job_carries_the_location_binding() {
     assert_eq!(
         projected["valueFrom"]["secretKeyRef"],
         serde_json::json!({"name": "logweir-s3", "key": "logweir-binding", "optional": true})
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PROD-08.1a: a Restore asks for complete coverage, and shows what it signed
+// ---------------------------------------------------------------------------
+
+/// [`PLAN_BYTES`] asking for complete coverage, with `bound` as its
+/// `sample.complete_max_records` when given.
+fn complete_plan_bytes(bound: Option<u64>) -> String {
+    let extra = bound.map_or_else(String::new, |n| format!("  complete_max_records: {n}\n"));
+    PLAN_BYTES.replace(
+        "  anchor: head\n",
+        &format!("  anchor: head\n  coverage: complete\n{extra}"),
+    )
+}
+
+/// A `Restore` over `plan` declaring `coverage`/`bound` on its spec.
+fn restore_declaring(plan: &str, coverage: Option<&str>, bound: Option<i64>) -> Restore {
+    let mut value: Value =
+        serde_json::from_str(&restore_json(plan, APPROVAL, NAME)).expect("fixture JSON");
+    if let Some(c) = coverage {
+        value["spec"]["coverage"] = serde_json::json!(c);
+    }
+    if let Some(n) = bound {
+        value["spec"]["completeMaxRecords"] = serde_json::json!(n);
+    }
+    serde_json::from_value(value).expect("the fixture is a Restore")
+}
+
+/// **PROD-08.1a: the declaration must be what the plan says.** Each row
+/// declares one thing on `spec` and signs another in the plan, and ends
+/// `Failed` / `ExecutionSpecInvalid` naming both — with ZERO `POST`s over a
+/// table that has them, and before the approval is read (it is UNVERIFIED on
+/// purpose, so a controller checking only at Job-build time would hold the
+/// object instead).
+///
+/// The first two rows are the two directions of "absent means sampled": a
+/// complete declaration over a sampled plan, and a complete plan with no
+/// declaration — the second is how a list would show `sampled` over a run
+/// that verifies everything, or the reverse.
+///
+/// The fifth row is a hand-written STANDING `Restore` (it carries
+/// `spec.authorization`, so the admission that follows is the standing one):
+/// its declaration is held to the plan exactly as a per-run one's, so a list
+/// can never read "sampled" over a standing run that verifies every record.
+///
+/// KILLS: removing the early `coverage_agrees(restore)?` (every row holds as
+/// `ApprovalNotVerified`); comparing coverage only (rows 3 and 4 admitted);
+/// reading absent as "whatever the plan says" (row 2 admitted); skipping the
+/// check for a `Restore` carrying `spec.authorization` (review RM3: row 5
+/// reads the approval).
+#[tokio::test]
+async fn a_declared_coverage_the_plan_does_not_say_is_refused_before_anything_is_read() {
+    let standing = |restore: weirkeeper::crds::restore::Restore| {
+        let mut value = serde_json::to_value(&restore).expect("serialises");
+        value["spec"]["authorization"] = serde_json::json!({
+            "kind": "Standing",
+            "approvalRef": {"name": "weekly-standing"},
+            "rehearsalScheduleRef": {"name": "weekly"},
+        });
+        let standing: weirkeeper::crds::restore::Restore =
+            serde_json::from_value(value).expect("the fixture is a standing Restore");
+        assert!(standing.spec.authorization.is_some(), "the row is standing");
+        standing
+    };
+    for (label, object, words) in [
+        (
+            "complete declared over a sampled plan",
+            restore_declaring(PLAN_BYTES, Some("complete"), None),
+            [
+                "sample.coverage `sampled`",
+                "spec declares coverage `complete`",
+            ],
+        ),
+        (
+            "a complete plan with no declaration",
+            restore_declaring(&complete_plan_bytes(None), None, None),
+            [
+                "sample.coverage `complete`",
+                "spec declares coverage `sampled`",
+            ],
+        ),
+        (
+            "the bound declared differs",
+            restore_declaring(&complete_plan_bytes(Some(20)), Some("complete"), Some(10)),
+            ["`complete` (20)", "`complete` (10)"],
+        ),
+        (
+            "a plan bound with no declared bound",
+            restore_declaring(&complete_plan_bytes(Some(20)), Some("complete"), None),
+            ["`complete` (20)", "`complete` (no bound)"],
+        ),
+        (
+            "a standing Restore's complete plan with no declaration",
+            standing(restore_declaring(&complete_plan_bytes(None), None, None)),
+            [
+                "sample.coverage `complete`",
+                "spec declares coverage `sampled`",
+            ],
+        ),
+    ] {
+        let (client, recorder, bodies) = mock_client_recording_bodies(admission_routes(
+            200,
+            approval_json(false, &plan_hash(), &plan_hash()),
+            200,
+            cluster_json(true, PLAINTEXT_AUTH),
+        ));
+        let outcome = reconcile_restore(
+            &object,
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("a refusal is an answer");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+            "{label}: {outcome:?}"
+        );
+        assert!(!outcome.created, "{label}");
+        let bodies = bodies.lock().expect("readable").clone();
+        assert_eq!(post_count(&bodies, "/jobs"), 0, "{label}: no Job");
+        assert_eq!(post_count(&bodies, "/configmaps"), 0, "{label}");
+        let calls = recorder.lock().expect("readable").clone();
+        assert!(
+            calls.iter().all(|c| !path(&c.uri).contains("/approvals/")),
+            "{label}: refused before the approval is read"
+        );
+        let status = &patched_statuses(&bodies)[0];
+        assert_eq!(
+            status["reason"], "ExecutionSpecInvalid",
+            "{label}: {status}"
+        );
+        let message = status["conditions"]
+            .as_array()
+            .and_then(|cs| cs.iter().find(|c| c["type"] == "Failed"))
+            .and_then(|c| c["message"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        for word in words {
+            assert!(message.contains(word), "{label}: `{word}` in {message}");
+        }
+    }
+}
+
+/// **The control, and the brief's row "a complete request reaches the
+/// runner's plan".** A `Restore` declaring complete coverage over a plan that
+/// asks for it, approved over those bytes, is admitted: the Job is created and
+/// the plan ConfigMap the runner reads carries `coverage: complete` and the
+/// bound, byte for byte. And a `Restore` that declares nothing over the
+/// sampled plan — every object written before the field — is admitted exactly
+/// as before, its plan carrying no `coverage` key.
+///
+/// KILLS: `coverage_agrees` refusing a matching pair; the plan ConfigMap
+/// rewritten (it is copied verbatim).
+#[tokio::test]
+async fn a_declared_coverage_the_plan_says_is_admitted_and_reaches_the_runners_plan() {
+    let plan = complete_plan_bytes(Some(5_000));
+    let hash = sha256_prefixed(plan.as_bytes());
+    let object = restore_declaring(&plan, Some("complete"), Some(5_000));
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(true, &hash, &hash),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    let outcome = reconcile_restore(
+        &object,
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("admitted");
+    assert!(outcome.created, "the Job was created: {outcome:?}");
+    let bodies = bodies.lock().expect("readable").clone();
+    let config_map = posted_config_map(&bodies);
+    let mounted = config_map["data"]["restore.yaml"]
+        .as_str()
+        .expect("the plan key");
+    assert_eq!(
+        mounted, plan,
+        "the runner reads the approved bytes verbatim"
+    );
+    let parsed: logweir_core::spec::DrillSpec =
+        serde_yaml::from_str(mounted).expect("the runner's grammar");
+    assert_eq!(
+        parsed.sample.coverage,
+        logweir_core::spec::Coverage::Complete
+    );
+    assert_eq!(parsed.sample.complete_max_records, Some(5_000));
+
+    // Absent over the sampled plan: as before.
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("admitted");
+    assert!(outcome.created);
+    let mounted = posted_config_map(&bodies.lock().expect("readable"))["data"]["restore.yaml"]
+        .as_str()
+        .expect("the plan key")
+        .to_string();
+    assert!(!mounted.contains("coverage"), "{mounted}");
+}
+
+/// The Job builder refuses exactly what the reconcile refuses — ONE function.
+///
+/// KILLS: dropping `coverage_agrees` from `runner_job_spec_with_policy`.
+#[test]
+fn the_job_builder_refuses_a_coverage_the_plan_does_not_say() {
+    let refused = runner_job_spec(
+        &restore_declaring(PLAN_BYTES, Some("complete"), None),
+        &cluster(true),
+        &[KEY_ID_LIVE.to_string()],
+        &approval(true),
+        &legacy_trust(),
+        now(),
+    );
+    match refused {
+        Err(weirkeeper::controllers::restore::RestoreError::Refused(state, message)) => {
+            assert_eq!(
+                state,
+                weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID
+            );
+            assert!(message.contains("spec declares coverage"), "{message}");
+        }
+        other => panic!("refused, not {other:?}"),
+    }
+}
+
+/// The fixture scorecard at format 1.4.0 carrying `integrity.verification`
+/// with `coverage` and, when given, its `complete` block; `outcome` and
+/// `integrity.result` as given.
+fn scorecard_with_verification(
+    outcome: &str,
+    result: &str,
+    coverage: &str,
+    complete: Option<Value>,
+) -> String {
+    let mut doc: Value = serde_json::from_str(&scorecard_json(
+        outcome,
+        result,
+        if result == "pass" {
+            ""
+        } else {
+            "the bound stopped it"
+        },
+    ))
+    .expect("the fixture is JSON");
+    doc["format_version"] = serde_json::json!("1.4.0");
+    let mut verification = serde_json::json!({
+        "coverage": coverage,
+        "comparison_basis": "archive",
+        "header_order": if coverage == "complete" { "verified" } else { "notVerified" },
+        "application": "notAttempted",
+        "gaps": [],
+        "pruned": []
+    });
+    if let Some(block) = complete {
+        verification["complete"] = block;
+    }
+    doc["integrity"]["verification"] = verification;
+    serde_json::to_string_pretty(&doc).expect("serialises")
+}
+
+/// A signed complete block: two partitions, the second NOT compared (past the
+/// bound), so `covered: false`.
+fn uncovered_block() -> Value {
+    let replay = |e: u64, r: u64, m: u64| {
+        serde_json::json!({"expected": e, "restored": r, "matching": m, "missing": e - m,
+            "unexpected": 0, "duplicates": 0, "out_of_order": 0, "mismatched": 0})
+    };
+    serde_json::json!({
+        "covered": false,
+        "incomplete_reason": "sample.complete_max_records is 300: orders/1 and every later \
+                              partition were not compared",
+        "max_records": 300,
+        "window": {"end_ms": 1_757_253_900_000_i64},
+        "archive": {"segments": 4, "segments_verified": 2, "segments_failed": [],
+                    "segments_unverified": ["orders/1/0.kbak", "orders/1/1.kbak"],
+                    "records_decoded": 250, "offset_holes": 0},
+        "replay": replay(250, 250, 250),
+        "partitions": [
+            {"topic": "orders", "partition": 0, "target_topic": "drill-orders",
+             "compared": true, "segments": 2, "segments_verified": 2,
+             "records_decoded": 250, "offset_holes": 0, "replay": replay(250, 250, 250),
+             "findings": []},
+            {"topic": "orders", "partition": 1, "target_topic": "drill-orders",
+             "compared": false, "segments": 2, "segments_verified": 0,
+             "records_decoded": 0, "offset_holes": 0, "replay": replay(0, 0, 0),
+             "findings": ["past the bound"]}
+        ]
+    })
+}
+
+/// **PROD-08.1a: what the run SIGNED about its coverage reaches the status.**
+/// A complete scorecard's coverage, `covered`, its reason, the archive counts,
+/// the totals and every partition's exact counts are copied onto
+/// `status.integrity`, from the same read as `outcome`; a sampled 1.4.0
+/// scorecard's `coverage: sampled` is copied with no block; a scorecard
+/// before 1.4.0 copies NO coverage at all (not recorded — never complete).
+///
+/// KILLS: `integrity_block` dropping `coverage` or `complete`; the
+/// observation reading the block beside a sampled coverage; inventing
+/// `coverage` for an older document.
+#[tokio::test]
+async fn the_signed_coverage_and_exact_counts_reach_the_restore_status() {
+    let doc = scorecard_with_verification(
+        "fail-integrity",
+        "partial",
+        "complete",
+        Some(uncovered_block()),
+    );
+    let observation = scorecard_observation(doc.as_bytes()).expect("a scorecard");
+    assert_eq!(observation.integrity_coverage.as_deref(), Some("complete"));
+    let oracle = move |_key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
+        let o = observation.clone();
+        Box::pin(async move { Some(o) })
+    };
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(2),
+        log_body(&i8_tail()),
+        "Failed",
+    ));
+    reconcile_restore(&restore(), &client, &oracle, &unverified_evidence, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    let status = patched_statuses(&seen).remove(0);
+    let integrity = &status["integrity"];
+    assert_eq!(integrity["coverage"], "complete", "{status}");
+    let complete = &integrity["complete"];
+    assert_eq!(complete["covered"], false, "{complete}");
+    assert!(
+        complete["incompleteReason"]
+            .as_str()
+            .is_some_and(|r| r.contains("complete_max_records is 300")),
+        "{complete}"
+    );
+    assert_eq!(complete["maxRecords"], 300);
+    assert_eq!(complete["archive"]["segmentsUnverifiedCount"], 2);
+    assert_eq!(complete["archive"]["segmentsFailedCount"], 0);
+    assert_eq!(complete["replay"]["expected"], 250);
+    assert_eq!(complete["partitionCount"], 2);
+    assert_eq!(complete["partitions"][1]["compared"], false);
+    assert_eq!(complete["partitions"][1]["topic"], "orders");
+    assert_eq!(complete["partitions"][0]["replay"]["matching"], 250);
+    assert_eq!(complete["partitions"][0]["targetTopic"], "drill-orders");
+    // It deserialises into the CRD's own type, so the API reads it typed.
+    let typed: weirkeeper::crds::restore::Integrity =
+        serde_json::from_value(integrity.clone()).expect("the CRD's Integrity");
+    assert_eq!(typed.complete.map(|c| c.covered), Some(false));
+
+    let sampled = scorecard_observation(
+        scorecard_with_verification("pass", "pass", "sampled", None).as_bytes(),
+    )
+    .expect("a scorecard");
+    let block = weirkeeper::controllers::restore::integrity_block(&sampled);
+    assert_eq!(block["coverage"], "sampled");
+    assert!(!block.contains_key("complete"), "{block:?}");
+
+    let older =
+        scorecard_observation(scorecard_json("pass", "pass", "").as_bytes()).expect("a scorecard");
+    let block = weirkeeper::controllers::restore::integrity_block(&older);
+    assert!(
+        !block.contains_key("coverage") && !block.contains_key("complete"),
+        "a document before 1.4.0 records no coverage, and none is invented: {block:?}"
+    );
+}
+
+/// **All of it or nothing, and never past the CRD's bounds.** A complete
+/// block missing a required field, or carrying a count of the wrong type, is
+/// not copied (the coverage still is). A block beside `coverage: sampled` is
+/// not copied (IV-4 keeps them together). A block listing more partitions
+/// than `status` holds is copied WITHOUT its rows, `partitionCount` saying how
+/// many. FX-23's `sample.unsampled_topics` is copied whole, or not at all
+/// past its bound.
+#[test]
+fn a_malformed_or_oversized_complete_block_is_not_copied_half_way() {
+    fn no_covered(b: &mut Value) {
+        b.as_object_mut().unwrap().remove("covered");
+    }
+    fn string_count(b: &mut Value) {
+        b["replay"]["missing"] = serde_json::json!("0");
+    }
+    fn no_archive(b: &mut Value) {
+        b.as_object_mut().unwrap().remove("archive");
+    }
+    fn uncompared_unknown(b: &mut Value) {
+        b["partitions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("compared");
+    }
+    for (label, mutate) in [
+        ("no covered", no_covered as fn(&mut Value)),
+        ("a string count", string_count),
+        ("no archive", no_archive),
+        ("a partition without compared", uncompared_unknown),
+    ] {
+        let mut block = uncovered_block();
+        mutate(&mut block);
+        let o = scorecard_observation(
+            scorecard_with_verification("fail-integrity", "partial", "complete", Some(block))
+                .as_bytes(),
+        )
+        .expect("JSON");
+        assert_eq!(o.integrity_coverage.as_deref(), Some("complete"), "{label}");
+        assert_eq!(o.integrity_complete, None, "{label}");
+    }
+    let o = scorecard_observation(
+        scorecard_with_verification("pass", "pass", "sampled", Some(uncovered_block())).as_bytes(),
+    )
+    .expect("JSON");
+    assert_eq!(
+        o.integrity_complete, None,
+        "a block beside sampled is not believed"
+    );
+
+    let mut many = uncovered_block();
+    let row = many["partitions"][0].clone();
+    many["partitions"] = Value::Array(
+        (0..=weirkeeper::crds::restore::COMPLETE_PARTITIONS_MAX)
+            .map(|p| {
+                let mut r = row.clone();
+                r["partition"] = serde_json::json!(p);
+                r
+            })
+            .collect(),
+    );
+    let o = scorecard_observation(
+        scorecard_with_verification("fail-integrity", "partial", "complete", Some(many)).as_bytes(),
+    )
+    .expect("JSON");
+    let block = o.integrity_complete.expect("the block, without its rows");
+    assert_eq!(block.partitions, None);
+    assert_eq!(
+        block.partition_count,
+        i64::try_from(weirkeeper::crds::restore::COMPLETE_PARTITIONS_MAX + 1).unwrap()
+    );
+
+    let with_unsampled = |list: Value| {
+        let mut doc: Value = serde_json::from_str(&scorecard_with_verification(
+            "pass", "pass", "sampled", None,
+        ))
+        .unwrap();
+        doc["format_version"] = serde_json::json!("1.6.0");
+        doc["sample"] = serde_json::json!({"unsampled_topics": list});
+        scorecard_observation(doc.to_string().as_bytes()).expect("JSON")
+    };
+    assert_eq!(
+        with_unsampled(serde_json::json!(["audit", "payments"])).unsampled_topics,
+        Some(vec!["audit".to_string(), "payments".to_string()])
+    );
+    let too_many: Vec<String> = (0..=weirkeeper::crds::restore::UNSAMPLED_TOPICS_MAX)
+        .map(|i| format!("t{i}"))
+        .collect();
+    assert_eq!(
+        with_unsampled(serde_json::json!(too_many)).unsampled_topics,
+        None
+    );
+    assert_eq!(
+        with_unsampled(serde_json::json!([1])).unsampled_topics,
+        None
+    );
+}
+
+/// **`covered: false` is never green, whatever `outcome` says.** A status
+/// whose evidence is `Valid`, whose `outcome` reads `pass` and whose exit code
+/// is 0 — a combination arm IV-6 keeps out of every document either reader
+/// accepts — is still NOT green when its complete block says `covered: false`:
+/// `CompleteNotCovered`. The same status with `covered: true` is green (the
+/// control).
+///
+/// KILLS: the badge rule's `covered` arm removed.
+#[test]
+fn a_complete_verification_that_did_not_cover_is_never_a_green_badge() {
+    let status = |covered: bool| {
+        serde_json::json!({
+            "exitCode": 0,
+            "outcome": "pass",
+            "integrity": {"result": "pass", "coverage": "complete",
+                          "complete": {"covered": covered}},
+            "evidence": {"verification": {"result": "Valid", "verifiedAt": "2026-09-07T14:10:00Z",
+                                          "matchedKeyId": KEY_ID_LIVE}}
+        })
+    };
+    let badge = weirkeeper::verification::restore_badge(&status(false));
+    assert!(!badge.green, "{badge:?}");
+    assert_eq!(
+        badge.reason,
+        weirkeeper::conditions::REASON_COMPLETE_NOT_COVERED
+    );
+    let badge = weirkeeper::verification::restore_badge(&status(true));
+    assert!(
+        badge.green,
+        "the control: a covered complete pass is green: {badge:?}"
+    );
+}
+
+/// **A real run whose complete verification did not cover is named
+/// `CompleteNotCovered`, not `OutcomeNotPass`** (PROD-08.1a review M2). Such a
+/// run signs `fail-integrity`, `integrity.result: partial`, and exits 2; the
+/// badge rule judges `covered` before the outcome, so the `Verified`
+/// condition says WHY it failed and an operator can alert on that reason.
+///
+/// CONTROLS: a complete run that DID cover and still failed integrity is
+/// `OutcomeNotPass` (so the reason comes from `covered`, not from the
+/// outcome); the same `covered: false` status over a verdict that is
+/// `Invalid` is `VerificationInvalid` (the signature is judged first, so no
+/// reason is ever read off a status whose document did not verify).
+///
+/// KILLS: the `covered` arm moved back after the outcome (the case reads
+/// `OutcomeNotPass`); the `covered` arm moved ahead of the verification (the
+/// second control reads `CompleteNotCovered`).
+#[test]
+fn a_real_run_that_did_not_cover_is_named_complete_not_covered() {
+    let status = |covered: bool, verdict: &str| {
+        serde_json::json!({
+            "exitCode": 2,
+            "outcome": "fail-integrity",
+            "integrity": {"result": if covered { "fail" } else { "partial" },
+                          "coverage": "complete",
+                          "complete": {"covered": covered,
+                                       "incompleteReason": "the bound stopped it"}},
+            "evidence": {"verification": {"result": verdict,
+                                          "verifiedAt": "2026-09-07T14:10:00Z",
+                                          "matchedKeyId": KEY_ID_LIVE}}
+        })
+    };
+    let badge = weirkeeper::verification::restore_badge(&status(false, "Valid"));
+    assert!(!badge.green, "{badge:?}");
+    assert_eq!(
+        badge.reason,
+        weirkeeper::conditions::REASON_COMPLETE_NOT_COVERED,
+        "a real covered: false run names itself"
+    );
+    let badge = weirkeeper::verification::restore_badge(&status(true, "Valid"));
+    assert!(!badge.green, "{badge:?}");
+    assert_eq!(
+        badge.reason,
+        weirkeeper::conditions::REASON_OUTCOME_NOT_PASS,
+        "the control: a covered run that failed integrity is OutcomeNotPass"
+    );
+    let badge = weirkeeper::verification::restore_badge(&status(false, "Invalid"));
+    assert!(!badge.green, "{badge:?}");
+    assert_eq!(
+        badge.reason,
+        weirkeeper::conditions::REASON_VERIFICATION_INVALID,
+        "the control: the signature is judged before anything the status says"
     );
 }

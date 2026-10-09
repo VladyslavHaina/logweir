@@ -649,6 +649,32 @@ the text before the quote. One `shape-index.json` case,
 `unsampled_topics_not_an_array` (`"orders"`), is a `message:` case: `drill
 verify` refuses it at deserialisation.
 
+## PROD-11.1: `source.selection` (scorecard format 1.7.0)
+
+Three arms, SEL-1 to SEL-3, which both readers state in the same position
+(after `sample.unsampled_topics`, before `redactions`). The block is a stated
+window START only (partition subsets are refused by the runner until the
+owner decides OD-9). Every case is `verification_1_4_sampled.json` (or, for
+SEL-3, `verification_1_4_complete_pass.json`) with `format_version` and
+`source.selection` set (and, for the complete cases, the complete block's
+`window`) and nothing else touched.
+
+| case | what it pins |
+|---|---|
+| `selection_1_7_sampled` | ACCEPT: a start under 1.7.0, beside a sampled verification |
+| `selection_1_7_complete_pass` | ACCEPT: a complete pass whose window is the selection's |
+| `selection_under_format_1_6_0` | SEL-1: the block under `1.6.0` |
+| `selection_start_at_its_end` | SEL-2: the start equal to the end |
+| `selection_complete_window_is_not_its_own` | SEL-3: a complete block whose window has no start beside a selection that states one |
+
+SEL-1's message interpolates the document's `format_version`, so its `arm` is
+the literal text before the placeholder; every other `arm` is the text of the
+arm's first source line. One `shape-index.json` case, `selection_not_an_object`
+(`"orders"`), is a `message:` case: `drill verify` refuses it at
+deserialisation. The other bad shapes (a missing or non-integer start or end,
+a value outside `i64`) are pinned by
+`docs/test_verify_scorecard.py::test_the_selection_shape_is_refused_before_its_arms`.
+
 ---
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

@@ -706,6 +706,25 @@ const RESTORE_TIME_BASIS = shapeOf(
   { plan: str },
 );
 
+/** PROD-08.1a: how much of a restore phase 7 verifies, in the product API's
+ *  one spelling for both what a Restore asks for and what its scorecard says
+ *  it verified. */
+export const COVERAGE_VALUES = Object.freeze(["sampled", "complete"]);
+
+// PROD-08.1a: a Restore's coverage -- what it asks for (`requested`, always
+// stated) and what its signed scorecard says it verified (`recorded`; ABSENT is
+// not recorded, never complete). `covered` and its reason belong to a recorded
+// complete verification. REQUIRED on the Restore, as the schema requires it:
+// the API always states what a Restore asks for.
+const RESTORE_COVERAGE = shapeOf(
+  "RestoreCoverageView",
+  { requested: oneOf(COVERAGE_VALUES) },
+  {
+    completeMaxRecords: int, recorded: oneOf(COVERAGE_VALUES), covered: bool,
+    incompleteReason: str,
+  },
+);
+
 const RESTORE = shapeOf(
   "Restore",
   {
@@ -714,6 +733,7 @@ const RESTORE = shapeOf(
     sourceArchive: objectOf(ARCHIVE), backupSetRef: str, pointInTime: str,
     target: objectOf(RESTORE_TARGET), deadlineSeconds: int,
     newTopics: listOf(str), operation: objectOf(OPERATION_SUMMARY),
+    coverage: objectOf(RESTORE_COVERAGE),
   },
   {
     createdAt: str, planBytes: opaque,
@@ -1650,6 +1670,7 @@ export const CONSOLE_SHAPES = Object.freeze({
   Backup: BACKUP,
   RestoreTargetView: RESTORE_TARGET,
   Restore: RESTORE,
+  RestoreCoverageView: RESTORE_COVERAGE,
   SubjectRefView: SUBJECT_REF,
   VerifiedSubjectView: VERIFIED_SUBJECT,
   Approval: APPROVAL,
@@ -2368,10 +2389,44 @@ const D3_PROGRESS = shapeOf(
   },
 );
 
+// PROD-08.1a: a complete verification's exact counts, copied from the signed
+// scorecard by the controller and served by the API beside a recorded
+// `coverage: complete` only. `covered: false` is never a pass.
+const D3_REPLAY_COUNTS = shapeOf(
+  "ReplayCountsView",
+  {
+    expected: int, restored: int, matching: int, missing: int, unexpected: int,
+    duplicates: int, outOfOrder: int, mismatched: int,
+  },
+);
+
+const D3_PARTITION_VERIFICATION = shapeOf(
+  "PartitionVerificationView",
+  { topic: str, partition: int, compared: bool, replay: objectOf(D3_REPLAY_COUNTS) },
+  { targetTopic: str },
+);
+
+const D3_COMPLETE_VERIFICATION = shapeOf(
+  "CompleteVerificationView",
+  {
+    covered: bool, segments: int, segmentsVerified: int, segmentsFailed: int,
+    segmentsUnverified: int, recordsDecoded: int, offsetHoles: int,
+    replay: objectOf(D3_REPLAY_COUNTS), partitionCount: int,
+  },
+  {
+    incompleteReason: str, maxRecords: int,
+    partitions: listOf(objectOf(D3_PARTITION_VERIFICATION)),
+  },
+);
+
 const D3_VERIFICATION_SCOPE = shapeOf(
   "VerificationScopeView",
   { level: oneOf(SCOPE_LEVELS) },
-  { recordsSampled: int, recordsSampledMatching: int, recordsExpected: int },
+  {
+    recordsSampled: int, recordsSampledMatching: int, recordsExpected: int,
+    coverage: oneOf(COVERAGE_VALUES), complete: objectOf(D3_COMPLETE_VERIFICATION),
+    unsampledTopics: listOf(str),
+  },
 );
 
 const D3_NEW_TOPIC = shapeOf("CreatedTopicView", { name: str }, { partitions: int });
@@ -2883,6 +2938,9 @@ export const D3_SHAPES = Object.freeze({
   DiagnosticView: D3_DIAGNOSTIC,
   DiagnosticObjectView: D3_DIAGNOSTIC_OBJECT,
   VerificationScopeView: D3_VERIFICATION_SCOPE,
+  CompleteVerificationView: D3_COMPLETE_VERIFICATION,
+  PartitionVerificationView: D3_PARTITION_VERIFICATION,
+  ReplayCountsView: D3_REPLAY_COUNTS,
   CompletionView: D3_COMPLETION,
   CreatedTopicView: D3_NEW_TOPIC,
   SampleWindowView: D3_SAMPLE_WINDOW,

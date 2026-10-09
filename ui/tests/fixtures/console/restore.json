@@ -11,6 +11,9 @@
     "newTopics": [
       "drill-20260911-orders"
     ],
+    "coverage": {
+      "requested": "sampled"
+    },
     "operation": {
       "state": "succeeded",
       "stateReason": "Ok",

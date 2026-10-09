@@ -778,6 +778,8 @@ fn the_rehearsal_scope_serialises_in_camel_case() {
         records_per_partition: 100,
         deadline_seconds: 900,
         modes: vec![MODE_SCRATCH.to_string()],
+        coverage: None,
+        complete_max_records: None,
     };
     let wire = serde_json::to_value(&scope).expect("a serialisable scope");
     for field in [
@@ -796,9 +798,32 @@ fn the_rehearsal_scope_serialises_in_camel_case() {
              differently would verify against a document nobody signed"
         );
     }
+    // PROD-08.1a: the two 1.1.0 fields are absent from a scope that states
+    // neither, so its bytes are a 1.0.0 scope's.
+    for field in ["coverage", "completeMaxRecords"] {
+        assert!(
+            wire.get(field).is_none(),
+            "{field} must not serialise when absent"
+        );
+    }
     let back: RehearsalScope = serde_json::from_value(wire).expect("a round trip");
     assert_eq!(back, scope);
     assert!(scope.is_scratch_only());
+    let complete = RehearsalScope {
+        coverage: Some(logweir_core::spec::Coverage::Complete),
+        complete_max_records: Some(1_000_000),
+        max_partitions: logweir_core::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS,
+        ..scope
+    };
+    let wire = serde_json::to_value(&complete).expect("a serialisable scope");
+    assert_eq!(wire["coverage"], "complete");
+    assert_eq!(
+        wire["maxPartitions"], 0,
+        "a complete scope signs a partition bound of 0"
+    );
+    assert_eq!(wire["completeMaxRecords"], 1_000_000);
+    let back: RehearsalScope = serde_json::from_value(wire).expect("a round trip");
+    assert_eq!(back, complete);
 }
 
 /// A scope naming any other mode is not scratch-only, and an empty mode list
@@ -814,6 +839,8 @@ fn a_scope_naming_another_mode_is_not_scratch_only() {
         records_per_partition: 1,
         deadline_seconds: 1,
         modes: vec![MODE_SCRATCH.to_string(), "newTopic".to_string()],
+        coverage: None,
+        complete_max_records: None,
     };
     assert!(!base.is_scratch_only());
     assert!(!RehearsalScope {

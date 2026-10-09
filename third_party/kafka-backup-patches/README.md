@@ -13,6 +13,7 @@ mistakes it for OSO's binary.
 | Patch | What it fixes | Oracle |
 | --- | --- | --- |
 | `0001-lockfile-rustls-h2-spin.patch` | The engine's Cargo.lock only: rustls 0.23.43 → 0.23.45 (RUSTSEC-2026-0285) with rustls-webpki 0.103.13 → 0.103.15, h2 0.4.15 → 0.4.19 (RUSTSEC-2026-0258), and the yanked spin 0.9.8 → 0.9.9. The first run of the engine's `cargo deny` gate (PROD-00.2) found all three in the shipped graph. Logweir's own graph already carries rustls 0.23.45, rustls-webpki 0.103.15 and h2 0.4.19 (it has spin 0.10.1, not 0.9). | `scripts/ci-check.sh`'s engine `cargo deny` (fails on the unpatched lock), and PROD-00.2's parity suites |
+| `0002-manifest-replication-factor.patch` | `merge_manifests` (`crates/kafka-backup-core/src/backup/engine.rs`) carries `source_replication_factor` from the current session into a topic the stored manifest already holds, as it already did `original_partition_count`. Without it the manifest records the factor for the FIRST topic a backup saves only: the configuration capture puts every topic into the manifest before the first save, so each later topic is already stored without a factor and the merge kept that. Found by PROD-05.1, fixed by FX-21 (Logweir's phase 7 had read the missing factor as matching). An upstream bug-class fix. | The patch's own engine unit tests (`test_merge_manifests_updates_replication_factor`, `…_preserves_replication_factor_when_none`, `test_manifest_persistence_keeps_every_topics_replication_factor`; the first and third fail on the unpatched source), and FX-21's e2e row `e2e/tests/replication_factor_parity.rs` (a three-topic backup on `cluster3` records every topic's factor) |
 
 ## The policy: patch first
 
@@ -55,7 +56,7 @@ set, each with negative controls.
 `third_party/kafka-backup-build.env` names Logweir's build:
 
 - `ENGINE_VERSION=<release>+logweir.<n>`: what `kafka-backup --version`
-  prints for Logweir's build (`kafka-backup 0.23.3+logweir.1`). `<n>` counts
+  prints for Logweir's build (`kafka-backup 0.23.3+logweir.2`). `<n>` counts
   Logweir's builds of one OSO release, from 1.
 - `ENGINE_DIGEST=sha256:<hex>`: the build-input digest, over the tarball's
   sha256, every patch's name and sha256 in order, and `ENGINE_VERSION`.

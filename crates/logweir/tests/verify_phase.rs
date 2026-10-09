@@ -79,6 +79,7 @@ fn scratch_deviations_are_intentional_and_anything_else_is_not() {
         intended,
         unexpected,
         not_reconstructed,
+        not_assessed,
     } = classify_parity(
         logweir_core::spec::TargetMode::Scratch,
         &fixtures::source_configs(&[
@@ -91,10 +92,14 @@ fn scratch_deviations_are_intentional_and_anything_else_is_not() {
             ("retention.ms", "-1"),
             ("max.message.bytes", "999"),
         ]),
-        /*src_partitions*/ 3,
+        /*src_partitions*/ Some(3),
         /*tgt_partitions*/ 3,
-        /*src_rf*/ 3,
+        /*src_rf*/ Some(3),
         /*tgt_rf*/ 1,
+    );
+    assert!(
+        not_assessed.is_empty(),
+        "both counts are recorded: {not_assessed:?}"
     );
     assert!(
         not_reconstructed.is_empty(),
@@ -188,9 +193,9 @@ fn a_source_config_key_absent_from_the_target_is_reported_not_silently_agreed() 
         logweir_core::spec::TargetMode::Scratch,
         &fixtures::source_configs(&[("max.message.bytes", "1048576")]),
         &BTreeMap::new(),
+        Some(3),
         3,
-        3,
-        1,
+        Some(1),
         1,
     );
     assert!(intended.is_empty());
@@ -213,9 +218,9 @@ fn a_partition_count_divergence_is_reported_as_intended() {
         logweir_core::spec::TargetMode::Scratch,
         &BTreeMap::new(),
         &BTreeMap::new(),
-        3,
+        Some(3),
         6,
-        1,
+        Some(1),
         1,
     );
     assert!(intended.contains(&"partition_count".to_string()));
@@ -328,6 +333,7 @@ fn plan_orders_to_drill_orders() -> RestorePlan {
             fixtures::ts("2026-08-30T02:00:00Z"),
         ),
         window_floor_source: WindowFloorSource::ArchiveManifest,
+        source_partitions: Default::default(),
         default_replication_factor: 1,
         checkpoint_state: "/tmp/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,
@@ -3519,18 +3525,21 @@ fn a_refused_target_configuration_read_is_not_assessed_never_compared_as_empty()
 
 use logweir_core::spec::TargetMode;
 
+/// `classify_parity`'s inputs after the mode: source and target configs, the
+/// source's partition count (as recorded) and the target's, the source's
+/// replication factor (as recorded) and the target's.
+type ParityInputs = (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    Option<i32>,
+    i32,
+    Option<i16>,
+    i16,
+);
+
 /// One deviation kind, alone: the configs and counts that differ on `kind`
 /// and on nothing else.
-fn only(
-    kind: &str,
-) -> (
-    BTreeMap<String, String>,
-    BTreeMap<String, String>,
-    i32,
-    i32,
-    i16,
-    i16,
-) {
+fn only(kind: &str) -> ParityInputs {
     let mut src = BTreeMap::new();
     let mut tgt = BTreeMap::new();
     let (mut src_partitions, mut src_rf) = (3, 3);
@@ -3549,7 +3558,7 @@ fn only(
     }
     // The target: three partitions at replication factor 3, so only `kind`
     // differs from the source.
-    (src, tgt, src_partitions, 3, src_rf, 3)
+    (src, tgt, Some(src_partitions), 3, Some(src_rf), 3)
 }
 
 /// Both modes for one kind, every list asserted EXACTLY: the label moves, the
@@ -3563,6 +3572,7 @@ fn assert_the_mode_decides_the_label(kind: &str) {
             intended: vec![kind.to_string()],
             unexpected: vec![],
             not_reconstructed: vec![],
+            not_assessed: vec![],
         },
         "{kind}: a scratch drill's deviation is INTENDED, exactly as before FX-3"
     );
@@ -3573,6 +3583,7 @@ fn assert_the_mode_decides_the_label(kind: &str) {
             intended: vec![],
             unexpected: vec![kind.to_string()],
             not_reconstructed: vec![kind.to_string()],
+            not_assessed: vec![],
         },
         "{kind}: a newTopic restore did NOT reconstruct it; it is never intended, and its \
          twin in `unexpected` is what a reader older than format 1.2.0 sees"
@@ -3612,16 +3623,17 @@ fn other_keys_stay_unexpected_and_a_matching_topic_has_nothing_in_either_mode() 
     let tgt = fixtures::target_configs(&[("max.message.bytes", "999")]);
     for mode in [TargetMode::Scratch, TargetMode::NewTopic] {
         assert_eq!(
-            classify_parity(mode, &src, &tgt, 3, 3, 3, 3),
+            classify_parity(mode, &src, &tgt, Some(3), 3, Some(3), 3),
             ParityClasses {
                 intended: vec![],
                 unexpected: vec!["max.message.bytes".to_string()],
                 not_reconstructed: vec![],
+                not_assessed: vec![],
             },
             "{mode}"
         );
         assert_eq!(
-            classify_parity(mode, &src, &src, 3, 3, 3, 3),
+            classify_parity(mode, &src, &src, Some(3), 3, Some(3), 3),
             ParityClasses::default(),
             "{mode}: nothing differs"
         );
@@ -3926,4 +3938,232 @@ fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pend
             "{doc} still calls FX-3's classification pending: {stale:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// FX-21: a source replication factor (or partition count) the archive does not
+// record is NOT ASSESSED, never read as matching. Engine 0.23.3 records the
+// factor in the manifest for the FIRST topic it saves only, and phase 7 used
+// the TARGET's own value in its place, so every other topic's factor
+// difference was signed as no divergence.
+// ---------------------------------------------------------------------------
+
+/// A verified receipt's coverage, `captured` for `orders`, whose 1.3.0
+/// `topic_configuration` records `orders`' replication factor as `factor`
+/// (`None`: no `topic_configuration` at all, a receipt before 1.3.0).
+fn receipt_with_factor(factor: Option<u32>) -> logweir_core::backup_receipt::SourceConfigCoverage {
+    let mut receipt: logweir_core::backup_receipt::BackupReceipt = serde_json::from_slice(
+        &std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../e2e/fixtures/signed/backup-receipt.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    receipt.format_version = "1.3.0".into();
+    receipt.config_coverage = Some(BTreeMap::from([(
+        "orders".to_string(),
+        logweir_core::backup_receipt::TopicConfigCoverage {
+            coverage: "captured".to_string(),
+            reason: None,
+            timestamp_type: None,
+        },
+    )]));
+    receipt.topic_configuration = factor.map(|f| {
+        BTreeMap::from([(
+            "orders".to_string(),
+            logweir_core::backup_receipt::TopicConfiguration {
+                partitions: Some(1),
+                replication_factor: Some(f),
+                entries: None,
+                owner: None,
+            },
+        )])
+    });
+    logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(&receipt)
+}
+
+/// Phase 7 over `healthy_parts`, with the manifest's factor and partition count
+/// for `orders` replaced, in `mode`.
+fn parity_with(
+    manifest_factor: Option<i16>,
+    manifest_partitions: Option<i32>,
+    coverage: &logweir_core::backup_receipt::SourceConfigCoverage,
+    mode: TargetMode,
+) -> logweir_core::scorecard::TopicParity {
+    let (store, mut facts, reader, engine) = healthy_parts();
+    facts.topics[0].source_replication_factor = manifest_factor;
+    facts.topics[0].original_partition_count = manifest_partitions;
+    run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+        coverage,
+        mode,
+    )
+    .unwrap()
+    .topic_parity
+}
+
+/// **FX-21, the defect.** The manifest records no replication factor for the
+/// topic and the bound receipt none either (a 1.1.0 receipt, or no binding):
+/// the factor is named in `not_assessed` and its fail-safe twin in
+/// `unexpected_divergence`, in both modes, and it is in neither the intended
+/// nor the not-reconstructed list — so no list reads it as matching or as a
+/// measured deviation. The plan's factor here is 1, the target's own value the
+/// writer before FX-21 substituted for the missing one, which signed the topic
+/// as "no replication-factor divergence".
+///
+/// Negative control: `t.source_replication_factor.unwrap_or(tgt_rf)` restored
+/// in `classify_parity_all` (the writer before FX-21) names nothing in
+/// `not_assessed` and fails every row below.
+#[test]
+fn a_replication_factor_the_archive_does_not_record_is_not_assessed_never_matched() {
+    let entry = "drill-orders: replication_factor (notRecorded)".to_string();
+    let twin = "drill-orders: replication_factor not assessed (notRecorded)".to_string();
+    for coverage in [
+        receipt_with_factor(None),
+        logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    ] {
+        for mode in [TargetMode::Scratch, TargetMode::NewTopic] {
+            let p = parity_with(None, Some(1), &coverage, mode);
+            let named = p.not_assessed.clone().expect("phase 7 ran");
+            assert!(named.contains(&entry), "{mode}: {p:?}");
+            assert!(p.unexpected_divergence.contains(&twin), "{mode}: {p:?}");
+            for list in [
+                &p.intentionally_deviated,
+                p.not_reconstructed.as_ref().expect("phase 7 ran"),
+            ] {
+                assert!(
+                    !list.iter().any(|e| e == "drill-orders: replication_factor"),
+                    "{mode}: an unrecorded factor is no measured deviation: {p:?}"
+                );
+            }
+        }
+    }
+    // Recorded nowhere, with the configuration captured: the factor is the
+    // ONLY thing not assessed, so the list is exactly the one entry.
+    let p = parity_with(
+        None,
+        Some(1),
+        &receipt_with_factor(None),
+        TargetMode::Scratch,
+    );
+    assert_eq!(p.not_assessed, Some(vec![entry]));
+}
+
+/// **FX-21, the receipt's factor.** Where the manifest records none, the bound
+/// receipt's `topic_configuration` factor (1.3.0, Logweir's own metadata read)
+/// is the source's, and is compared: 3 against the plan's 1 is a deviation,
+/// intended in a scratch drill and not reconstructed in a `newTopic` restore,
+/// and nothing is not assessed. The MANIFEST's factor comes first, so a
+/// document whose manifest records one is decided exactly as before FX-21:
+/// manifest 1 and receipt 3 is no deviation.
+///
+/// Negative controls: a phase 7 that ignores the receipt fails the first row
+/// (it names the factor not assessed); one that prefers the receipt fails the
+/// second (it reports a deviation).
+#[test]
+fn the_bound_receipts_factor_stands_where_the_manifest_records_none() {
+    let p = parity_with(
+        None,
+        Some(1),
+        &receipt_with_factor(Some(3)),
+        TargetMode::Scratch,
+    );
+    assert_eq!(p.not_assessed, Some(vec![]), "{p:?}");
+    assert!(p
+        .intentionally_deviated
+        .contains(&"drill-orders: replication_factor".to_string()));
+    let p = parity_with(
+        None,
+        Some(1),
+        &receipt_with_factor(Some(3)),
+        TargetMode::NewTopic,
+    );
+    assert_eq!(p.not_assessed, Some(vec![]), "{p:?}");
+    assert!(p
+        .not_reconstructed
+        .as_ref()
+        .unwrap()
+        .contains(&"drill-orders: replication_factor".to_string()));
+    let p = parity_with(
+        Some(1),
+        Some(1),
+        &receipt_with_factor(Some(3)),
+        TargetMode::Scratch,
+    );
+    assert_eq!(p.not_assessed, Some(vec![]), "{p:?}");
+    assert!(
+        !p.intentionally_deviated
+            .iter()
+            .any(|e| e.ends_with("replication_factor")),
+        "the manifest's factor (1, the plan's) wins: {p:?}"
+    );
+}
+
+/// **FX-21, the same class for the partition count.** A manifest that records
+/// no `original_partition_count` (an archive before engine 0.17) used to
+/// compare the TARGET's count against itself. It is now named in
+/// `not_assessed` with its twin, exactly like the factor. The control: the
+/// recorded count (1, the target's 1) is a match and adds nothing.
+#[test]
+fn a_partition_count_the_archive_does_not_record_is_not_assessed_never_matched() {
+    let p = parity_with(
+        Some(3),
+        None,
+        &receipt_with_factor(None),
+        TargetMode::Scratch,
+    );
+    assert_eq!(
+        p.not_assessed,
+        Some(vec![
+            "drill-orders: partition_count (notRecorded)".to_string()
+        ])
+    );
+    assert!(p
+        .unexpected_divergence
+        .contains(&"drill-orders: partition_count not assessed (notRecorded)".to_string()));
+    let p = parity_with(
+        Some(3),
+        Some(1),
+        &receipt_with_factor(None),
+        TargetMode::Scratch,
+    );
+    assert_eq!(p.not_assessed, Some(vec![]));
+    assert!(!p
+        .unexpected_divergence
+        .iter()
+        .any(|e| e.contains("partition_count")));
+}
+
+/// **FX-21 through phase 8's checks.** The `newTopic` document phase 7 writes
+/// for a topic whose factor is not recorded passes `validate_invariants` in
+/// full (NR-2 to NR-5 included: the twin names no setting the restore
+/// decides), so phase 8 signs it, and its `not_assessed` names the factor.
+#[test]
+fn a_new_topic_document_naming_an_unrecorded_factor_is_signable() {
+    let p = parity_with(
+        None,
+        Some(1),
+        &receipt_with_factor(None),
+        TargetMode::NewTopic,
+    );
+    let mut sc = fixtures::scorecard_pass();
+    sc.format_version = logweir_core::FORMAT_VERSION.to_string();
+    sc.target.mode = TargetMode::NewTopic;
+    sc.target.marker_topic = None;
+    sc.topic_parity = p;
+    sc.validate_invariants()
+        .expect("phase 8 signs the FX-21 document");
+    assert!(sc
+        .topic_parity
+        .not_assessed
+        .as_ref()
+        .unwrap()
+        .contains(&"drill-orders: replication_factor (notRecorded)".to_string()));
 }

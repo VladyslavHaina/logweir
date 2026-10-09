@@ -355,10 +355,13 @@ object.** The rules, exactly:
   `RecordedBeforeRevocation`; a client that must read older servers checks
   `trust.basis` as well.
 - `verificationScope.level` is `sampled` (`byte-fingerprint`), `degraded`
-  (`consume-only`) or `none`. **`complete` does not exist in v1.** A Backup is
-  always `none` with the three counts **absent** rather than zero: a receipt
-  attests counts and a window, not a restore, and `0 of 0 sampled records
-  matched` reads as a failed comparison.
+  (`consume-only`) or `none`: HOW records were compared. **`complete` is not a
+  level.** HOW MUCH was compared is `verificationScope.coverage` (PROD-08.1a,
+  [below](#the-restores-coverage-prod-081a)), so a complete verification
+  compared byte for byte reads `level: sampled` beside `coverage: complete`. A
+  Backup is always `none` with the three counts **absent** rather than zero: a
+  receipt attests counts and a window, not a restore, and `0 of 0 sampled
+  records matched` reads as a failed comparison.
 - `stale` is `true`, and the state is `unknown/StatusStale`, when an active run
   has not been observed for 300 s or an object has carried no status for 120 s
   after creation. A **terminal** object never goes stale: nothing is going to
@@ -952,6 +955,65 @@ rather than truncating it, because a partial list would be a claim the signed
 document does not make. The field is additive: a client that predates it
 ignores it.
 
+### The restore's coverage (PROD-08.1a)
+
+**Asking for it.** `POST .../restores` takes two optional fields beside the plan:
+
+```json
+{"coverage": "complete", "completeMaxRecords": 1000000}
+```
+
+They **declare** what `planBytes` says (`sample.coverage`,
+`sample.complete_max_records`) and are stored on `Restore.spec.coverage` and
+`spec.completeMaxRecords`. This route never parses the plan, so it cannot
+compare the two; the controller does, before an approval is waited for, and
+ends a `Restore` whose plan says otherwise `Failed` / `ExecutionSpecInvalid`
+([kubernetes.md](kubernetes.md) §12). Absent means `sampled`, stores nothing,
+and is left out of the idempotency request hash, so a client that predates the
+fields creates the object it always did. Complete coverage reads every archived
+record of the restored topics and the whole restored output: about a minute
+per GiB of one-KiB records with an optimised build on a laptop, against about
+five seconds for the sampled check.
+
+| `errors[].field` | `errors[].code` | when |
+|---|---|---|
+| `completeMaxRecords` | `out_of_range` | below 1: a complete verification that may decode no record compares nothing. |
+| `completeMaxRecords` | `requires_complete_coverage` | set without `coverage: complete`: it bounds a complete verification and nothing else. |
+
+**Reading it.** Both restore reads, the list included, carry a required
+`coverage` block:
+
+```json
+{"coverage": {"requested": "complete", "completeMaxRecords": 300,
+              "recorded": "complete", "covered": false,
+              "incompleteReason": "sample.complete_max_records is 300: orders/1 and every later partition were not compared"}}
+```
+
+`requested` is what the `Restore` asks for (`spec.coverage`, absent read as
+`sampled`). `recorded` is what its signed scorecard says it verified, copied by
+the controller onto `status.integrity.coverage` — a claim until the evidence
+verifies, and **absent means not recorded** (a scorecard before format 1.4.0, a
+refused run, or one not read yet), never complete. `covered` and
+`incompleteReason` belong to a recorded complete verification. **`covered:
+false` is never a pass**: `operation.verifiedSuccess` is computed with the
+controller's badge rule, which refuses green beside it (`CompleteNotCovered`),
+even beside an `outcome` that says pass.
+
+The operation route's `verificationScope` (`GET .../operations/restore/{name}`)
+adds `coverage` (the same `recorded` value), `complete` — `covered`,
+`incompleteReason`, `maxRecords`, the archive counts (`segments`,
+`segmentsVerified`, `segmentsFailed`, `segmentsUnverified`, `recordsDecoded`,
+`offsetHoles`), the totals under `replay` (`expected`, `restored`, `matching`,
+`missing`, `unexpected`, `duplicates`, `outOfOrder`, `mismatched`),
+`partitionCount` and, up to 256 partitions, `partitions[]` with each one's own
+`replay` and `compared` (absent past 256; the rows stay in the scorecard) — and
+FX-23's `unsampledTopics` for a sampled check: the restored topics the
+partition cap left without a sampled partition. `complete` is served only beside
+a recorded `coverage: complete`. All three are additive.
+
+`GET .../rehearsal-schedules[/{name}]`'s `bounds` carries `coverage` (`sampled`
+when the schedule states none, or `complete`) and `completeMaxRecords`.
+
 ### Saved destinations
 
 `spec.storage` and `spec.transport.security` are immutable — a different
@@ -1395,21 +1457,54 @@ validated names.
 
 Mutation bodies are strict: an unknown field is `422 validation_failed` naming
 the field, not a silently ignored key. So is an unknown or repeated query
-parameter (`400 malformed_request`). Bodies are capped at 1 MiB.
+parameter (`400 malformed_request`). Bodies are capped at 1 MiB, and must
+arrive in time (below).
 
-**The listener speaks HTTP/1.1 only, and the request head is on a clock.**
-A connection has ten seconds from the moment it is accepted to send a complete
-request head, and ten seconds again after each answer on a keep-alive
-connection; past that the server closes it, whether it sent part of a head or
-nothing at all (R4; FX-24 extended it to a connection that sends no byte). A
-head larger than 32 KiB is refused. At most 256 connections are served at
-once, and further ones wait in the kernel's listen queue until one closes, so
-idle sockets cannot hold that ceiling for longer than the ten-second deadline.
-The clock covers the head only: a request body a handler is still reading, and
-an answer the client has stopped reading, have no deadline of their own. **That
-case is open (FX-24b):** until it lands, clients that send requests and stop
-reading the answers can hold all 256 connections, and the console then answers
-nobody, exactly as silent sockets could before FX-24.
+**The listener speaks HTTP/1.1 only, and a connection is on a clock from its
+accept to its close.**
+
+- **The head.** A connection has ten seconds from the moment it is accepted to
+  send a complete request head, and ten seconds again after each answer on a
+  keep-alive connection; past that the server closes it, whether it sent part
+  of a head or nothing at all (R4; FX-24 extended it to a connection that
+  sends no byte). A head larger than 32 KiB is refused.
+- **A stall, after the head (FX-24b).** A connection may wait on its client
+  for thirty seconds with no progress at all: an answer the client has stopped
+  reading, or a request body it has stopped sending. Past that the write or
+  the read fails and the connection ends. The clock runs only while the
+  server is waiting on the client and restarts on every byte, so a slow but
+  steady reader keeps its connection for as long as its answer takes, and an
+  operation event stream that is being read is never cut by it: between
+  heartbeats it has nothing to write. A body that stops is answered `400 malformed_request`
+  ("stopped arriving") before the connection closes.
+- **A JSON body's total (FX-24b).** A mutation body must also arrive whole
+  within sixty seconds of the server starting to read it, so one that trickles
+  a byte at a time cannot hold a connection either: it is answered
+  `400 malformed_request` ("not received within 60 seconds") and the
+  connection is closed after the answer.
+- **The ceiling.** At most 256 connections are served at once, and further
+  ones wait in the kernel's listen queue until one closes. Silent sockets
+  cannot hold that ceiling for longer than the ten-second head deadline, nor
+  clients that stop reading an ordinary answer for much longer than the
+  thirty-second stall: the kernel still accepts a stopped reader's bytes for a
+  few seconds, so a connection is held until the stall clock, which starts at
+  the last byte the kernel took, runs out (about 35 s measured on macOS).
+- **An event stream whose client stops reading** is the exception. Its
+  heartbeats are too small to fill the kernel's buffers, so no write is ever
+  pending and the stall clock never starts: the stream is held to its own
+  300-second ceiling, then the ten-second idle deadline, up to 310 s. An actor
+  may hold at most four streams per namespace.
+
+**What these bounds do not stop (open: FX-24c).** They end abandoned and
+stalled clients, not slow ones. The stall clock restarts on every byte, so a
+client that reads, or sends, as little as one byte every thirty seconds keeps
+its connection for as long as it keeps that up, and 256 such clients hold every
+connection the console has. In shared mode only an enforcing NetworkPolicy
+keeps such peers away from the API pod, and `api.console.networkPolicy.enabled`
+is off by default (Docker Desktop accepts a NetworkPolicy without enforcing it).
+A client that comes through the ingress can do far less, because the ingress
+does not relay pipelined requests to the pod. FX-24c is the open row for a
+per-peer cap or a minimum rate.
 HTTP/2 is not served: a client that opens with the HTTP/2 preface (prior
 knowledge, `h2c`) is closed at its first line. A shutdown signal gives open
 connections ten seconds to finish, then drops them and exits 0.

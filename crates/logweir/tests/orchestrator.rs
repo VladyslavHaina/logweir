@@ -2355,3 +2355,231 @@ fn a_complete_coverage_plan_finds_a_changed_record_past_the_canary() {
     );
     assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
 }
+
+/// **PROD-11.1: a partition subset can never sign** (the review's H1,
+/// OD-9). A plan stating `restore.partitions` — one the archive satisfies, so
+/// the refusal is not the archive's — is refused exit 3 at phase 0, its
+/// message opening with `PartitionSubsetsAwaitOwnerDecision`: no target topic
+/// created, no sample fingerprinted, nothing signed. The control is the same
+/// archive with no selection (`Drill::Passes`), which runs and signs.
+///
+/// KILLS: the refusal deleted from `ReplaySelection::from_spec` (the subset
+/// would be restored and signed under a format a verifier that predates it
+/// reads as a full restore).
+#[test]
+fn a_partition_subset_is_refused_by_name_and_never_signed() {
+    let f = fixtures::orchestrator_fixture(Drill::StatesAPartitionSelection);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=GuardRefused");
+    assert!(
+        message.contains("PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition subset of orders"),
+        "{message}"
+    );
+    assert!(fixtures::created_topics(&f).is_empty(), "nothing created");
+    assert!(fixtures::fingerprint_calls(&f).is_empty(), "before phase 4");
+    assert!(
+        f.ctx
+            .store
+            .get(&format!("logweir/drills/{}.json", f.run_id))
+            .is_err(),
+        "a refused run signs nothing"
+    );
+    let control = fixtures::orchestrator_fixture(Drill::Passes);
+    execute_with(&control.args, &control.run_id, &control.ctx).expect("the control runs");
+    assert_eq!(fixtures::created_topics(&control).len(), 1);
+}
+
+/// **PROD-11.1: a stated window start is restored, judged over its window and
+/// SIGNED.** The approved plan states `restore.point_in_time:
+/// "<start>/<end>"` with the start at the archive's floor (so the restore is
+/// the archive's). The run passes, its scorecard is format 1.7.0 with
+/// `source.selection` naming the start and end, and the EXISTING
+/// `sample.coverage_note` opens with the window and names the sampled lane's
+/// one limit — what a reader that predates the block reads. The control is the
+/// same archive with no selection: no block, its version as before.
+///
+/// KILLS: dropping the block, writing it for a plan with no start, a version
+/// step writing an older minor over 1.7.0, the coverage note not naming the
+/// window.
+#[test]
+fn a_stated_window_start_is_restored_and_signed_with_its_window() {
+    let f = fixtures::orchestrator_fixture(Drill::StatesAWindowStart);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the window runs");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
+    assert_eq!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+    );
+    let start = chrono::DateTime::parse_from_rfc3339(fixtures::FIXTURE_WINDOW_START)
+        .unwrap()
+        .timestamp_millis();
+    let end = chrono::DateTime::parse_from_rfc3339(fixtures::FIXTURE_WINDOW_END)
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(
+        sc.source.selection,
+        Some(logweir_core::scorecard::SelectionLabel {
+            window_start_ms: start,
+            window_end_ms: end,
+        })
+    );
+    assert!(
+        sc.sample.coverage_note.starts_with(&format!(
+            "replay selection: every partition of every restored topic, from epoch-ms {start} \
+             (the plan's stated window start, inclusive)"
+        )),
+        "{}",
+        sc.sample.coverage_note
+    );
+    assert!(
+        sc.sample
+            .coverage_note
+            .contains("a sampled check does not find an in-window record held in a segment"),
+        "{}",
+        sc.sample.coverage_note
+    );
+    // Review N1: the sampled lane's signed note never says no record before
+    // the start was restored — it cannot show that.
+    assert!(
+        sc.sample.coverage_note.contains(
+            "no record before the start was expected; a sampled check does not prove that none \
+             was restored"
+        ),
+        "{}",
+        sc.sample.coverage_note
+    );
+    assert!(
+        !sc.sample.coverage_note.contains("was restored or expected"),
+        "{}",
+        sc.sample.coverage_note
+    );
+    assert!(sc.validate_invariants().is_ok());
+
+    let control = fixtures::orchestrator_fixture(Drill::Passes);
+    execute_with(&control.args, &control.run_id, &control.ctx).expect("the control runs");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&control)).unwrap();
+    assert!(sc.source.selection.is_none(), "no selection, no block");
+    assert_ne!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+    );
+    assert!(!sc.sample.coverage_note.contains("replay selection"));
+}
+
+// ----------------------------------------------------------------- PROD-08.1a
+
+/// **PROD-08.1a: a `covered: false` complete run never reads as a pass in a
+/// notification or a metrics label.** The plan asks for complete coverage
+/// with `complete_max_records: 1`, so the one partition is past the bound and
+/// is not compared: the signed scorecard says `covered: false` with its
+/// reason, and phase 8 scores it `fail-integrity` (exit 2, signed). The
+/// notification body says `outcome: fail-integrity`, `integrity.coverage:
+/// complete` and `integrity.covered: false`; the metrics file carries
+/// `outcome="fail-integrity"`, no `outcome="pass"` and no `result="pass"`,
+/// `logweir_drill_integrity_coverage{...coverage="complete"} 1` and
+/// `logweir_drill_integrity_complete_covered 0`. The covered run
+/// (`VerifiesCompletely`) is the control: `covered: true`, `pass`, and the
+/// gauge at 1.
+///
+/// KILLS: `notify_body` dropping `covered` or `coverage`; the metrics writer
+/// dropping either series or writing `covered` as 1; phase 8 scoring a
+/// `partial` result as `pass` (the outcome assertions).
+#[test]
+fn a_complete_run_that_did_not_cover_is_never_a_pass_in_the_notification_or_the_metrics() {
+    let f = fixtures::orchestrator_fixture(Drill::VerifiesCompletelyPastItsBound);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("not covered is not a pass");
+    assert!(matches!(err, DrillError::NotPass(..)), "{err:?}");
+    // THE SIGNED DOCUMENT, as the store holds it.
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::FailIntegrity);
+    let c = sc
+        .integrity
+        .verification
+        .as_ref()
+        .and_then(|v| v.complete.as_ref())
+        .expect("the complete block");
+    assert!(!c.covered, "{c:?}");
+    assert!(
+        c.incomplete_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("complete_max_records")),
+        "{c:?}"
+    );
+    assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+
+    let body = logweir::drill::phase7_verify::notify_body(&sc);
+    assert_eq!(body["outcome"], "fail-integrity", "{body}");
+    assert_ne!(body["integrity"]["result"], "pass", "{body}");
+    assert_eq!(body["integrity"]["coverage"], "complete", "{body}");
+    assert_eq!(body["integrity"]["covered"], false, "{body}");
+
+    logweir::metrics::write_textfile(&f.metrics, &sc).unwrap();
+    let t = std::fs::read_to_string(&f.metrics).unwrap();
+    assert!(t.contains("outcome=\"fail-integrity\""), "{t}");
+    assert!(!t.contains("outcome=\"pass\""), "{t}");
+    assert!(!t.contains("result=\"pass\""), "{t}");
+    assert!(
+        t.contains("logweir_drill_integrity_coverage{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\",coverage=\"complete\"} 1"),
+        "{t}"
+    );
+    assert!(
+        t.contains(
+            "logweir_drill_integrity_complete_covered{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\"} 0"
+        ),
+        "{t}"
+    );
+    assert!(
+        t.contains("logweir_drill_exit_code{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\"} 2"),
+        "{t}"
+    );
+
+    // The control: the covered run.
+    let ok = fixtures::orchestrator_fixture(Drill::VerifiesCompletely);
+    let sc = execute_with(&ok.args, &ok.run_id, &ok.ctx).expect("covered passes");
+    let body = logweir::drill::phase7_verify::notify_body(&sc);
+    assert_eq!(
+        (
+            body["outcome"].as_str(),
+            body["integrity"]["covered"].as_bool()
+        ),
+        (Some("pass"), Some(true)),
+        "{body}"
+    );
+    logweir::metrics::write_textfile(&ok.metrics, &sc).unwrap();
+    let t = std::fs::read_to_string(&ok.metrics).unwrap();
+    assert!(
+        t.contains(
+            "logweir_drill_integrity_complete_covered{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\"} 1"
+        ),
+        "{t}"
+    );
+}
+
+/// **A sampled run never claims complete** in the notification or the
+/// metrics: its body's `integrity.coverage` is `sampled` with no `covered`,
+/// and the metrics carry `coverage="sampled"` and no complete gauge.
+///
+/// KILLS: the coverage read from anything but the signed block; the complete
+/// gauge written for a sampled run.
+#[test]
+fn a_sampled_run_never_claims_complete_in_the_notification_or_the_metrics() {
+    let pass = fixtures::orchestrator_args_against_fixture_engine();
+    let sc = execute_with(&pass.args, &pass.run_id, &pass.ctx).unwrap();
+    let body = logweir::drill::phase7_verify::notify_body(&sc);
+    assert_eq!(body["integrity"]["coverage"], "sampled", "{body}");
+    assert!(body["integrity"].get("covered").is_none(), "{body}");
+    logweir::metrics::write_textfile(&pass.metrics, &sc).unwrap();
+    let t = std::fs::read_to_string(&pass.metrics).unwrap();
+    assert!(t.contains("coverage=\"sampled\"} 1"), "{t}");
+    assert!(!t.contains("coverage=\"complete\""), "{t}");
+    assert!(
+        !t.contains("logweir_drill_integrity_complete_covered{"),
+        "{t}"
+    );
+}

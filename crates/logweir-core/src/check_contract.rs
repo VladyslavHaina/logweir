@@ -309,6 +309,14 @@ closed_vocabulary! {
         PointInTimeBeforeCoverage => "PointInTimeBeforeCoverage",
         PointInTimeAfterCoverage => "PointInTimeAfterCoverage",
         TopicNotInBackupSet => "TopicNotInBackupSet",
+        // PROD-11.1: a plan's replay selection (window start (`restore.point_in_time: "<start>/<end>"`),
+        // `restore.partitions`) that the plan itself states wrongly, or that
+        // the archive cannot satisfy as stated. Each is refused, never widened
+        // (`logweir_core::replay_selection::SelectionRefusal`).
+        SelectionInvalid => "SelectionInvalid",
+        WindowStartBeforeCoverage => "WindowStartBeforeCoverage",
+        PartitionNotInBackupSet => "PartitionNotInBackupSet",
+        SelectionEmpty => "SelectionEmpty",
         SegmentMissing => "SegmentMissing",
         TargetNotAllowlisted => "TargetNotAllowlisted",
         TargetEqualsSource => "TargetEqualsSource",

@@ -185,6 +185,10 @@ The current scorecard checks include:
   that defines it; it is never empty, names no blank topic, is sorted with no
   repeat, and never sits beside a complete verification
   ([the arms](formats/drill-scorecard.md#sampleunsampled_topics-format-160)).
+- A `source.selection` block (format 1.7.0, a restore from a stated window
+  start) appears only under a version that defines it; its start is before its
+  end; and a complete block beside it uses its window
+  ([the arms](formats/drill-scorecard.md#sourceselection-format-170)).
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
 
@@ -200,6 +204,10 @@ The first is a format 1.1.0 document naming the topics whose configuration
 parity was not assessed; the second is every 1.0.0 document, and a 1.1.0 one
 whose drill stopped before phase 7. Neither is a refusal and neither changes the
 exit code. No line is printed when every topic was assessed (`not_assessed: []`).
+Since FX-21 the first line also names a replication factor or partition count
+the source's record lacks, which the writer did not compare
+(`drill-orders: replication_factor (notRecorded)`): a writer before FX-21
+compared the target's own value with itself there and printed nothing.
 See [what an empty divergence list does not prove](#an-empty-unexpected_divergence-is-not-configuration-parity).
 
 Both also print one line about the source settings a `newTopic` restore did
@@ -658,6 +666,21 @@ Since format 1.1.0 each topic `not_assessed` names ALSO has one entry
 script before 1.15.0, a `logweir drill show` built before FX-4, or a guide
 written for 1.0.0) sees a divergence for it, never a clean list. A
 configuration key never contains a space, which tells such an entry from a key.
+An FX-21 entry has the same twin, `"<target topic>: replication_factor not
+assessed (notRecorded)"` (or `partition_count`).
+
+**A replication factor is parity only where the source's is recorded.** Phase
+7 compares it from the archive's manifest, else from the bound receipt's
+`topic_configuration`; a scorecard written before FX-21 compared the target's
+own factor with itself where the manifest lacked the source's, which engine
+0.23.3 does for every topic after the first one a backup saves. No field marks
+FX-21: a runner-signed document whose `engine.version` is
+`0.23.3+logweir.2` or a later `+logweir.<n>` was written with it; for any
+other (and for a standalone CLI's), read `topics[].source_replication_factor`
+in the archive's manifest (`source.backup_id`, `source.manifest_sha256`): a
+topic without one has no replication-factor finding, whatever the scorecard
+lists
+([stability](stability.md#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
 
 **What "assessed" covers.** An assessed topic's parity compares the
 configuration OVERRIDES the engine captured — explicit topic-level settings on
@@ -765,8 +788,9 @@ The Python report ends with `verifier: verify_scorecard.py 1.23.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
 since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, `1.5.0` for a
-restore into a target whose auth mode is one PROD-01.3 added, or `1.6.0` for
-every sampled drill since FX-23). It
+restore into a target whose auth mode is one PROD-01.3 added, `1.6.0` for
+every sampled drill since FX-23, or `1.7.0` for a restore that states a replay
+selection since PROD-11.1). It
 changes when the reader's accepted-document set changes. The compatibility
 history is:
 
@@ -794,16 +818,45 @@ history is:
 | `1.20.0` | Knows backup-receipt and catalog-point format `1.3.0` (PROD-05.1). Adds the backup receipt's eight `topic_configuration` arms (12–19) and two `owner_detection` arms (20–21), their shape checks (the counts are `u32`, an entry's value a string or absent, `owner_detection` a list of strings) and the `topic_configuration` lines: per topic the recorded partition count, replication factor, entry counts by portability class and the apply route — never a configuration value. The route is the admin API only where `owner_detection` says the run looked for an owner; otherwise the line says the owner was not checked. Every document without the block is decided exactly as before. |
 | `1.21.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.4.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.4.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
 | `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line naming them; for every sampled `pass` it also prints a `sample coverage:` line saying whether the document's version proves FX-23's checks ran (only 1.6.0 or later does). Every document without the field is decided exactly as before. |
-| `1.23.0` | Knows backup-receipt format `1.5.0` (PROD-04.1). Adds the receipt's thirteen `consumer_positions` arms (22–34): the block only from 1.5.0; its topics exactly the named set; each topic's partitions from 0 in order, with whole, ordered marks and archived ranges; a `changed_during_capture` the marks derive; a closed listing word and at least one group; each group's outcome and reason from the closed sets; what a captured, a `GroupTypeNotCaptured` and any other group records; an `active` the two states derive; no kept position on a topic that changed during the capture; one position per partition of every named topic, so a missing partition is refused rather than read as offset 0; each position's status, value and reason; and every kept position's coverage, or its `PositionBeyondEnd`, re-derived from its partition's facts. Adds their shape checks (marks and positions are `i64`, partitions and members `u32`, the flags booleans) and prints the `consumer_positions` lines: per group its outcome, and for a captured group its type, both states, members, whether it was active and how many positions relate to archived data. Every document without the block is decided exactly as before. |
+| `1.23.0` | Knows scorecard format `1.7.0` (PROD-11.1). Adds `source.selection`'s three arms (SEL-1 to SEL-3: only from 1.7.0; a start before the end; a complete block over the block's window) and its shape check (an object with two integers), prints the `replay selection:` coverage line — saying no record before the start was RESTORED only over a complete verification that passed, and for a sampled document that the sampled check does not prove it — and for a sampled `pass` over a selection prints the `sample coverage:` line QUALIFIED by the window (`a sampled pass over a replay selection from epoch-ms S to epoch-ms E: …`) instead of the unqualified 1.6.0 line. Every document without the block is decided exactly as before. |
+| `1.24.0` | Knows backup-receipt format `1.5.0` (PROD-04.1). Adds the receipt's thirteen `consumer_positions` arms (22–34): the block only from 1.5.0; its topics exactly the named set; each topic's partitions from 0 in order, with whole, ordered marks and archived ranges; a `changed_during_capture` the marks derive; a closed listing word and at least one group; each group's outcome and reason from the closed sets; what a captured, a `GroupTypeNotCaptured` and any other group records; an `active` the two states derive; no kept position on a topic that changed during the capture; one position per partition of every named topic, so a missing partition is refused rather than read as offset 0; each position's status, value and reason; and every kept position's coverage, or its `PositionBeyondEnd`, re-derived from its partition's facts. Adds their shape checks (marks and positions are `i64`, partitions and members `u32`, the flags booleans) and prints the `consumer_positions` lines: per group its outcome, and for a captured group its type, both states, members, whether it was active and how many positions relate to archived data. Every document without the block is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
 reports `run_id`. Both refuse; this is not an acceptance disagreement.
 
-A verifier older than `1.23.0`, and a `logweir` built before PROD-04.1, accept
+A verifier older than `1.24.0`, and a `logweir` built before PROD-04.1, accept
 a 1.5.0 receipt — the major is unchanged — ignore `consumer_positions` and
 print no `consumer_positions` line, so they say nothing about the selected
 groups' positions; every other check applies as before.
+
+A verifier older than `1.23.0`, and a `logweir` built before PROD-11.1, accept a
+1.7.0 scorecard — the major is unchanged — ignore `source.selection` and print
+no `replay selection:` line. A 1.7.0 document is a restore from a stated
+window START over every partition (a partition subset is refused until the
+owner decides OD-9), and what they print about it is true: measured on the
+two live scorecards of a restore from epoch-ms 1760000000030 to
+1760000010000, `1.22.0` and main's `logweir drill verify` print, for the
+sampled one, `sample coverage: a sampled pass at format 1.6.0 or later: every
+mapped partition was held to its own count bound, …` (every partition was,
+over the restore window), and `1.21.0`, `1.22.0` and main's reader print, for
+the complete one, `integrity coverage: every selected record compared: 18
+expected, 18 restored, 18 matching, …`. None claims a restore from the
+archive's floor, and none names the start: the field that does is the
+free-text `sample.coverage_note`, which `logweir drill show` prints (a
+complete block's `window.start_ms` is the start too).
+
+`1.23.0` adds the `replay selection:` line and says `a sampled pass over a
+replay selection from epoch-ms 1760000000030 to epoch-ms 1760000010000: …`
+instead of the unqualified line. Each lane claims only what it proves about
+the records before the start: the line ends `no record before the start was
+restored or expected` only over a complete verification that passed (a
+restored record below the start is `unexpected` there); a sampled document
+ends `no record before the start was expected; a sampled check does not
+prove that none was restored` (a segment straddling the start counts all of
+its records into the per-partition bound), and anything else `no record
+before the start was expected`
+([the record](to-do/decisions/PROD-11.1-replay-selection.md) §5.3, §5.4).
 
 A verifier older than `1.22.0`, and a `logweir` built before FX-23, accept a
 1.6.0 scorecard — the major is unchanged — ignore `sample.unsampled_topics`

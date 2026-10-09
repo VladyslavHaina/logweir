@@ -63,21 +63,44 @@ pub struct DrillSpec {
 }
 
 /// Spec §3.2 `Restore.spec`'s restore block — the recovery POINT, which is the
-/// only half of the window a spec may state.
+/// half of the window every spec states, and (PROD-11.1) the optional replay
+/// selection: an inclusive window START and per-topic partition subsets.
 ///
-/// # There is deliberately no `window_start` here, and there never will be
+/// # The window start: absent is the archive's floor (guard G-WIN, amended)
 ///
-/// Spec §6.1 H7: the window is a closed interval and the spec binds its
-/// **start** to the archive, not to a field. `RestorePlan.time_window.0` is the
-/// archive set's earliest covered timestamp as recorded in the manifest, and
-/// `crate::engine::WindowFloorSource` is how the plan says so. A spec-supplied
-/// floor is what guard **G-WIN** exists to refuse: a restore that inherits a
-/// later start silently loses everything before it, while phase 7 reconciles
-/// only the *sampled* records and the scorecard says pass.
+/// Spec §6.1 H7: the window is a closed interval and, by default, the spec
+/// binds its **start** to the archive, not to a field. `RestorePlan.time_window.0`
+/// is then the archive set's earliest covered timestamp as recorded in the
+/// manifest (`crate::engine::WindowFloorSource::ArchiveManifest`). What guard
+/// **G-WIN** exists to refuse is a start that is INHERITED SILENTLY: a restore
+/// that took a later start from somewhere nobody approved loses everything
+/// before it, while phase 7 reconciles only the *sampled* records and the
+/// scorecard says pass.
+///
+/// PROD-11.1's recorded amendment (`docs/to-do/decisions/PROD-11.1-replay-selection.md`
+/// §2) admits ONE stated start, [`RestoreSpecBlock::window_start`]: it is in
+/// the plan bytes (inside `plan_hash`, so an approver saw it), the plan says so
+/// (`WindowFloorSource::InheritedFromSpec`), it is never earlier than the
+/// archive's coverage (refused, never silently widened), phase 5 re-derives it
+/// from the spec and the manifest, and the signed scorecard states it
+/// (`source.selection`, format 1.7.0).
 ///
 /// `point_in_time` is the window's END when it is present, and
 /// `sample.window_end` when it is absent — which preserves every existing
 /// drill's behaviour for the end of the window.
+///
+/// # The wire form of a stated start: `point_in_time: "<start>/<end>"`
+///
+/// A start is written INSIDE `restore.point_in_time`, as an ISO 8601 interval
+/// of two RFC 3339 instants (`"2026-09-07T13:00:00Z/2026-09-07T14:05:00Z"`),
+/// never as a key of its own. That is deliberate (the PROD-11.1 review's M2):
+/// every runner, controller and preflight built before PROD-11.1 reads
+/// `point_in_time` as one RFC 3339 instant, so it REFUSES the interval at
+/// parse ("drill spec does not parse", exit 1, before any client exists)
+/// instead of ignoring an unknown key and restoring more than the approved
+/// window. A `restore.window_start` key is refused at parse for the same
+/// reason: a key an older build would ignore cannot carry a narrowing. A plan
+/// that states no start keeps the instant form byte for byte.
 ///
 /// # It is INCLUSIVE, and its receipt twin is not
 ///
@@ -93,9 +116,8 @@ pub struct DrillSpec {
 /// A `point_in_time` at or before the archive set's earliest covered
 /// timestamp is refused, exit 3, naming both integers: the window would hold
 /// no instant and the restore would produce nothing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct RestoreSpecBlock {
-    #[serde(default)]
     pub point_in_time: Option<DateTime<Utc>>,
     /// **FX-8.** Which clock this plan accepts for its time selection over a
     /// `LogAppendTime` source topic.
@@ -124,8 +146,149 @@ pub struct RestoreSpecBlock {
     /// `RehearsalSchedule` slot's, `weirkeeper::rehearsal::plan_bytes`) is
     /// byte-identical to what it was before the field existed when it states
     /// none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_basis: Option<TimeBasis>,
+    /// **PROD-11.1.** The restore window's INCLUSIVE start: a record whose
+    /// timestamp equals it is restored, as one equal to the end is. On the
+    /// wire it is the first half of `point_in_time: "<start>/<end>"` (above);
+    /// it is never a key of its own.
+    ///
+    /// ABSENT — every plan written before PROD-11.1 — the start is the archive
+    /// set's floor, exactly as before (guard G-WIN). PRESENT, it must not be
+    /// earlier than that floor: a start the archive does not cover is REFUSED,
+    /// exit 3, naming both instants, and is never moved to the floor (that
+    /// would silently widen the selection the approver read). It must also be
+    /// earlier than the window's end. It is a time selection, so FX-8's
+    /// `restore.time_basis` rule applies to it as it does to `point_in_time`.
+    /// Present only beside a `point_in_time`: the interval states both ends.
+    pub window_start: Option<DateTime<Utc>>,
+    /// **PROD-11.1, REFUSED until the owner decides OD-9.** Per-topic
+    /// partition subsets, `{topic: [partition, …]}`. The key parses so it can
+    /// be refused BY NAME (`PartitionSubsetsAwaitOwnerDecision`, exit 3, at
+    /// phase 0 and in the restore preflight): a reader that predates a subset
+    /// restore's scorecard would read it as a full restore, so how such a
+    /// scorecard is versioned is the owner's decision
+    /// (`docs/to-do/product-expansion.md`, OD-9). Empty for every plan that
+    /// runs.
+    pub partitions: BTreeMap<String, Vec<i32>>,
+}
+
+/// The YAML/JSON form of [`RestoreSpecBlock`]: `point_in_time` is an RFC 3339
+/// instant or `"<start>/<end>"`, and a `window_start` key is refused.
+#[derive(Deserialize)]
+struct RestoreSpecBlockWire {
+    #[serde(default)]
+    point_in_time: Option<String>,
+    #[serde(default)]
+    time_basis: Option<TimeBasis>,
+    #[serde(default)]
+    window_start: Option<serde_yaml::Value>,
+    #[serde(default)]
+    partitions: BTreeMap<String, Vec<i32>>,
+}
+
+/// One RFC 3339 instant exactly as chrono's own `Deserialize` reads it (a
+/// `DateTime<FixedOffset>`, converted to UTC), so a plain `point_in_time`
+/// parses to the instant it always did.
+fn parse_instant(text: &str) -> Result<DateTime<Utc>, String> {
+    text.trim()
+        .parse::<DateTime<chrono::FixedOffset>>()
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| format!("`{text}` is not an RFC 3339 instant: {e}"))
+}
+
+/// `restore.point_in_time` as written: `(start, end)`, the start present only
+/// for the interval form `"<start>/<end>"`.
+pub fn parse_point_in_time(text: &str) -> Result<(Option<DateTime<Utc>>, DateTime<Utc>), String> {
+    match text.split_once('/') {
+        None => Ok((None, parse_instant(text)?)),
+        Some((start, end)) => {
+            let (start, end) = (parse_instant(start)?, parse_instant(end)?);
+            Ok((Some(start), end))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RestoreSpecBlock {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let wire = RestoreSpecBlockWire::deserialize(d)?;
+        if wire.window_start.is_some() {
+            return Err(D::Error::custom(
+                "restore.window_start is not a plan key: a window with a stated start is written \
+                 restore.point_in_time: \"<start>/<end>\", which a runner that predates it refuses \
+                 instead of restoring the whole archive",
+            ));
+        }
+        let (window_start, point_in_time) = match wire.point_in_time.as_deref() {
+            None => (None, None),
+            Some(text) => {
+                let (start, end) = parse_point_in_time(text)
+                    .map_err(|e| D::Error::custom(format!("restore.point_in_time: {e}")))?;
+                (start, Some(end))
+            }
+        };
+        Ok(RestoreSpecBlock {
+            point_in_time,
+            time_basis: wire.time_basis,
+            window_start,
+            partitions: wire.partitions,
+        })
+    }
+}
+
+/// The instant form serialises through chrono's own `Serialize`, so a plan
+/// that states no start keeps its bytes (and a rehearsal slot its
+/// `templateDigest`); the interval form is the two instants in RFC 3339.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum PointInTimeOut {
+    Instant(DateTime<Utc>),
+    Interval(String),
+}
+
+#[derive(Serialize)]
+struct RestoreSpecBlockOut<'a> {
+    point_in_time: Option<PointInTimeOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    time_basis: Option<TimeBasis>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    partitions: &'a BTreeMap<String, Vec<i32>>,
+}
+
+impl Serialize for RestoreSpecBlock {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error;
+        let point_in_time = match (self.window_start, self.point_in_time) {
+            (None, end) => end.map(PointInTimeOut::Instant),
+            (Some(start), Some(end)) => Some(PointInTimeOut::Interval(format!(
+                "{}/{}",
+                start.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+                end.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+            ))),
+            (Some(_), None) => {
+                return Err(S::Error::custom(
+                    "restore.window_start without restore.point_in_time: the interval form \
+                     states both ends",
+                ))
+            }
+        };
+        RestoreSpecBlockOut {
+            point_in_time,
+            time_basis: self.time_basis,
+            partitions: &self.partitions,
+        }
+        .serialize(s)
+    }
+}
+
+impl RestoreSpecBlock {
+    /// `true` when the plan states no replay selection of its own: no window
+    /// start and no partition subset. Such a plan is restored, verified and
+    /// signed exactly as every plan before PROD-11.1.
+    #[must_use]
+    pub fn selects_everything(&self) -> bool {
+        self.window_start.is_none() && self.partitions.is_empty()
+    }
 }
 
 /// **FX-8.** `restore.time_basis`'s closed value set: an unsupported spelling
