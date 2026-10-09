@@ -80,7 +80,7 @@
 # THE ASSERTION BENEATH THE `apt` LAYER is what makes "native" a machine check
 # rather than a claim: under QEMU, `dpkg --print-architecture` reports the
 # EMULATED architecture and therefore disagrees with `$BUILDARCH`.
-FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.89-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff AS builder
 WORKDIR /src
 
 # BuildKit predeclares both of these; they are re-declared here because a
@@ -169,7 +169,7 @@ RUN set -eux; \
 # build, which `just image-weirkeeper` states once as
 # `--platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}"`. Pinning it here would
 # let the recipe and the file disagree, silently.
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 
 # `ca-certificates` AND NOTHING ELSE, AND THE OMISSIONS ARE THE POINT.
 #
