@@ -31,8 +31,9 @@ behind it), 38 (FX-20, the binding for every other credential reference),
 39 (FX-18, a topic phase 0 creates is used only once the cluster serves
 it), 40 (FX-24, a silent connection meets the console's header deadline),
 41 (FX-21, a replication factor the archive does not record is never
-read as matching; the engine's first patch) and 42 (PROD-11.1, a restore
-can select a window start) so far. Items continue the next entry's
+read as matching; the engine's first patch), 42 (PROD-11.1, a restore
+can select a window start) and 43 (PROD-08.1a, complete coverage requested
+and shown through the CRDs, the API and the console) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -1042,6 +1043,94 @@ already written stay valid under the older readers, which ignore the block;
 the document's `sample.window_start` and `sample.coverage_note` still name the
 start.
 
+#### 43. A `Restore`, a rehearsal and the console can ask for complete coverage, and every surface says sampled or complete (PROD-08.1a)
+
+**Added.** Item 30's complete verification can now be requested and read
+outside a plan file. A `Restore` declares `spec.coverage: complete` (and
+`spec.completeMaxRecords`) beside a plan that says the same — the controller
+refuses, `ExecutionSpecInvalid` before any approval is waited for, a
+declaration the plan bytes do not say, in either direction. A
+`RehearsalSchedule` asks with `spec.bounds.coverage`/`completeMaxRecords`
+(inside `templateDigest`; each slot's plan then states no `max_partitions`).
+The product API's create route carries both fields; every restore read carries
+`coverage {requested, recorded, covered, incompleteReason}`; the operation
+view's `verificationScope` adds `coverage`, a complete block with every
+partition's exact counts, and FX-23's `unsampledTopics`; the rehearsal view's
+`bounds` carry the coverage. The controller copies the signed coverage, the
+complete block and the unsampled topics onto `Restore.status.integrity`, and a
+`COVERAGE` printer column reads it. The console's restore wizard offers complete
+coverage as a closed advanced choice with its cost stated beside it, never as
+the default; the History list, the Restore detail and the operation view say
+sampled or complete and show a complete run's per-partition counts. The
+runner's notification body adds `integrity.coverage`/`covered` and its metrics
+`logweir_drill_integrity_coverage` and `logweir_drill_integrity_complete_covered`
+([kubernetes.md](kubernetes.md) §12 *Complete coverage* and §7g,
+[api.md](api.md#the-restores-coverage-prod-081a), [metrics.md](metrics.md)).
+
+**`covered: false` is never a pass, anywhere.** The `Restore` badge's
+`Verified` condition is `CompleteNotCovered` beside it: for a real one
+(`fail-integrity`, exit 2), because the rule reads `covered` before the
+outcome, and even over a status whose other fields say pass. The API's
+`verifiedSuccess`, the console's badge and list verdict and a rehearsal's
+`lastSucceeded` all refuse it; the notification and the metrics label carry
+`fail-integrity`, and `logweir_drill_integrity_complete_covered` is 0.
+
+**The standing authorization signs the coverage (format 1.1.0).** A rehearsal
+scope gains optional `coverage` and `completeMaxRecords`; the plan's coverage
+must EQUAL the signed one (absent = sampled), and a signed record bound must be
+met. A scope that authorises complete coverage signs `maxPartitions: 0`, and
+every reader of this build refuses one with any other value: a runner or
+controller older than 1.1.0 ignores `coverage`, and under a partition bound of
+0 it runs nothing (its `Approval` controller refuses the scope, its
+plan-in-scope check every real plan). `logweir drill approve --standing` mints
+1.1.0 only when the scope carries one of the new fields. A scope signed before
+this field authorises sampled rehearsals only, so no existing authorization
+admits a complete plan
+([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)).
+
+**Do:** apply the CRDs (both new fields are additive and absent means sampled,
+so every existing `Restore`, `RehearsalSchedule`, template digest and plan hash
+is unchanged). To rehearse with complete coverage, create a NEW
+`RehearsalSchedule` with `spec.bounds.coverage: complete`, write `"coverage":
+"complete"` and `"maxPartitions": 0` in its `scope.json` (the minter refuses
+any other `maxPartitions` beside `complete`), and sign a new authorization for
+its `status.templateDigest`. Budget for the cost: complete coverage reads every
+archived record of the restored topics and the whole restored output — about a
+minute per GiB of one-KiB records with an optimised build on a laptop, against
+about five seconds for the sampled check. A plan written with the CLI that asks
+for complete coverage needs `spec.coverage: complete` on its `Restore`, or the
+controller refuses it.
+**Scope:** unit and mock-cluster rows in `logweir-core` (the scope predicate
+and the 1.1.0 admission, each arm with a control), `weirkeeper`
+(`restore_controller.rs`: the declaration refused both ways before the
+approval is read, admitted and reaching the plan ConfigMap byte for byte, the
+signed block copied all-or-nothing, `CompleteNotCovered`;
+`rehearsal_controller.rs`: the coverage inside `templateDigest`, a complete
+schedule firing only under a scope that signed complete, a sampled schedule's
+plan unchanged, a `covered: false` slot never a pass), `logweir-api`
+(`complete_coverage.rs`, over the console fixtures it writes), the runner
+(the standing document minted at 1.1.0 and admitted through the real binary,
+a complete scope minted and read only with `maxPartitions: 0`, a `covered:
+false` run never a pass in the notification or the metrics), the `Approval`
+controller (the zero bound only beside complete), and
+`ui/tests/complete-coverage.spec.js`; planted mutants, each killed. An older
+build's runner binary and `Approval` controller (`main` before this item) were
+run against a complete-only scope this build minted, and ran nothing under it
+(`execution_contract_v2.rs`, an `#[ignore]`d row taking `LOGWEIR_OLDER_RUNNER`). Live: a
+plan built by the console's own emitter, run with complete coverage on the
+compose stack over real records and through the controller's and the API's
+projections. The k8s rows (the CRDs, a `Restore` and a rehearsal through the
+real controller, the console in a browser) run at the next PoC upgrade.
+**Rollback:** an older controller ignores the spec fields (an older CRD prunes
+them) and runs the plan as written; it does not copy the status fields, and
+the console then reads "not recorded". An older runner or controller ignores a
+1.1.0 scope's fields and reads a complete-only scope as a sampled scope with a
+partition bound of 0: its `Approval` controller refuses it, and its
+plan-in-scope check refuses every real plan, so nothing runs under a
+complete-only authorization after a rollback (fail closed). An older minter
+refuses a `scope.json` with `maxPartitions: 0`
+([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)).
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1095,16 +1184,19 @@ In addition to the next entry's six, in its order:
 
 ### Verification scope after `v0.2.0-rc.1`
 
-- **Complete coverage is a command-line plan value.** Only `logweir drill run`
-  and `logweir restore run` can ask for it (item 30). Record checks in a
-  `Restore` or a rehearsal remain samples, and `verificationScope` still never
-  says `complete`; the signed scorecard says which in
-  `integrity.verification.coverage`.
+- **Complete coverage can be asked for by a plan, a `Restore`, a rehearsal and
+  the console** (items 30 and 41). A `Restore` or a rehearsal that does not ask
+  still verifies a sample. The signed scorecard says which in
+  `integrity.verification.coverage`; the `Restore`'s status, the product API
+  (`Restore.coverage`, `verificationScope.coverage`) and the console repeat
+  it. A protection event's `verification_scope` describes a policy's newest
+  POINT and still never says `complete`. A complete verification that did not
+  cover the restore (`covered: false`) is never a pass.
 
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41 and 42, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42 and 43, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1125,7 +1217,12 @@ console only and needs nothing unless an ingress dials the console with
 HTTP/2; item 41 changes the runner (phase 7 and the engine's build)
 only; item 42 changes the runner, the restore preview and the
 controller's standing-scope check, and needs nothing for a plan without a
-window start (an older runner refuses a plan with one). To roll back to
+window start (an older runner refuses a plan with one); item 43 changes the
+`Restore` and `RehearsalSchedule` CRDs, the controller, the runner's
+notification and metrics, the standing authorization's scope (format
+1.1.0), the product API and the console, and needs nothing unless a
+rehearsal is to verify every record (a new schedule and a new
+authorization). To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

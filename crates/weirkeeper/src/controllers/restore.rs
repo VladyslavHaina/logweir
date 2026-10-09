@@ -3158,6 +3158,8 @@ pub fn runner_job_spec_with_policy(
     // function the reconcile's early refusal also calls, so the Job can never
     // carry a value the object would have been refused for.
     let resources = runner_resources_of(restore)?;
+    // PROD-08.1a, by the same one function as the early refusal.
+    coverage_agrees(restore)?;
 
     // THE TARGET CONNECTION, FROM THE ONE RESOLVER THE PROBE AND THE BACKUP USE
     // (PLAT-07.1). The runner dials `planBytes`' target with THIS connection's
@@ -3462,6 +3464,69 @@ pub fn runner_resources_of(
     })
 }
 
+/// **PROD-08.1a.** `spec.coverage` and `spec.completeMaxRecords` against the
+/// plan's own `sample.coverage` and `sample.complete_max_records`.
+///
+/// The two spec fields DECLARE what the plan says — so a list, a printer
+/// column and the console can read the coverage without parsing the plan —
+/// and a declaration that disagrees with the bytes the approver signs is a
+/// `Restore` that would show one coverage and run another. Absent means
+/// `sampled` with no bound, so a plan asking for complete coverage needs the
+/// declaration too, and every `Restore` written before the fields existed
+/// (whose plans are all sampled) agrees.
+///
+/// A plan that does not parse is left to the runner, which refuses it as it
+/// always has, when the spec declares nothing; with a declaration there is
+/// nothing to compare it with, and that is refused here.
+///
+/// # Errors
+///
+/// [`RestoreError::Refused`] with
+/// [`crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID`], naming both
+/// values. TERMINAL: `spec` is immutable and the approval binds the plan.
+pub fn coverage_agrees(restore: &Restore) -> Result<(), RestoreError> {
+    let declared = crate::crds::restore::VerificationCoverage::of(restore.spec.coverage);
+    let declared_bound = restore.spec.complete_max_records;
+    let refused = |detail: String| {
+        RestoreError::Refused(
+            crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
+            format!(
+                "{detail}. spec.coverage and spec.completeMaxRecords state what the plan's \
+                 sample.coverage and sample.complete_max_records say (absent: sampled, no \
+                 bound), so a list and the console show the coverage that will run; no Job was \
+                 created. spec is immutable and the approval binds the plan bytes — create a \
+                 new Restore whose two fields match its plan"
+            ),
+        )
+    };
+    let plan = match serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes)
+    {
+        Ok(plan) => plan,
+        Err(_) if restore.spec.coverage.is_none() && declared_bound.is_none() => return Ok(()),
+        Err(error) => {
+            return Err(refused(format!(
+                "spec.coverage is declared and spec.planBytes does not parse as a restore plan, \
+                 so the two cannot be compared: {error}"
+            )))
+        }
+    };
+    let plan_bound = plan
+        .sample
+        .complete_max_records
+        .map(|n| i64::try_from(n).unwrap_or(i64::MAX));
+    if plan.sample.coverage != declared || plan_bound != declared_bound {
+        let bound = |b: Option<i64>| b.map_or_else(|| "no bound".to_string(), |n| n.to_string());
+        return Err(refused(format!(
+            "the plan asks for sample.coverage `{}` ({}) and spec declares coverage `{}` ({})",
+            plan.sample.coverage.as_str(),
+            bound(plan_bound),
+            declared.as_str(),
+            bound(declared_bound)
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Interface I8 — the three keys, read BY NAME from a bounded tail
 // ---------------------------------------------------------------------------
@@ -3619,6 +3684,129 @@ pub struct ScorecardObservation {
     /// of strings, or when a list holds more than
     /// [`TIME_BASIS_TOPICS_MAX`] entries.
     pub time_basis: Option<crate::crds::restore::RestoreTimeBasis>,
+    /// **PROD-08.1a.** `integrity.verification.coverage` (format 1.4.0),
+    /// `sampled` or `complete` — any other value is not copied. `None` is NOT
+    /// RECORDED (a document before 1.4.0), never "complete".
+    pub integrity_coverage: Option<String>,
+    /// **PROD-08.1a.** `integrity.verification.complete`, read as
+    /// [`crate::crds::restore::CompleteCoverage`] — all of it or nothing
+    /// ([`complete_coverage`]), and only beside `coverage: complete`.
+    pub integrity_complete: Option<crate::crds::restore::CompleteCoverage>,
+    /// **FX-23.** `sample.unsampled_topics` (format 1.6.0): all of it, or
+    /// nothing when malformed or past
+    /// [`crate::crds::restore::UNSAMPLED_TOPICS_MAX`].
+    pub unsampled_topics: Option<Vec<String>>,
+}
+
+/// **PROD-08.1a.** A signed `integrity.verification.complete` block read as
+/// the status' [`crate::crds::restore::CompleteCoverage`] — COPIED, never
+/// recomputed, and all of it or nothing: a block whose required fields are
+/// missing or of the wrong type yields `None`, and the status then carries the
+/// coverage without the block rather than numbers the document does not hold.
+/// The partition rows are copied only when there are at most
+/// [`crate::crds::restore::COMPLETE_PARTITIONS_MAX`] of them (`partitionCount`
+/// says how many either way); the failed and unverified segment KEYS stay in
+/// the scorecard and are counted here. `incomplete_reason` is cut at a char
+/// boundary to the CRD's 1024 bytes, marked, rather than dropped.
+#[must_use]
+pub fn complete_coverage(block: &Value) -> Option<crate::crds::restore::CompleteCoverage> {
+    use crate::crds::restore::{
+        CompleteArchive, CompleteCoverage, PartitionCoverage, ReplayCounts, COMPLETE_PARTITIONS_MAX,
+    };
+    let count = |v: &Value, key: &str| -> Option<i64> { i64::try_from(v.get(key)?.as_u64()?).ok() };
+    let replay = |v: &Value| -> Option<ReplayCounts> {
+        Some(ReplayCounts {
+            expected: count(v, "expected")?,
+            restored: count(v, "restored")?,
+            matching: count(v, "matching")?,
+            missing: count(v, "missing")?,
+            unexpected: count(v, "unexpected")?,
+            duplicates: count(v, "duplicates")?,
+            out_of_order: count(v, "out_of_order")?,
+            mismatched: count(v, "mismatched")?,
+        })
+    };
+    let block = block.as_object().map(|_| block)?;
+    let incomplete_reason = match block.get("incomplete_reason") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(reason)) => Some(bounded_reason(reason)),
+        Some(_) => return None,
+    };
+    let max_records = match block.get("max_records") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(i64::try_from(v.as_u64()?).ok()?),
+    };
+    let archive = block.get("archive")?;
+    let list_len =
+        |v: &Value, key: &str| -> Option<i64> { i64::try_from(v.get(key)?.as_array()?.len()).ok() };
+    let rows = block.get("partitions")?.as_array()?;
+    let partitions = if rows.len() <= COMPLETE_PARTITIONS_MAX {
+        Some(
+            rows.iter()
+                .map(|row| {
+                    let topic = row.get("topic")?.as_str()?;
+                    let target_topic = match row.get("target_topic") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(t)) if t.len() <= 249 => Some(t.clone()),
+                        Some(_) => return None,
+                    };
+                    (topic.len() <= 249).then_some(())?;
+                    Some(PartitionCoverage {
+                        topic: topic.to_string(),
+                        partition: i32::try_from(row.get("partition")?.as_i64()?).ok()?,
+                        target_topic,
+                        compared: row.get("compared")?.as_bool()?,
+                        replay: replay(row.get("replay")?)?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?,
+        )
+    } else {
+        None
+    };
+    Some(CompleteCoverage {
+        covered: block.get("covered")?.as_bool()?,
+        incomplete_reason,
+        max_records,
+        archive: CompleteArchive {
+            segments: count(archive, "segments")?,
+            segments_verified: count(archive, "segments_verified")?,
+            segments_failed_count: list_len(archive, "segments_failed")?,
+            segments_unverified_count: list_len(archive, "segments_unverified")?,
+            records_decoded: count(archive, "records_decoded")?,
+            offset_holes: count(archive, "offset_holes")?,
+        },
+        replay: replay(block.get("replay")?)?,
+        partition_count: i64::try_from(rows.len()).ok()?,
+        partitions,
+    })
+}
+
+/// A free-text reason cut to `status.integrity.complete.incompleteReason`'s
+/// 1024 bytes at a char boundary, marked when cut.
+fn bounded_reason(reason: &str) -> String {
+    const MAX: usize = 1024;
+    const MARK: &str = " [cut; the signed scorecard holds the whole reason]";
+    if reason.len() <= MAX {
+        return reason.to_string();
+    }
+    let mut end = MAX - MARK.len();
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{MARK}", &reason[..end])
+}
+
+/// **FX-23.** `sample.unsampled_topics`, all of it or nothing.
+fn unsampled_topics(list: &Value) -> Option<Vec<String>> {
+    let items = list.as_array()?;
+    if items.len() > crate::crds::restore::UNSAMPLED_TOPICS_MAX {
+        return None;
+    }
+    items
+        .iter()
+        .map(|t| t.as_str().filter(|t| t.len() <= 249).map(str::to_string))
+        .collect()
 }
 
 /// `status.timeBasis` (FX-8 review M-2) from a read scorecard: written
@@ -3737,6 +3925,21 @@ pub fn scorecard_observation(bytes: &[u8]) -> Option<ScorecardObservation> {
         sample_window_start: s("/sample/window_start").filter(|t| is_rfc3339(t)),
         sample_window_end: s("/sample/window_end").filter(|t| is_rfc3339(t)),
         time_basis: doc.pointer("/source/time_basis").and_then(time_basis_block),
+        integrity_coverage: s("/integrity/verification/coverage").filter(|c| {
+            c == logweir_core::scorecard::COVERAGE_SAMPLED
+                || c == logweir_core::scorecard::COVERAGE_COMPLETE
+        }),
+        // ONLY beside `coverage: complete` (arm IV-4 says the two go
+        // together; a document that broke that is not believed half-way).
+        integrity_complete: doc
+            .pointer("/integrity/verification/coverage")
+            .and_then(Value::as_str)
+            .filter(|c| *c == logweir_core::scorecard::COVERAGE_COMPLETE)
+            .and_then(|_| doc.pointer("/integrity/verification/complete"))
+            .and_then(complete_coverage),
+        unsampled_topics: doc
+            .pointer("/sample/unsampled_topics")
+            .and_then(unsampled_topics),
     })
 }
 
@@ -5698,6 +5901,22 @@ pub fn integrity_block(o: &ScorecardObservation) -> serde_json::Map<String, Valu
     if let Some(v) = o.integrity_partial_reason.as_ref() {
         m.insert("partialReason".to_string(), json!(v));
     }
+    // PROD-08.1a: what the run SIGNED about its coverage, and a complete
+    // verification's exact counts; FX-23: the topics a sampled check left
+    // unsampled. Each absent when the document carries none.
+    if let Some(v) = o.integrity_coverage.as_ref() {
+        m.insert("coverage".to_string(), json!(v));
+    }
+    if let Some(v) = o
+        .integrity_complete
+        .as_ref()
+        .and_then(|c| serde_json::to_value(c).ok())
+    {
+        m.insert("complete".to_string(), v);
+    }
+    if let Some(v) = o.unsampled_topics.as_ref() {
+        m.insert("unsampledTopics".to_string(), json!(v));
+    }
     m
 }
 
@@ -6861,6 +7080,9 @@ async fn reconcile_restore_inner(
         // run already started by an older controller is observed, never
         // refused mid-flight.
         runner_resources_of(restore)?;
+        // PROD-08.1a: the declared coverage against the plan's own, for the
+        // same reason and at the same point — a fact about the sealed spec.
+        coverage_agrees(restore)?;
 
         // THE ADMISSION, BEFORE THE FIRST `POST`. Two `GET`s and a pure
         // function; Global Constraint 6's operator half is that an unapproved

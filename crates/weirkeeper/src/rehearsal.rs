@@ -53,7 +53,7 @@ use logweir_core::spec::{
 };
 
 use crate::crds::rehearsal_schedule::{RehearsalSchedule, RehearsalScheduleSpec};
-use crate::crds::restore::Teardown;
+use crate::crds::restore::{Teardown, VerificationCoverage};
 
 // ===========================================================================
 // Names, labels and the rendered prefix
@@ -666,6 +666,13 @@ pub fn expected_scope(
         records_per_partition: u32::try_from(spec.bounds.records_per_partition).unwrap_or(u32::MAX),
         deadline_seconds: u32::try_from(spec.bounds.deadline_seconds).unwrap_or(u32::MAX),
         modes: vec![MODE_SCRATCH.to_string()],
+        // PROD-08.1a: what the schedule asks for, in the signed scope's own
+        // fields (absent when the schedule states none, as a 1.0.0 scope).
+        coverage: spec.bounds.coverage.map(VerificationCoverage::plan),
+        complete_max_records: spec
+            .bounds
+            .complete_max_records
+            .and_then(|n| u64::try_from(n).ok()),
     }
 }
 
@@ -787,9 +794,16 @@ pub struct PlanInputs<'a> {
 /// * `sample.window_start` = `from_ms`, `sample.window_end` = `to_ms - 1 ms`,
 ///   `sample.anchor` = `head` — the only anchor phase 7 implements
 ///   (`spec::Anchor`'s own doc comment says why `tail` and `random` are refused).
-/// * `sample.max_partitions` is ALWAYS set. W5's report makes an absent bound a
-///   refusal at the runner, because "unbounded" is not inside any finite ceiling
-///   a human signed.
+/// * `sample.max_partitions` is ALWAYS set on a sampled plan. W5's report
+///   makes an absent bound a refusal at the runner, because "unbounded" is not
+///   inside any finite ceiling a human signed.
+/// * `sample.coverage` = `spec.bounds.coverage` and
+///   `sample.complete_max_records` = `spec.bounds.completeMaxRecords`
+///   (PROD-08.1a), both absent from the bytes when the schedule states none. A
+///   `complete` plan states NO `max_partitions` — phase 0 refuses the pair —
+///   and the runner admits that only under a signed scope whose own
+///   `coverage` is `complete` (`plan_within_scope`); the schedule's
+///   `maxPartitions` still bounds the point selected.
 /// * `target.mode` = `scratch`, always. A rehearsal in `newTopic` mode would
 ///   restore into names an application might be reading, and the prefix-scoped
 ///   deletion guard that makes teardown safe only applies to scratch names.
@@ -809,6 +823,7 @@ pub fn render_plan(inputs: &PlanInputs<'_>) -> DrillSpec {
     let spec = inputs.spec;
     let point = &inputs.selected.point;
     let point_in_time = inputs.selected.point_in_time();
+    let coverage = VerificationCoverage::of(spec.bounds.coverage);
     DrillSpec {
         name: Some(inputs.plan_name.clone()),
         source: SourceSpec {
@@ -837,11 +852,22 @@ pub fn render_plan(inputs: &PlanInputs<'_>) -> DrillSpec {
             window_end: point_in_time,
             records_per_partition: usize::try_from(spec.bounds.records_per_partition).unwrap_or(25),
             anchor: Anchor::default(),
-            max_partitions: Some(u32::try_from(spec.bounds.max_partitions).unwrap_or(u32::MAX)),
-            // PROD-08.1: a rehearsal verifies by sample; complete coverage is not
-            // a schedule field yet (docs/to-do/decisions/PROD-08.1-integrity-contract.md).
-            coverage: logweir_core::spec::Coverage::Sampled,
-            complete_max_records: None,
+            // PROD-08.1a: a complete schedule's plan states NO partition bound
+            // — a complete verification checks every partition, and phase 0
+            // refuses the pair; the schedule's `maxPartitions` still bounded
+            // which point was selected. A sampled one always states it, as
+            // before, so its bytes are unchanged.
+            max_partitions: match coverage {
+                logweir_core::spec::Coverage::Sampled => {
+                    Some(u32::try_from(spec.bounds.max_partitions).unwrap_or(u32::MAX))
+                }
+                logweir_core::spec::Coverage::Complete => None,
+            },
+            coverage,
+            complete_max_records: spec
+                .bounds
+                .complete_max_records
+                .and_then(|n| u64::try_from(n).ok()),
         },
         restore: RestoreSpecBlock {
             point_in_time: Some(point_in_time),

@@ -54,6 +54,13 @@ import {
   replace,
   restorePointLink,
   SCOPE_LEVEL_OF_INTEGRITY,
+  UNVERIFIED,
+  badge as captionBadge,
+  coverageWords,
+  notCovered,
+  renderCompleteCoverage,
+  COMPLETE_COVERAGE_COST,
+  messageText,
   table,
   unverifiedCaption,
   verificationScopeSentence,
@@ -103,6 +110,13 @@ export const NO_HISTORY_SENTENCE =
  *  the case is added beside it. */
 export function restoreBadge(status) {
   const s = status || {};
+  // PROD-08.1a: A COMPLETE VERIFICATION THAT DID NOT COVER THE RESTORE IS NEVER
+  // GREEN, whatever else the status says -- the controller's own rule
+  // (`CompleteNotCovered`), applied here too so no row or detail can read it
+  // as a pass, in either mode.
+  if (notCovered(completeOf(s))) {
+    return captionBadge("unverified", UNVERIFIED + ": " + NOT_COVERED_CAPTION);
+  }
   if (((s.evidence || {}).verification) === undefined && s.__summary !== undefined) {
     return summaryBadge(s.__summary);
   }
@@ -113,6 +127,52 @@ export function restoreBadge(status) {
     return badge("unverified", unverifiedCaption(verification, succeeded));
   }
   return badge("green", greenLabel(verified[0], verified[1], verified[2]));
+}
+
+/** The caption a Restore badge carries over a complete verification that did
+ *  not cover the restore (PROD-08.1a). */
+export const NOT_COVERED_CAPTION =
+  "complete coverage did not cover this restore -- not a pass";
+
+/** PROD-08.1a: the recorded complete block, from whichever document this page
+ *  is looking at -- the product API's full `verificationScope.complete` on a
+ *  console detail, else the custom resource's (or a console list row's)
+ *  `status.integrity.complete`. `null` when none is recorded. */
+export function completeOf(status) {
+  const s = status || {};
+  const scope = s.verificationScope || null;
+  if (scope !== null && typeof scope === "object" && scope.complete) {
+    return scope.complete;
+  }
+  const integrity = s.integrity || {};
+  return integrity.complete && typeof integrity.complete === "object" ? integrity.complete : null;
+}
+
+/** PROD-08.1a: one Restore's coverage -- what it ASKS for (`spec.coverage`,
+ *  absent read as sampled; the controller has held it to the plan) and what
+ *  its signed scorecard RECORDED (`status.integrity.coverage`, or the API's
+ *  `verificationScope.coverage`; absent is not recorded, never complete). */
+export function coverageOf(object) {
+  const spec = (object && object.spec) || {};
+  const status = (object && object.status) || {};
+  const scope = status.verificationScope || {};
+  const recorded = typeof scope.coverage === "string"
+    ? scope.coverage
+    : (status.integrity || {}).coverage;
+  return {
+    requested: spec.coverage === "complete" ? "complete" : "sampled",
+    maxRecords: typeof spec.completeMaxRecords === "number" ? spec.completeMaxRecords : null,
+    recorded: recorded === "sampled" || recorded === "complete" ? recorded : null,
+    complete: completeOf(status),
+  };
+}
+
+/** The list row's coverage line, under the RESULT. */
+function coverageLine(object) {
+  const c = coverageOf(object);
+  return "<span class=\"cell-sub\" data-coverage=\"" + esc(c.recorded || "not-recorded") +
+    "\"" + (notCovered(c.complete) ? " data-covered=\"false\"" : "") + ">coverage: " +
+    esc(coverageWords(c.recorded, c.requested, c.complete)) + "</span>";
 }
 
 /** HOW MUCH OF ONE RESTORE WAS COMPARED, from whichever document this page
@@ -139,11 +199,17 @@ export function scopeOf(object) {
     return null;
   }
   const completion = status.completion || {};
+  const integrity = status.integrity || {};
   return {
     level: level,
     recordsSampled: completion.recordsSampled,
     recordsSampledMatching: completion.recordsSampledMatching,
     recordsExpected: completion.recordsExpected,
+    // PROD-08.1a / FX-23: the custom resource's copies of the signed facts,
+    // under the API's names.
+    coverage: integrity.coverage,
+    complete: integrity.complete,
+    unsampledTopics: integrity.unsampledTopics,
   };
 }
 
@@ -195,7 +261,7 @@ function resultCell(object) {
   return kindOf(object) === "Backup"
     ? cell(status.exitCode)
     : scorecardClaim(cell(status.outcome), validVerification(status) !== null ||
-      listRowVerified(status));
+      listRowVerified(status)) + coverageLine(object);
 }
 
 // A CONSOLE LIST ROW'S OWN GREEN (MCP-17): it carries no recorded verification
@@ -205,7 +271,8 @@ function resultCell(object) {
 function listRowVerified(status) {
   const s = status || {};
   return ((s.evidence || {}).verification) === undefined && s.__summary !== undefined &&
-    s.__summary.verifiedSuccess === true && s.__summary.verificationState === "valid";
+    s.__summary.verifiedSuccess === true && s.__summary.verificationState === "valid" &&
+    !notCovered(completeOf(s));
 }
 
 /** The badge for a row, per kind. */
@@ -384,6 +451,7 @@ export function renderRestoreDetail(object, operation) {
   // the verdict badge uses (`validVerification`).
   const verified = validVerification(status) !== null;
   const claim = (value) => scorecardClaim(cell(value), verified);
+  const coverage = coverageOf(object);
 
   return (
     "<h2>Restore " + nameOf(object) + "</h2>" +
@@ -417,6 +485,19 @@ export function renderRestoreDetail(object, operation) {
       ["time basis (signed)", "<span id=\"restore-time-basis-signed\">" +
         claim(signedTimeBasisText(status.timeBasis)) + "</span>"],
       ["backup set", cell(spec.backupSetRef)],
+      // PROD-08.1a: WHAT THIS RESTORE ASKED FOR, from `spec` (which the
+      // controller holds to the plan), and WHAT ITS SCORECARD SIGNED.
+      ["coverage (asked for)", "<span id=\"restore-coverage-requested\">" +
+        esc(coverage.requested === "complete"
+          ? "complete -- every record of every restored partition" +
+            (coverage.maxRecords === null
+              ? ", no record bound"
+              : ", at most " + String(coverage.maxRecords) + " archived records")
+          : "sampled -- the canary and the manifest's count bound") + "</span>"],
+      ["coverage (signed)", "<span id=\"restore-coverage-signed\"" +
+        (notCovered(coverage.complete) ? " data-covered=\"false\"" : "") + ">" +
+        claim(coverageWords(coverage.recorded, coverage.requested, coverage.complete)) +
+        "</span>"],
     ]) +
     (verified
       ? ""
@@ -434,6 +515,14 @@ export function renderRestoreDetail(object, operation) {
     // a result printed without its scope reads as an exhaustive comparison --
     // which no level in v1 performs and none is called `complete`.
     "<p class=\"scope\">" + esc(verificationScopeSentence(scopeOf(object))) + "</p>" +
+    // PROD-08.1a: A RECORDED COMPLETE VERIFICATION, IN FULL -- covered or not,
+    // the reason, and every partition's exact counts. A sampled run renders
+    // nothing here.
+    (coverage.recorded === "complete" ? renderCompleteCoverage(coverage.complete, claim) : "") +
+    (coverage.requested === "complete" && coverage.recorded === null
+      ? "<p class=\"note\" id=\"restore-coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) +
+        "</p>"
+      : "") +
     "<h3>Objectives asked for, and what the run achieved</h3>" +
     facts([
       ["objectives.rtoSeconds", cell(objectives.rtoSeconds)],

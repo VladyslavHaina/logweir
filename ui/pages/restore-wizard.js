@@ -135,12 +135,14 @@ import {
   readyButForDraftApproval,
   when,
   windowMessage,
+  COMPLETE_COVERAGE_COST,
 } from "../render.js";
 import {
   defaultTopicPrefix,
   MAX_REPLICATION_FACTOR,
   TARGET_MODES,
   TIME_BASIS_PRODUCER_TIME,
+  COVERAGE_COMPLETE,
   preparePlanDocument,
 } from "../plan.js";
 import {
@@ -222,6 +224,10 @@ export const WIZARD_DRAFT_FIELDS = Object.freeze([
   // FX-8: whether the plan accepts a point-in-time selection by producer
   // time -- `producerTime` or the empty string. A choice like any other.
   "timeBasis",
+  // PROD-08.1a: whether the plan asks for complete coverage -- `complete` or
+  // the empty string -- and its record bound AS TYPED (the empty string for
+  // none). Choices like any other.
+  "coverage", "completeMaxRecords",
 ]);
 
 /** The API server's field paths, mapped to the wizard's inputs. `archive` and
@@ -3388,14 +3394,101 @@ export function renderReplicationField(state) {
  *  ends with after the run. No level in this version compares every record. */
 export function verificationPlanSentence(state) {
   const sample = ((state || {}).fields || {}).sample || {};
+  // PROD-08.1a: A PLAN THAT ASKS FOR COMPLETE COVERAGE says so, and says what
+  // the result will tell -- never that it will pass.
+  if (sample.coverage === COVERAGE_COMPLETE) {
+    return "This restore will compare every record of every restored partition with the archive " +
+      "(complete coverage)" + (typeof sample.completeMaxRecords === "number"
+      ? ", decoding at most " + String(sample.completeMaxRecords) + " archived records"
+      : ", with no record bound") +
+      ". The result will give exact counts per partition and say whether it covered every " +
+      "partition; one that did not cover is not a pass.";
+  }
   const n = typeof sample.recordsPerPartition === "number" ? String(sample.recordsPerPartition) : "?";
   const anchor = typeof sample.anchor === "string" ? sample.anchor : "?";
   return (
     "This restore will compare " + n + " records per partition, anchored at " + anchor +
-    ", inside the sample window above. That is a sampled check, not an exhaustive comparison: " +
-    "no level in this version compares every restored record, and the result will say so beside " +
-    "its counts."
+    ", inside the sample window above. That is a sampled check, not an exhaustive comparison; " +
+    "choose complete coverage below to compare every record. The result will say which it was " +
+    "beside its counts."
   );
+}
+
+/** PROD-08.1a: the advanced choice of complete coverage, in step 4's limits
+ *  panel.
+ *
+ *  AN EXPLICIT, ADVANCED CHOICE AND NEVER THE DEFAULT. It sits inside a closed
+ *  `<details>` until chosen, the box is unticked by default and never ticked by
+ *  this page, and its cost is stated beside it whether or not it is ticked:
+ *  complete coverage reads the whole archive of the restored topics and the
+ *  whole output, and an operator choosing it must see that before the
+ *  approver signs it. Ticked, the plan states `sample.coverage: complete` (and
+ *  the bound, when typed), and the create request declares the same on
+ *  `Restore.spec`, where the controller holds the two together. */
+export function renderCoverageChoice(state) {
+  const s = state || {};
+  const sample = (s.fields || {}).sample || {};
+  const chosen = sample.coverage === COVERAGE_COMPLETE;
+  const bound = sample.completeMaxRecords === undefined || sample.completeMaxRecords === null
+    ? ""
+    : String(sample.completeMaxRecords);
+  return (
+    "<details class=\"advanced\" id=\"coverage-advanced\"" + (chosen ? " open" : "") + ">" +
+    "<summary>Advanced: verify every record</summary>" +
+    "<label class=\"inline\" for=\"coverage-complete\">" +
+    "<input type=\"checkbox\" id=\"coverage-complete\" name=\"coverage\"" +
+    (chosen ? " checked" : "") + "> " + esc(COVERAGE_CHOICE_LABEL) + "</label>" +
+    "<p class=\"note\" id=\"coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) + "</p>" +
+    "<div class=\"field\"><label for=\"coverage-bound\">record bound (optional)</label>" +
+    "<input id=\"coverage-bound\" name=\"completeMaxRecords\" inputmode=\"numeric\" value=\"" +
+    esc(bound) + "\"" + (chosen ? "" : " disabled") + ">" +
+    "<p class=\"help\">" + esc(COVERAGE_BOUND_HELP) + "</p></div>" +
+    "</details>"
+  );
+}
+
+/** The box's label. */
+export const COVERAGE_CHOICE_LABEL = "Verify every record (complete coverage)";
+
+/** What the bound does, under its input. */
+export const COVERAGE_BOUND_HELP =
+  "The most archived records the complete verification may decode, summed over every restored " +
+  "partition. Past it, the partitions left are not compared and the run signs covered: false, " +
+  "which is not a pass. Leave it empty for no bound beyond the run's deadline.";
+
+/** The review step's coverage line (PROD-08.1a), from the plan's own values. */
+export function coverageText(state) {
+  const sample = ((state || {}).fields || {}).sample || {};
+  if (sample.coverage !== COVERAGE_COMPLETE) {
+    return "sampled: the canary and the manifest's count bound (the default)";
+  }
+  return "complete (sample.coverage: complete" +
+    (typeof sample.completeMaxRecords === "number"
+      ? ", complete_max_records: " + String(sample.completeMaxRecords)
+      : ", no record bound") +
+    "): every record of every restored partition, compared with the archive";
+}
+
+/** Writes the coverage choice from the two controls: the box decides, and the
+ *  bound is read only beside it -- a whole number, kept as one; anything else
+ *  is kept as typed, so the plan refuses to render and names the field rather
+ *  than this page guessing a number. An unticked box clears both. */
+export function setCoverage(state, complete, boundText) {
+  const sample = state.fields.sample;
+  if (complete !== true) {
+    delete sample.coverage;
+    delete sample.completeMaxRecords;
+    return;
+  }
+  sample.coverage = COVERAGE_COMPLETE;
+  const text = typeof boundText === "string" ? boundText.trim() : "";
+  if (text.length === 0) {
+    delete sample.completeMaxRecords;
+  } else if (/^[0-9]+$/.test(text) && Number.isSafeInteger(Number(text))) {
+    sample.completeMaxRecords = Number(text);
+  } else {
+    sample.completeMaxRecords = text;
+  }
 }
 
 /** Resume: not implemented, said before the run and not after it.
@@ -3430,6 +3523,7 @@ export function renderRecoveryLimits(state) {
       ? "<p class=\"note\" id=\"partition-counts\">" + esc(PARTITION_COUNT_NOT_PUBLISHED) + "</p>"
       : "") +
     "<p class=\"scope\" id=\"verification-plan\">" + esc(verificationPlanSentence(s)) + "</p>" +
+    renderCoverageChoice(s) +
     (typeof meaning === "string"
       ? "<p class=\"note\" id=\"target-mode-meaning\">" + esc(meaning) + "</p>"
       : "") +
@@ -3920,7 +4014,14 @@ export function renderPlanStep(prepared, state) {
         "</span>"],
       // FX-8: THE CLOCK THE POINT IS READ ON, beside the plan that states it.
       ["time basis", "<span id=\"review-time-basis\">" + esc(timeBasisText(s)) + "</span>"],
+      // PROD-08.1a: HOW MUCH THE RUN WILL VERIFY, beside the plan that says so.
+      ["coverage", "<span id=\"review-coverage\">" + esc(coverageText(s)) + "</span>"],
     ]) +
+    // AND WHAT IT COSTS, where it is reviewed, when it is chosen.
+    ((((s.fields || {}).sample) || {}).coverage === COVERAGE_COMPLETE
+      ? "<p class=\"caveat\" id=\"review-coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) +
+        "</p>"
+      : "") +
     // FX-8 review M-2: A PLAN THAT OPTS IN IS WARNED, where it is reviewed.
     (((s.fields || {}).timeBasis) === TIME_BASIS_PRODUCER_TIME
       ? "<p class=\"caveat\" id=\"review-time-basis-warning\">" +
@@ -4619,6 +4720,13 @@ export function wizardDraftValues(state) {
       : "",
     // FX-8: the opt-in, as the one value or the empty string.
     timeBasis: f.timeBasis === TIME_BASIS_PRODUCER_TIME ? TIME_BASIS_PRODUCER_TIME : "",
+    // PROD-08.1a: the coverage choice as text -- `keepDraft` keeps strings and
+    // booleans only.
+    coverage: (f.sample || {}).coverage === COVERAGE_COMPLETE ? COVERAGE_COMPLETE : "",
+    completeMaxRecords: (f.sample || {}).coverage === COVERAGE_COMPLETE &&
+        (f.sample || {}).completeMaxRecords !== undefined
+      ? String(f.sample.completeMaxRecords)
+      : "",
   };
 }
 
@@ -4703,6 +4811,10 @@ export function applyWizardDraft(state, draft) {
   // FX-8: the opt-in comes back only as the one value it can be; an older
   // draft with none, or anything else, leaves the box unticked.
   state.fields.timeBasis = d.timeBasis === TIME_BASIS_PRODUCER_TIME ? TIME_BASIS_PRODUCER_TIME : "";
+  // PROD-08.1a: the coverage choice comes back only as the one value it can
+  // be; an older draft with none leaves the plan sampled.
+  setCoverage(state, d.coverage === COVERAGE_COMPLETE,
+    typeof d.completeMaxRecords === "string" ? d.completeMaxRecords : "");
   // A saved destination is the frozen source of these signed-plan values.
   // Older drafts may contain legacy controls, but must never override it.
   const legacyStorage = savedDestinationName(state).length === 0;
@@ -4886,6 +4998,17 @@ export function restoreBody(state, prepared) {
     },
     deadlineSeconds: typeof s.deadlineSeconds === "number" ? s.deadlineSeconds : 3600,
   };
+  // PROD-08.1a: the coverage the plan asks for, DECLARED on the Restore -- the
+  // controller refuses an object whose declaration and plan disagree, so the
+  // two come from the same field. Absent for a sampled plan: the object every
+  // earlier restore was.
+  const sample = fields.sample || {};
+  if (sample.coverage === COVERAGE_COMPLETE) {
+    spec.coverage = COVERAGE_COMPLETE;
+    if (typeof sample.completeMaxRecords === "number") {
+      spec.completeMaxRecords = sample.completeMaxRecords;
+    }
+  }
   if (typeof destination.name === "string" && destination.name.length > 0) {
     spec.sourceDestinationRef = { name: destination.name };
     // THE EVIDENCE DESTINATION THE OPERATOR CHOSE (PLAT-08.2) -- the point's
@@ -5946,7 +6069,7 @@ async function readApprovalPolicy(api, ns, lifecycle) {
 export const WIZARD_TEXT_INPUTS = Object.freeze([
   "point-in-time", "topic-prefix", "store-endpoint", "store-region", "evidence-bucket",
   "archive-secret", "evidence-endpoint", "evidence-region", "catalog-topics",
-  "replication-factor",
+  "replication-factor", "coverage-bound",
 ]);
 
 /** Whether a control's value is not the one the last render gave it -- what
@@ -7139,6 +7262,8 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   const catalogTopics = node.querySelector("#catalog-topics");
   const replication = node.querySelector("#replication-factor");
   const timeBasis = node.querySelector("#time-basis");
+  const coverage = node.querySelector("#coverage-complete");
+  const coverageBound = node.querySelector("#coverage-bound");
   const refresh = async () => {
     if (!active(lifecycle)) {
       return;
@@ -7161,6 +7286,11 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     // FX-8: the box and only the box writes the opt-in.
     if (timeBasis !== null) {
       state.fields.timeBasis = timeBasis.checked === true ? TIME_BASIS_PRODUCER_TIME : "";
+    }
+    // PROD-08.1a: the box decides, the bound is read beside it.
+    if (coverage !== null) {
+      setCoverage(state, coverage.checked === true,
+        coverageBound === null ? "" : valueOf(coverageBound));
     }
     if (mode !== null) {
       state.fields.target.mode = valueOf(mode);
@@ -7345,6 +7475,8 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     catalogTopics,
     replication,
     timeBasis,
+    coverage,
+    coverageBound,
   ]) {
     if (field !== null) {
       listen(field, "change", refresh, lifecycle);

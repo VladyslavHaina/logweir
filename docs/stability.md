@@ -1853,15 +1853,65 @@ a slot may run:
 | `targetClusterId` | The one cluster a rehearsal may restore into, compared with the id the cluster itself reports. |
 | `topicPrefix` | The prefix every restored topic name carries, rendered per schedule as `<prefix><schedule-uid-first-8>-`. |
 | `topics` | The source topics the authorization covers, by exact name. |
-| `maxPartitions` | The partition ceiling: each slot's plan carries the schedule's own bound as `sample.max_partitions`, which may not exceed it. |
+| `maxPartitions` | The partition ceiling: each slot's sampled plan carries the schedule's own bound as `sample.max_partitions`, which may not exceed it. **A scope that authorises `coverage: complete` signs exactly `0`** (format 1.1.0, below): a complete plan states no bound (it checks every partition), so this build never reads it for one, and 0 is what makes every older reader refuse every plan under the scope. The schedule's own `spec.bounds.maxPartitions` still bounds the point a slot selects, inside `templateDigest`. |
 | `recordsPerPartition` | The most records per partition the plan may sample and verify. It does not bound how many records the restore writes, which is every archived record in the window. |
 | `deadlineSeconds` | The wall-clock bound on one run, the Job's `activeDeadlineSeconds`. The controller checks it; the runner does not. |
 | `modes` | The target modes permitted: `["scratch"]`, and nothing else in this build. A scope naming any other mode is refused. |
+| `coverage` (format 1.1.0, optional) | The verification coverage the signer authorises; the plan's `sample.coverage` must be exactly it (PROD-08.1a). **Absent means `sampled`** — every 1.0.0 scope — so a scope signed before the field authorises sampled rehearsals only, and a complete plan under it is refused by name. `complete` (with `maxPartitions: 0`) admits a complete plan (which states no `max_partitions`) and refuses a sampled one. |
+| `completeMaxRecords` (format 1.1.0, optional) | Only beside `coverage: complete`: the most archived records one complete verification may decode. The plan's `sample.complete_max_records` must be present and no larger. Absent: the work is bounded by `deadlineSeconds` alone. |
+
+**Format 1.1.0 (PROD-08.1a).** `coverage` and `completeMaxRecords` are optional scope fields
+defined from `formatVersion` 1.1.0. `logweir drill approve --standing` mints 1.1.0 exactly when the
+scope carries one of them, and 1.0.0 — byte for byte as before — otherwise; the DSSE payload type is
+unchanged. This build refuses either field under a document whose minor is below 1 or not a number,
+`completeMaxRecords` beside a scope that does not authorise complete coverage, a bound of 0, and
+**a scope that authorises `coverage: complete` with any `maxPartitions` but 0** (the minter refuses
+to sign one, naming the value to write; the runner, the controller's slot and `admit_standing` and
+the `Approval` controller refuse to read one). The 0 is what keeps the format MINOR: OD-7 allows a
+change only when it can move a reader's verdict to the safer side, and every reader, of every
+version, is on that side:
+
+- **This build, a scope that states no `coverage` (every 1.0.0 document) or states `sampled`:** it
+  admits exactly the sampled plans a 1.0.0 reader admitted, and refuses every complete plan by
+  name. An older reader refused a complete plan with no `max_partitions` as an unbounded sample;
+  one with `max_partitions` was refused by the phase 0 of a runner from item 30 of the release
+  notes on, and run as the sampled plan it also is by an older runner. Either way this build only
+  refuses more.
+- **This build, a 1.1.0 scope that states `complete` (and `maxPartitions: 0`):** it admits a
+  complete plan with no `max_partitions` (when the scope signs `completeMaxRecords`, only one whose
+  `complete_max_records` is present and no larger), which every older reader refuses, and refuses
+  every sampled plan by its coverage. This is the new authority, and only a document that signs it
+  grants it.
+- **A runner or controller built before 1.1.0, the same complete-only document:** its admission
+  checks the major only and its scope type ignores unknown fields, so it reads a SAMPLED scope with
+  a partition bound of 0, and runs nothing under it. Its `Approval` controller refuses the scope
+  (`ScopeInvalid`: a bound of 0 is not a positive bound), so the `Approval` is never `Verified`, and
+  its rehearsal slot and its `admit_standing` both need a `Verified` one: no `Restore` and no Job.
+  Its plan-in-scope check — the runner's, and the controller's — refuses an ordinary sampled plan
+  (its bound is above 0) and a complete plan (no bound: unbounded), before any client. The only
+  plans that check passes state `max_partitions: 0`, and they sample no partition: a runner from
+  item 30 on refuses `complete` beside any bound at phase 0, and every build's phase 7 refuses an
+  empty selection before any verdict (exit 1, no scorecard), so none can be signed a pass. A rehearsal slot is refused earlier still: an older controller's
+  `templateDigest` omits `bounds.coverage`, so it no longer matches the signed one.
+- **An older minter** (`logweir drill approve --standing` before 1.1.0) refuses a `scope.json` with
+  `maxPartitions: 0` before signing anything, so it cannot mint a complete-only authorization at
+  all; one that does not state `coverage` mints a sampled scope as before.
+
+Proved against a build from before the format (`main` at `1c3a1b5e`): its runner binary refuses the
+ordinary sampled plan and the complete plan under a complete-only document this build minted, and
+its `Approval` controller refuses the document (`crates/logweir/tests/execution_contract_v2.rs`,
+`an_older_runner_refuses_every_plan_under_a_complete_only_scope_this_build_mints`, run with
+`LOGWEIR_OLDER_RUNNER`). With a positive `maxPartitions` beside `coverage: complete` — which no
+reader of this build accepts — the same older runner admits the sampled plan; that is why the 0 is
+required. As with every scope field, roll the controller and the runner out together.
 
 Unknown fields are ignored on read. They cannot widen authority: the standing format carries no
 approval-policy mode (PLAT-19.2 carries one end to end for per-run Restores only, through
 authorization document v2 — `docs/kubernetes.md` §8), so its readers require `GovernedApproval`
-whatever a namespace is bound to. A higher `formatVersion` major is refused.
+whatever a namespace is bound to. A field that NARROWS what a scope authorises needs more: a
+reader that predates it ignores it and would admit what the field excluded, so it ships beside a
+value of an existing field that such a reader already refuses everything under (format 1.1.0's
+`maxPartitions: 0`, above). A higher `formatVersion` major is refused.
 
 **The runner's order, and what each step buys.** The signature is checked over the envelope bytes
 *before* they are parsed, so nothing read out of the document is believed until those exact bytes

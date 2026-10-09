@@ -2470,3 +2470,116 @@ fn a_stated_window_start_is_restored_and_signed_with_its_window() {
     );
     assert!(!sc.sample.coverage_note.contains("replay selection"));
 }
+
+// ----------------------------------------------------------------- PROD-08.1a
+
+/// **PROD-08.1a: a `covered: false` complete run never reads as a pass in a
+/// notification or a metrics label.** The plan asks for complete coverage
+/// with `complete_max_records: 1`, so the one partition is past the bound and
+/// is not compared: the signed scorecard says `covered: false` with its
+/// reason, and phase 8 scores it `fail-integrity` (exit 2, signed). The
+/// notification body says `outcome: fail-integrity`, `integrity.coverage:
+/// complete` and `integrity.covered: false`; the metrics file carries
+/// `outcome="fail-integrity"`, no `outcome="pass"` and no `result="pass"`,
+/// `logweir_drill_integrity_coverage{...coverage="complete"} 1` and
+/// `logweir_drill_integrity_complete_covered 0`. The covered run
+/// (`VerifiesCompletely`) is the control: `covered: true`, `pass`, and the
+/// gauge at 1.
+///
+/// KILLS: `notify_body` dropping `covered` or `coverage`; the metrics writer
+/// dropping either series or writing `covered` as 1; phase 8 scoring a
+/// `partial` result as `pass` (the outcome assertions).
+#[test]
+fn a_complete_run_that_did_not_cover_is_never_a_pass_in_the_notification_or_the_metrics() {
+    let f = fixtures::orchestrator_fixture(Drill::VerifiesCompletelyPastItsBound);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("not covered is not a pass");
+    assert!(matches!(err, DrillError::NotPass(..)), "{err:?}");
+    // THE SIGNED DOCUMENT, as the store holds it.
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::FailIntegrity);
+    let c = sc
+        .integrity
+        .verification
+        .as_ref()
+        .and_then(|v| v.complete.as_ref())
+        .expect("the complete block");
+    assert!(!c.covered, "{c:?}");
+    assert!(
+        c.incomplete_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("complete_max_records")),
+        "{c:?}"
+    );
+    assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+
+    let body = logweir::drill::phase7_verify::notify_body(&sc);
+    assert_eq!(body["outcome"], "fail-integrity", "{body}");
+    assert_ne!(body["integrity"]["result"], "pass", "{body}");
+    assert_eq!(body["integrity"]["coverage"], "complete", "{body}");
+    assert_eq!(body["integrity"]["covered"], false, "{body}");
+
+    logweir::metrics::write_textfile(&f.metrics, &sc).unwrap();
+    let t = std::fs::read_to_string(&f.metrics).unwrap();
+    assert!(t.contains("outcome=\"fail-integrity\""), "{t}");
+    assert!(!t.contains("outcome=\"pass\""), "{t}");
+    assert!(!t.contains("result=\"pass\""), "{t}");
+    assert!(
+        t.contains("logweir_drill_integrity_coverage{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\",coverage=\"complete\"} 1"),
+        "{t}"
+    );
+    assert!(
+        t.contains(
+            "logweir_drill_integrity_complete_covered{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\"} 0"
+        ),
+        "{t}"
+    );
+    assert!(
+        t.contains("logweir_drill_exit_code{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\"} 2"),
+        "{t}"
+    );
+
+    // The control: the covered run.
+    let ok = fixtures::orchestrator_fixture(Drill::VerifiesCompletely);
+    let sc = execute_with(&ok.args, &ok.run_id, &ok.ctx).expect("covered passes");
+    let body = logweir::drill::phase7_verify::notify_body(&sc);
+    assert_eq!(
+        (
+            body["outcome"].as_str(),
+            body["integrity"]["covered"].as_bool()
+        ),
+        (Some("pass"), Some(true)),
+        "{body}"
+    );
+    logweir::metrics::write_textfile(&ok.metrics, &sc).unwrap();
+    let t = std::fs::read_to_string(&ok.metrics).unwrap();
+    assert!(
+        t.contains(
+            "logweir_drill_integrity_complete_covered{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\"} 1"
+        ),
+        "{t}"
+    );
+}
+
+/// **A sampled run never claims complete** in the notification or the
+/// metrics: its body's `integrity.coverage` is `sampled` with no `covered`,
+/// and the metrics carry `coverage="sampled"` and no complete gauge.
+///
+/// KILLS: the coverage read from anything but the signed block; the complete
+/// gauge written for a sampled run.
+#[test]
+fn a_sampled_run_never_claims_complete_in_the_notification_or_the_metrics() {
+    let pass = fixtures::orchestrator_args_against_fixture_engine();
+    let sc = execute_with(&pass.args, &pass.run_id, &pass.ctx).unwrap();
+    let body = logweir::drill::phase7_verify::notify_body(&sc);
+    assert_eq!(body["integrity"]["coverage"], "sampled", "{body}");
+    assert!(body["integrity"].get("covered").is_none(), "{body}");
+    logweir::metrics::write_textfile(&pass.metrics, &sc).unwrap();
+    let t = std::fs::read_to_string(&pass.metrics).unwrap();
+    assert!(t.contains("coverage=\"sampled\"} 1"), "{t}");
+    assert!(!t.contains("coverage=\"complete\""), "{t}");
+    assert!(
+        !t.contains("logweir_drill_integrity_complete_covered{"),
+        "{t}"
+    );
+}
