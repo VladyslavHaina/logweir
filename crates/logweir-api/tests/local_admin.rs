@@ -1915,6 +1915,59 @@ fn clients_that_stop_reading_cannot_hold_the_ceiling_past_the_stall_deadline() {
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
 }
 
+/// **One client that stops reading is ended by the stall deadline (FX-24b).**
+///
+/// The ceiling row above proves the permit comes back, but it opens 256
+/// sockets, and a connection flood may not run on a host that is serving a
+/// compose stack or the PoC (WORKER-RULES, 2026-10-08). Without this row the
+/// mutants that drop or blunt the OUTPUT clock were caught at the binary level
+/// only by that flood row (FX-24b review L3). So: one connection, through a
+/// 4 KiB receive buffer, pipelines sixteen requests for the 156 KiB asset and
+/// reads nothing. Nothing reads it before the stall deadline plus
+/// [`STALL_SLACK`] — a read is progress — and then it must already be over:
+/// EOF or reset within two seconds, short of its sixteen answers. A server
+/// without the output clock is still writing, and hands over every answer once
+/// read. A request on another connection is answered meanwhile, so the wait is
+/// this connection's, not the server's.
+#[test]
+fn a_client_that_stops_reading_is_ended_at_the_stall_deadline() {
+    const PIPELINED: usize = 16;
+    let fixture = Fixture::new("nonreader");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let runtime = socket_runtime();
+    let mut stopped = connect_with_receive_buffer(&runtime, address, 4096).unwrap();
+    stopped
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let request = format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    stopped
+        .write_all(request.repeat(PIPELINED).as_bytes())
+        .unwrap();
+    let sent = Instant::now();
+
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+
+    std::thread::sleep((STALL_DEADLINE + STALL_SLACK).saturating_sub(sent.elapsed()));
+    let whole = PIPELINED * render_js_size();
+    match answered_then_closed(&mut stopped, Duration::from_secs(2)) {
+        Ok((_, received)) if received.len() < whole => {}
+        Ok((_, received)) => panic!(
+            "the connection that stopped reading was sent all {} bytes of its answers once \
+             read: the server never ended it",
+            received.len()
+        ),
+        Err(why) => panic!(
+            "the connection that stopped reading was not ended by the server within {:?} of \
+             its requests: {why}",
+            STALL_DEADLINE + STALL_SLACK
+        ),
+    }
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+}
+
 /// **A slow but steady reader outlasts the stall deadline (FX-24b).**
 ///
 /// NEGATIVE CONTROL for the row above: the bound is on a STALL. One client
@@ -2268,13 +2321,26 @@ fn a_signed_in_body_that_stops_is_closed_at_the_stall_deadline() {
 /// **A signed-in client that trickles its body is answered and closed at the
 /// total deadline (FX-24b).**
 ///
-/// One byte (a space, which JSON allows) every five seconds: the body never
+/// One byte (a space, which JSON allows) every four seconds: the body never
 /// stalls for the thirty-second stall deadline, so only `read_json`'s total
 /// can end it — at sixty seconds, with `400 malformed_request`, "not received
 /// within 60 seconds", and the connection closed after the answer. A server
 /// with no total fails here; so does one whose total is the stall's.
+///
+/// THE DRIPS STOP EIGHT SECONDS SHORT OF THE TOTAL (FX-24b review L1). The
+/// first version dripped on its five-second read timeout, which divides sixty,
+/// so the twelfth byte was due the instant the server gave up on the body. A
+/// byte that lands after the server dropped the body is unread when it closes
+/// the socket, the kernel answers with a reset, and the next socket option
+/// call on the reset socket failed with `EINVAL` on macOS (2 of 8 runs under
+/// load). Now the last byte is sent at 52 s and is read long before the
+/// server's 60 s; the 8 s gap after it is still far inside the 30 s stall. The
+/// read timeout is set once, before the first byte, and the loop paces itself
+/// on the clock.
 #[test]
 fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
+    const DRIP_EVERY: Duration = Duration::from_secs(4);
+    const LAST_DRIP_BEFORE_THE_TOTAL: Duration = Duration::from_secs(8);
     let fixture = Fixture::new("bodytrickle");
     let (_server, port) = start_server(&fixture);
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -2284,10 +2350,15 @@ fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     trickle
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    trickle
         .write_all(backup_post_head(port, 4096, "fx24b-trickle-0001").as_bytes())
         .unwrap();
     let sent = Instant::now();
     let limit = BODY_DEADLINE + DEADLINE_SLACK;
+    let last_drip = BODY_DEADLINE.saturating_sub(LAST_DRIP_BEFORE_THE_TOTAL);
+    let mut next_drip = DRIP_EVERY;
     let mut received = Vec::new();
     let mut buffer = [0u8; 4096];
     let mut dripped = 0;
@@ -2299,20 +2370,17 @@ fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
             received.len(),
             String::from_utf8_lossy(&received)
         );
-        // The read timeout is the trickle's pace.
-        trickle
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        if received.is_empty() && next_drip <= last_drip && sent.elapsed() >= next_drip {
+            trickle
+                .write_all(b" ")
+                .unwrap_or_else(|e| panic!("drip at {:?}: {e}", sent.elapsed()));
+            dripped += 1;
+            next_drip += DRIP_EVERY;
+        }
         match trickle.read(&mut buffer) {
             Ok(0) => break sent.elapsed(),
             Ok(n) => received.extend_from_slice(&buffer[..n]),
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                // Nothing yet: one more byte. After the answer the server may
-                // have closed already, and a failed write is that, not ours.
-                if received.is_empty() && trickle.write_all(b" ").is_ok() {
-                    dripped += 1;
-                }
-            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
             Err(e) if e.kind() == ErrorKind::ConnectionReset => break sent.elapsed(),
             Err(e) => panic!(
                 "the trickling connection failed after {:?}: {e}",
@@ -2335,8 +2403,10 @@ fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
         "a trickling body was ended after {closed_at:?}, before the {BODY_DEADLINE:?} total \
          deadline ({dripped} bytes sent)"
     );
-    assert!(
-        dripped >= 10,
-        "only {dripped} bytes were trickled: the body was not kept moving"
+    // Every drip from 4 s to 52 s was sent: thirteen.
+    let expected = (last_drip.as_secs() / DRIP_EVERY.as_secs()) as usize;
+    assert_eq!(
+        dripped, expected,
+        "{dripped} bytes were trickled, not {expected}: the body was not kept moving"
     );
 }
