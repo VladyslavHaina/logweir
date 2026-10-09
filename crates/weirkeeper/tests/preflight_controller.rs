@@ -8821,3 +8821,39 @@ fn the_expected_rows_include_the_binding_row_when_a_grant_is_listed() {
         )
     );
 }
+
+/// **The console fixture's binding row is what `entry_of` writes for the
+/// runner's row.** `crates/logweir/tests/check_grant_binding.rs` holds the
+/// runner's message and facts to the same fixture with this fold spelled
+/// out; this row holds the fold itself, so neither side can drift alone.
+#[test]
+fn fx20c_the_console_fixture_is_the_status_entry_entry_of_writes() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ui/tests/fixtures/console/preflight-binding-mismatch.json");
+    let fixture: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture")).expect("json");
+    let want = fixture["item"]["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|c| c["id"] == "destination.credentialBound")
+        .expect("the binding row")
+        .clone();
+    let message = want["message"].as_str().expect("message");
+    let (runner_message, _) = message
+        .rsplit_once(" [archiveWrite=")
+        .expect("the fact is folded in");
+    let outcome = CheckOutcome::new(
+        CheckId::DestinationCredentialBound,
+        CheckState::NotReady,
+        Gating::Blocking,
+        Authority::CheckJob,
+        CheckCode::CredentialBindingMismatch,
+    )
+    .with_message(runner_message)
+    .with_fact("archiveWrite", "CredentialBindingMismatch");
+    let entry = serde_json::to_value(entry_of(&outcome)).expect("json");
+    for key in ["id", "state", "gating", "authority", "code", "message"] {
+        assert_eq!(entry[key], want[key], "{key}");
+    }
+}
