@@ -5163,14 +5163,20 @@ spec:
 ```
 
 Each run reads the selected groups just before its engine starts and records
-them in its signed receipt's `consumer_positions` (format 1.5.0): **exactly one
-outcome per group** — `captured` (one position per partition of every backed-up
-topic, each judged against the archive), `excluded` with a reason
-(`GroupTypeNotCaptured` for a share or streams group, or another protocol;
-`GroupNotFound` for an absent id), or `failed` with a reason (for example
-`NotVisibleToPrincipal`, a group the run's principal may not describe). A
-partition with no committed offset is `noCommittedPosition`, **never offset 0**,
-and nothing is ever dropped
+them as signed evidence (format 1.5.0): **exactly one outcome per group** —
+`captured`, `excluded` with a reason (`GroupTypeNotCaptured` for a share or
+streams group, or another protocol; `GroupNotFound` for an absent id), or
+`failed` with a reason (for example `NotVisibleToPrincipal`, a group the run's
+principal may not describe, or `GroupVanishedDuringCapture`, one deleted while
+it was read). The receipt's `consumer_positions` carries each group's outcome
+and, for a captured group, its position COUNTS; every position — every
+partition of every backed-up topic accounted for, each judged against the
+archive — is in the positions document beside the receipt
+(`<run_id>.consumer-positions.json`), which the receipt binds by digest. **The
+receipt's size depends on the number of groups, never on partitions**, so the
+catalog reads a point that selects 100 groups over many partitions as
+`Available`. A partition with no committed offset is counted, **never offset
+0**, and nothing is ever dropped
 ([the field reference](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-150)).
 
 - **What it costs the source.** Read-only: the group listings, one
@@ -5186,21 +5192,35 @@ and nothing is ever dropped
 - **Not atomic with the records.** Positions are read while applications run;
   an `active` group may commit again a moment later, and the engine reads the
   records after that. The receipt says when the positions were observed and
-  which groups were active; nothing claims one consistent cut. A topic
-  recreated or truncated during the run fails the groups holding a position on
-  it (`GenerationChangedDuringCapture`).
+  which groups were active; nothing claims one consistent cut. A topic whose
+  marks REGRESSED during the run — its log start or high watermark read after
+  the engine below the one read before — fails the groups holding a position
+  on it (`GenerationChangedDuringCapture`). That is the only detection there
+  is until topic identity (PROD-01.4a) lands: a topic recreated and refilled
+  past its old marks before the second read is not seen, and a second read
+  that failed decides nothing.
 - **Kafka 3.7.x.** A broker below ListGroups v5 types no group, so on 3.7.x
   every selected group is `excluded: GroupTypeNotCaptured`: the run says so
   rather than guessing. Use 3.9 or 4.x to capture positions.
 - **Where it shows.** Both receipt readers print one `consumer_positions` line
-  per group; the catalog point record carries the summary bound by the block's
-  digest; the catalog's view and the product API (`PointView.consumerPositions`)
-  show the snapshot's freshness (`observedBeforeRecoveryPointMs`) and, per
-  group, its outcome and how many positions relate to archived data.
+  per group, and — given the positions document (`--consumer-positions`) —
+  verify it against the receipt and print each position; the catalog point
+  record carries the summary bound by the block's digest; the catalog's view
+  and the product API (`PointView.consumerPositions`) show the snapshot's
+  freshness (`observedBeforeRecoveryPointMs`) and, per group, its outcome and
+  its COUNTS — how many positions relate to archived data, and how many were
+  never committed, beyond the end, failed or not observed. The per-position
+  relation is the document's.
 - **Refusals.** The CRD schema bounds the list (100 ids of 1 to 255
-  characters). A repeated, blank or control-character id is refused before any
-  Job (`ExecutionSpecInvalid`, naming `spec.consumerGroups`), and a schedule
-  carrying one is `Ready=False`.
+  characters). A repeated, blank or control-character id, one over 255 bytes,
+  or more than 100, is refused before any Job by name (`ExecutionSpecInvalid`:
+  `ConsumerGroupSelectedTwice`, `ConsumerGroupIdInvalid`,
+  `ConsumerGroupSelectionTooLarge`), and a schedule carrying one is
+  `Ready=False`.
+- **Set only through the CRDs today.** The product API's create bodies refuse
+  `consumerGroups` (an unknown field, never silently dropped) and the console
+  neither sets nor shows a selection; a `kubectl`-set selection survives a
+  console edit.
 - **Applying positions is not this field.** Nothing here resets a group: a
   reviewed cutover (PROD-04.2) applies translated positions. With the source
   gone, read them from the evidence store as

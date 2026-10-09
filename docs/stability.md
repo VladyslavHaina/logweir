@@ -398,41 +398,53 @@ documents — the backup receipt's `source.auth.mode` and the scorecard's
 ### Receipt and catalog-point format 1.5.0: `consumer_positions` (PROD-04.1)
 
 PROD-04.1 adds one optional block to the backup receipt, `consumer_positions`,
-and its digest-bound summary to the catalog point record, and moves both to
-**1.5.0** (`schemas/logweir-backup-receipt-1.5.0.json` and
+a new document beside the receipt that the block binds by digest — the
+positions document, format 1.0.0
+(`schemas/logweir-consumer-positions-1.0.0.json`) — and the block's
+digest-bound summary to the catalog point record, and moves the receipt and the
+record to **1.5.0** (`schemas/logweir-backup-receipt-1.5.0.json` and
 `schemas/logweir-catalog-point-1.5.0.json`, PROD-01.3's 1.4.0 files frozen
 beside them). It records, for every consumer group a backup selected, exactly
 one outcome — captured, excluded with a reason, or failed — and for a captured
-group one position per partition of every named topic, each judged against
-the partition's marks and the archive's offsets
+group its position counts in the receipt and every position in the document,
+each judged against the partition's marks and the archive's offsets
 ([the receipt format](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-150)).
 
 - **Absent means no group was selected**, never "no positions": every receipt
   before 1.5.0, and every later one whose backup selects none, which is
-  written as the 1.3.0 or 1.4.0 document it was, byte for byte. Within the
-  block, a partition with no committed offset is `noCommittedPosition`, never
+  written as the 1.3.0 or 1.4.0 document it was, byte for byte, with no
+  positions document. A partition with no committed offset is counted, never
   offset 0, and a group that is not captured carries no position at all.
-- **Thirteen arms, 22 to 34, are MINOR under OD-7 (a).** Each reads only the
-  new block (and `source.topics`, as arms 7 and 14 do), so no document without
-  it changes verdict; the corpus (`e2e/fixtures/invariants/`, a case per arm,
-  absence-read-as-0 among them) and the parity gate re-prove it on every
-  `just lint`; `verify_scorecard.py` is 1.24.0.
+- **The receipt stays bounded.** Its block depends on the selection only —
+  at most 100 groups, under 80 KiB at the worst ids (a proved bound) — never
+  on partitions, so the catalog's 256 KiB read and the evidence fetch's 1 MiB
+  hold; the positions grow in their own document, which neither reads.
+- **Six receipt arms, 22 to 27, and fourteen document arms, CP-1 to CP-14, are
+  MINOR under OD-7 (a).** The receipt's arms read only the new block, so no
+  document without it changes verdict; the document's run only when a reader
+  is given it. The corpus (`e2e/fixtures/invariants/`, a case per arm in
+  `backup-receipt-index.json` and `consumer-positions-index.json`) and the
+  parity gate re-prove both on every `just lint`; `verify_scorecard.py` is
+  1.24.0.
 - **The plan grammar gains `source.consumer_groups`**, and the CLI
   `--consumer-group`, both omitted when empty; a runner built before PROD-04.1
   ignores the plan key and refuses the flag. The `Backup` and `BackupSchedule`
   CRDs gain `spec.consumerGroups`; the frozen execution inputs carry it only
   when present, and the run-policy digest only when non-empty, so every
-  existing plan keeps its bytes and its digest.
+  existing plan keeps its bytes and its digest. More than 100 ids, a blank,
+  repeated or control-character id, or one over 255 bytes is refused by name.
 - **Positions are not atomic with the records.** The receipt says when they
   were observed and which groups were active, and never claims a consistent
-  cut; a topic that changed during the capture fails the groups holding a
-  position on it.
+  cut; a topic whose marks regressed during the capture fails the groups
+  holding a position on it.
 - **Kafka 3.7.x types no group**, so every selected group is
   `GroupTypeNotCaptured` there (PROD-04.0 §14.1): a stated limit, not a guess.
-- **Readers built before PROD-04.1** accept every 1.5.0 document and say
-  nothing about the positions. **Rollback** is safe for documents: the 1.5.0
-  receipts and records already written stay valid. An older controller refuses
-  a frozen run that carries `consumerGroups` (`PlanConfigMapConflict`).
+- **Readers built before PROD-04.1** (`verify_scorecard.py` 1.23.0 and earlier)
+  accept every 1.5.0 document and say nothing about the positions; reading
+  positions needs 1.24.0 or a `logweir` from PROD-04.1 on. **Rollback** is safe
+  for documents: the 1.5.0 receipts, their positions documents and the records
+  already written stay valid. An older controller refuses a frozen run that
+  carries `consumerGroups` (`PlanConfigMapConflict`).
 
 ### Scorecard format 1.6.0: `sample.unsampled_topics`, and a stricter sampled check (FX-23)
 

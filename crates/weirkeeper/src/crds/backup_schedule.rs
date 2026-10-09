@@ -477,18 +477,22 @@ pub struct BackupScheduleSpec {
     /// Consumer groups whose committed positions each run
     /// records as evidence in its signed receipt (`consumer_positions`), by
     /// exact id — never a pattern, never "all groups". Each selected group gets
-    /// exactly one outcome: captured (one position per partition of every
-    /// backed-up topic, each judged against the archive), excluded with a
-    /// reason (a share or streams group, an absent id), or failed with a
-    /// reason (for example a group this run's principal may not describe).
-    /// Absence is never offset 0. Positions are read just before the engine
-    /// while applications may be running, so an active group's positions are
-    /// not atomic with the records.
+    /// exactly one outcome: captured (its position counts in the receipt, and
+    /// every partition of every backed-up topic accounted for in the positions
+    /// document the receipt binds by digest, each judged against the archive),
+    /// excluded with a reason (a share or streams group, an absent id), or
+    /// failed with a reason (for example a group this run's principal may not
+    /// describe). Absence is never offset 0. The receipt's size depends on the
+    /// number of groups, never on partitions. Positions are read just before
+    /// the engine while applications may be running, so an active group's
+    /// positions are not atomic with the records.
     ///
     /// Optional and additive: ABSENT (or empty) selects no group and every run
     /// is the run it was — its plan, its digest and its receipt unchanged. A
-    /// blank, repeated or control-character id, or more than 100, is refused
-    /// before any Job (`ExecutionSpecInvalid`). An older controller ignores
+    /// blank, repeated or control-character id, one over 255 bytes, or more
+    /// than 100 ids, is refused by name before any Job (`ExecutionSpecInvalid`:
+    /// `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`,
+    /// `ConsumerGroupSelectionTooLarge`). An older controller ignores
     /// the field and records no positions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 100), inner(length(min = 1, max = 255)))]

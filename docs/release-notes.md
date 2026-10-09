@@ -1211,26 +1211,38 @@ reading or sending open again; nothing is stored, so nothing needs converting.
 
 **Added.** A backup now records, for each consumer group it is asked about,
 where that group would resume — read through Logweir's own client just before
-the engine starts, and signed in the receipt's new `consumer_positions` block
-(receipt and catalog point format **1.5.0**). Name the groups in the plan
-(`source.consumer_groups`), on the command line (`logweir backup run
---consumer-group <id>`, repeatable) or on a `Backup`/`BackupSchedule`
-(`spec.consumerGroups`; at most 100 exact ids). Every selected group gets
-exactly one outcome: `captured` — its type and state, whether it was active,
-and one position per partition of every backed-up topic, each judged against
-the partition's marks and the archive (`withinArchive`, `atArchiveEnd`,
+the engine starts, and signed: the receipt's new `consumer_positions` block
+(receipt and catalog point format **1.5.0**) carries each group's outcome and
+position counts, and binds by digest a positions document put beside the
+receipt (`<run_id>.consumer-positions.json`, format 1.0.0) that carries every
+position. Name the groups in the plan (`source.consumer_groups`), on the
+command line (`logweir backup run --consumer-group <id>`, repeatable) or on a
+`Backup`/`BackupSchedule` (`spec.consumerGroups`): **at most 100 exact ids**,
+each at most 255 bytes, anything else refused by name before anything runs
+(`ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`,
+`ConsumerGroupSelectedTwice`). Every selected group gets exactly one outcome:
+`captured` — its type and state, whether it was active, and every partition of
+every backed-up topic accounted for, each committed position judged against the
+partition's marks and the archive (`withinArchive`, `atArchiveEnd`,
 `beforeArchive`, `beyondArchive`, `beforeLogStart`, `noArchivedData`;
 `PositionBeyondEnd` above the partition's end) — `excluded` with a reason
 (`GroupTypeNotCaptured` for a share or streams group; `GroupNotFound`), or
 `failed` with a reason (for example `NotVisibleToPrincipal` for a group the
 backup principal may not describe, `PositionsUnstable` for a pending
-transactional offset commit). A partition with no committed offset is
-`noCommittedPosition`, never offset 0. Both readers check thirteen new arms (22
-to 34) and print one `consumer_positions` line per group;
-`verify_scorecard.py` is 1.24.0. The catalog point binds the block by its
-digest, and the catalog's view and the product API (`PointView.consumerPositions`)
-show the snapshot's freshness and how many of each group's positions relate to
-archived data
+transactional offset commit, `GroupVanishedDuringCapture` for a group deleted
+while it was read). A partition with no committed offset is counted, never
+offset 0. **The receipt's size depends on the selection, never on
+partitions** — 9 KB for 10 groups over 20 topics of 12 partitions and 44 KB for
+100 groups over 10 of 11, where inline positions would have been 482 KB and
+1.9 MB, over the catalog's 256 KiB read — so the catalog reads such a point
+`Available` and the console offers it. Both readers check six new receipt arms
+(22 to 27) and, given the positions document (`--consumer-positions <file>`),
+fourteen more over it (CP-1 to CP-14), refusing a document changed after
+signing; they print one `consumer_positions` line per group and, with the
+document, one per position. `verify_scorecard.py` is 1.24.0. The catalog point
+binds the block by its digest, and the catalog's view and the product API
+(`PointView.consumerPositions`) show the snapshot's freshness and, per group,
+its counts
 ([backup-receipt.md](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-150),
 [kubernetes.md](kubernetes.md#consumer-position-evidence-specconsumergroups),
 [stability.md](stability.md#receipt-and-catalog-point-format-150-consumer_positions-prod-041)).
@@ -1238,36 +1250,45 @@ archived data
 What it does not do: positions read while applications run are **not atomic**
 with the records the engine reads (the receipt says when and which groups were
 active); on Kafka 3.7.x, which types no group, every selected group is
-`excluded: GroupTypeNotCaptured`; nothing resets a group — applying positions
-is PROD-04.2's reviewed cutover. With the source gone, the positions are read
-from the evidence store ([the recovery path](formats/backup-receipt.md#recovering-positions-with-the-source-offline)).
-An engine consumer-group snapshot beside a foreign archive is only an import
-source, every group typed `unknown`.
+`excluded: GroupTypeNotCaptured`; a topic recreated and refilled past its old
+marks during the run is not detected until topic identity lands (PROD-01.4a);
+the product API and the console neither set nor show `spec.consumerGroups`
+(set it with `kubectl`); nothing resets a group — applying positions is
+PROD-04.2's reviewed cutover. With the source gone, the positions are read from
+the evidence store with a reader from 1.24.0 on
+([the recovery path](formats/backup-receipt.md#recovering-positions-with-the-source-offline)):
+an older reader says `VALID` over a 1.5.0 receipt and checks nothing in the
+block. An engine consumer-group snapshot beside a foreign archive is only an
+import source, every group typed `unknown`.
 
 **Do:** nothing for existing plans and objects: a backup that selects no group
-writes the receipt it wrote before, and its plan and run-policy digest are
-unchanged. Apply the CRDs before setting `spec.consumerGroups`, and give the
-backup principal Describe on each selected group (and on the cluster, for a
-complete listing). **Scope:** the core rules and the arms
-(`crates/logweir-core/src/consumer_positions.rs`,
+writes the receipt it wrote before, and no positions document, and its plan and
+run-policy digest are unchanged. Apply the CRDs before setting
+`spec.consumerGroups`, and give the backup principal Describe on each selected
+group (and on the cluster, for a complete listing). **Scope:** the core rules,
+the bound and the arms (`crates/logweir-core/src/consumer_positions.rs`,
 `crates/logweir-core/tests/backup_receipt.rs`, one row per arm), the builder
 (`crates/logweir/src/backup/consumer_positions.rs`), the seam
-(`crates/logweir/tests/consumer_positions_seam.rs`), the corpus and the parity
-gate over both readers, the catalog, view and API rows
-(`crates/logweir/tests/catalog.rs`, `crates/logweir/tests/check_cli.rs`,
-`crates/weirkeeper/tests/catalog_controller.rs`,
-`crates/logweir-api/tests/d3_reads.rs`), the controller rows
+(`crates/logweir/tests/consumer_positions_seam.rs`), the corpus
+(`scripts/fixtures/consumer_positions_corpus.py`) and the parity gates over
+both readers, the review's two sizes through the runner's own builder and the
+catalog (`crates/logweir/tests/check_cli.rs`), the catalog, view and API rows
+(`crates/logweir/tests/catalog.rs`, `crates/weirkeeper/tests/catalog_controller.rs`,
+`crates/logweir-api/tests/d3_reads.rs`), the console rows
+(`ui/tests/restore-catalog.spec.js`), the controller rows
 (`crates/weirkeeper/tests/backup_controller.rs`,
 `crates/weirkeeper/tests/schedule_controller.rs`), and live on the compose stack
 through the shipped binary, `e2e/tests/position_evidence.rs`: one outcome per
 group of each type on 4.3.1 and the 3.7.1 rule on the default line, a group
 hidden from the backup principal, a rebalance during the capture, a position
 beyond the end, expired records and deleted offsets, a partition added during
-the capture, and the capture read after the source topic and group are gone.
+the capture, the capture read after the source topic and group are gone, and
+the review's two sizes, each verified by both readers with its positions
+document and refused with one byte of it changed.
 **Rollback:** an older runner ignores `source.consumer_groups`, refuses
-`--consumer-group`, and records no positions; the 1.5.0 receipts and records
-already written stay valid under every major-1 reader. An older controller
-refuses a run whose frozen inputs carry `consumerGroups`
+`--consumer-group`, and records no positions; the 1.5.0 receipts, positions
+documents and records already written stay valid under every major-1 reader. An
+older controller refuses a run whose frozen inputs carry `consumerGroups`
 (`PlanConfigMapConflict`): let those runs finish, or remove
 `spec.consumerGroups` from the schedule, first.
 
