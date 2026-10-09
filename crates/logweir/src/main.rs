@@ -220,6 +220,7 @@ fn main() -> std::process::ExitCode {
             ticket,
             out,
             subject_kind,
+            approval_subject,
             standing,
             schedule_namespace,
             schedule_name,
@@ -259,6 +260,7 @@ fn main() -> std::process::ExitCode {
                 out,
                 // The parser owns the vocabulary; `approve` owns the bytes.
                 subject_kind: subject_kind.as_str().to_string(),
+                approval_subject: approval_subject.map(|s| s.wire().to_string()),
                 standing,
             })
         }

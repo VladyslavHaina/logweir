@@ -279,6 +279,7 @@ fn drill_run_capturing_stdout(spec_text: &str, env: &[(&str, &str)]) -> (Option<
         plan_hash: logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
         approved_at: chrono::Utc::now(),
         subject_kind: logweir_core::spec::SUBJECT_KIND_RESTORE.into(),
+        approval_subject: None,
     };
     let approval_bytes = serde_json::to_vec(&approval_doc).unwrap();
     std::fs::write(&approval, &approval_bytes).unwrap();

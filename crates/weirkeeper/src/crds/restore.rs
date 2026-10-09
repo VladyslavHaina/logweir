@@ -70,8 +70,24 @@ pub const COMPLETE_MAX_RECORDS_RULE: &str =
 pub const COMPLETE_MAX_RECORDS_MESSAGE: &str =
     "completeMaxRecords bounds a complete verification and is set only with coverage: complete";
 
+/// **PROD-15.1.** The CEL rule that keeps the original-name declaration
+/// beside the only target it describes: `topicNaming.originalName: true` only
+/// in `newTopic` mode and only with the empty prefix — the identity mapping
+/// the plan's `topic_naming: {prefix: "", original_name: {…}}` is.
+///
+/// ONE DIRECTION ONLY. An empty prefix WITHOUT the declaration is not refused
+/// here: such an object could have been stored before this rule existed, and
+/// the runner refuses its plan as it always has (a topic mapped onto itself).
+/// The controller holds the declaration to the plan in both directions
+/// (`controllers::restore::original_name_agrees`) before anything runs.
+pub const ORIGINAL_NAME_RULE: &str = "!has(self.target.topicNaming.originalName) || !self.target.topicNaming.originalName || (self.target.mode == 'newTopic' && self.target.topicNaming.prefix == '')";
+
+/// The message [`ORIGINAL_NAME_RULE`] travels with.
+pub const ORIGINAL_NAME_MESSAGE: &str =
+    "target.topicNaming.originalName is set only with target.mode newTopic and target.topicNaming.prefix \"\": a restore under the original topic names maps every topic onto its own name";
+
 /// The rules on `Restore`'s `.spec`.
-pub const SPEC_RULES: [SpecRule; 5] = [
+pub const SPEC_RULES: [SpecRule; 6] = [
     SpecRule::new(super::SPEC_IMMUTABLE_RULE, super::SPEC_IMMUTABLE_MESSAGE),
     SpecRule::new(DESTINATIONS_TOGETHER_RULE, DESTINATIONS_TOGETHER_MESSAGE),
     SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
@@ -80,6 +96,7 @@ pub const SPEC_RULES: [SpecRule; 5] = [
         EXACTLY_ONE_AUTHORIZATION_MESSAGE,
     ),
     SpecRule::new(COMPLETE_MAX_RECORDS_RULE, COMPLETE_MAX_RECORDS_MESSAGE),
+    SpecRule::new(ORIGINAL_NAME_RULE, ORIGINAL_NAME_MESSAGE),
 ];
 
 /// How much of a restore phase 7 verifies, as a `Restore` or
@@ -157,6 +174,30 @@ pub struct TopicNaming {
     /// result is what `status.newTopics` records, and — for `mode: scratch` —
     /// what phase 9 tears down.
     pub prefix: String,
+    /// **PROD-15.1: restore under the ORIGINAL topic names**, into topics that
+    /// do not exist (OD-2): `true` declares what the plan's
+    /// `target.topic_naming.original_name` block says, beside `prefix: ""` in
+    /// `newTopic` mode ([`ORIGINAL_NAME_RULE`]). It is what a list, the API and
+    /// the console read to show the restore — and its separate approval
+    /// subject, `originalName` — distinctly, without parsing the plan; the
+    /// controller refuses an object whose declaration and plan disagree
+    /// (`ExecutionSpecInvalid`) and an approval whose signed subject is not
+    /// the plan's (`ApprovalSubjectMismatch`), before any Job exists.
+    ///
+    /// ABSENT MEANS FALSE and is not serialised, so every object written
+    /// before this field is byte-identical. An older controller ignores the
+    /// key; its runner refuses the plan (a topic mapped onto itself), so
+    /// nothing runs under a reading that drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<bool>,
+}
+
+impl TopicNaming {
+    /// Whether this object declares a restore under the original names.
+    #[must_use]
+    pub fn is_original_name(&self) -> bool {
+        self.original_name == Some(true)
+    }
 }
 
 /// Where the restore writes, and in which mode.

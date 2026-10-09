@@ -481,9 +481,33 @@ pub fn failure_reason_for_exit(exit_code: i32, value: &str) -> Option<&'static s
 
 /// Every selected topic must have a mapping entry whose target DIFFERS from
 /// its source, or the restore would write over the topic it came from.
+///
+/// The ordinary rule — [`check_topic_mapping`] with no original-name opt-in.
 pub fn check_topic_mapping_coverage(
     topics: &[String],
     mapping: &BTreeMap<String, String>,
+) -> Result<(), GuardRefusal> {
+    check_topic_mapping(topics, mapping, false)
+}
+
+/// Every selected topic must have a mapping entry, and:
+///
+/// * `original_name: false` (every restore but one) — the target DIFFERS from
+///   its source, or the restore would write over the topic it came from;
+/// * `original_name: true` (PROD-15.1, a plan that passed
+///   [`crate::original_name::refuse_shape`]) — the target IS its source, for
+///   EVERY topic. An original-name restore maps nothing partway: a mapping
+///   that renames one topic and keeps another's name is two plans, and the
+///   conditions the runner proves next (absence, the cluster, the owners) are
+///   proved for the original names.
+///
+/// The identity mapping is never allowed by this function alone: the caller
+/// passes `true` only for a plan whose shape opted in, and the absence and
+/// cluster conditions are proved after it, before anything is written.
+pub fn check_topic_mapping(
+    topics: &[String],
+    mapping: &BTreeMap<String, String>,
+    original_name: bool,
 ) -> Result<(), GuardRefusal> {
     for t in topics {
         match mapping.get(t) {
@@ -492,9 +516,17 @@ pub fn check_topic_mapping_coverage(
                     "selected topic `{t}` has no topic_mapping entry"
                 )))
             }
-            Some(dst) if dst == t => {
+            Some(dst) if dst == t && !original_name => {
                 return Err(GuardRefusal(format!(
-                    "topic_mapping maps `{t}` onto itself; the target must differ from the source"
+                    "topic_mapping maps `{t}` onto itself; the target must differ from the source \
+                     (a restore under the original topic names states \
+                     target.topic_naming.original_name in newTopic mode, PROD-15.1)"
+                )))
+            }
+            Some(dst) if dst != t && original_name => {
+                return Err(GuardRefusal(format!(
+                    "topic_mapping maps `{t}` to `{dst}` in an original-name restore; every \
+                     topic of an original-name restore keeps its own name"
                 )))
             }
             Some(_) => {}

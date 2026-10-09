@@ -163,6 +163,27 @@ pub struct VerifyReport {
     /// What the document proves about records before a stated start (review
     /// N1), from its `integrity.result` and `integrity.verification`.
     pub before_the_start: logweir_core::scorecard::BeforeTheStart,
+    /// `target.original_name` (scorecard 1.8.0, PROD-15.1), carried as read:
+    /// `None` is a restore that did not write under the original names.
+    pub original_name: Option<logweir_core::scorecard::OriginalNameInfo>,
+}
+
+/// The two `original name:` lines both readers print for a restore under the
+/// ORIGINAL topic names (PROD-15.1): the writer's sentences
+/// (`OriginalNameInfo::lines`) — the approval subject and the document it was
+/// verified in, the cluster condition that admitted it, and where the run
+/// looked for a declarative owner and what it found. Nothing for a document
+/// without `target.original_name`. `docs/verify_scorecard.py::
+/// _original_name_lines` prints the same lines, and
+/// `scripts/check-verifier-parity.sh` compares every line starting
+/// `original name:` between the two readers.
+#[must_use]
+pub fn original_name_lines(
+    block: Option<&logweir_core::scorecard::OriginalNameInfo>,
+) -> Vec<String> {
+    block
+        .map(logweir_core::scorecard::OriginalNameInfo::lines)
+        .unwrap_or_default()
 }
 
 /// The replay-selection line both readers print for a restore from a stated
@@ -855,6 +876,7 @@ pub fn verify_scorecard(
             sc.integrity.verification.as_ref(),
         ),
         format_version: sc.format_version.clone(),
+        original_name: sc.target.original_name.clone(),
     }))
 }
 
@@ -922,6 +944,11 @@ fn print_report(r: &VerifyReport) {
     // selection.
     for line in selection_lines(r.selection.as_ref(), r.before_the_start) {
         println!("coverage:  {line}");
+    }
+    // PROD-15.1: nor an ordinary restore when it wrote under the original
+    // topic names — and what admitted that.
+    for line in original_name_lines(r.original_name.as_ref()) {
+        println!("target:    {line}");
     }
 }
 

@@ -125,14 +125,19 @@ golden:
 # (`the_frozen_1_6_0_scorecard_schema_does_not_describe_the_selection`); this
 # build writes 1.7.0 only for a restore that states a replay selection.
 #
+# PROD-15.1 moved the scorecard to 1.8.0 (`target.original_name`), and
+# PROD-11.1's `-1.7.0.json` is frozen beside the new file
+# (`the_frozen_1_7_0_scorecard_schema_does_not_describe_the_original_name`);
+# this build writes 1.8.0 only for a restore under the original topic names.
+#
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
-# (`scorecard::FORMAT_VERSION_WITH_SELECTION`,
+# (`scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME`,
 # `backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES`,
 # `catalog::record::FORMAT_VERSION_WITH_AUTH_MODES`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
-scorecard_schema_version := "1.7.0"
+scorecard_schema_version := "1.8.0"
 receipt_schema_version := "1.4.0"
 catalog_schema_version := "1.4.0"
 

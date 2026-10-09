@@ -1246,8 +1246,19 @@ pub enum RestoreCoverage {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TopicNamingRequest {
-    /// Prepended to each source topic name.
+    /// Prepended to each source topic name. Empty exactly for a restore under
+    /// the original topic names (`originalName: true`).
     pub prefix: String,
+    /// **PROD-15.1.** `true`: restore under the ORIGINAL topic names, into
+    /// topics that do not exist — `newTopic` mode and `prefix: ""` only. It is
+    /// stored as `Restore.spec.target.topicNaming.originalName`, the plan must
+    /// say the same (`target.topic_naming.original_name`, held by the
+    /// controller), and the restore needs its own approval subject,
+    /// `originalName`, which the console signs into the authorization document
+    /// only for such a Restore. Absent means `false`, is stored as absent, and
+    /// keeps the idempotency hash unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<bool>,
 }
 
 /// Where a restore writes.
@@ -1358,8 +1369,27 @@ pub struct RestoreTargetView {
     pub cluster_ref: NameRef,
     /// `scratch` or `newTopic`.
     pub mode: RestoreMode,
-    /// The topic prefix.
+    /// The topic prefix. Empty for a restore under the original names.
     pub topic_prefix: String,
+    /// **PROD-15.1.** Whether this restore writes under the ORIGINAL topic
+    /// names (`spec.target.topicNaming.originalName`), into absent topics.
+    pub original_name: bool,
+}
+
+/// **PROD-15.1.** The approval subject a restore needs, or an approval
+/// document carries: `ordinary`, or `originalName` for a restore under the
+/// original topic names, which only an approval signed for that subject
+/// authorises. `unknown` is an approval document whose subject this service
+/// could not read (the controller refuses it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalSubjectView {
+    /// Every restore that is not an original-name restore.
+    Ordinary,
+    /// A restore under the original topic names.
+    OriginalName,
+    /// An approval document whose subject could not be read.
+    Unknown,
 }
 
 /// A restore run.
@@ -1403,6 +1433,9 @@ pub struct Restore {
     pub point_in_time: DateTime<Utc>,
     /// Where it writes.
     pub target: RestoreTargetView,
+    /// **PROD-15.1.** The approval subject this restore needs: `originalName`
+    /// for a restore under the original topic names, else `ordinary`.
+    pub approval_subject: ApprovalSubjectView,
     /// The Job deadline.
     pub deadline_seconds: i64,
     /// The topics this run created.
@@ -1514,6 +1547,10 @@ pub struct Approval {
     pub subject_ref: SubjectRefView,
     /// The plan hash the create form supplied.
     pub plan_hash: String,
+    /// **PROD-15.1.** The approval subject the SIGNED document carries:
+    /// `originalName` authorises only a restore under the original topic
+    /// names, `ordinary` only any other restore.
+    pub approval_subject: ApprovalSubjectView,
     /// The approval document's length in bytes.
     pub approval_bytes_length: usize,
     /// The sidecar's length in bytes.

@@ -412,6 +412,21 @@ pub enum RestoreAdmission {
         /// Which non-secret identity component failed.
         detail: String,
     },
+    /// **PROD-15.1.** The Approval binds this Restore, but its SIGNED
+    /// approval subject is not the one the plan needs: an ordinary approval
+    /// for a restore under the original topic names (which needs its own,
+    /// `originalName`), the reverse, or a subject this build does not know.
+    ///
+    /// TERMINAL, under the same reason as [`Self::ApprovalSubjectMismatch`]
+    /// (`ApprovalSubjectMismatch`) and with its own message: both specs are
+    /// sealed, so only a new Approval signed for the right subject — and a new
+    /// Restore — can proceed.
+    ApprovalSubjectNotThePlans {
+        /// The referenced Approval name.
+        approval: String,
+        /// Both subjects, from `logweir_core::original_name::check_approval_subject`.
+        detail: String,
+    },
     /// `sha256_prefixed(spec.planBytes)` is not the `plan_hash` inside
     /// `Approval.spec.approvalBytes`.
     ///
@@ -474,7 +489,9 @@ impl RestoreAdmission {
             Self::Ok => REASON_ADMITTED,
             Self::ApprovalNotVerified { .. } => REASON_APPROVAL_NOT_VERIFIED,
             Self::ApprovalNotReceived { .. } => TERMINAL_STATE_APPROVAL_NOT_RECEIVED,
-            Self::ApprovalSubjectMismatch { .. } => TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH,
+            Self::ApprovalSubjectMismatch { .. } | Self::ApprovalSubjectNotThePlans { .. } => {
+                TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH
+            }
             Self::PlanHashMismatch { .. } => TERMINAL_STATE_PLAN_HASH_MISMATCH,
             Self::ClusterNotReachable { .. } => TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
             Self::StandingAuthorizationRefused { .. } => {
@@ -509,6 +526,7 @@ impl RestoreAdmission {
             Self::Ok | Self::ApprovalNotVerified { .. } => false,
             Self::ApprovalNotReceived { .. }
             | Self::ApprovalSubjectMismatch { .. }
+            | Self::ApprovalSubjectNotThePlans { .. }
             | Self::PlanHashMismatch { .. }
             | Self::ClusterNotReachable { .. }
             | Self::StandingAuthorizationRefused { .. }
@@ -543,6 +561,12 @@ impl fmt::Display for RestoreAdmission {
                 "spec.approvalRef names Approval `{approval}`, but its verified subject binding \
                  does not identify this Restore ({detail}); create a new Approval for this exact \
                  Restore name, namespace, and UID"
+            ),
+            Self::ApprovalSubjectNotThePlans { approval, detail } => write!(
+                f,
+                "spec.approvalRef names Approval `{approval}`, whose signed approval subject is \
+                 not the one this Restore's plan needs ({detail}); no Job was created. spec is \
+                 immutable: create a new Restore and an Approval signed for its subject"
             ),
             Self::PlanHashMismatch {
                 recomputed,
@@ -612,6 +636,52 @@ pub fn approval_plan_hash(approval: &Approval) -> Option<String> {
         .get(field)?
         .as_str()
         .map(str::to_string)
+}
+
+/// **PROD-15.1.** The approval subject the SIGNED document carries — v1's
+/// `approval_subject`, v2's `approvalSubject`, the spelling decided by the
+/// sidecar's payload type exactly as [`approval_plan_hash`] decides its own.
+///
+/// An absent key is an ordinary approval (every document before PROD-15.1).
+///
+/// # Errors
+///
+/// A document that does not parse as JSON, or a subject this build does not
+/// know ([`ApprovalSubject::from_wire`]).
+pub fn approval_subject_of(
+    approval: &Approval,
+) -> Result<logweir_core::original_name::ApprovalSubject, String> {
+    let field = if is_authorization_v2(approval) {
+        "approvalSubject"
+    } else {
+        "approval_subject"
+    };
+    let doc = serde_json::from_str::<Value>(&approval.spec.approval_bytes)
+        .map_err(|e| format!("the approval document is not JSON: {e}"))?;
+    match doc.get(field) {
+        None | Some(Value::Null) => Ok(logweir_core::original_name::ApprovalSubject::Ordinary),
+        Some(Value::String(s)) => {
+            logweir_core::original_name::ApprovalSubject::from_wire(Some(s.as_str()))
+        }
+        Some(other) => Err(format!(
+            "the approval document's {field} is {other}, not a string"
+        )),
+    }
+}
+
+/// **PROD-15.1.** The approval subject a `Restore` needs: `originalName` when
+/// its plan carries `target.topic_naming.original_name`, else ordinary.
+///
+/// FROM THE PLAN, the bytes the approver signs and the runner executes —
+/// [`original_name_agrees`] has already held the object's declaration to it
+/// before admission reads this. A plan that does not parse is ordinary here;
+/// the runner refuses it.
+#[must_use]
+pub fn plan_approval_subject(restore: &Restore) -> logweir_core::original_name::ApprovalSubject {
+    serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes).map_or(
+        logweir_core::original_name::ApprovalSubject::Ordinary,
+        |plan| logweir_core::original_name::ApprovalSubject::of_plan(&plan),
+    )
 }
 
 /// Whether this Approval carries an authorization document v2 — its sidecar's
@@ -943,6 +1013,28 @@ pub fn admit_with_policy(
         };
     }
 
+    // ---- 4b. the approval SUBJECT, from inside the signed bytes -----------
+    //
+    // PROD-15.1: a restore under the original topic names needs its own
+    // approval subject, `originalName`, which an ordinary approval cannot
+    // satisfy — and an `originalName` approval authorises nothing else. AFTER
+    // the plan hash, so the subject compared is inside bytes that bind this
+    // plan; BEFORE the target, because it is a fact about the two sealed
+    // documents and never changes. The runner checks it again (Global
+    // Constraint 6's "checked twice").
+    let subject_refusal = approval_subject_of(approval).and_then(|approved| {
+        logweir_core::original_name::check_approval_subject(
+            plan_approval_subject(restore),
+            approved,
+        )
+    });
+    if let Err(detail) = subject_refusal {
+        return RestoreAdmission::ApprovalSubjectNotThePlans {
+            approval: referent,
+            detail,
+        };
+    }
+
     // ---- 5. the target must report reachable -----------------------------
     let cluster_name = restore.spec.target.cluster_ref.name.clone();
     let reachable = cluster
@@ -1234,6 +1326,20 @@ fn admit_standing(
             ))
         }
     };
+    // PROD-15.1: a standing scope signs a rehearsal, and a rehearsal is never
+    // a restore under the original topic names: that path needs its own
+    // per-run approval subject (OD-2), which no standing document carries.
+    if logweir_core::original_name::ApprovalSubject::of_plan(&plan)
+        == logweir_core::original_name::ApprovalSubject::OriginalName
+    {
+        return refused(
+            "the plan restores under the original topic names \
+             (target.topic_naming.original_name), which only a per-run approval signed for the \
+             approval subject originalName authorises; a standing rehearsal authorization never \
+             does"
+                .to_string(),
+        );
+    }
     let allowed = logweir_core::spec::AllowedClusters {
         allowed_cluster_ids: vec![doc.scope.target_cluster_id.clone()],
         source_cluster_id: None,
@@ -3160,6 +3266,8 @@ pub fn runner_job_spec_with_policy(
     let resources = runner_resources_of(restore)?;
     // PROD-08.1a, by the same one function as the early refusal.
     coverage_agrees(restore)?;
+    // PROD-15.1, likewise.
+    original_name_agrees(restore)?;
 
     // THE TARGET CONNECTION, FROM THE ONE RESOLVER THE PROBE AND THE BACKUP USE
     // (PLAT-07.1). The runner dials `planBytes`' target with THIS connection's
@@ -3522,6 +3630,66 @@ pub fn coverage_agrees(restore: &Restore) -> Result<(), RestoreError> {
             bound(plan_bound),
             declared.as_str(),
             bound(declared_bound)
+        )));
+    }
+    Ok(())
+}
+
+/// **PROD-15.1: the original-name DECLARATION holds to the plan**, in both
+/// directions — the same rule and the same reason as [`coverage_agrees`].
+///
+/// `spec.target.topicNaming.originalName` declares what the plan's
+/// `target.topic_naming.original_name` says, so a list, the API and the
+/// console can show a restore under the original topic names — and its
+/// separate approval subject — without parsing the plan. A declaration that
+/// disagrees with the bytes the approver signs is a `Restore` that would show
+/// one subject and need another: an approver shown "ordinary" could sign the
+/// one approval that authorises a write under the production names.
+///
+/// A plan that does not parse is left to the runner when nothing is declared,
+/// and refused when something is.
+///
+/// # Errors
+///
+/// [`RestoreError::Refused`] with
+/// [`crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID`], naming both.
+pub fn original_name_agrees(restore: &Restore) -> Result<(), RestoreError> {
+    let declared = restore.spec.target.topic_naming.is_original_name();
+    let refused = |detail: String| {
+        RestoreError::Refused(
+            crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
+            format!(
+                "{detail}. spec.target.topicNaming.originalName states what the plan's \
+                 target.topic_naming.original_name says, so the console and a list show the \
+                 approval subject the restore needs; no Job was created. spec is immutable and the \
+                 approval binds the plan bytes — create a new Restore whose declaration matches \
+                 its plan"
+            ),
+        )
+    };
+    let plan = match serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes)
+    {
+        Ok(plan) => plan,
+        Err(_) if !declared => return Ok(()),
+        Err(error) => {
+            return Err(refused(format!(
+                "spec.target.topicNaming.originalName is declared and spec.planBytes does not \
+                 parse as a restore plan, so the two cannot be compared: {error}"
+            )))
+        }
+    };
+    let in_plan = logweir_core::original_name::ApprovalSubject::of_plan(&plan)
+        == logweir_core::original_name::ApprovalSubject::OriginalName;
+    if in_plan != declared {
+        return Err(refused(format!(
+            "the plan {} under the original topic names and spec.target.topicNaming.originalName \
+             is {}",
+            if in_plan {
+                "restores"
+            } else {
+                "does not restore"
+            },
+            if declared { "true" } else { "absent or false" }
         )));
     }
     Ok(())
@@ -7083,6 +7251,9 @@ async fn reconcile_restore_inner(
         // PROD-08.1a: the declared coverage against the plan's own, for the
         // same reason and at the same point — a fact about the sealed spec.
         coverage_agrees(restore)?;
+        // PROD-15.1: the original-name declaration against the plan, for the
+        // same reason — before an approver is shown the wrong subject.
+        original_name_agrees(restore)?;
 
         // THE ADMISSION, BEFORE THE FIRST `POST`. Two `GET`s and a pure
         // function; Global Constraint 6's operator half is that an unapproved

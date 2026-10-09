@@ -50,6 +50,10 @@ pub mod engine;
 pub mod execution_contract;
 pub mod guard;
 pub mod ids;
+/// PROD-15.1: restore under the original topic name into an absent topic —
+/// the conditions contract (OD-2), the separate approval subject, and the
+/// probe's scratch name.
+pub mod original_name;
 pub mod outcome;
 /// PLAT-19.1 / decision D3 §4.3: the scope a standing rehearsal
 /// authorization signs over. Types only — the `plan ∈ scope` predicate is

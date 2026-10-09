@@ -38,7 +38,7 @@ fn justfile_schema_version(name: &str) -> String {
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
         justfile_schema_version("scorecard"),
-        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME
     );
     assert_eq!(
         justfile_schema_version("receipt"),
@@ -53,7 +53,7 @@ fn checked_in_schema_matches_the_types() {
     let generated = logweir_core::schema::scorecard_schema();
     let checked_in = current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME,
     );
     assert_eq!(
         generated.trim_end(),
@@ -61,7 +61,7 @@ fn checked_in_schema_matches_the_types() {
         "schemas/logweir-drill-scorecard-{}.json is stale. \
          Run `just schema` and review the diff — a field added is a MINOR bump, \
          a field removed or retyped is a MAJOR bump (Global Constraint 12).",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME
     );
 }
 
@@ -98,7 +98,7 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
         current["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-            logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+            logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME
         )
     );
     let parity = &current["definitions"]["TopicParity"];
@@ -363,7 +363,7 @@ fn the_scorecard_top_level_shape_is_unchanged() {
     .expect("the frozen 1.1.0 scorecard schema parses");
     let checked_in: serde_json::Value = serde_json::from_str(&current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME,
     ))
     .expect("the checked-in scorecard schema parses");
     let generated: serde_json::Value =
@@ -687,6 +687,50 @@ fn the_frozen_1_6_0_scorecard_schema_does_not_describe_the_selection() {
         "1.7.0"
     );
     assert_eq!(logweir_core::scorecard::SELECTION_SINCE_MINOR, 7);
+}
+
+/// **PROD-15.1: PROD-11.1's 1.7.0 scorecard schema is FROZEN** beside the
+/// 1.8.0 one, and still describes every scorecard of a restore that states a
+/// window start and is not an original-name restore, which this build writes
+/// as 1.7.0: it names itself 1.7.0, describes `source.selection`, and its
+/// `target` does not describe `original_name`. The current file does, as an
+/// optional block.
+#[test]
+fn the_frozen_1_7_0_scorecard_schema_does_not_describe_the_original_name() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.7.0.json"
+    ))
+    .expect("the frozen 1.7.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.7.0.json"
+    );
+    assert!(frozen["definitions"]["SourceInfo"]["properties"]["selection"].is_object());
+    assert!(
+        frozen["definitions"]["TargetInfo"]["properties"]
+            .get("original_name")
+            .is_none(),
+        "the frozen 1.7.0 schema must not describe the 1.8.0 block"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
+    assert!(current["definitions"]["TargetInfo"]["properties"]["original_name"].is_object());
+    assert!(current["definitions"]["OriginalNameInfo"].is_object());
+    assert!(
+        !current["definitions"]["TargetInfo"]["required"]
+            .as_array()
+            .expect("TargetInfo has required fields")
+            .iter()
+            .any(|r| r == "original_name"),
+        "target.original_name is OPTIONAL: absent on every document that is not an \
+         original-name restore"
+    );
+    assert_eq!(
+        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME,
+        "1.8.0"
+    );
+    assert_eq!(logweir_core::scorecard::ORIGINAL_NAME_SINCE_MINOR, 8);
 }
 
 /// **FX-7's 1.2.0 receipt schema is FROZEN** beside PROD-05.1's 1.3.0 one. It

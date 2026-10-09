@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.23.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.24.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -949,6 +949,14 @@ def test_the_version_line_names_the_current_invariant_set():
         assert (
             "source.selection only from 1.7.0, its start before its end, and a complete block "
             "over its window"
+        ) in r.stdout, r.stdout
+        # 1.24.0's addition (PROD-15.1): `target.original_name`'s ten arms.
+        assert (
+            "target.original_name only from 1.8.0, only in a newTopic document with the empty "
+            "prefix, its subject originalName, its approval mode and cluster condition from "
+            "their closed sets, targetIsNotSource only beside a known other source cluster id, "
+            "somewhere looked for an owner, each owner from a place looked in, and an owned name "
+            "only on the owner path"
         ) in r.stdout, r.stdout
 
 
@@ -2253,9 +2261,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.23.0 (PROD-11.1) adds the scorecard's three `source.selection` arms
     # (SEL-1 to SEL-3, format 1.7.0), its shape check, the `replay
     # selection:` line and the narrowed sampled-pass line. Map still five.
+    #
+    # 1.24.0 (PROD-15.1) adds the scorecard's ten `target.original_name` arms
+    # (ON-1 to ON-10, format 1.8.0), its shape check and the two `original
+    # name:` lines. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.23.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.24.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -3826,3 +3838,147 @@ def test_the_selection_lines_are_the_rust_readers():
         "sample coverage: a sampled pass at format 1.6.0 or later")
     rust_reader = (ROOT / "crates/logweir/src/verify.rs").read_text()
     assert '"sample coverage: a sampled pass over a replay selection from epoch-ms {} to \\' in rust_reader
+
+# ---- PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-10 ----
+
+
+def _original_name_block(**over):
+    block = {
+        "approval_subject": "originalName",
+        "approval_mode": "governed",
+        "cluster_condition": "targetIsNotSource",
+        "source_cluster_id": "SOURCE-CLUSTER",
+        "owner_detection": ["plan"],
+        "owners": [],
+        "owner_path": False,
+    }
+    block.update(over)
+    return block
+
+
+def _scorecard_1_8(block=None, version="1.8.0"):
+    doc = _scorecard_1_4(_sampled_block(), version)
+    doc["target"]["mode"] = "newTopic"
+    doc["target"].pop("marker_topic", None)
+    doc["target"]["topic_mapping_prefix"] = ""
+    doc["target"]["original_name"] = _original_name_block() if block is None else block
+    return doc
+
+
+def test_the_original_name_minor_is_the_rust_readers():
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const ORIGINAL_NAME_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares ORIGINAL_NAME_SINCE_MINOR"
+    assert mod.SCORECARD_ORIGINAL_NAME_SINCE_MINOR == int(m.group(1))
+    m = re.search(r'pub const FORMAT_VERSION_WITH_ORIGINAL_NAME: &str = "1\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_ORIGINAL_NAME_SINCE_MINOR
+    # The closed sets, against the Rust reader's own constants.
+    core = (ROOT / "crates/logweir-core/src/original_name.rs").read_text()
+    for name, values in [
+        ("CLUSTER_CONDITION_TARGET_IS_NOT_SOURCE", "targetIsNotSource"),
+        ("CLUSTER_CONDITION_AUTO_CREATE_DISABLED", "autoCreateDisabled"),
+        ("OWNER_FOUND_IN_PLAN", "plan"),
+        ("OWNER_FOUND_IN_KAFKA_TOPIC_RESOURCES", "kafkaTopicResources"),
+        ("OWNER_FOUND_IN_POINT_RECEIPT", "pointReceipt"),
+    ]:
+        assert f'pub const {name}: &str = "{values}";' in core, name
+    assert mod.ORIGINAL_NAME_CLUSTER_CONDITIONS == ("targetIsNotSource", "autoCreateDisabled")
+    assert mod.ORIGINAL_NAME_OWNER_DETECTION_PLACES == (
+        "plan", "kafkaTopicResources", "pointReceipt")
+    assert (
+        'pub const ORIGINAL_NAME_APPROVAL_MODES: [&str; 3] = ["v1Approval", "governed", '
+        '"ordinary"];' in rust
+    )
+    assert mod.ORIGINAL_NAME_APPROVAL_MODES == ("v1Approval", "governed", "ordinary")
+
+
+def test_an_original_name_block_is_accepted_as_the_writer_writes_it():
+    mod = _verifier_module()
+    assert mod.check_invariants(_scorecard_1_8()) == ""
+    owned = _original_name_block(
+        cluster_condition="autoCreateDisabled",
+        source_cluster_id=None,
+        owner_detection=["plan", "kafkaTopicResources"],
+        owners=[{"topic": "orders", "kind": "strimzi", "reference": "kafka/orders",
+                 "found_in": "kafkaTopicResources"}],
+        owner_path=True,
+    )
+    assert mod.check_invariants(_scorecard_1_8(owned)) == ""
+    # `null` is ABSENT, as `Option` reads it.
+    doc = _scorecard_1_8()
+    doc["target"]["original_name"] = None
+    assert mod.check_invariants(doc) == ""
+
+
+def test_each_original_name_arm_refuses_with_the_rust_readers_words():
+    mod = _verifier_module()
+    on1 = _scorecard_1_8(version="1.7.0")
+    assert mod.check_invariants(on1) == (
+        'target.original_name is present but format_version "1.7.0" predates it: the block '
+        "is defined from 1.8.0"
+    )
+    on2 = _scorecard_1_8()
+    on2["target"]["mode"] = "scratch"
+    on2["target"]["marker_topic"] = "logweir.scratch"
+    assert mod.check_invariants(on2).startswith(
+        "target.original_name is present but target.mode is scratch")
+    on2b = _scorecard_1_8()
+    del on2b["target"]["mode"]
+    on2b["target"]["marker_topic"] = "logweir.scratch"
+    assert mod.check_invariants(on2b).startswith(
+        "target.original_name is present but target.mode is scratch")
+    on3 = _scorecard_1_8()
+    on3["target"]["topic_mapping_prefix"] = "restore-"
+    assert mod.check_invariants(on3).startswith(
+        "target.original_name is present but target.topic_mapping_prefix is not empty")
+    assert mod.check_invariants(
+        _scorecard_1_8(_original_name_block(approval_subject="ordinary"))
+    ).startswith('target.original_name.approval_subject is not "originalName"')
+    assert mod.check_invariants(
+        _scorecard_1_8(_original_name_block(approval_mode="standing"))
+    ).startswith("target.original_name.approval_mode is not one of")
+    assert mod.check_invariants(
+        _scorecard_1_8(_original_name_block(cluster_condition="sameCluster"))
+    ).startswith("target.original_name.cluster_condition is not one of")
+    on7 = "target.original_name.cluster_condition is targetIsNotSource but source_cluster_id"
+    assert mod.check_invariants(
+        _scorecard_1_8(_original_name_block(source_cluster_id=None))).startswith(on7)
+    same = _scorecard_1_8()
+    same["target"]["original_name"]["source_cluster_id"] = same["target"]["cluster_id"]
+    assert mod.check_invariants(same).startswith(on7)
+    for places in ([], ["plan", "plan"], ["kubernetes"]):
+        assert mod.check_invariants(
+            _scorecard_1_8(_original_name_block(owner_detection=places))
+        ).startswith("target.original_name.owner_detection is empty, repeats a place")
+    owner = {"topic": "orders", "kind": "strimzi", "reference": "kafka/orders",
+             "found_in": "pointReceipt"}
+    assert mod.check_invariants(
+        _scorecard_1_8(_original_name_block(owners=[owner], owner_path=True))
+    ).startswith("target.original_name.owners names a place owner_detection does not list")
+    owner["found_in"] = "plan"
+    assert mod.check_invariants(
+        _scorecard_1_8(_original_name_block(owners=[owner]))
+    ).startswith("target.original_name.owners is not empty and owner_path is false")
+
+
+def test_a_malformed_original_name_block_is_refused_at_the_shape_layer():
+    mod = _verifier_module()
+    for bad in ("orders", {"approval_subject": "originalName"},
+                _original_name_block(owner_path="yes"),
+                _original_name_block(owners=[{"topic": "orders"}])):
+        assert mod.check_invariants(_scorecard_1_8(bad)).startswith(
+            "target.original_name is not an object of the shape the writer gives it"), bad
+
+
+def test_the_original_name_lines_are_the_rust_readers():
+    mod = _verifier_module()
+    assert mod._original_name_lines(None) == []
+    lines = mod._original_name_lines(_original_name_block())
+    assert lines == [
+        "original name: restored under the source's own topic names, into topics this run "
+        "created (a new generation of each name, not the original topic); approval subject "
+        "originalName, approved by governed; the target cluster is not the source cluster "
+        "(SOURCE-CLUSTER)",
+        "original name: declarative owners looked for in plan: none found",
+    ]

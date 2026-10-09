@@ -505,6 +505,16 @@ pub enum DrillCmd {
             conflicts_with = "standing"
         )]
         subject_kind: SubjectKindArg,
+        /// **PROD-15.1: the separate approval subject.** `original-name`
+        /// approves a restore under the ORIGINAL topic names, into topics that
+        /// do not exist — the one approval such a plan accepts, and one that
+        /// authorises nothing else. Written INSIDE the signed bytes as
+        /// `approval_subject: "originalName"`; omitted, the approval is an
+        /// ordinary one and its bytes are what they always were. The plan is
+        /// read before signing, and a subject that is not the plan's is
+        /// refused here rather than by the runner.
+        #[arg(long, value_enum, conflicts_with = "standing")]
+        approval_subject: Option<ApprovalSubjectArg>,
         /// Mint a **standing rehearsal authorization** (D3 §4.3(e)) instead of
         /// a per-run approval: one signature covering every slot of one
         /// `RehearsalSchedule`, which is what
@@ -786,6 +796,22 @@ pub struct RestoreRunArgs {
     /// point-bound plan without it is refused with exit 3 `PointUntrusted`.
     #[arg(long)]
     pub evidence_keys: Option<PathBuf>,
+    /// **PROD-15.1.** Strimzi `KafkaTopic` resources of the TARGET, as YAML
+    /// (`kubectl get kafkatopics -A -o yaml`; separate documents work too).
+    /// Read only for a restore under the original topic names: a restored
+    /// name that a resource labelled `strimzi.io/cluster` manages — and not
+    /// annotated `strimzi.io/managed: "false"` — is a declarative owner, which
+    /// refuses the restore unless the plan chose the owner path. Giving the
+    /// file is also a place the run LOOKED for an owner, so a plan without
+    /// its own owner statement is not refused as unchecked. A file that cannot
+    /// be read or parsed fails the run, exit 1, before anything is dialled.
+    #[arg(long)]
+    pub kafka_topic_resources: Option<PathBuf>,
+    /// Count only `KafkaTopic` resources labelled `strimzi.io/cluster=<this>`:
+    /// the Strimzi cluster that IS this restore's target. Without it, any
+    /// cluster label counts.
+    #[arg(long, requires = "kafka_topic_resources")]
+    pub strimzi_cluster: Option<String>,
 }
 
 impl From<RestoreRunArgs> for crate::drill::RunArgs {
@@ -810,6 +836,8 @@ impl From<RestoreRunArgs> for crate::drill::RunArgs {
             policy_snapshot: a.policy_snapshot,
             confirmation_key: a.confirmation_key,
             evidence_keys: a.evidence_keys,
+            kafka_topic_resources: a.kafka_topic_resources,
+            strimzi_cluster: a.strimzi_cluster,
         }
     }
 }
@@ -931,6 +959,25 @@ pub enum SubjectKindArg {
     // pins the compact line.
     #[value(name = "RehearsalSchedule")]
     RehearsalSchedule,
+}
+
+/// `--approval-subject`'s one value (PROD-15.1). Kebab-case on the command
+/// line; `originalName` in the signed bytes
+/// (`logweir_core::original_name::APPROVAL_SUBJECT_ORIGINAL_NAME`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ApprovalSubjectArg {
+    #[value(name = "original-name")]
+    OriginalName,
+}
+
+impl ApprovalSubjectArg {
+    /// The wire value written into `approval.json`.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::OriginalName => logweir_core::original_name::APPROVAL_SUBJECT_ORIGINAL_NAME,
+        }
+    }
 }
 
 impl SubjectKindArg {

@@ -166,6 +166,7 @@ fn document(policy: &str, mode: ApprovalMode) -> RestoreAuthorization {
         expires_at: now() + chrono::Duration::minutes(5),
         // D0: required under Governed, optional under Ordinary.
         ticket: (mode == ApprovalMode::Governed).then(|| "CHG-4711".to_string()),
+        approval_subject: None,
     }
 }
 

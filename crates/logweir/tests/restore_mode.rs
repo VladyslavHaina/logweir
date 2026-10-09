@@ -444,6 +444,7 @@ fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
         TargetMode::NewTopic,
         Some(TopicNaming {
             prefix: prefix.clone(),
+            original_name: None,
         }),
     );
     let r = phase0(&spec, &NoMarkerBroker::new());
@@ -468,6 +469,7 @@ fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
         TargetMode::NewTopic,
         Some(TopicNaming {
             prefix: "incident 4471-".into(),
+            original_name: None,
         }),
     );
     let r = phase0(&spec, &NoMarkerBroker::new());
@@ -488,6 +490,7 @@ fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
         TargetMode::NewTopic,
         Some(TopicNaming {
             prefix: "restore/2026-".into(),
+            original_name: None,
         }),
     );
     let r = phase0(&spec, &NoMarkerBroker::new());
@@ -506,6 +509,7 @@ fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
         TargetMode::NewTopic,
         Some(TopicNaming {
             prefix: "b".repeat(240),
+            original_name: None,
         }),
     );
     let r = phase0(&spec, &NoMarkerBroker::new());
@@ -565,6 +569,7 @@ fn the_default_new_topic_prefix_carries_the_point_in_time() {
         TargetMode::NewTopic,
         Some(TopicNaming {
             prefix: "incident-4471-".into(),
+            original_name: None,
         }),
     );
     assert_eq!(target_topic_prefix(&spec), "incident-4471-");

@@ -319,6 +319,14 @@ pub struct RunArgs {
     /// standalone, it is the operator's own trust anchor. A point-bound plan
     /// with no keyring is refused (`PointUntrusted`), never run unverified.
     pub evidence_keys: Option<PathBuf>,
+    /// `--kafka-topic-resources` (PROD-15.1): the target's Strimzi
+    /// `KafkaTopic` resources, read for a restore under the original topic
+    /// names only — a place the run looks for a declarative owner of the
+    /// restored names. A Restore Job never carries it (the controller does not
+    /// list `KafkaTopic` resources, PROD-05.1a).
+    pub kafka_topic_resources: Option<PathBuf>,
+    /// `--strimzi-cluster`: count only resources labelled for this cluster.
+    pub strimzi_cluster: Option<String>,
 }
 
 /// Controller-pinned identity and byte digests carried by a new Restore Job's
@@ -1667,6 +1675,12 @@ pub struct Ctx {
     /// reader and to the plan's `target_auth`, so both clients present the
     /// same certificate. `None` for every other mode.
     pub target_client_certificate: Option<logweir_core::connection::ClientCertificateFiles>,
+    /// **PROD-15.1.** What the runner holds about an original-name restore's
+    /// source cluster and declarative owners beyond the plan: the verified
+    /// receipt's measured source cluster id and recorded owners, and the
+    /// Strimzi owners in the `KafkaTopic` resources it was given. Phase 0
+    /// reads it only for an original-name plan.
+    pub original_name: phase0_admit::OriginalNameInputs,
     /// **FX-4.** Each SOURCE topic's configuration capture coverage, from the
     /// backup receipt the plan's recovery point binds — VERIFIED (signature,
     /// digest, manifest) by `binding::verify_point_binding` before this
@@ -1692,6 +1706,7 @@ fn context(
     spec_text: String,
     allowed_text: String,
     contract: bool,
+    original_name: phase0_admit::OriginalNameInputs,
     source_config_coverage: SourceConfigCoverage,
     bound_set: Option<binding::BoundSet>,
 ) -> Result<Ctx, DrillError> {
@@ -1750,7 +1765,10 @@ fn context(
             );
             connect()?
         }
-    };
+    }
+    // PROD-15.1: the source topics' own names are never deleted, whatever
+    // the scratch prefix — teardown, the probe and any later caller alike.
+    .with_protected_names(spec.source.topics.iter().cloned());
 
     // === THE THREE HANDLES, UNDER THE STORE CONTRACT OR NOT (D2 §3.5) ===
     //
@@ -1839,6 +1857,8 @@ fn context(
         store,
         target_tls_ca_file,
         target_client_certificate,
+        // PROD-15.1: what the runner holds about the source and the owners.
+        original_name,
         // What `check_v2_bindings` verified; UNKNOWN for a plan bound to no
         // point, because there is then no signed capture record to read.
         source_config_coverage,
@@ -2416,6 +2436,17 @@ fn execute_for_reporting(
     if let Err(error) = region_refusal {
         return (Err(error.into()), Some(authenticated_spec));
     }
+    // **PROD-15.1: the approval SUBJECT, over the authenticated plan and
+    // BEFORE anything is read or dialled.** An original-name plan needs its
+    // own approval subject, which an ordinary approval cannot satisfy and a
+    // standing authorization never carries (`startup.approved` is `None` on
+    // the standing path); an `originalName` approval authorises nothing else.
+    // The controller made the same comparison before the Job existed; this is
+    // the runner's own half.
+    if let Err(error) = check_original_name_subject(&authenticated_spec, startup.approved.as_ref())
+    {
+        return (Err(error), Some(authenticated_spec));
+    }
     // **Execution contract v2's two bindings, and they go HERE.**
     //
     // After `load_startup_inputs`, so the plan bytes they read are the bytes
@@ -2476,10 +2507,19 @@ fn execute_for_reporting(
     // FX-4: the context is built WITH what the VERIFIED point binding
     // established about each source topic's configuration capture (unknown for
     // an unbound plan); `tests::the_run_context_is_built_with_the_verified_coverage`.
+    // PROD-15.1: what only the runner holds about an original-name restore's
+    // source and owners — the verified receipt's facts and the KafkaTopic
+    // resources it was given — read once, before any client exists.
+    let original_name = match original_name_inputs(args, &authenticated_spec, bindings.point_source)
+    {
+        Ok(inputs) => inputs,
+        Err(error) => return (Err(error), Some(authenticated_spec)),
+    };
     let outcome = match context(
         startup.spec_text,
         startup.allowed_text,
         store_contract,
+        original_name,
         bindings.source_config_coverage,
         bindings.bound_set,
     ) {
@@ -2500,6 +2540,10 @@ struct V2Bindings {
     /// **FX-16.** The set the verified point's receipt describes; `None` when
     /// the plan binds no point.
     bound_set: Option<binding::BoundSet>,
+    /// **PROD-15.1.** The verified receipt's measured source cluster id and
+    /// recorded owners, from the same `VerifiedPoint`; `None` when the plan
+    /// binds no point.
+    point_source: Option<(String, logweir_core::original_name::ReceiptOwners)>,
 }
 
 /// The standing-authorization scope check and the recovery-point binding
@@ -2580,6 +2624,7 @@ fn check_v2_bindings(
 
     let mut source_config_coverage = SourceConfigCoverage::unknown();
     let mut bound_set = None;
+    let mut point_source = None;
     if plan.source.point.is_some() {
         // A READ-ONLY handle, built here and dropped here. `Store` is not
         // `Clone` and `context` builds its own; a read-only handle cannot put
@@ -2614,12 +2659,14 @@ fn check_v2_bindings(
             }
             source_config_coverage = verified.config_coverage;
             bound_set = Some(verified.set);
+            point_source = Some((verified.source_cluster_id, verified.owners));
         }
     }
     Ok(V2Bindings {
         standing_approved,
         source_config_coverage,
         bound_set,
+        point_source,
     })
 }
 
@@ -2693,6 +2740,9 @@ fn standing_approved_from(
     }
     Ok(phase1_approval::Approved {
         validated_at: now,
+        // PROD-15.1: a standing scope is never the original-name subject.
+        approval_subject: logweir_core::original_name::ApprovalSubject::Ordinary,
+        approval_mode: phase1_approval::APPROVAL_MODE_STANDING,
         approval: logweir_core::scorecard::ApprovalInfo {
             approver: format!("standing-authorization/{}", doc.subject_ref.name),
             ticket: String::new(),
@@ -2815,9 +2865,23 @@ fn execute_with_validated_approval(
     let creator: &dyn TopicCreator = c.client.as_creator();
     let reader: &dyn ClusterReader = c.client.as_reader();
 
+    // PROD-15.1: a pre-validated approval's subject is held to the plan
+    // BEFORE phase 0, whose `LogAppendTime` arm may write; the production path
+    // checked it already, and this repeats it for every other caller.
+    if let Some(approved) = prevalidated_approval.as_ref() {
+        check_original_name_subject(&c.spec, Some(approved))?;
+    }
     // 0
     let admitted = record(&mut sc, 0, "admit", || {
-        phase0_admit::run(&c.spec, &c.spec_text, &c.allowed, reader, creator, deleter)
+        phase0_admit::run_with_original_name(
+            &c.spec,
+            &c.spec_text,
+            &c.allowed,
+            reader,
+            creator,
+            deleter,
+            &c.original_name,
+        )
     })?;
     let mut topic_preflight = admitted.topic_preflight.clone();
     sc.target = target_info(&c.spec, &admitted)?;
@@ -2848,6 +2912,16 @@ fn execute_with_validated_approval(
             .into()),
         },
     })?;
+    // PROD-15.1: the subject, held to the plan once more now that phase 1
+    // has verified it on every path, and — for an original-name restore —
+    // signed with what phase 0 proved (`target.original_name`, format 1.8.0).
+    check_original_name_subject(&c.spec, Some(&approved))?;
+    sc.target.original_name = original_name_info(&admitted, &approved);
+    sc.format_version = logweir_core::scorecard::format_version_with_original_name(
+        &sc.format_version,
+        sc.target.original_name.as_ref(),
+    )
+    .to_string();
     sc.approval = approved.approval.clone();
     sc.approval_validated_at = Some(approved.validated_at);
 
@@ -4014,6 +4088,9 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             // yet — and absent means plaintext, which is what every
             // scorecard this tree has written says by omission.
             auth: None,
+            // PROD-15.1: written once phase 1 has verified the approval
+            // subject (`original_name_info`), never on a draft.
+            original_name: None,
         },
         approval: ApprovalInfo {
             approver: String::new(),
@@ -4125,6 +4202,105 @@ fn source_info(
 /// `expect`: an unreachable refusal that becomes reachable through somebody
 /// else's edit must exit 3 with its `refusal-reason=` line, not abort the
 /// process.
+/// **PROD-15.1.** The approval's subject must be the plan's: an original-name
+/// plan needs an `originalName` approval, which an ordinary approval cannot
+/// satisfy and a standing authorization never is (`approved: None` here is
+/// the standing path at startup); an `originalName` approval authorises
+/// nothing else. Exit 3 either way.
+fn check_original_name_subject(
+    spec: &DrillSpec,
+    approved: Option<&phase1_approval::Approved>,
+) -> Result<(), DrillError> {
+    use logweir_core::original_name::{check_approval_subject, ApprovalSubject};
+    let needed = ApprovalSubject::of_plan(spec);
+    let signed = match approved {
+        Some(approved) if approved.approval_mode == phase1_approval::APPROVAL_MODE_STANDING => {
+            ApprovalSubject::Ordinary
+        }
+        Some(approved) => approved.approval_subject,
+        None => ApprovalSubject::Ordinary,
+    };
+    check_approval_subject(needed, signed).map_err(|e| GuardRefusal(e).into())
+}
+
+/// **PROD-15.1.** What only the runner holds about an original-name restore,
+/// read once before any client exists: the verified receipt's measured
+/// source cluster id and recorded owners, and — when given — the Strimzi
+/// owners of the restored names in the target's `KafkaTopic` resources.
+///
+/// The resources file is read ONLY for an original-name plan; for every other
+/// plan it is not opened. A file that cannot be read or parsed is exit 1,
+/// before anything is dialled.
+fn original_name_inputs(
+    args: &RunArgs,
+    spec: &DrillSpec,
+    point_source: Option<(String, logweir_core::original_name::ReceiptOwners)>,
+) -> Result<phase0_admit::OriginalNameInputs, DrillError> {
+    let (receipt_source_cluster_id, receipt_owners) = match point_source {
+        Some((source, owners)) => (Some(source), Some(owners)),
+        None => (None, None),
+    };
+    let kafka_topic_owners = match (
+        logweir_core::original_name::is_original_name_restore(spec),
+        &args.kafka_topic_resources,
+    ) {
+        (true, Some(path)) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| DrillError::Operational(format!("{}: {e}", path.display())))?;
+            let docs = logweir_core::topic_configuration::parse_resource_documents(&text).map_err(
+                |e| {
+                    DrillError::Operational(format!(
+                        "--kafka-topic-resources {}: {e}",
+                        path.display()
+                    ))
+                },
+            )?;
+            Some(logweir_core::topic_configuration::strimzi_owners(
+                &docs,
+                &spec.source.topics,
+                args.strimzi_cluster.as_deref(),
+            ))
+        }
+        _ => None,
+    };
+    Ok(phase0_admit::OriginalNameInputs {
+        receipt_source_cluster_id,
+        receipt_owners,
+        kafka_topic_owners,
+    })
+}
+
+/// **PROD-15.1.** The signed `target.original_name` block: what phase 0
+/// proved (the cluster condition, the owners) and what phase 1 verified (the
+/// approval subject and the document it was in). `None` for every restore
+/// that is not an original-name restore.
+fn original_name_info(
+    admitted: &phase0_admit::Admitted,
+    approved: &phase1_approval::Approved,
+) -> Option<logweir_core::scorecard::OriginalNameInfo> {
+    let proved = admitted.original_name.as_ref()?;
+    Some(logweir_core::scorecard::OriginalNameInfo {
+        approval_subject: approved.approval_subject.label().to_string(),
+        approval_mode: approved.approval_mode.to_string(),
+        cluster_condition: logweir_core::original_name::cluster_condition(&proved.relation)
+            .to_string(),
+        source_cluster_id: proved.relation.source().map(str::to_string),
+        owner_detection: proved.owners.owner_detection.clone(),
+        owners: proved
+            .owners
+            .owners
+            .iter()
+            .map(|o| logweir_core::scorecard::OriginalNameOwner {
+                topic: o.topic.clone(),
+                kind: o.kind.clone(),
+                reference: o.reference.clone(),
+                found_in: o.found_in.clone(),
+            })
+            .collect(),
+        owner_path: proved.owners.owner_path,
+    })
+}
+
 /// `TargetInfo::marker_topic` for a spec: the spec's value in `Scratch` mode
 /// and `None` in `NewTopic` mode.
 ///
@@ -4199,6 +4375,10 @@ fn target_info(
             mode: spec.target.auth.mode_str().into(),
             username: spec.target.auth.username().map(str::to_string),
         }),
+        // PROD-15.1: filled after phase 1 (`original_name_info`), the first
+        // point at which the approval subject is VERIFIED; a block written
+        // here would sign a subject nobody had checked yet.
+        original_name: None,
     })
 }
 
@@ -4325,7 +4505,7 @@ mod tests {
         assert!(
             body.contains(
                 "Ok(V2Bindings {\n        standing_approved,\n        source_config_coverage,\n        \
-                 bound_set,\n    })"
+                 bound_set,\n        point_source,\n    })"
             ),
             "check_v2_bindings must return the coverage it kept"
         );
@@ -4616,6 +4796,8 @@ mod tests {
             policy_snapshot: None,
             confirmation_key: None,
             evidence_keys: None,
+            kafka_topic_resources: None,
+            strimzi_cluster: None,
         }
     }
 
@@ -5682,6 +5864,7 @@ mod tests {
                 configs_set: Vec::new(),
                 topics_created: Vec::new(),
             },
+            original_name: None,
         };
 
         // `scratch` — v0.1's document, unchanged, and the mode absent on the
@@ -5805,6 +5988,8 @@ mod standing_approved_tests {
             policy_snapshot: None,
             confirmation_key: None,
             evidence_keys: None,
+            kafka_topic_resources: None,
+            strimzi_cluster: None,
         }
     }
 

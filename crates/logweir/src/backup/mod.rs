@@ -441,19 +441,14 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| BackupError::Operational(format!("{}: {e}", path.display())))?;
-            let mut docs = Vec::new();
-            for doc in serde_yaml::Deserializer::from_str(&text) {
-                let value =
-                    <serde_yaml::Value as serde::Deserialize>::deserialize(doc).map_err(|e| {
-                        BackupError::Operational(format!(
-                            "--kafka-topic-resources {}: not YAML: {e}",
-                            path.display()
-                        ))
-                    })?;
-                if !value.is_null() {
-                    docs.push(value);
-                }
-            }
+            let docs = logweir_core::topic_configuration::parse_resource_documents(&text).map_err(
+                |e| {
+                    BackupError::Operational(format!(
+                        "--kafka-topic-resources {}: {e}",
+                        path.display()
+                    ))
+                },
+            )?;
             for (topic, reference) in logweir_core::topic_configuration::strimzi_unrecordable(
                 &docs,
                 &spec.source.topics,

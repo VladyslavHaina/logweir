@@ -81,6 +81,9 @@ fn main() {
             // separate decision and stays `None` until a task changes it
             // deliberately.
             auth: None,
+            // PROD-15.1: absent, as on every document that is not an
+            // original-name restore.
+            original_name: None,
         },
         approval: ApprovalInfo {
             approver: "sre-oncall@example.com".into(),

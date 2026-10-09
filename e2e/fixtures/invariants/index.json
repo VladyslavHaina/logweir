@@ -793,5 +793,99 @@
   "python_exit": 1,
   "reason": "integrity.verification.complete.window is not source.selection's window; the expected output is selected by the plan's own start and end",
   "arm": "integrity.verification.complete.window is not source.selection's window; "
+ },
+ {
+  "id": "original_name_1_8_accepted",
+  "file": "original_name_1_8_accepted.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "original_name_1_8_owner_path",
+  "file": "original_name_1_8_owner_path.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "original_name_under_format_1_7_0",
+  "file": "original_name_under_format_1_7_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name is present but format_version \"1.7.0\" predates it: the block is defined from 1.8.0",
+  "arm": "target.original_name is present but format_version "
+ },
+ {
+  "id": "original_name_in_scratch_mode",
+  "file": "original_name_in_scratch_mode.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name is present but target.mode is scratch; a scratch drill never restores under the original topic names",
+  "arm": "target.original_name is present but target.mode is scratch; a scratch drill "
+ },
+ {
+  "id": "original_name_with_a_prefix",
+  "file": "original_name_with_a_prefix.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name is present but target.topic_mapping_prefix is not empty; an original-name restore maps every topic onto its own name",
+  "arm": "target.original_name is present but target.topic_mapping_prefix is not "
+ },
+ {
+  "id": "original_name_ordinary_subject",
+  "file": "original_name_ordinary_subject.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.approval_subject is not \"originalName\"; an original-name restore is authorised only by its own approval subject",
+  "arm": "target.original_name.approval_subject is not "
+ },
+ {
+  "id": "original_name_standing_approval",
+  "file": "original_name_standing_approval.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.approval_mode is not one of \"v1Approval\", \"governed\", \"ordinary\"",
+  "arm": "target.original_name.approval_mode is not one of "
+ },
+ {
+  "id": "original_name_unknown_cluster_condition",
+  "file": "original_name_unknown_cluster_condition.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.cluster_condition is not one of \"targetIsNotSource\", \"autoCreateDisabled\"",
+  "arm": "target.original_name.cluster_condition is not one of "
+ },
+ {
+  "id": "original_name_target_is_its_own_source",
+  "file": "original_name_target_is_its_own_source.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.cluster_condition is targetIsNotSource but source_cluster_id is absent or equals target.cluster_id; the condition is a comparison of two known cluster ids",
+  "arm": "target.original_name.cluster_condition is targetIsNotSource but "
+ },
+ {
+  "id": "original_name_looked_nowhere",
+  "file": "original_name_looked_nowhere.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.owner_detection is empty, repeats a place, or names one outside \"plan\", \"kafkaTopicResources\", \"pointReceipt\"; an owner nobody looked for is never read as no owner",
+  "arm": "target.original_name.owner_detection is empty, repeats a place, or names "
+ },
+ {
+  "id": "original_name_owner_from_a_place_not_looked",
+  "file": "original_name_owner_from_a_place_not_looked.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.owners names a place owner_detection does not list, a kind outside \"strimzi\" and \"external\", or a blank topic",
+  "arm": "target.original_name.owners names a place owner_detection does not list, a "
+ },
+ {
+  "id": "original_name_owned_off_the_owner_path",
+  "file": "original_name_owned_off_the_owner_path.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.owners is not empty and owner_path is false; an owned name is restored only on the owner path",
+  "arm": "target.original_name.owners is not empty and owner_path is false; an owned "
  }
 ]

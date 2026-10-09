@@ -662,6 +662,7 @@ fn a_blank_approver_or_ticket_is_refused_by_mint_itself() {
         ticket: ticket.to_string(),
         out: dir.path().join("blank.json"),
         subject_kind: "Restore".to_string(),
+        approval_subject: None,
         standing: None,
     };
 
@@ -731,6 +732,7 @@ fn mint_signs_the_callers_now_as_approved_at() {
                 ticket: "CHG-42".to_string(),
                 out: out.clone(),
                 subject_kind: "Restore".to_string(),
+                approval_subject: None,
                 standing: None,
             },
             now,

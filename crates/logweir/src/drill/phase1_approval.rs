@@ -6,6 +6,7 @@ use logweir_core::approval_policy::{
 };
 use logweir_core::guard::GuardRefusal;
 use logweir_core::ids::sha256_prefixed;
+use logweir_core::original_name::ApprovalSubject;
 use logweir_core::scorecard::ApprovalInfo;
 use logweir_core::spec::ApprovalDoc;
 use logweir_evidence::{
@@ -117,6 +118,27 @@ pub fn admit_pinned_approver_key_bytes(
 pub struct Approved {
     pub approval: ApprovalInfo,
     pub validated_at: DateTime<Utc>,
+    /// **PROD-15.1.** The approval subject inside the VERIFIED bytes — an
+    /// ordinary approval, or `originalName` — which the runner holds to the
+    /// plan before phase 0 (`logweir_core::original_name::check_approval_subject`).
+    pub approval_subject: ApprovalSubject,
+    /// **PROD-15.1.** Which document authorised the run, in the scorecard's
+    /// `target.original_name.approval_mode` words: `v1Approval`, `governed`,
+    /// `ordinary`, or `standing` (a rehearsal, which never authorises an
+    /// original-name restore).
+    pub approval_mode: &'static str,
+}
+
+/// [`Approved::approval_mode`] for a per-run approval document v1.
+pub const APPROVAL_MODE_V1: &str = "v1Approval";
+/// [`Approved::approval_mode`] for a standing rehearsal authorization.
+pub const APPROVAL_MODE_STANDING: &str = "standing";
+
+/// The approval subject a signed document carries, as a refusal when it is
+/// one this build does not know.
+fn signed_subject(value: Option<&str>) -> Result<ApprovalSubject, DrillError> {
+    ApprovalSubject::from_wire(value)
+        .map_err(|e| GuardRefusal(format!("{e}; no data operation was started")).into())
 }
 
 /// v0.1: approval is UNCONDITIONAL. There is no "spec_hash changed" disjunct,
@@ -220,8 +242,13 @@ pub fn verify_bytes(
     // refused either way — LABELLED. Both verifiers and `drill show` surface
     // it.
     let self_attested = key_id == signing_key.key_id();
+    // PROD-15.1: the subject inside the verified bytes; held to the plan by
+    // the caller, which has the plan parsed.
+    let approval_subject = signed_subject(doc.approval_subject.as_deref())?;
 
     Ok(Approved {
+        approval_subject,
+        approval_mode: APPROVAL_MODE_V1,
         // Logweir's own clock at the moment BOTH the signature verified and
         // the plan hash matched. THIS, not the human's approved_at, is the
         // input to measured.rto_seconds (spec §9.3 phase 8).
@@ -366,7 +393,13 @@ pub fn verify_authorization_v2_bytes(
         }
     };
     let self_attested = approver_id == signing_key.key_id();
+    let approval_subject = signed_subject(doc.approval_subject.as_deref())?;
     Ok(Approved {
+        approval_subject,
+        approval_mode: match policy.mode {
+            ApprovalMode::Governed => "governed",
+            ApprovalMode::Ordinary => "ordinary",
+        },
         validated_at: Utc::now(),
         approval: ApprovalInfo {
             approver: approver_label,

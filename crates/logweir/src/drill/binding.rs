@@ -98,6 +98,30 @@ pub struct VerifiedPoint {
     /// [`check_restored_set`] compares with the set the engine is about to
     /// restore before anything is decided from this receipt.
     pub set: BoundSet,
+    /// **PROD-15.1.** The verified receipt's `source.cluster_id` — read from
+    /// the broker at backup time, never from a spec — which an original-name
+    /// restore compares with its target's (condition 3).
+    pub source_cluster_id: String,
+    /// **PROD-15.1.** The verified receipt's recorded declarative owners
+    /// (PROD-05.1): where its backup looked, and each source topic's owner.
+    pub owners: logweir_core::original_name::ReceiptOwners,
+}
+
+/// **PROD-15.1.** The owners a verified receipt recorded: its
+/// `owner_detection` (absent reads as empty, "not checked") and each source
+/// topic's `topic_configuration[t].owner`.
+fn receipt_owners(
+    receipt: &logweir_core::backup_receipt::BackupReceipt,
+) -> logweir_core::original_name::ReceiptOwners {
+    logweir_core::original_name::ReceiptOwners {
+        owner_detection: receipt.owner_detection.clone().unwrap_or_default(),
+        owners: receipt
+            .topic_configuration
+            .iter()
+            .flatten()
+            .filter_map(|(topic, model)| model.owner.clone().map(|owner| (topic.clone(), owner)))
+            .collect(),
+    }
 }
 
 /// **FX-16.** The backup set a VERIFIED recovery point describes: the only set
@@ -403,6 +427,8 @@ pub fn verify_point_binding(
             manifest_sha256: manifest_digest,
             manifest_version_id: current_version,
         },
+        source_cluster_id: receipt.source.cluster_id.clone(),
+        owners: receipt_owners(&receipt),
     }))
 }
 
@@ -1165,6 +1191,10 @@ mod tests {
                 manifest_sha256: logweir_core::ids::sha256_prefixed(br#"{"topics":[]}"#),
                 manifest_version_id,
             },
+            // PROD-15.1: the fixture receipt's measured source, and no owner
+            // record (it predates PROD-05.1's block: "not checked").
+            source_cluster_id: "SOURCE00000000000000000".into(),
+            owners: logweir_core::original_name::ReceiptOwners::default(),
         })
     }
 

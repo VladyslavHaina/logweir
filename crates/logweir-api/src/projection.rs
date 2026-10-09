@@ -505,6 +505,13 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
                 TargetMode::NewTopic => RestoreMode::NewTopic,
             },
             topic_prefix: object.spec.target.topic_naming.prefix.clone(),
+            original_name: object.spec.target.topic_naming.is_original_name(),
+        },
+        // PROD-15.1: the subject this restore's approval must carry.
+        approval_subject: if object.spec.target.topic_naming.is_original_name() {
+            crate::contract::ApprovalSubjectView::OriginalName
+        } else {
+            crate::contract::ApprovalSubjectView::Ordinary
         },
         deadline_seconds: object.spec.deadline_seconds,
         new_topics: status
@@ -573,6 +580,17 @@ pub fn approval(object: &ApprovalCr) -> Approval {
         created_at: created_at(object),
         subject_ref: subject_ref(object),
         plan_hash: object.spec.plan_hash.clone(),
+        // PROD-15.1: what the SIGNED document authorises, read the way the
+        // controller reads it.
+        approval_subject: match weirkeeper::controllers::restore::approval_subject_of(object) {
+            Ok(logweir_core::original_name::ApprovalSubject::OriginalName) => {
+                crate::contract::ApprovalSubjectView::OriginalName
+            }
+            Ok(logweir_core::original_name::ApprovalSubject::Ordinary) => {
+                crate::contract::ApprovalSubjectView::Ordinary
+            }
+            Err(_) => crate::contract::ApprovalSubjectView::Unknown,
+        },
         approval_bytes_length: object.spec.approval_bytes.len(),
         sidecar_bytes_length: object.spec.sidecar_bytes.len(),
         verified: status.and_then(|s| s.verified),

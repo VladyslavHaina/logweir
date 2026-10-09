@@ -487,7 +487,21 @@ FORMAT_VERSION = "1.4.0"
 # layer refuses a block that is not the writer's shape; a `replay selection:`
 # coverage line names the window, and the sampled-pass line of a narrowed
 # document is qualified by its window, in the Rust reader's words.
-SCRIPT_VERSION = "1.23.0"
+#
+# 1.24.0 (PROD-15.1) knows scorecard format 1.8.0 and its optional
+# `target.original_name`: a restore under the source's ORIGINAL topic names,
+# into absent topics (OD-2). Ten arms, ON-1 to ON-10, mirrored byte for byte
+# and in position from `Scorecard::validate_invariants`: the block only under a
+# version of at least 1.8.0, only in a newTopic document with the empty prefix,
+# the approval subject `originalName`, the approval mode and the cluster
+# condition from their closed sets, `targetIsNotSource` only beside a known
+# source cluster id that is not the target's, somewhere looked for an owner,
+# each owner from a place looked in, and an owned name only on the owner path.
+# They fire only on a document carrying the block, so every document without
+# it is decided exactly as before (OD-7 (a)). The shape layer refuses a block
+# that is not the writer's shape; two `original name:` lines say what admitted
+# the restore, in the Rust reader's words.
+SCRIPT_VERSION = "1.24.0"
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
 # `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
@@ -511,6 +525,21 @@ PROD_01_3_AUTH_MODES = ("scramSha256", "plain", "mtls")
 # `crates/logweir-core/src/scorecard.rs`, which it must equal
 # (`docs/test_verify_scorecard.py::test_the_selection_minor_is_the_rust_readers`).
 SCORECARD_SELECTION_SINCE_MINOR = 7
+
+# The first minor of SCORECARD format 1 that defines `target.original_name`
+# (arm ON-1, PROD-15.1) -- `ORIGINAL_NAME_SINCE_MINOR` in
+# `crates/logweir-core/src/scorecard.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_original_name_minor_is_the_rust_readers`).
+SCORECARD_ORIGINAL_NAME_SINCE_MINOR = 8
+
+# `target.original_name`'s closed sets (PROD-15.1) -- `ORIGINAL_NAME_APPROVAL_MODES`
+# in `scorecard.rs`, `CLUSTER_CONDITIONS` and `OWNER_DETECTION_PLACES` in
+# `crates/logweir-core/src/original_name.rs`, and `OWNER_KINDS` in
+# `topic_configuration.rs`, which they must equal.
+ORIGINAL_NAME_APPROVAL_MODES = ("v1Approval", "governed", "ordinary")
+ORIGINAL_NAME_CLUSTER_CONDITIONS = ("targetIsNotSource", "autoCreateDisabled")
+ORIGINAL_NAME_OWNER_DETECTION_PLACES = ("plan", "kafkaTopicResources", "pointReceipt")
+ORIGINAL_NAME_OWNER_KINDS = ("strimzi", "external")
 
 # The first minor of SCORECARD format 1 that defines `sample.unsampled_topics`
 # (arm US-1, FX-23) -- `UNSAMPLED_TOPICS_SINCE_MINOR` in
@@ -860,6 +889,34 @@ def _selection_shape_ok(block) -> bool:
         and _int_in(block.get("window_start_ms"), 64)
         and _int_in(block.get("window_end_ms"), 64)
     )
+
+
+def _original_name_shape_ok(block) -> bool:
+    """`target.original_name` has the shape `OriginalNameInfo` deserialises
+    (PROD-15.1, format 1.8.0): strings `approval_subject`, `approval_mode` and
+    `cluster_condition`; `source_cluster_id` absent, null or a string;
+    `owner_detection` an array of strings; `owners` an array of objects of four
+    strings `topic`, `kind`, `reference`, `found_in`; and a bool `owner_path`.
+    Unknown keys are ignored, as serde ignores them."""
+    if not isinstance(block, dict):
+        return False
+    for name in ("approval_subject", "approval_mode", "cluster_condition"):
+        if not isinstance(block.get(name), str):
+            return False
+    source = block.get("source_cluster_id")
+    if source is not None and not isinstance(source, str):
+        return False
+    if not _strings(block.get("owner_detection")):
+        return False
+    owners = block.get("owners")
+    if not isinstance(owners, list):
+        return False
+    for owner in owners:
+        if not isinstance(owner, dict) or not all(
+            isinstance(owner.get(k), str) for k in ("topic", "kind", "reference", "found_in")
+        ):
+            return False
+    return isinstance(block.get("owner_path"), bool)
 
 
 def _int_in(x, bits) -> bool:
@@ -1375,6 +1432,19 @@ def check_invariants(doc) -> str:
         return (
             "source.selection is not an object of the shape the writer gives it: a window start "
             "and a window end, both integers"
+        )
+
+    # Also shape (PROD-15.1, scorecard 1.8.0): `target.original_name` is an
+    # `Option<OriginalNameInfo>` over there, so `null` is ABSENT and anything
+    # that is not the writer's shape is refused at DESERIALISATION. Arms ON-1
+    # to ON-10 below compare its fields, so the shape is asserted first. The
+    # bad shapes are cases in `shape-index.json`.
+    original_name = target.get("original_name")
+    if original_name is not None and not _original_name_shape_ok(original_name):
+        return (
+            "target.original_name is not an object of the shape the writer gives it: three "
+            "strings, an optional source cluster id, the places looked in, the owners found and "
+            "a bool owner_path"
         )
 
     # Also shape, and also the Rust reader's type doing the work over there:
@@ -2094,6 +2164,97 @@ def check_invariants(doc) -> str:
                     "integrity.verification.complete.window is not source.selection's window; "
                     "the expected output is selected by the plan's own start and end"
                 )
+
+    # `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to ON-10,
+    # mirrored ARM FOR ARM, IN THIS POSITION (after `source.selection`, before
+    # `redactions`) and with the same words from `Scorecard::validate_invariants`.
+    # They fire ONLY on a document carrying the block, so every document before
+    # 1.8.0 is decided exactly as before. Not interpolated except ON-1's
+    # version. The shape layer above has proved the block's types.
+    if original_name is not None:
+        # ON-1. A version before 1.8.0 cannot carry the 1.8.0 block.
+        minor = _minor(version)
+        if not (
+            doc_major == 1
+            and minor is not None
+            and minor >= SCORECARD_ORIGINAL_NAME_SINCE_MINOR
+        ):
+            return (
+                f"target.original_name is present but format_version "
+                f"{_rust_debug_str(version)} predates it: the block is defined from "
+                f"1.{SCORECARD_ORIGINAL_NAME_SINCE_MINOR}.0"
+            )
+        # ON-2. The identity ban stays in scratch mode (absent mode is scratch).
+        if target.get("mode") in (None, "scratch"):
+            return (
+                "target.original_name is present but target.mode is scratch; a scratch drill "
+                "never restores under the original topic names"
+            )
+        # ON-3. The original names ARE the identity mapping.
+        if target.get("topic_mapping_prefix") != "":
+            return (
+                "target.original_name is present but target.topic_mapping_prefix is not "
+                "empty; an original-name restore maps every topic onto its own name"
+            )
+        # ON-4.
+        if original_name["approval_subject"] != "originalName":
+            return (
+                "target.original_name.approval_subject is not \"originalName\"; an "
+                "original-name restore is authorised only by its own approval subject"
+            )
+        # ON-5.
+        if original_name["approval_mode"] not in ORIGINAL_NAME_APPROVAL_MODES:
+            return (
+                "target.original_name.approval_mode is not one of \"v1Approval\", "
+                "\"governed\", \"ordinary\""
+            )
+        # ON-6.
+        if original_name["cluster_condition"] not in ORIGINAL_NAME_CLUSTER_CONDITIONS:
+            return (
+                "target.original_name.cluster_condition is not one of \"targetIsNotSource\", "
+                "\"autoCreateDisabled\""
+            )
+        # ON-7. "Not the source" is a comparison of two known ids.
+        named_source = str(original_name.get("source_cluster_id") or "")
+        if original_name["cluster_condition"] == "targetIsNotSource" and (
+            not named_source.strip(RUST_WHITESPACE)
+            or named_source == target.get("cluster_id")
+        ):
+            return (
+                "target.original_name.cluster_condition is targetIsNotSource but "
+                "source_cluster_id is absent or equals target.cluster_id; the condition is a "
+                "comparison of two known cluster ids"
+            )
+        # ON-8. Somewhere was looked, each place once, from the closed set.
+        places = original_name["owner_detection"]
+        if (
+            not places
+            or len(set(places)) != len(places)
+            or any(p not in ORIGINAL_NAME_OWNER_DETECTION_PLACES for p in places)
+        ):
+            return (
+                "target.original_name.owner_detection is empty, repeats a place, or names "
+                "one outside \"plan\", \"kafkaTopicResources\", \"pointReceipt\"; an owner "
+                "nobody looked for is never read as no owner"
+            )
+        # ON-9.
+        owners = original_name["owners"]
+        if any(
+            o["found_in"] not in places
+            or o["kind"] not in ORIGINAL_NAME_OWNER_KINDS
+            or not o["topic"].strip(RUST_WHITESPACE)
+            for o in owners
+        ):
+            return (
+                "target.original_name.owners names a place owner_detection does not list, a "
+                "kind outside \"strimzi\" and \"external\", or a blank topic"
+            )
+        # ON-10.
+        if owners and not original_name["owner_path"]:
+            return (
+                "target.original_name.owners is not empty and owner_path is false; an owned "
+                "name is restored only on the owner path"
+            )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -2848,6 +3009,43 @@ def _selection_lines(block, before):
     ]
 
 
+def _original_name_lines(block):
+    """`target.original_name` as lines -- the twin of `crates/logweir/src/
+    verify.rs::original_name_lines` (PROD-15.1): the writer's two sentences
+    (`OriginalNameInfo::lines`). Absent prints nothing: the restore did not
+    write under the original topic names."""
+    if block is None:
+        return []
+    source = block.get("source_cluster_id")
+    if block["cluster_condition"] == "targetIsNotSource":
+        cluster = f"the target cluster is not the source cluster ({source or 'unknown'})"
+    elif source is not None:
+        cluster = (
+            f"the target may be the source cluster ({source}) and every broker reported "
+            "auto.create.topics.enable=false"
+        )
+    else:
+        cluster = (
+            "no source cluster id was known and every broker reported "
+            "auto.create.topics.enable=false"
+        )
+    owners = block["owners"]
+    found = (
+        ", ".join(
+            f"{o['topic']} ({o['kind']} {o['reference']}, from {o['found_in']})" for o in owners
+        )
+        if owners
+        else "none found"
+    )
+    return [
+        "original name: restored under the source's own topic names, into topics this run "
+        "created (a new generation of each name, not the original topic); approval subject "
+        f"{block['approval_subject']}, approved by {block['approval_mode']}; {cluster}",
+        f"original name: declarative owners looked for in {', '.join(block['owner_detection'])}: "
+        f"{found}" + ("; the approved plan chose the owner path" if block["owner_path"] else ""),
+    ]
+
+
 def _unsampled_lines(topics):
     """`sample.unsampled_topics` as lines -- the twin of `crates/logweir/src/
     verify.rs::unsampled_lines` (FX-23), in the same words. Absent or empty
@@ -3193,6 +3391,11 @@ def main(
         # words `logweir drill verify` prints (`selection_lines`).
         for line in _selection_lines(doc["source"].get("selection"), _before_the_start(doc)):
             print(f"       coverage: {line}")
+        # PROD-15.1: a restore under the original topic names, and what
+        # admitted it, in the words `logweir drill verify` prints
+        # (`original_name_lines`).
+        for line in _original_name_lines(doc["target"].get("original_name")):
+            print(f"       target:   {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -3239,6 +3442,11 @@ def main(
             "not blank, and never beside a complete verification; "
             "source.selection only from 1.7.0, its start before its end, and a complete block "
             "over its window; "
+            "target.original_name only from 1.8.0, only in a newTopic document with the empty "
+            "prefix, its subject originalName, its approval mode and cluster condition from "
+            "their closed sets, targetIsNotSource only beside a known other source cluster id, "
+            "somewhere looked for an owner, each owner from a place looked in, and an owned name "
+            "only on the owner path; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

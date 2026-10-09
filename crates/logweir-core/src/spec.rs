@@ -539,6 +539,19 @@ pub struct TargetSpec {
     #[serde(default = "delete")]
     pub teardown: String,
 }
+impl TargetSpec {
+    /// The plan's `topic_naming.original_name` block, WHATEVER the mode — the
+    /// shape rule ([`crate::original_name::refuse_shape`]) is what refuses it
+    /// beside `scratch` or a non-empty prefix, so this accessor must not hide
+    /// a block a refusal has to name.
+    #[must_use]
+    pub fn original_name(&self) -> Option<&OriginalNameSpec> {
+        self.topic_naming
+            .as_ref()
+            .and_then(|naming| naming.original_name.as_ref())
+    }
+}
+
 fn marker() -> String {
     "logweir.scratch".into()
 }
@@ -617,13 +630,63 @@ impl std::fmt::Display for TargetMode {
 
 /// `target.topicNaming` — how `newTopic` mode names the topics it creates.
 ///
-/// One field today. It is a BLOCK rather than a bare `target.topic_prefix`
-/// because the CRD already declares it as one
-/// (`target.topicNaming.prefix`, and `status.newTopics` is built from it), and
-/// a Rust shape that flattened it would make the two documents disagree.
+/// It is a BLOCK rather than a bare `target.topic_prefix` because the CRD
+/// already declares it as one (`target.topicNaming.prefix`, and
+/// `status.newTopics` is built from it), and a Rust shape that flattened it
+/// would make the two documents disagree.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TopicNaming {
     pub prefix: String,
+    /// **PROD-15.1: restore under the ORIGINAL topic names, into topics that
+    /// do not exist** — the one original-name path (OD-2; the tracker's rule
+    /// 5), and the explicit opt-in an identity mapping needs.
+    ///
+    /// It is valid only beside `prefix: ""` in `newTopic` mode
+    /// ([`crate::original_name::refuse_shape`]): the empty prefix IS the
+    /// identity mapping, and it is what makes an older runner REFUSE the plan
+    /// (its mapping guard refuses any topic mapped onto itself, exit 3) rather
+    /// than silently restore under some other name. An empty prefix WITHOUT
+    /// this block is refused exactly as before.
+    ///
+    /// Optional and skipped when absent, so every plan written before PROD-15.1
+    /// serialises, hashes and means exactly what it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<OriginalNameSpec>,
+}
+
+/// `target.topic_naming.original_name` — what the approver states about an
+/// original-name restore that the runner cannot observe for itself
+/// (PROD-15.1).
+///
+/// `deny_unknown_fields`: a misspelt `owner_path` silently read as `false`
+/// would refuse the plan for the wrong reason, and a misspelt `owners` would
+/// read as "not declared" — this block is the approver's signed statement, so
+/// a key this build does not know is refused instead.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OriginalNameSpec {
+    /// The declarative owners of the restored names ON THE TARGET, as the
+    /// approver states them: `{topic, kind, reference}` with `kind`
+    /// `strimzi` or `external`, the same shape as a backup's
+    /// `source.topic_owners` ([`crate::topic_configuration::DeclaredOwner`]).
+    ///
+    /// ABSENT and EMPTY differ, as they do there: an absent list declares
+    /// nothing (the runner then needs another place it looked — Strimzi
+    /// `KafkaTopic` resources given with `--kafka-topic-resources`, or the
+    /// bound point's receipt — or it refuses, `OriginalNameOwnerNotChecked`);
+    /// an empty list is the approver's signed statement that no declarative
+    /// owner manages any restored name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owners: Option<Vec<crate::topic_configuration::DeclaredOwner>>,
+    /// **The owner path**: restore although a declarative owner manages a
+    /// restored name. The approver states that the owner's reconciliation is
+    /// paused for the restore — so it neither creates the name first nor
+    /// reverts the restored topic's settings — and that it adopts the topic
+    /// afterwards. Logweir still creates every topic itself, exclusively.
+    /// Absent is `false`: an owner found refuses the restore
+    /// (`OriginalNameOwnerPresent`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_path: bool,
 }
 
 /// The `newTopic` default prefix: `restore-<YYYYmmddTHHMMSSZ>-`.
@@ -1204,6 +1267,20 @@ pub struct ApprovalDoc {
     /// document this workspace produces always names its kind.
     #[serde(default = "default_subject_kind")]
     pub subject_kind: String,
+    /// **PROD-15.1: the separate approval subject.** `originalName` when the
+    /// approver approved a restore under the ORIGINAL topic names
+    /// (`logweir drill approve --approval-subject original-name`); ABSENT for
+    /// every other approval, so every document minted before PROD-15.1 — and
+    /// every ordinary one minted after it — is byte for byte what it was.
+    ///
+    /// INSIDE THE SIGNED BYTES, for `subject_kind`'s reason. The runner and the
+    /// controller compare it with the plan in both directions
+    /// (`crate::original_name::check_approval_subject`); an older runner
+    /// ignores the key, and refuses the plan it could authorise anyway (an
+    /// original-name plan maps every topic onto itself, which its guard
+    /// refuses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_subject: Option<String>,
 }
 
 #[cfg(test)]

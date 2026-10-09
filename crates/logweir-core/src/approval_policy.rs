@@ -1146,7 +1146,11 @@ pub struct PolicyRef {
 ///
 /// `deny_unknown_fields`: a field this build does not know is a field whose
 /// meaning it cannot enforce, and an authorization is the last place to ignore
-/// one. A future field is a new `formatVersion` major.
+/// one. A future field is a new `formatVersion` major — unless, like
+/// PROD-15.1's `approvalSubject`, it is OPTIONAL, absent from every document
+/// that does not need it, and refuses-closed in an older reader, which this
+/// attribute makes it do; then the documents that carry it are exactly the
+/// ones an older reader refuses, and no other document changes.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RestoreAuthorization {
@@ -1173,6 +1177,21 @@ pub struct RestoreAuthorization {
     /// [`check_ticket`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// **PROD-15.1: the separate approval subject** — `originalName` for a
+    /// restore under the ORIGINAL topic names, ABSENT for every other one
+    /// (`crate::original_name::ApprovalSubject`). The console writes it only
+    /// for a `Restore` that declares `spec.target.topicNaming.originalName`,
+    /// and every boundary that reads the document holds it to the plan
+    /// (`crate::original_name::check_approval_subject`).
+    ///
+    /// ADDED WITHOUT A NEW `formatVersion`, and on purpose. Every document
+    /// without it is byte for byte what it was, and this struct is
+    /// `deny_unknown_fields`, so a reader that predates the key REFUSES the
+    /// only documents that carry it (`DocumentInvalid`, unknown field) — it can
+    /// never read one as an ordinary authorization. That is the outcome a new
+    /// major would buy, for the documents that need it and none of the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_subject: Option<String>,
 }
 
 impl RestoreAuthorization {
@@ -1360,6 +1379,12 @@ pub fn check_binding(
                 .to_string(),
         ));
     }
+    // PROD-15.1: a subject this build does not know is refused here, at every
+    // boundary; whether it is the PLAN's subject is the caller's comparison
+    // (`crate::original_name::check_approval_subject`), because the plan is
+    // not in this function's hands.
+    crate::original_name::ApprovalSubject::from_wire(doc.approval_subject.as_deref())
+        .map_err(AuthorizationRefusal::DocumentInvalid)?;
     check_ticket(doc.authorization_mode, doc.ticket.as_deref())
         .map_err(AuthorizationRefusal::DocumentInvalid)
 }
@@ -1556,6 +1581,7 @@ namespaces:
             issued_at: at("2026-09-22T10:00:00Z"),
             expires_at: at("2026-09-22T10:10:00Z"),
             ticket: (policy.mode == ApprovalMode::Governed).then(|| "CHG-1".to_string()),
+            approval_subject: None,
         }
     }
 

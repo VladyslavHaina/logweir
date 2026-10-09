@@ -1,8 +1,9 @@
 use crate::drill::DrillError;
 use logweir_core::guard::{
-    check_topic_mapping_coverage, scan_forbidden_keys, GuardRefusal,
+    check_topic_mapping, scan_forbidden_keys, GuardRefusal,
     TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
 };
+use logweir_core::original_name::{self, OwnerInputs, OwnerVerdict, ReceiptOwners, SourceRelation};
 use logweir_core::spec::{
     target_topic_prefix, AllowedClusters, Anchor, Coverage, DrillSpec, TargetMode,
 };
@@ -39,6 +40,39 @@ pub struct Admitted {
     /// `create_target_topics` — see that function for why the creation itself
     /// cannot happen inside this phase.
     pub topic_preflight: TopicPreflight,
+    /// **PROD-15.1.** What phase 0 PROVED for a restore under the original
+    /// topic names before admitting it — the cluster condition and the owner
+    /// verdict — and `None` for every other restore. The signed scorecard's
+    /// `target.original_name` is built from it after phase 1 has verified the
+    /// approval subject.
+    pub original_name: Option<OriginalNameAdmission>,
+}
+
+/// **PROD-15.1.** What only the runner holds about an original-name restore's
+/// source and owners, beyond the plan and the allowlist file. Every field is
+/// optional and absent means "not known" — never "no source", never "no
+/// owner".
+#[derive(Debug, Clone, Default)]
+pub struct OriginalNameInputs {
+    /// The bound recovery point's VERIFIED receipt's `source.cluster_id`,
+    /// read from the broker at backup time (`binding::VerifiedPoint`).
+    pub receipt_source_cluster_id: Option<String>,
+    /// The same receipt's recorded owners (PROD-05.1): its `owner_detection`
+    /// and each source topic's owner.
+    pub receipt_owners: Option<ReceiptOwners>,
+    /// The Strimzi owners of the restored names in the `KafkaTopic` resources
+    /// the runner was given (`--kafka-topic-resources`): `Some(empty)` is a
+    /// look that found none, `None` is no look.
+    pub kafka_topic_owners: Option<BTreeMap<String, logweir_core::backup_receipt::TopicOwner>>,
+}
+
+/// **PROD-15.1.** The conditions phase 0 proved for an original-name restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginalNameAdmission {
+    /// How the target relates to the source cluster.
+    pub relation: SourceRelation,
+    /// Where the run looked for declarative owners and what it found.
+    pub owners: OwnerVerdict,
 }
 
 /// What phase 0 found out about the target topics before anything was written,
@@ -194,6 +228,32 @@ pub fn run(
     creator: &dyn TopicCreator,
     deleter: &dyn TopicDeleter,
 ) -> Result<Admitted, DrillError> {
+    run_with_original_name(
+        spec,
+        spec_text,
+        allowed,
+        reader,
+        creator,
+        deleter,
+        &OriginalNameInputs::default(),
+    )
+}
+
+/// [`run`], with what the runner holds about an original-name restore's
+/// source and owners (PROD-15.1). [`run`] is this with nothing known, which
+/// is what every caller that is not the drill's own context passes — and for
+/// an original-name plan "nothing known" refuses (`OriginalNameOwnerNotChecked`
+/// unless the plan states its owners; the cluster condition then needs
+/// auto-creation proven disabled).
+pub fn run_with_original_name(
+    spec: &DrillSpec,
+    spec_text: &str,
+    allowed: &AllowedClusters,
+    reader: &dyn ClusterReader,
+    creator: &dyn TopicCreator,
+    deleter: &dyn TopicDeleter,
+    original: &OriginalNameInputs,
+) -> Result<Admitted, DrillError> {
     // `?` on purpose: the scan FAILS CLOSED. A spec text this scanner cannot
     // parse is a spec it did not scan, and that is a `GuardRefusal` (exit 3),
     // never an empty result silently treated as clean.
@@ -230,6 +290,16 @@ pub fn run(
     // same rule for every caller that reaches phase 0 another way.
     logweir_core::guard::reject_auth_without_required_tls("target.auth", &spec.target.auth)?;
 
+    // **PROD-15.1, condition 1**, purely local: an `original_name` block is
+    // legal only in `newTopic` mode and only beside `prefix: ""` — the identity
+    // ban stays in scratch mode, and a plan that names two names is refused.
+    // An empty prefix WITHOUT the block is the mapping guard's below, which
+    // refuses it exactly as before.
+    if let Some(refusal) = original_name::refuse_shape(spec) {
+        return Err(GuardRefusal(refusal).into());
+    }
+    let is_original_name = original_name::is_original_name_restore(spec);
+
     // The two PURELY LOCAL checks run first, before any network round trip. A
     // local refusal should not need a reachable broker, and putting them first
     // is what lets `guard_cli.rs` distinguish "refused by the mapping guard"
@@ -247,9 +317,12 @@ pub fn run(
         .iter()
         .map(|t| (t.clone(), format!("{prefix}{t}")))
         .collect();
-    // `check_topic_mapping_coverage` returns `Result<(), GuardRefusal>`; `?`
-    // converts it into `DrillError::Guard` via the `#[from]` impl.
-    check_topic_mapping_coverage(&spec.source.topics, &topic_mapping)?;
+    // `check_topic_mapping` returns `Result<(), GuardRefusal>`; `?` converts
+    // it into `DrillError::Guard` via the `#[from]` impl. The identity mapping
+    // is allowed ONLY for a plan whose shape opted in above (PROD-15.1), and
+    // there it is required for every topic; the conditions it needs are proved
+    // below, before anything is written.
+    check_topic_mapping(&spec.source.topics, &topic_mapping, is_original_name)?;
 
     // **PROD-11.1, the SHAPE of the replay selection**, purely local: a
     // partition subset for a topic the plan does not select, an empty subset,
@@ -627,19 +700,111 @@ pub fn run(
         .into());
     }
 
+    // **PROD-15.1, conditions 3 and 4**, after the absence refusal above
+    // (condition 2, the same refusal every restore gets) and BEFORE G-TS,
+    // whose `LogAppendTime` arm is the one write phase 0 makes. Every refusal
+    // here is exit 3 with nothing written.
+    let (original_name_admission, probe) = if is_original_name {
+        let admission =
+            original_name_conditions(spec, allowed, reader, &target_cluster_id, original)?;
+        // **Condition 7.** The probe never borrows an original name: it is
+        // created under the scratch prefix the deleter is scoped to, named
+        // from the approved bytes, and it must be free.
+        let probe = original_name::probe_topic_name(
+            &spec.target.topic_mapping_prefix,
+            &logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
+        );
+        let unusable = if !logweir_core::guard::topic_name_is_kafka_legal(&probe) {
+            Some("is not a name a broker accepts")
+        } else if topic_mapping.contains_key(&probe) {
+            Some("is one of the restored names")
+        } else if topics.iter().any(|t| t.name == probe) {
+            Some("already exists on the target")
+        } else {
+            None
+        };
+        if let Some(why) = unusable {
+            return Err(GuardRefusal(format!(
+                "{}: the LogAppendTime override probe of an original-name restore is created \
+                 under target.topic_mapping_prefix, never under an original name, as `{probe}`, \
+                 which {why}; delete it or change target.topic_mapping_prefix (the plan's \
+                 scratch prefix); nothing was written",
+                original_name::ORIGINAL_NAME_PROBE_UNUSABLE
+            ))
+            .into());
+        }
+        (Some(admission), Some(probe))
+    } else {
+        (None, None)
+    };
+
     // **Guard G-TS.** The target-topic preflight, after the cluster-identity,
     // marker and target-absence checks and before anything else. The absence
     // check comes FIRST on purpose: the `LogAppendTime` arm below creates the
     // first mapped target name as its probe, and it may only do that to a name
-    // this phase has just proved absent.
-    let topic_preflight = target_topic_preflight(spec, &topic_mapping, reader, creator, deleter)?;
+    // this phase has just proved absent. An original-name restore's probe is
+    // its own scratch name (condition 7 above).
+    let topic_preflight = target_topic_preflight(
+        spec,
+        &topic_mapping,
+        probe.as_deref(),
+        reader,
+        creator,
+        deleter,
+    )?;
 
     Ok(Admitted {
         target_cluster_id,
         topic_mapping,
         topic_mapping_prefix: prefix,
         topic_preflight,
+        original_name: original_name_admission,
     })
+}
+
+/// **PROD-15.1, conditions 3 and 4**, for a plan that passed condition 1 and
+/// whose every restored name phase 0 has just proved absent.
+///
+/// 3. The target is not the source cluster — every known source cluster id
+///    (the verified receipt's, then the allowlist file's) differs from it — or
+///    every broker reports `auto.create.topics.enable=false`. A broker that
+///    cannot be read is exit 1 (a `KafkaError`, FX-4's rule for a refused
+///    read); one that answers without the key, or with anything but `false`,
+///    is a refusal (exit 3).
+/// 4. Somewhere was looked for a declarative owner of the restored names, and
+///    none was found unless the plan chose the owner path.
+fn original_name_conditions(
+    spec: &DrillSpec,
+    allowed: &AllowedClusters,
+    reader: &dyn ClusterReader,
+    target_cluster_id: &str,
+    original: &OriginalNameInputs,
+) -> Result<OriginalNameAdmission, DrillError> {
+    let known: Vec<String> = original
+        .receipt_source_cluster_id
+        .iter()
+        .chain(allowed.source_cluster_id.iter())
+        .cloned()
+        .collect();
+    let relation = original_name::source_relation(&known, target_cluster_id);
+    if !matches!(relation, SourceRelation::TargetIsNotSource { .. }) {
+        let answers = reader.broker_config_value_all(original_name::AUTO_CREATE_TOPICS_KEY)?;
+        original_name::require_auto_create_disabled(&relation, target_cluster_id, &answers)
+            .map_err(GuardRefusal)?;
+    }
+    let block = spec.target.original_name().cloned().unwrap_or_default();
+    let owners = original_name::owner_verdict(
+        &spec.source.topics,
+        OwnerInputs {
+            declared: block.owners.as_deref(),
+            kafka_topic_resources: original.kafka_topic_owners.as_ref(),
+            receipt: original.receipt_owners.as_ref(),
+        },
+        block.owner_path,
+        &relation,
+    )
+    .map_err(GuardRefusal)?;
+    Ok(OriginalNameAdmission { relation, owners })
 }
 
 /// **Guard G-TS**, the refusing half.
@@ -689,6 +854,7 @@ pub fn run(
 fn target_topic_preflight(
     spec: &DrillSpec,
     topic_mapping: &BTreeMap<String, String>,
+    probe_name: Option<&str>,
     reader: &dyn ClusterReader,
     creator: &dyn TopicCreator,
     deleter: &dyn TopicDeleter,
@@ -767,7 +933,13 @@ fn target_topic_preflight(
     if timestamp_type != LOG_APPEND_TIME {
         return Ok(preflight);
     }
-    let Some(probe) = topic_mapping.values().next().cloned() else {
+    // PROD-15.1: an original-name restore's probe is its own scratch name
+    // (`original_name::probe_topic_name`), never a restored name; every other
+    // restore borrows the first mapped target, as before.
+    let Some(probe) = probe_name
+        .map(str::to_string)
+        .or_else(|| topic_mapping.values().next().cloned())
+    else {
         // No mapped target topic at all. `check_topic_mapping_coverage` above
         // has already refused an unmapped SELECTED topic, so this is reachable
         // only from a spec that selects nothing — there is nothing to probe and
@@ -941,24 +1113,52 @@ pub fn create_target_topics(
     if specs.is_empty() {
         return Ok(());
     }
+    // **PROD-15.1, condition 6: CREATION IS EXCLUSIVE, AND A RACE LOSES BY
+    // NAME.** Phase 0 proved every mapped name absent; phases 1–5 have run
+    // since. A name that exists NOW was created by someone else in between —
+    // a producer on a cluster that auto-creates, an operator, a declarative
+    // owner — and this run must never write into it. Looked for once more
+    // here, so the common race refuses before ANY topic of this run is
+    // created; `CreateTopics` itself then fails on a name that appears in the
+    // last instant, and that answer is the same refusal. Both modes: the
+    // creation step is one step, and the rule is the same.
+    let existing = reader.list_topics()?;
+    let appeared: Vec<&str> = specs
+        .iter()
+        .filter(|spec| existing.iter().any(|t| t.name == spec.name))
+        .map(|spec| spec.name.as_str())
+        .collect();
+    if !appeared.is_empty() {
+        return Err(target_topic_appeared(&appeared, &[]));
+    }
     // The slice outlives the `NewTopic`s built from it inside the impl — see
     // `RdKafkaReader::create_topics`, which cannot compile otherwise.
     let results = creator.create_topics(&specs)?;
+    let mut lost: Vec<String> = Vec::new();
+    let mut failed: Option<(String, String)> = None;
     for (name, r) in results {
         match r {
             Ok(()) => preflight.topics_created.push(name),
+            Err(e) if logweir_kafka::rdkafka_reader::is_topic_already_exists(&e) => lost.push(name),
             Err(e) => {
-                return Err(DrillError::Operational(format!(
-                    "target topic `{name}` could not be created with the pinned configuration \
-                     ({}): {e}",
-                    TARGET_TOPIC_CONFIGS
-                        .iter()
-                        .map(|(k, v)| format!("{k}={v}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )))
+                failed.get_or_insert((name, e));
             }
         }
+    }
+    if !lost.is_empty() {
+        let lost: Vec<&str> = lost.iter().map(String::as_str).collect();
+        return Err(target_topic_appeared(&lost, &preflight.topics_created));
+    }
+    if let Some((name, e)) = failed {
+        return Err(DrillError::Operational(format!(
+            "target topic `{name}` could not be created with the pinned configuration \
+             ({}): {e}",
+            TARGET_TOPIC_CONFIGS
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
     }
     // FX-18: the engine is handed topics the cluster SERVES, not topics the
     // controller has merely committed. The engine retries
@@ -980,6 +1180,37 @@ pub fn create_target_topics(
             })?;
     }
     Ok(())
+}
+
+/// **PROD-15.1, condition 6.** The race, lost by name: exit 1 (phases 0–5
+/// have run, `docs/stability.md`'s phase-5/6 ruling), with no write into any
+/// name someone else created. Topics THIS run created in the same request
+/// before losing are named and left in place, empty: an original name is
+/// never deleted by Logweir, and a prefixed one is the operator's to remove
+/// once they have looked at who created its neighbour.
+fn target_topic_appeared(appeared: &[&str], created_by_this_run: &[String]) -> DrillError {
+    let names = |list: &mut dyn Iterator<Item = &str>| {
+        list.map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let created = if created_by_this_run.is_empty() {
+        "This run created no topic.".to_string()
+    } else {
+        format!(
+            "This run created {} in the same request, before losing; they hold no record and are \
+             left in place — Logweir never deletes a name it may not own.",
+            names(&mut created_by_this_run.iter().map(String::as_str))
+        )
+    };
+    DrillError::Operational(format!(
+        "{}: mapped target topic(s) {} exist now, although phase 0 found every mapped name \
+         absent: someone created them while this run was admitted (a producer on a cluster that \
+         auto-creates, an operator, a declarative owner). Creation is exclusive, so the restore \
+         stops here and writes nothing into a topic it did not create. {created}",
+        logweir_core::original_name::TARGET_TOPIC_APPEARED,
+        names(&mut appeared.iter().copied())
+    ))
 }
 
 #[cfg(test)]

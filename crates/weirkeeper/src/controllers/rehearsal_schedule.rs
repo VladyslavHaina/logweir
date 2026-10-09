@@ -847,6 +847,9 @@ pub fn child_restore(
                 mode: TargetMode::Scratch,
                 topic_naming: TopicNaming {
                     prefix: order.prefix.clone(),
+                    // A rehearsal is a scratch drill: never an original-name
+                    // restore (PROD-15.1).
+                    original_name: None,
                 },
             },
             deadline_seconds: i64::from(spec.bounds.deadline_seconds),

@@ -491,6 +491,27 @@ pub fn reference_fits(reference: &str) -> bool {
         && !reference.chars().any(char::is_control)
 }
 
+/// The YAML documents of a `--kafka-topic-resources` file, as `kubectl get
+/// kafkatopics -A -o yaml` writes it (one `List`) or as separate documents;
+/// empty documents are skipped. ONE parser for every command that takes the
+/// file (`backup run`, PROD-05.1; `restore run`, PROD-15.1), so the two cannot
+/// read one file two ways.
+///
+/// # Errors
+///
+/// The YAML error, naming the document's failure.
+pub fn parse_resource_documents(text: &str) -> Result<Vec<serde_yaml::Value>, String> {
+    let mut docs = Vec::new();
+    for doc in serde_yaml::Deserializer::from_str(text) {
+        let value = <serde_yaml::Value as serde::Deserialize>::deserialize(doc)
+            .map_err(|e| format!("not YAML: {e}"))?;
+        if !value.is_null() {
+            docs.push(value);
+        }
+    }
+    Ok(docs)
+}
+
 /// **STRIMZI OWNERS, FROM `KafkaTopic` RESOURCES.**
 ///
 /// `resources` are parsed YAML documents as `kubectl get kafkatopics -o yaml`

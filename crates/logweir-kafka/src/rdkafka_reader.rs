@@ -45,6 +45,13 @@ pub struct RdKafkaReader {
     /// protection was "the caller passed the right names" (see
     /// `delete_topics`'s doc comment for the fuller rationale).
     scratch_prefix: Option<String>,
+    /// **PROD-15.1.** Names `delete_topics` refuses WHATEVER the prefix: the
+    /// source topics' own names, set by the drill via
+    /// [`RdKafkaReader::with_protected_names`]. An original topic name may
+    /// start with the scratch prefix (a source topic called `drill-orders`
+    /// under `topic_mapping_prefix: drill-`), and teardown must never delete
+    /// an original-name topic.
+    protected_names: std::collections::BTreeSet<String>,
 }
 
 /// The two TLS controls every TLS arm of [`RdKafkaReader::client_config`] sets.
@@ -249,7 +256,18 @@ impl RdKafkaReader {
             position_bound: DEFAULT_POSITION_BOUND,
             admin_bound: crate::groups::DEFAULT_ADMIN_BOUND,
             scratch_prefix: None,
+            protected_names: std::collections::BTreeSet::new(),
         })
+    }
+
+    /// **PROD-15.1.** Names this reader's `delete_topics` never deletes,
+    /// whatever the scratch prefix: a drill passes its source topics, so no
+    /// teardown, probe clean-up or later caller can delete a topic under its
+    /// ORIGINAL name — the one name a restore under the original names writes.
+    #[must_use]
+    pub fn with_protected_names(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.protected_names.extend(names);
+        self
     }
 
     /// The admin client, for `crate::rdkafka_admin`'s calls through
@@ -869,6 +887,75 @@ impl ClusterReader for RdKafkaReader {
         Ok(out)
     }
 
+    /// **PROD-15.1.** [`Self::broker_configs`]'s read, for EVERY broker id
+    /// the metadata lists, in ONE DescribeConfigs request; each broker's
+    /// answer is held to T13 exactly as the one-broker read is (an empty
+    /// answer is a refused read, an error), so `None` means only "this broker
+    /// answered and did not name the key".
+    fn broker_config_value_all(&self, key: &str) -> Result<Vec<(i32, Option<String>)>, KafkaError> {
+        use rdkafka::admin::{AdminOptions, OwnedResourceSpecifier, ResourceSpecifier};
+        let md = self
+            .consumer
+            .fetch_metadata(None, T)
+            .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        let ids: Vec<i32> = md.brokers().iter().map(|b| b.id()).collect();
+        if ids.is_empty() {
+            return Err(KafkaError::Unreachable(
+                "cluster metadata listed no broker, so there is no broker to describe configs for"
+                    .to_string(),
+            ));
+        }
+        let resources: Vec<ResourceSpecifier<'_>> = ids
+            .iter()
+            .map(|id| ResourceSpecifier::Broker(*id))
+            .collect();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let res = rt
+            .block_on(
+                self.admin
+                    .describe_configs(&resources, &AdminOptions::new().request_timeout(Some(T))),
+            )
+            .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        if res.len() != ids.len() {
+            return Err(KafkaError::Client(format!(
+                "DescribeConfigs for {} broker(s) returned {} result(s); a short or long answer \
+                 cannot be matched to the brokers it describes",
+                ids.len(),
+                res.len()
+            )));
+        }
+        // Matched by the resource EACH ANSWER NAMES, never by position: a
+        // broker id the answers do not name is an error, not an absent value.
+        let mut by_broker: BTreeMap<i32, Option<String>> = BTreeMap::new();
+        for r in res {
+            let cfg =
+                r.map_err(|e| KafkaError::Client(format!("DescribeConfigs on a broker: {e}")))?;
+            let OwnedResourceSpecifier::Broker(id) = cfg.specifier else {
+                return Err(KafkaError::Client(format!(
+                    "DescribeConfigs for brokers answered for {:?}",
+                    cfg.specifier
+                )));
+            };
+            let answer = Self::broker_answer(id, cfg)?;
+            by_broker.insert(id, answer.get(key).cloned());
+        }
+        ids.iter()
+            .map(|id| {
+                by_broker
+                    .remove(id)
+                    .map(|value| (*id, value))
+                    .ok_or_else(|| {
+                        KafkaError::Client(format!(
+                            "DescribeConfigs returned no answer for broker {id}"
+                        ))
+                    })
+            })
+            .collect()
+    }
+
     fn consume_range(
         &self,
         topic: &str,
@@ -1056,6 +1143,18 @@ pub fn new_topics_for(specs: &[NewTopicSpec]) -> Vec<rdkafka::admin::NewTopic<'_
         .collect()
 }
 
+/// **PROD-15.1.** Whether a per-topic `create_topics` failure is the
+/// broker's `TOPIC_ALREADY_EXISTS` — the exclusive create losing to a name
+/// that appeared after phase 0 proved it absent.
+///
+/// The creator reports a failure as the error code's text (`(name, code)`
+/// rendered by `RDKafkaErrorCode`'s `Display`), so this compares against that
+/// one code's own rendering rather than a hand-written string.
+#[must_use]
+pub fn is_topic_already_exists(error: &str) -> bool {
+    error == rdkafka::types::RDKafkaErrorCode::TopicAlreadyExists.to_string()
+}
+
 impl TopicCreator for RdKafkaReader {
     /// **Guard G-TS.** One `rdkafka::admin::NewTopic` per `NewTopicSpec`, with
     /// `.set(k, v)` called for each entry of `configs` IN ORDER.
@@ -1165,7 +1264,15 @@ impl TopicDeleter for RdKafkaReader {
         let mut allowed: Vec<&str> = Vec::new();
         let mut out: Vec<(String, Result<(), String>)> = Vec::new();
         for n in names {
-            if n.starts_with(prefix) {
+            if self.protected_names.contains(n) {
+                out.push((
+                    n.clone(),
+                    Err(format!(
+                        "delete_topics refused: {n:?} is a source topic's own name, and Logweir \
+                         never deletes a topic under its original name"
+                    )),
+                ));
+            } else if n.starts_with(prefix) {
                 allowed.push(n.as_str());
             } else {
                 out.push((

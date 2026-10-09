@@ -81,7 +81,12 @@ pub const MAX_TOPIC_MAPPING_ROWS: usize = 1000;
 ///   `mapping_identity` for a target equal to its source, which is a restore
 ///   writing over the topic it came from
 ///   (`logweir_core::guard::check_topic_mapping_coverage`).
-fn validate_topic_mapping(rows: &[TopicMappingRow], prefix: &str, errors: &mut Vec<FieldError>) {
+fn validate_topic_mapping(
+    rows: &[TopicMappingRow],
+    prefix: &str,
+    original_name: bool,
+    errors: &mut Vec<FieldError>,
+) {
     if rows.is_empty() {
         errors.push(FieldError::new(
             "topicMapping",
@@ -122,13 +127,16 @@ fn validate_topic_mapping(rows: &[TopicMappingRow], prefix: &str, errors: &mut V
             ));
             continue;
         }
-        if row.target == row.source {
+        // PROD-15.1: the identity map is the one mapping an original-name
+        // restore has, and it is refused everywhere else.
+        if row.target == row.source && !original_name {
             errors.push(FieldError::new(
                 format!("topicMapping[{index}].target"),
                 "mapping_identity",
                 format!(
                     "maps `{}` onto itself; a restore writes to a NEW topic and the target \
-                     must differ from the source",
+                     must differ from the source (a restore under the original names sets \
+                     target.topicNaming.originalName)",
                     row.source
                 ),
             ));
@@ -297,11 +305,34 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
         ));
     }
     let prefix = &request.target.topic_naming.prefix;
-    if prefix.is_empty() || prefix.len() > 128 || !validate::is_topic_name(prefix) {
+    // PROD-15.1: `originalName: true` is the one request whose prefix is
+    // empty — a restore under the original topic names, into topics that do
+    // not exist (OD-2) — and only in `newTopic` mode. Every other request
+    // keeps the non-empty prefix it always needed.
+    let original_name = request.target.topic_naming.original_name == Some(true);
+    if original_name {
+        if !matches!(request.target.mode, RestoreMode::NewTopic) {
+            errors.push(FieldError::new(
+                "target.topicNaming.originalName",
+                "requires_new_topic",
+                "a restore under the original topic names is a `newTopic` restore: a scratch \
+                 drill never restores under the original names",
+            ));
+        }
+        if !prefix.is_empty() {
+            errors.push(FieldError::new(
+                "target.topicNaming.prefix",
+                "prefix_with_original_name",
+                "must be empty with originalName: a restore under the original topic names \
+                 maps every topic onto its own name",
+            ));
+        }
+    } else if prefix.is_empty() || prefix.len() > 128 || !validate::is_topic_name(prefix) {
         errors.push(FieldError::new(
             "target.topicNaming.prefix",
             "invalid_prefix",
-            "a non-empty topic-name prefix is required: a restore only writes new topics",
+            "a non-empty topic-name prefix is required: a restore only writes new topics (a \
+             restore under the original topic names sets originalName instead)",
         ));
     }
     // THE MAPPING IS CHECKED AGAINST THE PREFIX ABOVE, and only when that
@@ -331,11 +362,10 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
                  route never parses, so nothing here could check the declaration against the \
                  prefix the run would use",
             ));
-        } else if errors
-            .iter()
-            .all(|e| e.field != "target.topicNaming.prefix")
-        {
-            validate_topic_mapping(rows, prefix, &mut errors);
+        } else if errors.iter().all(|e| {
+            e.field != "target.topicNaming.prefix" && e.field != "target.topicNaming.originalName"
+        }) {
+            validate_topic_mapping(rows, prefix, original_name, &mut errors);
         }
     }
     if !(60..=86_400).contains(&request.deadline_seconds) {
@@ -425,6 +455,10 @@ pub fn build(
                 },
                 topic_naming: TopicNaming {
                     prefix: request.target.topic_naming.prefix.clone(),
+                    // PROD-15.1: stored only when true, so every other
+                    // request stores the object it always did.
+                    original_name: (request.target.topic_naming.original_name == Some(true))
+                        .then_some(true),
                 },
             },
             deadline_seconds: request.deadline_seconds,
@@ -690,10 +724,26 @@ fn existing_is_ours(
         && doc.policy.name == policy.name
         && doc.policy.digest == policy.digest()
         && doc.authorization_mode == policy.mode
+        // PROD-15.1: and the approval subject this Restore declares.
+        && doc.approval_subject.as_deref() == restore_approval_subject(restore).wire()
         // A replay must also carry the ticket it signed; `None` is "any"
         // (the approval route, which reads the confirmation as it is).
         && ticket.is_none_or(|t| doc.ticket.as_deref() == t);
     ours.then_some(doc)
+}
+
+/// **PROD-15.1.** The approval subject a stored Restore needs, from its own
+/// declaration (`spec.target.topicNaming.originalName`) — what the console
+/// signs into the authorization document and nothing else. The controller
+/// holds the declaration to the plan before any Job exists, and refuses an
+/// approval whose signed subject is not the plan's.
+#[must_use]
+pub fn restore_approval_subject(restore: &Restore) -> logweir_core::original_name::ApprovalSubject {
+    if restore.spec.target.topic_naming.is_original_name() {
+        logweir_core::original_name::ApprovalSubject::OriginalName
+    } else {
+        logweir_core::original_name::ApprovalSubject::Ordinary
+    }
 }
 
 /// The audit record's policy identity: `<name>@<snapshot digest>`, or the
@@ -813,6 +863,7 @@ async fn authorize_submission(
         },
         state.now(),
         ticket.map(str::to_string),
+        restore_approval_subject(restore),
     );
     let bytes = doc.to_bytes();
     let sidecar = key
@@ -1218,6 +1269,31 @@ async fn record_legacy_approval(
                 signed_hash.as_deref().unwrap_or("none"),
                 restore.name_any()
             ),
+        )]));
+    }
+    // PROD-15.1: the signed approval subject must be the one this Restore
+    // needs, refused here as the plan hash is — before an Approval exists
+    // that the controller would refuse (`ApprovalSubjectMismatch`).
+    let signed_subject = serde_json::from_str::<serde_json::Value>(&approval_bytes)
+        .ok()
+        .and_then(|v| {
+            v.get("approval_subject")
+                .and_then(|h| h.as_str())
+                .map(str::to_string)
+        });
+    let subject_refusal =
+        logweir_core::original_name::ApprovalSubject::from_wire(signed_subject.as_deref())
+            .and_then(|signed| {
+                logweir_core::original_name::check_approval_subject(
+                    restore_approval_subject(restore),
+                    signed,
+                )
+            });
+    if let Err(reason) = subject_refusal {
+        return Err(ApiError::validation(vec![FieldError::new(
+            "approvalBytes",
+            "approval_subject_mismatch",
+            reason,
         )]));
     }
     let approval_name = restore.spec.approval_ref_name().to_string();

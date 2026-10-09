@@ -397,6 +397,7 @@ pub fn document(
     requester: Requester,
     issued_at: DateTime<Utc>,
     ticket: Option<String>,
+    approval_subject: logweir_core::original_name::ApprovalSubject,
 ) -> RestoreAuthorization {
     RestoreAuthorization {
         format_version: RESTORE_AUTHORIZATION_FORMAT_VERSION.to_string(),
@@ -418,6 +419,10 @@ pub fn document(
         issued_at,
         expires_at: issued_at + chrono::Duration::seconds(policy.max_age_seconds),
         ticket,
+        // PROD-15.1: the separate approval subject, from the Restore's own
+        // declaration and nothing else — absent for an ordinary restore, so
+        // its document is byte for byte what it was.
+        approval_subject: approval_subject.wire().map(str::to_string),
     }
 }
 
@@ -524,6 +529,7 @@ mod tests {
             },
             at,
             None,
+            logweir_core::original_name::ApprovalSubject::Ordinary,
         );
         assert_eq!(
             doc.expires_at - doc.issued_at,

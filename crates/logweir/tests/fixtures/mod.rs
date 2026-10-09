@@ -1768,6 +1768,10 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             policy_snapshot: None,
             confirmation_key: None,
             evidence_keys: None,
+            // PROD-15.1: no KafkaTopic resources; a row that drives an
+            // original-name restore states its owners in the plan.
+            kafka_topic_resources: None,
+            strimzi_cluster: None,
         },
         run_id: logweir::ids::new_run_id(),
         ctx: logweir::drill::Ctx {
@@ -1785,6 +1789,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             // (PLAT-07.1). `tests/tls_ca.rs` drives the other value.
             target_tls_ca_file: None,
             target_client_certificate: None,
+            // PROD-15.1: nothing known about the source or owners; an
+            // original-name row sets what it needs.
+            original_name: logweir::drill::phase0_admit::OriginalNameInputs::default(),
             // FX-4: an unbound plan's coverage — UNKNOWN for every topic.
             // `tests/config_coverage_drill.rs` drives the captured value.
             source_config_coverage: logweir_core::backup_receipt::SourceConfigCoverage::unknown(),

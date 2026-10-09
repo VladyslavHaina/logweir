@@ -1,0 +1,1309 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://logweir.dev/schemas/logweir-drill-scorecard-1.8.0.json",
+  "title": "Scorecard",
+  "type": "object",
+  "required": [
+    "approval",
+    "engine",
+    "evidence",
+    "format_version",
+    "integrity",
+    "last_phase_completed",
+    "measured",
+    "objectives",
+    "outcome",
+    "phases",
+    "requested_at",
+    "run_id",
+    "sample",
+    "source",
+    "target",
+    "target_diff",
+    "topic_parity"
+  ],
+  "properties": {
+    "approval": {
+      "$ref": "#/definitions/ApprovalInfo"
+    },
+    "approval_validated_at": {
+      "default": null,
+      "type": "string",
+      "format": "date-time",
+      "nullable": true
+    },
+    "engine": {
+      "$ref": "#/definitions/EngineInfo"
+    },
+    "engine_subreport": {
+      "default": null,
+      "allOf": [
+        {
+          "$ref": "#/definitions/EngineSubreport"
+        }
+      ],
+      "nullable": true
+    },
+    "evidence": {
+      "$ref": "#/definitions/EvidenceInfo"
+    },
+    "format_version": {
+      "description": "Semver of the document format, and the field every reader checks FIRST: Global Constraint 12 — readers ignore unknown fields and refuse a higher major.\n\nThe schema PINS the major with a pattern rather than leaving the field an unconstrained string. Without it, a document reading `\"9.9.9\"` validated cleanly against the file named `logweir-drill-scorecard-1.0.0.json`, so a schema-only validator — the one route that does not go through `Scorecard::refuse_unreadable_major` — accepted exactly the document GC12 exists to refuse. The pattern allows any `1.x.y`, because a MINOR bump adds optional fields only and a 1.0.0 reader must still read it.",
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$"
+    },
+    "integrity": {
+      "$ref": "#/definitions/Integrity"
+    },
+    "last_phase_completed": {
+      "description": "Highest phase INDEX completed. The DOMAIN is eleven phase slots, -1 through 9 (Global Constraint 18, panel decision D1, 2026-09-03); -1 is the source-side `--from-cluster` capture phase, whose code lands in a follow-up, so v0.1.0 never emits it.\n\nWHAT A v0.1.0 SIGNED DOCUMENT CAN ACTUALLY CARRY IS 5, 6 or 7, and the reason is structural rather than incidental: `phase8_score::run` signs a frozen clone, so phase 8's own record — and phase 9's, which happens after the put — are pushed onto the in-memory document AFTER the bytes were signed. A drill that completed teardown therefore reads 7 here and is NOT a drill whose teardown was skipped; the teardown is attested in its own separately signed document. `drill run`'s console line quotes this same value so the two cannot disagree.\n\nA previous version of this comment added \"a value below -1 is impossible because the phase-0 admission guard refusing yields exit code 3 with last_phase_completed = -1\", which implied such a document exists. It does not: exit 3 writes NO scorecard at all. The lower bound is a domain rule, enforced by `validate_invariants`, not a description of anything v0.1 emits.",
+      "type": "integer",
+      "format": "int8"
+    },
+    "measured": {
+      "$ref": "#/definitions/Measured"
+    },
+    "objectives": {
+      "$ref": "#/definitions/Objectives"
+    },
+    "outcome": {
+      "$ref": "#/definitions/Outcome"
+    },
+    "phases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PhaseRecord"
+      }
+    },
+    "redactions": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Redaction"
+      }
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "sample": {
+      "$ref": "#/definitions/SampleInfo"
+    },
+    "source": {
+      "$ref": "#/definitions/SourceInfo"
+    },
+    "target": {
+      "$ref": "#/definitions/TargetInfo"
+    },
+    "target_diff": {
+      "$ref": "#/definitions/TargetDiffSummary"
+    },
+    "topic_parity": {
+      "$ref": "#/definitions/TopicParity"
+    },
+    "triggered_by": {
+      "default": null,
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "definitions": {
+    "ApprovalInfo": {
+      "type": "object",
+      "required": [
+        "approved_at",
+        "approver",
+        "key_id",
+        "plan_hash",
+        "self_attested",
+        "ticket"
+      ],
+      "properties": {
+        "approved_at": {
+          "description": "The human's OUT-OF-BAND timestamp. Explicitly NOT an input to any measured field in v0.1 (spec §9.3 phase 8).",
+          "type": "string",
+          "format": "date-time"
+        },
+        "approver": {
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "plan_hash": {
+          "type": "string"
+        },
+        "self_attested": {
+          "description": "true when the approval key equals the signing key. Labelled, never refused (spec §10).",
+          "type": "boolean"
+        },
+        "ticket": {
+          "type": "string"
+        }
+      }
+    },
+    "ArchiveIntegrity": {
+      "description": "Archive integrity over every segment of every restored partition.",
+      "type": "object",
+      "required": [
+        "offset_holes",
+        "records_decoded",
+        "segments",
+        "segments_failed",
+        "segments_unverified",
+        "segments_verified"
+      ],
+      "properties": {
+        "offset_holes": {
+          "description": "Source offsets inside the decoded span that no archived record holds and no recorded gap or pruned range explains — a compacted source's holes. Disclosed, never a fault: the archive holds what the source held when it was read (PROD-01.1 C7).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "records_decoded": {
+          "description": "Archived records decoded, inside the window or not.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "segments": {
+          "description": "Segments the manifest lists for the restored partitions.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "segments_failed": {
+          "description": "Segment keys examined and found wrong: a sha256 mismatch, an object the store does not hold, or a decoded count or offset range that disagrees with the manifest.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "segments_unverified": {
+          "description": "Segment keys that could not be examined: no sha256 (written before 0.21), a format the decoder does not read, or past the bound.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "segments_verified": {
+          "description": "Segments read back whose sha256 matched the manifest, whose records decoded, and whose decoded count and offsets agreed with the manifest.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "AuthSummary": {
+      "description": "A nested optional block. GC12 as amended permits nested optional fields in tag 1 and no new top-level property: TargetInfo's own properties are not the scorecard's 21.\n\n**Never a password, and no field that could hold one** — the same rule `crate::backup_receipt::ReceiptAuth` and `crate::engine::AuthRender` state, for the same reason: the secret reaches the engine through its own `${VAR}` expansion and is never interpolated by us, so it can never be interpolated into a document we then sign and publish.\n\n`mode` is REQUIRED once the block is present, and blank is not a synonym for `plaintext`: `validate_invariants`'s two `target.auth` arms refuse a blank mode outright (ruling R-A's `trim().is_empty()`), because a SCRAM run recorded as plaintext by omission is exactly the claim an auditor would read the wrong way round. The way to say plaintext is to write no block.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "description": "**A CLOSED SET, VERSIONED: `\"plaintext\"` or `\"scramSha512\"` in every format, and from 1.5.0 also `\"scramSha256\"`, `\"plain\"` or `\"mtls\"` (PROD-01.3)** — the values `crate::backup_receipt::ReceiptAuth::mode` carries, and for the same reason: they are `crate::spec::AuthSpec`'s serde tag values, the `KafkaCluster` CRD's `auth.mode` enum byte for byte, and the only strings `AuthSpec::mode_str()` — which is what `logweir::drill::target_info` fills this field from — can return.\n\nTask 5b shipped this field with NO documented value set at all, and its review proved by execution that a scorecard carrying `target.auth = {\"mode\": \"totally-made-up\"}` verified 0/0 at both readers. `validate_invariants`'s THIRD `target.auth` arm closes it, mirrored word for word in `docs/verify_scorecard.py`.",
+          "type": "string"
+        },
+        "username": {
+          "default": null,
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "CompleteVerification": {
+      "description": "**PROD-08.1.** A complete verification's result: every archived segment of every restored partition read, hashed and decoded; the expected output computed from each record's own timestamp; every restored record compared with it by `x-original-offset`.",
+      "type": "object",
+      "required": [
+        "archive",
+        "covered",
+        "partitions",
+        "replay",
+        "window"
+      ],
+      "properties": {
+        "archive": {
+          "description": "Archive integrity, over every segment of every restored partition.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ArchiveIntegrity"
+            }
+          ]
+        },
+        "covered": {
+          "description": "`true` when every partition was compared; `false` when the bound stopped the verification or a partition could not be compared (an archive whose records carry no `x-original-offset`, a segment that could not be decoded). Arms IV-5 and IV-6: `false` names its reason and is never a pass.",
+          "type": "boolean"
+        },
+        "incomplete_reason": {
+          "description": "Why `covered` is `false`; absent when it is `true` (arm IV-5).",
+          "default": null,
+          "type": "string",
+          "nullable": true
+        },
+        "max_records": {
+          "description": "The plan's `sample.complete_max_records`, the bound in force; absent when the plan set none.",
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        },
+        "partitions": {
+          "description": "One entry per partition of every restored topic, sorted by topic and partition.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PartitionVerification"
+          }
+        },
+        "replay": {
+          "description": "The replay comparison, summed over every compared partition (arm IV-7: the sums of `partitions[].replay`).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReplayComparison"
+            }
+          ]
+        },
+        "window": {
+          "description": "The window the expected output was selected by, on each archived record's OWN timestamp: see [`CompleteWindow`].",
+          "allOf": [
+            {
+              "$ref": "#/definitions/CompleteWindow"
+            }
+          ]
+        }
+      }
+    },
+    "CompleteWindow": {
+      "description": "The selection the expected output is computed with. A record is expected when its own timestamp is at or before `end_ms` (inclusive, as the engine's restore filter is) and, when `start_ms` is present, at or after it.",
+      "type": "object",
+      "required": [
+        "end_ms"
+      ],
+      "properties": {
+        "end_ms": {
+          "description": "The restore window's end: the plan's point in time, or its sample window end when it states none. Inclusive.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "start_ms": {
+          "description": "ABSENT means NO LOWER BOUND: the plan's window starts at the archive (guard G-WIN, `ArchiveManifest`), so every archived record at or before `end_ms` is expected — including one older than every segment's FIRST record, which the engine's window floor drops (PROD-01.1 ts-floor, acceptance row 08-3).",
+          "default": null,
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        }
+      }
+    },
+    "EngineInfo": {
+      "type": "object",
+      "required": [
+        "digest",
+        "execution",
+        "id",
+        "levers",
+        "matrix_verdict",
+        "version"
+      ],
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "execution": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "levers": {
+          "$ref": "#/definitions/Levers"
+        },
+        "matrix_verdict": {
+          "$ref": "#/definitions/MatrixVerdict"
+        },
+        "matrix_verdict_reason": {
+          "description": "REQUIRED when `matrix_verdict` is `fail`; null otherwise. Enforced by `validate_invariants`.",
+          "default": null,
+          "type": "string",
+          "nullable": true
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "EngineSubreport": {
+      "type": "object",
+      "required": [
+        "body_b64",
+        "body_sha256",
+        "caveat",
+        "retained_verbatim",
+        "retrieved_from"
+      ],
+      "properties": {
+        "body_b64": {
+          "description": "The engine's evidence report as the EXACT bytes read from the bucket, base64 (RFC 4648 standard alphabet, padded).\n\nNOT a parsed `serde_json::Value`. OSO's envelope \"covers the exact, complete stored report bytes. No canonicalization is performed at verification time\" and \"no JSON parsing, re-serialization, or canonicalization influences the digest or signature check\" [VERIFIED U/kafka-backup/crates/kafka-backup-core/src/evidence/envelope.rs:5,254]. Re-emitting a parsed value through `to_deterministic_json`'s two-space `PrettyFormatter` would change whitespace, escaping and number formatting, so the digest OSO signed would no longer match and the SP1c exit criterion (\"the embedded engine sub-report round-trips through OSO's own `validation evidence-verify`\") could never be ticked.",
+          "type": "string"
+        },
+        "body_sha256": {
+          "description": "`sha256:<hex>` of the DECODED bytes, so an auditor can re-check the binding without base64-decoding anything.",
+          "type": "string"
+        },
+        "caveat": {
+          "type": "string"
+        },
+        "retained_verbatim": {
+          "type": "boolean"
+        },
+        "retrieved_from": {
+          "type": "string"
+        }
+      }
+    },
+    "EvidenceInfo": {
+      "description": "WHAT THIS BLOCK IS NOT: it is not evidence about the upload, and it is not a statement about the storage backend's capabilities.\n\nAll four fields describe the upload of THIS scorecard — an event that has not happened when the scorecard is signed, and cannot happen before it, because a signature covers bytes and the bytes must exist first. The scorecard is never re-serialised afterwards (that would invalidate the signature). So `crate::drill::phase8_score::run` ZEROES all four immediately before serialising, whatever the caller supplied, and every scorecard Logweir emits in v0.1 carries `{version_id: null, retain_until: null, immutable: false, create_only_enforced: false}`.\n\nRead that as **\"no proof was obtainable at signing time\"** — never as a finding about the object or the backend. The block deliberately UNDER-claims; what it buys is the guarantee that a valid Logweir signature can never cover an unsubstantiated WORM or create-only assertion.\n\nThe real post-upload readback IS published — in a second, separately signed document written after the put: `logweir/drills/<run_id>.receipt.json` plus its `.receipt.sig` sidecar (`crate::drill::phase8_score::PutReceipt`, Task 21a, discharging Task 20's carried obligation). It carries the observed `create_only_enforced`, `version_id`, `immutable` and `retain_until`, bound to the scorecard by the sha256 of the exact SIGNED BYTES. Read the two documents together: the scorecard is the measurement and under-claims about storage; the receipt is the storage evidence. `docs/stability.md` carries the adopter-facing version of this note.",
+      "type": "object",
+      "required": [
+        "create_only_enforced",
+        "immutable"
+      ],
+      "properties": {
+        "create_only_enforced": {
+          "description": "Always false in v0.1, on EVERY backend, including those whose conditional put was in fact used: whether the put was conditional is only known after it happens, and this document is signed first. `false` is NOT evidence that the backend lacks conditional put (spec §11) and NOT evidence that the object could have been overwritten — the two cases are indistinguishable in the signed document by design.",
+          "type": "boolean"
+        },
+        "immutable": {
+          "description": "Spec §6 C3 permits `true` ONLY after a provider readback. Always false in v0.1 — the readback happens after signing, and `object_store` 0.14 exposes no Object Lock / WORM API on any backend it can build, so there is nothing to read back. `false` means \"not proven here\"; it is NOT a claim that the object is mutable or unprotected.",
+          "type": "boolean"
+        },
+        "offset_report_key": {
+          "description": "The object key of the ENGINE's offset-mapping report for this run, `logweir/drills/<run_id>.offsets.json` (Task 9b, spec §6.1 N9).\n\n**A NESTED OPTIONAL FIELD, which is the only kind Global Constraint 12 as amended permits.** The scorecard stays at its frozen 21 top-level properties and 17 required ones; this is the third such field in tag 1 (after `target.auth`) and it pays GC12's full price in the same commit: both readers, a `SCRIPT_VERSION` bump, a corpus case with closed arithmetic, and the regenerated schema.\n\n`skip_serializing_if` is load-bearing, not tidiness: without it every document would gain a `\"offset_report_key\": null` line and the three checked-in signed fixtures under `e2e/fixtures/signed/` would stop verifying against their own sidecars. Absent means this run recorded no report — see `crate::drill::phase8_score::Signed::offset_report_key` in the `logweir` crate for the paths on which that is the truthful answer.\n\n# Why the report is uploaded at all\n\nThe engine writes it to a POD-LOCAL path [U:crates/kafka-backup-core/src/config.rs:857-858] and the pod is then deleted, so without this upload the one artefact describing what the restore's offsets map to would exist only for the lifetime of a container. It is evidence, not an instruction: Global Constraint 20 makes no offset commit anywhere in tag 1 and constraint 35 says tag 1 renders the report and applies nothing.",
+          "type": "string",
+          "nullable": true
+        },
+        "offset_report_sha256": {
+          "description": "`sha256:<hex>` of the EXACT offset-report bytes uploaded at `offset_report_key`, so a reader can bind the object to this signed document rather than trusting that the key still holds what the run wrote.\n\n**Present exactly when `offset_report_key` is.** The pair is checked by `validate_invariants` in both readers: a key with no digest names bytes nothing binds, and a digest with no key binds bytes nobody can fetch.",
+          "type": "string",
+          "nullable": true
+        },
+        "retain_until": {
+          "description": "Always null in v0.1: a retention date can only come from a provider readback performed after the put. NOT a claim that no retention applies.",
+          "default": null,
+          "type": "string",
+          "format": "date-time",
+          "nullable": true
+        },
+        "version_id": {
+          "description": "Always null in v0.1: the store's version id for this object is only known after the put, and the put follows the signature. NOT a claim that the bucket is unversioned.",
+          "default": null,
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "Integrity": {
+      "type": "object",
+      "required": [
+        "level",
+        "mismatches",
+        "records_sampled",
+        "records_sampled_matching",
+        "result"
+      ],
+      "properties": {
+        "level": {
+          "$ref": "#/definitions/IntegrityLevel"
+        },
+        "mismatches": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "partial_reason": {
+          "default": null,
+          "type": "string",
+          "nullable": true
+        },
+        "pass_rate_measured": {
+          "description": "MEASURED `records_sampled_matching / records_sampled`. The REQUESTED rate stays in `objectives.pass_rate`, so an auditor can read both the ask and the result off one document.\n\nNull in THREE cases, not one — a `byte-fingerprint` document with a null rate here is well-formed, not malformed: 1. `level` is not `byte-fingerprint` (also enforced by `validate_invariants`). 2. Not every selection's record lane reached a conclusion. A ratio over part of the sample, published as if it were the whole, is misleading even when every figure in it is true. 3. `records_sampled` is 0 — a zero denominator is withheld rather than published as NaN.\n\nDecided in one place, `crate::drill::phase7_verify::roll_up`.",
+          "default": null,
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "records_sampled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "records_sampled_matching": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "restoredPrincipalCouldConsume": {
+          "description": "SP3 only; null, never false, when not attempted. The wire name is camelCase because spec §6.1 and §14 SP3 both cite the path `integrity.restoredPrincipalCouldConsume`, and `format_version` freezes at 1.0.0 in this task — renaming later would be a MAJOR bump.",
+          "default": null,
+          "type": "boolean",
+          "nullable": true
+        },
+        "result": {
+          "$ref": "#/definitions/IntegrityResult"
+        },
+        "verification": {
+          "description": "**Format 1.4.0 (PROD-08.1).** What this verdict covered, structured: see [`Verification`].\n\nABSENT means NOT RECORDED — every document before 1.4.0, and one whose phase 7 never ran — and is read as SAMPLED, never as complete: before PROD-08.1 every drill sampled. Every 1.4.0 run that reaches phase 7 writes it. A nested optional field, which Global Constraint 12 as amended permits; `skip_serializing_if`, so every earlier document round-trips byte for byte.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Verification"
+            }
+          ],
+          "nullable": true
+        }
+      }
+    },
+    "IntegrityLevel": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "not-attempted"
+          ]
+        },
+        {
+          "description": "sha256(key‖value‖headers‖timestamp) reconciled per record.",
+          "type": "string",
+          "enum": [
+            "byte-fingerprint"
+          ]
+        },
+        {
+          "description": "The KBAK decoder returned Err(Unsupported); records were consumed but not reconciled against archive bytes (spec §11).",
+          "type": "string",
+          "enum": [
+            "consume-only"
+          ]
+        }
+      ]
+    },
+    "IntegrityResult": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        {
+          "description": "A selection whose evidence was inconclusive — something in the sample was not examined, so the drill cannot claim it. NOT a pass.\n\nA COMPACTED TOPIC DOES NOT REACH THIS in v0.1: it is reported as `fail`, through the same path a real mismatch takes. See `docs/stability.md`.",
+          "type": "string",
+          "enum": [
+            "partial"
+          ]
+        }
+      ]
+    },
+    "LeverState": {
+      "description": "Per-run readback of an engine lever (spec §9.3 phase 5, §7.2(a)).",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "honoured",
+            "ignored"
+          ]
+        },
+        {
+          "description": "`dry_run_check_segments` is not observable from DryRunReport; its only per-run readback is the absence of an unknown-key warning.",
+          "type": "string",
+          "enum": [
+            "unknown-not-observable"
+          ]
+        }
+      ]
+    },
+    "Levers": {
+      "type": "object",
+      "required": [
+        "dry_run_check_segments",
+        "header_preflight"
+      ],
+      "properties": {
+        "dry_run_check_segments": {
+          "$ref": "#/definitions/LeverState"
+        },
+        "header_preflight": {
+          "$ref": "#/definitions/LeverState"
+        },
+        "unknown_key_warnings": {
+          "description": "Every path the engine logged as `Ignoring unknown config key <path>`. A match on a Logweir-rendered key aborts the run (spec §7.2(a)).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "MatrixVerdict": {
+      "description": "The engine-matrix row THIS RUN established, decided once — in `logweir::drill::phase8_score::matrix_verdict_for` — immediately before the document is validated and signed.\n\nThis comment used to read \"copied from this engine tag's engine-matrix row; never re-derived per run\". That was never true of the shipped code: phase 5 raised the field to `Pass` the moment the `header_preflight` lever was honoured, and nothing lowered it afterwards, so a drill that blocked at preflight, restored nothing, failed its reconciliation or missed its RTO signed `matrix_verdict: \"pass\"` beside its own contradicting `outcome`. `docs/support-matrix.md` defines the five values; the decision function's doc comment carries the table.\n\nEvery variant serialises as a FLAT kebab-case string, so the field's schema is a plain enum and the auditor's ~20-line Python verifier never has to handle `string | object`. The reason for a `fail` lives in `EngineInfo.matrix_verdict_reason`, mirroring the `integrity.result`/`partial_reason` pair.",
+      "type": "string",
+      "enum": [
+        "pass",
+        "pass-degraded",
+        "fail",
+        "fail-lever-not-honoured",
+        "unsupported-lever-absent"
+      ]
+    },
+    "Measured": {
+      "type": "object",
+      "properties": {
+        "rpo_seconds": {
+          "description": "ARCHIVE COVERAGE GAP at the requested recovery point — NOT source-relative data loss.\n\n`requested_point_in_time - newest_restored_record`, in that order, and **never negative**: it is how far SHORT of the requested recovery point the newest restored record falls. A record at or beyond the requested point means no gap there, which is 0. A negative gap is not a smaller gap, it is a meaningless one, and a reader meeting `-90` here would most likely take it for \"no data loss\". Enforced by `validate_invariants`, so the rule holds for every writer, not only for today's single call site in `crate::drill::phase8_score`.",
+          "default": null,
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "rpo_source_relative_seconds": {
+          "description": "Source-relative data loss: how far behind the live source the restored data is. Null in v0.1 (the source is never contacted); becomes a number only under `--from-cluster`. **Never negative**, for the same reason as `rpo_seconds` and enforced by the same `validate_invariants` rule — a rule deliberately put in place BEFORE the first writer exists, so the `--from-cluster` implementation inherits it rather than has to invent it.",
+          "default": null,
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "rpo_source_relative_unmeasured_reason": {
+          "default": null,
+          "type": "string",
+          "nullable": true
+        },
+        "rto_excluding_preflight_seconds": {
+          "description": "THE value compared against objectives.rto_seconds (spec §9.3 phase 8).",
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        },
+        "rto_requested_to_verified_seconds": {
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        },
+        "rto_restore_only_seconds": {
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        },
+        "rto_seconds": {
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        }
+      }
+    },
+    "Objectives": {
+      "type": "object",
+      "properties": {
+        "met": {
+          "description": "The aggregate verdict over whichever objectives above are non-null.\n\n- `true`  — every non-null objective was met. - `false` — at least one non-null objective was missed. - `null`  — a `pass_rate` objective WAS requested but could not be measured (`integrity.pass_rate_measured` is null), so the aggregate is unmeasurable rather than satisfied.\n\nThe null condition is about the MEASURED rate, not this block's `pass_rate`. The earlier wording (\"null when pass_rate is null\") read the other way round and was wrong in the direction that matters: when `objectives.pass_rate` is null, no rate was asked for, nothing is unmeasurable, and `met` is a plain true/false over the remaining objectives. Decided in exactly one place, `crate::drill::phase8_score::decide`.",
+          "default": null,
+          "type": "boolean",
+          "nullable": true
+        },
+        "pass_rate": {
+          "default": null,
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "rpo_seconds": {
+          "description": "The REQUESTED maximum archive-coverage gap, copied verbatim from the adopter's spec. **Never negative** — a negative allowed gap is not a stricter objective, it is an unsatisfiable one (`measured.rpo_seconds` is itself non-negative, so `got <= want` could never hold), and a signed document asserting it would be incoherent. Enforced by `validate_invariants`; nothing else validates this value, since it travels straight from YAML into the signed document.",
+          "default": null,
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "rto_seconds": {
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        }
+      }
+    },
+    "OffsetRange": {
+      "description": "One inclusive source offset range of one partition, as the manifest records it.",
+      "type": "object",
+      "required": [
+        "from_offset",
+        "partition",
+        "to_offset",
+        "topic"
+      ],
+      "properties": {
+        "from_offset": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "partition": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "to_offset": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "topic": {
+          "type": "string"
+        }
+      }
+    },
+    "OriginalNameInfo": {
+      "description": "**PROD-15.1, scorecard format 1.8.0: the restore wrote under the source's ORIGINAL topic names**, into topics phase 0 proved absent and the run created itself, exclusively (`crate::original_name`). Present exactly on such a restore's documents.\n\nIt records what the run PROVED before it wrote, so a reader can tell the one original-name path from an ordinary restore and see which of OD-2's conditions admitted it: the separate approval subject and the approval mode it was verified under, which cluster condition held, where the run looked for a declarative owner and what it found, and whether the plan chose the owner path.\n\n**The restored topic is a NEW GENERATION of its name, never the original topic.** Kafka assigns topic ids at creation and none can be preserved; the block claims the name, not the identity (PROD-01.4 §7).",
+      "type": "object",
+      "required": [
+        "approval_mode",
+        "approval_subject",
+        "cluster_condition",
+        "owner_detection",
+        "owner_path",
+        "owners"
+      ],
+      "properties": {
+        "approval_mode": {
+          "description": "The approval document it was verified in ([`ORIGINAL_NAME_APPROVAL_MODES`], arm ON-5).",
+          "type": "string"
+        },
+        "approval_subject": {
+          "description": "`originalName`, the approval subject phase 1 verified (arm ON-4).",
+          "type": "string"
+        },
+        "cluster_condition": {
+          "description": "Which of OD-2's two cluster conditions admitted the identity mapping (`crate::original_name::CLUSTER_CONDITIONS`, arm ON-6): `targetIsNotSource` (a known source cluster id differs from `target.cluster_id`) or `autoCreateDisabled` (the target is, or may be, the source cluster, and every broker reported `auto.create.topics.enable=false`).",
+          "type": "string"
+        },
+        "owner_detection": {
+          "description": "Where the run looked for declarative owners of the restored names (`crate::original_name::OWNER_DETECTION_PLACES`): never empty, each place once (arm ON-8).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "owner_path": {
+          "description": "Whether the approved plan chose the owner path. Required for any owner found (arm ON-10).",
+          "type": "boolean"
+        },
+        "owners": {
+          "description": "Every owner found, sorted (arm ON-9).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/OriginalNameOwner"
+          }
+        },
+        "source_cluster_id": {
+          "description": "The source cluster id the condition compared, when one was known: the bound point's verified receipt, else the allowlist file's. Required beside `targetIsNotSource` (arm ON-7).",
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "OriginalNameOwner": {
+      "description": "One declarative owner an original-name restore found for a restored name.",
+      "type": "object",
+      "required": [
+        "found_in",
+        "kind",
+        "reference",
+        "topic"
+      ],
+      "properties": {
+        "found_in": {
+          "description": "The place that named it: one of `owner_detection`.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`strimzi` or `external`.",
+          "type": "string"
+        },
+        "reference": {
+          "description": "Where the desired state lives (a `KafkaTopic` `namespace/name`, a repository path).",
+          "type": "string"
+        },
+        "topic": {
+          "description": "The restored (original) topic name.",
+          "type": "string"
+        }
+      }
+    },
+    "Outcome": {
+      "description": "Spec §6.1. `drift` is deliberately NOT a v0.1 value — v0.1 collects no metadata. It returns as a minor bump when SP2 ships.",
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail-objective",
+        "fail-integrity",
+        "preflight-failed"
+      ]
+    },
+    "PartitionVerification": {
+      "description": "One partition of a complete verification.",
+      "type": "object",
+      "required": [
+        "compared",
+        "findings",
+        "offset_holes",
+        "partition",
+        "records_decoded",
+        "replay",
+        "segments",
+        "segments_verified",
+        "target_topic",
+        "topic"
+      ],
+      "properties": {
+        "compared": {
+          "description": "`false` when this partition was not compared — past the bound, or its expected output could not be established; `findings` says why.",
+          "type": "boolean"
+        },
+        "findings": {
+          "description": "The first findings, in words: which offsets are missing, duplicated, out of order or different, and why a partition was not compared. At most [`PARTITION_FINDINGS_CAP`] entries plus one that says how many were left out; the counts above are complete.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "offset_holes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "partition": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "records_decoded": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "replay": {
+          "$ref": "#/definitions/ReplayComparison"
+        },
+        "segments": {
+          "description": "Segments the manifest lists for this partition, and how many verified.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "segments_verified": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "target_topic": {
+          "description": "The restored topic it was compared with.",
+          "type": "string"
+        },
+        "topic": {
+          "description": "The archive-side (source) topic.",
+          "type": "string"
+        }
+      }
+    },
+    "PhaseRecord": {
+      "type": "object",
+      "required": [
+        "at",
+        "duration_ms",
+        "name",
+        "outcome",
+        "phase"
+      ],
+      "properties": {
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "description": "Free-form evidence attached to this phase record. Two producers today, and the list is corrected here rather than left stale (Task 20 fix round 2): - phase 5 (`crate::drill::phase5_preflight`) carries each `Finding`'s tag/detail here so a `preflight-failed` scorecard states *why* the drill was refused, not just that it was — without this field the adjudication's reasoning had nowhere in the signed document to land. Note that phase 5 defines WHAT it contributes; the `PhaseRecord` itself is not constructed until the orchestrator lands (Task 21a). - phase 8 (`crate::drill::phase8_score`) writes onto the phase-8 record when the engine-validation prefix is empty, and when it holds more than one object (naming the key retained and that others were dropped). Both are warnings that must not be silent: an absent or ambiguous engine sub-report is a fact about the evidence, not a failure.\n\n`skip_serializing_if` (matching `TargetDiffSummary::absent`, Task 16 fix round 1) so a document signed before this field existed keeps round-tripping byte-for-byte when it has nothing to report.\n\nThis reverses `task-3-addendum.md` A2 (\"do not add a `notes` field to `PhaseRecord`\"), on controller authority, in Task 17 fix round 1: that ruling predates `task-21a-brief.md:259`, which writes `p.notes = …` against this exact struct, so leaving the field out only delayed the same `E0560` to Task 21a.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "integer",
+          "format": "int8"
+        }
+      }
+    },
+    "Redaction": {
+      "type": "object",
+      "required": [
+        "path",
+        "present",
+        "reason"
+      ],
+      "properties": {
+        "path": {
+          "description": "A JSON pointer into THIS scorecard — never a missing field.",
+          "type": "string"
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "ReplayComparison": {
+      "description": "The replay comparison of one partition, or the sums over all of them.",
+      "type": "object",
+      "required": [
+        "duplicates",
+        "expected",
+        "matching",
+        "mismatched",
+        "missing",
+        "out_of_order",
+        "restored",
+        "unexpected"
+      ],
+      "properties": {
+        "duplicates": {
+          "description": "Restored records that repeat an `x-original-offset` already seen.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "expected": {
+          "description": "Archived records the window selects: the expected output.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "matching": {
+          "description": "Expected records whose restored copy (the first one, by `x-original-offset`) is byte-identical: key, value, timestamp and the headers in order.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "mismatched": {
+          "description": "Expected records whose first restored copy differs from the archive.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "missing": {
+          "description": "Expected records with no restored copy.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "out_of_order": {
+          "description": "Restored records whose `x-original-offset` is below one seen before them (archive order is source-offset order).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "restored": {
+          "description": "Records the target partition holds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "unexpected": {
+          "description": "Restored records that are no expected record: an `x-original-offset` the expected output does not hold, or none at all.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "SampleInfo": {
+      "type": "object",
+      "required": [
+        "anchor",
+        "coverage_note",
+        "partitions",
+        "records_expected",
+        "records_restored",
+        "topics",
+        "window_end",
+        "window_start"
+      ],
+      "properties": {
+        "anchor": {
+          "type": "string"
+        },
+        "coverage_note": {
+          "type": "string"
+        },
+        "partitions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "records_expected": {
+          "description": "THE CANARY SIZE: how many records this drill set out to reconcile — the sum of `sample.records_per_partition` over the partitions actually selected. `integrity.records_sampled` is measured against THIS figure.\n\nIt is NOT `crate::drill::phase4_sample::Selection::records_expected` (in `crates/logweir`), which shares the name and answers a different question: how many records the manifest says the whole sampled window holds. The two differ by orders of magnitude on any real archive — 25 against 500 on a single partition of this repository's own fixtures — and substituting one for the other would make a signed document overstate or understate what was verified. Both definition sites carry this note deliberately (Task 16's parked item, discharged in Task 21a); the field is not renamed because a scorecard field name is a Global Constraint 12 question and the format is frozen at 1.0.0.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "records_restored": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "topics": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "unsampled_topics": {
+          "description": "**FX-23, format 1.6.0.** The restored topics with records in the window that `sample.max_partitions` left WITHOUT a sampled partition: sorted, each once, never empty when present. Present exactly when the cap was below the number of such topics; the cap keeps one partition of every topic first (round-robin) before a second of any. Phase 7 still holds every partition of these topics to its count bound, so a topic named here was COUNTED, not reconciled record by record.\n\nABSENT means no topic is recorded as unsampled. A document before 1.6.0 was written by a build whose cap kept the first partitions in manifest order and recorded nothing about the rest, so its absence says nothing. Arms US-1 to US-3 read it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true
+        },
+        "window_end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "window_start": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "SelectionLabel": {
+      "description": "**PROD-11.1, scorecard format 1.7.0.** A narrowed restore's window: the plan's stated inclusive start and its end. The contract is `docs/to-do/decisions/PROD-11.1-replay-selection.md`.\n\n**A START ONLY.** Every partition of every restored topic is restored and judged; only the window's start moved. A partition-subset restore is refused by name (`PartitionSubsetsAwaitOwnerDecision`) until the owner decides OD-9, because a reader that predates its scorecard would read it as a full restore.\n\nEvery verdict of such a document is judged over `[window_start_ms, window_end_ms]`: samples start no earlier than the start, the count bound and the per-partition presence check are over that window, and a complete verification expects every archived record whose own timestamp is in it. The EXISTING fields name the start too: `sample.window_start` is never earlier than it, `sample.coverage_note` opens with it, and a complete block's `window.start_ms` (1.4.0) is it.",
+      "type": "object",
+      "required": [
+        "window_end_ms",
+        "window_start_ms"
+      ],
+      "properties": {
+        "window_end_ms": {
+          "description": "The window's INCLUSIVE end, epoch milliseconds: the end of the plan's `restore.point_in_time` interval.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "window_start_ms": {
+          "description": "The plan's stated INCLUSIVE window start, epoch milliseconds.",
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "SourceInfo": {
+      "type": "object",
+      "required": [
+        "backup_id",
+        "captured_by_logweir",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "backup_id": {
+          "type": "string"
+        },
+        "captured_by_logweir": {
+          "description": "true ONLY under `--from-cluster`. `--from-cluster` is in v0.1 scope (Global Constraint 18 / docs/architecture.md#adr-0007-source-capture-scope); its execution path lands in a follow-up task, so nothing in the main task line yet sets this true. The invariant below is live regardless.",
+          "type": "boolean"
+        },
+        "manifest_sha256": {
+          "type": "string"
+        },
+        "manifest_version_id": {
+          "default": null,
+          "type": "string",
+          "nullable": true
+        },
+        "selection": {
+          "description": "**Format 1.7.0 (PROD-11.1).** The plan's stated INCLUSIVE window start, when it states one: see [`SelectionLabel`].\n\nABSENT means the restore selected every record of every partition of every restored topic from the archive's floor, which is what every restore before 1.7.0 did. Partition subsets are refused until the owner decides OD-9, so no format-1 document narrows partitions. Nested optional (Global Constraint 12 as amended); `skip_serializing_if`, so every document without a start keeps its bytes.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SelectionLabel"
+            }
+          ],
+          "nullable": true
+        },
+        "time_basis": {
+          "description": "**Format 1.3.0 (FX-8).** Which clock this restore's TIME SELECTION read, for each source topic where that is not the topic's own: see [`TimeBasisLabel`].\n\nABSENT means NOT RECORDED — every document before 1.3.0 — and is never read as \"every selection used the topic's own clock\": before FX-8 a point-in-time restore over a `LogAppendTime` source was signed `pass` with no label at all (PROD-01.1, `lat`). Every run that reaches the time-basis decision writes `Some`, so a 1.3.0 document whose two lists are empty is the CLAIM that no topic was selected by producer time or with an unrecorded timestamp type AS FAR AS THE ARCHIVE MANIFEST'S SEGMENT BOUNDS SHOW (review L-1). A plan that states no point and whose `sample.window_end` is at or after every segment's first and last timestamp is not counted as a selection, yet with out-of-order timestamps inside a segment the engine's end filter can still drop a record later than both ends; that case is PROD-01.1b's.\n\nGlobal Constraint 12 as amended permits this as a NESTED optional field: `SourceInfo`'s properties are not the scorecard's 21. `skip_serializing_if`, so the signed 1.0.0 fixtures under `e2e/fixtures/signed/` round-trip byte for byte.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeBasisLabel"
+            }
+          ],
+          "nullable": true
+        }
+      }
+    },
+    "TargetDiffSummary": {
+      "description": "The published sink for phase 3 — the phase no shipped artifact performs. Without this block the diff would be computed and discarded, and the §4 positioning claim would rest on a value that reaches no reader.",
+      "type": "object",
+      "required": [
+        "level"
+      ],
+      "properties": {
+        "absent": {
+          "description": "Mapped target topics that do NOT exist on the target — the normal case on a scratch cluster. Every entry here has a corresponding `would_create` entry at the partition count the restore will build. `skip_serializing_if` (unlike its siblings here) so a document signed before this field existed keeps round-tripping byte-for-byte when it has nothing to report — added in Task 16 fix round 1, after `TargetDiff.absent` was found computed and never read.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "collisions": {
+          "description": "Mapped target topics that already EXIST on the target — regardless of whether they currently hold any records. Existence alone is what makes writing into them a collision worth flagging (Task 16 fix round 1, MINOR-2): an existing-but-empty topic can still carry configuration that differs from what the restore expects, and creating a topic fresh is a different operational fact from reusing one someone else already created — even an empty one. The prior wording here (\"already existed AND already held records\") described a narrower rule than the code implements; the code is right (refusing to write into an existing empty topic costs at most a false alarm, while the narrower rule would let a restore silently write into a topic someone else created), so this text was corrected to match it.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "level": {
+          "description": "\"full\" in v0.1. Becomes \"shallow\" only if spec §15 cut 0d is ever taken.",
+          "type": "string"
+        },
+        "not_assessed": {
+          "description": "**Format 1.1.0 (FX-4).** The `collisions` whose CONFIGURATION difference was not assessed, each as `\"<target topic>: configuration (<why>)\"`, the shape of `topic_parity.not_assessed`. `<why>` is the SOURCE topic's capture coverage from the verified backup receipt: `unknown` (the restore was bound to no receipt, or to one that predates 1.1.0), `notCaptured` or `captureDenied`.\n\nFor a collision listed here, its `differing config: […]` names every difference the archive's OWN record shows, but an empty list proves nothing: a denied DescribeConfigs at capture leaves that record empty. The collision strings themselves stay byte for byte what a writer before FX-4 produced: a qualifier inside them would change an existing field's content, which `docs/stability.md` calls MAJOR and the owner's OD-7 rulings of 2026-10-05 did not make MINOR. This new optional field carries it instead.\n\nABSENT means NOT RECORDED — every 1.0.0 document, and a document whose phase 3 never ran. `Some([])` is the claim that every collision's configuration difference was assessed (vacuously, when there is no collision); only phase 3 writes it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true
+        },
+        "would_create": {
+          "description": "(mapped target topic, partition count the restore created).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer",
+                "format": "int32"
+              }
+            ],
+            "maxItems": 2,
+            "minItems": 2
+          }
+        }
+      }
+    },
+    "TargetInfo": {
+      "type": "object",
+      "required": [
+        "cluster_id",
+        "topic_mapping_entries",
+        "topic_mapping_prefix",
+        "topic_mapping_sha256"
+      ],
+      "properties": {
+        "auth": {
+          "description": "How the TARGET client was told to authenticate. **Interface I1's scorecard end (Task 5b declares the shape; Task 6 fills it).**\n\nABSENT IS LEGAL AND MEANS PLAINTEXT. Every scorecard this tree has ever written has no `auth` block, and a reader that demanded one would refuse all of them — which is why the field is `Option` with `#[serde(default)]` and why `two_reader_parity.rs`'s existing cases are the test that keeps it tolerant.\n\n`skip_serializing_if` is NOT decoration. `crates/logweir-core/tests/ fixture_regen.rs::emit_fixture_reproduces_the_committed_scorecard_bytes` compares the generator's bytes against the checked-in SIGNED fixture byte for byte, and the signed fixtures are never re-minted here (ruling R-G). A field that serialised as `\"auth\": null` would change every document Logweir writes and orphan a signature this task may not replace, so the absent case stays absent on the wire.\n\nGlobal Constraint 12 as amended permits this as a NESTED optional field: `TargetInfo`'s own properties are not the scorecard's 21, so the top-level shape is unchanged (21 properties, 17 required) and `the_scorecard_top_level_shape_is_unchanged` still holds.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuthSummary"
+            }
+          ],
+          "nullable": true
+        },
+        "cluster_id": {
+          "type": "string"
+        },
+        "marker_topic": {
+          "description": "The v0.1 segregation proof, verified over the logweir-kafka client: cluster_id ∈ allowedClusterIds AND this topic exists (spec §9.3 phase 0).\n\n**SCRATCH MODE ONLY, and therefore optional (review F1).** In `newTopic` mode those are skipped checks 1 and 3 of the mode branch — neither the allowlist membership nor the topic's existence is verified — so writing the spec's value here put a field with THAT documented meaning into a DSSE-signed document about a run that never checked it. A `newTopic` run now omits the field, and the invariant below refuses the converse: a `scratch` document that omits it claims a segregation proof nothing recorded. `None` is therefore not \"unknown\", it is \"`mode` says this run had no marker topic to verify\".",
+          "type": "string",
+          "nullable": true
+        },
+        "mode": {
+          "description": "**Which of the two target modes the run was in.** The signed document carried no discriminator at all until fix round 1 (review F1): the mode travelled only on `crate::teardown::TeardownAttestation.target_mode`, a different document under a different media type that a `Verdict::Block` run (exit 2) never writes, and `target.topic_mapping_prefix` is not a substitute because `topic_naming.prefix` is adopter-chosen (`examples/restore.yaml` suggests `incident-4471-`). Without it a reader cannot tell whether the three scratch segregation checks ran, which is the whole difference between the two modes.\n\n`#[serde(default)]` is `Scratch`, so every document written before this field existed means exactly what it meant, and `skip_serializing_if` keeps the scratch case ABSENT ON THE WIRE — the same rule and the same reason as `auth` below: the three checked-in SIGNED fixtures are byte-compared against the generator by `crates/logweir-core/tests/fixture_regen.rs`, they are never re-minted (ruling R-G), and a field that serialised as `\"mode\": \"scratch\"` would orphan three signatures this round may not replace.\n\nGlobal Constraint 12 as amended permits this as a NESTED optional field: `TargetInfo`'s own properties are not the scorecard's 21, so the top-level shape is unchanged (21 properties, 17 required).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TargetMode"
+            }
+          ]
+        },
+        "original_name": {
+          "description": "**PROD-15.1 (format 1.8.0).** Present exactly when this restore wrote under the source's ORIGINAL topic names: see [`OriginalNameInfo`]. ABSENT on every other document, which is every document before 1.8.0; nested optional (Global Constraint 12 as amended) and skipped when absent, so every other document keeps its bytes.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/OriginalNameInfo"
+            }
+          ],
+          "nullable": true
+        },
+        "topic_mapping_entries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "topic_mapping_prefix": {
+          "type": "string"
+        },
+        "topic_mapping_sha256": {
+          "description": "sha256 over the rendered restore.yaml topic_mapping block, so an auditor can re-derive exactly what was written.",
+          "type": "string"
+        }
+      }
+    },
+    "TargetMode": {
+      "description": "**Interface I33, the Rust half.** The two restores tag 1 performs.\n\nThe serde names are `scratch` and `newTopic`, in that order, and they are the `Restore` CRD's `target.mode` enum byte for byte (`crates/weirkeeper/config/crd/restores.yaml`, pinned by `crates/weirkeeper/tests/crd_shape.rs:: restore_target_mode_accepts_only_scratch_or_new_topic` and compared against THIS type by `the_crd_mode_enum_and_target_mode_agree` in the same file). A `kubectl apply` that succeeds and a `restore run` that then refuses to parse the same string is the failure that agreement closes.\n\n# What the two modes actually differ in\n\n`Scratch` is v0.1's behaviour, unchanged: the marker topic must exist and be healthy, the target cluster id must be in `allowedClusterIds` and must not equal the source, and phase 9 deletes the topics the run created. Those three are the SCRATCH SEGREGATION PROOF — they exist to establish that a drill is writing to a throwaway cluster.\n\n`NewTopic` skips all three, and the reason is that each of them is meaningless for the thing tag 1's flagship actually does. A restore into a new topic on a real cluster is non-destructive BY CONSTRUCTION: it only ever writes a topic that did not exist, which phase 0 proves by refusing the plan outright if any mapped target topic is already there. A marker topic on a production cluster would be a lie about that cluster's purpose; an allowlist of scratch clusters cannot contain the cluster an operator is recovering INTO; and tearing the restored topic down would delete the recovery.\n\n`Default` is `Scratch`, so `#[serde(default)]` on `TargetSpec::mode` makes every spec written before this field existed mean exactly what it meant.\n\n`JsonSchema` is derived because `crate::scorecard::TargetInfo::mode` carries this type into the SIGNED document and therefore into `schemas/logweir-drill-scorecard-1.0.0.json` (global ruling GR3). It is the only spec type that does: nothing else in this module reaches a schema.",
+      "type": "string",
+      "enum": [
+        "scratch",
+        "newTopic"
+      ]
+    },
+    "TimeBasisLabel": {
+      "description": "**FX-8, scorecard format 1.3.0.** What the restore's time selection read, per selected source topic.\n\n# Why a restore needs this label at all\n\nThe pinned engine archives each record's PRODUCER timestamp (PROD-01.1 S3), so every selection by time — a stated `restore.point_in_time`, or a `sample.window_end` earlier than what the archive holds — reads producer time. For a `CreateTime` topic that is the topic's own clock. For a `LogAppendTime` topic it is not, and phase 7 cannot notice: it compares the target with the archive, and both carry producer time. So the runner REFUSES such a selection (`PointInTimeByProducerTime`) unless the approved plan states `restore.time_basis: producerTime`, and this block is what the signed document says about the selections it did make.\n\n# The three fields\n\n| field | meaning | |---|---| | `plan` | the approved plan's `restore.time_basis`, copied: `producerTime`, or ABSENT when the plan stated none | | `producer_time` | source topics whose recorded timestamp type is `LogAppendTime` and which this restore selected by time — by producer time, accepted by `plan` (arm TB-3) | | `not_recorded` | source topics this restore selected by time while their timestamp type was NOT RECORDED: no `message.timestamp.type` override in the archive manifest, and no effective value in a verified backup receipt (FX-4) — so the selection may have read producer time |\n\nA topic whose recorded type is `CreateTime`, and a topic the restore did not select by time (no `restore.point_in_time`, and a `sample.window_end` at or after every timestamp the manifest records for it), is in neither list. Both lists are sorted topic names.\n\n# Why the unknown case runs and is labelled rather than refused\n\nRule 3 of the expansion tracker: never read old evidence as a stronger guarantee. A receipt from before FX-4, or a plan bound to no receipt, carries no effective timestamp type, and most topics carry no manifest override; reading that silence as `CreateTime` would be the stronger reading, so it is never taken. Refusing would be the other mistake: it would stop every point-in-time restore of every archive written before FX-4, where a `CreateTime` topic's selection is right. So the restore runs and this list says, in the signed document, that the clock it selected by is unknown.",
+      "type": "object",
+      "required": [
+        "not_recorded",
+        "producer_time"
+      ],
+      "properties": {
+        "not_recorded": {
+          "description": "Source topics selected by time whose timestamp type was not recorded.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "plan": {
+          "description": "`producerTime` ([`TIME_BASIS_PRODUCER_TIME`], arm TB-2) when the approved plan stated `restore.time_basis: producerTime`; absent when it stated none.",
+          "type": "string",
+          "nullable": true
+        },
+        "producer_time": {
+          "description": "Source topics selected by PRODUCER time: recorded `LogAppendTime`, selected by time, accepted by `plan` (arm TB-3).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "TopicParity": {
+      "type": "object",
+      "required": [
+        "intentionally_deviated",
+        "unexpected_divergence"
+      ],
+      "properties": {
+        "intentionally_deviated": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "not_assessed": {
+          "description": "**Format 1.1.0 (FX-4).** What was not assessed per mapped target topic, each as `\"<target topic>: <what> (<why>)\"`.\n\n- `configuration` (FX-4): the topic's CONFIGURATION parity. `<why>` is the SOURCE topic's capture coverage from the verified backup receipt — `unknown` (the restore was bound to no receipt, or to one that predates 1.1.0), `notCaptured` or `captureDenied` — or `targetReadDenied` when the source was captured but the TARGET topic's configuration could not be read (its keys are then not compared at all). For such a topic, the two lists above still name every configuration difference the archive's OWN record shows, but their silence proves nothing: a denied DescribeConfigs at capture leaves the manifest's configuration empty, which compares as \"no divergence\". - `replication_factor` or `partition_count` (FX-21), `<why>` always `notRecorded`: the source's value is recorded nowhere phase 7 reads it (the manifest; for the factor, also the bound receipt's 1.3.0 `topic_configuration`), so it was not compared. Engine 0.23.3 records the factor for the first topic a backup saves only. Partition count and replication factor do not depend on the configuration capture and are compared wherever the source's value is recorded. A writer before FX-21 compared the target's own value with itself instead, so its silence about such a topic is not parity.\n\nEach entry has a fail-safe twin `\"<target topic>: <what> not assessed (<why>)\"` in `unexpected_divergence`.\n\nABSENT means NOT RECORDED — every 1.0.0 document, and a document whose phase 7 never ran — and is never read as \"every topic assessed\"; `Some([])` is that claim, and only phase 7 writes it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true
+        },
+        "not_reconstructed": {
+          "description": "**Format 1.2.0 (FX-3).** The source settings a `newTopic` restore did NOT reconstruct on the target, each as `\"<target topic>: <key>\"`, the shape of the two lists above. `<key>` is one of the four the restore's own topic creation decides instead of copying from the source: `cleanup.policy` (left to the target broker's default), `retention.ms` (`-1`), `partition_count` and `replication_factor` (the plan's). A `scratch` drill reports the same four as `intentionally_deviated`, because a scratch cluster runs `cleanup.policy=delete`, infinite retention and one broker on purpose; a `newTopic` restore is the recovery itself, so before 1.2.0 that label signed lost compaction and replication factor 1 as \"intended\".\n\n**Every entry is ALSO in `unexpected_divergence`, and never in `intentionally_deviated`** (arms NR-2 and NR-3 of `validate_invariants`, in both readers): a reader that predates this field sees each one as an unexpected divergence — a weaker conclusion than the label it replaces, never a stronger one, and never silence that reads as parity. In a `newTopic` document carrying the field, `intentionally_deviated` is empty (NR-4) and every `unexpected_divergence` entry on one of the [`RESTORE_DECIDED_SETTINGS`] is also here (NR-5), so a writer that lost the mode cannot sign `[]` beside the scratch labels.\n\nABSENT means NOT RECORDED: every document before 1.2.0, and one whose phase 7 never ran. In a `newTopic` document before 1.2.0 the writer applied the scratch rationale, so every `intentionally_deviated` entry there is a source setting that was NOT reconstructed, whatever its label; both readers print that. `Some([])` is the claim that no setting was left unreconstructed — every `scratch` run, and a `newTopic` run whose compared settings all matched — and only phase 7 writes it, from 1.2.0 on (arm NR-1).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true
+        },
+        "unexpected_divergence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "Verification": {
+      "description": "**PROD-08.1, scorecard format 1.4.0.** What phase 7's verdict covered, with the four kinds of evidence a restore can carry kept apart:\n\n| evidence | where it is | |---|---| | the authenticated report | the DSSE envelope over these bytes (and, for a point-bound plan, the verified receipt) — not in this block | | archive integrity | `complete.archive` (complete coverage); `evidence`/`integrity` counters for a sampled run | | replay comparison | `complete.replay` and `complete.partitions` (complete coverage); `integrity.records_sampled*` for a sampled run | | application validation | `application`: `notAttempted` in this build |\n\nThe full contract — the expected-output model, what each count means, and what filters, partition subsets, compaction and transformations do to it — is `docs/to-do/decisions/PROD-08.1-integrity-contract.md`.",
+      "type": "object",
+      "required": [
+        "application",
+        "comparison_basis",
+        "coverage",
+        "gaps",
+        "header_order",
+        "pruned"
+      ],
+      "properties": {
+        "application": {
+          "description": "Application-level validation of the restored data: `notAttempted` in this build ([`APPLICATION_NOT_ATTEMPTED`]; PROD-06.2 is where it is attempted).",
+          "type": "string"
+        },
+        "comparison_basis": {
+          "description": "What the restored records were compared WITH: `archive` in this build ([`COMPARISON_BASIS_ARCHIVE`]). Never the source: a loss that happened when the archive was written is in the archive and in the target, and this comparison cannot see it (PROD-01.1 V3).",
+          "type": "string"
+        },
+        "complete": {
+          "description": "Present exactly when `coverage` is `complete` (arm IV-4).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/CompleteVerification"
+            }
+          ],
+          "nullable": true
+        },
+        "coverage": {
+          "description": "`sampled` or `complete` ([`COVERAGE_SAMPLED`], [`COVERAGE_COMPLETE`]; arm IV-2): the plan's `sample.coverage`, as run.",
+          "type": "string"
+        },
+        "gaps": {
+          "description": "The capture gaps the manifest records for the partitions this run verified: source offset ranges the backup could NOT capture. Sorted by topic, partition and offset. Structured and signed; the free-text `sample.coverage_note` still carries the sampled-window subset.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/OffsetRange"
+          }
+        },
+        "header_order": {
+          "description": "Whether the comparison held each record's headers to their recorded ORDER: `verified` (complete coverage, which compares `logweir_kafka::fingerprint::record_digest_ordered`) or `notVerified` (sampled coverage, whose fingerprint sorts headers). Arm IV-3: `verified` only with `coverage: complete`.",
+          "type": "string"
+        },
+        "pruned": {
+          "description": "The ranges retention deliberately removed from the archive, for the same partitions, the same shape.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/OffsetRange"
+          }
+        }
+      }
+    }
+  }
+}

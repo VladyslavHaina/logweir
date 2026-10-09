@@ -49,6 +49,10 @@ pub struct ApproveArgs {
     /// parser: `mint` writes the bytes, and `cli.rs` decides what a command
     /// line may spell.
     pub subject_kind: String,
+    /// `--approval-subject` (PROD-15.1), as the wire value that goes into the
+    /// document — `originalName` — or `None` for an ordinary approval, whose
+    /// bytes carry no such key.
+    pub approval_subject: Option<String>,
     /// `--standing`. Mint a **standing rehearsal authorization** (D3 §4.3(e))
     /// instead of a per-run approval.
     ///
@@ -170,6 +174,7 @@ pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<St
     let spec_text =
         std::fs::read_to_string(spec_path).map_err(|e| format!("{}: {e}", spec_path.display()))?;
     let plan_hash = sha256_prefixed(spec_text.as_bytes());
+    let approval_subject = approval_subject_for(args, &spec_text, spec_path)?;
 
     let key = SigningKey::from_pem_file(&args.key).map_err(|e| {
         // `logweir_evidence::Error` carries no key material by construction,
@@ -192,6 +197,9 @@ pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<St
         // instead would leave check 8 comparing a field anyone who can write
         // the approval bundle could rewrite without touching the signature.
         subject_kind: args.subject_kind.clone(),
+        // PROD-15.1: INSIDE THE SIGNED BYTES too, and only when the approver
+        // asked for the separate subject — an ordinary approval carries no key.
+        approval_subject: approval_subject.wire().map(str::to_string),
     };
     let mut payload =
         serde_json::to_vec_pretty(&doc).map_err(|e| format!("serialising the approval: {e}"))?;
@@ -212,7 +220,8 @@ pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<St
 
     Ok(format!(
         "approved {spec}\n  plan_hash  {plan_hash}\n  approver   {approver}\n  \
-         ticket     {ticket}\n  subject    {subject_kind}\n  key_id     {key_id}\n  \
+         ticket     {ticket}\n  subject    {subject_kind}\n  approves   {approval_subject}\n  \
+         key_id     {key_id}\n  \
          wrote      {out}\n  wrote      {sig}\n\
          \nThis approval binds the EXACT bytes of {spec}. Edit the spec — including its\n\
          sample window — and `logweir drill run` refuses with exit 3 until you re-run\n\
@@ -221,10 +230,56 @@ pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<St
         approver = args.approver,
         ticket = args.ticket,
         subject_kind = args.subject_kind,
+        approval_subject = match approval_subject {
+            logweir_core::original_name::ApprovalSubject::OriginalName =>
+                "a restore under the ORIGINAL topic names (approval subject originalName)",
+            logweir_core::original_name::ApprovalSubject::Ordinary => "an ordinary restore",
+        },
         key_id = key.key_id(),
         out = args.out.display(),
         sig = sig_path.display(),
     ))
+}
+
+/// **PROD-15.1.** The approval subject this per-run approval carries, refused
+/// at MINTING time when it is not the plan's: an original-name plan needs
+/// `--approval-subject original-name`, and that subject approves nothing
+/// else. A plan this build cannot read as a restore plan is approved as it
+/// always was, ordinary — and refused if the original-name subject is asked
+/// for, because nothing could confirm the plan is one.
+fn approval_subject_for(
+    args: &ApproveArgs,
+    spec_text: &str,
+    spec_path: &Path,
+) -> Result<logweir_core::original_name::ApprovalSubject, String> {
+    use logweir_core::original_name::ApprovalSubject;
+    let requested = ApprovalSubject::from_wire(args.approval_subject.as_deref())?;
+    let plan = (args.subject_kind == logweir_core::spec::SUBJECT_KIND_RESTORE)
+        .then(|| serde_yaml::from_str::<logweir_core::spec::DrillSpec>(spec_text).ok())
+        .flatten();
+    let needed = plan.as_ref().map(ApprovalSubject::of_plan);
+    match (needed, requested) {
+        (Some(needed), requested) if needed == requested => Ok(requested),
+        (Some(ApprovalSubject::OriginalName), _) => Err(format!(
+            "{} restores under the ORIGINAL topic names (target.topic_naming.original_name), \
+             which only its own approval authorises: re-run with --approval-subject \
+             original-name. Nothing was signed.",
+            spec_path.display()
+        )),
+        (Some(ApprovalSubject::Ordinary), _) => Err(format!(
+            "--approval-subject original-name approves a restore under the original topic \
+             names, and {} is not one (it carries no target.topic_naming.original_name). \
+             Nothing was signed.",
+            spec_path.display()
+        )),
+        (None, ApprovalSubject::Ordinary) => Ok(requested),
+        (None, ApprovalSubject::OriginalName) => Err(format!(
+            "--approval-subject original-name needs a Restore plan this build can read, to \
+             confirm it restores under the original topic names; {} is not one. Nothing was \
+             signed.",
+            spec_path.display()
+        )),
+    }
 }
 
 /// Mint the **signed standing rehearsal authorization** D3 §4.3(e) defines —

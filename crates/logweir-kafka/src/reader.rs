@@ -658,6 +658,24 @@ pub trait ClusterReader: Send + Sync {
     /// a refused cluster read is [`KafkaError::NotAuthorized`] — see
     /// [`empty_broker_config_answer`].
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError>;
+    /// **PROD-15.1.** One broker setting, read from EVERY broker the
+    /// cluster's metadata lists: `(broker id, value)`, with `None` where that
+    /// broker's answer did not name the key. An original-name restore into the
+    /// source cluster needs `auto.create.topics.enable=false` PROVEN on every
+    /// broker, because one broker that auto-creates is enough for a producer
+    /// to recreate the name; [`Self::broker_configs`] describes one.
+    ///
+    /// The DEFAULT answers from [`Self::broker_configs`] alone, as broker
+    /// `-1`: a reader with one answer — every test double — answers for the
+    /// one broker it models.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::broker_configs`]: a refused or failed read is an error,
+    /// never an absent value.
+    fn broker_config_value_all(&self, key: &str) -> Result<Vec<(i32, Option<String>)>, KafkaError> {
+        Ok(vec![(-1, self.broker_configs()?.get(key).cloned())])
+    }
     /// FX-4: DescribeConfigs for every named TOPIC in ONE request, keeping
     /// each entry's SOURCE and flags — what a backup needs to record capture
     /// coverage and the effective `message.timestamp.type`.

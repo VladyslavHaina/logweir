@@ -1125,6 +1125,7 @@ fn a_new_topic_run_signs_its_lost_source_settings_as_not_reconstructed() {
     f.ctx.spec.target.mode = logweir_core::spec::TargetMode::NewTopic;
     f.ctx.spec.target.topic_naming = Some(logweir_core::spec::TopicNaming {
         prefix: "drill-".into(),
+        original_name: None,
     });
     execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
     let sc: logweir_core::scorecard::Scorecard =
@@ -1182,6 +1183,7 @@ fn a_scorecard_signed_before_phase_7_records_neither_parity_claim() {
             if mode == logweir_core::spec::TargetMode::NewTopic {
                 f.ctx.spec.target.topic_naming = Some(logweir_core::spec::TopicNaming {
                     prefix: "drill-".into(),
+                    original_name: None,
                 });
             }
             let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
