@@ -151,6 +151,7 @@ test("prod111b_the_apis_selection_decodes_and_reaches_every_console_surface", as
   assert.deepEqual(plainOf(item.selection.partitions), [{ topic: "orders", partitions: [0, 2] }],
     "NEGATIVE CONTROL: a `RESTORE` shape without `selection` drops it here");
   assert.equal(item.selection.narrowedTopics, 1);
+  assert.equal(item.selection.scope, "partial", "the API's marker");
   const operation = decodeD3Operation(fixture("console/operation-restore-subset-pass.json"));
   assert.deepEqual(plainOf(operation.value.item.verificationScope.selection.partitions),
     [{ topic: "orders", partitions: [0, 2] }],
@@ -182,6 +183,7 @@ test("prod111b_the_apis_selection_decodes_and_reaches_every_console_surface", as
     assert.deepEqual(plainOf(object.status.integrity.selection.partitions),
       [{ topic: "orders", partitions: [0, 2] }],
       "NEGATIVE CONTROL: the client's restore mapping not copying `selection` fails this");
+    assert.equal(object.status.integrity.selection.scope, "partial");
     assert.deepEqual(plainOf(object.status.verificationScope.selection.partitions),
       [{ topic: "orders", partitions: [0, 2] }],
       "NEGATIVE CONTROL: `mergeOperation` dropping the scope's selection fails this");

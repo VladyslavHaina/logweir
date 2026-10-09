@@ -55,6 +55,7 @@ fn golden(name: &str, projected: &Value) -> Value {
 fn a_subset_restore_names_its_selection_on_list_and_detail() {
     let object = cr(&support::fixture("restore-subset-pass.json"));
     let want = json!({
+        "scope": "partial",
         "windowEndMs": 1_788_789_900_000i64,
         "narrowedTopics": 1,
         "partitions": [{"topic": "orders", "partitions": [0, 2]}],
@@ -87,18 +88,19 @@ fn a_subset_restore_names_its_selection_on_list_and_detail() {
 
 /// **A selection the controller could not read is still a selection.** A
 /// status whose `integrity.selection` is empty (the controller's fail-safe
-/// copy of an unreadable block) is served as `selection: {}`, never omitted;
+/// copy of an unreadable block) is served as `selection: {"scope": "partial"}`,
+/// never omitted;
 /// a list past the status' bounds keeps its count.
 #[test]
 fn an_unreadable_or_oversized_selection_is_still_served_as_one() {
     let mut v = support::fixture("restore-subset-pass.json");
     v["status"]["integrity"]["selection"] = json!({});
     let row = serde_json::to_value(restore(&cr(&v), false)).unwrap();
-    assert_eq!(row["selection"], json!({}), "{row}");
+    assert_eq!(row["selection"], json!({"scope": "partial"}), "{row}");
     v["status"]["integrity"]["selection"] = json!({"narrowedTopics": 300});
     let view = serde_json::to_value(restore_view(&cr(&v), now())).unwrap();
     assert_eq!(
         view["verificationScope"]["selection"],
-        json!({"narrowedTopics": 300})
+        json!({"scope": "partial", "narrowedTopics": 300})
     );
 }

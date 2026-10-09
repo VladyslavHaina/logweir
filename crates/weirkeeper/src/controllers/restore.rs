@@ -3716,10 +3716,15 @@ pub struct ScorecardObservation {
 #[must_use]
 pub fn restore_selection(block: &Value) -> crate::crds::restore::RestoreSelection {
     use crate::crds::restore::{
-        RestoreSelection, SelectedPartitions, SELECTION_PARTITIONS_MAX, SELECTION_TOPICS_MAX,
+        RestoreSelection, SelectedPartitions, SELECTION_PARTITIONS_MAX, SELECTION_SCOPE_PARTIAL,
+        SELECTION_TOPICS_MAX,
     };
+    let scope = Some(SELECTION_SCOPE_PARTIAL.to_string());
     let Some(o) = block.as_object() else {
-        return RestoreSelection::default();
+        return RestoreSelection {
+            scope,
+            ..RestoreSelection::default()
+        };
     };
     let subsets = o.get("partitions").and_then(Value::as_array);
     let rows = subsets.and_then(|list| {
@@ -3745,6 +3750,7 @@ pub fn restore_selection(block: &Value) -> crate::crds::restore::RestoreSelectio
             .collect::<Option<Vec<_>>>()
     });
     RestoreSelection {
+        scope,
         window_start_ms: o.get("window_start_ms").and_then(Value::as_i64),
         window_end_ms: o.get("window_end_ms").and_then(Value::as_i64),
         // A key holding anything but an empty list narrows: a malformed one

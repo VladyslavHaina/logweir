@@ -12296,6 +12296,9 @@
       "RestoreSelectionView": {
         "description": "**PROD-11.1b.** `Restore.selection` and `verificationScope.selection`: the signed replay selection, copied from `status.integrity.selection` (itself copied from the scorecard's `source.selection`) and never recomputed. Present exactly when the scorecard states a selection; every field may be absent when the controller could not read the signed block, which is still a selection (never read as a restore of everything).",
         "type": "object",
+        "required": [
+          "scope"
+        ],
         "properties": {
           "engineRuns": {
             "description": "How many engine runs restored the selection.",
@@ -12316,6 +12319,10 @@
               "$ref": "#/components/schemas/SelectedPartitionsView"
             },
             "nullable": true
+          },
+          "scope": {
+            "description": "Always `partial`: the marker a client that reads no further cannot take for a restore of every partition of every topic.",
+            "type": "string"
           },
           "windowEndMs": {
             "description": "The inclusive window end, epoch milliseconds.",

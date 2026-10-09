@@ -4714,7 +4714,9 @@ fn the_restore_printer_columns_are_the_contract() {
             "COVERAGE",
             "RTO",
             "SIGNED",
-            "AGE"
+            "AGE",
+            // PROD-11.1b: appended, so every column before it keeps its place.
+            "SELECTION"
         ],
         "`kubectl get restores` is an interface: a renamed or reordered column breaks a runbook \
          nobody will think to update"
@@ -10624,6 +10626,7 @@ fn a_narrowed_restore_names_its_selection_in_the_status() {
     assert_eq!(
         block.get("selection"),
         Some(&serde_json::json!({
+            "scope": "partial",
             "windowEndMs": 1_760_000_010_000i64,
             "narrowedTopics": 2,
             "partitions": [{"topic": "orders", "partitions": [0, 2]},
@@ -10645,6 +10648,7 @@ fn a_narrowed_restore_names_its_selection_in_the_status() {
     assert_eq!(
         integrity_block(&start_only).get("selection"),
         Some(&serde_json::json!({
+            "scope": "partial",
             "windowStartMs": 1_760_000_000_030i64,
             "windowEndMs": 1_760_000_010_000i64
         }))
@@ -10661,12 +10665,12 @@ fn a_narrowed_restore_names_its_selection_in_the_status() {
         assert!(!integrity_block(&o).contains_key("selection"));
     }
 
-    // Fail safe: an unreadable block is a selection with nothing in it, and a
-    // malformed subset list is still narrowed.
+    // Fail safe: an unreadable block is a selection with only its marker, and
+    // a malformed subset list is still narrowed.
     let unreadable = observe(&scorecard_with_selection(Some(serde_json::json!("orders"))));
     assert_eq!(
         integrity_block(&unreadable).get("selection"),
-        Some(&serde_json::json!({}))
+        Some(&serde_json::json!({"scope": "partial"}))
     );
     let malformed = observe(&scorecard_with_selection(Some(serde_json::json!({
         "window_end_ms": 1,
@@ -10694,6 +10698,7 @@ fn a_narrowed_restore_names_its_selection_in_the_status() {
         "engine_runs": 1
     }))));
     let sel = big.selection.expect("still a selection");
+    assert_eq!(sel.scope.as_deref(), Some("partial"));
     assert_eq!(sel.partitions, None);
     assert_eq!(
         sel.narrowed_topics,

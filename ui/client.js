@@ -1250,7 +1250,9 @@ function projectRestore(item) {
 /** PROD-11.1b: a decoded `RestoreSelectionView`, with the decoder's `null`s
  *  (absent optional fields) left out, as the custom resource stores it. */
 function copySelection(selection) {
-  const out = {};
+  // `scope` is always "partial" on the API (PROD-11.1b): presence IS the
+  // marker, under the custom resource's name for it.
+  const out = { scope: "partial" };
   for (const field of ["windowStartMs", "windowEndMs", "narrowedTopics", "engineRuns"]) {
     if (typeof selection[field] === "number") {
       out[field] = selection[field];

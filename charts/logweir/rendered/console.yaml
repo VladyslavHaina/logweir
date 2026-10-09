@@ -4662,6 +4662,10 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
+    - description: partial when the signed scorecard records a replay selection (a partition subset or a window start; status.integrity.selection names it); empty is every partition of every topic
+      jsonPath: .status.integrity.selection.scope
+      name: SELECTION
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -5402,6 +5406,11 @@ spec:
                         maxItems: 256
                         nullable: true
                         type: array
+                      scope:
+                        description: 'The marker: [`SELECTION_SCOPE_PARTIAL`] whenever the signed scorecard records a selection at all -- even one this controller could not read -- so `kubectl get restores` (the SELECTION column) and any reader that looks no further never take a narrowed restore for a restore of every partition of every topic. Absent with the whole block.'
+                        maxLength: 16
+                        nullable: true
+                        type: string
                       windowEndMs:
                         description: The INCLUSIVE window end, epoch milliseconds.
                         format: int64

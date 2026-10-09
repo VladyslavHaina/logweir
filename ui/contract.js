@@ -737,7 +737,7 @@ const SELECTED_PARTITIONS = shapeOf(
 
 const RESTORE_SELECTION = shapeOf(
   "RestoreSelectionView",
-  {},
+  { scope: str },
   {
     windowStartMs: int, windowEndMs: int, narrowedTopics: int,
     partitions: listOf(objectOf(SELECTED_PARTITIONS)), engineRuns: int,

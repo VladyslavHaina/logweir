@@ -1013,6 +1013,28 @@ FX-23's `unsampledTopics` for a sampled check: the restored topics the
 partition cap left without a sampled partition. `complete` is served only beside
 a recorded `coverage: complete`. All three are additive.
 
+**A narrowed restore says so (PROD-11.1b).** Both restore reads and the
+operation route's `verificationScope` carry an optional `selection` when the
+signed scorecard records one — a partition subset (format 2.0.0) or a window
+from a stated start (format 1.7.0):
+
+```json
+{"selection": {"scope": "partial", "windowEndMs": 1788789900000, "narrowedTopics": 1,
+               "partitions": [{"topic": "orders", "partitions": [0, 2]}], "engineRuns": 2}}
+```
+
+`scope` is always `partial`: a client that reads no further still never takes
+the restore for one of every partition of every topic. `narrowedTopics` counts
+the topics narrowed to a partition subset; `partitions` lists them (a restored
+topic not listed restored every partition), absent past 256 topics or 1024
+partitions in one (the count stays; the rows are in the scorecard).
+`windowStartMs` is present only for a stated start. Every verdict beside it —
+`coverage.covered`, `complete.covered`, the result — is the SELECTION's: a
+covered complete check over a subset compared every record of every *selected*
+partition, not of the topic. **Absent `selection` is an unnarrowed restore,
+exactly as before.** A selection the controller could not read is still served
+(`{"scope": "partial"}`), never omitted. Additive.
+
 `GET .../rehearsal-schedules[/{name}]`'s `bounds` carries `coverage` (`sampled`
 when the schedule states none, or `complete`) and `completeMaxRecords`.
 

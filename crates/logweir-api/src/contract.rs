@@ -1470,6 +1470,9 @@ pub struct RestoreCoverageView {
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreSelectionView {
+    /// Always `partial`: the marker a client that reads no further cannot
+    /// take for a restore of every partition of every topic.
+    pub scope: String,
     /// The plan's stated inclusive window start, epoch milliseconds; absent:
     /// the archive's floor.
     #[serde(skip_serializing_if = "Option::is_none")]

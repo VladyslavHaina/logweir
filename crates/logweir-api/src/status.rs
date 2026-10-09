@@ -738,6 +738,8 @@ pub fn selection_view(
 ) -> Option<crate::contract::RestoreSelectionView> {
     let s = integrity?.selection.as_ref()?;
     Some(crate::contract::RestoreSelectionView {
+        // Present at all is partial, whatever the status' own marker says.
+        scope: weirkeeper::crds::restore::SELECTION_SCOPE_PARTIAL.to_string(),
         window_start_ms: s.window_start_ms,
         window_end_ms: s.window_end_ms,
         narrowed_topics: s.narrowed_topics,

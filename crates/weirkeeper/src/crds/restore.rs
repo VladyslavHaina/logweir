@@ -280,6 +280,9 @@ pub struct Integrity {
 /// `status.integrity.unsampledTopics`' `maxItems`.
 pub const UNSAMPLED_TOPICS_MAX: usize = 256;
 
+/// `status.integrity.selection.scope` for every recorded selection.
+pub const SELECTION_SCOPE_PARTIAL: &str = "partial";
+
 /// `status.integrity.selection.partitions`' `maxItems` (narrowed topics).
 pub const SELECTION_TOPICS_MAX: usize = 256;
 
@@ -292,6 +295,14 @@ pub const SELECTION_PARTITIONS_MAX: usize = 1024;
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreSelection {
+    /// The marker: [`SELECTION_SCOPE_PARTIAL`] whenever the signed scorecard
+    /// records a selection at all -- even one this controller could not read
+    /// -- so `kubectl get restores` (the SELECTION column) and any reader
+    /// that looks no further never take a narrowed restore for a restore of
+    /// every partition of every topic. Absent with the whole block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 16))]
+    pub scope: Option<String>,
     /// The plan's stated INCLUSIVE window start, epoch milliseconds. Absent:
     /// the window started at the archive set's floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -543,7 +554,10 @@ pub struct RestoreEvidence {
     printcolumn = r#"{"name":"COVERAGE","type":"string","jsonPath":".status.integrity.coverage","description":"what the signed scorecard verified: sampled or complete; empty is not recorded, never complete"}"#,
     printcolumn = r#"{"name":"RTO","type":"integer","jsonPath":".status.measured.rtoSeconds"}"#,
     printcolumn = r#"{"name":"SIGNED","type":"string","jsonPath":".status.evidence.verification.result","description":"green needs this Valid AND outcome pass"}"#,
-    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // PROD-11.1b: APPENDED after AGE, so no existing column moves (a runbook
+    // that reads a column by position keeps working).
+    printcolumn = r#"{"name":"SELECTION","type":"string","jsonPath":".status.integrity.selection.scope","description":"partial when the signed scorecard records a replay selection (a partition subset or a window start; status.integrity.selection names it); empty is every partition of every topic"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreSpec {

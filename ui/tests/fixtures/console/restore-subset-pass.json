@@ -38,6 +38,7 @@
       "covered": true
     },
     "selection": {
+      "scope": "partial",
       "windowEndMs": 1788789900000,
       "narrowedTopics": 1,
       "partitions": [
