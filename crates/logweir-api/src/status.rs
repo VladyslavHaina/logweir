@@ -721,6 +721,36 @@ pub struct VerificationScopeView {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub unsampled_topics: Vec<String>,
+    /// **PROD-11.1b.** The signed replay selection every count above is
+    /// over: a window from a stated start, or a partition subset of each
+    /// narrowed topic. ABSENT means the scorecard states none (every
+    /// partition of every restored topic, from the archive's floor).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<crate::contract::RestoreSelectionView>,
+}
+
+/// **PROD-11.1b.** `status.integrity.selection` as the API's
+/// [`crate::contract::RestoreSelectionView`], copied field for field; `None`
+/// exactly when the status carries none.
+#[must_use]
+pub fn selection_view(
+    integrity: Option<&weirkeeper::crds::restore::Integrity>,
+) -> Option<crate::contract::RestoreSelectionView> {
+    let s = integrity?.selection.as_ref()?;
+    Some(crate::contract::RestoreSelectionView {
+        window_start_ms: s.window_start_ms,
+        window_end_ms: s.window_end_ms,
+        narrowed_topics: s.narrowed_topics,
+        partitions: s.partitions.as_ref().map(|rows| {
+            rows.iter()
+                .map(|r| crate::contract::SelectedPartitionsView {
+                    topic: bounded(&r.topic, 249),
+                    partitions: r.partitions.clone(),
+                })
+                .collect()
+        }),
+        engine_runs: s.engine_runs,
+    })
 }
 
 /// **PROD-08.1a.** A complete verification's result, copied from
@@ -729,8 +759,9 @@ pub struct VerificationScopeView {
 #[derive(Clone, Debug, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CompleteVerificationView {
-    /// `true` when every partition of every restored topic was compared.
-    /// `false` is NEVER a pass, on any surface.
+    /// `true` when every SELECTED partition of every restored topic was
+    /// compared: every partition of a topic unless `selection.partitions`
+    /// narrows it (PROD-11.1b). `false` is NEVER a pass, on any surface.
     pub covered: bool,
     /// Why `covered` is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1349,6 +1380,7 @@ pub fn backup_view(backup: &Backup, now: DateTime<Utc>) -> OperationView {
             coverage: None,
             complete: None,
             unsampled_topics: Vec::new(),
+            selection: None,
         },
         awaiting_approval: false,
         stale,
@@ -1438,6 +1470,8 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
                 .filter(|t| t.len() <= weirkeeper::crds::restore::UNSAMPLED_TOPICS_MAX)
                 .map(|t| t.iter().map(|n| bounded(n, 249)).collect())
                 .unwrap_or_default(),
+            // PROD-11.1b: the selection every number above is over.
+            selection: selection_view(status.and_then(|s| s.integrity.as_ref())),
         },
         awaiting_approval,
         stale,
