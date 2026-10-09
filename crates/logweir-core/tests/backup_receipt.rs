@@ -1932,3 +1932,59 @@ fn the_written_version_defines_generations() {
         "1.5.0"
     );
 }
+
+/// **The generation rule over two RECEIPTS** (`topic_identity::between`): the
+/// lineage key is (source cluster, topic), so a previous point from another
+/// cluster is no predecessor, whatever its IDs say; a receipt without the
+/// block (every one before 1.5.0) establishes nothing; and only then do the
+/// two pre-capture IDs decide.
+#[test]
+fn the_generation_rule_reads_two_receipts_of_one_source_cluster() {
+    use logweir_core::topic_identity::{between, Generation, Unestablished};
+    let previous = pristine_1_5();
+    let mut current = pristine_1_5();
+    // Same cluster, same ID: the same generation.
+    assert_eq!(
+        between(Some(&previous), &current, "orders"),
+        Generation::Same {
+            topic_id: ID_A.into()
+        }
+    );
+    // Same cluster, recreated between the two points: a NEW generation.
+    let e = generation(&mut current, "orders");
+    e.topic_id = Some(ID_B.into());
+    e.topic_id_after = Some(ID_B.into());
+    assert_eq!(
+        between(Some(&previous), &current, "orders"),
+        Generation::New {
+            previous: ID_A.into(),
+            current: ID_B.into()
+        }
+    );
+    // Another source cluster with the SAME ID is still no predecessor.
+    let mut elsewhere = pristine_1_5();
+    elsewhere.source.cluster_id = "ANOTHER-CLUSTER-000000001".into();
+    assert_eq!(
+        between(Some(&elsewhere), &pristine_1_5(), "orders"),
+        Generation::NotEstablished(Unestablished::OtherCluster)
+    );
+    // A previous receipt before 1.5.0, and a current one without the block.
+    assert_eq!(
+        between(Some(&pristine_1_3()), &pristine_1_5(), "orders"),
+        Generation::NotEstablished(Unestablished::PreviousNotRecorded)
+    );
+    assert_eq!(
+        between(Some(&pristine_1_5()), &pristine_1_3(), "orders"),
+        Generation::NotEstablished(Unestablished::CurrentNotRecorded)
+    );
+    // No previous point at all.
+    assert_eq!(
+        between(None, &pristine_1_5(), "orders"),
+        Generation::NotEstablished(Unestablished::NoPredecessor)
+    );
+    // A broker with no IDs on both sides: unknown, never the same.
+    assert!(matches!(
+        between(Some(&pristine_1_5()), &pristine_1_5(), "payments"),
+        Generation::NotEstablished(Unestablished::PreviousUnread(_))
+    ));
+}
