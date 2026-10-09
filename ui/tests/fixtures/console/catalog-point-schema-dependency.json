@@ -1,0 +1,48 @@
+{
+  "about": "PROD-03.0. One chain, three readers: `recordTopics` is the point record's topics[].schema_dependency as the receipt writes it (format 1.5.0); `entryTopics` is what the catalog sync Job lists for them (crates/logweir/tests/check_cli.rs reads both and holds the runner to them); `pointTopics` is what the product API publishes for those entries (crates/logweir-api/tests/d3_reads.rs seeds `entryTopics` and holds the API to it); ui/tests/schema-dependency.spec.js renders `pointTopics`.",
+  "recordTopics": [
+    {
+      "name": "audit",
+      "schema_dependency": {
+        "verdict": "notDetected",
+        "basis": "complete",
+        "key": {"dependent": false, "framed": 0, "unframed": 40, "nulls": 0, "schema_ids": [], "schema_id_count": 0},
+        "value": {"dependent": false, "framed": 0, "unframed": 40, "nulls": 0, "schema_ids": [], "schema_id_count": 0}
+      }
+    },
+    {
+      "name": "empty",
+      "schema_dependency": {"verdict": "notAssessed", "reason": "noRecords"}
+    },
+    {
+      "name": "orders",
+      "schema_dependency": {
+        "verdict": "schemaDependent",
+        "basis": "sampled",
+        "key": {"dependent": true, "framed": 1000, "unframed": 0, "nulls": 0, "schema_ids": [2], "schema_id_count": 1},
+        "value": {"dependent": true, "framed": 998, "unframed": 0, "nulls": 2, "schema_ids": [3, 4], "schema_id_count": 2}
+      }
+    },
+    {
+      "name": "payments",
+      "schema_dependency": {
+        "verdict": "schemaDependent",
+        "basis": "complete",
+        "key": {"dependent": false, "framed": 1, "unframed": 99, "nulls": 0, "schema_ids": [9], "schema_id_count": 1},
+        "value": {"dependent": true, "framed": 100, "unframed": 0, "nulls": 0, "schema_ids": [100001, 100002, 100003, 100004, 100005, 100006, 100007, 100008, 100009, 100010, 100011, 100012, 100013, 100014, 100015, 100016], "schema_id_count": 18}
+      }
+    }
+  ],
+  "entryTopics": [
+    {"name": "audit", "schemaDependency": {"verdict": "notDetected", "basis": "complete"}},
+    {"name": "empty", "schemaDependency": {"verdict": "notAssessed", "reason": "noRecords"}},
+    {"name": "orders", "schemaDependency": {"verdict": "schemaDependent", "basis": "sampled", "sides": ["key", "value"], "schemaIds": [2, 3, 4]}},
+    {"name": "payments", "schemaDependency": {"verdict": "schemaDependent", "basis": "complete", "sides": ["value"], "schemaIds": [100001, 100002, 100003, 100004, 100005, 100006, 100007, 100008, 100009, 100010, 100011, 100012, 100013, 100014, 100015, 100016], "schemaIdsOmitted": true}}
+  ],
+  "pointTopics": [
+    {"name": "audit", "applyRoute": "unknown", "schemaDependency": {"verdict": "notDetected", "basis": "complete"}},
+    {"name": "empty", "applyRoute": "unknown", "schemaDependency": {"verdict": "notAssessed", "reason": "noRecords"}},
+    {"name": "orders", "applyRoute": "unknown", "schemaDependency": {"verdict": "schemaDependent", "basis": "sampled", "sides": ["key", "value"], "schemaIds": [2, 3, 4]}},
+    {"name": "payments", "applyRoute": "unknown", "schemaDependency": {"verdict": "schemaDependent", "basis": "complete", "sides": ["value"], "schemaIds": [100001, 100002, 100003, 100004, 100005, 100006, 100007, 100008, 100009, 100010, 100011, 100012, 100013, 100014, 100015, 100016], "schemaIdsOmitted": true}}
+  ]
+}

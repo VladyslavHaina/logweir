@@ -370,6 +370,12 @@ pub struct Ran {
     /// `source_replication_factor` for each NAMED topic it mentions — the
     /// counts `topic_configuration` records, from the same read-back.
     pub manifest_layouts: BTreeMap<String, crate::backup::config_coverage::Layout>,
+    /// **PROD-03.0.** Per NAMED topic, the schema dependency judged from a
+    /// bounded sample of the segments the manifest just read back lists —
+    /// `crate::backup::schema_dependency::detect`, through the same read-only
+    /// archive handle. Never fatal: a segment it cannot judge makes its topic
+    /// `notAssessed`.
+    pub schema_dependency: BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>,
 }
 
 pub fn run(
@@ -530,6 +536,12 @@ pub fn run(
     // panicking in a release build's wrapping.
     let covered_to_ms = newest_inclusive.saturating_add(1);
 
+    // **PROD-03.0.** The named topics' schema dependency, from the archived
+    // BYTES this run wrote: a bounded sample of each topic's segments, read
+    // back through the read-only archive handle and decoded with Logweir's own
+    // `.kbak` decoder. No registry is contacted. Never fatal.
+    let schema_dependency = crate::backup::schema_dependency::detect(&archive, &plan.topics, store);
+
     Ok(Ran {
         facts,
         manifest_key: set.manifest_key,
@@ -540,6 +552,7 @@ pub fn run(
         covered_to_ms,
         manifest_configurations,
         manifest_layouts,
+        schema_dependency,
     })
 }
 
@@ -594,11 +607,11 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// `BackupOutcome` -> the document. A pure projection: every field is a value
 /// the outcome already carries, and nothing here measures anything.
 ///
-/// `format_version` is `FORMAT_VERSION_WITH_TOPIC_CONFIGURATION` (`1.3.0`,
-/// PROD-05.1) of THIS document type (independent of the scorecard's), because
-/// this build writes `topic_configuration` on every receipt, pinned or not —
-/// or `FORMAT_VERSION_WITH_AUTH_MODES` (`1.4.0`, PROD-01.3) when the source's
-/// auth mode is one PROD-01.3 added — by
+/// `format_version` is `FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY` (`1.5.0`,
+/// PROD-03.0) of THIS document type (independent of the scorecard's), because
+/// this build writes `schema_dependency` on every receipt, beside
+/// `topic_configuration`, pinned or not and for every auth mode (1.5.0 defines
+/// PROD-01.3's modes too) — by
 /// `logweir_core::backup_receipt::format_version_for`, the one place that
 /// decides it. `source.auth` is `BackupOutcome::source_auth` rendered as the
 /// two strings `ReceiptAuth` holds — **never a password, and no field that
@@ -616,11 +629,11 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
     };
     let auth = receipt_auth(&outcome.source_auth);
     BackupReceipt {
-        // PROD-01.3: the version follows the auth mode too — 1.4.0 for
-        // `scramSha256`, `plain` and `mtls` (it defines PROD-05.1's block as
-        // well), PROD-05.1's 1.3.0 document otherwise.
+        // PROD-03.0: every receipt this build signs carries
+        // `schema_dependency`, so every one is 1.5.0 — which defines
+        // PROD-01.3's auth modes and PROD-05.1's block as well.
         format_version: logweir_core::backup_receipt::format_version_for(
-            &archive, true, false, &auth,
+            &archive, true, true, &auth,
         )
         .to_string(),
         run_id: outcome.run_id.clone(),
@@ -661,7 +674,11 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         // model, so a topic without an owner reads "not checked" when it is
         // empty and never "applied through the admin API".
         owner_detection: Some(outcome.owner_detection.clone()),
-        schema_dependency: None,
+        // PROD-03.0: ALWAYS written, so every receipt this build signs is
+        // 1.5.0 and says, per named topic, whether its records need a schema
+        // registry — never left to be read as NOT ASSESSED by omission when it
+        // was judged.
+        schema_dependency: Some(outcome.schema_dependency.clone()),
     }
 }
 
