@@ -158,6 +158,7 @@ api.console.trustedProxyCidrs|console-shared|-|--set-json|["198.51.100.0/24"]
 api.console.trustedProxyService.namespace|console-shared|-|--set-string|fx10-ingress
 api.console.trustedProxyService.name|console-shared|-|--set-string|fx10-proxy
 api.console.requireTrustedProxy|console-shared|--set api.console.requireTrustedProxy=false|--set|true
+api.console.trustedProxy|console-shared|--set-json api.console.trustedProxyCidrs=[] --set-string api.console.trustedProxyService.namespace= --set-string api.console.trustedProxyService.name= --set api.console.requireTrustedProxy=false|--set-string|none
 api.console.rateLimits.manualBackupsPerMinute|console|-|--set|11
 api.console.rateLimits.manualRestoresPerMinute|console|-|--set|3
 api.console.hostAliases|console|-|--set-json|[{"ip":"192.0.2.10","hostnames":["idp.fx10.example"]}]
