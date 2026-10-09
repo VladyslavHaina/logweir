@@ -284,6 +284,83 @@ impl ConsumerGroupSnapshotRead {
     }
 }
 
+/// **PROD-04.1.** The group type every group imported from an engine
+/// consumer-group snapshot carries: the engine records none (PROD-04.0 §3.7:
+/// it keeps a streams group's positions with no type at all), so an imported
+/// group is never shown as a consumer group's, and its positions are never
+/// applied on the snapshot's word (AP-04.1-7).
+pub const IMPORTED_GROUP_TYPE: &str = "unknown";
+
+/// **PROD-04.1.** One group of an engine snapshot, imported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedGroup {
+    /// The group id the engine recorded.
+    pub group_id: String,
+    /// Always [`IMPORTED_GROUP_TYPE`].
+    pub group_type: &'static str,
+    /// The committed offsets the engine recorded, by topic then partition:
+    /// only those `>= 0` on topics the engine archived, which is the engine's
+    /// own filter — a group or a partition missing here was not captured,
+    /// never "no committed position".
+    pub positions: Vec<vendored::consumer_groups::Position>,
+}
+
+/// **PROD-04.1.** An engine consumer-group snapshot, imported: the ONE way a
+/// foreign archive's snapshot is read as positions. Logweir's own backups
+/// never write one (the rendered document leaves the engine's
+/// `consumer_group_snapshot` at its default, `false`); they record the
+/// selected groups natively in the receipt (`consumer_positions`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedSnapshot {
+    /// The object's key.
+    pub key: String,
+    /// `sha256:<hex>` of its bytes.
+    pub sha256: String,
+    /// When the engine took it, epoch milliseconds, when it says.
+    pub snapshot_time_ms: Option<i64>,
+    /// Every group, in the engine's order.
+    pub groups: Vec<ImportedGroup>,
+}
+
+impl ConsumerGroupSnapshotRead {
+    /// **PROD-04.1.** The snapshot as an import source: `None` when there is no
+    /// object, `Some(Err)` when it is unreadable or a group's positions are not
+    /// the engine's shape — never a partial import, which would read as "no
+    /// committed position" for what it dropped.
+    #[must_use]
+    pub fn imported(&self) -> Option<Result<ImportedSnapshot, String>> {
+        match self {
+            Self::Absent => None,
+            Self::Unreadable { reason, .. } => Some(Err(reason.clone())),
+            Self::Parsed {
+                key,
+                sha256,
+                snapshot,
+            } => Some(
+                snapshot
+                    .groups
+                    .iter()
+                    .map(|g| {
+                        g.positions()
+                            .map(|positions| ImportedGroup {
+                                group_id: g.group_id.clone(),
+                                group_type: IMPORTED_GROUP_TYPE,
+                                positions,
+                            })
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|groups| ImportedSnapshot {
+                        key: key.clone(),
+                        sha256: sha256.clone(),
+                        snapshot_time_ms: snapshot.snapshot_time,
+                        groups,
+                    }),
+            ),
+        }
+    }
+}
+
 impl DataEngine for OsoCliEngine {
     fn id(&self) -> EngineId {
         EngineId {

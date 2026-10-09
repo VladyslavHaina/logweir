@@ -1333,3 +1333,51 @@ fn describe_returns_segment_keys_that_store_get_can_actually_resolve() {
     let (bytes, _) = store2.get(key).unwrap();
     assert_eq!(bytes, segment);
 }
+
+/// **PROD-04.1, AP-04.1-7: positions imported from an engine snapshot carry
+/// group type `unknown`**, never a consumer group's: the engine records no
+/// type and keeps a streams group's positions untyped (PROD-04.0 §3.7). The
+/// real snapshot imports every group with every position; an unreadable one
+/// imports nothing (never a partial import); no object imports nothing.
+#[test]
+fn an_engine_snapshot_imports_with_group_type_unknown_and_never_partially() {
+    use logweir_engine_oso::engine::{ConsumerGroupSnapshotRead, IMPORTED_GROUP_TYPE};
+    let real = std::fs::read(REAL_SNAPSHOT).unwrap();
+    let (dir, engine, set) = one_set_archive("prod041-import", Some(&real));
+    let read = engine.consumer_group_snapshot(&set).unwrap();
+    let imported = read
+        .imported()
+        .expect("an object")
+        .expect("the engine's own bytes import");
+    assert_eq!(IMPORTED_GROUP_TYPE, "unknown");
+    assert_eq!(imported.groups.len(), 4);
+    for g in &imported.groups {
+        assert_eq!(g.group_type, "unknown", "{}", g.group_id);
+        assert!(
+            !["classic", "consumer"].contains(&g.group_type),
+            "NEGATIVE CONTROL: an imported group shown as a consumer group's"
+        );
+    }
+    let positions: usize = imported.groups.iter().map(|g| g.positions.len()).sum();
+    assert_eq!(positions, 10);
+    assert_eq!(imported.sha256, logweir_core::ids::sha256_prefixed(&real));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Unreadable: no import at all, with the reason.
+    let (dir, engine, set) = one_set_archive("prod041-unreadable", Some(b"{\"groups\": 7}"));
+    match engine.consumer_group_snapshot(&set).unwrap() {
+        r @ ConsumerGroupSnapshotRead::Unreadable { .. } => {
+            assert!(r.imported().expect("an object").is_err());
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    // Absent: nothing to import, which is "not captured", never zero groups.
+    let (dir, engine, set) = one_set_archive("prod041-absent", None);
+    assert!(engine
+        .consumer_group_snapshot(&set)
+        .unwrap()
+        .imported()
+        .is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
