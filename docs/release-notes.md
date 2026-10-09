@@ -965,13 +965,14 @@ slow-rate clients.
 256 clients that pipeline requests for a 156 KiB asset and read nothing hold
 every connection slot, then a request queued behind them is answered no
 sooner than thirty seconds after the first and within forty-five of the last,
-every one of them ended by the server before its answers were all sent; a
+every one of them ended by the server before its answers were all sent, and a
+single such client on its own is ended the same way; a
 reader taking 8 KiB every 150 ms receives fourteen answers over more than
 thirty-five seconds, uncut; the operation event stream of a running backup,
 served by a fake API server, is still open with a heartbeat after the
 deadline; a signed-in body that stops is answered and closed at thirty seconds
 (not at the sixty-second total) while one sent three seconds late is read
-normally; one that trickles a byte every five seconds is answered and closed at
+normally; one that trickles a byte every four seconds is answered and closed at
 sixty; the deadlines are pinned to their documented values at their call
 sites. Unit rows over the two guards in `src/transport.rs` on loopback
 sockets and stub IO. The connection's own reads are deliberately not timed:
