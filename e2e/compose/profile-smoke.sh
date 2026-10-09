@@ -143,6 +143,20 @@ smoke_cluster2() {
   if printf '%s' "$out" | grep -qx logweir.scratch && ! printf '%s' "$out" | grep -qx orders; then pass cluster2.host-side "localhost:$p2 serves ITS topics: the marker, and not kafka-broker-1's orders"; else fail cluster2.host-side "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
 }
 
+smoke_autocreate() {
+  local out id1 id2 pa topic
+  pa=$(lw_e2e_port LOGWEIR_E2E_AUTOCREATE_PORT)
+  id1=$(innet "$T/kafka-cluster.sh cluster-id --bootstrap-server kafka-broker-1:9094" | sed -n 's/^Cluster ID: *//p')
+  id2=$(innet "$T/kafka-cluster.sh cluster-id --bootstrap-server kafka-autocreate:9094" | sed -n 's/^Cluster ID: *//p')
+  if [ -n "$id1" ] && [ -n "$id2" ] && [ "$id1" != "$id2" ]; then pass autocreate.distinct-cluster-id "kafka-broker-1 $id1, kafka-autocreate $id2"; else fail autocreate.distinct-cluster-id "ids '$id1' / '$id2'"; fi
+  # A producer that sends to a name the cluster does not have CREATES it --
+  # the property, observed, not the setting read back.
+  topic="smoke-autocreate-$RUN"
+  innet "printf 'x\\n' | timeout 60 $T/kafka-console-producer.sh --bootstrap-server kafka-autocreate:9094 --topic $topic" >/dev/null 2>&1 || true
+  out=$(hostside "$T/kafka-topics.sh --bootstrap-server localhost:$pa --list")
+  if printf '%s' "$out" | grep -qx "$topic"; then pass autocreate.producer-creates "a produce to $topic created it on localhost:$pa"; else fail autocreate.producer-creates "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
+}
+
 smoke_streams() {
   local out n last
   # A word no earlier run produced, so every count below is THIS run's.
@@ -465,6 +479,7 @@ for p in $profiles; do
     auth) smoke_auth ;;
     cluster3) smoke_cluster3 ;;
     cluster2) smoke_cluster2 ;;
+    autocreate) smoke_autocreate ;;
     streams) smoke_streams ;;
     objectstore) smoke_objectstore ;;
     registry) smoke_registry ;;

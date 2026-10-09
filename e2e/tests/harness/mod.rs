@@ -94,8 +94,8 @@ pub mod stack;
 // module-level `allow(dead_code)` does not cover an unused `use`.
 #[allow(unused_imports)]
 pub use stack::{
-    bootstrap, bootstrap_acl, bootstrap_acl_sasl, bootstrap_c3, bootstrap_k8s, bootstrap_sasl,
-    s3_endpoint,
+    bootstrap, bootstrap_acl, bootstrap_acl_sasl, bootstrap_autocreate, bootstrap_c3,
+    bootstrap_cluster2, bootstrap_k8s, bootstrap_sasl, s3_endpoint,
 };
 
 /// The `SASL` listener — the SAME SCRAM credential store as `bootstrap_sasl()`,

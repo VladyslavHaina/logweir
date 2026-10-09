@@ -50,6 +50,7 @@ PROFILES_LIST="
 auth      kafka-auth: SASL_SSL/PLAIN :9102, SASL_PLAINTEXT/SCRAM-SHA-256 :9103, SSL+client-cert :9104 (certs in .e2e/auth/<project>/)
 cluster3  kafka-c3-1..3: a three-node KRaft cluster, RF 3 / min ISR 2 by default, :9112-:9114
 cluster2  kafka-cluster2: a second single-node cluster with its own cluster id and the marker topic, :9122
+autocreate  kafka-autocreate: a single-node cluster that AUTO-CREATES topics (Kafka's default; every other broker here turns it off), its own cluster id, :9126
 streams   streams-wordcount: Apache Kafka's WordCountDemo on kafka-broker-1 (group logweir-e2e-wordcount)
 streams-protocol  streams-protocol-wordcount: WordCountProcessorDemo on kafka-broker-1 with group.protocol=streams (a Streams group, logweir-e2e-streams-protocol); 4.x lines only
 objectstore  objectstore: SeaweedFS 4.48 S3 :9130 with kafka-backups, logweir-evidence, kafka-backups-locked (Object Lock), kafka-backups-2
