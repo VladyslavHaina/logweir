@@ -789,6 +789,12 @@ pub fn verify_evidence(
     // reports, before a body byte is read, and is `NotAttempted` naming the
     // cap — a FINAL verdict (`not_attempted_class`): the object will not
     // shrink, so it is not read again on the schedule.
+    //
+    // AND OUT OF ONE BUDGET (review F2): the document's worst case is reserved
+    // before it is read and held until the verdict is built, so concurrent
+    // verifications cannot together exceed `read_budget`'s bound.
+    let _reservation = crate::read_budget::ReadBudget::controller()
+        .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
     let payload = match store.get_capped(payload_key, caps::CONTROLLER_DOCUMENT) {
         Ok((bytes, _version)) => bytes,
         Err(e) => return VerificationResult::not_attempted(payload_type, store_detail(&e)),
@@ -2113,7 +2119,8 @@ pub fn retrust_with(
                     SigningTime::NotNeeded
                     | SigningTime::Deferred
                     | SigningTime::Unreadable(_)
-                    | SigningTime::NotAttempted(_) => stored_claim(stored),
+                    | SigningTime::NotAttempted(_)
+                    | SigningTime::OverCap(_) => stored_claim(stored),
                 },
                 policy: policy_ref(&resolved.source),
                 compromise_recorded_by: resolved
@@ -2244,6 +2251,12 @@ pub fn retrust_with(
             SigningTime::Absent(_) => {
                 object.insert("signingTimeRead".into(), json!(SIGNING_TIME_ABSENT));
             }
+            // OVER THE CAP: the store answered with a size this controller
+            // will not read, and the next read would answer the same — so it
+            // settles too, with its own word (FX-31 review F8).
+            SigningTime::OverCap(_) => {
+                object.insert("signingTimeRead".into(), json!(SIGNING_TIME_OVER_CAP));
+            }
             // A SUCCESSFUL READ CARRIES NEITHER. `signedAt` is on the block now
             // and `compared_a_claim` answers from the basis, so leaving a stale
             // backoff behind would be a field nobody reads.
@@ -2331,6 +2344,7 @@ fn unverified_detail(
             format!("the archive was read for it and did not answer: {detail}")
         }
         SigningTime::NotAttempted(detail) => format!("no re-read was attempted: {detail}"),
+        SigningTime::OverCap(detail) => format!("the document was not re-read: {detail}"),
         // UNREACHABLE THROUGH `retrust_with`, which reaches this function only
         // for a claim that is still `NotRecorded` — and both of these arms
         // replace the claim. A sentence rather than a panic, because a
@@ -2447,11 +2461,16 @@ fn compared_a_claim(stored: &Value) -> bool {
     // settled fact: the absence is the DOCUMENT's, exactly as if a basis had
     // compared one. Without it a document that genuinely carries none is
     // re-read on every reconcile for ever — review finding **G2**.
-    if stored
-        .pointer("/trust/signingTimeRead")
-        .and_then(Value::as_str)
-        == Some(SIGNING_TIME_ABSENT)
-    {
+    //
+    // `overCap` settles the same way (FX-31 review F8): the store answered
+    // with a size this controller will not read, and it would answer the same
+    // again.
+    if matches!(
+        stored
+            .pointer("/trust/signingTimeRead")
+            .and_then(Value::as_str),
+        Some(SIGNING_TIME_ABSENT | SIGNING_TIME_OVER_CAP)
+    ) {
         return true;
     }
     matches!(
@@ -2463,6 +2482,10 @@ fn compared_a_claim(stored: &Value) -> bool {
 /// `trust.signingTimeRead` for a completed re-read whose document carried no
 /// signing time.
 const SIGNING_TIME_ABSENT: &str = "absent";
+
+/// `trust.signingTimeRead` for a re-read the store answered with a document
+/// over the controller's read cap (FX-31 review F8).
+pub const SIGNING_TIME_OVER_CAP: &str = "overCap";
 
 /// How long a fruitless attempt bars the next one — review finding **G2**.
 ///
@@ -2561,6 +2584,14 @@ pub enum SigningTime {
     /// evidence credential, or the destination reads evidence with a grant
     /// only a pod may hold (D2 §3.9).
     NotAttempted(String),
+    /// **FX-31 review F8.** The store answered, and the document is larger
+    /// than the controller's read cap, so it was not read. A fact about the
+    /// DOCUMENT, like [`Self::Absent`]: the object will not shrink, so the
+    /// question is SETTLED (`trust.signingTimeRead: overCap`, no
+    /// `retryAfter`) and never asked again — where [`Self::Unreadable`] would
+    /// re-read it every quarter hour for ever. Like `Unreadable`, nothing was
+    /// learned, so the stored result is kept on an unverified basis.
+    OverCap(String),
 }
 
 /// Whether a stored status needs one bounded re-read before its verdict can be
@@ -2704,9 +2735,14 @@ pub fn read_signing_time(store: Option<&Store>, need: &SigningTimeNeed) -> Signi
     let Some(store) = store else {
         return SigningTime::NotAttempted(NO_CREDENTIAL_DETAIL.to_string());
     };
-    // FX-31: under the same cap as `verify_evidence`'s read of the document.
+    // FX-31: under the same cap as `verify_evidence`'s read of the document,
+    // and out of the same budget (review F2).
+    let _reservation = crate::read_budget::ReadBudget::controller()
+        .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
     match store.get_capped(&need.payload_key, caps::CONTROLLER_DOCUMENT) {
         Ok((bytes, _version)) => signing_time_in(&bytes, need),
+        // Over the cap: settled, not retried (review F8).
+        Err(e @ StoreError::TooLarge { .. }) => SigningTime::OverCap(store_detail(&e)),
         Err(e) => SigningTime::Unreadable(store_detail(&e)),
     }
 }
@@ -2968,7 +3004,8 @@ where
         SigningTime::NotNeeded
         | SigningTime::Deferred
         | SigningTime::Unreadable(_)
-        | SigningTime::NotAttempted(_) => {
+        | SigningTime::NotAttempted(_)
+        | SigningTime::OverCap(_) => {
             "re-deriving from the stored matchedKeyId, signedAt and verifiedAt — no storage \
              read and no signature check"
         }

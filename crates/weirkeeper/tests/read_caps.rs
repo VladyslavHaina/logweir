@@ -279,7 +279,8 @@ fn the_signing_time_re_read_names_the_cap() {
         payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT.to_string(),
     };
     match read_signing_time(Some(&store), &need) {
-        SigningTime::Unreadable(detail) => {
+        // Settled, not retried (review F8).
+        SigningTime::OverCap(detail) => {
             assert!(names(&detail, caps::CONTROLLER_DOCUMENT), "{detail}")
         }
         other => panic!("an oversized document yields no signing time, got {other:?}"),
@@ -370,6 +371,30 @@ fn plant(root: &Path, size: u64) {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(size).unwrap();
     }
+}
+
+/// The control's object: [`RANDOM_BYTES`] of pseudo-random bytes, which no
+/// page compressor shrinks.
+const RANDOM_KEY: &str = "logweir/drills/random.bin";
+const RANDOM_BYTES: u64 = 128 << 20;
+
+/// `len` pseudo-random bytes (xorshift64*) at `path`.
+fn write_random(path: &Path, len: u64) {
+    use std::io::Write as _;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut left = len;
+    while left > 0 {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        let word = x.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes();
+        let n = usize::try_from(left.min(8)).unwrap();
+        w.write_all(&word[..n]).unwrap();
+        left -= n as u64;
+    }
+    w.flush().unwrap();
 }
 
 /// Where [`plant_tiny_values`] writes its manifest.
@@ -486,7 +511,7 @@ fn run_child(mode: &str, root: &Path) {
                 );
                 assert!(refused.is_some_and(|d| names(&d, caps::CONTROLLER_DOCUMENT)));
                 assert!(
-                    matches!(&signing_time, SigningTime::Unreadable(d) if names(d, caps::CONTROLLER_DOCUMENT))
+                    matches!(&signing_time, SigningTime::OverCap(d) if names(d, caps::CONTROLLER_DOCUMENT))
                 );
                 assert!(report.skipped[0]
                     .reason
@@ -495,9 +520,9 @@ fn run_child(mode: &str, root: &Path) {
         }
         "uncapped" => {
             let (bytes, _) = store
-                .get_capped(PAYLOAD_KEY, u64::MAX)
+                .get_capped(RANDOM_KEY, u64::MAX)
                 .expect("a cap far too large reads the whole object");
-            assert_eq!(bytes.len() as u64, PLANTED);
+            assert_eq!(bytes.len() as u64, RANDOM_BYTES);
         }
         "uncapped-live" => {
             let (bytes, _) = store
@@ -520,6 +545,59 @@ fn run_child(mode: &str, root: &Path) {
             let v: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
             assert!(v["pad"].is_array());
         }
+        "conc-manifests" | "conc-manifests-free" => {
+            let free = weirkeeper::read_budget::ReadBudget::new(u64::MAX);
+            let budget = if mode.ends_with("-free") {
+                &free
+            } else {
+                weirkeeper::read_budget::ReadBudget::controller()
+            };
+            let start = std::sync::Barrier::new(CONC_MANIFESTS);
+            std::thread::scope(|scope| {
+                for i in 0..CONC_MANIFESTS {
+                    let (store, start) = (&store, &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        let report = weirkeeper::retention::evaluate_within(
+                            budget,
+                            store,
+                            "file:///archive",
+                            &format!("logweir/conc/p{i}/"),
+                            &Retention {
+                                keep_last: Some(1),
+                                keep_days: None,
+                            },
+                            Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
+                        )
+                        .expect("the listing answers");
+                        assert_eq!(report.skipped, Vec::new(), "every manifest folds");
+                    });
+                }
+            });
+        }
+        "conc-documents" | "conc-documents-free" => {
+            let free = weirkeeper::read_budget::ReadBudget::new(u64::MAX);
+            let budget = if mode.ends_with("-free") {
+                &free
+            } else {
+                weirkeeper::read_budget::ReadBudget::controller()
+            };
+            let start = std::sync::Barrier::new(CONC_DOCUMENTS);
+            std::thread::scope(|scope| {
+                for i in 0..CONC_DOCUMENTS {
+                    let (store, start) = (&store, &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        let o = weirkeeper::controllers::restore::observe_scorecard_within(
+                            budget,
+                            store,
+                            &format!("logweir/conc/s{i}.scorecard.json"),
+                        );
+                        assert!(o.is_some(), "a JSON object is observed");
+                    });
+                }
+            });
+        }
         other => panic!("unknown {CHILD_ENV} mode {other}"),
     }
 }
@@ -537,7 +615,16 @@ fn child_peak_over(mode: &str, root: &Path, live: Option<&str>) -> u64 {
     let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
     cmd.args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, mode)
-        .env(ROOT_ENV, root);
+        .env(ROOT_ENV, root)
+        // THE METER MEASURES LIVE MEMORY, NOT AN ALLOCATOR'S CACHE (review F2).
+        // macOS's libmalloc keeps freed large blocks resident in its large
+        // cache: measured here, SIXTEEN parses of a 1 MB document in ONE
+        // thread, one after the other, peaked at 602 MB, and at 39 MB with the
+        // cache off. glibc's dynamic mmap threshold does the same in kind. The
+        // controller's bound is on what is live at once, so each child turns
+        // both off; each variable is ignored by the other platform's allocator.
+        .env("MallocLargeCache", "0")
+        .env("MALLOC_MMAP_THRESHOLD_", "131072");
     match live {
         Some(endpoint) => cmd.env(LIVE_ENDPOINT_ENV, endpoint),
         None => cmd.env_remove(LIVE_ENDPOINT_ENV),
@@ -607,6 +694,10 @@ fn the_controller_read_paths_hold_bounded_memory_over_a_512_mib_object() {
         "[fx31-mem] baseline child {baseline} B; five capped paths over {PLANTED} B objects \
          {capped} B (adds {added} B, bound {BOUND} B)"
     );
+    // THE CONTROL READS INCOMPRESSIBLE BYTES (review F9): the sparse objects
+    // read as zeros, which macOS compresses under memory pressure, so a whole
+    // read of one measured anywhere from 171 MB to 536 MB.
+    write_random(&big.join(RANDOM_KEY), RANDOM_BYTES);
     let uncapped = child_peak("uncapped", &big);
     let whole = uncapped.saturating_sub(baseline);
     eprintln!(
@@ -641,10 +732,8 @@ fn the_controller_read_paths_hold_bounded_memory_over_a_512_mib_object() {
         "the controller's read paths over {PLANTED}-byte objects added {added} bytes of resident \
          memory at their peak; each must be refused at its cap, never read (bound {BOUND})"
     );
-    // FOUR TIMES THE BOUND, NOT THE OBJECT'S SIZE: the planted objects are
-    // sparse, so the control reads zeros, and macOS compresses idle zero pages
-    // under memory pressure — a loaded host measured the 512 MiB read at
-    // 251 MB resident. The meter still has to tell that read from the bound.
+    // The control's 128 MiB of random bytes are resident whatever the host's
+    // memory pressure; four times the bound is what it must clear.
     assert!(
         whole > 4 * BOUND,
         "the control added only {whole} bytes; the meter cannot tell a capped read from a whole \
@@ -706,5 +795,146 @@ fn the_controller_read_paths_hold_bounded_memory_against_minio() {
     assert!(
         whole > 4 * BOUND,
         "the control added only {whole} bytes over S3 (objects of {size} bytes)"
+    );
+}
+
+// ===========================================================================
+// Concurrent reads share ONE budget (FX-31 review F2)
+// ===========================================================================
+
+/// How many retention evaluations, and how many scorecard reads, run at once.
+const CONC_MANIFESTS: usize = 8;
+const CONC_DOCUMENTS: usize = 16;
+
+/// A tree for the concurrency row: [`CONC_MANIFESTS`] archive prefixes, each
+/// holding ONE manifest (a hard link to one file of `manifest_bytes`), and
+/// [`CONC_DOCUMENTS`] scorecards (hard links to one document of
+/// `document_bytes`).
+///
+/// The manifest is a VALID one whose segment keys are pseudo-random text, so
+/// its fold takes long enough that the reads overlap, and the buffered bytes
+/// do not compress. The scorecard is `{"pad":[0,0,…]}`: valid, and the shape
+/// whose `serde_json::Value` is largest per byte.
+fn plant_concurrency(root: &Path, manifest_bytes: usize, document_bytes: usize) {
+    use std::io::Write as _;
+    let pool = root.join("pool");
+    std::fs::create_dir_all(&pool).unwrap();
+    let manifest = pool.join("manifest.json");
+    {
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&manifest).unwrap());
+        w.write_all(br#"{"topics":[{"partitions":[{"segments":["#)
+            .unwrap();
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut written = 0usize;
+        let mut first = true;
+        while first || written < manifest_bytes {
+            let mut key = [0u8; 96];
+            for b in &mut key {
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
+                *b =
+                    alphabet[usize::try_from(x.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58).unwrap()];
+            }
+            let entry = format!(
+                r#"{}{{"key":"{}","start_timestamp":1,"end_timestamp":2}}"#,
+                if first { "" } else { "," },
+                std::str::from_utf8(&key).unwrap()
+            );
+            w.write_all(entry.as_bytes()).unwrap();
+            written += entry.len();
+            first = false;
+        }
+        w.write_all(b"]}]}]}").unwrap();
+    }
+    let document = pool.join("scorecard.json");
+    {
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&document).unwrap());
+        w.write_all(br#"{"pad":[0"#).unwrap();
+        for _ in 0..document_bytes.saturating_sub(12) / 2 {
+            w.write_all(b",0").unwrap();
+        }
+        w.write_all(b"]}").unwrap();
+    }
+    for i in 0..CONC_MANIFESTS {
+        let at = root.join(format!("logweir/conc/p{i}/b1/manifest.json"));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::hard_link(&manifest, &at).unwrap();
+    }
+    for i in 0..CONC_DOCUMENTS {
+        let at = root.join(format!("logweir/conc/s{i}.scorecard.json"));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::hard_link(&document, &at).unwrap();
+    }
+}
+
+/// **The caps bound each read; the budget bounds them TOGETHER** (FX-31 review
+/// F2).
+///
+/// In child processes:
+/// - [`CONC_MANIFESTS`] retention evaluations, each over a 60 MiB manifest
+///   (under the 64 MiB cap), start together;
+/// - [`CONC_DOCUMENTS`] scorecard observations, each over a document just
+///   under the 1 MiB cap that parses into about 37 MiB, start together.
+///
+/// Under the controller's budget, peak RSS stays within the budget plus a
+/// fixed slack, whatever the number of readers. The control runs the same
+/// readers under a budget that admits everything (`ReadBudget::new(u64::MAX)`)
+/// and must add more than twice the budget, which shows the meter sees
+/// concurrent reads.
+///
+/// KILLS: "no reservation" in `retention::evaluate` or `observe_scorecard`
+/// (the budgeted child holds the control's memory); "a budget far too large".
+#[test]
+fn concurrent_reads_share_one_budget() {
+    use weirkeeper::read_budget::CONTROLLER_READ_BUDGET_BYTES as BUDGET;
+    if std::env::var(CHILD_ENV).is_ok() {
+        // The child's work is the other row's dispatch (`TEST_NAME`).
+        return;
+    }
+    let scratch = std::env::temp_dir().join(format!(
+        "logweir-fx31-conc-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let small = scratch.join("small");
+    let big = scratch.join("big");
+    plant_concurrency(&small, 1, 16);
+    plant_concurrency(&big, 60 << 20, 1_040_000);
+    let slack: u64 = 32 << 20;
+
+    let m_base = child_peak("conc-manifests", &small);
+    let m_budget = child_peak("conc-manifests", &big).saturating_sub(m_base);
+    let m_free = child_peak("conc-manifests-free", &big).saturating_sub(m_base);
+    let d_base = child_peak("conc-documents", &small);
+    let d_budget = child_peak("conc-documents", &big).saturating_sub(d_base);
+    let d_free = child_peak("conc-documents-free", &big).saturating_sub(d_base);
+    let _ = std::fs::remove_dir_all(&scratch);
+    eprintln!(
+        "[fx31-conc] {CONC_MANIFESTS} evaluations of 60 MiB manifests: under the budget add \
+         {m_budget} B, with no budget {m_free} B; {CONC_DOCUMENTS} scorecards of 1,040,000 B: \
+         under the budget {d_budget} B, with no budget {d_free} B (budget {BUDGET} B, slack \
+         {slack} B)"
+    );
+    assert!(
+        m_budget < BUDGET + slack,
+        "{CONC_MANIFESTS} concurrent retention evaluations added {m_budget} bytes; the budget \
+         holds them to {BUDGET} plus {slack}"
+    );
+    assert!(
+        d_budget < BUDGET + slack,
+        "{CONC_DOCUMENTS} concurrent scorecard reads added {d_budget} bytes; the budget holds \
+         them to {BUDGET} plus {slack}"
+    );
+    assert!(
+        m_free > 2 * BUDGET,
+        "the control's evaluations added only {m_free} bytes; the meter cannot see concurrent \
+         reads at this size"
+    );
+    assert!(
+        d_free > 2 * BUDGET,
+        "the control's scorecard reads added only {d_free} bytes; the meter cannot see \
+         concurrent reads at this size"
     );
 }

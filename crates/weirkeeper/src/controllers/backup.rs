@@ -2583,6 +2583,12 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
     if keys.receipt.is_none() && keys.sidecar.is_none() {
         return None;
     }
+    // Out of the controller's one read budget (FX-31 review F2): the receipt
+    // and the `Value` parsed from it below are held under this reservation.
+    let _reservation = keys.receipt.as_ref().map(|_| {
+        crate::read_budget::ReadBudget::controller()
+            .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES)
+    });
     let (receipt, payload) = match keys.receipt.as_deref() {
         None => (None, false),
         Some(key) => match store.get_capped(key, caps::CONTROLLER_DOCUMENT) {

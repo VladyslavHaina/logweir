@@ -4054,11 +4054,27 @@ pub fn unobserved_scorecard(_key: String) -> BoxFuture<'static, Option<Scorecard
 /// anchor), so the cap bounds that parse as well as the read. A scorecard
 /// over it is an observation carrying only
 /// [`ScorecardObservation::read_refused`], the sentence naming the cap.
+///
+/// **Out of the controller's one read budget** (FX-31 review F2): the bytes
+/// and the `Value` parsed from them are held under one
+/// [`crate::read_budget::DOCUMENT_READ_COST_BYTES`] reservation.
 #[must_use]
 pub fn observe_scorecard(store: &Store, key: &str) -> Option<ScorecardObservation> {
+    observe_scorecard_within(crate::read_budget::ReadBudget::controller(), store, key)
+}
+
+/// [`observe_scorecard`] under `budget` rather than the controller's own,
+/// for a row that compares the two.
+#[must_use]
+pub fn observe_scorecard_within(
+    budget: &crate::read_budget::ReadBudget,
+    store: &Store,
+    key: &str,
+) -> Option<ScorecardObservation> {
     if key.trim().is_empty() {
         return None;
     }
+    let _reservation = budget.reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
     let (bytes, _version) = match store.get_capped(key, caps::CONTROLLER_DOCUMENT) {
         Ok(read) => read,
         Err(e @ logweir_store::StoreError::TooLarge { .. }) => {
