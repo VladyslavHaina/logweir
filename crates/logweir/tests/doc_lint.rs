@@ -2055,6 +2055,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "complete coverage through the CRDs, the API and the console",
             "spec.coverage: complete",
         ),
+        // FX-24b (2026-10-08): a client that stops reading an answer, or
+        // stops sending a body, meets the console's stall deadline; the
+        // constant names the bound an operator can find in the source.
+        (
+            "a stopped client meets the console's stall deadline",
+            "IO_STALL_TIMEOUT",
+        ),
     ];
     assert_eq!(
         items.len(),

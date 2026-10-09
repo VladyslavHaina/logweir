@@ -42,6 +42,8 @@
 //! * [`contract`], [`problem`], [`openapi`] — the HTTP contract and its
 //!   generated, drift-tested OpenAPI document.
 //! * [`assets`] — the static UI allowlist.
+//! * [`transport`] — the stall deadline on every connection's output and on
+//!   every request body (FX-24b); `main.rs` applies it to each connection.
 
 pub mod access;
 pub mod app;
@@ -61,6 +63,7 @@ pub mod problem;
 pub mod projection;
 pub mod routes;
 pub mod status;
+pub mod transport;
 pub mod trusted_proxy;
 pub mod validate;
 
