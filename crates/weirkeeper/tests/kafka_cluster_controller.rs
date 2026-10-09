@@ -32,9 +32,10 @@ use weirkeeper::conditions::{
 use weirkeeper::connection::{resolve, ConnectionUse};
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY, KEY_SCAN_TAIL_LINES};
 use weirkeeper::controllers::kafka_cluster::{
-    action_for, auth_mode_flag, crashed_status_patch, name_limit_for_cluster, observed_at,
-    observed_status_patch, probe_job_name, probe_report, probe_started_patch, reconcile_cluster,
-    refused_status_patch, runner_argv, runner_job_spec, verdict, ProbeReport, Requeue,
+    action_for, auth_mode_flag, being_deleted, crashed_status_patch, is_benign_race,
+    name_limit_for_cluster, observed_at, observed_status_patch, probe_job_name, probe_report,
+    probe_started_patch, reconcile_cluster, refused_status_patch, runner_argv, runner_job_spec,
+    verdict, verdict_recorded, Deferred, KafkaClusterError, ProbeReport, Requeue,
     CLUSTER_ID_PREFIX, CONDITION_REACHABLE, PROBE_CONDITION_REASONS, PROBE_DEADLINE_SECONDS,
     PROBE_JOB_PREFIX, PROBE_TTL_SECONDS, REACHABLE_PREFIX, REASON_PROBE_OUTPUT_UNREADABLE,
     REASON_PROBE_REPORTED_UNREACHABLE, REASON_PROBE_RUNNING, REASON_REACHABLE, REQUEUE_SECS,
@@ -42,7 +43,7 @@ use weirkeeper::controllers::kafka_cluster::{
 };
 use weirkeeper::crds::kafka_cluster::{AuthMode, KafkaCluster, KafkaClusterStatus};
 use weirkeeper::job;
-use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
+use weirkeeper::testing::{mock_client_recording_bodies, CapturedLog, Route, SeenBody};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -2124,32 +2125,98 @@ async fn every_cluster_status_write_is_a_resource_version_preconditioned_merge_p
     }
 }
 
-/// **A `409` IS SURFACED, NOT SWALLOWED** — no caller of this reconciler writes
-/// twice in a pass, so the conflict is simply the API error it is, and
-/// `error_policy` requeues.
+/// The API server's `409` for a stale `resourceVersion` precondition.
+const CONFLICT_BODY: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                             "message":"the object has been modified","reason":"Conflict",
+                             "code":409}"#;
+
+/// **A `409` ON THE STATUS WRITE IS AN OUTCOME, AND IT NEVER PRECEDES A TTL**
+/// (FX-19). The shared helper still surfaces the conflict as the API error it
+/// is; this reconciler answers it as [`Deferred::StatusSuperseded`] — the
+/// watch cache handed the pass an older copy, the newer copy's own event
+/// reconciles again — at debug, never at WARN and never as a reconcile error.
+/// PoC batch 2 counted about seven of these WARN lines a cadence.
 ///
-/// KILLS: swallowing the 409 inside the helper and returning `Ok`.
+/// Both passes that write: the creating pass (the new Job's own events race
+/// the status it just wrote — the common case) and the verdict pass, where the
+/// ordering is the property: a verdict that did not land is NOT followed by
+/// the TTL, which would let pod garbage collection take a log nobody recorded.
+///
+/// NEGATIVE CONTROL: the same verdict pass with the write answered `200`
+/// patches the TTL, so the zero below can fail.
+///
+/// KILLS: swallowing the 409 inside the helper (the write would read as
+/// landed and the TTL would follow); a 409 that reaches `error_policy`;
+/// a superseded verdict followed by its TTL.
 #[tokio::test]
-async fn a_conflicting_cluster_status_write_is_surfaced() {
+async fn a_conflicting_cluster_status_write_is_an_outcome_and_never_precedes_a_ttl() {
+    // ---- the creating pass -------------------------------------------------
     let mut routes = creating_routes();
     for route in &mut routes {
         if route.method == "PATCH" && route.path_suffix.ends_with("/status") {
             route.status = 409;
-            route.body = r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
-                             "message":"the object has been modified","reason":"Conflict",
-                             "code":409}"#
-                .to_string();
+            route.body = CONFLICT_BODY.to_string();
         }
     }
-    let (client, _rec, _bodies) = mock_client_recording_bodies(routes);
-    let error = reconcile_cluster(&cluster(), &client, now())
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_cluster(&cluster(), &client, now())
         .await
-        .expect_err("a refused precondition is an error the reconciler requeues on");
-    assert!(
-        format!("{error}").contains("409")
-            || matches!(&error, e if format!("{e:?}").contains("409")),
-        "the conflict reaches the reconciler verbatim; got {error}"
+        .expect("a lost precondition is an outcome, not a reconcile error");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    assert_eq!(
+        count(&seen, "PATCH", "/status"),
+        1,
+        "the write was sent: {seen:?}"
     );
+    assert!(outcome.created, "the Job was created before the write");
+    assert_eq!(outcome.deferred, Some(Deferred::StatusSuperseded));
+    assert_eq!(outcome.requeue, Requeue::After(REQUEUE_SECS));
+    assert!(
+        log.at("WARN").is_empty(),
+        "no WARN: {:?}",
+        log.messages_at("WARN")
+    );
+    assert!(
+        log.messages_at("DEBUG")
+            .iter()
+            .any(|m| m.contains("lost its resourceVersion precondition")),
+        "the race is noticed at debug: {:?}",
+        log.messages_at("DEBUG")
+    );
+    drop(log);
+
+    // ---- the verdict pass: 409, then its control with 200 ------------------
+    for (status, expect_ttl_patches) in [(409_u16, 0_usize), (200, 1)] {
+        let mut routes = finished_routes(0, log_body(&i14_tail()));
+        for route in &mut routes {
+            if route.method == "PATCH" && route.path_suffix.ends_with("/status") && status == 409 {
+                route.status = 409;
+                route.body = CONFLICT_BODY.to_string();
+            }
+        }
+        let log = CapturedLog::start();
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_cluster(&cluster(), &client, now())
+            .await
+            .expect("an outcome either way");
+        let seen = bodies.lock().expect("the recorder is readable").clone();
+        assert_eq!(
+            count(&seen, "PATCH", "/jobs/logweir-probe-orders-prod"),
+            expect_ttl_patches,
+            "status {status}: the TTL follows a verdict write that landed, and only one: {seen:?}"
+        );
+        assert_eq!(
+            outcome.deferred,
+            (status == 409).then_some(Deferred::StatusSuperseded),
+            "status {status}"
+        );
+        assert!(
+            log.at("WARN").is_empty(),
+            "status {status}: no WARN: {:?}",
+            log.messages_at("WARN")
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2531,5 +2598,654 @@ async fn fx11_a_refused_probe_never_refreshes_observed_at() {
     assert!(
         patched_statuses(&seen)[0].get("observedAt").is_some(),
         "the crashed-Job patch carries observedAt, so the assertion above can fail"
+    );
+}
+
+// ===========================================================================
+// FX-19 — a probe Job Kubernetes is collecting is not a crash
+// ===========================================================================
+//
+// PoC batch 2 (`claude/poc-batch-2.result.md` F-1): the TTL controller deletes
+// a finished probe Job with FOREGROUND propagation, so the Job lingers,
+// pod-less, with a `deletionTimestamp`, while its pod goes first. STEP 4 read
+// that as a crashed probe and cleared `reachable` (about 17 s on a healthy
+// connection, until the next probe answered), and the `NotFound` / `Conflict`
+// races around it logged about twelve WARN lines a cadence for twelve
+// connections. Every row below runs the real reconcile over the double, with
+// EVERY route a crash classification would need present — so a reconciler
+// that judged the Job would write, not panic — and reads the log it emitted
+// through `testing::CapturedLog`.
+
+/// No pod at all: what a probe Job's pod list holds once the TTL controller's
+/// foreground delete has taken the pod.
+const NO_PODS: &str = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#;
+
+/// A probe Job in one of the states it passes through while it is collected.
+///
+/// * `finished`: `Complete` at 11:59 (the probe ran), or still running;
+/// * `ttl`: carries the `ttlSecondsAfterFinished` this reconciler patches on
+///   ONLY after the status write that recorded the Job's verdict;
+/// * `deleting`: carries a `deletionTimestamp` and the `foregroundDeletion`
+///   finalizer — what the TTL controller's delete leaves on the Job while its
+///   pod goes first.
+fn reaping_job(finished: bool, ttl: bool, deleting: bool) -> String {
+    let deletion = if deleting {
+        r#","deletionTimestamp":"2026-09-10T12:04:00Z","finalizers":["foregroundDeletion"]"#
+    } else {
+        ""
+    };
+    let ttl = if ttl {
+        format!(r#","ttlSecondsAfterFinished":{PROBE_TTL_SECONDS}"#)
+    } else {
+        String::new()
+    };
+    let status = if finished {
+        r#"{"conditions":[{"type":"Complete","status":"True",
+           "lastProbeTime":"2026-09-10T11:59:00Z","lastTransitionTime":"2026-09-10T11:59:00Z"}]}"#
+    } else {
+        r#"{"active":1}"#
+    };
+    format!(
+        r#"{{"apiVersion":"batch/v1","kind":"Job",
+  "metadata":{{"name":"{JOB}","namespace":"{NS}","uid":"{JOB_UID}"{deletion}}},
+  "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}{ttl}}},
+  "status":{status}}}"#
+    )
+}
+
+/// EVERY route any branch of the reconcile could take for `job` and `pods`:
+/// the pod list, the log, the Events, the status write, the TTL patch and a
+/// fresh `POST`. A reconciler that judged a Job it should not have would
+/// therefore WRITE — which the rows assert against — rather than panic in the
+/// double, which would prove nothing about the property.
+fn every_route(job: String, pods: String) -> Vec<Route> {
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: "/jobs/logweir-probe-orders-prod",
+            status: 200,
+            body: job.clone(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/pods",
+            status: 200,
+            body: pods,
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/pods/logweir-probe-orders-prod-abcde/log",
+            status: 200,
+            body: log_body(&i14_tail()),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/events",
+            status: 200,
+            body: probe_events(None),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/kafkaclusters/orders-prod/status",
+            status: 200,
+            body: cluster_json(NAME, PLAINTEXT_AUTH, "{}"),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/jobs/logweir-probe-orders-prod",
+            status: 200,
+            body: job,
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/jobs",
+            status: 201,
+            body: running_job_body(),
+        },
+    ]
+}
+
+/// `routes` with the one route for `method` + `suffix` answering `status` /
+/// `body` instead.
+fn answering(
+    mut routes: Vec<Route>,
+    method: &str,
+    suffix: &str,
+    status: u16,
+    body: String,
+) -> Vec<Route> {
+    let route = routes
+        .iter_mut()
+        .find(|r| r.method == method && r.path_suffix == suffix)
+        .expect("the route being changed is in the table");
+    route.status = status;
+    route.body = body;
+    routes
+}
+
+/// The connection as the last probe left it: `reachable: true`, read at 11:59
+/// — EXACTLY what the verdict pass writes, folded the way the API server
+/// folds it, so a pass that re-reads the same Job changes nothing.
+async fn reachable_cluster() -> KafkaCluster {
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+    reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the verdict pass completes");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    let verdict = patched_statuses(&seen);
+    assert_eq!(verdict.len(), 1, "one verdict write: {seen:?}");
+    let reachable = after_status(&cluster(), &verdict[0]);
+    assert_eq!(
+        reachable.status.as_ref().and_then(|s| s.reachable),
+        Some(true),
+        "the fixture is a reachable connection"
+    );
+    reachable
+}
+
+/// `status.reachable` as the object holds it.
+fn reachable_of(cluster: &KafkaCluster) -> Option<bool> {
+    cluster.status.as_ref().and_then(|s| s.reachable)
+}
+
+/// **FX-19 ROW 1: A PROBE JOB WITH A `deletionTimestamp` IS NEITHER A CRASH
+/// NOR A REASON TO CLEAR `reachable`.** Four shapes of a Job being deleted —
+/// the TTL'd one with its pod gone (the PoC's), the TTL'd one whose pod is
+/// still terminating, one deleted before any TTL (by hand, or by an owner
+/// cascade), and one still running — and in every one: one Job `GET` and
+/// nothing else, no status write, `reachable` as it was, no WARN, and a debug
+/// line that says the state was noticed.
+///
+/// NEGATIVE CONTROL: `fx19_control_a_real_crash_clears_reachable_and_warns_once`
+/// — the same pod-less finished Job WITHOUT the `deletionTimestamp` (and
+/// without the TTL) does clear `reachable` and WARNs.
+///
+/// KILLS: deletion treated as a crash (the TTL-less shape takes the crash
+/// write; the running one writes `ProbeRunning`); the check placed after the
+/// pod read.
+#[tokio::test]
+async fn fx19_a_probe_job_being_deleted_is_not_a_crash_and_clears_nothing() {
+    let reachable = reachable_cluster().await;
+    for (what, job, pods) in [
+        (
+            "finished and TTL'd, pod already collected (the PoC's shape)",
+            reaping_job(true, true, true),
+            NO_PODS.to_string(),
+        ),
+        (
+            "finished and TTL'd, pod still terminating",
+            reaping_job(true, true, true),
+            pod_list_terminated(0),
+        ),
+        (
+            "finished, deleted before any TTL, no pod",
+            reaping_job(true, false, true),
+            NO_PODS.to_string(),
+        ),
+        (
+            "still running, deleted",
+            reaping_job(false, false, true),
+            NO_PODS.to_string(),
+        ),
+    ] {
+        let parsed: k8s_openapi::api::batch::v1::Job =
+            serde_json::from_str(&job).expect("the fixture is a Job");
+        assert!(
+            being_deleted(&parsed),
+            "{what}: the fixture is being deleted"
+        );
+
+        let log = CapturedLog::start();
+        let (client, _rec, bodies) = mock_client_recording_bodies(every_route(job, pods));
+        let outcome = reconcile_cluster(&reachable, &client, now())
+            .await
+            .expect("a Job being deleted is not a reconcile error");
+        let seen = bodies.lock().expect("the recorder is readable").clone();
+
+        assert_eq!(
+            outcome.deferred,
+            Some(Deferred::JobBeingDeleted),
+            "{what}: {outcome:?}"
+        );
+        assert_eq!(
+            count(&seen, "PATCH", "/status"),
+            0,
+            "{what}: the last recorded verdict stands — nothing is written: {seen:?}"
+        );
+        assert_eq!(
+            seen.len(),
+            1,
+            "{what}: one Job GET; no pod list, no log, no Events, no TTL, no POST: {seen:?}"
+        );
+        assert_eq!(outcome.reachable, None, "{what}: nothing was observed");
+        assert_eq!(outcome.requeue, Requeue::After(REQUEUE_SECS), "{what}");
+        assert!(
+            log.at("WARN").is_empty(),
+            "{what}: no WARN: {:?}",
+            log.messages_at("WARN")
+        );
+        assert!(
+            log.messages_at("DEBUG")
+                .iter()
+                .any(|m| m.contains("the probe Job is being deleted")),
+            "{what}: noticed at debug: {:?}",
+            log.messages_at("DEBUG")
+        );
+    }
+}
+
+/// **FX-19 ROW 2: A JOB WHOSE VERDICT IS ALREADY RECORDED IS NOT RE-JUDGED.**
+/// A finished probe Job that carries its TTL — set only after the status
+/// write that recorded its verdict — and has no terminated `runner` left to
+/// read (pod collected, or a pod that never terminated whose crash is already
+/// on the status): no Events read, no status write, no TTL re-patch, no WARN.
+/// `reachable` stays `true` until the next probe answers.
+///
+/// NEGATIVE CONTROL: `fx19_control_a_real_crash_clears_reachable_and_warns_once`'s
+/// first pass is this Job without the TTL, and it does clear `reachable`.
+///
+/// KILLS: clearing on an already-recorded verdict (the crash write would land
+/// here); reading the TTL as anything but the marker.
+#[tokio::test]
+async fn fx19_a_recorded_verdict_whose_pod_was_collected_is_not_a_crash() {
+    let reachable = reachable_cluster().await;
+    for (what, pods) in [
+        ("pod collected", NO_PODS.to_string()),
+        (
+            "pod still there, runner never terminated",
+            pod_list_no_exit_code(),
+        ),
+    ] {
+        let job = reaping_job(true, true, false);
+        let parsed: k8s_openapi::api::batch::v1::Job =
+            serde_json::from_str(&job).expect("the fixture is a Job");
+        assert!(
+            verdict_recorded(&parsed) && !being_deleted(&parsed),
+            "{what}: the fixture carries its TTL and is not being deleted"
+        );
+
+        let log = CapturedLog::start();
+        let (client, _rec, bodies) = mock_client_recording_bodies(every_route(job, pods));
+        let outcome = reconcile_cluster(&reachable, &client, now())
+            .await
+            .expect("the reconcile completes");
+        let seen = bodies.lock().expect("the recorder is readable").clone();
+
+        assert_eq!(
+            outcome.deferred,
+            Some(Deferred::VerdictRecorded),
+            "{what}: {outcome:?}"
+        );
+        assert_eq!(
+            count(&seen, "PATCH", "/status"),
+            0,
+            "{what}: `reachable` is not cleared — nothing is written: {seen:?}"
+        );
+        assert_eq!(
+            count(&seen, "PATCH", "/jobs/logweir-probe-orders-prod"),
+            0,
+            "{what}: the TTL is not patched again"
+        );
+        assert_eq!(count(&seen, "GET", "/events"), 0, "{what}: no Events read");
+        assert_eq!(outcome.requeue, Requeue::After(RE_PROBE_SECS), "{what}");
+        assert!(
+            log.at("WARN").is_empty(),
+            "{what}: no WARN: {:?}",
+            log.messages_at("WARN")
+        );
+    }
+}
+
+/// **FX-19 NEGATIVE CONTROL: A REAL CRASH STILL CLEARS `reachable` AND WARNS —
+/// ONCE.** The same pod-less finished Job with no TTL and no
+/// `deletionTimestamp` is a probe that produced nothing: pass 1 clears
+/// `reachable`, writes `NoExitCode`, patches the TTL and logs exactly one
+/// WARN. Pass 2 sees that Job as the TTL patch left it (and the status as the
+/// write left it): nothing written, nothing logged above debug. Pass 3 is the
+/// TTL controller deleting it: the same. One WARN for one crashed Job.
+///
+/// KILLS (with rows 1 and 2): a fix that never clears (pass 1 would keep
+/// `true`); a WARN demoted for real crashes too (pass 1 would log none); a
+/// WARN per pass (passes 2 and 3 would log more).
+#[tokio::test]
+async fn fx19_control_a_real_crash_clears_reachable_and_warns_once() {
+    let reachable = reachable_cluster().await;
+    let mut warns = Vec::new();
+
+    // ---- pass 1: the crash ---------------------------------------------------
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(every_route(
+        reaping_job(true, false, false),
+        NO_PODS.to_string(),
+    ));
+    let outcome = reconcile_cluster(&reachable, &client, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    assert_eq!(outcome.deferred, None, "{outcome:?}");
+    assert_eq!(outcome.reason.as_deref(), Some("NoExitCode"));
+    assert!(outcome.ttl_patched, "the crash gets the re-probe TTL");
+    let statuses = patched_statuses(&seen);
+    assert_eq!(statuses.len(), 1, "{seen:?}");
+    assert_eq!(
+        statuses[0].get("reachable"),
+        Some(&Value::Null),
+        "a REAL crash clears `reachable`: {}",
+        statuses[0]
+    );
+    let crashed = after_status(&reachable, &statuses[0]);
+    assert_eq!(reachable_of(&crashed), None, "merged: cleared");
+    let first = log.messages_at("WARN");
+    assert_eq!(first.len(), 1, "exactly one WARN for the crash: {first:?}");
+    assert!(
+        first[0].contains("no probe output could be read"),
+        "{first:?}"
+    );
+    warns.extend(first);
+    drop(log);
+
+    // ---- passes 2 and 3: the same Job, TTL'd, then being deleted -------------
+    for (what, job) in [
+        (
+            "the Job as the TTL patch left it",
+            reaping_job(true, true, false),
+        ),
+        ("the Job being collected", reaping_job(true, true, true)),
+    ] {
+        let log = CapturedLog::start();
+        let (client, _rec, bodies) =
+            mock_client_recording_bodies(every_route(job, NO_PODS.to_string()));
+        let outcome = reconcile_cluster(&crashed, &client, now())
+            .await
+            .expect("the reconcile completes");
+        let seen = bodies.lock().expect("the recorder is readable").clone();
+        assert!(outcome.deferred.is_some(), "{what}: {outcome:?}");
+        assert_eq!(count(&seen, "PATCH", "/status"), 0, "{what}: {seen:?}");
+        warns.extend(log.messages_at("WARN"));
+    }
+    assert_eq!(warns.len(), 1, "one crashed Job, one WARN: {warns:?}");
+}
+
+/// **FX-19 ROW 3: `NotFound` WHILE A JOB IS COLLECTED IS NOT A RECONCILE
+/// ERROR.** The two `404`s PoC batch 2 logged at WARN, each from a race with
+/// the TTL controller:
+///
+/// * the pod listed, then gone by the `pods/log` read
+///   (`pods "logweir-probe-…" not found`): [`Deferred::PodGone`], nothing
+///   written — nothing was read;
+/// * the Job gone by the TTL patch that follows the verdict
+///   (`jobs.batch "logweir-probe-…" not found`): the verdict landed, so the
+///   pass is an ordinary outcome with `ttl_patched: false`.
+///
+/// Neither logs above debug. NEGATIVE CONTROL: a `500` on the same log read
+/// is still a reconcile error — the `404` arm is not a catch-all.
+///
+/// KILLS: WARN on `NotFound`; a `404` propagated with `?`; any status written
+/// from a pod whose log was never read.
+#[tokio::test]
+async fn fx19_not_found_while_a_job_is_collected_is_not_a_reconcile_error() {
+    let reachable = reachable_cluster().await;
+    let fresh = || every_route(reaping_job(true, false, false), pod_list_terminated(0));
+
+    // ---- the pod went between the list and the log read ---------------------
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(answering(
+        fresh(),
+        "GET",
+        "/pods/logweir-probe-orders-prod-abcde/log",
+        404,
+        not_found_body("pods", POD),
+    ));
+    let outcome = reconcile_cluster(&reachable, &client, now())
+        .await
+        .expect("a pod gone mid-pass is not a reconcile error");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    assert_eq!(outcome.deferred, Some(Deferred::PodGone), "{outcome:?}");
+    assert_eq!(
+        count(&seen, "PATCH", "/status"),
+        0,
+        "nothing read, nothing written"
+    );
+    assert_eq!(
+        count(&seen, "PATCH", "/jobs/logweir-probe-orders-prod"),
+        0,
+        "and no TTL"
+    );
+    assert!(
+        log.at("WARN").is_empty(),
+        "no WARN: {:?}",
+        log.messages_at("WARN")
+    );
+    assert!(
+        log.messages_at("DEBUG")
+            .iter()
+            .any(|m| m.contains("gone by the log read")),
+        "{:?}",
+        log.messages_at("DEBUG")
+    );
+    drop(log);
+
+    // ---- the Job went between the verdict write and its TTL patch -----------
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(answering(
+        fresh(),
+        "PATCH",
+        "/jobs/logweir-probe-orders-prod",
+        404,
+        not_found_body("jobs.batch", JOB),
+    ));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("a Job collected before its TTL patch is not a reconcile error");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    assert_eq!(outcome.deferred, None, "the verdict landed: {outcome:?}");
+    assert_eq!(outcome.reachable, Some(true));
+    assert!(!outcome.ttl_patched, "nothing was left to patch");
+    assert_eq!(count(&seen, "PATCH", "/jobs/logweir-probe-orders-prod"), 1);
+    assert!(
+        log.at("WARN").is_empty(),
+        "no WARN: {:?}",
+        log.messages_at("WARN")
+    );
+    drop(log);
+
+    // ---- NEGATIVE CONTROL: a 500 on the log read is still an error ----------
+    let (client, _rec, _bodies) = mock_client_recording_bodies(answering(
+        fresh(),
+        "GET",
+        "/pods/logweir-probe-orders-prod-abcde/log",
+        500,
+        r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"etcd timeout",
+            "reason":"InternalError","code":500}"#
+            .to_string(),
+    ));
+    let error = reconcile_cluster(&reachable, &client, now())
+        .await
+        .expect_err("a 500 is not a race with the TTL controller");
+    assert!(!is_benign_race(&error), "and it is still a WARN: {error}");
+}
+
+/// **FX-19: WHAT `error_policy` STILL WARNS ON.** A `404` or a `409` that
+/// reaches it from a call this module does not answer in place is the same
+/// race (debug); everything else — a `500`, a `403`, a refusal, a missing
+/// namespace — is a WARN.
+///
+/// KILLS: a classifier that demotes every API error (the `500` and `403`
+/// rows), or none (the `404` and `409` rows).
+#[test]
+fn fx19_error_policy_demotes_only_the_two_races() {
+    let api = |code: u16| {
+        KafkaClusterError::Api(kube::Error::Api(kube::core::ErrorResponse {
+            status: "Failure".to_string(),
+            message: format!("code {code}"),
+            reason: String::new(),
+            code,
+        }))
+    };
+    assert!(
+        is_benign_race(&api(404)),
+        "NotFound: a deletion raced the pass"
+    );
+    assert!(
+        is_benign_race(&api(409)),
+        "Conflict: a newer copy raced the pass"
+    );
+    for code in [400_u16, 403, 410, 422, 429, 500, 503] {
+        assert!(!is_benign_race(&api(code)), "{code} is still a WARN");
+    }
+    assert!(!is_benign_race(&KafkaClusterError::NoNamespace(
+        NAME.to_string()
+    )));
+    assert!(!is_benign_race(&KafkaClusterError::Refused(
+        TERMINAL_STATE_NAME_TOO_LONG,
+        "too long".to_string()
+    )));
+}
+
+/// **FX-19 ROW 4, THE POC'S SEQUENCE: OVER ONE WHOLE PROBE CYCLE `reachable`
+/// NEVER FLAPS AND NOTHING IS LOGGED AT WARN.** One pass per state the API
+/// server walks a healthy connection through, each over a fresh double, each
+/// status write folded onto the object the way the API server folds it:
+///
+/// 1. the next pass over the read, TTL'd Job (its own watch event): nothing;
+/// 2. the TTL controller's delete, pod still terminating;
+/// 3. the same, pod collected — PoC batch 2's 17-second flap;
+/// 4. a stale read of the TTL'd Job with no `deletionTimestamp` yet, pod gone;
+/// 5. the Job gone: the next probe is `POST`ed and `ProbeRunning` written;
+/// 6. the new Job's own event, handed the PRE-step-5 copy of the object by the
+///    watch cache: the write answers `409` — the Conflict WARN PoC batch 2
+///    counted about seven times a cadence;
+/// 7. the new probe running, read with the fresh copy: nothing new;
+/// 8. the new probe finished and read: `reachable: true` again.
+///
+/// After every pass the stored `reachable` is `true`, and the whole cycle logs
+/// no WARN. NEGATIVE CONTROL: `fx19_control_a_real_crash_clears_reachable_and_warns_once`
+/// — the step-3 Job without its TTL and deletion does clear it, so this
+/// row's assertion can fail.
+#[tokio::test]
+async fn fx19_one_probe_cycle_never_flaps_reachable_and_logs_no_warn() {
+    let mut stored = reachable_cluster().await;
+    let log = CapturedLog::start();
+    let mut statuses_written = 0_usize;
+
+    let steps: Vec<(&str, KafkaCluster, Vec<Route>, Option<Deferred>)> = vec![
+        (
+            "1 the read Job, TTL'd, re-read",
+            stored.clone(),
+            every_route(reaping_job(true, true, false), pod_list_terminated(0)),
+            None,
+        ),
+        (
+            "2 deleting, pod terminating",
+            stored.clone(),
+            every_route(reaping_job(true, true, true), pod_list_terminated(0)),
+            Some(Deferred::JobBeingDeleted),
+        ),
+        (
+            "3 deleting, pod collected",
+            stored.clone(),
+            every_route(reaping_job(true, true, true), NO_PODS.to_string()),
+            Some(Deferred::JobBeingDeleted),
+        ),
+        (
+            "4 stale read: TTL'd, no deletionTimestamp yet, pod collected",
+            stored.clone(),
+            every_route(reaping_job(true, true, false), NO_PODS.to_string()),
+            Some(Deferred::VerdictRecorded),
+        ),
+    ];
+    for (what, object, routes, expect) in steps {
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_cluster(&object, &client, now())
+            .await
+            .unwrap_or_else(|e| panic!("{what}: not a reconcile error: {e}"));
+        let seen = bodies.lock().expect("the recorder is readable").clone();
+        assert_eq!(outcome.deferred, expect, "{what}: {outcome:?}");
+        for patch in patched_statuses(&seen) {
+            statuses_written += 1;
+            stored = after_status(&stored, &patch);
+        }
+        assert_eq!(reachable_of(&stored), Some(true), "{what}: no flap");
+    }
+    assert_eq!(
+        statuses_written, 0,
+        "steps 1-4 write nothing: the read verdict is already on the object"
+    );
+
+    // ---- 5: the Job is gone; the next probe ---------------------------------
+    let before_step_5 = stored.clone();
+    let (client, _rec, bodies) = mock_client_recording_bodies(answering(
+        every_route(reaping_job(true, true, false), NO_PODS.to_string()),
+        "GET",
+        "/jobs/logweir-probe-orders-prod",
+        404,
+        not_found_body("jobs.batch", JOB),
+    ));
+    let outcome = reconcile_cluster(&stored, &client, now())
+        .await
+        .expect("5: the creating pass completes");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    assert!(outcome.created, "5: the next probe is created");
+    let patches = patched_statuses(&seen);
+    assert_eq!(patches.len(), 1, "5: ProbeRunning is written");
+    stored = after_status(&stored, &patches[0]);
+    assert_eq!(
+        reachable_of(&stored),
+        Some(true),
+        "5: a probe in flight leaves the last observation standing"
+    );
+
+    // ---- 6: the new Job's event, over the PRE-step-5 copy: 409 --------------
+    let (client, _rec, _bodies) = mock_client_recording_bodies(answering(
+        every_route(running_job_body(), NO_PODS.to_string()),
+        "PATCH",
+        "/kafkaclusters/orders-prod/status",
+        409,
+        CONFLICT_BODY.to_string(),
+    ));
+    let outcome = reconcile_cluster(&before_step_5, &client, now())
+        .await
+        .expect("6: a lost precondition is an outcome");
+    assert_eq!(outcome.deferred, Some(Deferred::StatusSuperseded), "6");
+    assert_eq!(reachable_of(&stored), Some(true), "6: nothing landed");
+
+    // ---- 7: the new probe running, fresh copy -------------------------------
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(every_route(running_job_body(), NO_PODS.to_string()));
+    let outcome = reconcile_cluster(&stored, &client, now())
+        .await
+        .expect("7: the running pass completes");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    assert_eq!(outcome.reason.as_deref(), Some(REASON_PROBE_RUNNING), "7");
+    assert_eq!(
+        count(&seen, "PATCH", "/status"),
+        0,
+        "7: ProbeRunning is already stored"
+    );
+
+    // ---- 8: the new probe answered ------------------------------------------
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+    let outcome = reconcile_cluster(&stored, &client, now())
+        .await
+        .expect("8: the verdict pass completes");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    assert_eq!(outcome.reachable, Some(true), "8");
+    for patch in patched_statuses(&seen) {
+        stored = after_status(&stored, &patch);
+    }
+    assert_eq!(reachable_of(&stored), Some(true), "8: read again");
+    assert_eq!(
+        stored.status.as_ref().and_then(|s| s.reason.as_deref()),
+        Some(REASON_REACHABLE),
+        "8"
+    );
+
+    assert!(
+        log.at("WARN").is_empty(),
+        "a whole healthy probe cycle logs no WARN (PoC batch 2: about 12 a cadence for 12 \
+         connections): {:?}",
+        log.messages_at("WARN")
     );
 }
