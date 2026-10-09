@@ -118,7 +118,15 @@ pub async fn login(State(state): State<AppState>, request: axum::extract::Reques
         Ok(discovery) => discovery,
         Err(error) => {
             audit.set_failure(error.code());
-            tracing::warn!(reason = %error.code(), "the identity provider is not usable");
+            // The detail says which of a stall (FX-28: `provider_timeout`, the
+            // deadline in seconds), a transport cause or an oversized document
+            // it was — the same text readiness logs, and like it, no
+            // credential: discovery carries none.
+            tracing::warn!(
+                reason = %error.code(),
+                detail = %error,
+                "the identity provider is not usable"
+            );
             return ApiError::new(
                 ProblemCode::KubernetesUnavailable,
                 "The identity provider could not be reached. Try again shortly.",

@@ -2075,7 +2075,14 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "schema-dependent topics are flagged",
             "Registry not captured: applications may not read these",
         ),
-        // FX-20c (2026-10-09, item 47): a destination's Test access compares
+        // FX-28 (2026-10-09, item 47): a sign-in whose identity provider
+        // stalls its body is answered at the provider deadline, under the
+        // audit code an operator alerts on.
+        (
+            "a stalled identity provider meets the provider deadline",
+            "provider_timeout",
+        ),
+        // FX-20c (2026-10-09, item 48): a destination's Test access compares
         // every grant's binding on a blocking row, and is never READY for a
         // destination a backup would refuse.
         (
