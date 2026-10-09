@@ -843,7 +843,7 @@ restore, PROD-11.1b), instead of reading it: a 2.0.0 document's
 which those readers would read as every partition (the owner's decision
 OD-9 (a)). Measured on the 2.0.0 scorecards a live subset restore signed
 (`e2e/tests/replay_selection.rs::older_readers_refuse_a_2_0_0_document`),
-`verify_scorecard.py` `1.16.0` to `1.23.0` each exit 1 with `INVALID:
+`verify_scorecard.py` `1.16.0` to `1.24.0` each exit 1 with `INVALID:
 format_version 2.0.0 has a major version newer than this reader understands
 (this script knows 1.4.0)` (`1.1.0`, `1.2.0` and `1.3.0` for 1.16.0, 1.17.0
 and 1.18.0). A
