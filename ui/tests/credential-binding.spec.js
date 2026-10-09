@@ -13,6 +13,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   CREATE_GRANT_SOURCES,
@@ -21,6 +22,7 @@ import {
   GRANT_SOURCES,
   renderDestinationForm,
   renderRotateForm,
+  renderTestPanel,
   validateDestination,
 } from "../pages/destinations.js";
 
@@ -80,4 +82,53 @@ test("fx20_the_inline_archive_secret_field_says_what_the_secret_must_carry", asy
   assert.ok(html.includes("name=\"archiveSecret\""), "the inline Secret field is on the form");
   assert.ok(html.includes("CredentialBindingMismatch"),
     "the field says what the Secret must carry, beside it");
+});
+
+// FX-20c: the destination's Test access renders the binding row a refused
+// grant produces -- the grant by its `spec.access` field, its destination, its
+// Secret, and whether the binding was absent or foreign -- under a verdict
+// that is not ready. The fixture is the one the product API's row
+// (`crates/logweir-api/tests/destinations.rs`,
+// `fx20c_a_destination_test_refused_on_a_binding_is_answered_by_grant`) sends
+// and the runner's message (`crates/logweir/tests/check_grant_binding.rs`) is
+// held to.
+const bindingMismatch = () => JSON.parse(readFileSync(
+  new URL("./fixtures/console/preflight-binding-mismatch.json", import.meta.url), "utf8")).item;
+
+function rowOf(html, id) {
+  const at = html.indexOf("<code>" + id + "</code>");
+  assert.notEqual(at, -1, id + " is rendered");
+  return html.slice(at, html.indexOf("</tr>", at));
+}
+
+test("fx20c_test_access_renders_the_refused_grant_by_name_under_a_not_ready_verdict", () => {
+  const item = bindingMismatch();
+  const html = renderTestPanel({ name: "fx20-thief" }, { test: item, mayOperate: true });
+  const headAt = html.indexOf("preflight-head");
+  const head = html.slice(headAt, html.indexOf("</p>", headAt));
+  assert.match(head, /not ready/);
+  assert.doesNotMatch(head, /badge-green/);
+  const row = rowOf(html, "destination.credentialBound");
+  assert.match(row, /CredentialBindingMismatch/);
+  assert.match(row, /badge-unverified">not ready/);
+  assert.match(row, new RegExp(
+    "<code>archiveWrite</code> of destination <code>fx20-thief</code> \\(Secret " +
+    "<code>lwd-primary-archive-write</code>: bound to another object or endpoint\\)"));
+  assert.match(row, /archiveWrite=CredentialBindingMismatch/);
+  assert.match(row, /remedy: .*logweir-binding/);
+  assert.match(row, /scope: BackupDestination\/fx20-thief/);
+  // The archive-write row is still listed as knowable only at execution.
+  assert.match(html, /Only knowable at execution time/);
+
+  // CONTROL: the F6 result as it was BEFORE this row existed -- every other
+  // row ready, the aggregate `ready` -- names no grant and reads green. The
+  // assertions above fail on it.
+  const before = Object.assign({}, item, {
+    state: "ready",
+    reason: "Ready",
+    checks: item.checks.filter((c) => c.id !== "destination.credentialBound"),
+  });
+  const old = renderTestPanel({ name: "fx20-thief" }, { test: before, mayOperate: true });
+  assert.doesNotMatch(old, /credentialBound|lwd-primary-archive-write|CredentialBindingMismatch/);
+  assert.match(old, /badge-green">ready/);
 });

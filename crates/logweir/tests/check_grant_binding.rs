@@ -631,3 +631,52 @@ fn fx20c_the_binding_row_is_blocking_and_expires() {
     assert_eq!(gating, Gating::Blocking);
     assert_eq!(expiry, Some(logweir::check::catalogue::EXPIRY_DEFAULT));
 }
+
+/// **The console fixture is this row.** `ui/tests/fixtures/console/
+/// preflight-binding-mismatch.json` is what the product API sends for the F6
+/// thief and what the console renders; its `destination.credentialBound`
+/// entry is THIS runner's row for that destination, as the controller folds
+/// its facts into the message (`entry_of`: `<message> [<k>=<v>; …]`), with
+/// this runner's remedy and the destination's scope.
+#[test]
+fn fx20c_the_console_fixture_is_the_runners_row() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ui/tests/fixtures/console/preflight-binding-mismatch.json");
+    let fixture: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture")).expect("json");
+    let entry = fixture["item"]["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|c| c["id"] == "destination.credentialBound")
+        .expect("the fixture carries the binding row")
+        .clone();
+    let thief = destination(
+        "fx20-thief",
+        &[(DestinationRole::ArchiveWrite, VICTIM_SECRET)],
+    );
+    let wiring = Fake::with(
+        &[(DestinationRole::ArchiveWrite, Some(VICTIM_BINDING))],
+        THIEF_BINDING,
+    );
+    let bound = bound_row(&run(
+        access(thief, vec![DestinationRole::ArchiveWrite]),
+        &wiring,
+    ));
+    let folded = format!(
+        "{} [{}]",
+        bound.message,
+        bound
+            .facts
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    assert_eq!(entry["message"].as_str(), Some(folded.as_str()));
+    assert_eq!(entry["remedy"].as_str(), Some(bound.remedy.as_str()));
+    assert_eq!(entry["code"].as_str(), Some(bound.code.as_str()));
+    assert_eq!(entry["state"], "notReady");
+    assert_eq!(entry["gating"], "blocking");
+    assert_eq!(entry["scope"]["name"], "fx20-thief");
+}
