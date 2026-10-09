@@ -2,7 +2,10 @@
 //! **PROD-03.0 — schema-dependent topics, flagged live from the archived
 //! bytes, with no registry contacted.**
 //!
-//! One row, `#[ignore]`d because it needs the stack's `registry` profile
+//! Two rows. `a_backup_flags_raw_framed_records_with_their_ids` runs in CI on
+//! the default `auth` stack: raw Confluent framing produced with rdkafka, the
+//! real engine, the real archive store (the review's M2). The second row is
+//! `#[ignore]`d because it needs the stack's `registry` profile
 //! (`e2e/README.md`): Karapace's Schema-Registry-compatible `registry` and its
 //! REST proxy `registry-rest`. The TEST produces through the REST proxy, so
 //! the records carry the Confluent wire format a real serializer writes —
@@ -391,6 +394,124 @@ fn schema_lines(o: &Output) -> Vec<String> {
             Some(l[i..].to_string())
         })
         .collect()
+}
+
+/// **The review's M2: the row CI runs**, on its default `COMPOSE_PROFILES=auth`
+/// stack — no registry, no node. Confluent framing written raw (magic byte 0,
+/// a 4-byte big-endian id, a payload) into three topics over two partitions,
+/// backed up with the real engine into the real archive store, and read back:
+/// the receipt flags exactly the framed sides with their ids, judged whole,
+/// and the plain topic is `notDetected`. A store read, a decoder or a
+/// detection that silently degraded to `notAssessed` fails here.
+#[test]
+fn a_backup_flags_raw_framed_records_with_their_ids() {
+    let n = nonce();
+    let t = |s: &str| format!("p030ci-{n}-{s}");
+    let names = ["framed", "keyed", "plain"];
+    let topics: Vec<String> = names.iter().map(|s| t(s)).collect();
+    for topic in &topics {
+        harness::create_topic(topic, 2);
+    }
+    let frame = |id: u32, body: &[u8]| {
+        let mut v = vec![0u8];
+        v.extend_from_slice(&id.to_be_bytes());
+        v.extend_from_slice(body);
+        v
+    };
+    // Values under two schema versions, string keys.
+    produce_raw(
+        &t("framed"),
+        &(0..40u32)
+            .map(|i| {
+                (
+                    Some(format!("order-{i}").into_bytes()),
+                    Some(frame(101 + i % 2, &[0x02, 0x06, b'a', b'b', b'c'])),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    // Framed keys, plain JSON values.
+    produce_raw(
+        &t("keyed"),
+        &(0..30u32)
+            .map(|i| {
+                (
+                    Some(frame(7, &i.to_be_bytes())),
+                    Some(format!("{{\"n\":{i}}}").into_bytes()),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    produce_raw(
+        &t("plain"),
+        &(0..20u32)
+            .map(|i| {
+                (
+                    Some(format!("k{i}").into_bytes()),
+                    Some(format!("{{\"id\":{i}}}").into_bytes()),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    let b = backup(&format!("p030ci-{n}"), &topics);
+    let r = &b.receipt;
+    assert_eq!(r.format_version, "1.5.0");
+    r.validate_invariants()
+        .expect("the signed receipt is valid");
+    let sd = r
+        .schema_dependency
+        .as_ref()
+        .expect("every receipt carries the block");
+    let framed = &sd[&t("framed")];
+    assert_eq!(framed.verdict, "schemaDependent", "{framed:?}");
+    assert_eq!(framed.basis.as_deref(), Some("complete"), "{framed:?}");
+    let v = framed.value.as_ref().unwrap();
+    assert_eq!(
+        (v.framed, v.unframed, v.schema_ids.clone()),
+        (40, 0, vec![101, 102])
+    );
+    assert!(!framed.key.as_ref().unwrap().dependent, "string keys");
+    let keyed = &sd[&t("keyed")];
+    assert_eq!(keyed.verdict, "schemaDependent", "{keyed:?}");
+    assert_eq!(keyed.key.as_ref().unwrap().schema_ids, vec![7]);
+    assert!(!keyed.value.as_ref().unwrap().dependent, "JSON values");
+    let plain = &sd[&t("plain")];
+    assert_eq!(plain.verdict, "notDetected", "{plain:?}");
+    assert_eq!(plain.basis.as_deref(), Some("complete"));
+
+    // The Rust reader verifies it and says it.
+    let dir = demo_dir().join(format!("{}-verify", b.backup_id));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (doc, sig) = (dir.join("receipt.json"), dir.join("receipt.sig"));
+    std::fs::write(&doc, &b.receipt_bytes).unwrap();
+    let (sidecar, _) = archive_store(&b.backup_id)
+        .get(&b.receipt_key.replace(".receipt.json", ".receipt.sig"))
+        .expect("the sidecar");
+    std::fs::write(&sig, sidecar).unwrap();
+    let mut rust = Command::new(bin());
+    rust.args([
+        "drill",
+        "verify",
+        "--payload-type",
+        "backup-receipt",
+        "--scorecard",
+    ])
+    .arg(&doc)
+    .arg("--signature")
+    .arg(&sig)
+    .arg("--public-key")
+    .arg(root().join("e2e/fixtures/signed/public.pem"));
+    let rust = output_within(rust, 60);
+    assert_eq!(rust.status.code(), Some(0), "{}", text(&rust));
+    let lines = schema_lines(&rust);
+    assert!(
+        lines.iter().any(|l| l.starts_with(&format!(
+            "schema_dependency[\"{}\"]: schema-dependent, registry not captured",
+            t("framed")
+        )) && l.contains("schema ids 101, 102")),
+        "{lines:?}"
+    );
 }
 
 #[test]
