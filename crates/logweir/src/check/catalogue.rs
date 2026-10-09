@@ -98,6 +98,14 @@ pub const RUNNER_ROWS: &[(CheckId, Gating, Option<Duration>)] = &[
         Gating::Advisory,
         Some(EXPIRY_DEFAULT),
     ),
+    // FX-20c: BLOCKING, whatever the gating of the per-role row the grant
+    // would answer — a grant a run presents and refuses is a run that fails,
+    // and the default expiry because a Secret can be rebound at any time.
+    (
+        CheckId::DestinationCredentialBound,
+        Gating::Blocking,
+        Some(EXPIRY_DEFAULT),
+    ),
     (
         CheckId::SignerPrivateKeyUsable,
         Gating::Blocking,

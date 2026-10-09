@@ -378,12 +378,128 @@ pub fn destination_checks(
     }
 }
 
+/// The per-grant fact value of a grant whose binding matched.
+pub const GRANT_BOUND: &str = "bound";
+
+/// FX-20c: `destination.credentialBound` — whether EVERY Secret-backed grant
+/// the plan lists ([`DestinationPlan::grant_bindings`]) carries the binding
+/// its destination expects, compared in the pod through
+/// [`logweir_core::credential_binding::check_grant_binding`]: the same
+/// comparison, over the same Secret key, that every runner makes before it
+/// builds a store (`STORE_BINDING_PAIRS`).
+///
+/// # Why a row of its own, and why it is blocking
+///
+/// The per-role rows above answer "may this principal do this" with a
+/// request, and the `archiveWrite` row may not make one at all. Before this
+/// row a destination whose only grant was another destination's
+/// `archiveWrite` Secret tested READY while every backup was refused
+/// (PoC batch 4, FX-20 F6). The binding needs no request: it is a public value
+/// beside the credential, compared here and never presented anywhere. So this
+/// row answers it for every listed grant, probed or not, and a foreign grant
+/// makes the verdict `notReady` — readiness is never READY for a destination
+/// a run would refuse.
+///
+/// # Per grant, by name
+///
+/// The message names each refused grant by its `spec.access` field, its Secret
+/// and its destination, and says whether the binding was absent or foreign;
+/// the facts carry one `<grant>=bound|CredentialBindingMismatch` per listed
+/// grant. Neither the projected nor the expected value is ever written.
+///
+/// `None` when no plan lists a grant (no Secret-backed grant, or a controller
+/// that predates FX-20c): `CheckRequest::compares_grant_bindings` is false and
+/// the controller expects no such row.
+#[must_use]
+pub fn credential_bound_row(
+    plans: &[&DestinationPlan],
+    wiring: &dyn Wiring,
+) -> Option<CheckOutcome> {
+    use logweir_core::credential_binding::{check_grant_binding, grant_field};
+    let now = wiring.now();
+    let get = |name: &str| wiring.env(name);
+    let mut refused: Vec<String> = Vec::new();
+    let mut facts: Vec<(&'static str, &'static str)> = Vec::new();
+    let mut checked = 0usize;
+    for plan in plans {
+        for grant in &plan.grant_bindings {
+            checked += 1;
+            let field = grant_field(grant.role);
+            match check_grant_binding(grant.role, &get) {
+                Ok(()) => facts.push((field, GRANT_BOUND)),
+                Err(refusal) => {
+                    facts.push((field, CheckCode::CredentialBindingMismatch.as_str()));
+                    refused.push(format!(
+                        "`{field}` of destination `{}` (Secret `{}`: {})",
+                        plan.name,
+                        grant.secret_name,
+                        if refusal.absent {
+                            "no binding"
+                        } else {
+                            "bound to another object or endpoint"
+                        }
+                    ));
+                }
+            }
+        }
+    }
+    if checked == 0 {
+        return None;
+    }
+    let first = plans.first()?;
+    let row = if refused.is_empty() {
+        ready(
+            CheckId::DestinationCredentialBound,
+            CheckCode::CredentialBound,
+            now,
+        )
+        .with_message(&format!(
+            "every Secret-backed grant this check covers carries the binding its destination \
+             expects ({checked} compared in the check pod; nothing was dialled to learn it)"
+        ))
+    } else {
+        catalogue::outcome(
+            CheckId::DestinationCredentialBound,
+            logweir_core::check_contract::CheckState::NotReady,
+            CheckCode::CredentialBindingMismatch,
+            now,
+        )
+        .with_message(&format!(
+            "{} {}: every run that presents {} is refused CredentialBindingMismatch before it \
+             builds a store, and this check compared the binding in the pod and dialled nothing \
+             with it",
+            refused.join(" and "),
+            if refused.len() == 1 {
+                "is not bound to its destination"
+            } else {
+                "are not bound to their destination"
+            },
+            if refused.len() == 1 {
+                "that grant"
+            } else {
+                "one of these grants"
+            },
+        ))
+        .with_remedy(remedy_for(CheckCode::CredentialBindingMismatch))
+    };
+    let mut row = row.with_scope(scope(first));
+    for (field, verdict) in facts {
+        row = row.with_fact(field, verdict);
+    }
+    Some(row)
+}
+
 /// Run one `destinationAccess`.
 #[must_use]
 pub fn run(req: &DestinationAccessRequest, wiring: &dyn Wiring, deadline: Deadline) -> Emission {
     let now = wiring.now();
     let mut result = CheckResult::new(CheckPlanKind::DestinationAccess);
     result.checks.push(super::runner_contract(now));
+    // FX-20c: first, and with no request — EVERY grant the destination
+    // configures, whichever roles this check exercises.
+    if let Some(row) = credential_bound_row(&[&req.destination], wiring) {
+        result.checks.push(row);
+    }
     destination_checks(
         &DestinationProbe {
             destination: &req.destination,

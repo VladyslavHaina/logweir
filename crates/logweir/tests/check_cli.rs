@@ -124,6 +124,7 @@ fn destination() -> DestinationPlan {
         uid: DEST_UID.to_string(),
         ca_file: None,
         credentials: CredentialMode::Static,
+        grant_bindings: Vec::new(),
     }
 }
 
@@ -1821,6 +1822,40 @@ fn access_plan(roles: Vec<DestinationRole>, write_probe: bool) -> CheckPlan {
         evidence_write: None,
         evidence_read: None,
     }))
+}
+
+/// FX-20c: a `destinationAccess` plan that lists a Secret-backed grant emits
+/// `destination.credentialBound` beside its role rows. The `want` literal is
+/// what `weirkeeper`'s `job_rows` mirror is held against
+/// (`the_expected_rows_include_the_binding_row_when_a_grant_is_listed`).
+#[test]
+fn a_destination_access_check_with_listed_grants_reports_every_row_it_owns() {
+    let mut plan = access_plan(
+        vec![DestinationRole::ArchiveRead, DestinationRole::ArchiveWrite],
+        false,
+    );
+    let CheckRequest::DestinationAccess(r) = &mut plan.request else {
+        unreachable!()
+    };
+    r.destination.grant_bindings = vec![logweir_core::check_contract::GrantBindingRef {
+        role: DestinationRole::ArchiveWrite,
+        secret_name: "lwd-primary-archive-write".to_string(),
+    }];
+    let m = mount(&plan);
+    let run = drive(
+        &m,
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, FakeObjects::new()),
+    );
+    let got: BTreeSet<&str> = ids(&run.result()).into_iter().collect();
+    let want: BTreeSet<&str> = [
+        "runner.contract",
+        "destination.credentialBound",
+        "destination.archiveListable",
+        "destination.archivePrefixWritable",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(got, want);
 }
 
 /// D2 §4.2's `destinationAccess` row: a denial and a not-found are different
@@ -4418,6 +4453,8 @@ fn every_failing_code_the_runner_emits_has_a_remedy() {
         CheckCode::MappedTopicsAbsent,
         CheckCode::TopicCreateValidated,
         CheckCode::TimestampWithinBound,
+        // FX-20c: `destination.credentialBound`'s ready code.
+        CheckCode::CredentialBound,
         CheckCode::CheckContractMismatch,
         CheckCode::ResultUnreadable,
         CheckCode::StoreErrorUnclassified,
@@ -4849,6 +4886,7 @@ mod live {
             uid: DEST_UID.to_string(),
             ca_file: None,
             credentials: CredentialMode::Static,
+            grant_bindings: Vec::new(),
         }
     }
 

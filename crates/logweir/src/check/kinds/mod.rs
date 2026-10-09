@@ -116,6 +116,16 @@ pub trait Wiring {
 
     /// The observation clock.
     fn now(&self) -> DateTime<Utc>;
+
+    /// One variable of this pod's environment — the FX-20c grant binding
+    /// pairs `destination.credentialBound` compares
+    /// ([`access::credential_bound_row`]). A PROVIDED method reading the
+    /// process environment, so the shipped wiring and every existing fake keep
+    /// it, and a test overrides it with a map instead of mutating the
+    /// process's environment. A non-UTF-8 value reads as absent.
+    fn env(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
 }
 
 /// The shipped wiring.
