@@ -16,33 +16,54 @@
 //! process memory: a login begun on one replica must be finishable on another,
 //! and a restart between the redirect and the callback must not strand the
 //! browser. The cookie is `__Host-` prefixed, `HttpOnly` and ten-minute-lived,
-//! and the callback clears it on success and on every refusal.
+//! and the callback clears it on success and on every refusal (the refusal's
+//! clear reaches the browser since FX-32: the problem rendering keeps the
+//! handler's `Set-Cookie`).
 //!
-//! WHAT THAT CLEARING IS AND IS NOT. It is advice to the browser, so it ends the
-//! attempt for an honest client and nothing more: this service keeps no record
-//! of a consumed `state`, so someone holding BOTH the login cookie and the code
-//! could re-drive the callback. The bound on replaying a code is the provider's
-//! single-use code, which is where OAuth puts it. What the cookie DOES carry is
-//! the `state`↔browser binding that defeats login CSRF — an attacker's code
-//! cannot be paired with a victim's cookie, because the `state` in it is not
-//! the attacker's — and that is asserted three ways in `tests/oidc_login.rs`
+//! THAT CLEARING IS ADVICE TO THE BROWSER, so on its own it ends the attempt
+//! for an honest client and nothing more. What the cookie carries is the
+//! `state`↔browser binding that defeats login CSRF — an attacker's code cannot
+//! be paired with a victim's cookie, because the `state` in it is not the
+//! attacker's — and that is asserted three ways in `tests/oidc_login.rs`
 //! (wrong `state`, no cookie, another login's cookie), each also asserting the
 //! code was never exchanged.
+//!
+//! THE STATE IS SINGLE-USE, ON EVERY REPLICA (FX-13a). A sealed cookie cannot
+//! remember being used, so someone who keeps a copy of it could once re-drive
+//! the callback for its whole 600 seconds, and each callback was a token
+//! request to the provider, authenticated as this client. Now, once the
+//! cookie has opened and its `state` matches, and BEFORE the code is
+//! exchanged, the callback CLAIMS the state: it creates one Kubernetes Event
+//! whose name is a keyed hash of the `state`
+//! ([`crate::kube::KubeAdapter::claim_sign_in_state`]). The API server's create
+//! is atomic per name, so exactly one callback per `state` is ever first —
+//! whichever replica it reaches, and however many arrive at once. Every other
+//! one is refused `login_state_replayed`, audited, with its cookie cleared and
+//! with no token request. A claim that cannot be recorded refuses the sign-in
+//! (`login_state_claim_failed`, 503) rather than exchange an unclaimed state,
+//! and readiness dry-runs a claim until one succeeds, so a console without the
+//! grant never takes a sign-in. The claim names the replica and nothing about
+//! the state, and the API server expires it (`--event-ttl`, one hour by
+//! default) long after the 600 seconds the state can live.
 //!
 //! THE BROWSER NEVER SEES A PROVIDER TOKEN, and the redirect that ends a
 //! successful login carries no fragment, no query and no credential: it is
 //! `303 See Other` to a path on this origin, with the session cookie in a
 //! `Set-Cookie` header.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, Utc};
 use http::{header, HeaderValue, StatusCode};
 
+use super::keys::CookieKeys;
 use super::session::{self, LoginState, SessionClaims};
 use crate::app::AppState;
 use crate::audit::Decision;
+use crate::kube::{KubeAdapter, KubeFailure, SignInClaim, SIGN_IN_CLAIM_PROBE_NAME};
 use crate::problem::{ApiError, ProblemCode};
 
 /// The login route.
@@ -71,6 +92,106 @@ fn redirect(location: &str, cookies: &[String]) -> Response {
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+/// The replica name a claim records when the process has none of its own
+/// (`HOSTNAME`, which Kubernetes sets to the Pod's name).
+pub const UNNAMED_REPLICA: &str = "logweir-api";
+
+/// FX-13a: where this replica records a redeemed sign-in `state`, as whom,
+/// and whether it has shown that it can.
+#[derive(Debug)]
+pub struct SignInClaims {
+    namespace: String,
+    replica: String,
+    writable: AtomicBool,
+}
+
+impl SignInClaims {
+    /// Claims recorded in `namespace` (this service's own: the in-cluster
+    /// service account's, or the kubeconfig context's) by `replica`. A
+    /// replica name that is not a DNS subdomain is recorded as
+    /// [`UNNAMED_REPLICA`], so a strange `HOSTNAME` cannot make every claim
+    /// invalid.
+    #[must_use]
+    pub fn new(namespace: impl Into<String>, replica: Option<&str>) -> Self {
+        let replica = replica
+            .filter(|name| name.len() <= 128 && crate::validate::is_dns_subdomain(name))
+            .unwrap_or(UNNAMED_REPLICA)
+            .to_string();
+        Self {
+            namespace: namespace.into(),
+            replica,
+            writable: AtomicBool::new(false),
+        }
+    }
+
+    /// The namespace claims are recorded in.
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// The replica name claims carry.
+    #[must_use]
+    pub fn replica(&self) -> &str {
+        &self.replica
+    }
+
+    /// The claim for one `state`.
+    #[must_use]
+    pub fn claim_for(&self, keys: &CookieKeys, state: &str, now: DateTime<Utc>) -> SignInClaim {
+        SignInClaim::new(
+            &self.namespace,
+            &keys.sign_in_claim_name(state),
+            &self.replica,
+            now,
+        )
+    }
+
+    /// Readiness: whether this replica can record a claim, by a DRY-RUN
+    /// create, asked until it succeeds once and then latched.
+    ///
+    /// The dry run exercises exactly what a sign-in will: the grant, the
+    /// namespace, the shape the API server validates and any admission in the
+    /// way. A console that would refuse every sign-in with
+    /// `login_state_claim_failed` is therefore held out of the rollout
+    /// instead. Latched like the provider half of readiness: a later outage
+    /// refuses sign-ins by name and does not cut the sessions already issued.
+    pub async fn ready(&self, kube: &KubeAdapter, now: DateTime<Utc>) -> bool {
+        if self.writable.load(Ordering::Acquire) {
+            return true;
+        }
+        let probe = SignInClaim::new(
+            &self.namespace,
+            SIGN_IN_CLAIM_PROBE_NAME,
+            &self.replica,
+            now,
+        );
+        match kube.claim_sign_in_state(&probe, true).await {
+            // A taken name is still an authorized, valid create.
+            Ok(()) | Err(KubeFailure::AlreadyExists) => {
+                if !self.writable.swap(true, Ordering::AcqRel) {
+                    tracing::info!(
+                        namespace = %self.namespace,
+                        replica = %self.replica,
+                        "redeemed sign-in states are recorded as Events in this namespace (FX-13a)"
+                    );
+                }
+                true
+            }
+            Err(failure) => {
+                tracing::warn!(
+                    namespace = %self.namespace,
+                    failure = ?failure,
+                    "this console cannot record a redeemed sign-in state (`create` on `events` in \
+                     its own namespace, FX-13a); it stays not ready rather than refuse every \
+                     sign-in"
+                );
+                false
+            }
+        }
+    }
 }
 
 /// Where to send the browser after a successful login.
@@ -172,15 +293,18 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
     }
     audit.set_action("auth.callback", Decision::Deny);
 
-    let refuse = |code: &'static str, detail: &'static str| -> Response {
+    let refuse_as = |problem: ProblemCode, code: &'static str, detail: &'static str| -> Response {
         audit.set_failure(code);
-        let mut response = ApiError::new(ProblemCode::Unauthenticated, detail).into_response();
+        let mut response = ApiError::new(problem, detail).into_response();
         // Whatever went wrong, the login attempt is over: clear its cookie so
         // a retry starts a fresh `state`/`nonce`/verifier.
         if let Ok(value) = HeaderValue::from_str(&session::clear_cookie(session::LOGIN_COOKIE)) {
             response.headers_mut().append(header::SET_COOKIE, value);
         }
         response
+    };
+    let refuse = |code: &'static str, detail: &'static str| -> Response {
+        refuse_as(ProblemCode::Unauthenticated, code, detail)
     };
 
     let query = match crate::http::parse_query(
@@ -232,6 +356,41 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
         };
     if !super::keys::constant_time_eq(login_state.state.as_bytes(), returned_state.as_bytes()) {
         return refuse("state_mismatch", "The sign-in state does not match.");
+    }
+
+    // FX-13a: CLAIM THE STATE BEFORE THE CODE IS EXCHANGED. Exactly one
+    // callback per `state` gets past this line, on any replica: see the
+    // module documentation. Nothing below it may run for a state that was not
+    // claimed — that includes the token request.
+    let claim = shared
+        .sign_in_claims
+        .claim_for(&shared.keys, &login_state.state, state.now());
+    match state.kube().claim_sign_in_state(&claim, false).await {
+        Ok(()) => {}
+        Err(KubeFailure::AlreadyExists) => {
+            tracing::warn!(
+                claim = %claim.metadata.name.as_deref().unwrap_or_default(),
+                "a sign-in state was presented again after it was redeemed; refused before any \
+                 token request (login_state_replayed)"
+            );
+            return refuse(
+                "login_state_replayed",
+                "This sign-in was already used. Start again at /auth/login.",
+            );
+        }
+        Err(failure) => {
+            tracing::warn!(
+                failure = ?failure,
+                namespace = %shared.sign_in_claims.namespace(),
+                "a sign-in state could not be recorded as redeemed; the sign-in is refused \
+                 before any token request (login_state_claim_failed)"
+            );
+            return refuse_as(
+                ProblemCode::KubernetesUnavailable,
+                "login_state_claim_failed",
+                "The sign-in could not be recorded. Start again at /auth/login.",
+            );
+        }
     }
 
     let identity = match shared

@@ -10,10 +10,11 @@
 //! refused by a process holding key 2 with `session_expired` instead of being
 //! silently mis-decrypted.
 //!
-//! THE FILE IS NEVER THE KEY. Two subkeys are derived from the file bytes with
-//! HMAC-SHA-256 under distinct labels — one for the AEAD, one for the CSRF
-//! synchronizer token — so the same file cannot be used to forge a token in
-//! the other domain, and the AEAD always gets exactly 32 bytes whatever the
+//! THE FILE IS NEVER THE KEY. Three subkeys are derived from the file bytes
+//! with HMAC-SHA-256 under distinct labels — one for the AEAD, one for the
+//! CSRF synchronizer token, one for the name a redeemed sign-in `state` is
+//! recorded under (FX-13a) — so the same file cannot be used to forge a value
+//! in another domain, and the AEAD always gets exactly 32 bytes whatever the
 //! file's length.
 //!
 //! THE AEAD IS ChaCha20-Poly1305 FROM `ring`, with a fresh 96-bit random nonce
@@ -40,6 +41,11 @@ pub const SEAL_PREFIX: &str = "lw1";
 const LABEL_AEAD: &[u8] = b"logweir-api/cookie-aead/v1";
 /// The HMAC label for the CSRF subkey.
 const LABEL_CSRF: &[u8] = b"logweir-api/csrf-token/v1";
+/// The HMAC label for the sign-in claim subkey (FX-13a).
+const LABEL_SIGN_IN_CLAIM: &[u8] = b"logweir-api/sign-in-claim/v1";
+
+/// The prefix of every sign-in claim's object name (FX-13a).
+pub const SIGN_IN_CLAIM_PREFIX: &str = "logweir-signin-";
 
 /// The URL-safe, unpadded base64 alphabet every cookie and token uses.
 pub const B64: base64::engine::general_purpose::GeneralPurpose =
@@ -197,15 +203,16 @@ fn derive(key: &[u8], label: &[u8]) -> zeroize::Zeroizing<[u8; 32]> {
     subkey
 }
 
-/// The two subkeys derived from one key file, plus its version.
+/// The three subkeys derived from one key file, plus its version.
 ///
-/// The CSRF subkey is wiped on drop; the AEAD subkey's intermediate bytes are
+/// The CSRF and claim subkeys are wiped on drop; the AEAD subkey's intermediate bytes are
 /// wiped as soon as `ring` has taken them, and what `ring`'s `LessSafeKey`
 /// keeps internally is `ring`'s to manage.
 pub struct CookieKeys {
     version: u32,
     aead: LessSafeKey,
     csrf: zeroize::Zeroizing<[u8; 32]>,
+    sign_in_claim: zeroize::Zeroizing<[u8; 32]>,
     random: SystemRandom,
 }
 
@@ -239,6 +246,7 @@ impl CookieKeys {
             version: key.version(),
             aead,
             csrf: derive(key.bytes(), LABEL_CSRF),
+            sign_in_claim: derive(key.bytes(), LABEL_SIGN_IN_CLAIM),
             random: SystemRandom::new(),
         }
     }
@@ -352,6 +360,31 @@ impl CookieKeys {
     pub fn csrf_token_matches(&self, session_id: &str, presented: &str) -> bool {
         let expected = self.csrf_token(session_id);
         constant_time_eq(expected.as_bytes(), presented.as_bytes())
+    }
+
+    /// The Kubernetes object name a redeemed sign-in `state` is recorded
+    /// under (FX-13a): [`SIGN_IN_CLAIM_PREFIX`] and 32 lowercase hex
+    /// characters — 128 bits of HMAC-SHA-256 under the claim subkey.
+    ///
+    /// DERIVED, NOT STORED, AND THE SAME ON EVERY REPLICA: any process holding
+    /// the same key file names the same object for the same `state`, which is
+    /// what lets the API server's create-if-absent decide "first" across
+    /// replicas. KEYED, so the name says nothing about the `state` to anyone
+    /// who can list Events, and someone who learned a `state` (it travels in
+    /// the authorization URL) cannot compute the name to claim it first.
+    #[must_use]
+    pub fn sign_in_claim_name(&self, state: &str) -> String {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.sign_in_claim.as_ref())
+            .expect("HMAC takes any key length");
+        mac.update(b"logweir-api/sign-in-claim/v1\n");
+        mac.update(state.as_bytes());
+        let digest = mac.finalize().into_bytes();
+        let mut name = String::with_capacity(SIGN_IN_CLAIM_PREFIX.len() + 32);
+        name.push_str(SIGN_IN_CLAIM_PREFIX);
+        for byte in &digest[..16] {
+            name.push_str(&format!("{byte:02x}"));
+        }
+        name
     }
 
     fn aad(&self, domain: &str) -> Vec<u8> {
@@ -517,6 +550,43 @@ mod tests {
         ));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **FX-13a: one `state`, one claim name, on every replica; and the name
+    /// is a Kubernetes object name that says nothing about the `state`.**
+    #[test]
+    fn a_sign_in_claim_name_is_keyed_stable_and_a_valid_object_name() {
+        let a = keys(1);
+        let replica = CookieKeys::new(&VersionedKey::from_parts(1, vec![0x11; 32]));
+        let other_key = CookieKeys::new(&VersionedKey::from_parts(1, vec![0x22; 32]));
+        let state = "a-state-of-forty-three-characters-xxxxxxxxx";
+
+        let name = a.sign_in_claim_name(state);
+        assert_eq!(
+            name,
+            replica.sign_in_claim_name(state),
+            "a second process holding the same key names the same object"
+        );
+        assert_ne!(name, a.sign_in_claim_name("another-state"));
+        assert_ne!(
+            name,
+            other_key.sign_in_claim_name(state),
+            "the name is keyed: without the key it cannot be computed from the state"
+        );
+        let suffix = name
+            .strip_prefix(SIGN_IN_CLAIM_PREFIX)
+            .expect("the claim prefix");
+        assert_eq!(suffix.len(), 32, "128 bits, as hex");
+        assert!(
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "lowercase hex, so the name is a DNS-1123 subdomain: {name}"
+        );
+        assert!(name.len() <= 63);
+        assert!(!name.contains(state) && !name.contains(&B64.encode(state)));
+        // Another domain's derivation over the same input is unrelated.
+        assert!(!a.csrf_token(state).contains(suffix));
     }
 
     #[test]

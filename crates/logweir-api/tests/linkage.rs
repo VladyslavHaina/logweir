@@ -511,6 +511,11 @@ fn the_adapter_spends_each_verb_on_exactly_these_resources() {
         // THE TWO CORE OBJECTS, one verb each.
         "get configmaps",
         "create secrets",
+        // FX-13a: a redeemed sign-in state, recorded as an Event in this
+        // service's own namespace (`KubeAdapter::claim_sign_in_state`). Create
+        // only: the API server is what decides "first" across replicas, and
+        // it expires the record itself, so no read, update or delete exists.
+        "create events",
         // CHART GAP G6: the trusted-proxy set's ONE read — a labelled list of
         // `endpointslices` in the namespace and for the Service the
         // configuration file names (`KubeAdapter::list_service_endpoints`).
@@ -528,7 +533,7 @@ fn the_adapter_spends_each_verb_on_exactly_these_resources() {
         "the (verb, resource) set this adapter uses changed. Adding one is a change to the \
          console ServiceAccount's RBAC (D2 §7.3) and to the security review that approved it: \
          this service must never hold `get` or `list` on secrets, any verb on pods, jobs or \
-         logs, or a delete on anything."
+         logs, a read of the events it records, or a delete on anything."
     );
 
     // The negative, stated as text so the intent survives a refactor of the
@@ -546,6 +551,9 @@ fn the_adapter_spends_each_verb_on_exactly_these_resources() {
         "\"get\", \"endpointslices\"",
         "\"create\", \"endpointslices\"",
         "\"patch\", \"endpointslices\"",
+        "\"get\", \"events\"",
+        "\"list_page\", \"events\"",
+        "\"patch\", \"events\"",
     ] {
         assert!(
             !code_lines(&text).any(|(_, line)| line.contains(forbidden)),

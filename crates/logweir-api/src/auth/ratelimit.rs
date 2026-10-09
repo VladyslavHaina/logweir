@@ -15,12 +15,16 @@
 //!    endpoint (`login.rs:231` → `oidc.rs:577`, `oidc.rs:604`): the provider
 //!    makes authorization codes single-use, short-lived and unguessable
 //!    (RFC 6749 §4.1.2 and §10.10) and binds each to the verifier (RFC 7636).
-//!    More attempts buy an attacker nothing but load. THE LOGIN COOKIE IS NOT
-//!    SINGLE-USE HERE: it is sealed and stateless, it opens for
-//!    `LOGIN_STATE_SECONDS` (600 s, `session.rs:36`; checked for authenticity
-//!    and age only, `session.rs:241-256`), and nothing records a used
-//!    `state`, so one `/auth/login` arms any number of callbacks inside the
-//!    callback key's own budget — each one a token request (point 3).
+//!    More attempts buy an attacker nothing but load. THE LOGIN STATE IS
+//!    SINGLE-USE (FX-13a): the cookie is sealed and stateless and opens for
+//!    `LOGIN_STATE_SECONDS` (600 s), but a callback claims its `state` in the
+//!    cluster before it exchanges the code (`crate::auth::login`,
+//!    `KubeAdapter::claim_sign_in_state`), so one `/auth/login` arms ONE token
+//!    request, on whichever replica, and a replay is refused
+//!    `login_state_replayed` with none. Before FX-13a one cookie armed any
+//!    number of callbacks inside the callback key's own budget, each a token
+//!    request; now a token request costs a fresh `/auth/login` from the same
+//!    budget (point 3).
 //!
 //! 2. NO AMPLIFICATION: AT MOST ONE PROVIDER REQUEST PER REQUEST. Readiness
 //!    warms the discovery and JWKS caches before a replica takes traffic

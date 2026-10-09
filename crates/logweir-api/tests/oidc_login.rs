@@ -573,9 +573,10 @@ async fn the_login_state_the_cookie_and_the_pkce_verifier_are_all_checked() {
     assert!(session_cookie_of(&refused).is_none());
 }
 
-/// **A login cookie is single-use through this service: the callback clears it,
-/// so replaying the same code with the same `state` cannot be completed twice
-/// by the same browser.**
+/// **The callback consumes the login cookie: it clears it, so the same browser
+/// does not present it again.** Clearing is advice to the browser; what makes
+/// the `state` single-use against someone who kept a copy is its claim in the
+/// cluster, asserted in `tests/sign_in_state.rs` (FX-13a).
 #[tokio::test]
 async fn a_consumed_login_cookie_is_cleared() {
     let key = TestKey::ec("k-ec-1");

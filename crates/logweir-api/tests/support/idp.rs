@@ -197,6 +197,10 @@ struct IdpState {
     discovery_fetches: usize,
     token_calls: usize,
     last_token_form: String,
+    /// How long the token endpoint takes to answer, after counting the call:
+    /// the network round trip a real provider costs, which is the window two
+    /// concurrent callbacks race in (FX-13a).
+    token_delay: Option<std::time::Duration>,
 }
 
 struct Inner {
@@ -281,6 +285,12 @@ impl MockIdp {
     /// How many times discovery has been fetched.
     pub fn discovery_fetches(&self) -> usize {
         self.with(|s| s.discovery_fetches)
+    }
+
+    /// Make the token endpoint answer only after `delay` (the call is counted
+    /// at once).
+    pub fn set_token_delay(&self, delay: Option<std::time::Duration>) {
+        self.with(|s| s.token_delay = delay);
     }
 
     /// How many token exchanges were attempted.
@@ -373,39 +383,56 @@ impl HttpClient for MockIdp {
             }
             let form: BTreeMap<String, String> =
                 serde_urlencoded::from_str(&body).unwrap_or_default();
-            idp.with(|s| {
-                s.token_calls += 1;
-                s.last_token_form = body.clone();
-                let code = form.get("code").cloned().unwrap_or_default();
-                let Some(grant) = s.grants.get(&code).cloned() else {
+            let (answer, delay) = idp.with(|s| {
+                let delay = s.token_delay;
+                (Self::token_answer(s, &form, &body), delay)
+            });
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            answer
+        })
+    }
+}
+
+impl MockIdp {
+    fn token_answer(
+        s: &mut IdpState,
+        form: &BTreeMap<String, String>,
+        body: &str,
+    ) -> Result<Vec<u8>, HttpError> {
+        {
+            s.token_calls += 1;
+            s.last_token_form = body.to_string();
+            let code = form.get("code").cloned().unwrap_or_default();
+            let Some(grant) = s.grants.get(&code).cloned() else {
+                return Err(HttpError::Failed(
+                    "the provider answered HTTP 400".to_string(),
+                ));
+            };
+            if let Some(expected) = &grant.code_challenge {
+                let verifier = form.get("code_verifier").cloned().unwrap_or_default();
+                if &MockIdp::challenge(&verifier) != expected {
                     return Err(HttpError::Failed(
                         "the provider answered HTTP 400".to_string(),
                     ));
-                };
-                if let Some(expected) = &grant.code_challenge {
-                    let verifier = form.get("code_verifier").cloned().unwrap_or_default();
-                    if &MockIdp::challenge(&verifier) != expected {
-                        return Err(HttpError::Failed(
-                            "the provider answered HTTP 400".to_string(),
-                        ));
-                    }
                 }
-                if let Some(expected) = &grant.redirect_uri {
-                    if form.get("redirect_uri") != Some(expected) {
-                        return Err(HttpError::Failed(
-                            "the provider answered HTTP 400".to_string(),
-                        ));
-                    }
+            }
+            if let Some(expected) = &grant.redirect_uri {
+                if form.get("redirect_uri") != Some(expected) {
+                    return Err(HttpError::Failed(
+                        "the provider answered HTTP 400".to_string(),
+                    ));
                 }
-                Ok(serde_json::to_vec(&json!({
-                    "id_token": grant.id_token,
-                    "token_type": "Bearer",
-                    "access_token": "an-access-token-the-api-must-never-keep",
-                    "refresh_token": "a-refresh-token-the-api-must-never-keep",
-                    "expires_in": 300,
-                }))
-                .unwrap())
-            })
-        })
+            }
+            Ok(serde_json::to_vec(&json!({
+                "id_token": grant.id_token,
+                "token_type": "Bearer",
+                "access_token": "an-access-token-the-api-must-never-keep",
+                "refresh_token": "a-refresh-token-the-api-must-never-keep",
+                "expires_in": 300,
+            }))
+            .unwrap())
+        }
     }
 }
