@@ -133,6 +133,12 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             return ExitCode::FAILURE;
         }
     };
+    // FX-24c: the per-peer cap exists only where a trusted-proxy set does, so
+    // the ingress is never capped as one peer (see `PeerLimit`). localAdmin
+    // mode has no such set, and every peer it serves is this machine anyway.
+    let peer_limit = state
+        .shared()
+        .and_then(|shared| PeerLimit::outside(&shared.trusted_proxies, MAX_CONNECTIONS_PER_PEER));
     tracing::info!(
         listen = %config.listen,
         public_origin = %config.public_origin,
@@ -160,14 +166,20 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             .installation
             .as_ref()
             .map_or(String::new(), |i| format!("{}/{}", i.namespace, i.config_map)),
+        // FX-24c (review L1): whether one peer outside the trusted proxy is
+        // capped, and at what; 0 is off. A capped install that refuses nobody
+        // and an uncapped one look the same in the log otherwise.
+        per_peer_cap = peer_limit.as_ref().map_or(0, |_| MAX_CONNECTIONS_PER_PEER),
         "logweir-api started"
     );
-    // FX-24c: the per-peer cap exists only where a trusted-proxy set does, so
-    // the ingress is never capped as one peer (see `PeerLimit`). localAdmin
-    // mode has no such set, and every peer it serves is this machine anyway.
-    let peer_limit = state
-        .shared()
-        .and_then(|shared| PeerLimit::outside(&shared.trusted_proxies, MAX_CONNECTIONS_PER_PEER));
+    if state.shared().is_some() && peer_limit.is_none() {
+        tracing::warn!(
+            per_peer_cap = 0,
+            "no trusted proxy is configured (trustedProxyService or trustedProxyCidrs), so the \
+             per-peer connection cap is off: one peer may hold every connection this console \
+             serves. Name the ingress controller with trustedProxyService"
+        );
+    }
     serve(listener, logweir_api::app::router(state), peer_limit).await
 }
 
