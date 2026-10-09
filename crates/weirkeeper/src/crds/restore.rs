@@ -261,8 +261,8 @@ pub struct Integrity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 256), inner(length(max = 249)))]
     pub unsampled_topics: Option<Vec<String>>,
-    /// **PROD-11.1b.** The signed `source.selection` (scorecard format 1.7.0
-    /// for a window start, 2.0.0 for a partition subset): this restore
+    /// The signed `source.selection` (scorecard format 1.7.0 for a window
+    /// start, 2.0.0 for a partition subset): this restore
     /// restored a SELECTION — a window from a stated start, or only the listed
     /// partitions of a narrowed topic — not every record of every partition
     /// of every restored topic from the archive's floor. Every verdict above
@@ -270,9 +270,10 @@ pub struct Integrity {
     ///
     /// ABSENT means the scorecard states no selection: every partition of
     /// every restored topic, from the archive's floor, exactly as every
-    /// restore before PROD-11.1. A signed block this controller cannot read is
-    /// still copied as a selection (with nothing in it), never dropped: a
-    /// narrowed restore is never shown as a full one.
+    /// restore before replay selections existed. A signed block this
+    /// controller cannot read is still copied as a selection (with only its
+    /// `scope`), never dropped: a narrowed restore is never shown as a full
+    /// one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<RestoreSelection>,
 }
@@ -289,7 +290,7 @@ pub const SELECTION_TOPICS_MAX: usize = 256;
 /// The `maxItems` of one narrowed topic's `partitions` list.
 pub const SELECTION_PARTITIONS_MAX: usize = 1024;
 
-/// **PROD-11.1b.** A restore's replay selection, copied from the signed
+/// A restore's replay selection, copied from the signed
 /// `source.selection` and never recomputed. A CLAIM until
 /// `evidence.verification` says `Valid`, like every scorecard fact here.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
@@ -360,9 +361,8 @@ pub const COMPLETE_PARTITIONS_MAX: usize = 256;
 pub struct CompleteCoverage {
     /// `true` when every SELECTED partition of every restored topic was
     /// compared: every partition of each topic unless
-    /// `integrity.selection.partitions` narrows it to a subset (PROD-11.1b),
-    /// in which case no other partition of that topic was restored or
-    /// compared.
+    /// `integrity.selection.partitions` narrows it to a subset, in which
+    /// case no other partition of that topic was restored or compared.
     pub covered: bool,
     /// Why `covered` is `false`: the bound, an archive without lineage
     /// headers, a segment that could not be decoded.

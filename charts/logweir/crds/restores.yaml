@@ -599,7 +599,7 @@ spec:
                         - segmentsVerified
                         type: object
                       covered:
-                        description: '`true` when every SELECTED partition of every restored topic was compared: every partition of each topic unless `integrity.selection.partitions` narrows it to a subset (PROD-11.1b), in which case no other partition of that topic was restored or compared.'
+                        description: '`true` when every SELECTED partition of every restored topic was compared: every partition of each topic unless `integrity.selection.partitions` narrows it to a subset, in which case no other partition of that topic was restored or compared.'
                         type: boolean
                       incompleteReason:
                         description: 'Why `covered` is `false`: the bound, an archive without lineage headers, a segment that could not be decoded.'
@@ -763,9 +763,9 @@ spec:
                     type: string
                   selection:
                     description: |-
-                      **PROD-11.1b.** The signed `source.selection` (scorecard format 1.7.0 for a window start, 2.0.0 for a partition subset): this restore restored a SELECTION — a window from a stated start, or only the listed partitions of a narrowed topic — not every record of every partition of every restored topic from the archive's floor. Every verdict above (`result`, `coverage`, `complete`) is the selection's.
+                      The signed `source.selection` (scorecard format 1.7.0 for a window start, 2.0.0 for a partition subset): this restore restored a SELECTION — a window from a stated start, or only the listed partitions of a narrowed topic — not every record of every partition of every restored topic from the archive's floor. Every verdict above (`result`, `coverage`, `complete`) is the selection's.
 
-                      ABSENT means the scorecard states no selection: every partition of every restored topic, from the archive's floor, exactly as every restore before PROD-11.1. A signed block this controller cannot read is still copied as a selection (with nothing in it), never dropped: a narrowed restore is never shown as a full one.
+                      ABSENT means the scorecard states no selection: every partition of every restored topic, from the archive's floor, exactly as every restore before replay selections existed. A signed block this controller cannot read is still copied as a selection (with only its `scope`), never dropped: a narrowed restore is never shown as a full one.
                     nullable: true
                     properties:
                       engineRuns:
