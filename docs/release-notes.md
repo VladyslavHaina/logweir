@@ -33,8 +33,10 @@ it), 40 (FX-24, a silent connection meets the console's header deadline),
 41 (FX-21, a replication factor the archive does not record is never
 read as matching; the engine's first patch), 42 (PROD-11.1, a restore
 can select a window start) and 43 (PROD-08.1a, complete coverage requested
-and shown through the CRDs, the API and the console) and 44 (FX-24b, a
-client that stops reading or sending meets a stall deadline) so far. Items continue the next entry's
+and shown through the CRDs, the API and the console), 44 (FX-24b, a
+client that stops reading or sending meets a stall deadline) and 45 (FX-28,
+a sign-in whose identity provider stalls is answered at the provider
+deadline) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -96,6 +98,10 @@ new runner's engine identity.
 Item 44 is fix-now row FX-24b, proven the same way; it changes the console
 only, and the PoC upgrade that carries it repeats the slow-reader probe and
 the event-stream row against the shared-mode console.
+Item 45 is fix-now row FX-28, proven by rows over a loopback identity
+provider that stalls and on the built console binary; it changes the console
+only, and the PoC upgrade that carries it signs in through Dex (a stall cannot
+be simulated on the live Dex).
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1200,6 +1206,52 @@ probe runs at the PoC upgrade that carries this item.
 **Rollback:** an older console leaves a connection whose client stopped
 reading or sending open again; nothing is stored, so nothing needs converting.
 
+#### 45. A sign-in whose identity provider stalls is answered at the provider deadline (FX-28)
+
+**Changed.** The shared-mode console's OIDC client put its ten-second provider
+deadline (`PROVIDER_DEADLINE`) around the request up to the response head only,
+and read the body after it with no timer. A provider, or a path to it, that
+answered a head and then stopped sending held the sign-in open for as long as
+the socket stayed open: `/auth/login`, which is unauthenticated, whenever its
+hour-long discovery cache is stale, and `/auth/callback` at the token endpoint
+or the key set. Each such request held one of the console's 256 connection
+slots. Now one deadline covers the connection, the request, the head and the
+whole body of every provider request (discovery, the key set and the token
+exchange), and a document over 512 KiB is still refused, now by name. A
+stalled request fails at ten seconds and the console drops its connection to
+the provider: `/auth/login` answers `503 kubernetes_unavailable` ("The identity
+provider could not be reached. Try again shortly."), the callback
+`401 unauthenticated` ("The sign-in could not be completed."). The audit
+failure is a new code, `provider_timeout`, and the console's warning says "did
+not complete a request within the 10-second provider deadline"; the login
+warning now carries that detail too, as the callback's and readiness's already
+did. The deadline is per request: `/auth/login` makes at most one, and a
+callback at most four, so a provider that answers each just inside the bound
+can take a callback to forty seconds, while one that stalls ends it at once.
+Provider connections now carry TCP keepalive (30 s idle, then three probes ten
+seconds apart), so a pooled connection to a provider that has gone is dropped
+between sign-ins ([api.md](api.md#sign-in)).
+**Do:** nothing is required. Alert on `provider_timeout` beside
+`provider_unreachable` and `code_exchange_failed`.
+**Scope:** rows over a loopback HTTP provider that this repository's tests
+bind, reached through the console's production client
+(`crates/logweir-api/tests/oidc_provider_deadline.rs`): a discovery document,
+a key set and a token response that each send a head and stall are answered
+after 10.0 s (10.006–10.029 s measured) with `provider_timeout`, and the
+provider sees the console hang up at 10.0 s; under the pre-fix code each row is
+still pending at fifteen seconds. A provider that takes six seconds per
+document still signs in (login 6.0 s, callback 12.1 s). An oversized document
+is refused by name. On the built binary in shared mode, a raw-socket
+`GET /auth/login` against a stalled provider gets its `503` status line at
+10.0 s and the server closes the connection. A unit row reads keepalive back
+off a socket the provider's connector dialled. Eleven mutants, all killed: the pre-fix timer, the body uncapped, keepalive
+off or partial, the deadline doubled, halved or moved, and the timeout
+reported under another name.
+Live: the PoC upgrade that carries this item signs in through Dex; a stall
+cannot be simulated on the live Dex.
+**Rollback:** an older console reads a stalled provider's body with no
+deadline again; nothing is stored, so nothing needs converting.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1265,7 +1317,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43 and 44, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44 and 45, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1291,7 +1343,8 @@ window start (an older runner refuses a plan with one); item 43 changes the
 notification and metrics, the standing authorization's scope (format
 1.1.0), the product API and the console, and needs nothing unless a
 rehearsal is to verify every record (a new schedule and a new
-authorization); item 44 changes the console only and needs nothing. To roll back to
+authorization); item 44 changes the console only and needs nothing; item 45
+changes the console only and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
