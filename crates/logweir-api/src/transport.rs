@@ -1,6 +1,6 @@
 //! The limits on every connection the listener serves: a progress window on
-//! each connection's output and on each request body (FX-24b, with FX-24c's
-//! rate floor), and a cap on the connections one peer may hold (FX-24c).
+//! each connection's output and on each request body (FX-24b), a rate floor on
+//! the body's window, and a cap on the connections one peer may hold (FX-24c).
 //!
 //! THE GAP. hyper's HTTP/1 server bounds the request HEAD (`main.rs`'s header
 //! deadline) and nothing after it. A client that sends requests and stops
@@ -12,25 +12,39 @@
 //! pipelined `GET /ui/render.js` and read nothing held every permit, and a real
 //! request was still unanswered at 30 s.
 //!
-//! THE BOUND IS A RATE OVER A WINDOW, NOT A TOTAL. Each guard here opens a
-//! window when an operation goes PENDING, and fails the operation if the
-//! window's limit passes before a FLOOR of bytes has moved in it. FX-24b's
-//! first version closed the window on any progress at all, and the FX-24b
-//! review measured what that let through: a client that read one byte every
-//! twenty seconds kept its connection past 100 s, so 256 of them could hold
-//! every permit at almost no cost (FX-24c). The floor is far below any real
-//! link, so a client that reads slowly but steadily keeps its connection
-//! however long the answer takes; what ends is the connection whose client
-//! stopped, or trickles.
+//! THE BOUND IS A WINDOW, NOT A TOTAL. Each guard here opens a window when an
+//! operation goes PENDING, and fails the operation if the window's limit
+//! passes before a FLOOR of bytes has moved in it; progress past the floor, or
+//! the operation settling, closes the window. A client that reads slowly but
+//! steadily keeps its connection however long the answer takes; what ends is
+//! the connection whose client stopped, or, for a body, trickles.
 //!
-//! WHAT CLOSES A WINDOW, ON THE OUTPUT. Either the floor's worth of bytes
-//! accepted by the kernel since it opened, or the output CATCHING UP: hyper
-//! flushes the IO itself only once its own write buffer is empty (hyper 1.11
-//! `src/proto/h1/io.rs:271-304`, `Buffered::poll_flush`), so a ready
-//! `poll_flush` here means everything hyper had to write has been written. A
-//! server-sent event stream that is being read catches up on every heartbeat,
-//! and between heartbeats it has no write pending at all, so no window is ever
-//! open on it long enough to matter, whatever the size of its frames.
+//! THE OUTPUT'S FLOOR IS ONE BYTE, AND THAT IS MEASURED, NOT ASSUMED (FX-24c).
+//! The server sees a reader's progress only when the kernel lets it write
+//! again, and the kernel does that in bursts the size of a send buffer: on
+//! macOS a client draining a steady 16 KiB/s woke the writer with 167 KB, then
+//! 12 KB five seconds later, then not at all for 25 s, and a client reading one
+//! byte every twenty seconds got exactly the same first thirty seconds
+//! (instrumented binary, 2026-10-09). A window that wanted 32 KiB cut that
+//! steady reader at 32.5 s, which the one-byte stall served to the end; and the
+//! stall already ends the one-byte reader, at 35.1 s on the same host, because
+//! the kernel stops waking a writer whose client takes almost nothing. So the
+//! output keeps the stall; slow-RATE readers that keep the kernel moving are
+//! the peer cap's to bound, below.
+//!
+//! THE BODY'S FLOOR IS REAL (FX-24c). hyper reads a body as it arrives, with no
+//! buffer between the client's rate and the frames the handler sees, so a
+//! window on a body measures the client. A body still arriving at the end of a
+//! window must have brought the floor in it; a body that ends inside its
+//! window is never cut, however small.
+//!
+//! WHAT CLOSES A WINDOW, ON THE OUTPUT. Any byte the kernel accepts, or the
+//! output CATCHING UP: hyper flushes the IO itself only once its own write
+//! buffer is empty (hyper 1.11 `src/proto/h1/io.rs:271-304`,
+//! `Buffered::poll_flush`), so a ready `poll_flush` here means everything hyper
+//! had to write has been written. A server-sent event stream that is being read
+//! catches up on every heartbeat, and between heartbeats it has no write
+//! pending at all.
 //!
 //! TWO GUARDS, BECAUSE THE TRANSPORT CANNOT TELL A BODY READ FROM AN IDLE ONE.
 //! - [`StallGuard`] wraps the connection's IO and times its OUTPUT: a pending
@@ -56,12 +70,13 @@
 //! (`poll_drain_or_close_read`, hyper 1.11 `src/proto/h1/conn.rs:858-873`).
 //!
 //! THE PEER CAP ([`PeerLimit`]) bounds what one address can hold whatever its
-//! rate: a client that reads just above the floor keeps each connection, so
-//! the floor alone only raises the price of holding every permit. Peers inside
-//! the trusted-proxy set are never capped, because the ingress multiplexes
-//! every browser behind it onto its own address; and with no trusted-proxy set
-//! configured nothing is capped at all, because the console cannot then tell
-//! its ingress from any other peer.
+//! rate: a client that reads fast enough to keep the kernel waking the writer
+//! keeps each connection however long its pipelined answers take, so no window
+//! can bound it and only a count can. Peers inside the trusted-proxy set are
+//! never capped, because the ingress multiplexes every browser behind it onto
+//! its own address; and with no trusted-proxy set configured nothing is capped
+//! at all, because the console cannot then tell its ingress from any other
+//! peer.
 
 use std::collections::HashMap;
 use std::future::Future as _;
@@ -142,15 +157,17 @@ impl StallClock {
 
     /// The `TimedOut` error a window that expired fails with.
     fn stalled(&self, what: &str) -> io::Error {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
+        let message = if self.floor <= 1 {
+            format!("{what} made no progress for {} s", self.limit.as_secs_f64())
+        } else {
             format!(
                 "{what} moved {} of the {} bytes it must move in {} s",
                 self.window.unwrap_or(0),
                 self.floor,
                 self.limit.as_secs_f64()
-            ),
-        )
+            )
+        };
+        io::Error::new(io::ErrorKind::TimedOut, message)
     }
 
     /// A write: its bytes count toward the window.
@@ -193,7 +210,7 @@ impl StallClock {
     }
 }
 
-/// A connection's IO with a progress window on its output.
+/// A connection's IO with a stall deadline on its output.
 ///
 /// Reads pass through untouched; see the module documentation for why they
 /// must.
@@ -204,13 +221,13 @@ pub struct StallGuard<T> {
 }
 
 impl<T> StallGuard<T> {
-    /// Wrap `inner`: an output operation that stays behind for `limit`
-    /// without the kernel taking `floor` bytes fails with
-    /// [`io::ErrorKind::TimedOut`]. A `floor` of one byte is a pure stall.
-    pub const fn new(inner: T, limit: Duration, floor: usize) -> Self {
+    /// Wrap `inner`: an output operation pending for `limit` with no progress
+    /// at all fails with [`io::ErrorKind::TimedOut`]. The output's floor is
+    /// one byte; the module documentation says why it is not higher.
+    pub const fn new(inner: T, limit: Duration) -> Self {
         Self {
             inner,
-            output: StallClock::new(limit, floor),
+            output: StallClock::new(limit, 1),
         }
     }
 }
@@ -488,18 +505,20 @@ impl Drop for PeerSlot {
 #[cfg(test)]
 mod tests {
     //! The guards on real loopback sockets and on stub IO, at a 300 ms limit
-    //! and a 4 KiB floor, and the peer cap over plain addresses.
+    //! (and a 4 KiB floor for bodies), and the peer cap over plain addresses.
     //!
     //! Each row can fail: the non-reader and the stuck-IO rows fail without
     //! the output clock; the steady-reader and idle rows fail if the clock is a
     //! total rather than a window; the pending-read row fails if reads are
-    //! timed at the transport; the floor rows fail when any byte closes a
-    //! window (FX-24b's clock), or when the floor is far too high; the
-    //! catching-up row fails when a window outlives the output it was opened
-    //! for; the body rows fail without the body clock, or with one that never
-    //! closes; the cap rows fail with no cap, with the trusted proxy capped,
-    //! with a cap where no trusted proxy is configured, or with slots that
-    //! never come back.
+    //! timed at the transport; the trickling-reader row fails if the output is
+    //! given a floor above one byte (FX-24c measured why it must not be); the
+    //! clock row fails when progress below the floor closes a window, or when a
+    //! settled operation leaves its window open; the body floor rows fail when
+    //! any byte closes a body's window, or when the floor is far too high; the
+    //! body rows fail without the body clock, or with one that never closes;
+    //! the cap rows fail with no cap, with the trusted proxy capped, with a cap
+    //! where no trusted proxy is configured, or with places that never come
+    //! back.
 
     use super::*;
     use crate::config::{Cidr, ServiceRef};
@@ -510,7 +529,7 @@ mod tests {
     use std::time::Instant as StdInstant;
 
     const LIMIT: Duration = Duration::from_millis(300);
-    /// The floor these rows use: 4 KiB per 300 ms window, about 13 KiB/s.
+    /// The body floor these rows use: 4 KiB per 300 ms window, about 13 KiB/s.
     const FLOOR: usize = 4 * 1024;
     /// A generous margin for a loaded host: the clock is the server's own and
     /// fires on time, but the test thread can be scheduled late.
@@ -521,9 +540,9 @@ mod tests {
 
     type Server = StallGuard<TokioIo<tokio::net::TcpStream>>;
 
-    /// A connected pair: the server side guarded at `limit` and `floor`, and
-    /// a blocking std client.
-    async fn pair_at(limit: Duration, floor: usize) -> (Server, std::net::TcpStream) {
+    /// A connected pair: the server side guarded at `limit`, and a blocking
+    /// std client.
+    async fn pair_at(limit: Duration) -> (Server, std::net::TcpStream) {
         let listening = tokio::net::TcpSocket::new_v4().unwrap();
         listening.set_send_buffer_size(SOCKET_BUFFER).unwrap();
         listening.bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -535,11 +554,11 @@ mod tests {
         let client = client.unwrap().into_std().unwrap();
         client.set_nonblocking(false).unwrap();
         let (server, _) = accepted.unwrap();
-        (StallGuard::new(TokioIo::new(server), limit, floor), client)
+        (StallGuard::new(TokioIo::new(server), limit), client)
     }
 
     async fn pair() -> (Server, std::net::TcpStream) {
-        pair_at(LIMIT, FLOOR).await
+        pair_at(LIMIT).await
     }
 
     async fn write<T: hyper::rt::Write + Unpin>(io: &mut T, buf: &[u8]) -> io::Result<usize> {
@@ -621,7 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_output_operation_is_timed() {
-        let mut io = StallGuard::new(Stuck, LIMIT, FLOOR);
+        let mut io = StallGuard::new(Stuck, LIMIT);
         assert!(hyper::rt::Write::is_write_vectored(&io));
 
         let started = StdInstant::now();
@@ -634,7 +653,7 @@ mod tests {
         assert_eq!(flushed.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert_at_the_limit(started.elapsed(), "a stuck flush");
 
-        let mut io = StallGuard::new(Stuck, LIMIT, FLOOR);
+        let mut io = StallGuard::new(Stuck, LIMIT);
         let started = StdInstant::now();
         let shut = bounded(
             LIMIT + SLACK,
@@ -645,7 +664,7 @@ mod tests {
         assert_eq!(shut.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert_at_the_limit(started.elapsed(), "a stuck shutdown");
 
-        let mut io = StallGuard::new(Stuck, LIMIT, FLOOR);
+        let mut io = StallGuard::new(Stuck, LIMIT);
         let started = StdInstant::now();
         let slices = [io::IoSlice::new(b"a"), io::IoSlice::new(b"b")];
         let written = bounded(
@@ -665,13 +684,10 @@ mod tests {
         // pace: on macOS a reader taking 64 KiB every 75 ms still left the
         // writer waiting 315 ms at a time (a probe, 2026-10-08). One second is
         // several times the gaps a steady reader leaves, so a cut here is the
-        // guard misjudging progress, not the kernel. The floor is the
-        // production one, 32 KiB a window; this reader moves dozens of times
-        // that.
+        // guard misjudging progress, not the kernel.
         const STEADY_LIMIT: Duration = Duration::from_secs(1);
-        const STEADY_FLOOR: usize = 32 * 1024;
         const TOTAL: usize = 8 * 1024 * 1024;
-        let (mut server, mut client) = pair_at(STEADY_LIMIT, STEADY_FLOOR).await;
+        let (mut server, mut client) = pair_at(STEADY_LIMIT).await;
         // At most 128 KiB every 50 ms: the writer waits on the reader nearly
         // all the time, for several limits in all, but never for a limit.
         let reader = std::thread::spawn(move || {
@@ -790,49 +806,30 @@ mod tests {
         }
     }
 
-    /// **A client that keeps reading, but below the floor, fails at the limit
-    /// (FX-24c).** It never stalls — 64 bytes go every 50 ms, six times a
-    /// window — so FX-24b's clock, which any byte closed, never fired on it;
-    /// 384 bytes a window is a tenth of the floor.
+    /// **The output is judged by the stall alone: a reader that keeps the
+    /// kernel taking bytes, however few, is not cut (FX-24c's decision).**
+    ///
+    /// 64 bytes every 50 ms is 384 bytes a window, a tenth of the body floor.
+    /// On the output that is not the client's rate but the kernel's: it wakes
+    /// a writer in bursts the size of its send buffer, so a steady 16 KiB/s
+    /// reader showed the server 12 KB in thirty seconds on macOS, and a window
+    /// floor cut it where the stall served it to the end (the module
+    /// documentation). A floor added to the output fails here first.
     #[tokio::test]
-    async fn a_client_reading_below_the_floor_fails_at_the_limit() {
-        let mut io = StallGuard::new(Drip::new(64, LIMIT / 6), LIMIT, FLOOR);
-        let started = StdInstant::now();
-        let error = bounded(
-            LIMIT + SLACK,
-            "a write to a client below the floor",
-            write_all(&mut io, 1024 * 1024),
-        )
-        .await
-        .expect_err("a client below the floor must be cut");
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
-        assert!(
-            error.to_string().contains(&format!("of the {FLOOR} bytes")),
-            "{error}"
-        );
-        assert_at_the_limit(started.elapsed(), "the write below the floor");
-    }
-
-    /// **A client that keeps reading above the floor is never cut (FX-24c).**
-    /// The control for the row above: 2 KiB every 50 ms is 12 KiB a window,
-    /// three floors (so a window closes after two chunks, and a host that
-    /// runs the timer late still closes it in time), and the writer is
-    /// pending between every chunk for more than five windows in all.
-    #[tokio::test]
-    async fn a_client_reading_above_the_floor_is_never_cut() {
-        const TOTAL: usize = 240 * 1024;
-        let mut io = StallGuard::new(Drip::new(2048, LIMIT / 6), LIMIT, FLOOR);
+    async fn the_output_is_judged_by_the_stall_alone() {
+        const TOTAL: usize = 6 * 1024;
+        let mut io = StallGuard::new(Drip::new(64, LIMIT / 6), LIMIT);
         let started = StdInstant::now();
         let result = bounded(
-            Duration::from_secs(30),
-            "a write to a client above the floor",
+            Duration::from_secs(60),
+            "a write to a client that takes 64 bytes every 50 ms",
             write_all(&mut io, TOTAL),
         )
         .await;
         let elapsed = started.elapsed();
         assert!(
             result.is_ok(),
-            "a client above the floor was cut after {elapsed:?}: {result:?}"
+            "a reader the kernel kept taking bytes from was cut after {elapsed:?}: {result:?}"
         );
         assert!(
             elapsed > LIMIT * 5,
@@ -840,107 +837,59 @@ mod tests {
         );
     }
 
-    /// Output whose acceptance the row decides: `allowed` bytes may be taken,
-    /// and nothing else; flushes are always done.
-    struct Scripted {
-        allowed: usize,
-    }
-
-    impl hyper::rt::Write for Scripted {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            if self.allowed == 0 {
-                return Poll::Pending;
-            }
-            let taken = buf.len().min(self.allowed);
-            self.allowed -= taken;
-            Poll::Ready(Ok(taken))
-        }
-        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    /// One poll, by hand, with a waker nobody listens to: the row decides when
-    /// to poll again.
-    fn poll_write_once(io: &mut StallGuard<Scripted>, len: usize) -> Poll<io::Result<usize>> {
-        let mut cx = Context::from_waker(Waker::noop());
-        Pin::new(io).poll_write(&mut cx, &vec![0u8; len])
-    }
-
-    fn poll_flush_once(io: &mut StallGuard<Scripted>) -> Poll<io::Result<()>> {
-        let mut cx = Context::from_waker(Waker::noop());
-        Pin::new(io).poll_flush(&mut cx)
-    }
-
-    /// **Progress below the floor does not close a window; catching up does
-    /// (FX-24c).**
+    /// **Progress below the floor keeps a window open; the floor's worth, or
+    /// the operation settling, closes it (FX-24c).** The clock itself, polled
+    /// by hand with a waker nobody listens to.
     ///
-    /// - A write goes pending, and the window opens. Half a limit later the
-    ///   kernel takes 100 bytes, far short of the floor, and the next write is
-    ///   pending again: one limit after the window opened it must have
-    ///   expired. FX-24b's clock, which any byte closed, would have opened a
-    ///   fresh window there instead.
-    /// - The same partial write followed by a ready flush — hyper's own buffer
-    ///   is empty, the output has caught up — closes the window: two limits
-    ///   later a new pending write opens a new one, not an expired one. A
-    ///   window that outlived the output it was opened for would cut the next
+    /// - A window opens; 100 bytes move, far short of a 4 KiB floor; one limit
+    ///   after the window opened it has expired. FX-24b's clock, which any byte
+    ///   closed, would have opened a fresh window there instead.
+    /// - The floor's worth closes the window: a limit later, a new pending
+    ///   operation opens a new one, not an expired one.
+    /// - So does settling — the output caught up, the body ended: two limits
+    ///   later the next pending operation is judged by a new window. A window
+    ///   that outlived the operation it was opened for would cut the next
     ///   answer at once, or an event stream's next frame.
     #[tokio::test]
-    async fn progress_below_the_floor_keeps_the_window_and_catching_up_closes_it() {
-        // Below the floor, not caught up.
-        let mut io = StallGuard::new(Scripted { allowed: 0 }, LIMIT, FLOOR);
-        assert!(
-            poll_write_once(&mut io, 1000).is_pending(),
-            "opens a window"
-        );
-        tokio::time::sleep(LIMIT / 2).await;
-        io.inner.allowed = 100;
-        assert!(matches!(
-            poll_write_once(&mut io, 1000),
-            Poll::Ready(Ok(100))
-        ));
-        assert!(poll_write_once(&mut io, 900).is_pending(), "still behind");
-        tokio::time::sleep(LIMIT / 2 + LIMIT / 10).await;
-        match poll_write_once(&mut io, 900) {
-            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::TimedOut => {
-                assert!(error.to_string().contains("moved 100 of the"), "{error}");
-            }
-            other => panic!(
-                "100 bytes in a window whose floor is {FLOOR} kept the connection: {other:?}"
-            ),
-        }
+    async fn progress_below_the_floor_keeps_the_window_and_settling_closes_it() {
+        let mut cx = Context::from_waker(Waker::noop());
 
-        // The same, but the output catches up.
-        let mut io = StallGuard::new(Scripted { allowed: 0 }, LIMIT, FLOOR);
-        assert!(poll_write_once(&mut io, 100).is_pending(), "opens a window");
+        let mut clock = StallClock::new(LIMIT, FLOOR);
+        assert!(!clock.expired(&mut cx), "opens a window");
         tokio::time::sleep(LIMIT / 2).await;
-        io.inner.allowed = 100;
-        assert!(matches!(
-            poll_write_once(&mut io, 100),
-            Poll::Ready(Ok(100))
-        ));
+        clock.moved(100);
+        assert!(!clock.expired(&mut cx), "still inside the window");
+        tokio::time::sleep(LIMIT / 2 + LIMIT / 10).await;
         assert!(
-            matches!(poll_flush_once(&mut io), Poll::Ready(Ok(()))),
-            "caught up"
+            clock.expired(&mut cx),
+            "100 bytes in a window whose floor is {FLOOR} kept it open past its limit"
         );
+        assert!(
+            clock.stalled("x").to_string().contains("moved 100 of the"),
+            "{}",
+            clock.stalled("x")
+        );
+
+        let mut clock = StallClock::new(LIMIT, FLOOR);
+        assert!(!clock.expired(&mut cx), "opens a window");
+        tokio::time::sleep(LIMIT / 2).await;
+        clock.moved(FLOOR);
+        tokio::time::sleep(LIMIT / 2 + LIMIT / 10).await;
+        assert!(
+            !clock.expired(&mut cx),
+            "a window that saw its floor was still judged by its old limit"
+        );
+
+        let mut clock = StallClock::new(LIMIT, FLOOR);
+        assert!(!clock.expired(&mut cx), "opens a window");
+        tokio::time::sleep(LIMIT / 2).await;
+        clock.moved(100);
+        clock.settled();
         tokio::time::sleep(LIMIT * 2).await;
         assert!(
-            poll_write_once(&mut io, 100).is_pending(),
-            "a write two limits after the output caught up was judged by the old window"
+            !clock.expired(&mut cx),
+            "an operation two limits after the last one settled was judged by the old window"
         );
-        tokio::time::sleep(LIMIT / 2).await;
-        io.inner.allowed = 100;
-        assert!(matches!(
-            poll_write_once(&mut io, 100),
-            Poll::Ready(Ok(100))
-        ));
     }
 
     /// A body that is never ready and never wakes anyone.
