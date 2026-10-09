@@ -3,10 +3,14 @@
 `application/vnd.logweir.catalog-point+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-catalog-point-1.3.0.json`](../../schemas/logweir-catalog-point-1.3.0.json),
+[`schemas/logweir-catalog-point-1.5.0.json`](../../schemas/logweir-catalog-point-1.5.0.json),
 regenerated from the Rust type by `just schema` and `diff -u`'d against the
 checked-in file by `just schema-check`, so this document and the schema cannot
 drift apart silently. A MINOR bump is a new schema file beside the old one: the
+[`1.4.0` schema](../../schemas/logweir-catalog-point-1.4.0.json) (PROD-01.3's
+auth modes) and the [`1.3.0` schema](../../schemas/logweir-catalog-point-1.3.0.json)
+(PROD-05.1, `topics[].configuration`), which describe the records written
+before PROD-03.0, the
 [`1.2.0` schema](../../schemas/logweir-catalog-point-1.2.0.json) (FX-7,
 `archive.manifest_version_id`) and the
 [`1.1.0` schema](../../schemas/logweir-catalog-point-1.1.0.json) (FX-4,
@@ -169,6 +173,7 @@ all of them wanted:
 | `topics[].config_coverage` | object, **optional** (1.1.0) | The backup receipt's [`config_coverage`](backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110) entry for the topic, COPIED: `coverage` (`captured`, `notCaptured`, `captureDenied`), `reason` for `notCaptured`, and the effective `timestamp_type` with its `source`. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means UNKNOWN — every 1.0.0 record, and every record derived from a receipt that predates 1.1.0 — and is never read as `captured`. |
 | `topics[].partitions` | int, **optional** | The source's partition count, receipt-derived from the receipt's [`topic_configuration`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) (format 1.3.0): the count the archive manifest records and a restore creates the topic with. ABSENT — every record before 1.3.0, and a 1.3.0 one whose manifest recorded none — is unknown. See [absent means unknown](#absent-means-unknown-never-zero). |
 | `topics[].configuration` | object, **optional** (1.3.0) | The backup receipt's [`topic_configuration`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) entry for the topic, COPIED: `partitions`, `replication_factor`, the recorded `entries` with their `source` and `portability`, and the declarative `owner`. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0 — and is never read as "no configuration". |
+| `topics[].schema_dependency` | object, **optional** (1.5.0) | The backup receipt's [`schema_dependency`](backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150) entry for the topic, COPIED: the `verdict` (`schemaDependent`, `notDetected`, `notAssessed`), its `basis` or `reason`, and the `key` and `value` sides with their framed counts and schema ids. A `schemaDependent` topic reads "schema-dependent, registry not captured": its archived records name schema ids a registry issued, and Logweir captures none. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means NOT ASSESSED — every record before 1.5.0 — and is never read as "not schema-dependent". |
 | `owner_detection` | string[], **optional** (1.3.0) | The backup receipt's [`owner_detection`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130), COPIED: where the run looked for declarative owners (`declared`, `kafkaTopicResources`). EMPTY means it looked nowhere, so a topic without an `owner` has its owner NOT CHECKED — never "applied through the admin API". Receipt-derived (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0. |
 | `source.cluster_id` | string | Read from the broker at admission and carried by the receipt — never from a spec. |
 | `source.bootstrap_servers` | string[] | Addressing. |
@@ -266,6 +271,9 @@ This is the rule that is easiest to get wrong and most expensive to get wrong.
 * absent `installation` → the writing installation is **unknown**.
 * absent `topics[].configuration` → the topic's configuration model is **not
   recorded**; a restore that needs it knows none and says so.
+* absent `topics[].schema_dependency` → whether that topic's records need a
+  schema registry is **not assessed**, never "not schema-dependent"; the
+  catalog's view, the API and the console say "not assessed".
 * absent `topics[].config_coverage` → whether that topic's configuration was
   captured is **unknown**, and never `captured`. A restore does not read this
   copy at all: its configuration parity takes coverage from the bound point's
@@ -348,6 +356,13 @@ none of them.
   stays as above. No verifier evaluates a catalog record's invariants, so an
   older reader still reads it; the receipt it names is what an older verifier
   refuses.
+  **1.5.0 (PROD-03.0)** is the fifth: `topics[].schema_dependency`, copied from
+  a receipt that carries the block — every receipt this build signs, so every
+  record it writes is 1.5.0. A record backfilled from an older receipt keeps the
+  format it would have had, and its topics' schema dependency is not assessed.
+  The catalog's view lists each topic's verdict, the dependent sides and their
+  schema ids (`PointView.topics[].schemaDependency` in the product API) for an
+  `Available` point only.
 * **A major bump** is for a change a `1.x` reader could misread — a field whose
   meaning changed, or a required field removed. It writes under a new key path.
 * **Absent optional fields are unknown**, in every version.
