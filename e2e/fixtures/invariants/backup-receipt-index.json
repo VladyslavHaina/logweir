@@ -390,5 +390,133 @@
     "python_exit": 1,
     "reason": "topic_configuration[\"payments\"] records partitions 0 and replication_factor 1: a recorded count is at least 1",
     "arm": "topic_configuration[\"payments\"] records partitions 0 and replication_factor 1: a recorded count is at least 1"
+  },
+  {
+    "id": "receipt_1_5_with_schema_dependency",
+    "file": "receipt_1_5_with_schema_dependency.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "receipt_1_5_not_assessed",
+    "file": "receipt_1_5_not_assessed.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "receipt_1_5_key_side_and_more_ids",
+    "file": "receipt_1_5_key_side_and_more_ids.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "schema_dependency_under_format_1_4_0",
+    "file": "schema_dependency_under_format_1_4_0.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency is present but format_version \"1.4.0\" predates it: the field is defined from 1.5.0",
+    "arm": "schema_dependency is present but format_version \"1.4.0\" predates it: the field is defined from 1.5.0"
+  },
+  {
+    "id": "schema_dependency_missing_a_named_topic",
+    "file": "schema_dependency_missing_a_named_topic.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
+    "arm": "schema_dependency covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}"
+  },
+  {
+    "id": "schema_dependency_verdict_outside_the_set",
+    "file": "schema_dependency_verdict_outside_the_set.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"orders\"] verdict \"registryNeeded\" with reason absent and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\" or \"segmentUnreadable\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason",
+    "arm": "schema_dependency[\"orders\"] verdict \"registryNeeded\" with reason absent and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\" or \"segmentUnreadable\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason"
+  },
+  {
+    "id": "schema_dependency_not_assessed_with_a_basis",
+    "file": "schema_dependency_not_assessed_with_a_basis.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"payments\"] verdict \"notAssessed\" with reason \"noRecords\" and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\" or \"segmentUnreadable\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason",
+    "arm": "schema_dependency[\"payments\"] verdict \"notAssessed\" with reason \"noRecords\" and basis \"sampled\" is not a verdict this format defines: the verdict is \"schemaDependent\", \"notDetected\" or \"notAssessed\"; a \"notAssessed\" topic has a reason, \"noRecords\" or \"segmentUnreadable\", and no basis, and any other topic has a basis, \"sampled\" or \"complete\", and no reason"
+  },
+  {
+    "id": "schema_dependency_judged_without_a_value_side",
+    "file": "schema_dependency_judged_without_a_value_side.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"orders\"] verdict \"schemaDependent\" records key 4000 records and value absent: a judged topic records a key side and a value side over the same records, at least one, and a \"notAssessed\" topic records neither",
+    "arm": "schema_dependency[\"orders\"] verdict \"schemaDependent\" records key 4000 records and value absent: a judged topic records a key side and a value side over the same records, at least one, and a \"notAssessed\" topic records neither"
+  },
+  {
+    "id": "schema_dependency_complete_short_of_records",
+    "file": "schema_dependency_complete_short_of_records.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"payments\"] judges 917 records under \"complete\" and records counts 918: a \"complete\" basis judges every record the receipt counts, a \"sampled\" one at most that many, and \"noRecords\" is said only of a topic that counts none",
+    "arm": "schema_dependency[\"payments\"] judges 917 records under \"complete\" and records counts 918: a \"complete\" basis judges every record the receipt counts, a \"sampled\" one at most that many, and \"noRecords\" is said only of a topic that counts none"
+  },
+  {
+    "id": "schema_dependency_no_records_beside_records",
+    "file": "schema_dependency_no_records_beside_records.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"payments\"] judges 0 records under \"noRecords\" and records counts 917: a \"complete\" basis judges every record the receipt counts, a \"sampled\" one at most that many, and \"noRecords\" is said only of a topic that counts none",
+    "arm": "schema_dependency[\"payments\"] judges 0 records under \"noRecords\" and records counts 917: a \"complete\" basis judges every record the receipt counts, a \"sampled\" one at most that many, and \"noRecords\" is said only of a topic that counts none"
+  },
+  {
+    "id": "schema_dependency_ids_descending",
+    "file": "schema_dependency_ids_descending.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"orders\"].value lists schema_ids [4, 3] with schema_id_count 2 and framed 3990: the ids are distinct, ascending and from 1 to 16777215, all of them when the count is 16 or fewer and 16 otherwise, and the count is at least 1 exactly when a record is framed and never above the framed count",
+    "arm": "schema_dependency[\"orders\"].value lists schema_ids [4, 3] with schema_id_count 2 and framed 3990: the ids are distinct, ascending and from 1 to 16777215, all of them when the count is 16 or fewer and 16 otherwise, and the count is at least 1 exactly when a record is framed and never above the framed count"
+  },
+  {
+    "id": "schema_dependency_id_above_the_plausible_range",
+    "file": "schema_dependency_id_above_the_plausible_range.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"orders\"].value lists schema_ids [3, 16777216] with schema_id_count 2 and framed 3990: the ids are distinct, ascending and from 1 to 16777215, all of them when the count is 16 or fewer and 16 otherwise, and the count is at least 1 exactly when a record is framed and never above the framed count",
+    "arm": "schema_dependency[\"orders\"].value lists schema_ids [3, 16777216] with schema_id_count 2 and framed 3990: the ids are distinct, ascending and from 1 to 16777215, all of them when the count is 16 or fewer and 16 otherwise, and the count is at least 1 exactly when a record is framed and never above the framed count"
+  },
+  {
+    "id": "schema_dependency_framed_without_an_id",
+    "file": "schema_dependency_framed_without_an_id.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"payments\"].key lists schema_ids [] with schema_id_count 0 and framed 1: the ids are distinct, ascending and from 1 to 16777215, all of them when the count is 16 or fewer and 16 otherwise, and the count is at least 1 exactly when a record is framed and never above the framed count",
+    "arm": "schema_dependency[\"payments\"].key lists schema_ids [] with schema_id_count 0 and framed 1: the ids are distinct, ascending and from 1 to 16777215, all of them when the count is 16 or fewer and 16 otherwise, and the count is at least 1 exactly when a record is framed and never above the framed count"
+  },
+  {
+    "id": "schema_dependency_dependent_flag_the_counts_contradict",
+    "file": "schema_dependency_dependent_flag_the_counts_contradict.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"payments\"].value is not dependent with framed 90 and unframed 810: a side is dependent exactly when at least one record and at least one in ten of its non-null records are framed",
+    "arm": "schema_dependency[\"payments\"].value is not dependent with framed 90 and unframed 810: a side is dependent exactly when at least one record and at least one in ten of its non-null records are framed"
+  },
+  {
+    "id": "schema_dependency_dependent_below_one_in_ten",
+    "file": "schema_dependency_dependent_below_one_in_ten.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"orders\"].value is dependent with framed 1 and unframed 3989: a side is dependent exactly when at least one record and at least one in ten of its non-null records are framed",
+    "arm": "schema_dependency[\"orders\"].value is dependent with framed 1 and unframed 3989: a side is dependent exactly when at least one record and at least one in ten of its non-null records are framed"
+  },
+  {
+    "id": "schema_dependency_verdict_its_sides_contradict",
+    "file": "schema_dependency_verdict_its_sides_contradict.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_dependency[\"orders\"] verdict \"notDetected\" does not fit its sides: a judged topic is \"schemaDependent\" exactly when its key side or its value side is dependent",
+    "arm": "schema_dependency[\"orders\"] verdict \"notDetected\" does not fit its sides: a judged topic is \"schemaDependent\" exactly when its key side or its value side is dependent"
   }
 ]

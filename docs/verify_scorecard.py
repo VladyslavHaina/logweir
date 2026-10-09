@@ -487,7 +487,20 @@ FORMAT_VERSION = "1.4.0"
 # layer refuses a block that is not the writer's shape; a `replay selection:`
 # coverage line names the window, and the sampled-pass line of a narrowed
 # document is qualified by its window, in the Rust reader's words.
-SCRIPT_VERSION = "1.23.0"
+#
+# 1.24.0 (PROD-03.0) knows backup receipt format 1.5.0 and its optional
+# `schema_dependency`: per named topic, whether the archived keys or values
+# carry Confluent wire-format framing (magic byte 0 and a schema id), with the
+# ids seen, judged from archived bytes and never from a registry. Eight arms,
+# 22 to 29, mirrored byte for byte and in position from
+# `BackupReceipt::validate_invariants`: the block only from 1.5.0, its topic
+# set, the closed verdict/reason/basis sets, both sides exactly when judged,
+# the judged count against `records`, the schema ids, the one-in-ten
+# threshold, and the verdict from its sides. They fire only on a document
+# carrying the block, so every earlier receipt is decided exactly as before
+# (OD-7 (a)). The shape layer refuses a block that is not the writer's shape,
+# and `schema_dependency` lines say, per topic, what the Rust reader says.
+SCRIPT_VERSION = "1.24.0"
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
 # `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
@@ -606,6 +619,52 @@ RECEIPT_CONFIG_COVERAGE_SINCE_MINOR = 1
 # `crates/logweir-core/src/backup_receipt.rs`, which it must equal
 # (`docs/test_verify_scorecard.py::test_the_topic_configuration_minor_is_the_rust_readers`).
 RECEIPT_TOPIC_CONFIGURATION_SINCE_MINOR = 3
+
+# PROD-03.0: the first minor of the BACKUP RECEIPT's format 1 that defines
+# `schema_dependency` (arm 22) — `SCHEMA_DEPENDENCY_SINCE_MINOR` in
+# `crates/logweir-core/src/backup_receipt.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_schema_dependency_constants_are_the_rust_readers`).
+RECEIPT_SCHEMA_DEPENDENCY_SINCE_MINOR = 5
+
+# PROD-03.0: the detection contract's constants, which arms 24, 27 and 28 read
+# — `logweir_core::schema_dependency`'s `VERDICTS`, `NOT_ASSESSED_REASONS`,
+# `BASES`, `MAX_SCHEMA_ID`, `SCHEMA_IDS_LISTED` and
+# `DEPENDENT_SHARE_DENOMINATOR`, which they must equal.
+SCHEMA_DEPENDENCY_VERDICTS = ("schemaDependent", "notDetected", "notAssessed")
+SCHEMA_DEPENDENCY_REASONS = ("noRecords", "segmentUnreadable")
+SCHEMA_DEPENDENCY_BASES = ("sampled", "complete")
+SCHEMA_ID_MAX = 0x00FFFFFF
+SCHEMA_IDS_LISTED = 16
+DEPENDENT_SHARE_DENOMINATOR = 10
+
+
+def _dependent_by_share(framed: int, unframed: int) -> bool:
+    """`logweir_core::schema_dependency::dependent_by_share`: at least one
+    framed record, and at least one in ten of the side's non-null records
+    framed. Python's integers are exact, as the Rust side's `u128` is."""
+    return framed >= 1 and framed * DEPENDENT_SHARE_DENOMINATOR >= framed + unframed
+
+
+def _shown_or_absent(value) -> str:
+    """An optional string as arms 24 and 26 render it: `absent`, or Rust's
+    `{:?}` of it."""
+    return "absent" if value is None else _rust_debug_str(value)
+
+
+def _side_records_shown(side) -> str:
+    """An optional side as arm 25 renders it: `absent`, or its judged count."""
+    return "absent" if side is None else f"{_judged_records(side)} records"
+
+
+def _u32_list_debug(ids) -> str:
+    """A `Vec<u32>` as Rust's `{:?}` renders it: `[3, 4]`, `[]`."""
+    return "[" + ", ".join(str(i) for i in ids) + "]"
+
+
+def _judged_records(side) -> int:
+    """`logweir_core::schema_dependency::judged_records`: framed, unframed and
+    nulls together, exact."""
+    return side["framed"] + side["unframed"] + side["nulls"]
 
 # PROD-05.1: `ConfigEntry::portability`'s closed set (arm 16), in
 # `logweir_core::topic_configuration::PORTABILITY_CLASSES`'s order, which the
@@ -2267,6 +2326,48 @@ def _receipt_shape(doc) -> str:
         not isinstance(detection, list) or not all(isinstance(d, str) for d in detection)
     ):
         return "owner_detection is not a list of strings"
+    # PROD-03.0, format 1.5.0: `schema_dependency` is `Option<BTreeMap<String,
+    # TopicSchemaDependency>>`: a required `verdict` string, optional `reason`
+    # and `basis` strings, and optional `key`/`value` `SideFraming`s of a
+    # bool, four `u64`s and a `Vec<u32>`. Rust refuses every one of these at
+    # DESERIALISATION, before arm 22 runs, so they belong in the shape layer
+    # here for the reason `source.auth` does. `null` is absent on both sides.
+    dependency = doc.get("schema_dependency")
+    if dependency is not None:
+        if not isinstance(dependency, dict):
+            return "schema_dependency is not an object"
+        for topic in sorted(dependency):
+            entry = dependency[topic]
+            where = f"schema_dependency[{_rust_debug_str(topic)}]"
+            if not isinstance(entry, dict):
+                return f"{where} is not an object"
+            if not isinstance(entry.get("verdict"), str):
+                return f"{where}.verdict is not a string"
+            for name in ("reason", "basis"):
+                if entry.get(name) is not None and not isinstance(entry[name], str):
+                    return f"{where}.{name} is not a string"
+            for name in ("key", "value"):
+                side = entry.get(name)
+                if side is None:
+                    continue
+                if not isinstance(side, dict):
+                    return f"{where}.{name} is not an object"
+                if not isinstance(side.get("dependent"), bool):
+                    return f"{where}.{name}.dependent is not a boolean"
+                for count in ("framed", "unframed", "nulls", "schema_id_count"):
+                    value = side.get(count)
+                    if (
+                        not isinstance(value, int)
+                        or isinstance(value, bool)
+                        or not 0 <= value < 2 ** 64
+                    ):
+                        return f"{where}.{name}.{count} is not a u64"
+                ids = side.get("schema_ids")
+                if not isinstance(ids, list) or not all(
+                    isinstance(i, int) and not isinstance(i, bool) and 0 <= i < 2 ** 32
+                    for i in ids
+                ):
+                    return f"{where}.{name}.schema_ids is not a list of u32"
     return ""
 
 
@@ -2642,6 +2743,138 @@ def check_backup_receipt_invariants(doc) -> str:
                     "\"declared\", a \"kafkaTopicResource\" owner \"kafkaTopicResources\""
                 )
 
+    # ARMS 22-29 (format 1.5.0, PROD-03.0): the `schema_dependency` block, and
+    # ONLY when it is present, so every earlier receipt is decided exactly as
+    # before. Topics in NAME order, and per topic arms 24, 25 and 26, then 27
+    # and 28 for the key side and then the value side, then 29.
+    dependency = doc.get("schema_dependency")
+    if dependency is not None:
+        # ARM 22. A document declaring a minor before 5 cannot carry a 1.5 field.
+        if parsed[1] < RECEIPT_SCHEMA_DEPENDENCY_SINCE_MINOR:
+            return (
+                f"schema_dependency is present but format_version {_rust_debug_str(version)} "
+                "predates it: the field is defined from "
+                f"1.{RECEIPT_SCHEMA_DEPENDENCY_SINCE_MINOR}.0"
+            )
+        # ARM 23. The judged set is the named set — arms 3, 7 and 14's twin.
+        judged = list(dependency.keys())
+        if sorted(set(judged)) != sorted(set(named_topics)):
+            return (
+                f"schema_dependency covers {_render_topic_set(judged)} but the named topic "
+                f"set is {_render_topic_set(named_topics)}"
+            )
+        for topic in sorted(dependency):
+            entry = dependency[topic]
+            verdict = entry["verdict"]
+            reason = entry.get("reason")
+            basis = entry.get("basis")
+            key = entry.get("key")
+            value = entry.get("value")
+
+            # ARM 24. The verdict, and a reason or a basis as it requires,
+            # from closed sets.
+            assessed = verdict != "notAssessed"
+            if assessed:
+                fits = reason is None and basis in SCHEMA_DEPENDENCY_BASES
+            else:
+                fits = basis is None and reason in SCHEMA_DEPENDENCY_REASONS
+            if verdict not in SCHEMA_DEPENDENCY_VERDICTS or not fits:
+                return (
+                    f"schema_dependency[{_rust_debug_str(topic)}] verdict "
+                    f"{_rust_debug_str(verdict)} with reason {_shown_or_absent(reason)} and basis "
+                    f"{_shown_or_absent(basis)} is not a verdict this format defines: the verdict is "
+                    "\"schemaDependent\", \"notDetected\" or \"notAssessed\"; a "
+                    "\"notAssessed\" topic has a reason, \"noRecords\" or "
+                    "\"segmentUnreadable\", and no basis, and any other topic has a basis, "
+                    "\"sampled\" or \"complete\", and no reason"
+                )
+
+            # ARM 25. Both sides exactly when the topic was judged, over the
+            # same records, at least one.
+            if key is not None and value is not None:
+                fits = (
+                    assessed
+                    and _judged_records(key) == _judged_records(value)
+                    and _judged_records(key) >= 1
+                )
+            elif key is None and value is None:
+                fits = not assessed
+            else:
+                fits = False
+            if not fits:
+                return (
+                    f"schema_dependency[{_rust_debug_str(topic)}] verdict "
+                    f"{_rust_debug_str(verdict)} records key {_side_records_shown(key)} and value "
+                    f"{_side_records_shown(value)}: a judged topic records a key side and a value side "
+                    "over the same records, at least one, and a \"notAssessed\" topic records "
+                    "neither"
+                )
+
+            # ARM 26. What was judged, against what the receipt counts.
+            counted = doc["records"].get(topic, 0)
+            judged_n = 0 if key is None else _judged_records(key)
+            if basis == "complete":
+                fits = judged_n == counted
+            elif basis is not None:
+                fits = judged_n <= counted
+            elif reason == "noRecords":
+                fits = counted == 0
+            else:
+                fits = True
+            if not fits:
+                under = _shown_or_absent(basis if basis is not None else reason)
+                return (
+                    f"schema_dependency[{_rust_debug_str(topic)}] judges {judged_n} records "
+                    f"under {under} and records counts {counted}: a \"complete\" basis judges "
+                    "every record the receipt counts, a \"sampled\" one at most that many, and "
+                    "\"noRecords\" is said only of a topic that counts none"
+                )
+
+            for name, side in (("key", key), ("value", value)):
+                if side is None:
+                    continue
+                ids = side["schema_ids"]
+                count = side["schema_id_count"]
+                framed = side["framed"]
+                # ARM 27. The ids: distinct, ascending, plausible, as many as the
+                # count allows, and a count that fits the framing.
+                fits = (
+                    all(a < b for a, b in zip(ids, ids[1:]))
+                    and all(1 <= i <= SCHEMA_ID_MAX for i in ids)
+                    and len(ids) == min(count, SCHEMA_IDS_LISTED)
+                    and (count >= 1) == (framed >= 1)
+                    and count <= framed
+                )
+                if not fits:
+                    return (
+                        f"schema_dependency[{_rust_debug_str(topic)}].{name} lists schema_ids "
+                        f"{_u32_list_debug(ids)} with schema_id_count {count} and "
+                        f"framed {framed}: the ids are distinct, ascending and from 1 to "
+                        "16777215, all of them when the count is 16 or fewer and 16 otherwise, "
+                        "and the count is at least 1 exactly when a record is framed and never "
+                        "above the framed count"
+                    )
+                # ARM 28. The threshold: `dependent` is what the counts say.
+                if side["dependent"] != _dependent_by_share(framed, side["unframed"]):
+                    said = "dependent" if side["dependent"] else "not dependent"
+                    return (
+                        f"schema_dependency[{_rust_debug_str(topic)}].{name} is {said} with "
+                        f"framed {framed} and unframed {side['unframed']}: a side is dependent "
+                        "exactly when at least one record and at least one in ten of its "
+                        "non-null records are framed"
+                    )
+
+            # ARM 29. The verdict is what the sides say.
+            if key is not None and value is not None:
+                dependent = key["dependent"] or value["dependent"]
+                if (verdict == "schemaDependent") != dependent:
+                    return (
+                        f"schema_dependency[{_rust_debug_str(topic)}] verdict "
+                        f"{_rust_debug_str(verdict)} does not fit its sides: a judged topic is "
+                        "\"schemaDependent\" exactly when its key side or its value side is "
+                        "dependent"
+                    )
+
     return ""
 
 
@@ -2726,6 +2959,55 @@ def _topic_configuration_lines(block, detection=None):
             f"{count(model.get('partitions'))}, replication factor "
             f"{count(model.get('replication_factor'))}, {said}, {route}"
         )
+    return lines
+
+
+def _schema_dependency_lines(block):
+    """The receipt's `schema_dependency`, one line per topic in NAME order, or
+    the line that says it is absent — the twin of `crates/logweir/src/
+    verify.rs::schema_dependency_lines`, in the same words (PROD-03.0). Absent
+    is NOT ASSESSED, never "not schema-dependent"."""
+    if block is None:
+        return [
+            "schema_dependency: not assessed, so whether any topic's records need a schema "
+            "registry is not known from this receipt"
+        ]
+
+    def side_words(name, side):
+        out = f"{name} framed {side['framed']} of {side['framed'] + side['unframed']} non-null"
+        if side["dependent"]:
+            out += ", dependent"
+        ids = side["schema_ids"]
+        if ids:
+            out += ", schema ids " + ", ".join(str(i) for i in ids)
+            more = max(0, side["schema_id_count"] - len(ids))
+            if more > 0:
+                out += f" and {more} more"
+        return out
+
+    lines = []
+    for topic in sorted(block):
+        entry = block[topic]
+        verdict = entry["verdict"]
+        if verdict == "schemaDependent":
+            said = "schema-dependent, registry not captured"
+        elif verdict == "notDetected":
+            said = "no schema framing detected"
+        else:
+            reason = entry.get("reason")
+            said = f"not assessed ({reason if reason is not None else 'no reason recorded'})"
+        key = entry.get("key")
+        value = entry.get("value")
+        if key is not None and value is not None:
+            basis = entry.get("basis")
+            lines.append(
+                f"schema_dependency[{_rust_debug_str(topic)}]: {said}; "
+                f"{_judged_records(key)} records judged "
+                f"({basis if basis is not None else 'no basis recorded'}); "
+                f"{side_words('key', key)}; {side_words('value', value)}"
+            )
+        else:
+            lines.append(f"schema_dependency[{_rust_debug_str(topic)}]: {said}")
     return lines
 
 
@@ -3311,6 +3593,11 @@ def main(
             doc.get("topic_configuration"), doc.get("owner_detection")
         ):
             print(f"       {line}")
+        # PROD-03.0: the schema dependency, one line per topic, in the same
+        # words `logweir drill verify` prints (`verify.rs::
+        # schema_dependency_lines`); the parity script compares them.
+        for line in _schema_dependency_lines(doc.get("schema_dependency")):
+            print(f"       {line}")
         print(
             "       This signature covers the receipt only. It says what THIS run "
             "captured; it is not a claim about any other backup of the same topics."
@@ -3328,8 +3615,12 @@ def main(
             "config_coverage, covering exactly the named topic set, entries exactly where the "
             "read succeeded, closed source and class sets, secret and inherited where they "
             "fit, a closed owner with a usable reference, and counts of at least one, "
-            "and owner_detection's two: a closed set present only beside "
-            "topic_configuration, and an owner only from a source it lists)"
+            "owner_detection's two: a closed set present only beside "
+            "topic_configuration, and an owner only from a source it lists, "
+            "and schema_dependency's eight: present only from 1.5.0, covering exactly the "
+            "named topic set, closed verdict, reason and basis sets, both sides exactly when "
+            "judged, a judged count that fits records, distinct plausible schema ids within "
+            "the cap, the one-in-ten threshold, and a verdict its sides give)"
         )
         return 0
 
