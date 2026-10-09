@@ -2,13 +2,32 @@
 //! ([`crate::capture`]), from PROD-04.0b's classification and descriptions,
 //! PROD-04.0a's positions, and two plain reads this module adds — a topic's
 //! partitions (metadata) and its partitions' marks, READ_UNCOMMITTED. No
-//! `unsafe`; every call is bounded by the reader's admin or position bound.
+//! `unsafe`; every call is bounded by the reader's admin or position bound,
+//! and one pass over the marks by [`MARKS_BUDGET`] in all.
+//!
+//! **The marks are read only when a position was asked for** (PROD-04.1
+//! review L8): a capture that described no group — every group excluded, as
+//! on a broker that types none (Kafka 3.7.x), or failed — reads no partition
+//! and no mark, so an unavailable leader costs nothing there.
 use crate::capture::{GroupsObservation, Marks, ObservedGroup, TopicMarks};
 use crate::groups::GroupVerdict;
 use crate::positions::{GroupListing, TopicPartition};
 use crate::rdkafka_reader::RdKafkaReader;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+/// The most one pass over the marks may take, across every partition of every
+/// named topic. Each watermark read is bounded by the admin bound already; a
+/// broker whose leaders are down would otherwise cost that bound once per
+/// partition. A partition the pass did not reach in time is recorded with
+/// its marks NOT read (`MarksNotRead` for a position there), never guessed.
+pub const MARKS_BUDGET: Duration = Duration::from_secs(60);
+
+/// Why a topic's partitions were not read at capture: no group was described,
+/// so no position was asked for.
+pub const NOTHING_ASKED: &str =
+    "not read: no selected group was described, so no position was asked for";
 
 impl RdKafkaReader {
     /// The partition ids of `topic`, from one metadata read, sorted. A topic
@@ -50,16 +69,27 @@ impl RdKafkaReader {
         cfg.create().map_err(|e| format!("the marks handle: {e}"))
     }
 
-    /// The marks of exactly `partitions` of `topic`.
+    /// The marks of exactly `partitions` of `topic`, each bounded by `bound`,
+    /// none started after `deadline`.
     fn marks_of(
         handle: &BaseConsumer,
         topic: &str,
         partitions: &[i32],
-        bound: std::time::Duration,
+        bound: Duration,
+        deadline: Instant,
     ) -> Vec<(i32, Result<Marks, String>)> {
         partitions
             .iter()
             .map(|&p| {
+                if Instant::now() >= deadline {
+                    return (
+                        p,
+                        Err(format!(
+                            "{topic}:{p}: marks not read: the {}-second budget for one pass                              over the marks was spent",
+                            MARKS_BUDGET.as_secs()
+                        )),
+                    );
+                }
                 let read = handle
                     .fetch_watermarks(topic, p, bound)
                     .map_err(|e| format!("{topic}:{p}: marks: {e}"))
@@ -88,12 +118,13 @@ impl RdKafkaReader {
             Ok(h) => h,
             Err(e) => return topics.iter().map(|t| (t.clone(), Err(e.clone()))).collect(),
         };
+        let deadline = Instant::now() + MARKS_BUDGET;
         topics
             .iter()
             .map(|t| {
                 let read = self
                     .partition_ids(t)
-                    .map(|ids| Self::marks_of(&handle, t, &ids, self.admin_bound()));
+                    .map(|ids| Self::marks_of(&handle, t, &ids, self.admin_bound(), deadline));
                 (t.clone(), read)
             })
             .collect()
@@ -122,10 +153,19 @@ impl RdKafkaReader {
             .collect();
         let mut descriptions: BTreeMap<String, _> =
             self.describe_groups(&capturable).into_iter().collect();
-        // 3. The partitions every position is asked for.
+        // 3. The partitions every position is asked for — only when a group
+        //    was described, so a capture that will ask nothing reads nothing.
+        let any_described = descriptions.values().any(Result::is_ok);
         let asked: BTreeMap<String, Result<Vec<i32>, String>> = topics
             .iter()
-            .map(|t| (t.clone(), self.partition_ids(t)))
+            .map(|t| {
+                let ids = if any_described {
+                    self.partition_ids(t)
+                } else {
+                    Err(format!("{t}: {NOTHING_ASKED}"))
+                };
+                (t.clone(), ids)
+            })
             .collect();
         let tps: Vec<TopicPartition> = asked
             .iter()
@@ -156,14 +196,21 @@ impl RdKafkaReader {
             })
             .collect();
         // 5. The marks of exactly the asked partitions, AFTER the positions.
-        let handle = self.marks_handle();
+        let handle = if any_described {
+            self.marks_handle()
+        } else {
+            Err(NOTHING_ASKED.to_string())
+        };
+        let deadline = Instant::now() + MARKS_BUDGET;
         let topics = asked
             .into_iter()
             .map(|(t, ids)| {
                 let read = match (&handle, ids) {
                     (_, Err(e)) => Err(e),
                     (Err(e), Ok(_)) => Err(e.clone()),
-                    (Ok(h), Ok(ids)) => Ok(Self::marks_of(h, &t, &ids, self.admin_bound())),
+                    (Ok(h), Ok(ids)) => {
+                        Ok(Self::marks_of(h, &t, &ids, self.admin_bound(), deadline))
+                    }
                 };
                 (t, read)
             })
