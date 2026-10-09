@@ -1485,7 +1485,7 @@ impl BackupReceipt {
                             }
                             _ => reason.is_none(),
                         }
-                        && (status == "notObserved") == !facts.observed;
+                        && (status == "notObserved") != facts.observed;
                     if !fits {
                         return Err(format!(
                             "consumer_positions.groups[{id:?}].positions[{i}] has status {:?}, \

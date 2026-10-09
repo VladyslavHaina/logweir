@@ -1726,14 +1726,15 @@ fn arm_25_refuses_marks_that_are_not_well_formed() {
                 well formed: a log start and its high watermark are recorded together with 0 <= \
                 log start <= high watermark, the archived range is recorded whole with 0 <= first \
                 <= last, and a partition the capture did not observe has no group-capture marks";
-    let cases: Vec<Box<dyn Fn(&mut logweir_core::consumer_positions::PartitionFacts)>> = vec![
-        Box::new(|p| p.high_watermark = None),
-        Box::new(|p| p.log_start = Some(21)),
-        Box::new(|p| p.log_start = Some(-1)),
-        Box::new(|p| p.archived_last = None),
-        Box::new(|p| p.archived_first = Some(24)),
-        Box::new(|p| p.high_watermark_after = Some(-1)),
-        Box::new(|p| p.observed = false),
+    type Mutate = fn(&mut logweir_core::consumer_positions::PartitionFacts);
+    let cases: [Mutate; 7] = [
+        |p| p.high_watermark = None,
+        |p| p.log_start = Some(21),
+        |p| p.log_start = Some(-1),
+        |p| p.archived_last = None,
+        |p| p.archived_first = Some(24),
+        |p| p.high_watermark_after = Some(-1),
+        |p| p.observed = false,
     ];
     for (i, mutate) in cases.iter().enumerate() {
         let mut doc = pristine_1_5();
