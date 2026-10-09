@@ -1516,6 +1516,28 @@ fn stability_lists_the_deferred_items() {
         );
     }
 
+    // OD-2 (2026-10-05) narrowed Never #1 to a LIVE topic, and the tracker's
+    // rule 8 lands a Never-entry change only with its owner decision and this
+    // lint together. Its row names the decision, keeps the live-topic refusal,
+    // and names the one path it no longer covers — so an edit that drops the
+    // narrowing, its citation, or the refusal fails here (PROD-15.1).
+    let never_1 = section
+        .lines()
+        .find(|l| l.starts_with("| 1 | **Restore-in-place into a live topic**"))
+        .expect("docs/stability.md's Never #1 row");
+    for needle in [
+        "Narrowed by the owner's decision [OD-2]",
+        "to exactly that: a LIVE topic",
+        "into a topic that does NOT exist is not this entry",
+        "behind its own approval subject (`originalName`)",
+        "A name that exists, in any mode, and an identity mapping in a scratch drill stay refused",
+    ] {
+        assert!(
+            never_1.contains(needle),
+            "docs/stability.md's Never #1 row must carry OD-2's narrowing: missing `{needle}`"
+        );
+    }
+
     // The two lists are stated separately, and the difference is the point.
     assert!(
         section.contains("### Later, named") && section.contains("### Never"),
