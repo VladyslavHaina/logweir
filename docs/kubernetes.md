@@ -9147,13 +9147,22 @@ judges a bounded sample of the segments it just wrote, through the archive
 credential it already holds: **no schema registry is contacted, and none needs
 to be reachable from the runner**. The sample is at most two segments per
 partition for at most eight partitions per topic, streamed, with six bytes kept
-per key and value; a segment stored over 64 MiB or decompressing past 256 MiB,
-or detection running past 120 s, leaves the affected topics `notAssessed`
-(`segmentTooLargeForDetection`, `detectionTimeBudgetExceeded`), and any other
-failure `segmentUnreadable`. None of these fails the backup, and the runner's
-memory stays bounded whatever the segments hold (measured: a ~190 MiB segment
-and a 1 GiB decompression bomb each add about 2.5 MB to the process). A topic
-with no record reads `notAssessed (noRecords)`.
+per key and value. A segment stored over 16 MiB, a zstd frame declaring a
+window over 8 MiB or a body decompressing past 256 MiB leaves its topic
+`notAssessed (segmentTooLargeForDetection)`; detection stops after **120 s per
+backup** (a hard stop: no read or scan continues past it) and leaves the rest
+`notAssessed (detectionTimeBudgetExceeded)`; any other failure is
+`segmentUnreadable`. None of these fails the backup. **Memory:** detection
+adds at most about **17 MB** to the runner, measured — the worst case is a
+16 MiB incompressible segment held while scanned (+16.6 MB); a 1 GiB zstd
+bomb, a zstd frame declaring a 128 MiB window and a 250 MiB lz4 body each add
+2.4 MB. **Time:** give a `Backup` whose `spec.deadlineSeconds` is tight up to
+120 s more for detection after the engine, or detection may be cut short by
+the Job's deadline before the receipt is signed. A topic with no record reads
+`notAssessed (noRecords)`. Detection reads only Confluent's payload prefix:
+schema ids in record headers, Apicurio's 8-byte ids and other registries'
+framing read `notDetected`
+([the stated limits](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
 
 ### 21.7 Skipping a check is not answering it
 

@@ -396,22 +396,49 @@ constants.
    to 2^56 (a `LongSerializer` key holding a database id or an
    epoch-millisecond timestamp). Such a side reads as dependent with the
    "ids" its bytes happen to hold; the flag only adds a warning and never
-   blocks or changes a restore.
-5. **Which records are read.** `logweir backup run` judges the segments it
+   blocks or changes a restore; the "ids" listed for it are four bytes of the
+   key itself.
+5. **What it does not detect (false negatives, stated).** Only Confluent's
+   payload prefix is read, so these read `notDetected`: schema ids carried in
+   record headers (Confluent's header-based serializers, Apicurio's header
+   mode); Apicurio's default 8-byte global id (its 4-byte "id" is 0, refused);
+   other registries' framing (AWS Glue's magic byte 3, any other magic);
+   Confluent ids of 2^24 and above; a 5-byte framed value with an empty body;
+   and framing under one in ten of a side's sampled records, or only outside
+   the sample (`basis: sampled` says the sample was not every record).
+   `notDetected` is therefore "no Confluent wire-format framing detected", never
+   "no registry needed".
+6. **Which records are read.** `logweir backup run` judges the segments it
    just wrote, read back through the read-only archive handle: per topic the
    first 8 partitions holding records (lowest id first), and per partition the
    first 500 records of its first segment and the last 500 of its last (a
    partition of one segment is scanned once, and read whole when it holds
    1 000 records or fewer). A topic read whole says `complete`; the complete
    verification lane (PROD-08.1) does not re-judge at restore time.
-6. **Bounded, and never a failed backup.** Segments are STREAMED through
+7. **Bounded, and never a failed backup.** Segments are STREAMED through
    Logweir's own decoder (`kbak::scan_segment`), keeping each key and value to
    its first six bytes; the head scan stops after its records and the tail is a
-   ring of 500. A segment stored larger than 64 MiB is never fetched, a body
-   that decompresses past 256 MiB stops its scan, and detection stops after
-   120 s per backup — each `notAssessed` with its reason. A segment that cannot
-   be read, or a detector that fails in any way, is `segmentUnreadable`. None of
-   them fails the backup, and none reads as "not schema-dependent".
+   ring of 500. The bounds:
+   - a segment STORED larger than **16 MiB** is never fetched (its size is
+     read first); the fetched bytes are what detection holds while it scans;
+   - a zstd frame declaring a window above **8 MiB** (2^23) is refused before
+     it is decoded (the engine Logweir runs writes level 3, a 2 MiB window);
+   - lz4 is decoded as a stream that keeps only the 64 KiB a match can reach;
+   - a body that decompresses past **256 MiB** stops its scan;
+   - detection takes at most **120 s** per backup, as a hard stop: every
+     store read is given only what is left, every scan stops reading when it
+     runs out.
+
+   Past a bound the topic is `notAssessed` with its reason; a segment that
+   cannot be read, or a detector that fails in any way (a panic included), is
+   `segmentUnreadable`. **Measured** (child-process peak RSS, macOS, the row
+   `crates/logweir/tests/schema_dependency_memory.rs`): a 1 GiB zstd bomb, the
+   same bomb in a frame declaring a 2^27 window, and a 250 MiB lz4 body each
+   add 2.4 MB to the process; the worst case is a 16 MiB incompressible
+   segment held while scanned, **+16.6 MB**. None of them fails the backup, and
+   none reads as "not schema-dependent". A backup whose arms would refuse the
+   block it judged (a manifest this build did not foresee) is signed with every
+   topic `notAssessed (segmentUnreadable)` instead.
 
 ---
 
@@ -1118,8 +1145,8 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
   `schema_dependency` (record format 1.1.0–1.4.0 as before).
 - **Backup cost.** Detection reads back at most two segments per partition for
   at most eight partitions per topic, streams them and stops at its caps
-  (64 MiB stored per segment, 256 MiB decompressed, 120 s per backup); see the
-  contract above.
+  (16 MiB stored per segment, a zstd window of 8 MiB, 256 MiB decompressed,
+  120 s per backup, about 17 MB of memory at worst); see the contract above.
 - **Rollback.** A runner from before PROD-03.0 writes 1.3.0/1.4.0 receipts with
   no block; the 1.5.0 receipts already written stay valid for every reader.
 

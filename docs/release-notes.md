@@ -1230,25 +1230,34 @@ application needs is the registry that issued those ids. A receipt before
 1.5.0, or a topic the backup could not judge, reads **not assessed**, never "no
 registry needed". Detection is bounded and never fails a backup: it streams at
 most two segments per partition for at most eight partitions per topic,
-keeps six bytes per key and value, and stops at 64 MiB stored or 256 MiB
-decompressed per segment and 120 s per backup — those topics read
-`notAssessed` (`segmentTooLargeForDetection`, `detectionTimeBudgetExceeded`,
-`segmentUnreadable`). Both verifiers read the block: `verify_scorecard.py`
+keeps six bytes per key and value, and stops at 16 MiB stored, an 8 MiB zstd
+window or 256 MiB decompressed per segment and at 120 s per backup (a hard
+stop) — those topics read `notAssessed` (`segmentTooLargeForDetection`,
+`detectionTimeBudgetExceeded`, `segmentUnreadable`). It adds at most about
+**17 MB** to the runner's memory, measured: a 16 MiB incompressible segment
+held while scanned (+16.6 MB) is the worst case; a 1 GiB zstd bomb, a frame
+declaring a 128 MiB window and a 250 MiB lz4 body each add 2.4 MB. Both verifiers read the block: `verify_scorecard.py`
 **1.24.0** and `logweir drill verify` check its eight arms (22 to 29) and
 print one `schema_dependency` line per topic. Stated limit: a binary key that
 is a big-endian 64-bit integer from 2^24 to 2^56 (an epoch-millisecond
 timestamp, a large database id) looks framed and is flagged with the "ids" its
-bytes hold ([the contract](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
-**Do:** nothing is required. To see a point's flags, open the restore review or
-the catalog page, or verify its receipt with either reader. Points recorded
-before this item read not assessed until a backup by this runner records them.
+bytes hold; schema ids in record headers, Apicurio's 8-byte ids and other
+registries' framing are not detected ([the contract](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
+**Do:** nothing is required. A `Backup` whose `spec.deadlineSeconds` is tight
+should allow up to 120 s more for detection after the engine. To see a point's
+flags, open the restore review or the catalog page, or verify its receipt with
+either reader. Points recorded before this item read not assessed until a
+backup by this runner records them.
 **Scope:** unit rows over the detector (Avro, JSON Schema and Protobuf framing
 in keys and values, unframed payloads, nulls and tombstones, short records and
 random ids after a zero byte, the one-in-ten boundary, a mixed topic, an empty
 topic, the 16-id cap); the sampler measured with a counting segment source;
 the caps, the time budget, a panicking source and the head's early stop; a
-child-process memory row (a ~190 MiB segment and a 1 GiB decompression bomb
-each add about 2.5 MB; decoding the same segment whole adds 397 MB); arms
+child-process memory row (a ~190 MiB segment, a 1 GiB zstd bomb, a frame
+declaring a 128 MiB window and a 250 MiB lz4 body each add 2.4 MB; a 16 MiB
+incompressible segment +16.6 MB; decoding a segment whole adds 397 MB); a row
+CI runs on its default stack (raw Confluent framing, the real engine and
+store, the receipt's ids asserted); arms
 22–29 with their exact text in both readers, the corpus and the parity gate
 (which also derives each reader's lines from the document); the catalog's
 cross-check and reconcile; one fixture read by the runner's, the API's and the

@@ -452,7 +452,8 @@ pub struct PointSchemaDependencyView {
     /// judged) or `complete` (every one was), for a judged topic.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub basis: Option<String>,
-    /// `noRecords` or `segmentUnreadable`, for a `notAssessed` topic.
+    /// `noRecords`, `segmentUnreadable`, `segmentTooLargeForDetection` or
+    /// `detectionTimeBudgetExceeded`, for a `notAssessed` topic.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// The sides that need the registry: `key`, `value`, or both.

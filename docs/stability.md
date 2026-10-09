@@ -620,9 +620,13 @@ the schema ids seen (the 16 smallest and a count) and how much was judged
 - **Detection never fails a backup and is bounded.** It runs after the archive
   and manifest exist, streams at most two segments per partition for at most
   eight partitions per topic, keeps six bytes of each key and value, and stops
-  at 64 MiB stored per segment, 256 MiB decompressed per segment and 120 s per
-  backup; past a cap, or on any failure (a caught panic included), the topic is
-  `notAssessed` with its reason.
+  at 16 MiB stored per segment, a zstd window of 8 MiB, 256 MiB decompressed
+  per segment and 120 s per backup (a hard stop); past a cap, or on any failure
+  (a caught panic included), the topic is `notAssessed` with its reason. It
+  adds at most about 17 MB of memory, measured (the worst case is a 16 MiB
+  incompressible segment held while scanned). A block the receipt's own arms
+  would refuse is signed as `notAssessed` instead, so it never leaves a backup
+  unsigned.
 - **Readers built before PROD-03.0** (`verify_scorecard.py` 1.23.0 and earlier,
   and an older `logweir`) accept every 1.5.0 document — the major is unchanged
   and the block is an optional field they ignore — print no schema line and do

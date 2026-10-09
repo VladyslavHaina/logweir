@@ -1059,9 +1059,12 @@ const _: () = assert!(MAX_ENTRY_SCHEMA_IDS == logweir_core::schema_dependency::S
 /// **PROD-03.0.** One topic's schema dependency as the runner lists it: the
 /// receipt's verdict and how it was reached, the DEPENDENT sides, and the
 /// schema ids they name — what a restore review needs to say "registry not
-/// captured" and which ids the applications will ask a registry for. Never a
-/// payload byte. Copied from a point record the runner cross-checked against
-/// its verified receipt (rule 3).
+/// captured" and which ids the applications will ask a registry for. The ids
+/// are bytes 1-4 of framed keys or values: a registry's schema id for real
+/// Confluent framing, but for the stated residual (big-endian 64-bit integer
+/// keys from 2^24 to 2^56) four bytes of the key itself. Nothing else of a
+/// payload is listed. Copied from a point record the runner cross-checked
+/// against its verified receipt (rule 3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntrySchemaDependency {
@@ -1070,7 +1073,8 @@ pub struct EntrySchemaDependency {
     /// `sampled` or `complete`, for a judged topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub basis: Option<String>,
-    /// `noRecords` or `segmentUnreadable`, for a `notAssessed` one.
+    /// `noRecords`, `segmentUnreadable`, `segmentTooLargeForDetection` or
+    /// `detectionTimeBudgetExceeded`, for a `notAssessed` one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// The dependent sides, `key` and/or `value`, in that order.

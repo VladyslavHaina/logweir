@@ -63,7 +63,24 @@
 //!   key holding a database id or an epoch-millisecond timestamp). Such a
 //!   side reads as dependent, with the "ids" its bytes happen to hold. The
 //!   flag only ever adds a warning; it never blocks a restore or changes what
-//!   is restored.
+//!   is restored. The "ids" listed for such a side are four bytes of the key
+//!   itself.
+//!
+//! # What it does NOT detect (false negatives, stated)
+//!
+//! Only Confluent's payload prefix is read, so these read `notDetected`, and a
+//! reader must not take `notDetected` for "no registry needed" without them in
+//! mind:
+//! - schema ids carried in record HEADERS (Confluent's header-based schema-id
+//!   serializers, Apicurio's header mode);
+//! - Apicurio's default 8-byte global id after the magic byte (its high bytes
+//!   are zero, so the 4-byte "id" is 0, which is refused);
+//! - other registries' framing: AWS Glue (magic byte 3), and anything else not
+//!   starting with Confluent's magic byte 0;
+//! - Confluent ids of 2^24 and above;
+//! - a 5-byte framed value with an empty body (an Avro record with no fields);
+//! - framing under one in ten of a side's sampled records, or only in
+//!   segments or partitions outside the sample (`basis: sampled` says so).
 //!
 //! # Which records are read
 //!
@@ -279,8 +296,10 @@ impl TopicTally {
     }
 }
 
-/// A topic nothing could be judged for, and why: [`REASON_NO_RECORDS`] or
-/// [`REASON_SEGMENT_UNREADABLE`].
+/// A topic nothing could be judged for, and why: one of
+/// [`NOT_ASSESSED_REASONS`] — [`REASON_NO_RECORDS`],
+/// [`REASON_SEGMENT_UNREADABLE`], [`REASON_SEGMENT_TOO_LARGE`] or
+/// [`REASON_TIME_BUDGET`].
 #[must_use]
 pub fn not_assessed(reason: &str) -> TopicSchemaDependency {
     TopicSchemaDependency {

@@ -342,7 +342,10 @@ pub struct EntryTopic {
 /// controller's `catalog_view::EntrySchemaDependency`, field for field. The
 /// ids are the dependent sides' listed ids, merged
 /// (`logweir_core::schema_dependency::dependent_ids`), so at most
-/// `SCHEMA_IDS_LISTED` of them; never a payload byte.
+/// `SCHEMA_IDS_LISTED` of them. An id is bytes 1-4 of a framed key or value:
+/// a registry's schema id for real Confluent framing, four bytes of the key
+/// itself for the stated residual (big-endian 64-bit integers from 2^24 to
+/// 2^56); nothing else of a payload is listed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntrySchemaDependency {

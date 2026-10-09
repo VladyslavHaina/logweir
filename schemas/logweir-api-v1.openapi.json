@@ -10167,7 +10167,7 @@
             "nullable": true
           },
           "reason": {
-            "description": "`noRecords` or `segmentUnreadable`, for a `notAssessed` topic.",
+            "description": "`noRecords`, `segmentUnreadable`, `segmentTooLargeForDetection` or `detectionTimeBudgetExceeded`, for a `notAssessed` topic.",
             "type": "string",
             "nullable": true
           },

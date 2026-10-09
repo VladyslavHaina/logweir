@@ -206,10 +206,12 @@ pub struct BackupReceipt {
     /// on every surface.
     ///
     /// ABSENT means NOT ASSESSED for every topic — every receipt before 1.5.0
-    /// — and never "not schema-dependent": [`SchemaDependency::of`] is the
-    /// one reader and answers [`SchemaDependency::NotAssessed`] for an absent
-    /// block or entry. Appended LAST and skipped when absent, so an older
-    /// document round-trips byte for byte.
+    /// — and never "not schema-dependent". [`SchemaDependency::of`] states
+    /// that rule in one place (it answers [`SchemaDependency::NotAssessed`] for
+    /// an absent block or entry); each surface — the two verifiers, the
+    /// catalog rule-3 check, the API and the console — applies the same rule
+    /// itself and holds it with its own row. Appended LAST and skipped when
+    /// absent, so an older document round-trips byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_dependency: Option<BTreeMap<String, TopicSchemaDependency>>,
 }
