@@ -36,9 +36,10 @@ can select a window start) and 43 (PROD-08.1a, complete coverage requested
 and shown through the CRDs, the API and the console), 44 (FX-24b, a
 client that stops reading or sending meets a stall deadline), 45 (FX-29, a
 controller no longer rewrites a status whose content has not changed), 46
-(PROD-03.0, schema-dependent topics flagged from the archived bytes) and 47
+(PROD-03.0, schema-dependent topics flagged from the archived bytes), 47
 (FX-28, a sign-in whose identity provider stalls is answered at the provider
-deadline) so far. Items continue the next entry's
+deadline) and 48 (FX-24c, one peer's share of the console's connections, and
+a rate floor on request bodies) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -114,6 +115,10 @@ Item 47 is fix-now row FX-28, proven by rows over a loopback identity
 provider that stalls and on the built console binary; it changes the console
 only, and the PoC upgrade that carries it signs in through Dex (a stall cannot
 be simulated on the live Dex).
+Item 48 is fix-now row FX-24c, proven by rows on the built console binary in
+both modes and live on the host; it changes the console only, and the PoC
+upgrade that carries it runs the per-peer probe against one shared-mode
+console pod and a burst through the ingress.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1172,15 +1177,15 @@ client stops reading is held to its own 300-second ceiling instead, up to
 mutation body must also arrive whole within **sixty seconds**
 (`JSON_BODY_DEADLINE`), so one that trickles a byte at a time is ended too.
 A body that stops, or misses the total, is answered `400 malformed_request`
-("The request body stopped arriving before it was complete." or "The request
-body was not received within 60 seconds.") and the connection is closed after
-the answer. These bounds end abandoned and stalled clients, not slow ones: a
-client that reads, or sends, as little as one byte every thirty seconds keeps
-its connection, so 256 such clients can still hold every connection. In shared
-mode only an enforcing NetworkPolicy keeps such peers away from the API pod,
-and `api.console.networkPolicy.enabled` is off by default; the ingress does
-not relay pipelined requests, so clients that come through it can do far
-less. **That case is open as FX-24c** ([api.md](api.md#conventions)).
+("The request body stopped arriving before it was complete." — item 48 adds
+"or arrived too slowly" — or "The request body was not received within 60
+seconds.") and the connection is closed after the answer. This item said these
+bounds end abandoned and stalled clients but not a client that reads, or sends,
+one byte every thirty seconds; item 48 re-measured that: the stall ends such a
+reader at 35.1 s, a body sent that way is now ended at thirty seconds, and what
+remains — a client that reads fast enough to keep the kernel taking its answer
+— is held to one peer's share of the connections
+([api.md](api.md#conventions)).
 **Do:** nothing is required. A client that pauses mid-transfer for more than
 thirty seconds, or sends a mutation body over more than sixty, sees its
 connection closed and retries; the console's own browser client does neither.
@@ -1188,8 +1193,8 @@ In shared mode on a cluster whose network plugin enforces NetworkPolicy,
 consider `api.console.networkPolicy.enabled: true`, with the ingress
 controller's selectors and the identity provider's egress (`oidcCIDRs` or
 `oidcPeers`; [chart README](../charts/logweir/README.md)), so that only the
-ingress controller can reach the API pod: until FX-24c it is the one bound on
-slow-rate clients.
+ingress controller can reach the API pod: beside item 48's per-peer share, it
+is the bound on slow-rate clients from many addresses.
 **Scope:** rows on the built binary (`crates/logweir-api/tests/local_admin.rs`):
 256 clients that pipeline requests for a 156 KiB asset and read nothing hold
 every connection slot, then a request queued behind them is answered no
@@ -1407,6 +1412,88 @@ cannot be simulated on the live Dex.
 **Rollback:** an older console reads a stalled provider's body with no
 deadline again; nothing is stored, so nothing needs converting.
 
+#### 48. One peer outside the trusted proxy holds at most 32 of the console's connections, and a request body must keep up 32 KiB a window (FX-24c)
+
+**Changed.** Item 44 said that a client reading, or sending, one byte every
+thirty seconds keeps a console connection, so 256 of them could hold every
+connection (the FX-24b review measured "still open at 100 s" for one byte
+every twenty seconds). Re-measured on the built binary, that does not hold for
+a reader: the stall deadline ends one that reads one byte, or 16 KiB, every
+twenty seconds at 35.1 s, because the kernel stops taking an answer for a
+client that takes almost nothing. The review's probe read a byte at a time out
+of the half megabyte the kernel had buffered and never reached the
+end-of-stream behind it; re-run against item 44's binary it still prints
+"still open" while that server logs both connections ended at 35.1 s. What does
+keep a connection is a client that reads fast enough to keep the kernel taking
+its answer — one reading a steady 16 KiB/s kept its connection to the end of
+82 s of pipelined answers — and a signed-in client that sends its request body
+a byte at a time, until the sixty-second total. So:
+- **One peer's share.** In shared mode, once `trustedProxyService` or
+  `trustedProxyCidrs` names a proxy, any other peer — a pod dialling the
+  console's pod IP, a kubelet probe, a `kubectl port-forward` — may hold at
+  most **32** of the console's 256 connections at once
+  (`MAX_CONNECTIONS_PER_PEER`). Its next connection is closed as soon as it is
+  accepted, before anything is read, and the console logs `closed a connection
+  at once` (at most once every ten seconds). Holding all 256 now takes eight
+  addresses. The trusted proxy is never capped, because every browser behind
+  the ingress arrives from its address; with no trusted proxy configured — the
+  chart's default — nobody is capped, because the console cannot then tell its
+  ingress from any other peer; localAdmin mode has no cap.
+- **A body's floor.** A request body the console is reading must bring at
+  least **32 KiB in every thirty-second window** while it is still arriving
+  (`BODY_MIN_PROGRESS`). One that trickles a byte every twenty seconds is
+  answered `400 malformed_request` at thirty seconds, not sixty, with the
+  detail "The request body stopped arriving, or arrived too slowly, before it
+  was complete."; a body that ends inside its window is never cut, however
+  small. The `malformed_request` description in the OpenAPI document says so.
+- **The answer keeps item 44's stall.** A 32 KiB window on answers was built and
+  measured: the server sees a reader's progress only when the kernel lets it
+  write again, in bursts the size of a send buffer, and that window cut a steady
+  16 KiB/s reader at 32.5 s which the stall serves to the end.
+**Do:** in shared mode, set `api.console.trustedProxyService` to the ingress
+controller's Service even without `requireTrustedProxy`: without a trusted
+proxy the per-peer share is off. If another proxy (an L7 load balancer, a
+second ingress) carries many clients to the console's pods, name it too, or
+those clients share 32 connections; a refusal warning naming such a proxy's
+address says so. An enforcing NetworkPolicy
+(`api.console.networkPolicy.enabled`) remains the bound on clients from many
+addresses ([api.md](api.md#conventions); [chart
+README](../charts/logweir/README.md)).
+**Scope:** rows on the built binary (`crates/logweir-api/tests/local_admin.rs`).
+In shared mode: one peer outside the trusted set holds 32 connections and its
+33rd is closed within two seconds, unanswered and logged, and a connection it
+drops gives a place back before its other connections' own ten-second
+deadline; a trusted proxy holds 40, and with no trusted proxy configured a
+peer holds 40, neither refused; and, at CI scale, 256 clients of one address
+of which exactly 32 are held and 224 closed (where the host can dial from
+`127.0.0.2`, Linux, a second address is answered at once). In localAdmin mode:
+a client reading one byte every twenty seconds is ended at the stall deadline
+(drained after the bound, short of its answers), and 256 of them, at CI scale,
+let a queued request through between 29 s and 45 s; a signed-in body sent a
+byte every twenty seconds is answered "arrived too slowly" and closed at
+thirty seconds; one that keeps 8 KiB every four seconds still runs to the
+sixty-second total. The floor and the cap are pinned at their call sites.
+Unit rows over the clock, the guards and the cap in `src/transport.rs`. The
+256-socket rows ran at eight and forty clients on the worker's host (the flood
+rule) and run at 256 in CI. Mutants, all killed: the body floor off (at the
+call site and in the clock), the window at 300 s, the cap off (served, and
+never reached), the trusted proxy capped, a cap with no trusted proxy, places
+that never come back, the cap off by one, IPv4-mapped peers counted apart, a
+window that outlives its operation, the 32 KiB floor on answers, a body floor
+of 1 MiB, and an output clock that restarts on every poll. Live, the built
+binary on the host, before and after: in shared mode one peer outside the
+trusted proxy kept 32 of 40 connections and its 41st request was reset at
+once, with one warning logged (before: all 40 kept and the 41st answered); as
+the trusted proxy it kept all 40 on both builds; a body sent a byte every
+twenty seconds was answered at 30.0 s, "arrived too slowly" (before: at 60.0
+s, "not received within 60 seconds"); a reader of one byte, or of 16 KiB,
+every twenty seconds was ended at 35.1 s on both builds, and a steady 16 KiB/s
+reader completed in 82.0 s on both. The PoC upgrade that carries this item
+runs the per-peer probe against one console pod (it passed against this build
+on the host and failed against the one before it).
+**Rollback:** an older console caps no peer and reads a body a byte at a time
+until its sixty-second total; nothing is stored, so nothing needs converting.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1472,7 +1559,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46 and 47, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 and 48, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1502,7 +1589,9 @@ authorization); item 44 changes the console only and needs nothing; item 45
 changes the controller only (and two CRD descriptions) and needs nothing; item 46
 changes the runner's receipts and catalog records, the catalog's view (runner
 and controller), the product API and the console, and needs nothing; item 47
-changes the console only and needs nothing. To roll back to
+changes the console only and needs nothing; item 48 changes the console only
+and needs nothing, though a shared console needs a trusted proxy configured
+for its per-peer share to apply. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

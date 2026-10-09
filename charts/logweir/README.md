@@ -670,6 +670,21 @@ the residual it leaves at the identity provider (generous per-client limits
 there, alerts, and the in-cluster administrator mode as the break-glass path)
 are in [docs/api.md](../../docs/api.md), *Rate limits*.
 
+**The trusted proxy also decides who is capped** (FX-24c). Once either
+`trustedProxyService` or `trustedProxyCidrs` names a proxy, every other peer —
+a pod that dials the console's pod IP, a kubelet probe, a `kubectl
+port-forward` — may hold at most 32 of the console's 256 connections at
+once; its 33rd is closed as soon as it is accepted, and the console logs
+`closed a connection at once` (at most once every ten seconds). The ingress
+itself is never capped: every browser behind it arrives from its address.
+**With neither value set, nobody is capped**, because the console cannot then
+tell its ingress from any other peer — the chart's default. So set
+`trustedProxyService` in shared mode even without `requireTrustedProxy`; and if
+another proxy (an L7 load balancer, a second ingress) also carries many
+clients to the console, name it too, or its clients share 32 connections.
+[docs/api.md](../../docs/api.md#conventions) has the full set of connection
+limits.
+
 ### The identity provider inside the cluster: a private CA, a name, a path
 
 Three values exist for an issuer the console cannot reach with the defaults —

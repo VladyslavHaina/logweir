@@ -2082,6 +2082,14 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a stalled identity provider meets the provider deadline",
             "provider_timeout",
         ),
+        // FX-24c (2026-10-09, item 48): one peer outside the trusted proxy
+        // holds at most its share of the console's connections, and a request
+        // body must keep up the window's floor; the constant names the cap an
+        // operator can find in the source.
+        (
+            "one peer's share of the console's connections",
+            "MAX_CONNECTIONS_PER_PEER",
+        ),
     ];
     assert_eq!(
         items.len(),
