@@ -487,7 +487,29 @@ FORMAT_VERSION = "1.4.0"
 # layer refuses a block that is not the writer's shape; a `replay selection:`
 # coverage line names the window, and the sampled-pass line of a narrowed
 # document is qualified by its window, in the Rust reader's words.
-SCRIPT_VERSION = "1.23.0"
+#
+# 1.24.0 (PROD-11.1b, the owner's decision OD-9 (a)) reads scorecard format
+# 2.0.0, the format's first MAJOR, written ONLY for a restore that states a
+# partition subset: 1.7.0's fields with the subset meaning (its
+# `complete.partitions[]` and the sampled lane's fields name the SELECTED
+# partitions). Major 2 is read for that shape alone -- a 2.x document without
+# `source.selection.partitions` is refused before any arm (PS-1) -- and every
+# arm of major 1 holds for it. PS-2 holds a format-1 block to a start and its
+# end (so no subset rides in a document an older reader accepts); PS-3 to
+# PS-5 judge the subset list, the engine runs and the complete block. The
+# shape layer reads the 2.0.0 block (an optional start, the subsets, the
+# runs); the `replay selection:` line names the subset and the sampled-pass
+# line of a subset document is qualified by it, in the Rust reader's words.
+# Every reader before 1.24.0 refuses a 2.0.0 document as an unsupported major.
+SCRIPT_VERSION = "1.24.0"
+
+# PROD-11.1b: the format of a partition-subset restore and its major --
+# `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
+# `crates/logweir-core/src/scorecard.rs`, which they must equal
+# (`docs/test_verify_scorecard.py::test_the_partition_subset_major_is_the_rust_readers`).
+# The newest major this script reads, and only for that shape (arm PS-1).
+SCORECARD_PARTITION_SUBSETS_VERSION = "2.0.0"
+SCORECARD_PARTITION_SUBSETS_MAJOR = 2
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
 # `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
@@ -798,6 +820,27 @@ def _major(version: str):
     return n if n < 2 ** 64 else None
 
 
+def _defines_format_1_minor(version, since_minor) -> bool:
+    """Whether a document of `version` defines a field format 1 added at
+    `since_minor` -- the twin of `logweir_core::scorecard::
+    defines_format_1_minor` (PROD-11.1b): a 1.x document from that minor on,
+    and every document of major 2, which is 1.7.0's fields plus the subset
+    meaning. False for a version that does not parse or names another
+    major."""
+    major = _major(version)
+    if major == 1:
+        minor = _minor(version)
+        return minor is not None and minor >= since_minor
+    return major == SCORECARD_PARTITION_SUBSETS_MAJOR
+
+
+def _narrows_partitions(block) -> bool:
+    """`SelectionLabel::narrows_partitions`: the block names a partition
+    subset (a non-empty `partitions` list). The shape layer has proved the
+    block's shape before any caller reads it."""
+    return isinstance(block, dict) and bool(block.get("partitions"))
+
+
 def _minor(version: str):
     """Second integer of a dotted version string, or None if there is none.
 
@@ -852,14 +895,33 @@ def _time_basis_shape_ok(block) -> bool:
 
 def _selection_shape_ok(block) -> bool:
     """`source.selection` has the shape `SelectionLabel` deserialises
-    (PROD-11.1, format 1.7.0): an object whose `window_start_ms` and
-    `window_end_ms` are both i64. Unknown keys are ignored, as serde ignores
-    them."""
-    return (
-        isinstance(block, dict)
-        and _int_in(block.get("window_start_ms"), 64)
-        and _int_in(block.get("window_end_ms"), 64)
-    )
+    (PROD-11.1, format 1.7.0; PROD-11.1b, format 2.0.0): an object whose
+    `window_end_ms` is an i64, whose `window_start_ms` is absent, null or an
+    i64, whose `partitions` is absent, null or an array of `{topic: string,
+    partitions: [i32]}`, and whose `engine_runs` is absent, null or a u32.
+    Unknown keys are ignored, as serde ignores them. Which of the optional
+    fields a document of each major must carry is an arm's (PS-1, PS-2)."""
+    if not isinstance(block, dict) or not _int_in(block.get("window_end_ms"), 64):
+        return False
+    start = block.get("window_start_ms")
+    if start is not None and not _int_in(start, 64):
+        return False
+    subsets = block.get("partitions")
+    if subsets is not None:
+        if not isinstance(subsets, list):
+            return False
+        for entry in subsets:
+            if not isinstance(entry, dict) or not isinstance(entry.get("topic"), str):
+                return False
+            listed = entry.get("partitions")
+            if not isinstance(listed, list) or not all(_int_in(p, 32) for p in listed):
+                return False
+    runs = block.get("engine_runs")
+    if runs is not None and not (
+        isinstance(runs, int) and not isinstance(runs, bool) and 0 <= runs < 2 ** 32
+    ):
+        return False
+    return True
 
 
 def _int_in(x, bits) -> bool:
@@ -1294,11 +1356,12 @@ def check_invariants(doc) -> str:
     doc_major = _major(version)
     if doc_major is None:
         return f"format_version {version!r} is not a parseable semver"
-    known_major = _major(FORMAT_VERSION)
-    if doc_major > known_major:
+    # PROD-11.1b: this script reads major 2, the partition-subset format, too
+    # (and only for that shape: arm PS-1, after the shape layer below).
+    if doc_major > SCORECARD_PARTITION_SUBSETS_MAJOR:
         return (
             f"format_version {version} has a major version newer than this reader "
-            f"understands (this script knows {FORMAT_VERSION})"
+            f"understands (this script knows {SCORECARD_PARTITION_SUBSETS_VERSION})"
         )
 
     # THE BLOCK-PRESENCE CHECKS ARE NOT INVARIANT ARMS. They are this script's
@@ -1373,8 +1436,9 @@ def check_invariants(doc) -> str:
     selection = source.get("selection")
     if selection is not None and not _selection_shape_ok(selection):
         return (
-            "source.selection is not an object of the shape the writer gives it: a window start "
-            "and a window end, both integers"
+            "source.selection is not an object of the shape the writer gives it: a window end "
+            "and an optional window start, both integers, an optional array of topic partition "
+            "lists and an optional engine-run count"
         )
 
     # Also shape, and also the Rust reader's type doing the work over there:
@@ -1520,8 +1584,22 @@ def check_invariants(doc) -> str:
     # both readers. A retroactive tightening of the 1.0.0 reader, not a format
     # change: no byte of the format changes, the accepted set narrows, and the
     # writer's zeroing is unconditional, so no document Logweir has ever written
-    # is refused. Scoped to major 1 so a future major may redefine the block.
-    if doc_major == 1:
+    # is refused. Scoped to the majors this script reads (1, and 2 since
+    # PROD-11.1b, which is 1.7.0's fields), so a future major may redefine the
+    # block.
+    #
+    # PS-1 first (PROD-11.1b), mirrored from `Scorecard::refuse_unreadable_major`,
+    # which the Rust reader runs before every arm: major 2 is the format of a
+    # partition-subset restore and nothing else. HERE, after the shape layer,
+    # because the Rust reader reaches it only after `serde_json` has read the
+    # document; the same words.
+    if doc_major == SCORECARD_PARTITION_SUBSETS_MAJOR and not _narrows_partitions(selection):
+        return (
+            f"format_version {version} is the format of a partition-subset restore, and this "
+            "document carries no source.selection.partitions; a reader reads major "
+            f"{SCORECARD_PARTITION_SUBSETS_MAJOR} only for that shape"
+        )
+    if doc_major in (1, SCORECARD_PARTITION_SUBSETS_MAJOR):
         if evidence.get("version_id") is not None:
             return "evidence.version_id is set but the four post-put fields are zeroed before signing"
         if evidence.get("retain_until") is not None:
@@ -1797,10 +1875,7 @@ def check_invariants(doc) -> str:
         # 1.5.0, and the unchanged closed two below it.
         target_mode = str(target_auth.get("mode"))
         version = doc.get("format_version")
-        five_defined = (
-            _major(version) == 1
-            and (_minor(version) or 0) >= SCORECARD_AUTH_MODES_SINCE_MINOR
-        )
+        five_defined = _defines_format_1_minor(version, SCORECARD_AUTH_MODES_SINCE_MINOR)
         if target_mode in PROD_01_3_AUTH_MODES:
             if not five_defined:
                 return (
@@ -1830,12 +1905,7 @@ def check_invariants(doc) -> str:
     # both lists and the block are arrays of strings.
     if not_reconstructed is not None:
         # NR-1. A version before 1.2.0 cannot carry the 1.2.0 field.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR
-        ):
+        if not _defines_format_1_minor(version, TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR):
             return (
                 f"topic_parity.not_reconstructed is present but format_version "
                 f"{_rust_debug_str(version)} predates it: the field is defined from "
@@ -1890,12 +1960,7 @@ def check_invariants(doc) -> str:
     # lists name topics. The shape layer above has proved the block's shape.
     if time_basis is not None:
         # TB-1. A version before 1.3.0 cannot carry the 1.3.0 field.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= SCORECARD_TIME_BASIS_SINCE_MINOR
-        ):
+        if not _defines_format_1_minor(version, SCORECARD_TIME_BASIS_SINCE_MINOR):
             return (
                 f"source.time_basis is present but format_version "
                 f"{_rust_debug_str(version)} predates it: the field is defined from "
@@ -1931,12 +1996,7 @@ def check_invariants(doc) -> str:
     # u64 loop every count's domain.
     if verification is not None:
         # IV-1. A version before 1.4.0 cannot carry the 1.4.0 field.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= SCORECARD_VERIFICATION_SINCE_MINOR
-        ):
+        if not _defines_format_1_minor(version, SCORECARD_VERIFICATION_SINCE_MINOR):
             return (
                 f"integrity.verification is present but format_version "
                 f"{_rust_debug_str(version)} predates it: the field is defined from "
@@ -2027,12 +2087,7 @@ def check_invariants(doc) -> str:
     # by code point and Rust `String` by UTF-8 byte, which order alike.
     if unsampled is not None:
         # US-1. A version before 1.6.0 cannot carry the 1.6.0 field.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR
-        ):
+        if not _defines_format_1_minor(version, SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR):
             return (
                 f"sample.unsampled_topics is present but format_version "
                 f"{_rust_debug_str(version)} predates it: the field is defined from "
@@ -2057,35 +2112,40 @@ def check_invariants(doc) -> str:
                 "leaves no topic unsampled"
             )
 
-    # `source.selection` (format 1.7.0, PROD-11.1): arms SEL-1 to SEL-3,
-    # mirrored ARM FOR ARM, IN THIS POSITION (after `sample.unsampled_topics`,
-    # before `redactions`) and with the same words from
-    # `Scorecard::validate_invariants`. They fire ONLY on a document carrying
-    # the block, so every document before 1.7.0 is decided exactly as before.
-    # Not interpolated except SEL-1's version. The shape layer above has
-    # proved its two integers.
+    # `source.selection` (format 1.7.0, PROD-11.1): arms SEL-1 to SEL-3, and
+    # (format 2.0.0, PROD-11.1b, OD-9 (a)) PS-2 to PS-5, mirrored ARM FOR ARM,
+    # IN THIS POSITION (after `sample.unsampled_topics`, before `redactions`)
+    # and with the same words from `Scorecard::validate_invariants`. They fire
+    # ONLY on a document carrying the block, so every document without it is
+    # decided exactly as before. Not interpolated except SEL-1's version. The
+    # shape layer above has proved the block's types.
     if selection is not None:
         # SEL-1. A version before 1.7.0 cannot carry the 1.7.0 block.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= SCORECARD_SELECTION_SINCE_MINOR
-        ):
+        if not _defines_format_1_minor(version, SCORECARD_SELECTION_SINCE_MINOR):
             return (
                 f"source.selection is present but format_version "
                 f"{_rust_debug_str(version)} predates it: the block is defined from "
                 f"1.{SCORECARD_SELECTION_SINCE_MINOR}.0"
             )
-        start = selection["window_start_ms"]
+        start = selection.get("window_start_ms")
         end = selection["window_end_ms"]
+        subsets = selection.get("partitions")
+        runs = selection.get("engine_runs")
+        # PS-2. A format-1 block is a window start and its end, nothing else.
+        if doc_major == 1 and (start is None or subsets is not None or runs is not None):
+            return (
+                "source.selection under major 1 is a stated window start and its end, and "
+                "nothing else: a block without window_start_ms, or with partitions or "
+                "engine_runs, is a partition-subset selection, which is format 2.0.0"
+            )
         # SEL-2. A stated start is before the end.
-        if start >= end:
+        if start is not None and start >= end:
             return (
                 "source.selection.window_start_ms is not before window_end_ms; a selection's "
                 "window holds at least one instant after its start"
             )
-        # SEL-3. The complete block's window is the selection's.
+        # SEL-3. The complete block's window is the selection's (no start for
+        # a 2.0.0 block from the archive's floor, as the complete block's).
         complete = verification.get("complete") if verification is not None else None
         if complete is not None:
             window = complete["window"]
@@ -2094,6 +2154,42 @@ def check_invariants(doc) -> str:
                     "integrity.verification.complete.window is not source.selection's window; "
                     "the expected output is selected by the plan's own start and end"
                 )
+        if subsets is not None:
+            # PS-3. One spelling per selection.
+            well_formed = all(
+                a["topic"] < b["topic"] for a, b in zip(subsets, subsets[1:])
+            ) and all(
+                e["topic"].strip(RUST_WHITESPACE)
+                and e["partitions"]
+                and all(p >= 0 for p in e["partitions"])
+                and all(a < b for a, b in zip(e["partitions"], e["partitions"][1:]))
+                for e in subsets
+            )
+            if not well_formed:
+                return (
+                    "source.selection.partitions does not name each topic once, in order, with "
+                    "a non-empty, sorted list of distinct partitions that are not negative"
+                )
+            # PS-4. One run per distinct subset, and at most one more.
+            need = len({tuple(e["partitions"]) for e in subsets})
+            if runs is None or runs not in (need, need + 1):
+                return (
+                    "source.selection.engine_runs is not one run per distinct partition subset, "
+                    "or one more for the topics without one"
+                )
+            # PS-5. Nothing is expected from a partition the plan did not
+            # select.
+            if complete is not None:
+                chosen = {e["topic"]: e["partitions"] for e in subsets}
+                for entry in complete["partitions"]:
+                    listed = chosen.get(entry["topic"])
+                    if entry["replay"]["expected"] > 0 and (
+                        listed is not None and entry["partition"] not in listed
+                    ):
+                        return (
+                            "integrity.verification.complete.partitions expects records from a "
+                            "partition source.selection does not select"
+                        )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -2777,25 +2873,42 @@ def _sampled_pass_lines(doc):
     sampled = block is None or block.get("coverage") == "sampled"
     if doc.get("outcome") != "pass" or not sampled:
         return []
-    # PROD-11.1 (review H1): over a narrowed window the guarantee is QUALIFIED
-    # by it, in the Rust reader's words (`sampled_pass_lines_over`).
+    # PROD-11.1 (review H1): over a narrowed restore the guarantee is
+    # QUALIFIED by the selection, in the Rust reader's words
+    # (`sampled_pass_lines_over`): a 2.0.0 partition subset (PROD-11.1b), or
+    # a 1.7.0 window start.
+    start_clause = (
+        "no record before the start was expected, and a sampled check does not prove that "
+        "none was restored"
+    )
     window = doc["source"].get("selection")
+    if _narrows_partitions(window):
+        start = window.get("window_start_ms")
+        frm = "the archive's floor" if start is None else f"epoch-ms {start}"
+        line = (
+            f"sample coverage: a sampled pass over a partition subset from {frm} to epoch-ms "
+            f"{window['window_end_ms']}: every selected partition was held to its own count "
+            "bound over that window, every other partition of a narrowed topic was held empty, "
+            "max_partitions reached every topic before a second partition of any, and a "
+            "readable engine report lacking a selected partition with records in that window "
+            "was refused"
+        )
+        if start is not None:
+            line += "; " + start_clause
+        return [line]
     if window is not None:
         return [
             f"sample coverage: a sampled pass over a replay selection from epoch-ms "
-            f"{window['window_start_ms']} to epoch-ms {window['window_end_ms']}: every mapped "
-            "partition was held to its own count bound over that window, max_partitions "
+            f"{window.get('window_start_ms') or 0} to epoch-ms {window['window_end_ms']}: every "
+            "mapped partition was held to its own count bound over that window, max_partitions "
             "reached every topic before a second partition of any, and a readable engine "
-            "report lacking a partition with records in that window was refused; no record "
-            "before the start was expected, and a sampled check does not prove that none was "
-            "restored"
+            "report lacking a partition with records in that window was refused; "
+            + start_clause
         ]
     version = doc.get("format_version")
-    if (
-        _major(version) == 1
-        and (_minor(version) is not None)
-        and _minor(version) >= SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR
-    ):
+    # A 2.x document is written only by a build with FX-23's checks
+    # (`proves_fx23_sampled_checks`).
+    if _defines_format_1_minor(version, SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR):
         return [
             "sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition "
             "was held to its own count bound, max_partitions reached every topic before a "
@@ -2832,20 +2945,56 @@ def _before_the_start(doc):
     return "no record before the start was expected"
 
 
-def _selection_lines(block, before):
+def _outside_the_subset(doc):
+    """What a 2.0.0 document proves about the OTHER partitions of a narrowed
+    topic -- the twin of `OutsideTheSubset::of` in `crates/logweir-core/src/
+    scorecard.rs` (PROD-11.1b), in the same words. A verification whose
+    `integrity.result` is `pass` shows none of them holds a restored record,
+    on either lane (the sampled lane holds them empty; the complete lane
+    counts a record there as unexpected, and IV-6 refuses the pass);
+    anything else shows only that none was expected."""
+    block = doc["integrity"].get("verification")
+    if block is not None and doc["integrity"].get("result") == "pass":
+        return "no record of another partition of these topics was restored or expected"
+    return "no record of another partition of these topics was expected"
+
+
+def _selection_lines(block, before, outside):
     """`source.selection` as lines -- the twin of `crates/logweir/src/
     verify.rs::selection_lines` (PROD-11.1): the writer's sentence
-    (`SelectionLabel::sentence`), ending in `before`, what this document
-    proves about the records before the start (`_before_the_start`, review
-    N1). Absent prints nothing: the restore selected every record from the
-    archive's floor."""
+    (`SelectionLabel::sentence`), ending in what this document proves -- of
+    the other partitions of a narrowed topic (`outside`, `_outside_the_subset`,
+    a 2.0.0 block) and of the records before a stated start (`before`,
+    `_before_the_start`, review N1). Absent prints nothing: the restore
+    selected every record from the archive's floor."""
     if block is None:
         return []
-    return [
-        f"replay selection: every partition of every restored topic, from epoch-ms "
-        f"{block['window_start_ms']} (the plan's stated window start, inclusive) to epoch-ms "
-        f"{block['window_end_ms']} (inclusive); {before}"
-    ]
+    start = block.get("window_start_ms")
+    end = block["window_end_ms"]
+    if not _narrows_partitions(block):
+        # Format 1.7.0, a start only: the 1.23.0 sentence, byte for byte.
+        return [
+            f"replay selection: every partition of every restored topic, from epoch-ms "
+            f"{start or 0} (the plan's stated window start, inclusive) to epoch-ms {end} "
+            f"(inclusive); {before}"
+        ]
+    named = "; ".join(
+        f"{e['topic']} partitions [{', '.join(str(p) for p in e['partitions'])}]"
+        for e in block["partitions"]
+    )
+    frm = (
+        "from the archive's floor"
+        if start is None
+        else f"from epoch-ms {start} (the plan's stated window start, inclusive)"
+    )
+    line = (
+        f"replay selection: ONLY {named} (every partition of any other restored topic), {frm} "
+        f"to epoch-ms {end} (inclusive), in {block.get('engine_runs') or 0} engine run(s); "
+        f"{outside}"
+    )
+    if start is not None:
+        line += f"; {before}"
+    return [line]
 
 
 def _unsampled_lines(topics):
@@ -3191,7 +3340,9 @@ def main(
             print(f"       coverage: {line}")
         # PROD-11.1: the replay selection a narrowed restore restored, in the
         # words `logweir drill verify` prints (`selection_lines`).
-        for line in _selection_lines(doc["source"].get("selection"), _before_the_start(doc)):
+        for line in _selection_lines(
+            doc["source"].get("selection"), _before_the_start(doc), _outside_the_subset(doc)
+        ):
             print(f"       coverage: {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
@@ -3239,6 +3390,9 @@ def main(
             "not blank, and never beside a complete verification; "
             "source.selection only from 1.7.0, its start before its end, and a complete block "
             "over its window; "
+            "format 2.0.0 only with source.selection.partitions, a format-1 selection a start "
+            "only, each subset list sorted and distinct, one engine run per distinct subset or "
+            "one more, and a complete block that expects nothing from an unselected partition; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

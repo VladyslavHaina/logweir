@@ -708,6 +708,15 @@
   "rust_exit": 1,
   "python_exit": 1,
   "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"orders\", expected struct SelectionLabel",
-  "python_reason": "source.selection is not an object of the shape the writer gives it: a window start and a window end, both integers"
+  "python_reason": "source.selection is not an object of the shape the writer gives it: a window end and an optional window start, both integers, an optional array of topic partition lists and an optional engine-run count"
+ },
+ {
+  "id": "subsets_engine_runs_negative",
+  "file": "subsets_engine_runs_negative.json",
+  "check": "message:source.selection is not an object of the shape the writer gives it: a window ",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid value: integer `-1`, expected u32",
+  "python_reason": "source.selection is not an object of the shape the writer gives it: a window end and an optional window start, both integers, an optional array of topic partition lists and an optional engine-run count"
  }
 ]
