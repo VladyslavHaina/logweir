@@ -520,3 +520,102 @@ impl Drop for Tree {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
+
+// ---------------------------------------------------------------- the guard
+
+/// Every read call in production source, with the text of its arguments.
+fn production_reads() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/logweir-store sits two levels under the workspace root")
+        .to_path_buf();
+    let patterns = [
+        ".get_capped(",
+        ".get_version_capped(",
+        ".manifest_facts(",
+        "access.get(",
+        "access.get_with_version(",
+        "access.get_version(",
+        "archive.get(",
+    ];
+    let mut out = Vec::new();
+    let mut stack = vec![root.join("crates")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the tree lists") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                // Production source only: `src/` trees, never `tests/`.
+                if path
+                    .file_name()
+                    .is_some_and(|n| n != "tests" && n != "target")
+                {
+                    stack.push(path);
+                }
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            if !rel.contains("/src/") || path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a source file reads");
+            for pat in patterns {
+                let mut from = 0;
+                while let Some(at) = text[from..].find(pat) {
+                    let open = from + at + pat.len();
+                    let mut depth = 1usize;
+                    let mut end = open;
+                    for (i, c) in text[open..].char_indices() {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = open + i;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let line = text[..open].matches('\n').count() + 1;
+                    out.push((format!("{rel}:{line}"), text[open..end].to_string()));
+                    from = open;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// **Every production read names its cap from the table**, and none is
+/// "far too large": each call's arguments name `caps::…`, the catalog walk's
+/// own `CATALOG_DOCUMENT_READ_CAP`, or a `max_bytes` its own caller chose
+/// (the evidence fetch's plan cap, the store's own pass-through), and none
+/// names `u64::MAX`.
+///
+/// KILLS: "a cap far too large" at any production read site (a `u64::MAX`
+/// or a literal in place of a named cap), including one a later change adds.
+#[test]
+fn every_production_read_names_a_cap_from_the_table() {
+    let reads = production_reads();
+    assert!(
+        reads.len() >= 25,
+        "the scan must see the production reads, found {}: {reads:?}",
+        reads.len()
+    );
+    let named = ["caps::", "CATALOG_DOCUMENT_READ_CAP", "max_bytes"];
+    let bad: Vec<&(String, String)> = reads
+        .iter()
+        .filter(|(_, args)| args.contains("u64::MAX") || !named.iter().any(|n| args.contains(n)))
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "every production read names a cap from `logweir_store::caps` (or its caller's \
+         `max_bytes`) and never `u64::MAX`: {bad:#?}"
+    );
+}
