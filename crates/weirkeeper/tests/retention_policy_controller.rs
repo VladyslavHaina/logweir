@@ -3441,6 +3441,75 @@ async fn a_policy_with_no_resource_version_sends_no_patch() {
     assert!(f.status_patches().is_empty(), "requests: {:?}", f.seen());
 }
 
+/// **FX-29's class sweep: a steady policy writes nothing.** A second pass over
+/// the same catalog, a minute later, with the status the first pass wrote,
+/// sends NO patch — and `lastEvaluation.at` still names the evaluation whose
+/// findings these are.
+///
+/// This reconciler's own status write wakes it (`Controller::new` watches the
+/// policy). Before FX-29 `lastEvaluation.at` was `now` on every evaluation, and
+/// every `candidates[]` element carried `objects: null, bytes: null` — members
+/// the API server prunes, so the no-op skip saw a change on every pass even
+/// with the clock frozen. Every pass wrote, and the write woke the next pass: a
+/// hot loop on every `Report` or `Enforce` policy whose catalog resolved.
+/// CONTROL: at `a8a30428` every pass below sends a patch.
+#[tokio::test]
+async fn a_steady_policy_writes_nothing_once_settled() {
+    let first = fixture(happy_routes(&six_points()));
+    run_at(&first, &policy(json!({}), json!({})), now()).await;
+    let mut written = first.status();
+    assert_eq!(written["lastEvaluation"]["at"], json!(now()));
+    // THE FIRST PASS SAW NO `observedGeneration`, so it published "the spec
+    // changed" on `EnforcementDegraded`; the pass after it publishes the
+    // steady message. That is one real change, written once, and it is not
+    // the property here — the passes after it are.
+    let settle = fixture(happy_routes(&six_points()));
+    run_at(
+        &settle,
+        &policy(json!({}), written.clone()),
+        now() + chrono::Duration::milliseconds(500),
+    )
+    .await;
+    for patch in settle.status_patches() {
+        weirkeeper::conditions::apply_merge_patch(&mut written, &patch["status"]);
+    }
+    assert_eq!(
+        written["lastEvaluation"]["at"],
+        json!(now()),
+        "the settling write changed a condition message, not the findings, so the evaluation \
+         instant stays: {written}"
+    );
+
+    for later in [
+        now() + chrono::Duration::seconds(1),
+        now() + chrono::Duration::minutes(1),
+        now() + chrono::Duration::minutes(30),
+    ] {
+        let again = fixture(happy_routes(&six_points()));
+        run_at(&again, &policy(json!({}), written.clone()), later).await;
+        assert!(
+            again.status_patches().is_empty(),
+            "at {later}: the same catalog evaluates to the same findings, so nothing is \
+             written; a patch here is the reconciler's own write waking it for ever: {:?}",
+            again.status_patches()
+        );
+    }
+
+    // AND A REAL CHANGE STILL WRITES, with a new instant: one point fewer.
+    let fewer: Vec<Value> = six_points().into_iter().take(5).collect();
+    let changed = fixture(happy_routes(&fewer));
+    let later = now() + chrono::Duration::hours(2);
+    run_at(&changed, &policy(json!({}), written.clone()), later).await;
+    let patches = changed.status_patches();
+    assert_eq!(patches.len(), 1, "a changed evaluation is written once");
+    assert_eq!(
+        patches[0]["status"]["lastEvaluation"]["at"],
+        json!(later),
+        "and its instant is the evaluation that found the change"
+    );
+    assert_eq!(patches[0]["status"]["lastEvaluation"]["pointsEvaluated"], 5);
+}
+
 /// Every condition reason this controller writes is in the closed set, and
 /// every one is a valid `metav1.Condition.reason`.
 #[test]

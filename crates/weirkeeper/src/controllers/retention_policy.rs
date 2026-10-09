@@ -90,7 +90,7 @@ use logweir_core::destination::DestinationRole;
 
 use crate::catalog_view::{self as view, ViewEntry};
 use crate::check;
-use crate::conditions::{merge_condition, status_unchanged};
+use crate::conditions::{keep_instant_unless_changed, merge_condition, status_unchanged};
 use crate::crds::backup::Backup;
 use crate::crds::recovery_catalog::RecoveryCatalog;
 use crate::crds::restore::Restore;
@@ -2826,7 +2826,7 @@ impl Pass<'_> {
             .candidates
             .iter()
             .map(|c| {
-                json!({
+                let mut candidate = json!({
                     "pointId": c.point_id,
                     "reason": c.reason.as_str(),
                     "recoveryPointAt": Time::from(
@@ -2840,7 +2840,19 @@ impl Pass<'_> {
                     // view carries no segment keys.
                     "objects": c.objects(),
                     "bytes": c.bytes,
-                })
+                });
+                // AND ABSENT MEANS NO KEY AT ALL, NOT `null` — FX-29's class
+                // sweep. An array is replaced wholesale by a merge patch, so a
+                // `null` member inside an element is not a deletion: the API
+                // server prunes it (the CRD does not mark the field nullable)
+                // and the object this controller reads back has no such key.
+                // The no-op skip compared the two and saw a change on every
+                // pass, so the status was written on every pass even when
+                // nothing else had moved.
+                if let Some(fields) = candidate.as_object_mut() {
+                    fields.retain(|_, value| !value.is_null());
+                }
+                candidate
             })
             .collect();
         let protected: Vec<Value> = evaluation
@@ -2990,34 +3002,51 @@ impl Pass<'_> {
                 },
             ),
         ]);
+        // `lastEvaluation.at` IS THE EVALUATION THAT REACHED THESE FINDINGS —
+        // FX-29's class sweep. It was `now` on every evaluation, and this
+        // reconciler's own status write wakes it (`Controller::new` watches the
+        // policy), so every `Report`/`Enforce` policy whose catalog resolved
+        // wrote its status on every pass, for ever. It is kept while the rest
+        // of the block — the counts, the candidates, the plan and its expiry —
+        // comes out the same, and moves with the first evaluation that finds
+        // something different (`keep_instant_unless_changed`, compared on what
+        // the API server will store).
+        let mut last_evaluation = json!({
+            "at": self.ctx.now,
+            "pointsEvaluated": evaluation.points_evaluated,
+            "candidateCount": i64::try_from(evaluation.candidates.len()).unwrap_or(i64::MAX),
+            "kept": evaluation.kept,
+            "candidates": candidates,
+            "protected": protected,
+            "skipped": skipped,
+            "planSha256": plan_sha256,
+            // THE PLAN THIS EVALUATION RENDERED, NAMED WHERE ITS DIGEST IS
+            // PUBLISHED — defect RET-STALE-PLANREF. `planRef` used to be
+            // written by `start_run` and by nothing else, so an evaluation
+            // that rendered a NEW plan without starting a run left the ref
+            // naming the previous run's `ConfigMap` while `planSha256`
+            // beside it named the new plan's bytes: two fields of one block
+            // describing two different plans, and the one an administrator
+            // reads to preview what would be deleted was the stale one.
+            //
+            // The name is a pure function of the policy UID and the digest
+            // (`plan::plan_config_map_name`), so it is exactly as true as
+            // the digest it sits next to — including before any run
+            // materializes the object, which is the case this fixes.
+            "planRef": { "name": plan::plan_config_map_name(&self.uid, plan_sha256) },
+            "planExpiresAt": window.expires_at,
+        });
+        keep_instant_unless_changed(
+            self.observed()
+                .as_ref()
+                .and_then(|status| status.get("lastEvaluation")),
+            &mut last_evaluation,
+            "at",
+        );
         let mut status = json!({
             "enforcement": decision.enforcement,
             "guarantees": guarantees,
-            "lastEvaluation": {
-                "at": self.ctx.now,
-                "pointsEvaluated": evaluation.points_evaluated,
-                "candidateCount": i64::try_from(evaluation.candidates.len()).unwrap_or(i64::MAX),
-                "kept": evaluation.kept,
-                "candidates": candidates,
-                "protected": protected,
-                "skipped": skipped,
-                "planSha256": plan_sha256,
-                // THE PLAN THIS EVALUATION RENDERED, NAMED WHERE ITS DIGEST IS
-                // PUBLISHED — defect RET-STALE-PLANREF. `planRef` used to be
-                // written by `start_run` and by nothing else, so an evaluation
-                // that rendered a NEW plan without starting a run left the ref
-                // naming the previous run's `ConfigMap` while `planSha256`
-                // beside it named the new plan's bytes: two fields of one block
-                // describing two different plans, and the one an administrator
-                // reads to preview what would be deleted was the stale one.
-                //
-                // The name is a pure function of the policy UID and the digest
-                // (`plan::plan_config_map_name`), so it is exactly as true as
-                // the digest it sits next to — including before any run
-                // materializes the object, which is the case this fixes.
-                "planRef": { "name": plan::plan_config_map_name(&self.uid, plan_sha256) },
-                "planExpiresAt": window.expires_at,
-            },
+            "lastEvaluation": last_evaluation,
             // FX-20: what `spec.enforcement.credentialSecretRef` must carry
             // under `logweir-binding`; `null` clears it when enforcement is
             // removed.

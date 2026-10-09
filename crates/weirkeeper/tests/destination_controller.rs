@@ -585,6 +585,68 @@ async fn an_unchanged_verdict_sends_no_patch() {
     );
 }
 
+/// **FX-29's class sweep: a CA bundle that goes away is written ONCE.**
+///
+/// `dest-a` was `Valid` with a private CA, so its status carries
+/// `caBundleSha256`. The `ConfigMap` is deleted: the verdict is
+/// `CaBundleNotFound` with no digest. Before FX-29 the patch OMITTED the key
+/// (`skip_serializing_if`), a merge patch keeps an omitted key, and
+/// `observed_at_for` compared the stale stored digest with the verdict's
+/// `None` on every pass — so `observedAt` was `now` on every pass, every write
+/// woke this reconciler's own watch, and the destination spun. CONTROL: at
+/// `a8a30428` twenty passes write twenty times and the digest stays.
+///
+/// The fake API is `testing::ObjectStore`, which applies each merge patch as
+/// the API server does and hands the next pass the stored object.
+#[tokio::test]
+async fn a_ca_bundle_that_goes_away_is_cleared_once_and_settles() {
+    use weirkeeper::testing::{mock_client_with_store, ObjectStore};
+    const KEY: &str = "/namespaces/team-a/backupdestinations/dest-a";
+
+    // The Valid status a reconcile with the CA present writes.
+    let pem = ca_pem(0x5A);
+    let dest = build(dest_a_unreconciled());
+    let verdict = destination::evaluate(&dest, &CaObservation::Present(pem.into_bytes()));
+    let mut stored = dest_a_unreconciled();
+    stored["status"] = serde_json::to_value(status_for(&dest, &verdict, chrono::Utc::now()))
+        .expect("a status serialises");
+    assert!(
+        stored["status"]["caBundleSha256"].is_string(),
+        "the premise"
+    );
+
+    let store = ObjectStore::shared();
+    store.lock().expect("store").put(KEY, stored);
+    let passes = 20;
+    for _ in 0..passes {
+        let current = build(store.lock().expect("store").get(KEY).expect("stored"));
+        let (client, _rec, _bodies) = mock_client_with_store(routes(None), store.clone());
+        let verdict = reconcile_destination(&current, &client)
+            .await
+            .expect("a 404 on the ConfigMap is a verdict");
+        assert_eq!(verdict.reason, CheckCode::CaBundleNotFound.as_str());
+    }
+    let writes = store
+        .lock()
+        .expect("store")
+        .writes()
+        .iter()
+        .filter(|w| w.method == "PATCH" && w.status == 200)
+        .count();
+    assert_eq!(
+        writes, 1,
+        "the CaBundleNotFound verdict is written once; {passes} passes later it has not been \
+         written again"
+    );
+    let after = store.lock().expect("store").get(KEY).expect("stored");
+    assert!(
+        after["status"].get("caBundleSha256").is_none(),
+        "no bytes were read, so the object no longer claims a digest: {}",
+        after["status"]
+    );
+    assert_eq!(after["status"]["reason"], "CaBundleNotFound");
+}
+
 /// The condition reasons are a CLOSED set, and every one of them is a
 /// [`CheckCode`].
 #[test]

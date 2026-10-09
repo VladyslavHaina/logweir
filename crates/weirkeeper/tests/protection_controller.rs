@@ -2097,6 +2097,83 @@ fn a_steady_policy_issues_no_patch_at_all() {
     );
 }
 
+/// **FX-29's class sweep: a field that becomes absent is cleared, and the
+/// policy then settles.**
+///
+/// The notification routes are removed from the spec, so the policy publishes
+/// no `credentialBindings` any more. Before FX-29 the patch OMITTED the key
+/// (`skip_serializing_if`; it is not in `CLEARABLE_STATUS_FIELDS`), a merge
+/// patch keeps an omitted key, and `settle_clock_fields` compared the stale
+/// stored bindings with the computed `None` on every pass — so `evaluatedAt`
+/// was `now` on every pass, and every write woke this reconciler's own watch.
+/// The same held for any optional field nested in `lastAvailablePoint`,
+/// `lastAttempt`, `missed` or `rehearsal`. CONTROL: at `a8a30428` pass 3 sends
+/// a PATCH (and the double, which has no PATCH route there, refuses it).
+#[test]
+fn a_field_that_becomes_absent_is_cleared_and_the_policy_settles() {
+    let no_catalog = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"objectives": {"requireCatalogAvailability": false}}),
+        );
+        value
+    };
+    let fired = json!({"lastFireTime": at(10)});
+    let with_routes = || {
+        let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], fired.clone());
+        routes.push(patch(STATUS_PATH));
+        routes
+    };
+
+    // Pass 1: notification routes configured, so bindings are published.
+    let (_, _, bodies) = drive(&policy_with(no_catalog.clone(), json!({})), with_routes());
+    let first = last_status_patch(&bodies)["status"].clone();
+    assert!(
+        first["credentialBindings"].is_array(),
+        "the premise: the routes' bindings are published: {first}"
+    );
+
+    // Pass 2: the routes are removed (a spec edit, generation 3 -> 4).
+    let mut without = no_catalog;
+    without
+        .as_object_mut()
+        .expect("a spec object")
+        .remove("notifications");
+    let edited = |status: Value| {
+        let mut policy = policy_with(without.clone(), status);
+        policy.metadata.generation = Some(4);
+        policy
+    };
+    let (_, _, bodies) = drive_at(
+        &edited(first.clone()),
+        with_routes(),
+        now() + Duration::seconds(10),
+    );
+    let patch = last_status_patch(&bodies);
+    assert!(
+        patch["status"]
+            .as_object()
+            .expect("a status object")
+            .get("credentialBindings")
+            .is_some_and(Value::is_null),
+        "the bindings are sent as an explicit null, which clears them: {patch}"
+    );
+    let mut stored = first;
+    weirkeeper::conditions::apply_merge_patch(&mut stored, &patch["status"]);
+    assert!(stored.get("credentialBindings").is_none());
+
+    // Pass 3: nothing changed. NO PATCH route: the double refuses one.
+    let routes = read_routes(vec![backup("b-1", 2, json!({}))], fired);
+    let (outcome, recorder, _) = drive_at(&edited(stored), routes, now() + Duration::seconds(100));
+    assert!(outcome.committed);
+    assert!(
+        !requests(&recorder).iter().any(|(m, _)| m == "PATCH"),
+        "a settled policy writes nothing: {:?}",
+        requests(&recorder)
+    );
+}
+
 /// The other side of erratum **E11(d)**: past `evaluatedAt`'s half-interval
 /// window the object IS written, and the only things that move are the three
 /// clock-derived fields.

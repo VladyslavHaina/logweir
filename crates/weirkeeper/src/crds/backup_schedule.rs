@@ -282,7 +282,9 @@ impl RetrySpec {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionReport {
-    /// When the controller last evaluated retention.
+    /// When an evaluation first reached the findings below. Later evaluations
+    /// that find the same keep this instant, so it is when the findings last
+    /// changed, not when the controller last looked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluated_at: Option<Time>,
     /// `spec.retention.keepLast`, **as it was applied**. Absent when no rule
