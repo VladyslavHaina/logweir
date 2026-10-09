@@ -718,21 +718,21 @@ async fn a_cleared_migration_block_is_cleared_on_the_object() {
 fn replacing_sends_null_for_every_key_the_stored_block_has_and_the_new_one_lacks() {
     let stored = serde_json::json!({
         "slot": "a", "backupRef": { "name": "old" }, "nested": { "keep": 1, "gone": 2 },
-        "list": [1, 2, 3]
+        "items": [1, 2, 3]
     });
-    let next = serde_json::json!({ "slot": "b", "nested": { "keep": 1 }, "list": [1] });
+    let next = serde_json::json!({ "slot": "b", "nested": { "keep": 1 }, "items": [1] });
     let patch = replacing(next, Some(&stored));
     assert_eq!(
         patch,
         serde_json::json!({
-            "slot": "b", "backupRef": null, "nested": { "keep": 1, "gone": null }, "list": [1]
+            "slot": "b", "backupRef": null, "nested": { "keep": 1, "gone": null }, "items": [1]
         })
     );
     let mut merged = stored.clone();
     apply_merge_patch(&mut merged, &patch);
     assert_eq!(
         merged,
-        serde_json::json!({ "slot": "b", "nested": { "keep": 1 }, "list": [1] }),
+        serde_json::json!({ "slot": "b", "nested": { "keep": 1 }, "items": [1] }),
         "merged, the block IS the new one"
     );
     // Nothing stored, or nothing to clear: unchanged.
