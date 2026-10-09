@@ -475,7 +475,20 @@ FORMAT_VERSION = "1.4.0"
 # per-partition bound, every-topic sampling and the engine-report check;
 # before 1.6.0 only the canary and one count bound over every topic together,
 # because such a document is the same bytes whichever build signed it.
-SCRIPT_VERSION = "1.22.0"
+#
+# 1.23.0 (PROD-01.4a) knows receipt format 1.5.0 and its `generations`: per
+# named topic, the topic ID (KIP-516) Logweir's own DescribeTopics read
+# returned before the engine and after it, or `null` with the reason. Five arms,
+# 22 to 26, mirrored byte for byte and in position from
+# `BackupReceipt::validate_invariants`: the block only from 1.5.0, covering
+# exactly the named topic set, every recorded ID in Kafka's text (22 URL-safe
+# base64 characters over 16 bytes, never the all-zero ID), a reason exactly for
+# a null ID from the closed set, and a source exactly for a recorded one. They
+# fire only on a document carrying the block (OD-7 (a)). The shape layer
+# refuses a block whose fields are not strings or null, and the `generations`
+# lines say, per topic, whether the capture saw one generation, saw the topic
+# recreated while it ran, or could not establish it by ID.
+SCRIPT_VERSION = "1.23.0"
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
 # `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
@@ -588,6 +601,44 @@ RECEIPT_CONFIG_COVERAGE_SINCE_MINOR = 1
 # `crates/logweir-core/src/backup_receipt.rs`, which it must equal
 # (`docs/test_verify_scorecard.py::test_the_topic_configuration_minor_is_the_rust_readers`).
 RECEIPT_TOPIC_CONFIGURATION_SINCE_MINOR = 3
+
+# PROD-01.4a: the first minor of the BACKUP RECEIPT's format 1 that defines
+# `generations` (arm 22) — `GENERATIONS_SINCE_MINOR` in
+# `crates/logweir-core/src/backup_receipt.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_generations_minor_is_the_rust_readers`).
+RECEIPT_GENERATIONS_SINCE_MINOR = 5
+
+# PROD-01.4a: why a topic ID is null (arm 25) and where a recorded one came
+# from (arm 26) — `TOPIC_ID_REASONS` and `TOPIC_ID_SOURCES` in
+# `crates/logweir-core/src/topic_identity.rs`, in their order.
+RECEIPT_TOPIC_ID_REASONS = (
+    "noTopicId",
+    "notAuthorized",
+    "topicNotFound",
+    "readFailed",
+    "notRead",
+)
+RECEIPT_TOPIC_ID_SOURCES = ("describeTopics", "engineManifest")
+
+_TOPIC_ID_ALPHABET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+
+
+def _is_canonical_topic_id(text) -> bool:
+    """Kafka's text form of a real topic ID — the twin of
+    `logweir_core::topic_identity::is_canonical`: 22 URL-safe base64
+    characters, no padding, over 16 bytes that re-encode to the SAME text (no
+    stray trailing bits), and never the all-zero ID (Kafka's "no ID")."""
+    if not isinstance(text, str) or len(text) != 22 or not set(text) <= _TOPIC_ID_ALPHABET:
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(text + "==")
+    except (ValueError, TypeError):
+        return False
+    if len(raw) != 16 or raw == bytes(16):
+        return False
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") == text
 
 # PROD-05.1: `ConfigEntry::portability`'s closed set (arm 16), in
 # `logweir_core::topic_configuration::PORTABILITY_CLASSES`'s order, which the
@@ -2187,6 +2238,29 @@ def _receipt_shape(doc) -> str:
         not isinstance(detection, list) or not all(isinstance(d, str) for d in detection)
     ):
         return "owner_detection is not a list of strings"
+    # PROD-01.4a, format 1.5.0: `generations` is `Option<BTreeMap<String,
+    # TopicIdentity>>`, whose five fields are each an `Option<String>`, so Rust
+    # refuses any other JSON type at DESERIALISATION, before arm 22 runs. `null`
+    # is absent on both sides.
+    generations = doc.get("generations")
+    if generations is not None:
+        if not isinstance(generations, dict):
+            return "generations is not an object"
+        for topic in sorted(generations):
+            entry = generations[topic]
+            where = f"generations[{_rust_debug_str(topic)}]"
+            if not isinstance(entry, dict):
+                return f"{where} is not an object"
+            for name in (
+                "topic_id",
+                "topic_id_after",
+                "topic_id_source",
+                "topic_id_reason",
+                "topic_id_after_reason",
+            ):
+                value = entry.get(name)
+                if value is not None and not isinstance(value, str):
+                    return f"{where}.{name} is not a string"
     return ""
 
 
@@ -2248,6 +2322,12 @@ def check_backup_receipt_invariants(doc) -> str:
     4. `covered.from_ms < covered.to_ms` — the end is EXCLUSIVE.
     5. `source.auth.mode` is `plaintext` or `scramSha512`, and from format
        1.4.0 (PROD-01.3) also `scramSha256`, `plain` or `mtls`.
+
+    Arms 6-21 read the 1.1.0 and 1.3.0 blocks (FX-4, PROD-05.1), and arms
+    22-26 the 1.5.0 `generations` (PROD-01.4a): present only from 1.5.0,
+    covering exactly the named topic set, every recorded topic ID canonical, a
+    reason exactly when an ID is null, and a source exactly when one is
+    recorded. Each block's arms run only when it is present.
     """
     # ARM 1. GC12 for this document: a reader refuses a major it has never
     # seen rather than guessing at a shape. FIRST, so a document from a future
@@ -2562,6 +2642,75 @@ def check_backup_receipt_invariants(doc) -> str:
                     "\"declared\", a \"kafkaTopicResource\" owner \"kafkaTopicResources\""
                 )
 
+    # ARMS 22-26 (format 1.5.0, PROD-01.4a): the `generations` block, and ONLY
+    # when it is present, so every earlier receipt is decided exactly as
+    # before. Topics in NAME order; per topic, arms 24, 25 and 26, each over
+    # `topic_id` then `topic_id_after`.
+    generations = doc.get("generations")
+    if generations is not None:
+        # ARM 22. A document declaring a minor before 5 cannot carry a 1.5 field.
+        if parsed[1] < RECEIPT_GENERATIONS_SINCE_MINOR:
+            return (
+                f"generations is present but format_version {_rust_debug_str(version)} "
+                "predates it: the field is defined from "
+                f"1.{RECEIPT_GENERATIONS_SINCE_MINOR}.0"
+            )
+        # ARM 23. The observed set is the named set — arms 3, 7 and 14's twin.
+        observed = list(generations.keys())
+        if sorted(set(observed)) != sorted(set(named_topics)):
+            return (
+                f"generations covers {_render_topic_set(observed)} but the named topic set "
+                f"is {_render_topic_set(named_topics)}"
+            )
+        for topic in sorted(generations):
+            entry = generations[topic]
+            reads = (
+                ("topic_id", entry.get("topic_id"), entry.get("topic_id_reason")),
+                (
+                    "topic_id_after",
+                    entry.get("topic_id_after"),
+                    entry.get("topic_id_after_reason"),
+                ),
+            )
+            # ARM 24. A recorded ID is Kafka's text form of a real ID.
+            for field, topic_id, _ in reads:
+                if topic_id is not None and not _is_canonical_topic_id(topic_id):
+                    return (
+                        f"generations[{_rust_debug_str(topic)}].{field} "
+                        f"{_rust_debug_str(topic_id)} is not a topic ID this format defines: "
+                        "22 characters of URL-safe base64 without padding over the ID's 16 "
+                        "bytes, and never the all-zero ID"
+                    )
+            # ARM 25. A reason exactly when the ID is null, from the closed set.
+            for field, topic_id, reason in reads:
+                if topic_id is not None:
+                    fits = reason is None
+                else:
+                    fits = reason is not None and reason in RECEIPT_TOPIC_ID_REASONS
+                if not fits:
+                    rendered = "absent" if reason is None else _rust_debug_str(reason)
+                    state = "recorded" if topic_id is not None else "null"
+                    return (
+                        f"generations[{_rust_debug_str(topic)}].{field}_reason {rendered} "
+                        f"does not fit a {state} {field}: a reason is present exactly when "
+                        "the ID is null, and is \"noTopicId\", \"notAuthorized\", "
+                        "\"topicNotFound\", \"readFailed\" or \"notRead\""
+                    )
+            # ARM 26. A source exactly when an ID is recorded, from the closed set.
+            recorded = entry.get("topic_id") is not None or entry.get("topic_id_after") is not None
+            source = entry.get("topic_id_source")
+            if source is not None:
+                fits = recorded and source in RECEIPT_TOPIC_ID_SOURCES
+            else:
+                fits = not recorded
+            if not fits:
+                rendered = "absent" if source is None else _rust_debug_str(source)
+                return (
+                    f"generations[{_rust_debug_str(topic)}].topic_id_source {rendered} does "
+                    "not fit its IDs: a source is present exactly when an ID is recorded, and "
+                    "is \"describeTopics\" or \"engineManifest\""
+                )
+
     return ""
 
 
@@ -2591,6 +2740,52 @@ def _coverage_lines(block):
         else:
             timestamp = "message.timestamp.type not recorded"
         lines.append(f"config_coverage[{_rust_debug_str(topic)}]: {coverage}, {timestamp}")
+    return lines
+
+
+def _generation_lines(block):
+    """The receipt's `generations`, one line per topic in NAME order, or the
+    line that says it is absent — the twin of `crates/logweir/src/verify.rs::
+    generation_lines`, in the same words (PROD-01.4a). An unknown ID is never
+    read as "the same": it says why, and that the generation is not
+    established by ID."""
+    if block is None:
+        return [
+            "generations: not recorded, so no topic ID is known from this receipt and each "
+            "topic's generation is UNKNOWN, never the same as another point's"
+        ]
+
+    def side(topic_id, reason):
+        if topic_id is not None:
+            return topic_id
+        if reason is not None:
+            return f"not recorded ({reason})"
+        return "not recorded"
+
+    lines = []
+    for topic in sorted(block):
+        entry = block[topic]
+        before = entry.get("topic_id")
+        after = entry.get("topic_id_after")
+        if before is not None and after is not None and before == after:
+            source = entry.get("topic_id_source")
+            said = (
+                f"topic ID {before} before and after the capture "
+                f"({source if source is not None else 'no source'}), one generation"
+            )
+        elif before is not None and after is not None:
+            said = (
+                f"topic ID CHANGED during the capture ({before} before, {after} after): the "
+                "topic was deleted and recreated while it ran, so this point mixes two "
+                "generations"
+            )
+        else:
+            said = (
+                f"topic ID {side(before, entry.get('topic_id_reason'))} before the capture and "
+                f"{side(after, entry.get('topic_id_after_reason'))} after it, so its "
+                "generation is not established by ID and is UNKNOWN"
+            )
+        lines.append(f"generations[{_rust_debug_str(topic)}]: {said}")
     return lines
 
 
@@ -3173,6 +3368,11 @@ def main(
             doc.get("topic_configuration"), doc.get("owner_detection")
         ):
             print(f"       {line}")
+        # PROD-01.4a: the topic ID before and after the capture, one line per
+        # topic, in the same words `logweir drill verify` prints (`verify.rs::
+        # generation_lines`); the parity script compares them.
+        for line in _generation_lines(doc.get("generations")):
+            print(f"       {line}")
         print(
             "       This signature covers the receipt only. It says what THIS run "
             "captured; it is not a claim about any other backup of the same topics."
@@ -3190,8 +3390,11 @@ def main(
             "config_coverage, covering exactly the named topic set, entries exactly where the "
             "read succeeded, closed source and class sets, secret and inherited where they "
             "fit, a closed owner with a usable reference, and counts of at least one, "
-            "and owner_detection's two: a closed set present only beside "
-            "topic_configuration, and an owner only from a source it lists)"
+            "owner_detection's two: a closed set present only beside "
+            "topic_configuration, and an owner only from a source it lists, "
+            "and the topic IDs' five: generations present only from 1.5.0, covering exactly "
+            "the named topic set, every recorded ID in Kafka's text and never the zero ID, a "
+            "reason exactly for a null ID, and a source exactly for a recorded one)"
         )
         return 0
 

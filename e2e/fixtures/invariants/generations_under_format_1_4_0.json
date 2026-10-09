@@ -1,0 +1,117 @@
+{
+  "format_version": "1.4.0",
+  "run_id": "01J8Z9QK7V6M3F2R5T8W1XB0CD",
+  "backup_id": "logweir-backup-01J8Z9QK7V",
+  "requested_at": "2026-09-09T11:02:14Z",
+  "started_at": "2026-09-09T11:02:19Z",
+  "finished_at": "2026-09-09T11:04:46Z",
+  "exit_code": 0,
+  "triggered_by": "release-engineering",
+  "source": {
+    "cluster_id": "kRtQ7yZ1S0uPq9AeVxN2Lg",
+    "bootstrap_servers": [
+      "kafka-broker-1:9094"
+    ],
+    "auth": {
+      "mode": "scramSha512",
+      "username": "logweir-backup"
+    },
+    "topics": [
+      "orders",
+      "payments"
+    ]
+  },
+  "engine": {
+    "id": "oso-cli",
+    "version": "v0.21.0",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "archive": {
+    "manifest_key": "logweir/backups/logweir-backup-01J8Z9QK7V/manifest.json",
+    "manifest_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "prefix": "logweir/backups/logweir-backup-01J8Z9QK7V/"
+  },
+  "records": {
+    "orders": 4211,
+    "payments": 917
+  },
+  "covered": {
+    "from_ms": 1757415734000,
+    "to_ms": 1757419486000
+  },
+  "config_coverage": {
+    "orders": {
+      "coverage": "captured",
+      "timestamp_type": {
+        "value": "LogAppendTime",
+        "source": "dynamicDefaultBrokerConfig"
+      }
+    },
+    "payments": {
+      "coverage": "captureDenied"
+    }
+  },
+  "topic_configuration": {
+    "orders": {
+      "partitions": 6,
+      "replication_factor": 3,
+      "entries": {
+        "cleanup.policy": {
+          "value": "compact",
+          "source": "dynamicTopicConfig",
+          "portability": "portable"
+        },
+        "message.format.version": {
+          "value": "3.0-IV1",
+          "source": "dynamicTopicConfig",
+          "portability": "removedInKafka4"
+        },
+        "min.insync.replicas": {
+          "value": "2",
+          "source": "dynamicTopicConfig",
+          "portability": "portable"
+        },
+        "retention.ms": {
+          "value": "604800000",
+          "source": "defaultConfig",
+          "portability": "inherited"
+        },
+        "vendor.token": {
+          "source": "dynamicTopicConfig",
+          "portability": "secret"
+        }
+      },
+      "owner": {
+        "kind": "strimzi",
+        "basis": "kafkaTopicResource",
+        "reference": "kafka/orders"
+      }
+    },
+    "payments": {
+      "partitions": 1,
+      "replication_factor": 1,
+      "owner": {
+        "kind": "external",
+        "basis": "declared",
+        "reference": "terraform: kafka_topic.payments"
+      }
+    }
+  },
+  "owner_detection": [
+    "declared",
+    "kafkaTopicResources"
+  ],
+  "generations": {
+    "orders": {
+      "topic_id": "gtOq2VXiTCK1QM2UtERijA",
+      "topic_id_after": "gtOq2VXiTCK1QM2UtERijA",
+      "topic_id_source": "describeTopics"
+    },
+    "payments": {
+      "topic_id": null,
+      "topic_id_after": null,
+      "topic_id_reason": "noTopicId",
+      "topic_id_after_reason": "noTopicId"
+    }
+  }
+}
