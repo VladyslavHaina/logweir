@@ -6540,6 +6540,27 @@ how many the scorecard holds — a truncated list would be a claim the signed
 document does not make); and FX-23's `integrity.unsampledTopics` for a sampled
 check (format 1.6.0). Each is all of it or nothing, like `timeBasis`.
 
+**A narrowed restore says so (PROD-11.1b).** When the signed scorecard records
+a replay selection — a partition subset (format 2.0.0) or a window from a
+stated start (format 1.7.0) — the controller copies it to
+`integrity.selection`: `scope: partial` (the marker; the `SELECTION` printer
+column, appended after `AGE` so no column moves), `windowStartMs` (a stated
+start only), `windowEndMs`, `narrowedTopics`, `partitions` (each narrowed
+topic and its selected partitions; up to 256 topics and 1024 partitions in one,
+past which the rows are omitted and `narrowedTopics` still says how many) and
+`engineRuns`. Every verdict beside it is the selection's: `complete.covered:
+true` over a subset means every record of every *selected* partition was
+compared, and no other partition of a narrowed topic was restored. A block
+the controller cannot read is still copied as `{scope: partial}` — never read
+as a restore of everything. **Absent `selection` is an unnarrowed restore,
+exactly as before.** The schema change is additive.
+
+```bash
+kubectl --context docker-desktop get restore r1 \
+  -o jsonpath='{.status.integrity.selection.scope}{"  "}{.status.integrity.selection.partitions}'
+# partial  [{"partitions":[0,2],"topic":"orders"}]
+```
+
 ```bash
 kubectl --context docker-desktop get restore r1 \
   -o jsonpath='{.spec.coverage}{"  "}{.status.integrity.coverage}{"  "}{.status.integrity.complete.covered}'
@@ -6623,7 +6644,8 @@ a recorded non-zero `exitCode` (§15.2). An older runner prints no keys at exit
 read-only archive credential: `outcome`, `lastPhaseCompleted`, `objectives`
 (`rtoSeconds`, `rpoSeconds`, `passRate`, `met`), `integrity`
 (`level`, `result`, `partialReason`, and since PROD-08.1a `coverage`,
-`complete` and `unsampledTopics` — *Complete coverage* above) and `measured`. The controller **never
+`complete` and `unsampledTopics` — *Complete coverage* above — and since
+PROD-11.1b `selection`) and `measured`. The controller **never
 parses the scorecard into a typed struct and re-emits it**: that type accepts
 unknown fields and defaults every one of its own, so a field the reader does
 not declare is silently dropped — and a re-emitted status block would quietly

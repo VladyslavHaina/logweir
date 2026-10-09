@@ -38,7 +38,7 @@ fn justfile_schema_version(name: &str) -> String {
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
         justfile_schema_version("scorecard"),
-        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
     );
     assert_eq!(
         justfile_schema_version("receipt"),
@@ -53,7 +53,7 @@ fn checked_in_schema_matches_the_types() {
     let generated = logweir_core::schema::scorecard_schema();
     let checked_in = current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS,
     );
     assert_eq!(
         generated.trim_end(),
@@ -61,7 +61,7 @@ fn checked_in_schema_matches_the_types() {
         "schemas/logweir-drill-scorecard-{}.json is stale. \
          Run `just schema` and review the diff — a field added is a MINOR bump, \
          a field removed or retyped is a MAJOR bump (Global Constraint 12).",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
     );
 }
 
@@ -98,7 +98,7 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
         current["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-            logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+            logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
         )
     );
     let parity = &current["definitions"]["TopicParity"];
@@ -363,7 +363,7 @@ fn the_scorecard_top_level_shape_is_unchanged() {
     .expect("the frozen 1.1.0 scorecard schema parses");
     let checked_in: serde_json::Value = serde_json::from_str(&current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS,
     ))
     .expect("the checked-in scorecard schema parses");
     let generated: serde_json::Value =
@@ -712,24 +712,103 @@ fn the_frozen_1_6_0_scorecard_schema_does_not_describe_the_selection() {
             .is_none(),
         "the frozen 1.6.0 schema must not describe the 1.7.0 block"
     );
-    let current: serde_json::Value =
-        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
-    assert_ne!(current["$id"], frozen["$id"]);
-    assert!(current["definitions"]["SourceInfo"]["properties"]["selection"].is_object());
-    assert!(current["definitions"]["SelectionLabel"].is_object());
+    // The file that first described it, PROD-11.1's 1.7.0, frozen since
+    // PROD-11.1b, describes it as an OPTIONAL block (the current 2.0.0 file
+    // requires it: below).
+    let frozen_1_7: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.7.0.json"
+    ))
+    .expect("the frozen 1.7.0 scorecard schema parses");
+    assert_ne!(frozen_1_7["$id"], frozen["$id"]);
+    assert!(frozen_1_7["definitions"]["SourceInfo"]["properties"]["selection"].is_object());
+    assert!(frozen_1_7["definitions"]["SelectionLabel"].is_object());
     assert!(
-        !current["definitions"]["SourceInfo"]["required"]
+        !frozen_1_7["definitions"]["SourceInfo"]["required"]
             .as_array()
             .expect("SourceInfo has required fields")
             .iter()
             .any(|r| r == "selection"),
-        "source.selection is OPTIONAL: absent on every document that states no selection"
+        "source.selection is OPTIONAL in 1.7.0: absent on every document that states no selection"
     );
     assert_eq!(
         logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION,
         "1.7.0"
     );
     assert_eq!(logweir_core::scorecard::SELECTION_SINCE_MINOR, 7);
+}
+
+/// **PROD-11.1b (OD-9 (a)): PROD-11.1's 1.7.0 scorecard schema is FROZEN**
+/// beside the 2.0.0 one, and still describes every document this build
+/// writes as 1.x — a start-only block, and every document with none: it
+/// names itself 1.7.0, pins major 1, and its `SelectionLabel` is a start and
+/// an end with no `partitions` and no `engine_runs`. The current 2.0.0 file
+/// pins major 2 and requires `source.selection` with its partition subsets
+/// and engine runs, so a 1.x document never validates against it and a
+/// subset document never validates against 1.7.0. KILLS: regenerating the
+/// 1.7.0 file; a 2.0.0 file that leaves the subset optional or the major
+/// unpinned.
+#[test]
+fn the_frozen_1_7_0_scorecard_schema_does_not_describe_partition_subsets() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.7.0.json"
+    ))
+    .expect("the frozen 1.7.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.7.0.json"
+    );
+    assert_eq!(
+        frozen["properties"]["format_version"]["pattern"],
+        r"^1\.[0-9]+\.[0-9]+$"
+    );
+    let label = &frozen["definitions"]["SelectionLabel"];
+    assert_eq!(
+        label["required"],
+        serde_json::json!(["window_end_ms", "window_start_ms"])
+    );
+    assert!(label["properties"].get("partitions").is_none());
+    assert!(label["properties"].get("engine_runs").is_none());
+    assert!(frozen["definitions"].get("TopicPartitions").is_none());
+
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_eq!(
+        current["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-2.0.0.json"
+    );
+    assert_eq!(
+        current["properties"]["format_version"]["pattern"],
+        r"^2\.[0-9]+\.[0-9]+$"
+    );
+    let required = |def: &str| -> Vec<String> {
+        current["definitions"][def]["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{def} has required fields"))
+            .iter()
+            .map(|r| r.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(required("SourceInfo").contains(&"selection".to_string()));
+    assert_eq!(
+        required("SelectionLabel"),
+        ["engine_runs", "partitions", "window_end_ms"],
+        "a 2.0.0 block names its subsets and its runs; its start is optional (the floor)"
+    );
+    let label = &current["definitions"]["SelectionLabel"]["properties"];
+    assert_eq!(label["partitions"]["minItems"], 1);
+    assert!(label["partitions"].get("nullable").is_none());
+    assert_eq!(label["engine_runs"]["minimum"], 1.0);
+    let topic = &current["definitions"]["TopicPartitions"]["properties"];
+    assert_eq!(topic["partitions"]["minItems"], 1);
+    // Review L5: PS-3's distinct, not-negative partitions and non-empty topic.
+    assert_eq!(topic["partitions"]["uniqueItems"], true);
+    assert_eq!(topic["partitions"]["items"]["minimum"], 0.0);
+    assert_eq!(topic["topic"]["minLength"], 1);
+    assert_eq!(
+        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS,
+        "2.0.0"
+    );
+    assert_eq!(logweir_core::scorecard::PARTITION_SUBSETS_MAJOR, 2);
 }
 
 /// **FX-7's 1.2.0 receipt schema is FROZEN** beside PROD-05.1's 1.3.0 one. It

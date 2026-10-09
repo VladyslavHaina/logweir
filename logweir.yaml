@@ -5366,6 +5366,12 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
+    - description: partial when the signed scorecard records a replay selection (a
+        partition subset or a window start; status.integrity.selection names it);
+        empty is every partition of every topic
+      jsonPath: .status.integrity.selection.scope
+      name: SELECTION
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -6019,8 +6025,11 @@ spec:
                         - segmentsVerified
                         type: object
                       covered:
-                        description: '`true` when every partition of every restored
-                          topic was compared.'
+                        description: '`true` when every SELECTED partition of every
+                          restored topic was compared: every partition of each topic
+                          unless `integrity.selection.partitions` narrows it to a
+                          subset, in which case no other partition of that topic was
+                          restored or compared.'
                         type: boolean
                       incompleteReason:
                         description: 'Why `covered` is `false`: the bound, an archive
@@ -6211,6 +6220,79 @@ spec:
                       not examined — and is NOT a pass.'
                     nullable: true
                     type: string
+                  selection:
+                    description: |-
+                      The signed `source.selection` (scorecard format 1.7.0 for a window start, 2.0.0 for a partition subset): this restore restored a SELECTION — a window from a stated start, or only the listed partitions of a narrowed topic — not every record of every partition of every restored topic from the archive's floor. Every verdict above (`result`, `coverage`, `complete`) is the selection's.
+
+                      ABSENT means the scorecard states no selection: every partition of every restored topic, from the archive's floor, exactly as every restore before replay selections existed. A signed block this controller cannot read is still copied as a selection (with only its `scope`), never dropped: a narrowed restore is never shown as a full one.
+                    nullable: true
+                    properties:
+                      engineRuns:
+                        description: How many engine runs restored the selection (one
+                          per distinct subset, and one more for the topics without
+                          one).
+                        format: int64
+                        nullable: true
+                        type: integer
+                      narrowedTopics:
+                        description: How many topics the restore narrowed to a PARTITION
+                          SUBSET (format 2.0.0). Present exactly when the signed block
+                          names one, so a list past [`SELECTION_TOPICS_MAX`] or [`SELECTION_PARTITIONS_MAX`]
+                          still says the restore was narrowed when its rows are not
+                          copied.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      partitions:
+                        description: 'Each narrowed topic and the partitions it restored,
+                          sorted — all of it or nothing: absent past the bounds above,
+                          and absent for a window start alone. A restored topic not
+                          listed restored every partition.'
+                        items:
+                          description: One narrowed topic of a [`RestoreSelection`].
+                          properties:
+                            partitions:
+                              description: Its selected partitions, ascending; no
+                                other partition of it was restored.
+                              items:
+                                format: int32
+                                type: integer
+                              maxItems: 1024
+                              type: array
+                            topic:
+                              description: The SOURCE topic.
+                              maxLength: 249
+                              type: string
+                          required:
+                          - partitions
+                          - topic
+                          type: object
+                        maxItems: 256
+                        nullable: true
+                        type: array
+                      scope:
+                        description: 'The marker: [`SELECTION_SCOPE_PARTIAL`] whenever
+                          the signed scorecard records a selection at all -- even
+                          one this controller could not read -- so `kubectl get restores`
+                          (the SELECTION column) and any reader that looks no further
+                          never take a narrowed restore for a restore of every partition
+                          of every topic. Absent with the whole block.'
+                        maxLength: 16
+                        nullable: true
+                        type: string
+                      windowEndMs:
+                        description: The INCLUSIVE window end, epoch milliseconds.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      windowStartMs:
+                        description: 'The plan''s stated INCLUSIVE window start, epoch
+                          milliseconds. Absent: the window started at the archive
+                          set''s floor.'
+                        format: int64
+                        nullable: true
+                        type: integer
+                    type: object
                   unsampledTopics:
                     description: '**FX-23.** The signed `sample.unsampled_topics`
                       (format 1.6.0): the restored topics a SAMPLED check''s partition

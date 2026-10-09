@@ -1453,7 +1453,8 @@ mod tests {
             "{refusal}"
         );
         let subset = plan_scope_facts(
-            &plan("  point_in_time: \"2026-01-01T12:00:00Z\"\n  partitions: {orders: [1]}\n"),
+            // PROD-11.1b: a subset is written beside the open-start interval.
+            &plan("  point_in_time: \"../2026-01-01T12:00:00Z\"\n  partitions: {orders: [1]}\n"),
             &allowed,
         );
         let refusal = plan_within_scope(&subset, &scope()).expect_err("a subset is refused");

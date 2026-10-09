@@ -123,7 +123,14 @@ golden:
 # PROD-11.1 moved the scorecard to 1.7.0 (`source.selection`), and FX-23's
 # `-1.6.0.json` is frozen beside the new file
 # (`the_frozen_1_6_0_scorecard_schema_does_not_describe_the_selection`); this
-# build writes 1.7.0 only for a restore that states a replay selection.
+# build writes 1.7.0 only for a restore that states a window start only.
+#
+# PROD-11.1b moved the scorecard to its first MAJOR, 2.0.0 (the owner's
+# decision OD-9 (a)): a partition-subset restore's document, with
+# `source.selection.partitions` required. PROD-11.1's `-1.7.0.json` is frozen
+# beside the new file and still describes every 1.x document this build writes
+# (`the_frozen_1_7_0_scorecard_schema_does_not_describe_partition_subsets`);
+# this build writes 2.0.0 only for a restore that states a partition subset.
 #
 # PROD-03.0 moved the receipt and the catalog point to 1.5.0
 # (`schema_dependency`), and PROD-01.4a to 1.6.0 (`generations`,
@@ -142,12 +149,12 @@ golden:
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
-# (`scorecard::FORMAT_VERSION_WITH_SELECTION`,
+# (`scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS`,
 # `backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`,
 # `catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
-scorecard_schema_version := "1.7.0"
+scorecard_schema_version := "2.0.0"
 receipt_schema_version := "1.7.0"
 catalog_schema_version := "1.7.0"
 

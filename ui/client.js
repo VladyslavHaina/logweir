@@ -1235,8 +1235,36 @@ function projectRestore(item) {
       }
     }
   }
+  // PROD-11.1b: THE SIGNED SELECTION, under the custom resource's own name
+  // (`status.integrity.selection`), so one list line and one detail row read
+  // it in both modes. Absent stays absent (every partition, from the floor);
+  // an empty block is still a selection.
+  if (item.selection !== null && item.selection !== undefined) {
+    status.integrity = status.integrity || {};
+    status.integrity.selection = copySelection(item.selection);
+  }
   object.status = status;
   return object;
+}
+
+/** PROD-11.1b: a decoded `RestoreSelectionView`, with the decoder's `null`s
+ *  (absent optional fields) left out, as the custom resource stores it. */
+function copySelection(selection) {
+  // `scope` is always "partial" on the API (PROD-11.1b): presence IS the
+  // marker, under the custom resource's name for it.
+  const out = { scope: "partial" };
+  for (const field of ["windowStartMs", "windowEndMs", "narrowedTopics", "engineRuns"]) {
+    if (typeof selection[field] === "number") {
+      out[field] = selection[field];
+    }
+  }
+  if (Array.isArray(selection.partitions)) {
+    out.partitions = selection.partitions.map((row) => ({
+      topic: row.topic,
+      partitions: row.partitions.slice(),
+    }));
+  }
+  return out;
 }
 
 // P10: THE CEILING A QUEUED MANUAL RUN WAITS BEHIND, under the custom
@@ -1344,6 +1372,10 @@ function mergeOperation(object, operation, trust, scope) {
       if (scope[field] !== null && scope[field] !== undefined) {
         copied[field] = scope[field];
       }
+    }
+    // PROD-11.1b: the selection every count above is over.
+    if (scope.selection !== null && scope.selection !== undefined) {
+      copied.selection = copySelection(scope.selection);
     }
     status.verificationScope = copied;
   }

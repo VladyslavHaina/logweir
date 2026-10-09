@@ -2029,3 +2029,219 @@ for name in sel1-under-1.6.0 sel2-start-at-end sel3-window; do
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (selection refused)"
 done
 echo "check-verifier-parity: both readers accept $SCORECARD_SELECTION_VERSION scorecards, say the same about the selection, what a narrowed sampled pass proves and what each lane proves before the start, and refuse each of the three selection arms with the same words"
+
+# ---------------------------------------------------------------------------
+# SUBSET LOOP (PROD-11.1b, the owner's decision OD-9 (a)): scorecard format
+# 2.0.0, a partition-subset restore's document, and what an exit 0 says about
+# it.
+# ---------------------------------------------------------------------------
+#
+# Four documents both readers ACCEPT, and the `replay selection:` and
+# `sample coverage:` lines each must print — the SAME lines from both,
+# compared WHOLE:
+#
+#   floor-sampled     orders [0, 2] from the archive's floor, a sampled pass:
+#                     the subset line (the other partitions proved empty) and
+#                     the sampled-pass line QUALIFIED by the subset
+#   start-sampled     the same from a stated start: both lines also say the
+#                     sampled check does not prove no record before the start
+#                     was restored
+#   start-complete    orders [0, 1] from a start, a complete pass: the subset
+#                     line, "restored or expected" for both clauses
+#   start-complete-fail  the same complete block under fail-integrity: both
+#                     clauses say only "expected"
+#
+# and seven both readers REFUSE: PS-1 twice (a 2.0.0 document with a
+# start-only block, and with none) and PS-2 to PS-5 once each, with the same
+# full text; plus a 3.0.0 document each reader refuses as newer than it reads
+# (their sentences differ by one word, "build" and "script", so each is
+# pinned on its own). Generated and signed here with the throwaway fixture key,
+# like the loops above.
+#
+# The format of a partition-subset restore —
+# `FORMAT_VERSION_WITH_PARTITION_SUBSETS`; a renumber moves both.
+SCORECARD_SUBSET_VERSION="2.0.0"
+mkdir -p "$tmp/scorecard-subset"
+"$PY" - "$ROOT" "$tmp/scorecard-subset" "$SC_PT" "$SCORECARD_SUBSET_VERSION" <<'PYEOF'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+root, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+current = sys.argv[4]
+fix = root / "e2e" / "fixtures" / "signed"
+key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+base = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
+sampled = {"coverage": "sampled", "comparison_basis": "archive",
+           "header_order": "notVerified", "application": "notAttempted",
+           "gaps": [], "pruned": []}
+complete = json.loads(
+    (root / "e2e" / "fixtures" / "invariants" / "verification_1_4_complete_pass.json")
+    .read_text())["integrity"]["verification"]
+END = complete["complete"]["window"]["end_ms"]
+START = END - 55_200_000
+
+
+def subset(parts=(("orders", [0, 2]),), runs=1, start=None):
+    s = {"window_end_ms": END,
+         "partitions": [{"topic": t, "partitions": list(ps)} for t, ps in parts],
+         "engine_runs": runs}
+    if start is not None:
+        s["window_start_ms"] = start
+    return s
+
+
+def doc(selection, version=current, block=None):
+    d = json.loads(json.dumps(base))
+    d["format_version"] = version
+    d["integrity"]["verification"] = json.loads(json.dumps(block or sampled))
+    if selection is not None:
+        d["source"]["selection"] = selection
+    return d
+
+
+def not_a_pass(d):
+    d["outcome"] = "fail-integrity"
+    d["integrity"]["result"] = "fail"
+    d["integrity"]["partial_reason"] = "not a pass"
+    d["engine"]["matrix_verdict"] = "pass-degraded"
+    return d
+
+
+def windowed(start):
+    b = json.loads(json.dumps(complete))
+    b["complete"]["window"] = {"end_ms": END} if start is None else {"start_ms": start, "end_ms": END}
+    return b
+
+
+whole = (("orders", [0, 1]),)
+
+
+def mixed_block():
+    # Review L2: orders/0 narrowed, payments/0 a topic with no subset.
+    b = windowed(None)
+    rows = b["complete"]["partitions"]
+    rows[1]["topic"], rows[1]["partition"] = "payments", 0
+    rows[1]["target_topic"] = "drill-payments"
+    return b
+
+
+cases = {
+    "floor-sampled": doc(subset()),
+    "start-sampled": doc(subset(start=START)),
+    "start-complete": doc(subset(whole, start=START), block=windowed(START)),
+    "start-complete-fail": not_a_pass(doc(subset(whole, start=START), block=windowed(START))),
+    "mixed-complete": doc(subset((("orders", [0]),), runs=2), block=mixed_block()),
+    "ps1-start-only": doc({"window_start_ms": START, "window_end_ms": END}),
+    "ps1-no-block": doc(None),
+    "ps2-subset-under-1.7.0": doc(subset(start=START), version="1.7.0"),
+    "ps3-unsorted": doc(subset((("orders", [2, 0]),))),
+    "ps4-runs": doc(subset((("orders", [0, 2]), ("payments", [1])), runs=1)),
+    "ps5-unselected": doc(subset((("orders", [0]),)), block=windowed(None)),
+    "newer-major": doc(subset(), version="3.0.0"),
+}
+for name, d in cases.items():
+    payload = (json.dumps(d, indent=2) + "\n").encode()
+    t = pt.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{name}.json").write_bytes(payload)
+    (out / f"{name}.sig").write_text(json.dumps(
+        {"payloadType": pt,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+(out / "window.txt").write_text(f"{START} {END}\n")
+PYEOF
+read -r SUB_START SUB_END <"$tmp/scorecard-subset/window.txt"
+
+for name in floor-sampled start-sampled start-complete start-complete-fail mixed-complete; do
+    doc="$tmp/scorecard-subset/$name.json"
+    sig="$tmp/scorecard-subset/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 0 ] || { cat "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 0"; }
+    [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 0"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_lines="$(grep -oE '(replay selection|sample coverage): .*' "$tmp/rust.all" || true)"
+    py_lines="$(grep -oE '(replay selection|sample coverage): .*' "$tmp/py.all" || true)"
+    if [ "$rust_lines" != "$py_lines" ]; then
+        fail "scorecard/$name: the two readers say different things about the subset.
+  rust:   $rust_lines
+  python: $py_lines"
+    fi
+    proved="no record of another partition of these topics was restored or expected"
+    expected="no record of another partition of these topics was expected"
+    held="every selected partition was held to its own count bound over that window, every other partition of a narrowed topic was held empty, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a selected partition with records in that window was refused"
+    started="from epoch-ms $SUB_START (the plan's stated window start, inclusive) to epoch-ms $SUB_END (inclusive), in 1 engine run(s); "
+    case "$name" in
+        floor-sampled) want="sample coverage: a sampled pass over a partition subset from the archive's floor to epoch-ms $SUB_END: $held
+replay selection: ONLY orders partitions [0, 2] (every partition of any other restored topic), from the archive's floor to epoch-ms $SUB_END (inclusive), in 1 engine run(s); $proved" ;;
+        start-sampled) want="sample coverage: a sampled pass over a partition subset from epoch-ms $SUB_START to epoch-ms $SUB_END: $held; no record before the start was expected, and a sampled check does not prove that none was restored
+replay selection: ONLY orders partitions [0, 2] (every partition of any other restored topic), ${started}${proved}; no record before the start was expected; a sampled check does not prove that none was restored" ;;
+        start-complete) want="replay selection: ONLY orders partitions [0, 1] (every partition of any other restored topic), ${started}${proved}; no record before the start was restored or expected" ;;
+        start-complete-fail) want="replay selection: ONLY orders partitions [0, 1] (every partition of any other restored topic), ${started}${expected}; no record before the start was expected" ;;
+        mixed-complete) want="replay selection: ONLY orders partitions [0] (every partition of any other restored topic), from the archive's floor to epoch-ms $SUB_END (inclusive), in 2 engine run(s); $proved" ;;
+    esac
+    if [ "$rust_lines" != "$want" ]; then
+        fail "scorecard/$name: expected the subset and sample coverage lines to be
+$want
+got:
+$rust_lines"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (partition subset, $SCORECARD_SUBSET_VERSION)"
+done
+
+for name in ps1-start-only ps1-no-block ps2-subset-under-1.7.0 ps3-unsorted ps4-runs ps5-unselected newer-major; do
+    doc="$tmp/scorecard-subset/$name.json"
+    sig="$tmp/scorecard-subset/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 4"; }
+    [ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 1"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
+    py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
+    ps1="format_version $SCORECARD_SUBSET_VERSION is the format of a partition-subset restore, and this document carries no source.selection.partitions; a reader reads major 2 only for that shape"
+    case "$name" in
+        ps1-start-only|ps1-no-block) want_msg="$ps1" ;;
+        ps2-subset-under-1.7.0) want_msg="source.selection under major 1 is a stated window start and its end, and nothing else: a block without window_start_ms, or with partitions or engine_runs, is a partition-subset selection, which is format 2.0.0" ;;
+        ps3-unsorted) want_msg="source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative" ;;
+        ps4-runs) want_msg="source.selection.engine_runs is not one run per distinct partition subset, or one more for the topics without one" ;;
+        ps5-unselected) want_msg="integrity.verification.complete.partitions expects records from a partition source.selection does not select" ;;
+        newer-major) want_msg="format_version 3.0.0 has a major version newer than this reader understands (this build knows $SCORECARD_SUBSET_VERSION)" ;;
+    esac
+    if [ "$name" = newer-major ]; then
+        py_want="format_version 3.0.0 has a major version newer than this reader understands (this script knows $SCORECARD_SUBSET_VERSION)"
+        if [ "$rust_msg" != "$want_msg" ] || [ "$py_msg" != "$py_want" ]; then
+            fail "scorecard/$name: a reader did not refuse the newer major in its own words.
+  rust:   $rust_msg
+  python: $py_msg"
+        fi
+    elif [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
+        fail "scorecard/$name: the refusal differs between the two readers or from its arm.
+  rust:   $rust_msg
+  python: $py_msg
+  want:   $want_msg"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (partition subset refused)"
+done
+echo "check-verifier-parity: both readers accept $SCORECARD_SUBSET_VERSION partition-subset scorecards, say the same about the subset, what a narrowed sampled pass proves and what each verdict proves of the other partitions and before a start, read major 2 only for that shape, and refuse each of PS-1 to PS-5 with the same words"

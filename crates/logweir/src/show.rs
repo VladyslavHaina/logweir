@@ -674,7 +674,9 @@ mod tests {
 
     #[test]
     fn a_higher_major_format_version_is_refused_and_never_rendered() {
-        let (_dir, path) = write_temp(&a_scorecard_at_format_version("2.0.0"));
+        // 3.0.0: since PROD-11.1b this build reads major 2 (the
+        // partition-subset format), so the first major it does not read is 3.
+        let (_dir, path) = write_temp(&a_scorecard_at_format_version("3.0.0"));
         let mut out = Vec::new();
         assert_eq!(
             run_writing(&path, "table", &mut out),
@@ -694,13 +696,46 @@ mod tests {
     /// document makes the same claim by a quieter route.
     #[test]
     fn a_higher_major_format_version_is_refused_under_json_format_too() {
-        let (_dir, path) = write_temp(&a_scorecard_at_format_version("2.0.0"));
+        let (_dir, path) = write_temp(&a_scorecard_at_format_version("3.0.0"));
         let mut out = Vec::new();
         assert_eq!(
             run_writing(&path, "json", &mut out),
             crate::exit::ExitCode::Operational
         );
         assert!(out.is_empty());
+    }
+
+    /// **PROD-11.1b (OD-9 (a)): major 2 is read for ONE shape.** A 2.0.0
+    /// document carrying a partition subset renders; a 2.0.0 document
+    /// without one is refused (arm PS-1) and nothing is written, under both
+    /// formats. KILLS: `drill show` rendering any 2.x document; refusing the
+    /// subset one.
+    #[test]
+    fn a_2_0_0_document_renders_only_when_it_states_a_partition_subset() {
+        let mut doc: serde_json::Value = serde_json::from_slice(GOOD_SCORECARD).unwrap();
+        doc["format_version"] = "2.0.0".into();
+        let (_dir, path) = write_temp(&serde_json::to_vec_pretty(&doc).unwrap());
+        for format in ["table", "json"] {
+            let mut out = Vec::new();
+            assert_eq!(
+                run_writing(&path, format, &mut out),
+                crate::exit::ExitCode::Operational,
+                "{format}"
+            );
+            assert!(out.is_empty(), "{format}");
+        }
+        doc["source"]["selection"] = serde_json::json!({
+            "window_end_ms": 1_760_000_005_000i64,
+            "partitions": [{"topic": "orders", "partitions": [0]}],
+            "engine_runs": 1
+        });
+        let (_dir, path) = write_temp(&serde_json::to_vec_pretty(&doc).unwrap());
+        let mut out = Vec::new();
+        assert_eq!(
+            run_writing(&path, "table", &mut out),
+            crate::exit::ExitCode::Ok
+        );
+        assert!(!out.is_empty());
     }
 
     /// The other half of GC12, and the half a too-eager refusal would break:

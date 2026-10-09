@@ -2000,3 +2000,191 @@ fn the_three_dedup_key_families_cannot_collide() {
         );
     }
 }
+
+// ------------------------------------------------------------- PROD-11.1b
+// A restore of a PARTITION SUBSET notified as a plain pass: the body carried
+// no selection and the PagerDuty title said `Pass`, so the on-call reader saw
+// a full restore (review M1). The body now carries `selection` with `scope:
+// "partial"` and the title says partial; an unnarrowed restore's body and
+// title are exactly what they were (the control in each row).
+
+fn subset_scorecard(
+    start: Option<i64>,
+    rows: Option<Vec<(&str, Vec<i32>)>>,
+) -> logweir_core::scorecard::Scorecard {
+    let mut sc = scorecard_pass();
+    sc.format_version = if rows.is_some() { "2.0.0" } else { "1.7.0" }.into();
+    sc.source.selection = Some(logweir_core::scorecard::SelectionLabel {
+        window_start_ms: start,
+        window_end_ms: 1_788_789_900_000,
+        engine_runs: rows.as_ref().map(|_| 2),
+        partitions: rows.map(|rows| {
+            rows.into_iter()
+                .map(
+                    |(topic, partitions)| logweir_core::scorecard::TopicPartitions {
+                        topic: topic.into(),
+                        partitions,
+                    },
+                )
+                .collect()
+        }),
+    });
+    sc
+}
+
+/// **A partition subset notifies as partial, on every sink and in the
+/// incident title.** The body's `selection` names the narrowed topic, its
+/// partitions, the window's end and the engine runs, under `scope: partial`;
+/// every webhook (Slack included) posts that body, PagerDuty embeds it, and
+/// the incident title reads `Pass (partial: partitions 0, 2 of topic
+/// orders)`. THE CONTROL: the unnarrowed pass has no `selection` and the
+/// title it always had.
+///
+/// KILLS: `notify_body` dropping `selection`; `notify_selection` dropping the
+/// marker or the rows; the PagerDuty summary ignoring `selection_title`.
+#[test]
+fn a_partition_subset_notifies_as_partial_on_every_sink_and_in_the_incident_title() {
+    use logweir::drill::phase7_verify::{notify_body, notify_with_sink};
+    let sc = subset_scorecard(None, Some(vec![("orders", vec![0, 2])]));
+    let body = notify_body(&sc);
+    assert_eq!(
+        body["selection"],
+        serde_json::json!({
+            "scope": "partial",
+            "window_end_ms": 1_788_789_900_000i64,
+            "narrowed_topics": 1,
+            "partitions": [{"topic": "orders", "partitions": [0, 2]}],
+            "engine_runs": 2
+        }),
+        "{body}"
+    );
+    assert_eq!(body["format_version"], "2.0.0");
+
+    let mut n = pagerduty_only(None);
+    n.webhooks = vec!["https://hooks.example.test/a".into()];
+    n.slack_webhook = Some("https://hooks.slack.com/services/T/B/zz".into());
+    let sink = RecordingSink::default();
+    notify_with_sink(&n, Some("nightly"), &sc, &sink);
+    let posts = sink.posts();
+    assert_eq!(posts.len(), 3, "{posts:?}");
+    for (url, posted) in &posts {
+        let selection = if posted.get("routing_key").is_some() {
+            &posted["payload"]["custom_details"]["selection"]
+        } else {
+            &posted["selection"]
+        };
+        assert_eq!(selection["scope"], "partial", "{url}: {posted}");
+    }
+    let pd = sink.pagerduty();
+    assert_eq!(
+        pd[0].1["payload"]["summary"],
+        format!(
+            "logweir drill {}: Pass (partial: partitions 0, 2 of topic orders)",
+            sc.run_id
+        ),
+        "the incident title an on-call reader sees first says partial"
+    );
+
+    // THE CONTROL: an unnarrowed pass is what it was.
+    let whole = scorecard_pass();
+    assert!(whole.source.selection.is_none());
+    let body = notify_body(&whole);
+    assert!(body.get("selection").is_none(), "{body}");
+    let sink = RecordingSink::default();
+    notify_with_sink(&pagerduty_only(None), Some("nightly"), &whole, &sink);
+    assert_eq!(
+        sink.pagerduty()[0].1["payload"]["summary"],
+        format!("logweir drill {}: Pass", whole.run_id)
+    );
+}
+
+/// **Every selection says partial, whatever its shape.** A window start alone
+/// (format 1.7.0) carries `window_start_ms` and no rows, titled `partial:
+/// from a stated window start`; four narrowed topics are titled by count; past
+/// the body's bounds the rows go and `narrowed_topics` stays.
+///
+/// KILLS: `notify_selection` dropping `window_start_ms` or the count past the
+/// bound, or keeping rows past it; `selection_title` listing past its bound
+/// or reading a start-only selection as `None`.
+#[test]
+fn a_start_only_or_oversized_selection_still_notifies_as_partial() {
+    use logweir::notify::{
+        notify_selection, selection_title, NOTIFY_SELECTION_PARTITIONS_MAX,
+        NOTIFY_SELECTION_TOPICS_MAX,
+    };
+    let start = subset_scorecard(Some(1_788_782_400_000), None);
+    let sel = notify_selection(start.source.selection.as_ref().unwrap());
+    assert_eq!(
+        sel,
+        serde_json::json!({
+            "scope": "partial",
+            "window_start_ms": 1_788_782_400_000i64,
+            "window_end_ms": 1_788_789_900_000i64
+        })
+    );
+    assert_eq!(
+        selection_title(&start).as_deref(),
+        Some("partial: from a stated window start")
+    );
+
+    let four = subset_scorecard(
+        None,
+        Some(vec![
+            ("a", vec![0]),
+            ("b", vec![1]),
+            ("c", vec![2]),
+            ("d", vec![3]),
+        ]),
+    );
+    assert_eq!(
+        selection_title(&four).as_deref(),
+        Some("partial: a partition subset of 4 topics")
+    );
+    let three = subset_scorecard(
+        None,
+        Some(vec![("a", vec![0]), ("b", vec![1, 2]), ("c", vec![2])]),
+    );
+    assert_eq!(
+        selection_title(&three).as_deref(),
+        Some(
+            "partial: partitions 0 of topic a; partitions 1, 2 of topic b; partitions 2 of topic c"
+        )
+    );
+
+    let names: Vec<String> = (0..=NOTIFY_SELECTION_TOPICS_MAX)
+        .map(|i| format!("t{i:04}"))
+        .collect();
+    let many = subset_scorecard(
+        None,
+        Some(names.iter().map(|t| (t.as_str(), vec![0])).collect()),
+    );
+    let sel = notify_selection(many.source.selection.as_ref().unwrap());
+    assert!(sel.get("partitions").is_none(), "{sel}");
+    assert_eq!(sel["narrowed_topics"], NOTIFY_SELECTION_TOPICS_MAX + 1);
+    assert_eq!(sel["scope"], "partial");
+    let wide = subset_scorecard(
+        None,
+        Some(vec![(
+            "orders",
+            (0..=i32::try_from(NOTIFY_SELECTION_PARTITIONS_MAX).unwrap()).collect(),
+        )]),
+    );
+    let sel = notify_selection(wide.source.selection.as_ref().unwrap());
+    assert!(sel.get("partitions").is_none(), "{sel}");
+    assert_eq!(sel["narrowed_topics"], 1);
+    // At the bound exactly, the rows are listed.
+    let at = subset_scorecard(
+        None,
+        Some(vec![(
+            "orders",
+            (0..i32::try_from(NOTIFY_SELECTION_PARTITIONS_MAX).unwrap()).collect(),
+        )]),
+    );
+    let sel = notify_selection(at.source.selection.as_ref().unwrap());
+    assert_eq!(
+        sel["partitions"][0]["partitions"].as_array().map(Vec::len),
+        Some(NOTIFY_SELECTION_PARTITIONS_MAX)
+    );
+    // The control: no selection, no title words.
+    assert_eq!(selection_title(&scorecard_pass()), None);
+}

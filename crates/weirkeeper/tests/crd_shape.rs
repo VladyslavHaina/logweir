@@ -571,6 +571,9 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
             ("RTO", ".status.measured.rtoSeconds", "integer"),
             ("SIGNED", ".status.evidence.verification.result", "string"),
             ("AGE", ".metadata.creationTimestamp", "date"),
+            // PROD-11.1b: `partial` for a narrowed restore, appended so no
+            // column before it moves.
+            ("SELECTION", ".status.integrity.selection.scope", "string"),
         ],
     ),
     (
@@ -2773,12 +2776,53 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
             "level",
             "partialReason",
             "result",
+            "selection",
             "unsampledTopics"
         ],
         "`status.integrity` carries `partialReason` beside `level` and `result` — a `partial` \
          with no reason is a badge an auditor cannot act on — and, since PROD-08.1a, the \
          signed `coverage`, a complete verification's `complete` block and FX-23's \
-         `unsampledTopics`"
+         `unsampledTopics`, and since PROD-11.1b the signed replay `selection`"
+    );
+    // PROD-11.1b: the selection's marker and its bounded rows.
+    let selection = at(integrity, &["properties", "selection"]);
+    let mut snames: Vec<&str> = selection
+        .get("properties")
+        .and_then(Value::as_mapping)
+        .expect("selection has properties")
+        .keys()
+        .map(|k| k.as_str().expect("a name"))
+        .collect();
+    snames.sort();
+    assert_eq!(
+        snames,
+        vec![
+            "engineRuns",
+            "narrowedTopics",
+            "partitions",
+            "scope",
+            "windowEndMs",
+            "windowStartMs"
+        ]
+    );
+    assert_eq!(
+        at(selection, &["properties", "partitions", "maxItems"]).as_u64(),
+        Some(256)
+    );
+    assert_eq!(
+        at(
+            selection,
+            &[
+                "properties",
+                "partitions",
+                "items",
+                "properties",
+                "partitions",
+                "maxItems"
+            ]
+        )
+        .as_u64(),
+        Some(1024)
     );
 
     // `measured` is what the run achieved; `objectives` is what was asked

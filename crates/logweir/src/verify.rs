@@ -163,23 +163,31 @@ pub struct VerifyReport {
     /// What the document proves about records before a stated start (review
     /// N1), from its `integrity.result` and `integrity.verification`.
     pub before_the_start: logweir_core::scorecard::BeforeTheStart,
+    /// What a 2.0.0 document proves about the other partitions of a narrowed
+    /// topic (PROD-11.1b), from the same two fields.
+    pub outside_the_subset: logweir_core::scorecard::OutsideTheSubset,
 }
 
-/// The replay-selection line both readers print for a restore from a stated
-/// start (PROD-11.1): the writer's sentence (`SelectionLabel::sentence`),
-/// ending in what THIS document proves about the records before the start
-/// (`BeforeTheStart::of`, review N1) — "restored or expected" only over a
-/// complete verification that passed. Nothing for a document without
-/// `source.selection`: it restored every partition from the archive's floor.
-/// `docs/verify_scorecard.py::_selection_lines` prints the same line, and
-/// `scripts/check-verifier-parity.sh` compares every line starting
-/// `replay selection:` between the two readers.
+/// The replay-selection line both readers print for a narrowed restore
+/// (PROD-11.1): the writer's sentence (`SelectionLabel::sentence`), ending in
+/// what THIS document proves — about the other partitions of a narrowed topic
+/// (`OutsideTheSubset::of`, a 2.0.0 document, PROD-11.1b) and about the
+/// records before a stated start (`BeforeTheStart::of`, review N1), each
+/// "restored or expected" only over a verdict that proves it. Nothing for a
+/// document without `source.selection`: it restored every partition from the
+/// archive's floor. `docs/verify_scorecard.py::_selection_lines` prints the
+/// same line, and `scripts/check-verifier-parity.sh` compares every line
+/// starting `replay selection:` between the two readers.
 #[must_use]
 pub fn selection_lines(
     selection: Option<&logweir_core::scorecard::SelectionLabel>,
     before: logweir_core::scorecard::BeforeTheStart,
+    outside: logweir_core::scorecard::OutsideTheSubset,
 ) -> Vec<String> {
-    selection.map(|s| s.sentence(before)).into_iter().collect()
+    selection
+        .map(|s| s.sentence(before, outside))
+        .into_iter()
+        .collect()
 }
 
 /// The line both readers print for a SAMPLED `pass` (FX-23 review M2): what
@@ -199,14 +207,22 @@ pub fn sampled_pass_lines(
 }
 
 /// [`sampled_pass_lines`] for a document that may carry `source.selection`
-/// (PROD-11.1 review H1): over a narrowed window the guarantee is QUALIFIED
-/// by that window — the count bound, the per-partition presence and the
-/// engine-report check were judged over `[start, end]`, and no record before
-/// the start was expected — so the line a 1.7.0 reader prints never reads as
-/// a pass over the whole archive. It says the sampled check does NOT show
-/// that no record before the start was restored (review N1): the sample is
-/// drawn from the window, and a segment straddling the start counts all of
-/// its records into the bound.
+/// (PROD-11.1 review H1): over a narrowed restore the guarantee is QUALIFIED
+/// by the selection, so the line a 1.7.0 or 2.0.0 reader prints never reads
+/// as a pass over the whole archive.
+///
+/// - **A window start (1.7.0):** the count bound, the per-partition presence
+///   and the engine-report check were judged over `[start, end]`, and no
+///   record before the start was expected. It says the sampled check does
+///   NOT show that no record before the start was restored (review N1): the
+///   sample is drawn from the window, and a segment straddling the start
+///   counts all of its records into the bound.
+/// - **A partition subset (2.0.0, PROD-11.1b):** every SELECTED partition was
+///   held to its own count bound, every other partition of a narrowed topic
+///   was held EMPTY on the target, and the engine report was checked for the
+///   selected partitions; the start clause above follows when the plan
+///   states one.
+///
 /// `docs/verify_scorecard.py::_sampled_pass_lines` prints the same line.
 #[must_use]
 pub fn sampled_pass_lines_over(
@@ -220,15 +236,36 @@ pub fn sampled_pass_lines_over(
     if outcome != Outcome::Pass || !sampled {
         return Vec::new();
     }
+    const START_CLAUSE: &str = "no record before the start was expected, and a sampled check \
+                                does not prove that none was restored";
+    if let Some(window) = selection.filter(|s| s.narrows_partitions()) {
+        let from = match window.window_start_ms {
+            Some(ms) => format!("epoch-ms {ms}"),
+            None => "the archive's floor".to_string(),
+        };
+        let mut line = format!(
+            "sample coverage: a sampled pass over a partition subset from {from} to epoch-ms {}: \
+             every selected partition was held to its own count bound over that window, every \
+             other partition of a narrowed topic was held empty, max_partitions reached every \
+             topic before a second partition of any, and a readable engine report lacking a \
+             selected partition with records in that window was refused",
+            window.window_end_ms
+        );
+        if window.window_start_ms.is_some() {
+            line.push_str("; ");
+            line.push_str(START_CLAUSE);
+        }
+        return vec![line];
+    }
     if let Some(window) = selection {
         return vec![format!(
             "sample coverage: a sampled pass over a replay selection from epoch-ms {} to \
              epoch-ms {}: every mapped partition was held to its own count bound over that \
              window, max_partitions reached every topic before a second partition of any, and a \
              readable engine report lacking a partition with records in that window was \
-             refused; no record before the start was expected, and a sampled check does not \
-             prove that none was restored",
-            window.window_start_ms, window.window_end_ms
+             refused; {START_CLAUSE}",
+            window.window_start_ms.unwrap_or_default(),
+            window.window_end_ms
         )];
     }
     if logweir_core::scorecard::proves_fx23_sampled_checks(format_version) {
@@ -1173,6 +1210,10 @@ pub fn verify_scorecard_with(
             &sc.integrity.result,
             sc.integrity.verification.as_ref(),
         ),
+        outside_the_subset: logweir_core::scorecard::OutsideTheSubset::of(
+            &sc.integrity.result,
+            sc.integrity.verification.as_ref(),
+        ),
         format_version: sc.format_version.clone(),
     }))
 }
@@ -1239,7 +1280,11 @@ fn print_report(r: &VerifyReport) {
     }
     // PROD-11.1: nor a restore of the whole archive when it restored a
     // selection.
-    for line in selection_lines(r.selection.as_ref(), r.before_the_start) {
+    for line in selection_lines(
+        r.selection.as_ref(),
+        r.before_the_start,
+        r.outside_the_subset,
+    ) {
         println!("coverage:  {line}");
     }
 }

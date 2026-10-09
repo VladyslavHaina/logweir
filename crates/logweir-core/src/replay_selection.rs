@@ -2,13 +2,16 @@
 //! its execution select records by.
 //!
 //! A plan may narrow a restore by an inclusive window START, stated in its
-//! bytes (inside `plan_hash`) as `restore.point_in_time: "<start>/<end>"`.
-//! Per-topic PARTITION SUBSETS (`restore.partitions`) are REFUSED BY NAME
-//! until the owner decides OD-9 (how a subset restore's scorecard is
-//! versioned): the subset machinery below is built and tested but no plan can
-//! reach it. Absent a start, the selection is exactly what every plan before
-//! PROD-11.1 restored: every partition of every selected topic, from the
-//! archive's floor to the window's end (guard G-WIN).
+//! bytes (inside `plan_hash`) as `restore.point_in_time: "<start>/<end>"`, and
+//! (PROD-11.1b, the owner's decision OD-9 (a)) by per-topic PARTITION SUBSETS,
+//! `restore.partitions`, written beside an interval form of the point in time
+//! (`"<start>/<end>"`, or `"../<end>"` from the archive's floor) that a runner
+//! older than either cannot parse. A run that states a subset signs scorecard
+//! format **2.0.0**, which every reader before it refuses as an unsupported
+//! major instead of reading it as a full restore. Absent both, the selection
+//! is exactly what every plan before PROD-11.1 restored: every partition of
+//! every selected topic, from the archive's floor to the window's end (guard
+//! G-WIN).
 //!
 //! # Who calls it
 //!
@@ -16,12 +19,12 @@
 //!   `archive.segments` rows (`logweir::check::kinds::restore`), which read the
 //!   manifest through the check's own object seam and hand its topics here.
 //! - **Execution**: plan construction (`logweir::drill::build_plan`, the
-//!   window's start and its claim), phase 0 (the subset refusal and the shape
-//!   refusals), phase 4 (which partitions a sample may come from), phase 5
-//!   (the independent re-derivation of the rendered start), phase 7 (which
-//!   partitions must hold records, which must be empty, and the expected
-//!   output of a complete verification) and the engine adapter (one engine
-//!   run per distinct subset).
+//!   window's start and its claim), phase 0 (the shape refusals), phase 4
+//!   (which partitions a sample may come from), phase 5 (the independent
+//!   re-derivation of the rendered start and of every engine run's partition
+//!   filter), phase 7 (which partitions must hold records, which must be
+//!   empty, and the expected output of a complete verification) and the
+//!   engine adapter (one engine run per distinct subset).
 //!
 //! The two sides therefore cannot disagree about which segments, partitions
 //! and instants a plan selects: there is one predicate for each, here.
@@ -48,12 +51,13 @@
 //!
 //! # What is refused, and never silently widened
 //!
-//! [`SelectionRefusal`]: any partition subset (OD-9), a start before the
-//! archive's coverage, an empty window, a start after the sample window, and a
-//! selection no segment overlaps (and, for a hand-built subset, a partition the
-//! archive does not list). Each is a plan the archive cannot satisfy
-//! as stated, refused before anything runs (exit 3) — never answered by moving
-//! the start to the floor or by restoring partitions the plan did not name.
+//! [`SelectionRefusal`]: a subset for a topic the plan does not select, an
+//! empty subset, a repeated or negative partition, a start before the
+//! archive's coverage, an empty window, a start after the sample window, a
+//! partition the archive does not list, and a selection no segment overlaps.
+//! Each is a plan the archive cannot satisfy as stated, refused before
+//! anything runs (exit 3) — never answered by moving the start to the floor or
+//! by restoring partitions the plan did not name.
 //!
 //! # Global Constraint 1
 //!
@@ -62,10 +66,6 @@
 use crate::engine::{TopicFacts, WindowFloorSource};
 use crate::spec::DrillSpec;
 use std::collections::{BTreeMap, BTreeSet};
-
-/// The name a refused partition subset carries (the refusal message opens
-/// with it, and `logweir::drill`'s refusal-reason line names it).
-pub const PARTITION_SUBSETS_AWAIT_OWNER_DECISION: &str = "PartitionSubsetsAwaitOwnerDecision";
 
 /// A plan's replay selection, read off its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,11 +89,14 @@ pub struct ReplaySelection {
 /// refusal before anything runs (exit 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectionRefusal {
-    /// **`restore.partitions` is refused by name until the owner decides
-    /// OD-9** (how a partition-subset restore's scorecard is versioned): a
-    /// reader that predates such a scorecard reads it as a full restore (the
-    /// PROD-11.1 review's H1). The topics the plan names, sorted.
-    PartitionSubsetsAwaitOwnerDecision { topics: Vec<String> },
+    /// `restore.partitions` names a topic `source.topics` does not select.
+    SubsetForUnselectedTopic { topic: String },
+    /// `restore.partitions.<topic>` is an empty list.
+    EmptySubset { topic: String },
+    /// A partition is named twice in one subset.
+    RepeatedPartition { topic: String, partition: i32 },
+    /// A negative partition number.
+    NegativePartition { topic: String, partition: i32 },
     /// The stated start is at or after the window's end.
     EmptyWindow {
         start_ms: i64,
@@ -119,15 +122,25 @@ pub enum SelectionRefusal {
 impl std::fmt::Display for SelectionRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PartitionSubsetsAwaitOwnerDecision { topics } => write!(
+            Self::SubsetForUnselectedTopic { topic } => write!(
                 f,
-                "{PARTITION_SUBSETS_AWAIT_OWNER_DECISION}: restore.partitions names a partition \
-                 subset of {}; a restore of a partition subset is refused until the owner decides \
-                 how its scorecard is versioned (OD-9), because a verifier that predates it would \
-                 read the narrowed restore as a full one. Remove restore.partitions to restore \
-                 every partition (a window start, restore.point_in_time: \"<start>/<end>\", is \
-                 accepted)",
-                topics.join(", ")
+                "restore.partitions names `{topic}`, which source.topics does not select; a \
+                 partition subset narrows a selected topic and cannot add one"
+            ),
+            Self::EmptySubset { topic } => write!(
+                f,
+                "restore.partitions.{topic} is empty; a subset that selects no partition would \
+                 restore nothing from `{topic}`. Remove the topic from source.topics, or name at \
+                 least one partition"
+            ),
+            Self::RepeatedPartition { topic, partition } => write!(
+                f,
+                "restore.partitions.{topic} names partition {partition} more than once"
+            ),
+            Self::NegativePartition { topic, partition } => write!(
+                f,
+                "restore.partitions.{topic} names partition {partition}; a partition number is \
+                 never negative"
             ),
             Self::EmptyWindow {
                 start_ms,
@@ -242,19 +255,17 @@ impl ResolvedSelection {
 }
 
 impl ReplaySelection {
-    /// Reads the selection off a plan: its stated start and its end. It
-    /// REFUSES any partition subset by name
-    /// ([`SelectionRefusal::PartitionSubsetsAwaitOwnerDecision`], OD-9), a
-    /// start at or after the window's end and a start after
-    /// `sample.window_end`. Nothing here reads the archive;
-    /// [`ReplaySelection::resolve`] does.
+    /// Reads the selection off a plan: its stated start, its end and its
+    /// per-topic partition subsets. It refuses the SHAPES no archive could
+    /// satisfy: a subset for a topic the plan does not select, an empty
+    /// subset, a repeated or negative partition, a start at or after the
+    /// window's end and a start after `sample.window_end`. Nothing here reads
+    /// the archive; [`ReplaySelection::resolve`] does.
     ///
     /// Every path that turns a plan into a selection goes through here
     /// (phase 0, the resolution before phase 2, plan construction and the
-    /// restore preflight), so a subset can be neither previewed, restored nor
-    /// signed. The subset machinery past it (the engine runs, phase 5's
-    /// per-run check, phase 7's subset judging) is reachable only from a plan
-    /// built by hand in a test, and stays ready for OD-9's decision.
+    /// restore preflight). (Until PROD-11.1b, the owner's OD-9 (a), any subset
+    /// was refused here by name.)
     ///
     /// # Errors
     ///
@@ -267,15 +278,35 @@ impl ReplaySelection {
         };
         let window_end_ms = end.timestamp_millis();
         let window_start_ms = spec.restore.window_start.map(|t| t.timestamp_millis());
-        // FAIL CLOSED, BY NAME (OD-9): no partition subset is parsed, judged
-        // or signed until the owner decides how its scorecard is versioned.
-        // An explicitly empty map selects nothing narrower and is accepted.
-        if !spec.restore.partitions.is_empty() {
-            return Err(SelectionRefusal::PartitionSubsetsAwaitOwnerDecision {
-                topics: spec.restore.partitions.keys().cloned().collect(),
-            });
+        let mut partitions = BTreeMap::new();
+        for (topic, list) in &spec.restore.partitions {
+            if !topics.contains(topic) {
+                return Err(SelectionRefusal::SubsetForUnselectedTopic {
+                    topic: topic.clone(),
+                });
+            }
+            if list.is_empty() {
+                return Err(SelectionRefusal::EmptySubset {
+                    topic: topic.clone(),
+                });
+            }
+            let mut set = BTreeSet::new();
+            for &p in list {
+                if p < 0 {
+                    return Err(SelectionRefusal::NegativePartition {
+                        topic: topic.clone(),
+                        partition: p,
+                    });
+                }
+                if !set.insert(p) {
+                    return Err(SelectionRefusal::RepeatedPartition {
+                        topic: topic.clone(),
+                        partition: p,
+                    });
+                }
+            }
+            partitions.insert(topic.clone(), set);
         }
-        let partitions = BTreeMap::new();
         if let Some(start_ms) = window_start_ms {
             // `>=`: a window `[t, t]` holds one instant, which is the same
             // refusal `build_plan_with_floor` makes for a recovery point at
@@ -734,10 +765,12 @@ mod tests {
 
     /// The plan grammar: absent fields are the full selection; the end follows
     /// `build_plan_with_floor`'s rule; a start is the interval form of
-    /// `point_in_time`; ANY partition subset is refused by name (OD-9); every
-    /// shape refusal fires before the archive is read. KILLS: accepting a
-    /// subset (the review's H1), a start at the end, a start after the sample
-    /// window.
+    /// `point_in_time`; a partition subset (PROD-11.1b, OD-9 (a)) is read
+    /// beside an interval form, sorted and unique; every shape refusal fires
+    /// before the archive is read. KILLS: refusing a well-formed subset (the
+    /// lifted refusal), accepting a subset for an unselected topic, an empty,
+    /// repeated or negative subset, a start at the end, a start after the
+    /// sample window.
     #[test]
     fn the_shape_of_a_selection_is_refused_before_the_archive_is_read() {
         let full = ReplaySelection::from_spec(&spec("  point_in_time: \"2026-01-01T12:00:00Z\"\n"))
@@ -754,17 +787,49 @@ mod tests {
         assert_eq!(ok.window_start_ms, Some(1_767_247_200_000));
         assert_eq!(ok.window_end_ms, 1_767_268_800_000);
         assert!(ok.partitions.is_empty());
+        // A subset with a start, and one from the archive's floor (`../<end>`).
+        let both = ReplaySelection::from_spec(&spec(
+            "  point_in_time: \"2026-01-01T06:00:00Z/2026-01-01T12:00:00Z\"\n  partitions: {b: [2, 1], a: [0]}\n",
+        ))
+        .unwrap();
+        assert!(!both.is_full());
+        assert_eq!(both.window_start_ms, Some(1_767_247_200_000));
+        let want: BTreeMap<String, BTreeSet<i32>> = [
+            ("a".to_string(), [0].into_iter().collect()),
+            ("b".to_string(), [1, 2].into_iter().collect()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(both.partitions, want);
+        let floor = ReplaySelection::from_spec(&spec(
+            "  point_in_time: \"../2026-01-01T12:00:00Z\"\n  partitions: {a: [0, 1, 2]}\n",
+        ))
+        .unwrap();
+        assert!(!floor.is_full());
+        assert_eq!(floor.window_start_ms, None, "the open start is the floor");
+        assert_eq!(floor.window_end_ms, 1_767_268_800_000);
+        assert_eq!(floor.partitions["a"], [0, 1, 2].into_iter().collect());
         for (body, want) in [
             (
-                "  point_in_time: \"2026-01-01T06:00:00Z/2026-01-01T12:00:00Z\"\n  partitions: {b: [1], a: [0]}\n",
-                SelectionRefusal::PartitionSubsetsAwaitOwnerDecision {
-                    topics: vec!["a".into(), "b".into()],
+                "  point_in_time: \"../2026-01-01T12:00:00Z\"\n  partitions: {zz: [0]}\n",
+                SelectionRefusal::SubsetForUnselectedTopic { topic: "zz".into() },
+            ),
+            (
+                "  point_in_time: \"../2026-01-01T12:00:00Z\"\n  partitions: {a: []}\n",
+                SelectionRefusal::EmptySubset { topic: "a".into() },
+            ),
+            (
+                "  point_in_time: \"../2026-01-01T12:00:00Z\"\n  partitions: {a: [1, 1]}\n",
+                SelectionRefusal::RepeatedPartition {
+                    topic: "a".into(),
+                    partition: 1,
                 },
             ),
             (
-                "  partitions: {a: [0, 1, 2]}\n",
-                SelectionRefusal::PartitionSubsetsAwaitOwnerDecision {
-                    topics: vec!["a".into()],
+                "  point_in_time: \"../2026-01-01T12:00:00Z\"\n  partitions: {b: [0, -1]}\n",
+                SelectionRefusal::NegativePartition {
+                    topic: "b".into(),
+                    partition: -1,
                 },
             ),
             (
@@ -785,12 +850,62 @@ mod tests {
         ] {
             assert_eq!(ReplaySelection::from_spec(&spec(body)), Err(want), "{body}");
         }
-        let refused = ReplaySelection::from_spec(&spec("  partitions: {a: [0]}\n"))
-            .unwrap_err()
-            .to_string();
+    }
+
+    /// The wire form of a SUBSET (PROD-11.1b): `restore.partitions` parses
+    /// only beside an interval form of `point_in_time` — `"<start>/<end>"`, or
+    /// `"../<end>"` from the archive's floor — which a runner that predates
+    /// partition subsets cannot parse, so it refuses the plan instead of
+    /// ignoring the key and restoring every partition. The open-start form is
+    /// a subset plan's alone. Both round-trip to their own spelling. KILLS:
+    /// accepting a subset beside an instant or with no point in time (an older
+    /// runner would widen it), accepting `"../<end>"` without a subset (two
+    /// spellings of one plan), serialising a floor subset as an instant.
+    #[test]
+    fn a_subset_is_written_only_beside_an_interval_an_older_runner_refuses() {
+        let parse = |restore: &str| {
+            serde_yaml::from_str::<crate::spec::RestoreSpecBlock>(restore)
+                .map_err(|e| e.to_string())
+        };
+        for refused in [
+            "point_in_time: \"2026-01-01T12:00:00Z\"\npartitions: {a: [0]}\n",
+            "partitions: {a: [0]}\n",
+        ] {
+            let e = parse(refused).unwrap_err();
+            assert!(
+                e.contains("restore.partitions is written only beside the interval form"),
+                "{refused}: {e}"
+            );
+        }
+        let e = parse("point_in_time: \"../2026-01-01T12:00:00Z\"\n").unwrap_err();
         assert!(
-            refused.starts_with("PartitionSubsetsAwaitOwnerDecision: "),
-            "the refusal opens with its name: {refused}"
+            e.contains("is the form of a plan that states restore.partitions"),
+            "{e}"
+        );
+        assert!(parse("point_in_time: \"../later\"\npartitions: {a: [0]}\n").is_err());
+        // Round trips: each form serialises back to itself.
+        for text in [
+            "point_in_time: ../2026-01-01T12:00:00Z\npartitions:\n  a:\n  - 0\n  - 2\n",
+            "point_in_time: 2026-01-01T06:00:00Z/2026-01-01T12:00:00Z\npartitions:\n  a:\n  - 1\n",
+        ] {
+            let block = parse(text).unwrap();
+            assert_eq!(serde_yaml::to_string(&block).unwrap(), text);
+        }
+        let floor =
+            parse("point_in_time: \"../2026-01-01T12:00:00Z\"\npartitions: {a: [0]}\n").unwrap();
+        assert_eq!(floor.window_start, None);
+        assert_eq!(
+            floor.point_in_time.unwrap().timestamp_millis(),
+            1_767_268_800_000
+        );
+        // An older runner reads `point_in_time` as ONE instant: the open-start
+        // interval is what it refuses, so it never restores every partition
+        // of a narrowed plan.
+        assert!(
+            serde_yaml::from_str::<Option<chrono::DateTime<chrono::Utc>>>(
+                "\"../2026-01-01T12:00:00Z\""
+            )
+            .is_err()
         );
     }
 

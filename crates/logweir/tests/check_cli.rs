@@ -9341,35 +9341,87 @@ fn the_preview_refuses_a_window_start_before_coverage() {
     }
 }
 
-/// A partition subset is refused BY NAME at `plan.parse` (OD-9: the preview's
-/// `SelectionInvalid`, its message opening `PartitionSubsetsAwaitOwnerDecision`),
-/// and nothing after it runs; a window no segment overlaps is `SelectionEmpty`.
+/// `selecting_yaml` with a partition subset, written beside the interval
+/// form a subset needs (PROD-11.1b): `"<start>/<pit>"`, or `"../<pit>"` from
+/// the archive's floor.
+fn subset_yaml(start_ms: Option<i64>, point_in_time_ms: i64, partitions: &str) -> String {
+    let pit = ms_to_rfc3339(point_in_time_ms);
+    let written = match start_ms {
+        Some(start) => format!("\"{}/{pit}\"", ms_to_rfc3339(start)),
+        None => format!("\"../{pit}\""),
+    };
+    restore_yaml(&pit, &["orders"], "scratch").replace(
+        &format!("  point_in_time: {pit}\n"),
+        &format!("  point_in_time: {written}\n  partitions:\n    {partitions}\n"),
+    )
+}
+
+/// **A partition subset is previewed through the shared function**
+/// (PROD-11.1b, OD-9 (a)): a subset the archive satisfies is `ready` at
+/// `plan.parse` and covered at `archive.coverage`, which names how many
+/// partitions it selects, from where and in how many engine runs; a subset
+/// naming a partition the archive does not list is `PartitionNotInBackupSet`;
+/// an empty subset is `SelectionInvalid` at `plan.parse` and nothing after it
+/// runs; a subset beside a plain instant (which an older runner would widen)
+/// does not parse. A window no segment overlaps is `SelectionEmpty`. KILLS:
+/// the old by-name refusal; a preview that widens a subset to the topic.
 #[test]
-fn the_preview_refuses_a_partition_subset_by_name_and_names_an_empty_selection() {
-    for extra in [
-        "  partitions:\n    orders: [0]\n",
-        "  partitions:\n    orders: [0, 3]\n",
-    ] {
-        let yaml = selecting_yaml(None, INSIDE_MS, extra);
-        let m = mount(&restore_plan(&yaml, None));
-        let run = drive(
-            &m,
-            &restore_wiring(&yaml, &manifest_json(), FakeProbe::new()),
-        );
-        let row = run.row(CheckId::PlanParse);
-        assert_eq!(row.code, CheckCode::SelectionInvalid, "{extra}");
-        assert_eq!(row.state, CheckState::NotReady);
-        assert!(
-            row.message
-                .starts_with("PartitionSubsetsAwaitOwnerDecision: restore.partitions names"),
-            "{}",
-            row.message
-        );
-        assert!(
-            !run.has(CheckId::ArchiveCoverage),
-            "nothing after plan.parse runs"
-        );
-    }
+fn the_preview_resolves_a_partition_subset_and_names_what_it_cannot_satisfy() {
+    let run_of = |yaml: &str, manifest: &serde_json::Value| {
+        let m = mount(&restore_plan(yaml, None));
+        drive(&m, &restore_wiring(yaml, manifest, FakeProbe::new()))
+    };
+    let run = run_of(
+        &subset_yaml(None, INSIDE_MS, "orders: [1]"),
+        &two_partition_manifest(),
+    );
+    assert_eq!(run.row(CheckId::PlanParse).code, CheckCode::PlanParsed);
+    let row = run.row(CheckId::ArchiveCoverage);
+    assert_eq!(row.code, CheckCode::PointInTimeCovered, "{:?}", row.message);
+    assert!(
+        row.message.contains(
+            "the plan selects 1 partition(s) of 1 topic(s) (1 with archived segments in the \
+             window) from epoch-ms 1757898000000 (the archive's floor)"
+        ) && row.message.contains("restored by 1 engine run(s)"),
+        "{:?}",
+        row.message
+    );
+
+    let run = run_of(
+        &subset_yaml(None, INSIDE_MS, "orders: [0, 3]"),
+        &manifest_json(),
+    );
+    let row = run.row(CheckId::ArchiveCoverage);
+    assert_eq!(row.code, CheckCode::PartitionNotInBackupSet);
+    assert!(
+        row.message
+            .contains("restore.partitions.orders names partition 3, which the archive set's"),
+        "{:?}",
+        row.message
+    );
+
+    let run = run_of(
+        &subset_yaml(None, INSIDE_MS, "orders: []"),
+        &manifest_json(),
+    );
+    let row = run.row(CheckId::PlanParse);
+    assert_eq!(row.code, CheckCode::SelectionInvalid);
+    assert_eq!(row.state, CheckState::NotReady);
+    assert!(
+        row.message
+            .starts_with("restore.partitions.orders is empty"),
+        "{}",
+        row.message
+    );
+    assert!(
+        !run.has(CheckId::ArchiveCoverage),
+        "nothing after plan.parse runs"
+    );
+
+    let beside_an_instant = selecting_yaml(None, INSIDE_MS, "  partitions:\n    orders: [0]\n");
+    let run = run_of(&beside_an_instant, &manifest_json());
+    assert_eq!(run.row(CheckId::PlanParse).code, CheckCode::PlanUnparseable);
+    assert!(!run.has(CheckId::ArchiveCoverage));
 
     // The gap between the two segments: a window inside it selects nothing.
     let yaml = selecting_yaml(Some(1_757_902_000_000), 1_757_904_000_000, "");
@@ -9513,8 +9565,28 @@ fn the_preview_and_execution_resolve_the_same_selection() {
     let mapping: BTreeMap<String, String> = [("orders".to_string(), "restore-orders".to_string())]
         .into_iter()
         .collect();
-    for start in [1_757_900_000_000i64, 1_757_901_600_001, 1_757_906_500_000] {
-        let yaml = selecting_yaml(Some(start), 1_757_908_000_000, "");
+    // Three window starts, and (PROD-11.1b) two partition subsets: one from
+    // the archive's floor and one from a start.
+    let plans: Vec<(String, String)> = [1_757_900_000_000i64, 1_757_901_600_001, 1_757_906_500_000]
+        .iter()
+        .map(|start| {
+            (
+                format!("start {start}"),
+                selecting_yaml(Some(*start), 1_757_908_000_000, ""),
+            )
+        })
+        .chain([
+            (
+                "subset [0, 2] from the floor".to_string(),
+                subset_yaml(None, 1_757_908_000_000, "orders: [2, 0]"),
+            ),
+            (
+                "subset [1] from a start".to_string(),
+                subset_yaml(Some(1_757_900_000_000), 1_757_908_000_000, "orders: [1]"),
+            ),
+        ])
+        .collect();
+    for (start, yaml) in plans {
         let spec: logweir_core::spec::DrillSpec = serde_yaml::from_str(&yaml).unwrap();
         let execution = logweir::drill::resolve_selection(&spec, &mapping, &facts)
             .expect("execution resolves")

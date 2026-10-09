@@ -725,6 +725,25 @@ const RESTORE_COVERAGE = shapeOf(
   },
 );
 
+// PROD-11.1b: a Restore's signed replay selection -- a window from a stated
+// start, or a partition subset of each narrowed topic. ABSENT means the
+// scorecard states none (every partition of every restored topic, from the
+// archive's floor); PRESENT and empty is a selection the controller could not
+// read, which is still a selection and never a restore of everything.
+const SELECTED_PARTITIONS = shapeOf(
+  "SelectedPartitionsView",
+  { topic: str, partitions: listOf(int) },
+);
+
+const RESTORE_SELECTION = shapeOf(
+  "RestoreSelectionView",
+  { scope: str },
+  {
+    windowStartMs: int, windowEndMs: int, narrowedTopics: int,
+    partitions: listOf(objectOf(SELECTED_PARTITIONS)), engineRuns: int,
+  },
+);
+
 const RESTORE = shapeOf(
   "Restore",
   {
@@ -739,6 +758,7 @@ const RESTORE = shapeOf(
     createdAt: str, planBytes: opaque,
     sourceDestinationRef: objectOf(NAME_REF), evidenceDestinationRef: objectOf(NAME_REF),
     queue: objectOf(RUN_QUEUE), timeBasis: objectOf(RESTORE_TIME_BASIS),
+    selection: objectOf(RESTORE_SELECTION),
   },
 );
 
@@ -1671,6 +1691,8 @@ export const CONSOLE_SHAPES = Object.freeze({
   RestoreTargetView: RESTORE_TARGET,
   Restore: RESTORE,
   RestoreCoverageView: RESTORE_COVERAGE,
+  RestoreSelectionView: RESTORE_SELECTION,
+  SelectedPartitionsView: SELECTED_PARTITIONS,
   SubjectRefView: SUBJECT_REF,
   VerifiedSubjectView: VERIFIED_SUBJECT,
   Approval: APPROVAL,
@@ -2425,7 +2447,7 @@ const D3_VERIFICATION_SCOPE = shapeOf(
   {
     recordsSampled: int, recordsSampledMatching: int, recordsExpected: int,
     coverage: oneOf(COVERAGE_VALUES), complete: objectOf(D3_COMPLETE_VERIFICATION),
-    unsampledTopics: listOf(str),
+    unsampledTopics: listOf(str), selection: objectOf(RESTORE_SELECTION),
   },
 );
 

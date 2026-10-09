@@ -878,9 +878,10 @@ pub enum Drill {
     /// every objective is met, so a non-pass here can only come from the
     /// orchestrator handing phase 7 the report phase 6 read.
     EngineReportLacksTheTopic,
-    /// **PROD-11.1.** `Passes`, with the approved plan stating a partition
-    /// subset the archive satisfies, `restore.partitions: {orders: [0]}`:
-    /// refused by name at phase 0 until the owner decides OD-9.
+    /// **PROD-11.1b.** `Passes`, with the approved plan stating a partition
+    /// subset the archive satisfies, `restore.partitions: {orders: [0]}`, from
+    /// the archive's floor (`restore.point_in_time: "../<window end>"`): the
+    /// run restores and signs format 2.0.0 (the owner's OD-9 (a)).
     StatesAPartitionSelection,
     /// **PROD-11.1.** `Passes`, with the approved plan stating a window start
     /// AT the archive's floor (`restore.point_in_time: "<window start>/<window
@@ -1398,7 +1399,10 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             "restore:\n  point_in_time: \"{FIXTURE_WINDOW_END}\"\n  time_basis: producerTime\n"
         ),
         // PROD-11.1: a selection the fixture archive satisfies.
-        Drill::StatesAPartitionSelection => "restore:\n  partitions:\n    orders: [0]\n".into(),
+        // PROD-11.1b: a subset is written beside the open-start interval.
+        Drill::StatesAPartitionSelection => format!(
+            "restore:\n  point_in_time: \"../{FIXTURE_WINDOW_END}\"\n  partitions:\n    orders: [0]\n"
+        ),
         Drill::StatesAWindowStart => {
             format!("restore:\n  point_in_time: \"{FIXTURE_WINDOW_START}/{FIXTURE_WINDOW_END}\"\n")
         }
@@ -1651,7 +1655,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         | Drill::VerifiesCompletely
         | Drill::VerifiesCompletelyAndFindsAChangedRecord
         // PROD-11.1. The engine is the passing one: the variable is the
-        // plan's `restore.partitions`.
+        // plan's replay selection (`restore.partitions`, the window start).
         | Drill::StatesAPartitionSelection
         | Drill::StatesAWindowStart
         | Drill::VerifiesCompletelyPastItsBound
