@@ -15,7 +15,7 @@
 mod fixtures;
 
 use logweir::backup::schema_dependency::{
-    detect, detect_within, DetectionLimits, SegmentSource, MAX_DECOMPRESSED_BYTES,
+    detect, detect_on_clock, detect_within, DetectionLimits, SegmentSource, MAX_DECOMPRESSED_BYTES,
     MAX_SEGMENT_BYTES, TIME_BUDGET,
 };
 use logweir_core::backup_receipt::BackupReceipt;
@@ -26,8 +26,9 @@ use logweir_core::schema_dependency::{
     SAMPLE_RECORDS_PER_END, SCHEMA_DEPENDENT,
 };
 use logweir_kafka::reader::ConsumedRecord;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// Confluent framing: 0x00, the id big-endian, then an Avro record body.
 fn framed(id: u32) -> Vec<u8> {
@@ -66,7 +67,12 @@ struct Segments {
 }
 
 impl SegmentSource for Segments {
-    fn segment_bounded(&self, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, String> {
+    fn segment_bounded(
+        &self,
+        key: &str,
+        max_bytes: u64,
+        _within: Duration,
+    ) -> Result<Option<Vec<u8>>, String> {
         let bytes = self
             .objects
             .get(key)
@@ -444,6 +450,36 @@ fn a_backup_run_signs_a_1_5_0_receipt_naming_the_framed_topic() {
             topic("audit", vec![partition(0, vec![audit])]),
         ],
     };
+    let (outcome, receipt) = sign_backup(&engine, &archive, &evidence);
+    assert_eq!(receipt.format_version, "1.5.0");
+    receipt.validate_invariants().unwrap();
+    let block = receipt
+        .schema_dependency
+        .as_ref()
+        .expect("written on every receipt");
+    assert_eq!(block["orders"].verdict, SCHEMA_DEPENDENT);
+    assert_eq!(block["orders"].value.as_ref().unwrap().schema_ids, vec![11]);
+    assert_eq!(block["audit"].verdict, NOT_DETECTED);
+    // The catalog point copies it, topic by topic.
+    let point_key = outcome.catalog_key.expect("the catalog point was written");
+    let (point, _) = evidence.get(&point_key).unwrap();
+    let point: serde_json::Value = serde_json::from_slice(&point).unwrap();
+    let orders = point["topics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "orders")
+        .unwrap();
+    assert_eq!(orders["schema_dependency"]["verdict"], "schemaDependent");
+}
+
+/// One `execute_with` over `engine`, the topics `orders` and `audit` named;
+/// the outcome and the signed receipt read back from the evidence store.
+fn sign_backup(
+    engine: &Engine<'_>,
+    archive: &Store,
+    evidence: &Store,
+) -> (logweir::backup::BackupOutcome, BackupReceipt) {
     let dir = tempfile::tempdir().unwrap();
     let spec = dir.path().join("backup.yaml");
     std::fs::write(
@@ -484,30 +520,50 @@ fn a_backup_run_signs_a_1_5_0_receipt_naming_the_framed_topic() {
         kafka_topic_resources: None,
         strimzi_cluster: None,
     };
-    let outcome = execute_with(&args, "01JRUN", &Reader, &engine, &archive, &evidence)
+    let outcome = execute_with(&args, "01JRUN", &Reader, engine, archive, evidence)
         .unwrap_or_else(|e| panic!("the run failed: {e}"));
     let (bytes, _) = evidence.get(&outcome.receipt_key).unwrap();
-    let receipt: BackupReceipt = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(receipt.format_version, "1.5.0");
+    (outcome, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// The review's L1 end to end: an engine whose manifest lists `orders` TWICE
+/// (4 records each). The backup is SIGNED, its `records` counts 8 and its
+/// schema dependency judged the same 8 (`complete`); the first version judged
+/// 4 and the backup failed at signing.
+#[test]
+fn a_manifest_listing_a_topic_twice_still_signs() {
+    let archive = Store::in_memory("logweir/");
+    let evidence = Store::in_memory("logweir/");
+    let put = |key: &str, recs: &[ConsumedRecord]| {
+        archive
+            .put_create_only(key, &fixtures::kbak_segment(recs))
+            .unwrap();
+        let mut s = Segments::default();
+        s.put(key, recs)
+    };
+    let first = put(
+        "logweir/seeded/orders/0",
+        &records(0, 4, |_| Some(framed(11))),
+    );
+    let again = put(
+        "logweir/seeded/orders/0b",
+        &records(4, 4, |_| Some(framed(11))),
+    );
+    let audit = put("logweir/seeded/audit/0", &records(0, 4, |o| Some(plain(o))));
+    let engine = Engine {
+        archive: &archive,
+        topics: vec![
+            topic("orders", vec![partition(0, vec![first])]),
+            topic("orders", vec![partition(1, vec![again])]),
+            topic("audit", vec![partition(0, vec![audit])]),
+        ],
+    };
+    let (_, receipt) = sign_backup(&engine, &archive, &evidence);
     receipt.validate_invariants().unwrap();
-    let block = receipt
-        .schema_dependency
-        .as_ref()
-        .expect("written on every receipt");
-    assert_eq!(block["orders"].verdict, SCHEMA_DEPENDENT);
-    assert_eq!(block["orders"].value.as_ref().unwrap().schema_ids, vec![11]);
-    assert_eq!(block["audit"].verdict, NOT_DETECTED);
-    // The catalog point copies it, topic by topic.
-    let point_key = outcome.catalog_key.expect("the catalog point was written");
-    let (point, _) = evidence.get(&point_key).unwrap();
-    let point: serde_json::Value = serde_json::from_slice(&point).unwrap();
-    let orders = point["topics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|t| t["name"] == "orders")
-        .unwrap();
-    assert_eq!(orders["schema_dependency"]["verdict"], "schemaDependent");
+    assert_eq!(receipt.records["orders"], 8);
+    let orders = &receipt.schema_dependency.as_ref().unwrap()["orders"];
+    assert_eq!(orders.basis.as_deref(), Some(BASIS_COMPLETE));
+    assert_eq!(orders.value.as_ref().unwrap().framed, 8);
 }
 
 // ===========================================================================
@@ -613,7 +669,7 @@ fn one_segment_topic(s: &mut Segments, name: &str, bytes: Vec<u8>, count: i64) -
 
 #[test]
 fn the_production_limits_are_the_documented_ones() {
-    assert_eq!(MAX_SEGMENT_BYTES, 64 << 20);
+    assert_eq!(MAX_SEGMENT_BYTES, 16 << 20);
     assert_eq!(MAX_DECOMPRESSED_BYTES, 256 << 20);
     assert_eq!(TIME_BUDGET, std::time::Duration::from_secs(120));
     assert_eq!(
@@ -714,11 +770,16 @@ fn past_the_time_budget_the_rest_is_not_assessed() {
 fn a_panic_inside_detection_is_a_value_not_a_failed_backup() {
     struct Panics<'a>(&'a Segments);
     impl SegmentSource for Panics<'_> {
-        fn segment_bounded(&self, key: &str, max: u64) -> Result<Option<Vec<u8>>, String> {
+        fn segment_bounded(
+            &self,
+            key: &str,
+            max: u64,
+            within: Duration,
+        ) -> Result<Option<Vec<u8>>, String> {
             if key.contains("/boom/") {
                 panic!("a store client that panics");
             }
-            self.0.segment_bounded(key, max)
+            self.0.segment_bounded(key, max, within)
         }
     }
     let mut s = Segments::default();
@@ -771,4 +832,199 @@ fn the_head_scan_stops_after_its_records() {
         Some(REASON_SEGMENT_UNREADABLE),
         "NEGATIVE CONTROL: a whole scan reaches the broken record"
     );
+}
+
+// ===========================================================================
+// The review's fix round: one budget per backup, a hard stop, a topic listed
+// twice, the real store's cap, and the advisory block never blocking signing.
+// ===========================================================================
+
+/// A source on a fake clock: every read costs `per_read`, and the `within`
+/// each read was given is recorded.
+struct Slow<'a> {
+    inner: &'a Segments,
+    now: &'a Cell<Duration>,
+    per_read: Duration,
+    within: RefCell<Vec<Duration>>,
+    /// Reads at or past this instant fail as a store timeout would.
+    fails_from: Option<Duration>,
+}
+
+impl SegmentSource for Slow<'_> {
+    fn segment_bounded(
+        &self,
+        key: &str,
+        max: u64,
+        within: Duration,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.within.borrow_mut().push(within);
+        let start = self.now.get();
+        self.now.set(start + self.per_read);
+        if self.fails_from.is_some_and(|t| start + self.per_read > t) {
+            return Err(format!("{key}: not read within {within:?}"));
+        }
+        self.inner.segment_bounded(key, max, within)
+    }
+}
+
+fn three_topics() -> (Segments, BackupSetFacts) {
+    let mut s = Segments::default();
+    let topics = ["a", "b", "c"]
+        .map(|n| one_segment_topic(&mut s, n, kbak(&[(None, Some(framed(5)))], false, None), 1));
+    (s, set(topics.to_vec()))
+}
+
+/// ONE budget for the whole backup (the review's mutant RR1 restarted it per
+/// topic), and a HARD one: with 100 ms reads and a 150 ms budget, `a` is
+/// judged; `b`'s read is given the 50 ms left and overruns it, so `b` is not
+/// scanned; `c` is not even read. Each read is given only what is left.
+#[test]
+fn the_budget_is_one_per_backup_across_topics() {
+    let (s, archive) = three_topics();
+    let now = Cell::new(Duration::ZERO);
+    let slow = Slow {
+        inner: &s,
+        now: &now,
+        per_read: Duration::from_millis(100),
+        within: RefCell::new(Vec::new()),
+        fails_from: None,
+    };
+    let limits = DetectionLimits {
+        time_budget: Duration::from_millis(150),
+        ..DetectionLimits::default()
+    };
+    let got = detect_on_clock(&archive, &names(&["a", "b", "c"]), &slow, &limits, &|| {
+        now.get()
+    });
+    assert_eq!(got["a"].verdict, SCHEMA_DEPENDENT);
+    assert_eq!(got["b"].reason.as_deref(), Some(REASON_TIME_BUDGET));
+    assert_eq!(got["c"].reason.as_deref(), Some(REASON_TIME_BUDGET));
+    assert_eq!(
+        *slow.within.borrow(),
+        vec![Duration::from_millis(150), Duration::from_millis(50)],
+        "each read is given what is left, and `c` is never read"
+    );
+    // NEGATIVE CONTROL: a budget that covers three reads judges all three.
+    now.set(Duration::ZERO);
+    let roomy = DetectionLimits {
+        time_budget: Duration::from_millis(350),
+        ..DetectionLimits::default()
+    };
+    let got = detect_on_clock(&archive, &names(&["a", "b", "c"]), &slow, &roomy, &|| {
+        now.get()
+    });
+    assert_eq!(got["c"].verdict, SCHEMA_DEPENDENT);
+}
+
+/// A read the budget ends is the budget's: the store's timeout reads
+/// `detectionTimeBudgetExceeded`, never `segmentUnreadable`; the same failure
+/// with budget left is `segmentUnreadable` (the control).
+#[test]
+fn a_read_the_budget_ends_is_not_assessed_for_the_budget() {
+    let (s, archive) = three_topics();
+    let now = Cell::new(Duration::ZERO);
+    let slow = Slow {
+        inner: &s,
+        now: &now,
+        per_read: Duration::from_millis(200),
+        within: RefCell::new(Vec::new()),
+        fails_from: Some(Duration::from_millis(150)),
+    };
+    let limits = DetectionLimits {
+        time_budget: Duration::from_millis(150),
+        ..DetectionLimits::default()
+    };
+    let got = detect_on_clock(&archive, &names(&["a"]), &slow, &limits, &|| now.get());
+    assert_eq!(got["a"].reason.as_deref(), Some(REASON_TIME_BUDGET));
+    now.set(Duration::ZERO);
+    let roomy = DetectionLimits {
+        time_budget: Duration::from_secs(10),
+        ..DetectionLimits::default()
+    };
+    let got = detect_on_clock(&archive, &names(&["a"]), &slow, &roomy, &|| now.get());
+    assert_eq!(got["a"].reason.as_deref(), Some(REASON_SEGMENT_UNREADABLE));
+}
+
+/// The REAL store's cap (the review's mutant RS1 doubled it): over
+/// `Store::in_memory`, a segment of exactly the cap is judged, and one byte
+/// less refuses it without a fetch.
+#[test]
+fn the_real_stores_cap_is_exact() {
+    let store = logweir_engine_oso::storage::Store::in_memory("logweir/");
+    let bytes = kbak(&[(None, Some(framed(5)))], false, None);
+    let n = bytes.len() as u64;
+    store.put_create_only("logweir/seg/a", &bytes).unwrap();
+    let archive = set(vec![topic(
+        "a",
+        vec![partition(0, vec![facts_of("logweir/seg/a", 1)])],
+    )]);
+    let at = DetectionLimits {
+        max_segment_bytes: n,
+        ..DetectionLimits::default()
+    };
+    assert_eq!(
+        detect_within(&archive, &names(&["a"]), &store, &at)["a"].verdict,
+        SCHEMA_DEPENDENT
+    );
+    let under = DetectionLimits {
+        max_segment_bytes: n - 1,
+        ..DetectionLimits::default()
+    };
+    assert_eq!(
+        detect_within(&archive, &names(&["a"]), &store, &under)["a"]
+            .reason
+            .as_deref(),
+        Some(REASON_SEGMENT_TOO_LARGE)
+    );
+}
+
+/// A topic the manifest lists TWICE is judged over both entries — the records
+/// `phase_run` counts — so the judgement and `records` agree (the review's
+/// L1: the first version judged the first entry and the backup failed at
+/// signing).
+#[test]
+fn a_topic_listed_twice_is_judged_over_both_entries() {
+    let mut s = Segments::default();
+    let one = s.put("t/twice/0/a", &records(0, 4, |_| Some(framed(3))));
+    let two = s.put("t/twice/1/a", &records(0, 4, |o| Some(plain(o))));
+    let archive = set(vec![
+        topic("twice", vec![partition(0, vec![one])]),
+        topic("twice", vec![partition(1, vec![two])]),
+    ]);
+    let got = &detect(&archive, &names(&["twice"]), &s)["twice"];
+    assert_eq!(got.basis.as_deref(), Some(BASIS_COMPLETE));
+    let v = got.value.as_ref().unwrap();
+    assert_eq!((v.framed, v.unframed), (4, 4), "both entries judged");
+}
+
+/// The advisory block never blocks signing: a receipt whose block its own
+/// arms refuse is signed with every topic `notAssessed (segmentUnreadable)`;
+/// a sound receipt is left as it is, and a refusal of something else is left
+/// for the signing step to report.
+#[test]
+fn a_block_the_arms_refuse_is_degraded_never_left_to_fail_the_signing() {
+    use logweir::backup::phase_run::signable_schema_dependency;
+    let mut receipt: BackupReceipt = serde_json::from_str(include_str!(
+        "../../../e2e/fixtures/invariants/receipt_1_5_with_schema_dependency.json"
+    ))
+    .unwrap();
+    receipt.validate_invariants().unwrap();
+    assert_eq!(
+        signable_schema_dependency(receipt.clone()).schema_dependency,
+        receipt.schema_dependency,
+        "a sound block is untouched"
+    );
+    let mut broken = receipt.clone();
+    broken.records.insert("payments".into(), 918); // `complete` now short (arm 26)
+    broken.validate_invariants().unwrap_err();
+    let mended = signable_schema_dependency(broken);
+    mended
+        .validate_invariants()
+        .expect("the mended receipt signs");
+    for entry in mended.schema_dependency.as_ref().unwrap().values() {
+        assert_eq!(entry.reason.as_deref(), Some(REASON_SEGMENT_UNREADABLE));
+    }
+    receipt.covered.to_ms = receipt.covered.from_ms; // arm 4: not the block's
+    let other = signable_schema_dependency(receipt.clone());
+    assert_eq!(other.schema_dependency, receipt.schema_dependency);
 }

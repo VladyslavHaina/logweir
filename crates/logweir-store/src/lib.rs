@@ -680,14 +680,22 @@ impl Store {
     }
 
     /// **PROD-03.0 — read an object only when it is at most `max_bytes`
-    /// long.** `Ok(None)` when the store reports it larger: nothing is
-    /// fetched. Otherwise the bytes of a ranged read of exactly the size the
-    /// store reported, so an object that grows between the two requests is
-    /// still read to that bound and no further (a truncated read is the
-    /// caller's to refuse). For a reader that must never hold an object the
-    /// adopter's configuration could make arbitrarily large — schema
-    /// dependency detection at backup time.
-    pub fn get_bounded(&self, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, StoreError> {
+    /// long, and only within `within`.** `Ok(None)` when the store reports it
+    /// larger: nothing is fetched. Otherwise the bytes of a ranged read of
+    /// exactly the size the store reported, so an object that grows between
+    /// the two requests is still read to that bound and no further (a
+    /// truncated read is the caller's to refuse). Both requests together end
+    /// within `within` when it is given — the store's own retries included —
+    /// or fail with [`StoreError::Io`] naming the timeout. For a reader that
+    /// must never hold an object the adopter's configuration could make
+    /// arbitrarily large, nor wait on a degraded store past its own budget —
+    /// schema dependency detection at backup time.
+    pub fn get_bounded(
+        &self,
+        key: &str,
+        max_bytes: u64,
+        within: Option<std::time::Duration>,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         let rt = &self.rt;
         rt.block_on(async {
             let path = OPath::from(key);
@@ -695,19 +703,35 @@ impl Store {
                 object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
                 other => StoreError::Io(format!("{key}: {other}")),
             };
-            let size = self.inner.head(&path).await.map_err(not_found_or_io)?.size;
-            if size > max_bytes {
-                return Ok(None);
+            let read = async {
+                let size = self.inner.head(&path).await.map_err(not_found_or_io)?.size;
+                if size > max_bytes {
+                    return Ok(None);
+                }
+                if size == 0 {
+                    return Ok(Some(Vec::new()));
+                }
+                let b = self
+                    .inner
+                    .get_range(&path, 0..size)
+                    .await
+                    .map_err(not_found_or_io)?;
+                // Moved, not copied, where the buffer is the read's own: the
+                // caller holds the stored bytes once, not twice.
+                Ok(Some(Vec::<u8>::from(b)))
+            };
+            match within {
+                None => read.await,
+                // No budget left: no request is started.
+                Some(limit) if limit.is_zero() => Err(StoreError::Io(format!(
+                    "{key}: not read: no time is left of the reader's remaining budget"
+                ))),
+                Some(limit) => tokio::time::timeout(limit, read).await.unwrap_or_else(|_| {
+                    Err(StoreError::Io(format!(
+                        "{key}: not read within {limit:?}, the reader's remaining budget"
+                    )))
+                }),
             }
-            if size == 0 {
-                return Ok(Some(Vec::new()));
-            }
-            let b = self
-                .inner
-                .get_range(&path, 0..size)
-                .await
-                .map_err(not_found_or_io)?;
-            Ok(Some(b.to_vec()))
         })
     }
 

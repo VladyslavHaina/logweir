@@ -682,6 +682,44 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
     }
 }
 
+/// **PROD-03.0 (the review's L1).** The schema dependency block is advisory:
+/// it must never be the reason a backup goes unsigned. When the receipt's own
+/// arms refuse the block — a manifest this build did not foresee, a detector
+/// defect — every topic's entry becomes `notAssessed (segmentUnreadable)`,
+/// which the arms always accept, and the run says so at `warn`. Every other
+/// refusal is left for step 1 of `persist_receipt` to report.
+pub fn signable_schema_dependency(mut receipt: BackupReceipt) -> BackupReceipt {
+    let Err(refusal) = receipt.validate_invariants() else {
+        return receipt;
+    };
+    if !refusal.starts_with("schema_dependency") {
+        return receipt;
+    }
+    tracing::warn!(
+        run_id = %receipt.run_id,
+        refusal = %refusal,
+        "the schema dependency this run judged contradicts the receipt; every topic's is          recorded as notAssessed (segmentUnreadable) so the backup is still signed"
+    );
+    // Keyed by the NAMED topics, so a block whose topic set was the refusal
+    // (arm 23) is mended too.
+    receipt.schema_dependency = Some(
+        receipt
+            .source
+            .topics
+            .iter()
+            .map(|topic| {
+                (
+                    topic.clone(),
+                    logweir_core::schema_dependency::not_assessed(
+                        logweir_core::schema_dependency::REASON_SEGMENT_UNREADABLE,
+                    ),
+                )
+            })
+            .collect(),
+    );
+    receipt
+}
+
 /// `AuthRender` -> `ReceiptAuth`. The wire spellings, and the ONE place they
 /// are chosen for this document.
 ///
@@ -759,7 +797,7 @@ pub(crate) fn persist_receipt(
 ) -> Result<Persisted, BackupError> {
     let sig = |e: String| BackupError::Signing(e);
     crate::backup::print_progress_step(crate::backup::PROGRESS_STEP_SIGN);
-    let receipt = build_receipt(outcome);
+    let receipt = signable_schema_dependency(build_receipt(outcome));
 
     // 1. Refuse to sign a self-contradicting document.
     receipt.validate_invariants().map_err(|e| {

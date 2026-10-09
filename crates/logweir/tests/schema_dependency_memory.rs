@@ -1,40 +1,60 @@
-//! **PROD-03.0 (the security review of the first version): schema dependency
-//! detection holds a bounded amount of memory, whatever the segment.**
+//! **PROD-03.0: schema dependency detection holds a bounded amount of memory,
+//! whatever the segment.**
 //!
 //! Detection runs inside a backup that has already succeeded, so a segment
 //! that made it hold its records — or a decompression bomb — could OOM-kill a
 //! runner whose archive exists (the class of FX-23's M1). The first version
-//! decoded every record of a sampled segment into owned keys and values; this
-//! one streams it and keeps six bytes of each key and value.
+//! decoded every record of a sampled segment into owned keys and values. The
+//! security review made it stream, keeping six bytes of each key and value. The
+//! Tier A review then measured two shapes that still cost 135–263 MB (M1),
+//! fixed in the fix round:
+//! - a zstd frame declaring a 2^27 window: the decoder allocated and touched it;
+//! - an lz4 body decompressed whole.
 //!
 //! ONE test, measured in CHILD processes, the way
 //! `crates/logweir-engine-oso/tests/offset_report_memory.rs` measures the
-//! engine report: the test binary runs itself again with `P030_MEM_CHILD` set,
-//! the child runs one detection over one segment file and exits, and the
-//! parent takes the children's peak resident set from
-//! `getrusage(RUSAGE_CHILDREN)` — a safe API; a counting global allocator
-//! would need `unsafe`, which the workspace lint forbids. The peak is
-//! monotonic over the children, so they run smallest first:
+//! engine report:
+//! 1. the test binary runs itself again with `P030_MEM_CHILD` set;
+//! 2. the child runs one detection over one segment file and exits;
+//! 3. the parent takes the children's peak resident set from
+//!    `getrusage(RUSAGE_CHILDREN)`.
+//!
+//! That is a safe API; a counting global allocator would need `unsafe`, which
+//! the workspace lint forbids. The peak is monotonic over the children, so they
+//! run smallest first:
 //!
 //! | child | segment | must |
 //! |---|---|---|
 //! | `baseline` | one small record | (the reference) |
-//! | `large` | 3 000 records of 64 KiB values, ~190 MiB decompressed, under the default caps | add at most `BOUND` to the baseline, and judge it `schemaDependent (sampled)` |
-//! | `bomb` | one record whose value is 1 GiB of zeros, ~40 KiB stored | add at most `BOUND`, and read `segmentTooLargeForDetection` at the 256 MiB cap |
-//! | `control` | the `large` segment through `kbak::decode_segment`, which materialises its records | add many times `BOUND` — the meter sees a reader that holds the records |
+//! | `large` | 3 000 records of 64 KiB zero-padded values, zstd, ~190 MiB decompressed | add at most `BOUND`, judged `schemaDependent (sampled)` |
+//! | `bomb` | one value of 1 GiB of zeros, zstd level 3, ~40 KiB stored | add at most `BOUND`, `segmentTooLargeForDetection` at the 256 MiB output cap |
+//! | `window` | the same bomb in a frame declaring a 2^27 window (review M1) | add at most `BOUND`, `segmentTooLargeForDetection` before decoding |
+//! | `lz4` | one ~250 MiB value as an lz4 block, ~1 MiB stored (review M1) | add at most `BOUND`, judged (streamed, never held) |
+//! | `stored` | one ~16 MiB incompressible value, uncompressed, just under the 16 MiB stored cap | add at most `BOUND`: the stored bytes are held, nothing more |
+//! | `control` | the `large` segment through `kbak::decode_segment`, which materialises its records | add many times `BOUND` (the meter sees a reader that holds records) |
+//!
+//! The largest addition measured is the documented worst case
+//! (`docs/kubernetes.md`, `docs/formats/backup-receipt.md`, release-notes item
+//! 45).
 use logweir::backup::schema_dependency::{detect_within, DetectionLimits, SegmentSource};
 use logweir_core::engine::{BackupSetFacts, PartitionFacts, SegmentFacts, TopicFacts};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 /// The most resident memory one detection may add to the baseline child: the
-/// stream buffers, the zstd window, a thousand six-byte prefixes and the
-/// allocator's slack.
+/// stored segment (at most 16 MiB), the zstd window (at most 8 MiB), the
+/// stream buffers, a thousand six-byte prefixes and the allocator's slack.
 const BOUND: u64 = 32 << 20;
 
 const LARGE_RECORDS: u64 = 3_000;
 const LARGE_VALUE: u64 = 64 << 10;
 const BOMB_VALUE: u64 = 1 << 30;
+const LZ4_VALUE: u64 = 250 << 20;
+/// Just under the 16 MiB stored cap once the header, the frame and the footer
+/// are added.
+const STORED_VALUE: u64 = (16 << 20) - 1024;
 
 const TEST_NAME: &str = "detection_holds_a_bounded_amount_whatever_the_segment";
 
@@ -60,25 +80,6 @@ fn child_peak(mode: &str, path: &Path) -> u64 {
     children_peak_rss()
 }
 
-/// The header, the zstd body the caller writes through `write`, the CRC-32 and
-/// the end magic — the body streamed through the encoder, never held whole.
-fn write_segment(path: &Path, records: u64, write: impl FnOnce(&mut dyn std::io::Write)) {
-    let mut enc = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
-    write(&mut enc);
-    let body = enc.finish().unwrap();
-    let mut out = Vec::new();
-    out.extend_from_slice(b"KBAK");
-    out.extend_from_slice(&[1, 1, 0, 0]);
-    out.extend_from_slice(&records.to_le_bytes());
-    out.extend_from_slice(&0i64.to_le_bytes());
-    out.extend_from_slice(&(records as i64 - 1).to_le_bytes());
-    out.extend_from_slice(&body);
-    let crc = crc32(&out);
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(b"BKAE");
-    std::fs::write(path, out).unwrap();
-}
-
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for &b in bytes {
@@ -91,27 +92,117 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
+/// The 32-byte header, `body` under `codec`, the CRC-32 and the end magic.
+fn write_envelope(path: &Path, records: u64, codec: u8, body: &[u8]) {
+    let mut out = Vec::with_capacity(body.len() + 40);
+    out.extend_from_slice(b"KBAK");
+    out.extend_from_slice(&[1, codec, 0, 0]);
+    out.extend_from_slice(&records.to_le_bytes());
+    out.extend_from_slice(&0i64.to_le_bytes());
+    out.extend_from_slice(&(records as i64 - 1).to_le_bytes());
+    out.extend_from_slice(body);
+    let crc = crc32(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(b"BKAE");
+    std::fs::write(path, out).unwrap();
+}
+
+/// A zstd body the caller writes through `write`, streamed through the
+/// encoder (never held whole), with the frame's window log when given.
+fn write_zstd_segment(
+    path: &Path,
+    records: u64,
+    window_log: Option<u32>,
+    write: impl FnOnce(&mut dyn std::io::Write),
+) {
+    let mut enc = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+    if let Some(w) = window_log {
+        enc.window_log(w).unwrap();
+    }
+    write(&mut enc);
+    write_envelope(path, records, 1, &enc.finish().unwrap());
+}
+
+/// The bytes before a record's value: its length prefix, timestamp, offset,
+/// a null key and the value's length.
+fn record_head(offset: i64, len: u64) -> Vec<u8> {
+    let frame = 8 + 8 + 4 + 4 + len + 2;
+    let mut h = Vec::new();
+    h.extend_from_slice(&(frame as u32).to_le_bytes());
+    h.extend_from_slice(&1_760_000_000_000i64.to_le_bytes());
+    h.extend_from_slice(&offset.to_le_bytes());
+    h.extend_from_slice(&(-1i32).to_le_bytes());
+    h.extend_from_slice(&(len as i32).to_le_bytes());
+    h
+}
+
+/// The Confluent framing for schema id 7, then zeros: `len` bytes.
+const FRAMED_HEAD: [u8; 6] = [0, 0, 0, 0, 7, 1];
+
 /// One record: a null key and a value of `len` bytes that starts with the
 /// Confluent framing for schema id 7, then zeros.
 fn write_record(w: &mut dyn std::io::Write, offset: i64, len: u64) {
-    let frame = 8 + 8 + 4 + 4 + len + 2;
-    w.write_all(&(frame as u32).to_le_bytes()).unwrap();
-    w.write_all(&1_760_000_000_000i64.to_le_bytes()).unwrap();
-    w.write_all(&offset.to_le_bytes()).unwrap();
-    w.write_all(&(-1i32).to_le_bytes()).unwrap();
-    w.write_all(&(len as i32).to_le_bytes()).unwrap();
-    let head = [0u8, 0, 0, 0, 7, 1];
-    let shown = len.min(head.len() as u64);
-    w.write_all(&head[..shown as usize]).unwrap();
+    w.write_all(&record_head(offset, len)).unwrap();
+    let shown = len.min(FRAMED_HEAD.len() as u64);
+    w.write_all(&FRAMED_HEAD[..shown as usize]).unwrap();
     std::io::copy(&mut std::io::Read::take(std::io::repeat(0), len - shown), w).unwrap();
     w.write_all(&0u16.to_le_bytes()).unwrap();
 }
 
-struct OneFile(Vec<u8>);
+/// An lz4 length's extension bytes (the format's 255-run encoding).
+fn lz4_length(out: &mut Vec<u8>, mut rest: u64) {
+    while rest >= 255 {
+        out.push(255);
+        rest -= 255;
+    }
+    out.push(rest as u8);
+}
+
+/// ONE record whose value is `len` bytes (the framing, then zeros), as an lz4
+/// block in lz4_flex's size-prepended format, encoded by hand: the record's
+/// head and the framing as literals, the zeros as one match of offset 1 (its
+/// length in 255-runs, about `len / 255` bytes), and the header count as the
+/// last literals.
+fn write_lz4_segment(path: &Path, len: u64) {
+    let mut lit = record_head(0, len);
+    lit.extend_from_slice(&FRAMED_HEAD);
+    lit.push(0); // the first zero, which the match then repeats
+    let zeros = len - FRAMED_HEAD.len() as u64 - 1;
+    let total = lit.len() as u64 + zeros + 2;
+    let mut block = (total as u32).to_le_bytes().to_vec();
+    block.push(0xFF); // 15 literals + more, a 15+ match
+    lz4_length(&mut block, lit.len() as u64 - 15);
+    block.extend_from_slice(&lit);
+    block.extend_from_slice(&1u16.to_le_bytes());
+    lz4_length(&mut block, zeros - 4 - 15);
+    block.push(0x20); // the last sequence: two literals, no match
+    block.extend_from_slice(&0u16.to_le_bytes());
+    write_envelope(path, 1, 2, &block);
+}
+
+/// One uncompressed record of `len` incompressible bytes after the framing.
+fn write_stored_segment(path: &Path, len: u64) {
+    let mut body = record_head(0, len);
+    body.extend_from_slice(&FRAMED_HEAD);
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    body.extend((0..len - FRAMED_HEAD.len() as u64).map(|_| {
+        x = x
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (x >> 33) as u8
+    }));
+    body.extend_from_slice(&0u16.to_le_bytes());
+    write_envelope(path, 1, 0, &body);
+}
+
+/// The segment, handed over ONCE and moved, never copied — as the store's
+/// ranged read hands its bytes over.
+struct OneFile(RefCell<Option<Vec<u8>>>);
 
 impl SegmentSource for OneFile {
-    fn segment_bounded(&self, _: &str, max: u64) -> Result<Option<Vec<u8>>, String> {
-        Ok((self.0.len() as u64 <= max).then(|| self.0.clone()))
+    fn segment_bounded(&self, _: &str, max: u64, _: Duration) -> Result<Option<Vec<u8>>, String> {
+        let bytes = self.0.borrow_mut().take().expect("read once");
+        Ok((bytes.len() as u64 <= max).then_some(bytes))
     }
 }
 
@@ -151,34 +242,39 @@ fn archive(records: i64) -> BackupSetFacts {
 /// return (the test passes).
 fn run_child(mode: &str, path: &Path) {
     let bytes = std::fs::read(path).unwrap();
+    if mode == "control" {
+        let records = logweir_engine_oso::kbak::decode_segment(&bytes).unwrap();
+        assert_eq!(records.len() as u64, LARGE_RECORDS);
+        return;
+    }
     let topics = vec!["t".to_string()];
-    let limits = DetectionLimits::default();
+    let records = if mode == "large" {
+        LARGE_RECORDS as i64
+    } else {
+        1
+    };
+    let got = detect_within(
+        &archive(records),
+        &topics,
+        &OneFile(RefCell::new(Some(bytes))),
+        &DetectionLimits::default(),
+    );
+    let t = &got["t"];
     match mode {
-        "baseline" => {
-            let got = detect_within(&archive(1), &topics, &OneFile(bytes), &limits);
-            assert_eq!(got["t"].verdict, "schemaDependent", "{got:?}");
+        "baseline" | "lz4" | "stored" => {
+            assert_eq!(t.verdict, "schemaDependent", "{mode}: {t:?}");
+            assert_eq!(t.basis.as_deref(), Some("complete"), "{mode}: {t:?}");
         }
         "large" => {
-            let got = detect_within(
-                &archive(LARGE_RECORDS as i64),
-                &topics,
-                &OneFile(bytes),
-                &limits,
-            );
-            assert_eq!(got["t"].verdict, "schemaDependent", "{got:?}");
-            assert_eq!(got["t"].basis.as_deref(), Some("sampled"));
+            assert_eq!(t.verdict, "schemaDependent", "{t:?}");
+            assert_eq!(t.basis.as_deref(), Some("sampled"));
         }
-        "bomb" => {
-            let got = detect_within(&archive(1), &topics, &OneFile(bytes), &limits);
+        "bomb" | "window" => {
             assert_eq!(
-                got["t"].reason.as_deref(),
+                t.reason.as_deref(),
                 Some("segmentTooLargeForDetection"),
-                "{got:?}"
+                "{mode}: {t:?}"
             );
-        }
-        "control" => {
-            let records = logweir_engine_oso::kbak::decode_segment(&bytes).unwrap();
-            assert_eq!(records.len() as u64, LARGE_RECORDS);
         }
         other => panic!("unknown P030_MEM_CHILD mode {other}"),
     }
@@ -192,47 +288,57 @@ fn detection_holds_a_bounded_amount_whatever_the_segment() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let small = dir.path().join("small.kbak");
-    write_segment(&small, 1, |w| write_record(w, 0, 32));
-    let large = dir.path().join("large.kbak");
-    write_segment(&large, LARGE_RECORDS, |w| {
+    let path = |name: &str| dir.path().join(name);
+    write_zstd_segment(&path("small"), 1, None, |w| write_record(w, 0, 32));
+    write_zstd_segment(&path("large"), LARGE_RECORDS, None, |w| {
         for i in 0..LARGE_RECORDS {
             write_record(w, i as i64, LARGE_VALUE);
         }
     });
-    let bomb = dir.path().join("bomb.kbak");
-    write_segment(&bomb, 1, |w| write_record(w, 0, BOMB_VALUE));
-    let stored = |p: &Path| std::fs::metadata(p).unwrap().len();
+    write_zstd_segment(&path("bomb"), 1, None, |w| write_record(w, 0, BOMB_VALUE));
+    write_zstd_segment(&path("window"), 1, Some(27), |w| {
+        write_record(w, 0, BOMB_VALUE)
+    });
+    write_lz4_segment(&path("lz4"), LZ4_VALUE);
+    write_stored_segment(&path("stored"), STORED_VALUE);
+    let stored = |name: &str| std::fs::metadata(path(name)).unwrap().len();
+    for name in ["bomb", "window", "lz4"] {
+        assert!(
+            stored(name) < 2 << 20,
+            "{name} is small stored: {}",
+            stored(name)
+        );
+    }
     assert!(
-        stored(&bomb) < 1 << 20,
-        "the bomb is small stored: {}",
-        stored(&bomb)
+        stored("stored") <= 16 << 20,
+        "under the stored cap: {}",
+        stored("stored")
     );
     assert!(
-        stored(&large) < 64 << 20,
-        "under the fetch cap: {}",
-        stored(&large)
+        stored("stored") > 15 << 20,
+        "near the stored cap: {}",
+        stored("stored")
     );
 
-    let baseline = child_peak("baseline", &small);
-    let after_large = child_peak("large", &large);
-    let after_bomb = child_peak("bomb", &bomb);
+    let baseline = child_peak("baseline", &path("small"));
+    let mut worst = 0u64;
+    let mut lines = vec![format!("baseline {baseline}")];
+    for mode in ["large", "bomb", "window", "lz4", "stored"] {
+        let peak = child_peak(mode, &path(mode));
+        let added = peak.saturating_sub(baseline);
+        worst = worst.max(added);
+        lines.push(format!("{mode} {peak} (+{added})"));
+        assert!(
+            peak <= baseline + BOUND,
+            "detection over `{mode}` held {added} bytes over the baseline, more than {BOUND}"
+        );
+    }
     eprintln!(
-        "peak RSS: baseline {baseline}, large {after_large}, bomb {after_bomb} (bound {BOUND} \
-         over the baseline)"
-    );
-    assert!(
-        after_large <= baseline + BOUND,
-        "detection over a ~190 MiB segment held {} bytes over the baseline, more than {BOUND}",
-        after_large - baseline
-    );
-    assert!(
-        after_bomb <= baseline + BOUND,
-        "detection over a decompression bomb held {} bytes over the baseline, more than {BOUND}",
-        after_bomb - baseline
+        "peak RSS: {}; worst addition {worst} (bound {BOUND})",
+        lines.join(", ")
     );
     // THE METER WORKS: a reader that materialises the records is seen.
-    let control = child_peak("control", &large);
+    let control = child_peak("control", &path("large"));
     eprintln!("peak RSS: control {control}");
     assert!(
         control > baseline + 4 * BOUND,

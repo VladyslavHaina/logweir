@@ -35,15 +35,27 @@
 //!   first `MIN_FRAMED_LEN` bytes — all the framing test reads — and skips the
 //!   rest; the head scan STOPS after its records; the tail is a ring of
 //!   `SAMPLE_RECORDS_PER_END` prefixes;
-//! - **the bytes are capped twice**: a segment the store reports larger than
-//!   [`DetectionLimits::max_segment_bytes`] is never fetched
-//!   (`Store::get_bounded`: a size check, then a ranged read to that size),
-//!   and a body that decompresses past
-//!   [`DetectionLimits::max_decompressed_bytes`] stops the scan
-//!   (`kbak::ScanError::TooLarge`) — both are `segmentTooLargeForDetection`;
-//! - **the time is capped**: past [`DetectionLimits::time_budget`], measured
-//!   from the start of detection, every topic not yet judged is
+//! - **the bytes are capped**: a segment the store reports larger than
+//!   [`DetectionLimits::max_segment_bytes`] (16 MiB) is never fetched
+//!   (`Store::get_bounded`: a size check, then a ranged read to that size);
+//!   a body that decompresses past [`DetectionLimits::max_decompressed_bytes`]
+//!   stops the scan; a zstd frame declaring a window above 8 MiB is refused
+//!   before it is decoded; lz4 is decoded as a stream — all
+//!   `segmentTooLargeForDetection`. What one segment's judgement holds is the
+//!   stored bytes plus at most the zstd window and a few hundred KiB (the
+//!   review's fix round, M1; measured in `tests/schema_dependency_memory.rs`);
+//! - **the time is a hard stop**: [`DetectionLimits::time_budget`] runs from
+//!   the start of detection; every store read gets only what is left of it
+//!   (`Store::get_bounded`'s `within`), every scan stops reading when it runs
+//!   out (`kbak::ScanLimits::deadline`), and every topic not yet judged is
 //!   `detectionTimeBudgetExceeded`.
+//!
+//! # A topic the manifest lists twice
+//!
+//! Every manifest entry with the topic's name is judged together — their
+//! partitions merged — exactly as `phase_run::run` counts its records, so the
+//! judgement and the receipt's `records` describe the same records (the
+//! review's L1).
 //!
 //! # Never fatal
 //!
@@ -56,29 +68,32 @@
 //! archive holds no record of is `notAssessed` with `noRecords`.
 
 use logweir_core::backup_receipt::TopicSchemaDependency;
-use logweir_core::engine::{BackupSetFacts, PartitionFacts, SegmentFacts, TopicFacts};
+use logweir_core::engine::{BackupSetFacts, PartitionFacts, SegmentFacts};
 use logweir_core::schema_dependency::{
     self as sd, TopicTally, MIN_FRAMED_LEN, REASON_NO_RECORDS, REASON_SEGMENT_TOO_LARGE,
     REASON_SEGMENT_UNREADABLE, REASON_TIME_BUDGET, SAMPLE_PARTITIONS, SAMPLE_RECORDS_PER_END,
 };
-use logweir_engine_oso::kbak::{scan_segment, RecordPrefix, ScanError};
+use logweir_engine_oso::kbak::{scan_segment, RecordPrefix, ScanError, ScanLimits};
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
-/// The largest STORED segment detection fetches: 64 MiB. The engine's
-/// default segment is 10 MiB (`backup.segment_max_bytes`); a set written with
-/// larger segments is judged where they fit and `segmentTooLargeForDetection`
-/// where they do not.
-pub const MAX_SEGMENT_BYTES: u64 = 64 << 20;
+/// The largest STORED segment detection fetches: 16 MiB. The engine's default
+/// segment is 10 MiB before compression (`backup.segment_max_bytes`), so a
+/// default backup is judged whole; a set written with larger segments is
+/// judged where they fit and `segmentTooLargeForDetection` where they do not.
+/// The fetched bytes are held while one segment is scanned, so this is most of
+/// what detection can hold at once.
+pub const MAX_SEGMENT_BYTES: u64 = 16 << 20;
 
 /// The most bytes one segment's body may decompress to before its scan stops:
-/// 256 MiB. The scan holds none of them past its stream buffers (an lz4 body,
-/// whose block format decompresses whole, is refused before allocating when
-/// it declares more).
+/// 256 MiB. A bound on the work, not on memory: the scan streams the body and
+/// holds none of it past its buffers.
 pub const MAX_DECOMPRESSED_BYTES: u64 = 256 << 20;
 
-/// The time one backup spends on detection before every topic still to judge
-/// is `detectionTimeBudgetExceeded`: 120 s.
+/// The time one backup spends on detection: 120 s, from its start, with no
+/// read or scan continuing past it. Every topic still to judge is then
+/// `detectionTimeBudgetExceeded`. A `Backup`'s deadline should leave this much
+/// after the engine.
 pub const TIME_BUDGET: Duration = Duration::from_secs(120);
 
 /// The bounds detection runs within. [`DetectionLimits::default`] is the
@@ -105,16 +120,28 @@ impl Default for DetectionLimits {
 
 /// Where segment bytes come from: the archive
 /// [`logweir_engine_oso::storage::Store`] in production, a double in a row that
-/// needs a read to fail or an object to be large.
+/// needs a read to fail, to be slow, or an object to be large.
 pub trait SegmentSource {
     /// The exact bytes of the object at `key` when it is at most `max_bytes`
-    /// long; `Ok(None)`, with nothing fetched, when it is larger.
-    fn segment_bounded(&self, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, String>;
+    /// long; `Ok(None)`, with nothing fetched, when it is larger. The read
+    /// must end within `within` (what is left of the budget), or fail.
+    fn segment_bounded(
+        &self,
+        key: &str,
+        max_bytes: u64,
+        within: Duration,
+    ) -> Result<Option<Vec<u8>>, String>;
 }
 
 impl SegmentSource for logweir_engine_oso::storage::Store {
-    fn segment_bounded(&self, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, String> {
-        self.get_bounded(key, max_bytes).map_err(|e| e.to_string())
+    fn segment_bounded(
+        &self,
+        key: &str,
+        max_bytes: u64,
+        within: Duration,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.get_bounded(key, max_bytes, Some(within))
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -133,6 +160,32 @@ impl NotJudged {
     }
 }
 
+/// The budget as one detection sees it: how much of it is spent, read from a
+/// clock that starts at zero.
+struct Budget<'a> {
+    elapsed: &'a dyn Fn() -> Duration,
+    limit: Duration,
+}
+
+impl Budget<'_> {
+    /// What is left, `None` once nothing is.
+    fn left(&self) -> Option<Duration> {
+        let left = self.limit.saturating_sub((self.elapsed)());
+        (!left.is_zero()).then_some(left)
+    }
+
+    fn spent(&self, what: &str) -> NotJudged {
+        NotJudged {
+            reason: REASON_TIME_BUDGET,
+            why: format!(
+                "detection has used {:?} of its {:?} budget; {what}",
+                (self.elapsed)(),
+                self.limit
+            ),
+        }
+    }
+}
+
 /// One entry per named topic, in name order: the judgement of what `archive`
 /// holds for it, within [`DetectionLimits::default`]. A named topic `archive`
 /// does not mention holds no record.
@@ -145,7 +198,7 @@ pub fn detect(
     detect_within(archive, topics, source, &DetectionLimits::default())
 }
 
-/// [`detect`], within `limits`.
+/// [`detect`], within `limits`, on the wall clock.
 #[must_use]
 pub fn detect_within(
     archive: &BackupSetFacts,
@@ -154,15 +207,41 @@ pub fn detect_within(
     limits: &DetectionLimits,
 ) -> BTreeMap<String, TopicSchemaDependency> {
     let started = Instant::now();
+    detect_on_clock(archive, topics, source, limits, &|| started.elapsed())
+}
+
+/// [`detect_within`], on a clock the caller supplies — `elapsed` answers how
+/// much time this detection has used so far. A row uses it to make the budget
+/// run out between two reads deterministically.
+#[must_use]
+pub fn detect_on_clock(
+    archive: &BackupSetFacts,
+    topics: &[String],
+    source: &dyn SegmentSource,
+    limits: &DetectionLimits,
+    elapsed: &dyn Fn() -> Duration,
+) -> BTreeMap<String, TopicSchemaDependency> {
+    // ONE budget for the whole backup, measured from here: never restarted
+    // per topic (the review's mutant RR1).
+    let budget = Budget {
+        elapsed,
+        limit: limits.time_budget,
+    };
     topics
         .iter()
         .map(|name| {
-            let facts = archive.topics.iter().find(|t| &t.name == name);
+            // Every manifest entry with the name, merged (L1).
+            let partitions: Vec<&PartitionFacts> = archive
+                .topics
+                .iter()
+                .filter(|t| &t.name == name)
+                .flat_map(|t| t.partitions.iter())
+                .collect();
             // ANY failure is a value: a panic inside the decoder or the
             // detector is caught here and recorded as `segmentUnreadable`,
             // never let through to fail a backup whose archive exists.
             let judged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                judge_topic(facts, source, limits, started)
+                judge_topic(&partitions, source, limits, &budget)
             }))
             .unwrap_or_else(|_| {
                 Err(NotJudged::unreadable(
@@ -206,18 +285,15 @@ fn holds_records(p: &PartitionFacts) -> bool {
 /// One record's prefixes, as the tally takes them.
 type Prefixes = (Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// One topic's judgement, or why it was not judged.
+/// One topic's judgement, over every partition the manifest lists for it, or
+/// why it was not judged.
 fn judge_topic(
-    facts: Option<&TopicFacts>,
+    partitions: &[&PartitionFacts],
     source: &dyn SegmentSource,
     limits: &DetectionLimits,
-    started: Instant,
+    budget: &Budget<'_>,
 ) -> Result<TopicSchemaDependency, NotJudged> {
-    let Some(facts) = facts else {
-        return Ok(sd::not_assessed(REASON_NO_RECORDS));
-    };
-    let counted: u64 = facts
-        .partitions
+    let counted: u64 = partitions
         .iter()
         .flat_map(|p| p.segments.iter())
         .map(count_of)
@@ -225,14 +301,16 @@ fn judge_topic(
     if counted == 0 {
         return Ok(sd::not_assessed(REASON_NO_RECORDS));
     }
-    let mut partitions: Vec<&PartitionFacts> = facts
-        .partitions
+    let mut holding: Vec<&PartitionFacts> = partitions
         .iter()
+        .copied()
         .filter(|p| holds_records(p))
         .collect();
-    partitions.sort_by_key(|p| p.partition_id);
+    // Partition id first; a partition listed twice keeps both entries, side by
+    // side, and each is sampled as listed.
+    holding.sort_by_key(|p| p.partition_id);
     let mut tally = TopicTally::default();
-    for p in partitions.iter().take(SAMPLE_PARTITIONS) {
+    for p in holding.iter().take(SAMPLE_PARTITIONS) {
         let mut segs: Vec<&SegmentFacts> = p.segments.iter().filter(|s| count_of(s) > 0).collect();
         // Archive order is source-offset order; nothing orders a manifest.
         segs.sort_by_key(|s| (s.start_offset, s.end_offset));
@@ -243,12 +321,12 @@ fn judge_topic(
             // One segment, scanned once: its head, and a ring of the records
             // after the head. A segment of up to twice the sample is judged
             // whole.
-            sample(first, source, limits, started, true)?
+            sample(first, source, limits, budget, true)?
         } else {
-            let (head, _) = sample(first, source, limits, started, false)?;
+            let (head, _) = sample(first, source, limits, budget, false)?;
             // The LAST segment's last records: its head and its ring together
             // hold at most twice the sample, and the last of them are kept.
-            let (last_head, last_ring) = sample(last, source, limits, started, true)?;
+            let (last_head, last_ring) = sample(last, source, limits, budget, true)?;
             let mut tail: VecDeque<Prefixes> = last_head.into_iter().chain(last_ring).collect();
             while tail.len() > SAMPLE_RECORDS_PER_END {
                 tail.pop_front();
@@ -272,33 +350,44 @@ fn sample(
     seg: &SegmentFacts,
     source: &dyn SegmentSource,
     limits: &DetectionLimits,
-    started: Instant,
+    budget: &Budget<'_>,
     whole: bool,
 ) -> Result<(Vec<Prefixes>, VecDeque<Prefixes>), NotJudged> {
-    if started.elapsed() >= limits.time_budget {
-        return Err(NotJudged {
-            reason: REASON_TIME_BUDGET,
-            why: format!(
-                "detection has taken {:?} of its {:?} budget; segment {} was not read",
-                started.elapsed(),
-                limits.time_budget,
-                seg.key
-            ),
-        });
-    }
+    let Some(left) = budget.left() else {
+        return Err(budget.spent(&format!("segment {} was not read", seg.key)));
+    };
     let too_large = |why: String| NotJudged {
         reason: REASON_SEGMENT_TOO_LARGE,
         why,
     };
-    let bytes = source
-        .segment_bounded(&seg.key, limits.max_segment_bytes)
-        .map_err(|e| NotJudged::unreadable(format!("segment {} could not be read: {e}", seg.key)))?
-        .ok_or_else(|| {
-            too_large(format!(
+    let bytes = match source.segment_bounded(&seg.key, limits.max_segment_bytes, left) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            return Err(too_large(format!(
                 "segment {} is stored larger than the {} bytes detection reads",
                 seg.key, limits.max_segment_bytes
-            ))
-        })?;
+            )))
+        }
+        // A read the budget ended is the budget's, whatever the store said.
+        Err(e) if budget.left().is_none() => {
+            return Err(budget.spent(&format!("segment {}: {e}", seg.key)))
+        }
+        Err(e) => {
+            return Err(NotJudged::unreadable(format!(
+                "segment {} could not be read: {e}",
+                seg.key
+            )))
+        }
+    };
+    // The scan stops reading when what was left of the budget at its start
+    // has passed.
+    let scan_limits = ScanLimits {
+        max_decompressed: limits.max_decompressed_bytes,
+        deadline: budget.left().map(|left| Instant::now() + left),
+    };
+    if scan_limits.deadline.is_none() {
+        return Err(budget.spent(&format!("segment {} was read but not scanned", seg.key)));
+    }
     let mut head: Vec<Prefixes> = Vec::with_capacity(SAMPLE_RECORDS_PER_END);
     let mut tail: VecDeque<Prefixes> = VecDeque::with_capacity(SAMPLE_RECORDS_PER_END + 1);
     let mut visit = |r: RecordPrefix| {
@@ -312,18 +401,14 @@ fn sample(
         }
         true
     };
-    let read = scan_segment(
-        &bytes,
-        limits.max_decompressed_bytes,
-        MIN_FRAMED_LEN,
-        &mut visit,
-    )
-    .map_err(|e| match e {
-        ScanError::TooLarge(m) => too_large(format!("segment {}: {m}", seg.key)),
-        ScanError::Unreadable(m) => {
-            NotJudged::unreadable(format!("segment {} could not be decoded: {m}", seg.key))
-        }
-    })?;
+    let read =
+        scan_segment(&bytes, &scan_limits, MIN_FRAMED_LEN, &mut visit).map_err(|e| match e {
+            ScanError::TooLarge(m) => too_large(format!("segment {}: {m}", seg.key)),
+            ScanError::TimedOut(m) => budget.spent(&format!("segment {}: {m}", seg.key)),
+            ScanError::Unreadable(m) => {
+                NotJudged::unreadable(format!("segment {} could not be decoded: {m}", seg.key))
+            }
+        })?;
     // A scan that read the whole segment is held to its manifest count. A
     // head scan that stopped early cannot be, and its records are still
     // records the manifest counts.
