@@ -1892,20 +1892,26 @@ async fn reconcile(
 /// race the reconcile answers in place (FX-19), so it is a debug line: the
 /// requeue (or the event that caused the race) resolves it.
 fn error_policy(cluster: Arc<KafkaCluster>, err: &KafkaClusterError, _ctx: Arc<Context>) -> Action {
+    log_reconcile_error(&cluster.name_any(), err);
+    Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
+}
+
+/// [`error_policy`]'s log line: debug for [`is_benign_race`], WARN for
+/// everything else. Its own function so a row can read the level it chooses.
+pub fn log_reconcile_error(cluster: &str, err: &KafkaClusterError) {
     if is_benign_race(err) {
         debug!(
-            cluster = %cluster.name_any(),
+            cluster = %cluster,
             error = %err,
             "KafkaCluster probe reconcile raced a deletion or a newer copy; requeueing"
         );
     } else {
         warn!(
-            cluster = %cluster.name_any(),
+            cluster = %cluster,
             error = %err,
             "KafkaCluster probe reconcile failed; requeueing"
         );
     }
-    Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
 }
 
 /// Whether a reconcile error is only a race with Kubernetes itself — an object

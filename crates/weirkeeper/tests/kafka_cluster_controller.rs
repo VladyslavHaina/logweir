@@ -33,13 +33,13 @@ use weirkeeper::connection::{resolve, ConnectionUse};
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY, KEY_SCAN_TAIL_LINES};
 use weirkeeper::controllers::kafka_cluster::{
     action_for, auth_mode_flag, being_deleted, crashed_status_patch, is_benign_race,
-    name_limit_for_cluster, observed_at, observed_status_patch, probe_job_name, probe_report,
-    probe_started_patch, reconcile_cluster, refused_status_patch, runner_argv, runner_job_spec,
-    verdict, verdict_recorded, Deferred, KafkaClusterError, ProbeReport, Requeue,
-    CLUSTER_ID_PREFIX, CONDITION_REACHABLE, PROBE_CONDITION_REASONS, PROBE_DEADLINE_SECONDS,
-    PROBE_JOB_PREFIX, PROBE_TTL_SECONDS, REACHABLE_PREFIX, REASON_PROBE_OUTPUT_UNREADABLE,
-    REASON_PROBE_REPORTED_UNREACHABLE, REASON_PROBE_RUNNING, REASON_REACHABLE, REQUEUE_SECS,
-    RE_PROBE_SECS, SOURCE_PASSWORD_ENV, SOURCE_PASSWORD_SECRET_KEY,
+    log_reconcile_error, name_limit_for_cluster, observed_at, observed_status_patch,
+    probe_job_name, probe_report, probe_started_patch, reconcile_cluster, refused_status_patch,
+    runner_argv, runner_job_spec, verdict, verdict_recorded, Deferred, KafkaClusterError,
+    ProbeReport, Requeue, CLUSTER_ID_PREFIX, CONDITION_REACHABLE, PROBE_CONDITION_REASONS,
+    PROBE_DEADLINE_SECONDS, PROBE_JOB_PREFIX, PROBE_TTL_SECONDS, REACHABLE_PREFIX,
+    REASON_PROBE_OUTPUT_UNREADABLE, REASON_PROBE_REPORTED_UNREACHABLE, REASON_PROBE_RUNNING,
+    REASON_REACHABLE, REQUEUE_SECS, RE_PROBE_SECS, SOURCE_PASSWORD_ENV, SOURCE_PASSWORD_SECRET_KEY,
 };
 use weirkeeper::crds::kafka_cluster::{AuthMode, KafkaCluster, KafkaClusterStatus};
 use weirkeeper::job;
@@ -2217,6 +2217,45 @@ async fn a_conflicting_cluster_status_write_is_an_outcome_and_never_precedes_a_t
             log.messages_at("WARN")
         );
     }
+
+    // ---- the two refusal writes: a connection that does not resolve, and a
+    // name too long — the 409 is the same outcome, looked at again on the
+    // short clock rather than waited out as `AwaitChange` --------------------
+    let unresolved: KafkaCluster = serde_json::from_str(&cluster_json(
+        NAME,
+        r#"{ "mode": "scramSha512", "username": "logweir", "tls": true }"#,
+        "{}",
+    ))
+    .expect("the fixture is a KafkaCluster");
+    let long = "c".repeat(name_limit_for_cluster() + 1);
+    let too_long: KafkaCluster = serde_json::from_str(&cluster_json(&long, PLAINTEXT_AUTH, "{}"))
+        .expect("the fixture is a KafkaCluster");
+    for (what, object) in [("unresolved", unresolved), ("too long", too_long)] {
+        let routes = vec![
+            Route {
+                method: "GET",
+                path_suffix: "/jobs/logweir-probe-orders-prod",
+                status: 404,
+                body: not_found_body("jobs.batch", JOB),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/status",
+                status: 409,
+                body: CONFLICT_BODY.to_string(),
+            },
+        ];
+        let (client, _rec, _bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_cluster(&object, &client, now())
+            .await
+            .expect("a lost precondition is an outcome");
+        assert_eq!(
+            outcome.deferred,
+            Some(Deferred::StatusSuperseded),
+            "{what}: {outcome:?}"
+        );
+        assert_eq!(outcome.requeue, Requeue::After(REQUEUE_SECS), "{what}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3101,6 +3140,96 @@ fn fx19_error_policy_demotes_only_the_two_races() {
         TERMINAL_STATE_NAME_TOO_LONG,
         "too long".to_string()
     )));
+    // AND THE LINE `error_policy` WRITES FOR EACH: debug for the two races,
+    // WARN for the rest.
+    for (code, warns) in [(404_u16, 0_usize), (409, 0), (500, 1), (403, 1)] {
+        let log = CapturedLog::start();
+        log_reconcile_error(NAME, &api(code));
+        assert_eq!(
+            log.at("WARN").len(),
+            warns,
+            "{code}: {:?}",
+            log.messages_at("WARN")
+        );
+        assert_eq!(
+            log.at("DEBUG").len(),
+            1 - warns,
+            "{code}: {:?}",
+            log.messages_at("DEBUG")
+        );
+    }
+}
+
+/// **FX-19: A REFUSED PROBE POD IS ONE WARN PER JOB, TOO.** FX-11's fail-fast
+/// pass cancels the Job and records `PodCreationForbidden` (one WARN); the
+/// pass that then sees the cancelled Job finished writes the same status —
+/// unchanged, so nothing is sent — and logs it at debug; a third pass over the
+/// Job as its TTL patch left it is a recorded verdict.
+///
+/// KILLS: a refusal WARN on every pass (`warn_when_first_recorded!` taking the
+/// WARN arm whatever the write did).
+#[tokio::test]
+async fn fx19_a_refused_probe_pod_warns_once_per_job() {
+    let mut warns = Vec::new();
+
+    // ---- pass 1: running, refused, cancelled --------------------------------
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
+        podless_probe_job("2026-09-10T11:59:15Z", false),
+        probe_events(Some(QUOTA_REFUSAL)),
+    ));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(outcome.reason.as_deref(), Some("PodCreationForbidden"));
+    let seen = bodies.lock().expect("readable").clone();
+    let refused = after_status(&cluster(), &patched_statuses(&seen)[0]);
+    warns.extend(log.messages_at("WARN"));
+    assert_eq!(warns.len(), 1, "the first record WARNs: {warns:?}");
+    drop(log);
+
+    // ---- pass 2: the cancelled Job has failed; the status already says it ---
+    let log = CapturedLog::start();
+    let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
+        podless_probe_job("2026-09-10T11:59:15Z", true),
+        probe_events(Some(QUOTA_REFUSAL)),
+    ));
+    let outcome = reconcile_cluster(&refused, &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(outcome.reason.as_deref(), Some("PodCreationForbidden"));
+    assert!(
+        outcome.ttl_patched,
+        "the TTL, which marks the verdict recorded"
+    );
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(
+        count(&seen, "PATCH", "/status"),
+        0,
+        "the same refusal is not written twice: {seen:?}"
+    );
+    warns.extend(log.messages_at("WARN"));
+    drop(log);
+
+    // ---- pass 3: the Job as the TTL patch left it ---------------------------
+    let log = CapturedLog::start();
+    let ttl_job = {
+        let mut job: Value =
+            serde_json::from_str(&podless_probe_job("2026-09-10T11:59:15Z", true)).expect("JSON");
+        job["spec"]["ttlSecondsAfterFinished"] = serde_json::json!(PROBE_TTL_SECONDS);
+        job.to_string()
+    };
+    let (client, _rec, _bodies) = mock_client_recording_bodies(podless_probe_routes(
+        ttl_job,
+        probe_events(Some(QUOTA_REFUSAL)),
+    ));
+    let outcome = reconcile_cluster(&refused, &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(outcome.deferred, Some(Deferred::VerdictRecorded));
+    warns.extend(log.messages_at("WARN"));
+
+    assert_eq!(warns.len(), 1, "one refused Job, one WARN: {warns:?}");
 }
 
 /// **FX-19 ROW 4, THE POC'S SEQUENCE: OVER ONE WHOLE PROBE CYCLE `reachable`
@@ -3167,6 +3296,11 @@ async fn fx19_one_probe_cycle_never_flaps_reachable_and_logs_no_warn() {
             stored = after_status(&stored, &patch);
         }
         assert_eq!(reachable_of(&stored), Some(true), "{what}: no flap");
+        assert_eq!(
+            count(&seen, "PATCH", "/jobs/logweir-probe-orders-prod"),
+            0,
+            "{what}: the Job already carries its TTL; nothing re-patches it: {seen:?}"
+        );
     }
     assert_eq!(
         statuses_written, 0,
