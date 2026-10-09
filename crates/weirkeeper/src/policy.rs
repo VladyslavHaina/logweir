@@ -136,6 +136,11 @@ pub fn selected_groups(spec: &BackupSpec) -> Option<&[String]> {
 
 #[must_use]
 pub fn run_policy_sha256(spec: &BackupSpec) -> String {
+    logweir_core::ids::sha256_prefixed(&run_policy_document(spec))
+}
+
+/// The canonical run-policy document [`run_policy_sha256`] digests.
+fn run_policy_document(spec: &BackupSpec) -> Vec<u8> {
     let mut topics = spec.topics.clone();
     topics.sort();
     topics.dedup();
@@ -162,9 +167,8 @@ pub fn run_policy_sha256(spec: &BackupSpec) -> String {
             groups
         }),
     };
-    let bytes = logweir_core::det_json::to_deterministic_json(&policy)
-        .expect("a RunPolicyV1 is strings and integers and always canonicalises");
-    logweir_core::ids::sha256_prefixed(&bytes)
+    logweir_core::det_json::to_deterministic_json(&policy)
+        .expect("a RunPolicyV1 is strings and integers and always canonicalises")
 }
 
 /// The `spec.topics` / `spec.allUserTopics` combination this spec declares.
@@ -352,5 +356,57 @@ fn shown(value: &str) -> String {
         format!("{cleaned}…")
     } else {
         cleaned
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(consumer_groups: Option<Vec<&str>>) -> BackupSpec {
+        let mut v = serde_json::json!({
+            "sourceRef": {"name": "prod"},
+            "topics": ["payments", "orders"],
+            "archive": {"url": "s3://kafka-backups/logweir", "secretRef": {"name": "logweir-s3"}},
+            "triggeredBy": "manual",
+            "deadlineSeconds": 3600
+        });
+        if let Some(groups) = consumer_groups {
+            v["consumerGroups"] = serde_json::json!(groups);
+        }
+        serde_json::from_value(v).expect("a BackupSpec")
+    }
+
+    /// **PROD-04.1: a policy that selects no consumer group is the document it
+    /// was before the field existed**, byte for byte — so every existing
+    /// schedule's and run's `runPolicySha256` is unchanged. The literal is the
+    /// `run-policy/v1` document as it stood before PROD-04.1. KILLS:
+    /// serialising an absent selection (`consumerGroups: null`), or an empty
+    /// one (`[]`).
+    #[test]
+    fn a_policy_that_selects_no_group_is_the_document_it_was() {
+        let before = serde_json::json!({
+            "formatVersion": "run-policy/v1",
+            "sourceRef": {"name": "prod"},
+            "topics": ["orders", "payments"],
+            "allUserTopics": null,
+            "archive": {"url": "s3://kafka-backups/logweir", "secretRef": {"name": "logweir-s3"}},
+            "activeDeadlineSeconds": 3600
+        });
+        for groups in [None, Some(vec![])] {
+            let doc = String::from_utf8(run_policy_document(&spec(groups.clone()))).unwrap();
+            assert!(!doc.contains("consumerGroups"), "{groups:?}: {doc}");
+            let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
+            assert_eq!(parsed, before, "{groups:?}");
+            assert_eq!(
+                doc,
+                String::from_utf8(logweir_core::det_json::to_deterministic_json(&before).unwrap())
+                    .unwrap(),
+                "{groups:?}: the same bytes, in the same order"
+            );
+        }
+        let selected: serde_json::Value =
+            serde_json::from_slice(&run_policy_document(&spec(Some(vec!["b", "a", "b"])))).unwrap();
+        assert_eq!(selected["consumerGroups"], serde_json::json!(["a", "b"]));
     }
 }

@@ -888,6 +888,28 @@ mod tests {
         );
     }
 
+    /// A partition the fetch did not answer for is `failed: PartitionFailed`,
+    /// never `noCommittedPosition`: an unanswered partition says nothing about
+    /// what the group committed. Kills: reading a missing answer as "no
+    /// committed offset".
+    #[test]
+    fn a_partition_the_fetch_did_not_answer_is_failed_never_uncommitted() {
+        let f = Fixture::new(
+            observation(
+                vec![captured_group("g", vec![committed(1)])],
+                vec![(0, marks(0, 5)), (1, marks(0, 5))],
+            ),
+            &["g"],
+        );
+        let b = f.build();
+        valid(&b);
+        let p = &group(&b, "g").positions.as_ref().expect("captured")[1];
+        assert_eq!(
+            (p.status.as_str(), p.reason.as_deref(), p.position),
+            ("failed", Some("PartitionFailed"), None)
+        );
+    }
+
     /// The manifest's ranges: only well-formed ones, per partition, from the
     /// lowest start to the highest end. Kills: min/max swapped; a negative
     /// range recorded (the receipt would then fail its own arm 25).
